@@ -56,7 +56,7 @@ Four primary inter-agent communication protocols govern system operations:
 ├── Papers/               Whitepapers and system documentation \
 ├── README.md             Project overview and guide \
 ├── requirements.txt      Python dependency list \
-└── readthedocs.yml       Build configuration for ReadTheDocs \
+└── readthedocs.yml       Build configuration for ReadTheDocs 
 
 ---
 
