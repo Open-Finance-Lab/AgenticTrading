@@ -1,36 +1,34 @@
-# FinAgent-Orchestration
-
-**FINAGENT-ORCHESTRATION** is a modular, protocol-driven, and learning-augmented orchestration framework designed for autonomous multi-agent systems in algorithmic trading. The system provides a dynamic, DAG-based execution graph controller, layered communication protocols, and long-term memory integration to facilitate adaptive, composable, and explainable trading workflows.
-
-## Motivation
-
-Contemporary algorithmic trading systems are often constrained by static rule-based pipelines, which limit their ability to adapt to evolving market regimes. This framework introduces a novel agentic architecture that enables runtime reconfiguration, agent selection, and control signal propagation based on high-level strategy objectives and market feedback.
-
----
-
 ## 📐 System Overview
 
-The architecture is composed of vertically layered modules reflecting a self-contained intelligent system:
+The system is structured as a vertically layered, protocol-oriented architecture for orchestrating autonomous agent behaviors in algorithmic trading environments. It supports real-time, adaptive decision-making by dynamically composing agents through task-specific execution graphs.
 
-1. **Raw Market Data Layer**  
-   Ingests real-time or historical financial data including prices, orderbooks, macroeconomic indicators, and news streams.
+At the entry point, high-level strategic queries are issued via the **Users Query** interface. These are interpreted by the **DAG Planner Agent**, which constructs a directed acyclic graph (DAG) to encode task flow. The **Orchestrator** executes the DAG, coordinating communication and execution across agent pools.
 
-2. **Memory & Learning Layer**  
-   Contains a long-term memory agent (`MemoryAgent`) and an optional DRL-based policy agent that evolves orchestration DAGs over time via reward-guided structural learning.
+The architecture includes the following specialized **Agent Pools**:
 
-3. **Task Execution Layer**  
-   Includes specialized agent pools:  
-   - `DataAgents`: Preprocessing and feature enrichment  
-   - `AlphaAgents`: Signal and factor generation  
-   - `RiskAgents`: Risk modeling and constraint enforcement  
-   - `CostAgents`: Transaction cost estimation  
-   - `ExecutionAgents`: Order execution and market interaction  
-   - `AnalysisAgents`: Post-trade performance attribution
+- **Data Agents Pool**: Acquires and preprocesses real-time or historical financial data
+- **Alpha Agents Pool**: Generates predictive signals and quantitative factors
+- **Risk Agents Pool**: Models portfolio exposure and applies constraints
+- **Transaction Cost Agents Pool**: Estimates slippage and market impact
+- **Portfolio Construction Agents Pool**: Allocates positions using alpha, risk, and cost inputs
+- **Execution Agents Pool**: Routes and executes orders in external markets
+- **Attribution Agents Pool**: Analyzes post-trade performance and contribution
+- **Backtest Agents Pool**: Evaluates DAG performance over historical market data
 
-4. **Control & Orchestration Layer**  
-   - `Orchestration Core`: Executes task DAGs and propagates intermediate states  
-   - `DAGControllerAgent`: Constructs and optimizes the DAG topology  
-   - `RegistrationBus`: Tracks agent registration, health, and metadata
+All agent pools communicate with a centralized **Memory Agent**, which logs execution traces, model outputs, and evaluation results to support continual learning. Agent registration and health status are maintained by the **Registration Bus**.
+
+The system uses four protocol layers to govern communication:
+
+- **MCP** (Multi-agent Control Protocol): for task scheduling and DAG execution
+- **ACP** (Agent Communication Protocol): for result reporting and synchronization
+- **A2A** (Agent-to-Agent Protocol): for direct communication between dependent agents
+- **ANP** (Agent Notification Protocol): for asynchronous, event-driven system alerts
+
+The complete system design is illustrated below:
+
+![System Architecture](docs/source/intro/finagent_architecture.png)
+
+This framework enables composable, interpretable, and learning-augmented multi-agent orchestration, offering a flexible foundation for intelligent trading strategy research and deployment.
 
 ---
 
@@ -48,17 +46,17 @@ Four primary inter-agent communication protocols govern system operations:
 ---
 
 ## 📁 Project Structure
-├── docs/                 Documentation and Sphinx sources
-├── orchestration/        DAG Controller, Orchestration engine, Bus, Protocols
-├── agents/               Modular agent pools (Alpha, Risk, Execution, etc.)
-├── memory/               Memory Agent and DRL policy learner
-├── config/               YAML-based system configuration
-├── examples/             Strategy simulation and demo DAG runs
-├── tests/                Unit and integration testing modules
-├── Papers/               Whitepapers and system documentation
-├── README.md             Project overview and guide
-├── requirements.txt      Python dependency list
-└── readthedocs.yml       Build configuration for ReadTheDocs
+├── docs/                 Documentation and Sphinx sources \\
+├── orchestration/        DAG Controller, Orchestration engine, Bus, Protocols \\
+├── agents/               Modular agent pools (Alpha, Risk, Execution, etc.) \\
+├── memory/               Memory Agent and DRL policy learner \\
+├── config/               YAML-based system configuration \\
+├── examples/             Strategy simulation and demo DAG runs \\
+├── tests/                Unit and integration testing modules \\
+├── Papers/               Whitepapers and system documentation \\
+├── README.md             Project overview and guide \\
+├── requirements.txt      Python dependency list \\
+└── readthedocs.yml       Build configuration for ReadTheDocs \\
 
 ---
 
