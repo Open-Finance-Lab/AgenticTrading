@@ -1,0 +1,19 @@
+
+# Binance Agent Configuration
+
+agent_id: binance_agent
+
+api:
+  base_url: https://api.binance.com
+  endpoints:
+    spot_price: /api/v3/ticker/price
+    ohlcv: /api/v3/klines
+  default_interval: 1h
+
+authentication:
+  api_key: YOUR_API_KEY_HERE
+  secret_key: YOUR_SECRET_KEY_HERE
+
+constraints:
+  timeout: 5  # seconds
+  rate_limit_per_minute: 120
