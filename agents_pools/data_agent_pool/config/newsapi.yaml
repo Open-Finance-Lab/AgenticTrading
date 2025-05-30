@@ -1,0 +1,15 @@
+agent_id: newsapi_agent
+
+api:
+  base_url: https://newsapi.org/v2
+  endpoints:
+    headlines: /top-headlines
+    everything: /everything
+  default_interval: 1h  
+
+authentication:
+  api_key: YOUR_NEWSAPI_KEY
+
+constraints:
+  timeout: 5
+  rate_limit_per_minute: 60

@@ -1,0 +1,10 @@
+[project]
+name = "finagent-orchestration"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "a2a-sdk>=0.2.4",
+    "mcp[cli]>=1.9.1",
+]

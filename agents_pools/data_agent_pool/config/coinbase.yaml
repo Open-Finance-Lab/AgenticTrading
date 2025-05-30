@@ -1,0 +1,16 @@
+agent_id: coinbase_agent
+
+api:
+  base_url: https://api.coinbase.com
+  endpoints:
+    spot_price: /v2/prices/{symbol}-USD/spot
+    ohlcv: /v2/prices/{symbol}-USD/candles  
+  default_interval: 1h
+
+authentication:
+  api_key: YOUR_API_KEY_HERE
+  secret_key: YOUR_SECRET_KEY_HERE
+
+constraints:
+  timeout: 5
+  rate_limit_per_minute: 100

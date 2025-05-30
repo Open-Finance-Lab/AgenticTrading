@@ -1,0 +1,16 @@
+agent_id: iex_agent
+
+api:
+  base_url: https://cloud.iexapis.com/stable
+  endpoints:
+    quote: /stock/{symbol}/quote
+    ohlcv: /stock/{symbol}/chart
+  default_interval: 1d  
+
+authentication:
+  api_key: YOUR_IEX_API_KEY
+  secret_key: YOUR_IEX_SECRET_KEY  
+
+constraints:
+  timeout: 5
+  rate_limit_per_minute: 100
