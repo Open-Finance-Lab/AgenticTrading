@@ -47,8 +47,8 @@ Four primary inter-agent communication protocols govern system operations:
 
 ## 📁 Project Structure
 ├── docs/                 Documentation and Sphinx sources \
-├── orchestration/        DAG Controller, Orchestration engine, Bus, Protocols \
-├── agents/               Modular agent pools (Alpha, Risk, Execution, etc.) \
+├── orchestrator/         DAG Controller, Orchestration engine, Bus, Protocols \
+├── agents_pools/         Modular agent pools (Alpha, Risk, Execution, etc.) \
 ├── memory/               Memory Agent and DRL policy learner \
 ├── config/               YAML-based system configuration \
 ├── examples/             Strategy simulation and demo DAG runs \
