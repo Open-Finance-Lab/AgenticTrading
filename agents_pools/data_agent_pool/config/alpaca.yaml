@@ -1,0 +1,16 @@
+agent_id: alpaca_agent
+
+api:
+  base_url: https://paper-api.alpaca.markets
+  endpoints:
+    quote: /v1beta1/stocks/{symbol}/quotes
+    bars: /v2/stocks/{symbol}/bars
+  default_interval: 1d  
+
+authentication:
+  api_key: YOUR_ALPACA_API_KEY
+  secret_key: YOUR_ALPACA_SECRET_KEY
+
+constraints:
+  timeout: 5
+  rate_limit_per_minute: 200

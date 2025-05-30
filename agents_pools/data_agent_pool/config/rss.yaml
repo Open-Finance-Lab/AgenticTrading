@@ -1,0 +1,13 @@
+agent_id: rss_agent
+
+api:
+  base_url: https://rss.nytimes.com
+  endpoints:
+    default: /services/xml/rss/nyt/HomePage.xml
+  default_interval: 1h
+
+authentication: {}
+
+constraints:
+  timeout: 5
+  rate_limit_per_minute: 60

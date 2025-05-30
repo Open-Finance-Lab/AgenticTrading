@@ -1,6 +1,3 @@
-
-# Binance Agent Configuration
-
 agent_id: binance_agent
 
 api:
@@ -15,5 +12,5 @@ authentication:
   secret_key: YOUR_SECRET_KEY_HERE
 
 constraints:
-  timeout: 5  # seconds
+  timeout: 5
   rate_limit_per_minute: 120
