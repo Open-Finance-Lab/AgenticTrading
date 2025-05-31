@@ -26,7 +26,7 @@ The system uses four protocol layers to govern communication:
 
 The complete system design is illustrated below:
 
-![System Architecture](docs/source/intro/finagent_architecture.png)
+![System Architecture](docs/source/intro/FinProtocol.jpg)
 
 This framework enables composable, interpretable, and learning-augmented multi-agent orchestration, offering a flexible foundation for intelligent trading strategy research and deployment.
 

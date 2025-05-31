@@ -2,7 +2,7 @@
 Overview
 =============================
 
-.. figure:: finagent_architecture.png
+.. figure:: FinProtocol.jpg
    :align: center
    :width: 90%
 
