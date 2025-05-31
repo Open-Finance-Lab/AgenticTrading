@@ -6,14 +6,14 @@ At the entry point, high-level strategic queries are issued via the **Users Quer
 
 The architecture includes the following specialized **Agent Pools**:
 
-- **Data Agents Pool**: Acquires and preprocesses real-time or historical financial data
-- **Alpha Agents Pool**: Generates predictive signals and quantitative factors
-- **Risk Agents Pool**: Models portfolio exposure and applies constraints
-- **Transaction Cost Agents Pool**: Estimates slippage and market impact
-- **Portfolio Construction Agents Pool**: Allocates positions using alpha, risk, and cost inputs
-- **Execution Agents Pool**: Routes and executes orders in external markets
-- **Attribution Agents Pool**: Analyzes post-trade performance and contribution
-- **Backtest Agents Pool**: Evaluates DAG performance over historical market data
+- **Data Agent Pool**: Acquires and preprocesses real-time or historical financial data
+- **Alpha Agent Pool**: Generates predictive signals and quantitative factors
+- **Risk Agent Pool**: Models portfolio exposure and applies constraints
+- **Transaction Cost Agent Pool**: Estimates slippage and market impact
+- **Portfolio Construction Agent Pool**: Allocates positions using alpha, risk, and cost inputs
+- **Execution Agent Pool**: Routes and executes orders in external markets
+- **Attribution Agent Pool**: Analyzes post-trade performance and contribution
+- **Backtest Agent Pool**: Evaluates DAG performance over historical market data
 
 All agent pools communicate with a centralized **Memory Agent**, which logs execution traces, model outputs, and evaluation results to support continual learning. Agent registration and health status are maintained by the **Registration Bus**.
 
@@ -48,7 +48,7 @@ Four primary inter-agent communication protocols govern system operations:
 ## 📁 Project Structure
 ├── docs/                 Documentation and Sphinx sources \\
 ├── orchestration/        DAG Controller, Orchestration engine, Bus, Protocols \\
-├── agents/               Modular agent pools (Alpha, Risk, Execution, etc.) \\
+├── agent_pools/          Modular agent pools (Alpha, Risk, Execution, etc.) \\
 ├── memory/               Memory Agent and DRL policy learner \\
 ├── config/               YAML-based system configuration \\
 ├── examples/             Strategy simulation and demo DAG runs \\
