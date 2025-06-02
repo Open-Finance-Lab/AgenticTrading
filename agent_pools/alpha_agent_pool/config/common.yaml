@@ -1,0 +1,13 @@
+# Common configurations for all agents
+parameters:
+  min_confidence: 0.7
+  max_position_size: 0.1
+  max_drawdown: 0.05
+
+data_sources:
+  - name: market_data
+    type: market
+    description: Real-time market data including price, volume, and order book
+  - name: fundamental_data
+    type: fundamental
+    description: Company financial statements and fundamental metrics 

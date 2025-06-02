@@ -12,7 +12,7 @@ mcp = FastMCP("Data Agent Pool", stateless_http=True)
 
 # -----------------------------------------------------------------------------
 # Tool: agent.execute
-# Executes a registered agent’s function and returns its result
+# Executes a registered agent's function and returns its result
 # -----------------------------------------------------------------------------
 @mcp.tool(
     name="agent.execute",
