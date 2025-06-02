@@ -10,7 +10,7 @@ The Memory Agent operates as a centralized service, interacting with other agent
 
 The Memory Agent's architecture is designed for efficient memory management and standardized access:
 
-* **MCP Server (`server_testing.py`):**
+* **MCP Server (`memory_server.py`):**
     * This is the heart of the Memory Agent, built using `FastMCP`.
     * It exposes memory operations as tools accessible via the Model Context Protocol (MCP).
     * **Key Tools Implemented:**
@@ -27,7 +27,7 @@ The Memory Agent's architecture is designed for efficient memory management and 
         * **Semantic Search:** Performs similarity searches based on query embeddings to find relevant memories.
     * The current implementation primarily uses an in-memory ChromaDB instance, meaning data is reset when the MCP server stops. For persistence, this component would need to be configured to use a persistent ChromaDB backend.
 
-* **OpenAI-Powered Client & RAG (`openai_mcp_client.py`):**
+* **OpenAI-Powered Client & RAG (`memory_agent.py`):**
     * While not part of the Memory Agent *server* itself, this client demonstrates how an external AI agent (powered by OpenAI's GPT models) can interact with the Memory Agent.
     * **Tool Utilization:** It's configured with definitions of the `store_memory` and `retrieve_memory` tools, allowing the OpenAI model to decide when to call these functions based on user interaction.
     * **MCP Communication:** Uses `mcp.client` libraries to communicate with the Memory Agent's MCP server, sending tool call requests and receiving results.
