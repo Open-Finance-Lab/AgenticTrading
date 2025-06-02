@@ -13,7 +13,7 @@ class TaskStatus(Enum):
 class AgentType(Enum):
     """Enumeration of agent types"""
     DATA = "data_agent"
-    ALPHA = "alpha_agent"
+    ALPHA = "alpha_agent_pool"
     RISK = "risk_agent"
     TRANSACTION = "transaction_agent"
     PORTFOLIO = "portfolio_agent"

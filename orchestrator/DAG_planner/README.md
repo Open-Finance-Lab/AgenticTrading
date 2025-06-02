@@ -1,8 +1,37 @@
 # DAG Planner Component
 
-## Overview
+## Project Status
+![Version](https://img.shields.io/badge/version-1.0.0-blue)
+![Python Version](https://img.shields.io/badge/Python-3.8%2B-green)
+![License](https://img.shields.io/badge/license-OpenMDW-yellow)
 
-The DAG (Directed Acyclic Graph) Planner is a critical component in the FinAgent-Orchestration system, responsible for converting high-level strategic queries into executable task flows. It implements a protocol-oriented architecture that enables dynamic composition of agent behaviors through task-specific execution graphs.
+## Abstract
+
+The DAG (Directed Acyclic Graph) Planner constitutes a fundamental component within the FinAgent-Orchestration system, facilitating the transformation of high-level strategic queries into executable task workflows. This component implements a protocol-oriented architecture that enables dynamic composition of agent behaviors through task-specific execution graphs, thereby enhancing the system's adaptability and extensibility.
+
+## Quick Start
+
+### Installation
+
+```bash
+pip install -r requirements.txt
+```
+
+### Configuration
+
+1. Create a configuration file `config.yaml`:
+```yaml
+planner:
+  host: localhost
+  port: 8000
+  max_workers: 4
+  timeout: 30
+```
+
+2. Set environment variables:
+```bash
+export DAG_PLANNER_CONFIG_PATH=/path/to/config.yaml
+```
 
 ## Architecture
 
@@ -34,135 +63,192 @@ DAG_planner/
 ├── task.py             # Task definitions and types
 ├── server.py           # MCP server implementation
 ├── client.py           # MCP client implementation
+├── config.py           # Configuration management
+├── exceptions.py       # Custom exceptions
+├── utils/             # Utility functions
+│   ├── __init__.py
+│   ├── validation.py
+│   └── logging.py
 ├── protocols/
 │   ├── __init__.py
 │   └── planner_protocol.py  # Message definitions and serialization
 └── tests/
     ├── __init__.py
     ├── conftest.py     # Test configuration and fixtures
-    └── test_planner.py # Test suite
+    ├── test_planner.py # Test suite
+    └── test_integration.py # Integration tests
 ```
 
-## Design Principles
+## API Documentation
 
-### 1. Protocol-Oriented Architecture
-
-The system employs a protocol-oriented design pattern, where communication between components is governed by well-defined protocols:
-
-- **Message Types**: Each message type (QUERY, MEMORY_UPDATE, DAG_RESPONSE, etc.) is explicitly defined
-- **Serialization**: JSON-based message serialization for platform independence
-- **Error Handling**: Comprehensive error handling and status reporting
-- **Correlation**: Request tracking through correlation IDs
-
-### 2. Asynchronous Execution
-
-The implementation leverages Python's asyncio for non-blocking operations:
-
-- Asynchronous server-client communication
-- Concurrent task planning and execution
-- Efficient resource utilization
-- Scalable request handling
-
-### 3. State Management
-
-The system maintains several state collections:
-
-- `active_requests`: Tracks in-progress planning tasks
-- `completed_requests`: Stores successfully planned DAGs
-- `memory_context`: Maintains system-wide context for planning
-- `task_registry`: Manages task definitions and dependencies
-
-## Communication Flow
-
-1. **Query Reception**
-   - Client sends a planning query with context
-   - Server validates and processes the request
-   - Correlation ID is generated for request tracking
-
-2. **DAG Planning**
-   - Planner agent converts query into task DAG
-   - Dependencies are analyzed and validated
-   - Task registry is updated with new tasks
-
-3. **Response Handling**
-   - Planned DAG is serialized and stored
-   - Response is sent back to client
-   - Results are cached for future requests
-
-## Testing Strategy
-
-The component implements a comprehensive testing strategy:
-
-1. **Unit Tests**
-   - Protocol message serialization
-   - Task management operations
-   - DAG validation and construction
-
-2. **Integration Tests**
-   - Server-client communication
-   - End-to-end workflow validation
-   - Memory context integration
-
-3. **Mock Implementations**
-   - MockDAGPlanner for testing
-   - Simulated agent behaviors
-   - Controlled test environments
-
-## Usage Example
+### DAGPlannerAgent
 
 ```python
-# Create and start server
-planner = DAGPlannerAgent()
-server = DAGPlannerServer(planner)
-await server.start()
+class DAGPlannerAgent:
+    async def plan_dag(self, query: str, context: Dict) -> DAG:
+        """
+        Plans a DAG based on the provided query and context.
+        
+        Parameters:
+            query (str): The planning query
+            context (Dict): Contextual information
+            
+        Returns:
+            DAG: The constructed directed acyclic graph
+        """
+        pass
 
-# Client usage
-client = DAGPlannerClient()
-await client.connect()
-
-# Plan DAG
-dag = await client.plan_dag(
-    query="Trading strategy",
-    context={"market": "US", "timeframe": "1d"}
-)
-
-# Update memory
-await client.update_memory({
-    "market_data": {"AAPL": 150.0},
-    "risk_metrics": {"volatility": 0.2}
-})
+    async def update_memory(self, memory_update: Dict) -> None:
+        """
+        Updates the system's memory context.
+        
+        Parameters:
+            memory_update (Dict): Memory update data
+        """
+        pass
 ```
 
-## Future Enhancements
+### DAGPlannerClient
 
-1. **Performance Optimization**
-   - Implement caching strategies
-   - Optimize DAG validation
-   - Add request batching
+```python
+class DAGPlannerClient:
+    async def connect(self) -> None:
+        """Establishes connection to the DAG Planner server"""
+        pass
 
-2. **Feature Extensions**
-   - Support for dynamic DAG modification
-   - Enhanced error recovery
-   - Real-time planning updates
+    async def plan_dag(self, query: str, context: Dict) -> DAG:
+        """Submits a planning request"""
+        pass
 
-3. **Monitoring and Observability**
-   - Add metrics collection
-   - Implement tracing
-   - Enhanced logging
+    async def update_memory(self, memory_update: Dict) -> None:
+        """Updates system memory"""
+        pass
+```
+
+## Implementation Details
+
+### Design Principles
+
+1. **Protocol-Oriented Architecture**
+   - Well-defined message types (QUERY, MEMORY_UPDATE, DAG_RESPONSE)
+   - JSON-based message serialization
+   - Comprehensive error handling
+   - Request correlation through unique identifiers
+
+2. **Asynchronous Execution**
+   - Non-blocking server-client communication
+   - Concurrent task planning and execution
+   - Efficient resource utilization
+   - Scalable request handling
+
+3. **State Management**
+   - Active request tracking
+   - Completed request storage
+   - System-wide context maintenance
+   - Task registry management
+
+### Communication Flow
+
+1. **Query Reception**
+   - Client query submission with context
+   - Server-side request validation
+   - Correlation ID generation
+
+2. **DAG Planning**
+   - Query-to-DAG transformation
+   - Dependency analysis and validation
+   - Task registry updates
+
+3. **Response Handling**
+   - DAG serialization and storage
+   - Client response transmission
+   - Result caching
+
+## Testing Methodology
+
+### Unit Testing
+- Protocol message serialization
+- Task management operations
+- DAG validation and construction
+
+### Integration Testing
+- Server-client communication
+- End-to-end workflow validation
+- Memory context integration
+
+### Mock Implementations
+- MockDAGPlanner for testing
+- Simulated agent behaviors
+- Controlled test environments
+
+## Performance Optimization
+
+### Caching Strategies
+- LRU cache implementation
+- Query result caching
+- Memory usage optimization
+
+### Concurrency Management
+- Parallel task execution
+- Resource pool management
+- Load balancing
+
+## Monitoring and Observability
+
+### Metrics Collection
+- Request latency
+- Memory utilization
+- Task completion rate
+- Error rate
+
+### Logging Configuration
+```python
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+```
+
+## Contribution Guidelines
+
+### Code Standards
+- PEP 8 compliance
+- Type annotations
+- Comprehensive docstrings
+
+### Testing Requirements
+- Unit test coverage > 80%
+- Integration test suite
+- Performance benchmarks
+
+### Submission Process
+- Feature branch creation
+- Test case implementation
+- Pull request submission
+
+### Documentation
+- API documentation updates
+- Usage examples
+- Changelog maintenance
 
 ## Dependencies
 
-- `networkx`: DAG construction and validation
-- `asyncio`: Asynchronous operations
-- `pydantic`: Data validation
-- `pytest`: Testing framework
-- `pytest-asyncio`: Async test support
+- `networkx>=2.6.3`: DAG construction and validation
+- `asyncio>=3.4.3`: Asynchronous operations
+- `pydantic>=1.9.0`: Data validation
+- `pytest>=7.0.0`: Testing framework
+- `pytest-asyncio>=0.18.0`: Async test support
+- `pyyaml>=6.0`: Configuration management
+- `structlog>=22.1.0`: Structured logging
 
-## Contributing
+## License
 
-When contributing to this component, please ensure:
+This component is part of the FinAgent-Orchestration project and is licensed under the OpenMDW License. See the [LICENSE](../../LICENSE) file in the project root directory for details.
 
-1. All new features include comprehensive tests
-2. Protocol changes maintain backward compatibility
-3. Documentation is updated accordingly
-4. Code follows the established style guide 
+## Contact Information
+
+- Issue Tracking: GitHub Issues
+- Email: [Maintainer Email]
+- Documentation: [Documentation Link] 
