@@ -1,25 +1,31 @@
+# openai_mcp_client.py
 import openai
-import requests
 import json
 import os
 from datetime import datetime
-from dotenv import load_dotenv 
-from typing import List, Dict, Any
+from dotenv import load_dotenv
+from typing import List, Dict, Any, Optional
+import asyncio
+import httpx 
+from mcp.client.session import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+from mcp import types as mcp_types
 
 #.env has OpenAI key in main dir
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 dotenv_path = os.path.join(project_root, '.env')
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
-load_dotenv(dotenv_path=dotenv_path)
 
-api_key = os.environ.get("OPENAI_API_KEY")
-MCP_SERVER_URL = "http://127.0.0.1:8000/mcp"
+MCP_SERVER_URL = "http://127.0.0.1:8000/mcp" 
+
 
 tools_definition = [
     {
         "type": "function",
         "function": {
-            "name": "store_memory",
+            "name": "store_memory", 
             "description": "Stores a piece of information or memory into the memory database. Use this to remember facts, user statements, or context for future reference.",
             "parameters": {
                 "type": "object",
@@ -39,24 +45,23 @@ tools_definition = [
                     "timestamp": {
                         "type": "string",
                         "format": "date-time",
-                        "description": "An ISO 8601 timestamp for when the memory occurred or was recorded. Will be auto-generated if not provided."
+                        "description": "An ISO 8601 timestamp for when the memory occurred or was recorded. Can be null or omitted to auto-generate."
                     },
                     "additional_metadata": {
                         "type": "object",
-                        "description": "Any other structured data to store with the memory as key-value pairs.",
+                        "description": "Any other structured data to store with the memory as key-value pairs. Can be an empty object if no additional metadata.",
                         "additionalProperties": True
                     }
                 },
-                "required": ["content"],
+                "required": ["content"], 
             },
-        }
+        },
     },
     {
         "type": "function",
         "function": {
-            "name": "retrieve_memories",
-            "description": "Retrieves relevant memories from the database based on a textual query. "
-            "Use this to recall past information, facts, or context related to the current conversation to help answer a question.",
+            "name": "retrieve_memory", 
+            "description": "Retrieves relevant memories from the database based on a textual query. Use this to recall past information, facts, or context related to the current conversation to help answer a question.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -66,184 +71,171 @@ tools_definition = [
                     },
                     "k": {
                         "type": "integer",
-                        "description": "The maximum number of memories to retrieve. Optional, defaults to 3."
+                        "description": "The maximum number of memories to retrieve. Optional, server defaults to 3 if not provided."
                     }
                 },
                 "required": ["query"],
             },
-        }
+        },
     }
 ]
 
+async def call_mcp_tool(session: ClientSession, tool_name: str, tool_args: Dict[str, Any]) -> Any:
+    """Helper function to call a tool on the MCP server."""
+    print(f"📞 Calling MCP tool: {tool_name} with raw args from OpenAI: {json.dumps(tool_args, indent=2)}")
+
+    if tool_name == "store_memory":
+        if "category" not in tool_args or tool_args["category"] is None:
+            tool_args["category"] = "General"
+        if "source_agent_id" not in tool_args or tool_args["source_agent_id"] is None:
+            tool_args["source_agent_id"] = "openai_gpt4o_chat_agent" 
+        if "timestamp" not in tool_args:
+             tool_args["timestamp"] = None
+        if "additional_metadata" not in tool_args:
+            tool_args["additional_metadata"] = {}
+    elif tool_name == "retrieve_memory":
+        if "k" not in tool_args or tool_args["k"] is None:
+            tool_args["k"] = tool_args.get("k", 3) 
 
 
+    print(f"   Processed args for MCP server: {json.dumps(tool_args, indent=2)}")
 
-
-def call_mcp_server_tool(function_name: str, function_args: dict) -> dict:
-    """Calls the specified tool on the MCP server."""
-    print(f"Attempting to call MCP tool: {function_name} with args: {function_args}")
-    payload = {
-        "method": "agent.execute",
-        "params": {
-            "agent_id": "openai_gpt4o_chat_agent", 
-            "function": function_name,
-            "input": function_args
-        },
-        "id": f"chat-req-{datetime.now().timestamp()}"
-    }
-
-
-    #debugging/errors
     try:
-        response = requests.post(MCP_SERVER_URL, json=payload, headers={"Content-Type": "application/json"})
-        response.raise_for_status()
-        print(f"MCP Server Response ({response.status_code}): {response.json()}")
-        return response.json()
-    except requests.exceptions.HTTPError as http_err:
-        print(f"HTTP error calling MCP server for {function_name}: {http_err}")
-        raw_response_text = http_err.response.text if http_err.response else "N/A"
-        try:
-            error_details = http_err.response.json()
-        except json.JSONDecodeError:
-            error_details = raw_response_text
-        return {"error": {"message": str(http_err), "type": "mcp_http_error", "status_code": http_err.response.status_code, "details": error_details, "function_called": function_name}}
-    except requests.exceptions.RequestException as e:
-        print(f"Error calling MCP server for {function_name}: {e}")
-        return {"error": {"message": str(e), "type": "mcp_request_failed", "function_called": function_name}}
-    except json.JSONDecodeError as e:
-        print(f"Error decoding JSON response from MCP server for {function_name}: {e}")
-        return {"error": {"message": "Failed to decode JSON response.", "type": "mcp_response_invalid_json", "raw_response": response.text if 'response' in locals() else "N/A"}}
+        mcp_response = await session.call_tool(tool_name, tool_args)
 
+        if mcp_response.isError or not mcp_response.content:
+            error_message = f"Error from MCP tool '{tool_name}'."
+            if mcp_response.content and isinstance(mcp_response.content[0], mcp_types.TextContent):
+                error_message += f" Details: {mcp_response.content[0].text}"
+            elif mcp_response.meta and mcp_response.meta.get("error_message"): 
+                error_message += f" Details: {mcp_response.meta['error_message']}"
+            print(f"❌ {error_message}")
+            return {"error": error_message, "mcp_tool_error_details": error_message} 
 
-
-
-#main loop
-def run_conversation():
-    messages = [{"role": "system", "content": "You are a helpful financial memory assistant."
-    " You have tools to store and retrieve memories. When retrieving memories, analyze the user's "
-    "query to determine if the retrieved information should be used to directly answer the query or "
-    "if further synthesis is needed. Always aim to be factual and use stored memories to enhance your responses."}]
-    
-    print("Agent: You are now chatting with memory agent that is connected to the DB. Type 'exit' to end.")
-
-    while True:
-        user_input = input("You: ")
-        if user_input.lower() == 'exit':
-            break
-        if not user_input.strip():
-            continue
-
-        messages.append({"role": "user", "content": user_input})
-        original_user_query_for_rag = user_input
         
+        if isinstance(mcp_response.content[0], mcp_types.TextContent):
+            tool_result_text = mcp_response.content[0].text
+            print(f"✅ MCP tool '{tool_name}' successful. Raw result: {tool_result_text}")
+            try:
+
+                return json.loads(tool_result_text) 
+            except json.JSONDecodeError:
+                print(f"⚠️ MCP tool '{tool_name}' result was not valid JSON: {tool_result_text}")
+                return {"raw_output": tool_result_text} 
+        else:
+            print(f"⚠️ Unexpected content type from MCP tool '{tool_name}': {type(mcp_response.content[0])}")
+            return {"error": "Unexpected content type from MCP tool"}
+
+    except Exception as e:
+        print(f"❌ Exception during MCP tool call '{tool_name}': {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e), "exception_type": type(e).__name__}
+
+
+async def run_conversation_with_tools(user_prompt: str, mcp_session: ClientSession):
+    messages = [{"role": "user", "content": user_prompt}]
+    print(f"\n👤 User: {user_prompt}")
+
+    for iteration_count in range(5): 
         try:
             response = client.chat.completions.create(
-                model="gpt-4o",
+                model="gpt-4o", 
                 messages=messages,
                 tools=tools_definition,
-                tool_choice="auto",
+                tool_choice="auto", 
             )
             response_message = response.choices[0].message
-            messages.append(response_message)
+            tool_calls = response_message.tool_calls
 
-            if response_message.tool_calls:
-                print("Agent wants to use a tool.")
-                tool_call_results = []
+            if tool_calls:
+                messages.append(response_message) 
 
-                for tool_call in response_message.tool_calls:
+                for tool_call in tool_calls:
                     function_name = tool_call.function.name
-                    function_args = json.loads(tool_call.function.arguments)
-
-                    print(f"System: Calling tool '{function_name}' with arguments: {function_args}")
-
-                    if function_name == "store_memory":
-                        if "source_agent_id" not in function_args:
-                            function_args["source_agent_id"] = "openai_gpt4o_chat_agent"
-                        
-                        tool_response_data = call_mcp_server_tool(
-                            function_name=function_name,
-                            function_args=function_args
-                        )
-                        tool_call_results.append({
+                    function_args_str = tool_call.function.arguments
+                    try:
+                        function_args = json.loads(function_args_str)
+                    except json.JSONDecodeError:
+                        print(f"Error: Could not decode arguments for {function_name}: {function_args_str}")
+                        function_response_content = f"Error: Invalid arguments provided for {function_name}. Arguments string was: {function_args_str}"
+                        messages.append({
                             "tool_call_id": tool_call.id,
                             "role": "tool",
                             "name": function_name,
-                            "content": json.dumps(tool_response_data), #send back json string of the mcp response
+                            "content": function_response_content,
                         })
+                        continue 
 
-                    elif function_name == "retrieve_memories":
-                        retrieved_data_from_mcp = call_mcp_server_tool(
-                            function_name=function_name,
-                            function_args=function_args
-                        )
+                    print(f"   - Tool: {function_name}")
+                    print(f"   - Arguments from OpenAI: {json.dumps(function_args, indent=2)}")
 
-                        if retrieved_data_from_mcp.get("error") or \
-                           not retrieved_data_from_mcp.get("result") or \
-                           not retrieved_data_from_mcp["result"].get("retrieved_memories"):
-                            
-                            tool_call_results.append({
-                                "tool_call_id": tool_call.id,
-                                "role": "tool",
-                                "name": function_name,
-                                "content": json.dumps({"status": "No relevant memories found or error in retrieval.", "retrieved_memories": []}),
-                            })
-                            continue
+                    function_response = await call_mcp_tool(mcp_session, function_name, function_args)
+                    
+                    if isinstance(function_response, (dict, list)):
+                        response_content_str = json.dumps(function_response)
+                    elif isinstance(function_response, str):
+                        response_content_str = function_response
+                    elif function_response is None:
+                         response_content_str = json.dumps({"status": "Tool executed but returned None."})
+                    else:
+                        response_content_str = str(function_response)
 
-                        retrieved_memories = retrieved_data_from_mcp["result"]["retrieved_memories"]
-                        
-                        #augment the prompt with retrieved memories
-                        context_str = "Based on the following retrieved information from my memory:\n"
-                        if retrieved_memories:
-                            for i, mem_item in enumerate(retrieved_memories):
-                                content = mem_item.get('document', '')
-                                context_str += f"{i+1}. (Memory ID: {mem_item.get('id', 'N/A')}) {content}\n"
-                        
-                        rag_question = original_user_query_for_rag 
-                        augmented_prompt = f"{context_str}\nNow, please answer the user's request: \"{rag_question}\""
-                        
-                        print(f"\n--- RAG: Augmented Prompt for LLM ---\n{augmented_prompt}\n------------------------------------")
 
-                        rag_response_messages = [
-                            {"role": "system", "content": "You are a helpful assistant. Base your answer *only* on the provided context. "
-                            "If the context isn't sufficient or relevant to the question, clearly state that the provided information doesn't answer the question."},
-                            {"role": "user", "content": augmented_prompt}
-                        ]
-                        
-                        rag_llm_response = client.chat.completions.create(
-                            model="gpt-4o",
-                            messages=rag_response_messages,
-                            temperature=0.3 #more factual response with lower temperature.... less randomness
-                        )
-                        final_rag_answer = rag_llm_response.choices[0].message.content
-                        print(f"RAG: LLM generated answer: {final_rag_answer}")
-
-                        tool_call_results.append({
-                            "tool_call_id": tool_call.id,
-                            "role": "tool",
-                            "name": function_name,
-                            "content": json.dumps({
-                                "status": "Successfully retrieved and synthesized information.", 
-                                "synthesized_answer": final_rag_answer, #RAG results
-                                "source_memory_ids": [mem.get('id') for mem in retrieved_memories if mem.get('id')] 
-                            }), 
-                        })
-                
-                if tool_call_results:
-                    messages.extend(tool_call_results)
-                    final_response_after_tools = client.chat.completions.create(
-                        model="gpt-4o",
-                        messages=messages,
-                    )
-                    final_gpt_message = final_response_after_tools.choices[0].message
-                    print(f"GPT (after tool processing): {final_gpt_message.content}")
-                    messages.append(final_gpt_message)
+                    messages.append({
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": function_name,
+                        "content": response_content_str,
+                    })
             else:
-                print(f"GPT: {response_message.content}")
+                assistant_response = response_message.content
+                print(f"\n🤖 Agent: {assistant_response}")
+                return assistant_response 
 
+        except openai.APIError as e:
+            print(f"OpenAI API Error: {e}")
+            return f"Sorry, I encountered an API error: {e}"
         except Exception as e:
-            print(f"An error occurred in the conversation loop: {e}")
+            print(f"An unexpected error occurred: {e}")
             import traceback
             traceback.print_exc()
+            return f"Sorry, an unexpected error occurred: {e}"
+    
+    print("Max tool iterations reached. Returning last known state or error.")
+    return "Max tool iterations reached. The conversation might be stuck in a loop or require more steps."
+
+
+async def main():
+    print(f"Attempting to connect to MCP server at {MCP_SERVER_URL}...")
+    try:
+        async with streamablehttp_client(MCP_SERVER_URL) as (read, write, transport_specific_context):
+            async with ClientSession(read, write) as session:
+                print("✅ Connected to MCP server's session.\n")
+                
+                while True:
+                    try:
+                        user_query = input("👤 You (exit to end): ")
+                        if user_query.lower() in ["exit", "quit"]:
+                            print("Agent: Goodbye!")
+                            break
+                        if not user_query.strip():
+                            continue
+                        
+                        await run_conversation_with_tools(user_query, session)
+                        print("-" * 60)
+                    except Exception as e: 
+                        print(f"An error occurred in the input loop: {e}")
+                        break
+
+
+    except httpx.ConnectError as e:
+        print(f"❌ Connection Error: Failed to connect to MCP server at {MCP_SERVER_URL}.")
+        print(f"   Details: {e}")
+    except Exception as e:
+        print(f"❌ An unexpected error occurred during MCP client setup: {e}")
+        import traceback
+        traceback.print_exc()
 
 if __name__ == "__main__":
-    run_conversation()
+    asyncio.run(main())

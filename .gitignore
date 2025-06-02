@@ -1,3 +1,4 @@
 /Papers
 .env
 .venv
+/memory/__pycache__
