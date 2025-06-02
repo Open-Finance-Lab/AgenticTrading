@@ -1,0 +1,34 @@
+agent_id: ml_agent
+agent_type: ML_BASED
+description: Machine learning based trading agent using predictive models
+
+data_sources:
+  - name: ml_features
+    type: ml
+    description: Engineered features for machine learning models
+  - name: model_predictions
+    type: prediction
+    description: Real-time model predictions and confidence scores
+
+parameters:
+  model_confidence_threshold: 0.8
+  prediction_horizon: 1d
+
+signal_rules:
+  - name: model_prediction
+    description: Trading signals based on model predictions
+    parameters:
+      min_confidence: 0.8
+      prediction_threshold: 0.6
+  - name: ensemble_validation
+    description: Validate signals across multiple models
+    parameters:
+      min_models_agree: 2
+      consensus_threshold: 0.7
+
+risk_parameters:
+  - name: ml_risk
+    description: Risk management for ML-based predictions
+    parameters:
+      max_model_exposure: 0.1
+      prediction_stop_loss: 0.04 
