@@ -38,7 +38,7 @@ Four primary inter-agent communication protocols govern system operations:
 
 | Protocol | Role |
 |----------|------|
-| `MCP` (Multi-agent Control Protocol) | Task scheduling and lifecycle control |
+| `MCP` (Multi-agent Communication Protocol) | Task scheduling and lifecycle control |
 | `ACP` (Agent Communication Protocol) | Agent feedback and status reporting |
 | `A2A` (Agent-to-Agent Protocol) | Peer-to-peer DAG-executed subtask coordination |
 | `ANP` (Agent Notification Protocol) | Event-driven alerts and system-wide state propagation |
