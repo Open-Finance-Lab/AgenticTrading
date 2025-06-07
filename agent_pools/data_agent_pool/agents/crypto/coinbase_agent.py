@@ -1,5 +1,5 @@
-from registry import BaseAgent
-from schema.crypto_schema import CoinbaseConfig
+from agent_pools.data_agent_pool.registry import BaseAgent
+from agent_pools.data_agent_pool.schema.crypto_schema import CoinbaseConfig
 
 class CoinbaseAgent(BaseAgent):
     def __init__(self, config: CoinbaseConfig):

@@ -69,17 +69,18 @@ def register_agent(agent_id: str, agent_instance: BaseAgent):
     logging.info(f"Agent '{agent_id}' registered with config: {agent_instance.config}")
 
 # === Agent Class Imports ===
-from agents.crypto.binance_agent import BinanceAgent
-from agents.crypto.coinbase_agent import CoinbaseAgent
-from agents.equity.alpaca_agent import AlpacaAgent
-from agents.equity.iex_agent import IEXAgent
-from agents.news.newsapi_agent import NewsAPIAgent
-from agents.news.rss_agent import RSSAgent
+from agent_pools.data_agent_pool.agents.crypto.binance_agent import BinanceAgent
+from agent_pools.data_agent_pool.agents.crypto.coinbase_agent import CoinbaseAgent
+from agent_pools.data_agent_pool.agents.equity.alpaca_agent import AlpacaAgent
+from agent_pools.data_agent_pool.agents.equity.iex_agent import IEXAgent
+from agent_pools.data_agent_pool.agents.news.newsapi_agent import NewsAPIAgent
+from agent_pools.data_agent_pool.agents.news.rss_agent import RSSAgent
+from agent_pools.data_agent_pool.agents.equity.polygon_agent import PolygonAgent
 
 # === Schema Imports ===
-from schema.crypto_schema import BinanceConfig, CoinbaseConfig
-from schema.equity_schema import AlpacaConfig, IEXConfig
-from schema.news_schema import NewsAPIConfig, RSSConfig
+from agent_pools.data_agent_pool.schema.crypto_schema import BinanceConfig, CoinbaseConfig
+from agent_pools.data_agent_pool.schema.equity_schema import AlpacaConfig, IEXConfig, PolygonConfig
+from agent_pools.data_agent_pool.schema.news_schema import NewsAPIConfig, RSSConfig
 
 # === Config Loader ===
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
@@ -104,8 +105,10 @@ def preload_default_agents():
     # equity
     alpaca_cfg = AlpacaConfig(**load_config("alpaca_agent"))
     iex_cfg = IEXConfig(**load_config("iex_agent"))
+    polygon_cfg = PolygonConfig(**load_config("polygon_agent"))  
     register_agent("alpaca_agent", AlpacaAgent(alpaca_cfg))
     register_agent("iex_agent", IEXAgent(iex_cfg))
+    register_agent("polygon_agent", PolygonAgent(polygon_cfg))
 
     # news
     newsapi_cfg = NewsAPIConfig(**load_config("newsapi_agent"))

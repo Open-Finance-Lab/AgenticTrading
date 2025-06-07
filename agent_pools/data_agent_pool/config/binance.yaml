@@ -8,8 +8,8 @@ api:
   default_interval: 1h
 
 authentication:
-  api_key: YOUR_API_KEY_HERE
-  secret_key: YOUR_SECRET_KEY_HERE
+  api_key: "YOUR_API_KEY_HERE"
+  secret_key: "YOUR_SECRET_KEY_HERE"
 
 constraints:
   timeout: 5
