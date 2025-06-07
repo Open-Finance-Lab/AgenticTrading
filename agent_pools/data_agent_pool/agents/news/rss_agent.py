@@ -1,5 +1,5 @@
-from registry import BaseAgent
-from schema.news_schema import RSSConfig
+from agent_pools.data_agent_pool.registry import BaseAgent
+from agent_pools.data_agent_pool.schema.news_schema import RSSConfig
 
 class RSSAgent(BaseAgent):
     def __init__(self, config: RSSConfig):

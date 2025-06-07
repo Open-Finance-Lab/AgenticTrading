@@ -1,4 +1,3 @@
-
 from pydantic import BaseModel
 from typing import Optional, Dict
 
@@ -26,3 +25,11 @@ class IEXConfig(BaseModel):
     api: APISettings
     authentication: AuthSettings
     constraints: Constraints
+
+class PolygonConfig(BaseModel):
+    """Configuration schema for Polygon.io API"""
+    api_key: str
+    timeout: int
+    rate_limit: int
+    base_url: str 
+    llm_enabled: bool

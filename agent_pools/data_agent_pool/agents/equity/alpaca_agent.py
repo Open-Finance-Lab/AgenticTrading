@@ -1,5 +1,5 @@
-from registry import BaseAgent
-from schema.equity_schema import AlpacaConfig
+from agent_pools.data_agent_pool.registry import BaseAgent
+from agent_pools.data_agent_pool.schema.equity_schema import AlpacaConfig
 
 class AlpacaAgent(BaseAgent):
     def __init__(self, config: AlpacaConfig):

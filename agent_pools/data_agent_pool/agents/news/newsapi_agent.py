@@ -1,5 +1,5 @@
-from registry import BaseAgent
-from schema.news_schema import NewsAPIConfig
+from agent_pools.data_agent_pool.registry import BaseAgent
+from agent_pools.data_agent_pool.schema.news_schema import NewsAPIConfig
 
 class NewsAPIAgent(BaseAgent):
     def __init__(self, config: NewsAPIConfig):
