@@ -183,81 +183,71 @@ Do not invent or use any other tool names.
              **kwargs) -> pd.DataFrame:
         """
         Fetch comprehensive market data from Polygon.io.
-
-        Args:
-            symbol: Stock ticker symbol
-            start: Start date in ISO format
-            end: End date in ISO format
-            interval: Data resolution (1m,5m,15m,30m,1h,1d)
-            force_refresh: Force API call instead of using cache
-
-        Returns:
-            pd.DataFrame with columns:
-            - timestamp, open, high, low, close, volume
-            - vwap, trades, pre_market, after_market
-            - dividend, split
         """
+        # Accept 'from' and 'to' as aliases for 'start' and 'end'
+        if start is None:
+            start = kwargs.get("from")
+        if end is None:
+            end = kwargs.get("to")
+        if not start or not end:
+            raise ValueError("Missing required parameters: start/end (or from/to)")
+
+        # Convert start and end to YYYY-MM-DD format
         try:
-            # Support 'from' and 'to' as aliases for 'start' and 'end'
-            if start is None:
-                start = kwargs.get("from")
-            if end is None:
-                end = kwargs.get("to")
-            if not start or not end:
-                raise ValueError("Missing required parameters: start/end (or from/to)")
-
-            # Check cache first
-            cache_file = os.path.join(
-                self.cache_dir, 
-                f'{symbol}_{start}_{end}_{interval}.csv'
-            )
-            if not force_refresh and os.path.exists(cache_file):
-                return pd.read_csv(cache_file, index_col=0, parse_dates=True)
-
-            # Validate interval
-            if interval not in self.INTERVAL_MAP:
-                raise ValueError(f"Unsupported interval: {interval}")
-            multiplier, timespan = self.INTERVAL_MAP[interval]
-
-            # Prepare API call
-            url = f"{self.api_base_url}/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start}/{end}"
-            params = {
-                "adjusted": "true",
-                "sort": "asc",
-                "limit": 50000,
-                "apiKey": self.config["api_key"]
-            }
-
-            print("Plan parameters:", params)
-
-            # Get OHLCV data
-            response = requests.get(url, params=params)
-            if response.status_code != 200:
-                raise RuntimeError(f"API error: {response.status_code} {response.text}")
-            
-            data = response.json()
-            if not data.get("results"):
-                raise ValueError(f"No data returned for {symbol}")
-
-            # Convert to DataFrame
-            df = pd.DataFrame(data["results"])
-            df['timestamp'] = pd.to_datetime(df['t'], unit='ms')
-            df.set_index('timestamp', inplace=True)
-            df = df.rename(columns={
-                'o': 'open', 'h': 'high', 'l': 'low',
-                'c': 'close', 'v': 'volume', 'n': 'trades'
-            })
-
-            # Fetch additional data (VWAP, pre/post market, etc.)
-            if interval in ['1d', '1h']:
-                self._enrich_market_data(df, symbol)
-
-            # Cache results
-            df.to_csv(cache_file)
-            return df
-
+            start = datetime.strptime(start, "%Y-%m-%d").date()
+            end = datetime.strptime(end, "%Y-%m-%d").date()
         except Exception as e:
-            raise RuntimeError(f"Failed to fetch data: {str(e)}")
+            raise ValueError(f"Invalid date format for start or end: {str(e)}")
+
+        # Check cache first
+        cache_file = os.path.join(
+            self.cache_dir, 
+            f'{symbol}_{start}_{end}_{interval}.csv'
+        )
+        if not force_refresh and os.path.exists(cache_file):
+            return pd.read_csv(cache_file, index_col=0, parse_dates=True)
+
+        # Validate interval
+        if interval not in self.INTERVAL_MAP:
+            raise ValueError(f"Unsupported interval: {interval}")
+        multiplier, timespan = self.INTERVAL_MAP[interval]
+
+        # Prepare API call
+        url = f"{self.api_base_url}/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start}/{end}"
+        params = {
+            "adjusted": "true",
+            "sort": "asc",
+            "limit": 50000,
+            "apiKey": self.config["api_key"]
+        }
+
+        print("Plan parameters:", params)
+
+        # Get OHLCV data
+        response = requests.get(url, params=params)
+        if response.status_code != 200:
+            raise RuntimeError(f"API error: {response.status_code} {response.text}")
+        
+        data = response.json()
+        if not data.get("results"):
+            raise ValueError(f"No data returned for {symbol}")
+
+        # Convert to DataFrame
+        df = pd.DataFrame(data["results"])
+        df['timestamp'] = pd.to_datetime(df['t'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df = df.rename(columns={
+            'o': 'open', 'h': 'high', 'l': 'low',
+            'c': 'close', 'v': 'volume', 'n': 'trades'
+        })
+
+        # Fetch additional data (VWAP, pre/post market, etc.)
+        if interval in ['1d', '1h']:
+            self._enrich_market_data(df, symbol)
+
+        # Cache results
+        df.to_csv(cache_file)
+        return df
 
     def _enrich_market_data(self, df: pd.DataFrame, symbol: str) -> None:
         """Add VWAP, pre/post market prices, dividends and splits."""
@@ -397,6 +387,8 @@ Do not invent or use any other tool names.
             [self.system_prompt, HumanMessage(content=query)]
         ])
         plan = self._parse_intent(intent_analysis.generations[0][0].text)
+        print("=== Execution Plan ===")
+        print(plan)
         result = await self._execute_strategy(plan)
         return {
             "execution_plan": plan,

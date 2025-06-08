@@ -11,7 +11,7 @@ async def main():
 
     # Example natural language query
     query = (
-        "Analyze the trading volume and price trend of AAPL for the last 30 days. "
+        "Analyze the trading volume and price trend of AAPL and MSFT for the last 30 days. "
         "Highlight any unusual volume spikes and provide a summary."
     )
 
