@@ -17,23 +17,12 @@ class AppContext:
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    """Manage application lifecycle with type-safe context"""
-    # The 'retriever' instance is already created globally.
-    # For many ChromaDB client setups (especially in-memory), explicit connect/disconnect
-    # after __init__ isn't standard via separate methods on a wrapper like ChromaRetriever.
-    # The client is initialized within ChromaRetriever's __init__.
-    # If specific setup/teardown for the underlying chromadb.Client were needed,
-    # you'd add methods to ChromaRetriever and call them here.
-
     print("Lifespan event: Initializing application context.")
-    # For now, we'll assume the globally initialized 'retriever' is the service
-    # we want to make available through the lifespan context.
     current_retriever_instance = retriever 
 
     try:
         yield AppContext(chroma_service=current_retriever_instance)
     finally:
-        # For example: current_retriever_instance.client.reset() # if you want to clear it
         print("Lifespan event: Cleaning up application context.")
 
 mcp = FastMCP(
@@ -110,5 +99,5 @@ def retrieve_memory(query: str, k: int):
     except Exception as e:
         print(f"❌ ERROR during retriever.search: {e}")
         raise e
-# What Uvi rus
+# What Uvi runs
 app = mcp.streamable_http_app()
