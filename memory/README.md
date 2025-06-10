@@ -1,48 +1,148 @@
-# 🧠 Memory Agent
+# 🧠 Intelligent Memory System
 
-## 📐 System Overview
+### Abstract
 
-The Memory Agent serves as a specialized component within a broader financial agent orchestration framework. Its primary function is to provide a robust, persistent, and queryable memory layer for all other agents in the system. This enables learning, adaptation, and contextually aware decision-making by allowing agents to store and retrieve information from past actions, market events, and operational logs.
+This project implements an advanced, server-based memory system for Large Language Models (LLMs). It leverages a vector database (ChromaDB) for efficient information retrieval and exposes memory operations via a standardized server protocol. The system is designed to provide external LLM agents with a dynamic, queryable, long-term memory that overcomes standard context window limitations, enabling more accurate and context-aware responses.
 
-The Memory Agent operates as a centralized service, interacting with other agents via standardized protocols. It leverages a hybrid approach to data storage and employs advanced retrieval techniques to ensure relevant information is available when needed.
+### Project Status
 
-## 🏗️ Core Architecture & Functionality
+The project is currently in a **prototyping and evaluation phase**. The core server and retrieval mechanisms are functional, and performance is being actively measured through dedicated latency and accuracy tests.
 
-The Memory Agent's architecture is designed for efficient memory management and standardized access:
+### Architecture
 
-* **MCP Server (`memory_server.py`):**
-    * This is the heart of the Memory Agent, built using `FastMCP`.
-    * It exposes memory operations as tools accessible via the Model Context Protocol (MCP).
-    * **Key Tools Implemented:**
-        * `store_memory`: Allows agents to save textual information along with structured metadata (category, source, timestamp, custom key-value pairs) into the memory system.
-        * `retrieve_memory`: Enables agents to query the memory system using natural language or specific keywords to find the most relevant stored information, returning a specified number of results.
-    * Integrates a lifespan manager (`app_lifespan`) for resource initialization and cleanup, ensuring the underlying database retriever is properly managed.
-    * The server is designed to be run as an ASGI application (e.g., with Uvicorn), exposing an MCP endpoint (typically `/mcp`).
+#### Directory Structure
 
-* **Data Retrieval & Storage (`chroma_retriever.py`):**
-    * This module provides an abstraction layer over the underlying vector database, currently ChromaDB.
-    * It handles:
-        * **Embedding Generation:** Converts textual content into vector embeddings for semantic search (using Sentence Transformers).
-        * **Storage:** Adds documents, their embeddings, and associated metadata to the ChromaDB collection.
-        * **Semantic Search:** Performs similarity searches based on query embeddings to find relevant memories.
-    * The current implementation primarily uses an in-memory ChromaDB instance, meaning data is reset when the MCP server stops. For persistence, this component would need to be configured to use a persistent ChromaDB backend.
+```
+/
+├── testing/
+│   ├── accuracy_testing.py   # Tests the model's ability to find facts
+│   └── latency_test.py       # Measures performance with large contexts
+├── chroma_retriever.py         # Manages interaction with ChromaDB vector store
+├── memory_agent.py             # Client example of an OpenAI agent using the server
+├── memory_server.py            # Core MCP server exposing memory tools
+├── pydantic_models.py          # Pydantic schemas for data validation
+├── server_testing.py           # Deprecated or alternative server implementation
+├── test_client.py              # Simple client for unit testing server tools
+├── sp500_headlines_2... .csv  # Sample dataset for testing
+└── README.md                   # This documentation file
+```
 
-* **OpenAI-Powered Client & RAG (`memory_agent.py`):**
-    * While not part of the Memory Agent *server* itself, this client demonstrates how an external AI agent (powered by OpenAI's GPT models) can interact with the Memory Agent.
-    * **Tool Utilization:** It's configured with definitions of the `store_memory` and `retrieve_memory` tools, allowing the OpenAI model to decide when to call these functions based on user interaction.
-    * **MCP Communication:** Uses `mcp.client` libraries to communicate with the Memory Agent's MCP server, sending tool call requests and receiving results.
-    * **Retrieval Augmented Generation (RAG):** Implements a basic RAG flow. For user queries that aren't direct storage commands, it first calls `retrieve_memory` to fetch relevant context. This context is then provided to the OpenAI model along with the original query to generate more informed and grounded responses.
-    * **Interaction Model:** Supports iterative tool calls and uses a low temperature for OpenAI responses to promote factuality.
+### Implementation Details
 
-## 🔗 Communication Protocols Utilized
+#### Core Components
 
-While the broader FinAgent Orchestration Framework might use several protocols, the Memory Agent specifically relies on:
+* **Memory Server (`memory_server.py`)**
+    The heart of the application, built using `FastMCP`. It exposes core memory operations as tools that external agents can call.
 
-| Protocol | Role within Memory Agent Context                                      |
-| :------- | :-------------------------------------------------------------------- |
-| `MCP`    | Governs all interactions with the Memory Agent's tools (`store_memory`, `retrieve_memory`) from other agents or clients. Facilitates standardized data exchange for memory operations. |
-| `HTTP(S)`| Underlies the MCP communication when using `streamablehttp_client` and `FastMCP`'s streamable HTTP application. |
+    * **Tool `store_memory`**: Allows an agent to save textual information along with structured metadata (category, source, timestamp) into the ChromaDB database.
 
-*(Integration with A2A or other protocols would occur at the FinAgent Orchestration level, where other agents use these protocols to communicate among themselves and then use MCP to interact with this Memory Agent).*
+    * **Tool `retrieve_memory`**: Enables an agent to query the memory system using a natural language string to find the most relevant stored information via semantic search.
 
-## 📁 Project Structure (Memory Agent Component)
+* **Chroma Retriever (`chroma_retriever.py`)**
+    This module is an abstraction layer over the ChromaDB vector database. It handles all data storage and retrieval logic.
+
+    * **Embedding**: Automatically converts text documents into vector embeddings using a `SentenceTransformer` model (`all-MiniLM-L6-v2`).
+
+    * **Storage**: Adds documents, their vector embeddings, and associated metadata to a specified ChromaDB collection.
+
+    * **Semantic Search**: Executes vector similarity searches to find documents most relevant to a given query.
+
+* **Agent Client (`memory_agent.py`)**
+    A standalone client application demonstrating how an external AI agent (powered by OpenAI's `gpt-4o`) can interact with the Memory Server.
+
+    * **Tool Definitions**: It is configured with JSON definitions for `store_memory` and `retrieve_memory`, enabling the LLM to decide when to call these functions.
+
+    * **MCP Communication**: Uses the `mcp.client` library to communicate with the Memory Server, sending tool call requests and parsing the results.
+
+    * **Autonomous Operation**: Implements a conversational loop where the LLM can make multiple tool calls in a row to achieve a goal.
+
+* **Pydantic Models (`pydantic_models.py`)**
+    Defines strict, type-safe data schemas for all API interactions and data structures. This includes models for tool inputs (`StoreMemoryInput`, `RetrieveMemoriesInput`), tool outputs, and the MCP protocol itself, ensuring data integrity and clear contracts.
+
+### Testing Framework
+
+The project includes a multi-faceted testing suite to ensure functionality and evaluate performance.
+
+#### Unit & Integration Testing
+
+* The `test_client.py` script serves as a simple integration test, making direct calls to the `store_memory` and `retrieve_memory` tools on a running `memory_server.py` instance to validate basic functionality.
+
+#### Performance & Accuracy Evaluation
+
+The `/testing` directory contains scripts for more advanced evaluation against real-world data (`sp500_headlines_2... .csv`).
+
+* **`latency_test.py`**: Measures system performance by sending progressively larger chunks of text data to the model and plotting the latency and throughput. This tests the "Scalability" challenge.
+
+* **`accuracy_testing.py`**: Tests the "Information Retrieval" challenge by providing the model a massive context (up to 120,000 tokens) and asking it to find a specific fact ("needle-in-a-haystack") buried within it.
+
+### Getting Started
+
+#### Prerequisites
+
+* Python 3.9+
+
+* An OpenAI API Key set as an environment variable: `OPENAI_API_KEY`.
+
+* Required Python packages as listed in `requirements.txt`.
+
+#### Installation
+
+1.  **Clone the repository:**
+
+    ```bash
+    git clone <your-repository-url>
+    cd <repository-name>
+    ```
+
+2.  **Install dependencies:**
+    *`requirements.txt`*
+
+    ```bash
+    pip install openai pandas matplotlib chromadb sentence-transformers "mcp-client" "mcp-server"
+    ```
+
+#### Running the Application
+
+1.  **Set your environment variable:**
+
+    ```bash
+    export OPENAI_API_KEY='your-secret-key-here'
+    ```
+
+2.  **Start the Memory Server:**
+    Open a terminal and run the server. It will handle requests for storing and retrieving memories.
+
+    ```bash
+    python memory_server.py
+    ```
+
+3.  **Run the Agent Client:**
+    Open a *second* terminal to run the interactive agent client. This agent will connect to the server you just started.
+
+    ```bash
+    python memory_agent.py
+    ```
+
+### Dependencies
+
+* **openai**: For interacting with GPT models.
+
+* **pandas**: For loading and processing the sample CSV data.
+
+* **matplotlib**: For plotting performance graphs in `latency_test.py`.
+
+* **chromadb**: The vector database used for memory storage.
+
+* **sentence-transformers**: For generating text embeddings.
+
+* **mcp-client** & **mcp-server**: For the core client-server communication protocol.
+
+### License
+
+This component is part of the FinAgent-Orchestration project and is licensed under the OpenMDW License. See the [LICENSE](../LICENSE) file in the project root directory for details.
+
+### Contact Information
+
+* **Issue Tracking:** [Link to your GitHub Issues Page]
+
+* **Maintainer:** [Your Name or Email Address]
