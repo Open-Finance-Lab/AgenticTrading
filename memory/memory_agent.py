@@ -1,4 +1,3 @@
-# openai_mcp_client.py
 import openai
 import json
 import os
@@ -81,7 +80,6 @@ tools_definition = [
 ]
 
 async def call_mcp_tool(session: ClientSession, tool_name: str, tool_args: Dict[str, Any]) -> Any:
-    """Helper function to call a tool on the MCP server."""
     print(f"📞 Calling MCP tool: {tool_name} with raw args from OpenAI: {json.dumps(tool_args, indent=2)}")
 
     if tool_name == "store_memory":
