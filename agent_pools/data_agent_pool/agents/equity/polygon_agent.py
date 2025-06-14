@@ -45,21 +45,17 @@ class PolygonAgent(BaseAgent):
         Initialize enhanced market data agent.
         """
         super().__init__(config.model_dump())
-        self.api_base_url = "https://api.polygon.io/v2"
+        self.config = config  # Ensure config is a PolygonConfig instance
+        self.api_base_url = self.config.api.base_url
         self.cache_dir = 'data/cache'
         os.makedirs(self.cache_dir, exist_ok=True)
         self._validate_config()
         self._init_tools()
         self._init_analysis_chain()
-        # The llm_enabled parameter must be required to appear in the configuration, otherwise an error will be reported.
-        if "llm_enabled" not in self.config:
+        if not hasattr(self.config, "llm_enabled"):
             raise ValueError("Missing required config parameter: 'llm_enabled'. Please add 'llm_enabled: true/false' to your polygon.yaml.")
-        raw_llm_enabled = self.config.get("llm_enabled")
-        if isinstance(raw_llm_enabled, str):
-            self.llm_enabled = raw_llm_enabled.strip().lower() == "true"
-        else:
-            self.llm_enabled = bool(raw_llm_enabled)
-        print(f"llm_enabled config raw value: {self.config.get('llm_enabled')}, parsed: {self.llm_enabled}")
+        self.llm_enabled = bool(self.config.llm_enabled)
+        print(f"llm_enabled config value: {self.llm_enabled}")
         if self.llm_enabled:
             self._init_llm_interface()
 
@@ -218,7 +214,7 @@ Do not invent or use any other tool names.
             "adjusted": "true",
             "sort": "asc",
             "limit": 50000,
-            "apiKey": self.config["api_key"]
+            "apiKey": self.config.authentication.api_key
         }
 
         print("Plan parameters:", params)
@@ -253,10 +249,8 @@ Do not invent or use any other tool names.
         """Add VWAP, pre/post market prices, dividends and splits."""
         for date in df.index.date:
             date_str = date.strftime('%Y-%m-%d')
-            
-            # Get daily details
-            url = f"https://api.polygon.io/v1/open-close/{symbol}/{date_str}"
-            params = {"adjusted": "true", "apiKey": self.config["api_key"]}
+            url = f"{self.config.api.base_url.replace('/v2', '')}/v1/open-close/{symbol}/{date_str}"
+            params = {"adjusted": "true", "apiKey": self.config.authentication.api_key}
             
             try:
                 response = requests.get(url, params=params)
@@ -272,8 +266,8 @@ Do not invent or use any other tool names.
     def get_company_info(self, symbol: str) -> Dict[str, Any]:
         """Get detailed company information."""
         try:
-            url = f"https://api.polygon.io/v3/reference/tickers/{symbol}"
-            params = {"apiKey": self.config["api_key"]}
+            url = f"{self.config.api.base_url.replace('/v2', '')}/v3/reference/tickers/{symbol}"
+            params = {"apiKey": self.config.authentication.api_key}
             
             response = requests.get(url, params=params)
             if response.status_code != 200:
@@ -300,7 +294,7 @@ Do not invent or use any other tool names.
 
     def _validate_config(self) -> None:
         """Validate configuration parameters."""
-        if not self.config.get("api_key"):
+        if not getattr(self.config.authentication, "api_key", None):
             raise ValueError("Missing required Polygon API key")
 
     def _init_analysis_chain(self):

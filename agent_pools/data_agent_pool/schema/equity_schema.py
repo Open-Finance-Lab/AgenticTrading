@@ -8,7 +8,7 @@ class APISettings(BaseModel):
 
 class AuthSettings(BaseModel):
     api_key: str
-    secret_key: str
+    secret_key: Optional[str] = None  # Allow to be empty
 
 class Constraints(BaseModel):
     timeout: int
@@ -27,9 +27,8 @@ class IEXConfig(BaseModel):
     constraints: Constraints
 
 class PolygonConfig(BaseModel):
-    """Configuration schema for Polygon.io API"""
-    api_key: str
-    timeout: int
-    rate_limit: int
-    base_url: str 
+    agent_id: str
+    api: APISettings
+    authentication: AuthSettings
+    constraints: Constraints
     llm_enabled: bool
