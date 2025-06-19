@@ -1,6 +1,0 @@
-# Polygon.io API configuration
-api_key: ""  # Replace with actual API key
-timeout: 30  # Request timeout in seconds
-rate_limit: 5  # API calls per minute limit
-llm_enabled: True
-base_url: "https://api.polygon.io/v2"

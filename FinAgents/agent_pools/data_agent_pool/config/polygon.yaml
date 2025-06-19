@@ -1,0 +1,17 @@
+# Polygon.io API configuration
+
+agent_id: polygon_agent
+api:
+  base_url: "https://api.polygon.io"
+  endpoints:
+    ohlcv: "/v2/aggs/ticker/{symbol}/range"
+    company_info: "/v3/reference/tickers/{symbol}"
+    # ...可继续扩展
+  default_interval: "1d"
+authentication:
+  api_key: "sPyhe4R8hELdEDjG2LrncAke9H7PLLGZ"  # Replace with actual API key
+  secret_key: ""
+constraints:
+  timeout: 30
+  rate_limit_per_minute: 120
+llm_enabled: false
