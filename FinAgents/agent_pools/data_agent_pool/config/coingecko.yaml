@@ -1,0 +1,18 @@
+agent_id: coingecko_agent
+api:
+  base_url: https://api.coingecko.com/api/v3
+  endpoints:
+    current_price: /simple/price
+    historical_data: /coins/{id}/market_chart/range
+    market_data: /coins/{id}
+    trending: /search/trending
+    search: /search
+    coins_list: /coins/list
+    coin_info: /coins/{id}
+  default_vs_currency: usd
+authentication:
+  api_key: "YOUR_COINGECKO_API_KEY_HERE"
+  pro_api: false  # Set to true if using CoinGecko Pro API
+constraints:
+  timeout: 10
+  rate_limit_per_minute: 50  # Free tier: 50 calls/minute, Pro: 500 calls/minute

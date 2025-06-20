@@ -26,3 +26,9 @@ class CoinbaseConfig(BaseModel):
     api: APISettings
     authentication: AuthSettings
     constraints: Constraints
+
+class CoinGeckoConfig(BaseModel):
+    agent_id: str
+    api: APISettings
+    authentication: AuthSettings
+    constraints: Constraints
