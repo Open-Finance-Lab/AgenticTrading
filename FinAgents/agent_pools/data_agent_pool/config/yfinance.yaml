@@ -1,0 +1,45 @@
+agent_id: yfinance_agent
+api:
+  base_url: https://query1.finance.yahoo.com
+  endpoints:
+    historical: /v8/finance/chart/{symbol}
+    quote: /v7/finance/quote
+    options: /v7/finance/options/{symbol}
+    financials: /ws/fundamentals-timeseries/v1/finance/timeseries/{symbol}
+    news: /v1/finance/search
+    recommendations: /v6/finance/recommendationsbysymbol/{symbol}
+  default_interval: 1d
+authentication:
+  # Yahoo Finance doesn't require API keys
+  api_key: null
+  secret_key: null
+cache:
+  enabled: true
+  directory: data/cache/yfinance
+  max_age_minutes: 60  # For intraday data
+  max_age_hours: 24    # For daily+ data
+periods:
+  supported: [1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max]
+  default: 1y
+intervals:
+  supported: [1m, 2m, 5m, 15m, 30m, 60m, 90m, 1h, 1d, 5d, 1wk, 1mo, 3mo]
+  default: 1d
+features:
+  historical_data: true
+  real_time_quotes: true
+  company_info: true
+  financial_statements: true
+  options_data: true
+  dividends_splits: true
+  market_news: true
+  analyst_recommendations: true
+  esg_scores: true
+  institutional_holdings: true
+  market_summary: true
+llm_enabled: true
+constraints:
+  timeout: 10
+  rate_limit_per_minute: 2000  # Yahoo Finance is more lenient
+  max_symbols_per_request: 10
+  retry_attempts: 3
+  retry_delay: 1

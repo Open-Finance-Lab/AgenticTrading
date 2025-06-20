@@ -24,3 +24,9 @@ class RSSConfig(BaseModel):
     agent_id: str
     api: APISettings
     constraints: Constraints
+
+class AlphaVantageConfig(BaseModel):
+    agent_id: str
+    api: APISettings
+    authentication: AuthSettings
+    constraints: Constraints
