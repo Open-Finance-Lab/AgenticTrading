@@ -1,0 +1,48 @@
+agent_id: alpha_vantage_news_agent
+api:
+  base_url: https://www.alphavantage.co/query
+  endpoints:
+    news_sentiment: /query?function=NEWS_SENTIMENT
+  default_function: NEWS_SENTIMENT
+authentication:
+  api_key: YOUR_ALPHA_VANTAGE_API_KEY
+constraints:
+  timeout: 30
+  rate_limit_per_minute: 5  # Free tier: 5 requests per minute, 500 per day
+  min_request_interval: 12  # seconds between requests
+  max_articles_per_request: 1000
+features:
+  sentiment_analysis: true
+  topic_filtering: true
+  time_range_filtering: true
+  company_specific_news: true
+  market_news: true
+  source_analysis: true
+llm_config:
+  llm_enabled: true
+  model: gpt-4o-mini
+  temperature: 0.1
+caching:
+  enabled: true
+  cache_dir: data/cache/alpha_vantage_news
+  cache_ttl: 3600  # 1 hour
+default_parameters:
+  sort: LATEST
+  limit: 50
+  topics: financial_markets
+supported_topics:
+  - blockchain
+  - earnings
+  - ipo
+  - mergers_and_acquisitions
+  - financial_markets
+  - economy_fiscal
+  - economy_monetary
+  - economy_macro
+  - energy_transportation
+  - finance
+  - life_sciences
+  - manufacturing
+  - real_estate
+  - retail_wholesale
+  - technology
