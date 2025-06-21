@@ -1,0 +1,24 @@
+# Momentum Alpha Agent Configuration
+
+agent_id: momentum_agent
+
+strategy:
+  name: "momentum"
+  window: 5               # Window length for momentum calculation
+  threshold: 0.01         # Momentum change percentage threshold
+
+execution:
+  port: 5051              # MCP server listening port
+  mode: "mcp_server"
+  timeout: 20             # Timeout for a single request
+
+authentication:
+  api_key: ""             # Fill in access credentials if remote data is needed
+  secret_key: ""
+
+metadata:
+  author: "FinAgent Labs"
+  description: "Momentum strategy MCP agent using price delta"
+  tags: ["alpha", "theory-driven", "momentum"]
+
+llm_enabled: false        # LLM strategy generation not enabled

@@ -1,0 +1,6 @@
+mcp:
+  servers:
+    alpha_pool:
+      name: alpha_pool
+      url: http://localhost:5050/sse
+      transport: sse
