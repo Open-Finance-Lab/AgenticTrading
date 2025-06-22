@@ -1,6 +1,6 @@
-## 📐 System Overview
+## 📐 Overview
 
-The system is structured as a vertically layered, protocol-oriented architecture for orchestrating autonomous agent behaviors in algorithmic trading environments. It supports real-time, adaptive decision-making by dynamically composing agents through task-specific execution graphs.
+We develop a vertically layered, protocol-oriented architecture for orchestrating autonomous FinAgents in a algorithmic trading task. It supports real-time decision-making by dynamically composing agents through task-specific execution graphs.
 
 At the entry point, high-level strategic queries are issued via the **Users Query** interface. These are interpreted by the **DAG Planner Agent**, which constructs a directed acyclic graph (DAG) to encode task flow. The **Orchestrator** executes the DAG, coordinating communication and execution across agent pools.
 
