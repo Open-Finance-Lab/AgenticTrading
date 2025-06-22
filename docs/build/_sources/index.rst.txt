@@ -20,6 +20,11 @@ FinAgent Orchestration Documentation
    :caption: Introduction
 
    intro/overview
+   intro/motivation
 
-
-
+.. toctree::
+   :maxdepth: 2
+   :caption: Agent Pools
+   
+   intro/data_agent_pool
+   intro/alpha_agent_pool

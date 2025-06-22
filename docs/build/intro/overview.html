@@ -21,6 +21,7 @@
     <script src="../_static/js/theme.js"></script>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
+    <link rel="next" title="Motivation" href="motivation.html" />
     <link rel="prev" title="FinAgent Orchestration Documentation" href="../index.html" /> 
 </head>
 
@@ -45,7 +46,16 @@
         </div><div class="wy-menu wy-menu-vertical" data-spy="affix" role="navigation" aria-label="Navigation menu">
               <p class="caption" role="heading"><span class="caption-text">Introduction</span></p>
 <ul class="current">
-<li class="toctree-l1 current"><a class="current reference internal" href="#">Overview</a></li>
+<li class="toctree-l1 current"><a class="current reference internal" href="#">Overview</a><ul>
+<li class="toctree-l2"><a class="reference internal" href="#design-philosophy">Design Philosophy</a></li>
+</ul>
+</li>
+<li class="toctree-l1"><a class="reference internal" href="motivation.html">Motivation</a></li>
+</ul>
+<p class="caption" role="heading"><span class="caption-text">Agent Pools</span></p>
+<ul>
+<li class="toctree-l1"><a class="reference internal" href="data_agent_pool.html">Data Agent Pool</a></li>
+<li class="toctree-l1"><a class="reference internal" href="alpha_agent_pool.html">Alpha Agent Pool</a></li>
 </ul>
 
         </div>
@@ -75,7 +85,7 @@
   <section id="overview">
 <h1>Overview<a class="headerlink" href="#overview" title="Link to this heading"></a></h1>
 <figure class="align-center" id="id1">
-<a class="reference internal image-reference" href="../_images/finagent_architecture.png"><img alt="../_images/finagent_architecture.png" src="../_images/finagent_architecture.png" style="width: 90%;" />
+<a class="reference internal image-reference" href="../_images/FinProtocol.jpg"><img alt="../_images/FinProtocol.jpg" src="../_images/FinProtocol.jpg" style="width: 90%;" />
 </a>
 <figcaption>
 <p><span class="caption-number">Fig. 1 </span><span class="caption-text">System architecture of the protocol-driven multi-agent orchestration framework.</span><a class="headerlink" href="#id1" title="Link to this image"></a></p>
@@ -91,6 +101,18 @@
 <li><p><strong>ANP</strong> (Agent Notification Protocol): broadcast alerts and asynchronous signaling</p></li>
 </ul>
 <p>By enabling dynamic task routing and memory-informed learning, the framework provides a foundation for research and deployment of intelligent, multi-agent financial systems capable of long-term strategic adaptation.</p>
+<p>The <strong>FinAgent Orchestration System</strong> is a protocol-driven, modular, and autonomous agent-based framework designed for the next generation of algorithmic trading infrastructures. It leverages a <strong>multi-agent architecture</strong> augmented by layered communication protocols, dynamic orchestration, and memory-augmented decision processes. The system is engineered to support <strong>self-organizing, adaptive, and explainable financial strategies</strong> across heterogeneous agent pools.</p>
+<section id="design-philosophy">
+<h2>Design Philosophy<a class="headerlink" href="#design-philosophy" title="Link to this heading"></a></h2>
+<p>Our architecture is guided by foundational principles derived from both <strong>systems engineering</strong> and <strong>philosophical frameworks of coordination</strong>, particularly:</p>
+<ul class="simple">
+<li><p><strong>Emergent Order</strong>: Inspired by self-organizing phenomena in economic systems and swarm intelligence, FinAgent promotes bottom-up coordination among agents, where global strategy emerges from local interactions without a centralized controller.</p></li>
+<li><p><strong>Subsidiarity</strong>: Following the principle that decisions should be handled at the most immediate level capable of resolving them, each agent in the system maintains autonomy over local tasks, escalating only when higher-level orchestration is necessary.</p></li>
+<li><p><strong>Distributed Causality</strong>: Rather than attributing behavior to individual agents, the system treats causality as co-constructed, allowing context and intent to be propagated and shared dynamically.</p></li>
+<li><p><strong>Protocol Duality</strong>: FinAgent supports dual communication protocols—Multi-agent Control Protocol (MCP) for orchestrated scheduling, and Agent-to-Agent Protocol (A2A) for peer-level cooperation—enabling both centralized task dispatch and decentralized collaboration.</p></li>
+</ul>
+<p>This architectural philosophy allows for <strong>scalable cooperation</strong>, <strong>resilient decision making</strong>, and <strong>context-sensitive planning</strong>, which are essential characteristics in volatile, data-intensive financial environments.</p>
+</section>
 </section>
 
 
@@ -98,6 +120,7 @@
           </div>
           <footer><div class="rst-footer-buttons" role="navigation" aria-label="Footer">
         <a href="../index.html" class="btn btn-neutral float-left" title="FinAgent Orchestration Documentation" accesskey="p" rel="prev"><span class="fa fa-arrow-circle-left" aria-hidden="true"></span> Previous</a>
+        <a href="motivation.html" class="btn btn-neutral float-right" title="Motivation" accesskey="n" rel="next">Next <span class="fa fa-arrow-circle-right" aria-hidden="true"></span></a>
     </div>
 
   <hr/>
