@@ -32,3 +32,10 @@ class PolygonConfig(BaseModel):
     authentication: AuthSettings
     constraints: Constraints
     llm_enabled: bool
+
+class YFinanceConfig(BaseModel):
+    agent_id: str
+    api: APISettings
+    authentication: AuthSettings
+    constraints: Constraints
+    llm_enabled: bool

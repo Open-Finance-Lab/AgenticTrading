@@ -2,8 +2,8 @@ from typing import Dict, List, Optional, Union, Any, Callable
 import requests
 import os
 from datetime import datetime, timedelta
-from agent_pools.data_agent_pool.registry import BaseAgent
-from agent_pools.data_agent_pool.schema.equity_schema import AlphaVantageNewsConfig
+from registry import BaseAgent
+from schema.news_schema import AlphaVantageConfig
 from langchain_community.chat_models import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage
 from langchain.agents import Tool
@@ -33,7 +33,7 @@ class AlphaVantageNewsAgent(BaseAgent):
     - Market sentiment trends
     """
 
-    def __init__(self, config: AlphaVantageNewsConfig):
+    def __init__(self, config: AlphaVantageConfig):
         """Initialize Alpha Vantage News API agent."""
         super().__init__(config.model_dump())
         self.config = config

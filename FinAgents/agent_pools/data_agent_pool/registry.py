@@ -1,46 +1,3 @@
-# import logging
-# from typing import Dict, Callable, Any
-
-# # === Base Interface for All Agents ===
-# class BaseAgent:
-#     def __init__(self, config: dict):
-#         self.config = config
-
-#     def execute(self, function_name: str, inputs: dict) -> Any:
-#         """Dispatch execution to agent methods dynamically."""
-#         method: Callable = getattr(self, function_name, None)
-#         if not method:
-#             raise AttributeError(f"Function '{function_name}' not found in agent.")
-#         return method(**inputs)
-
-# # === Global Agent Registry ===
-# AGENT_REGISTRY: Dict[str, BaseAgent] = {}
-
-# def register_agent(agent_id: str, agent_instance: BaseAgent):
-#     """Register agent instance to the global registry."""
-#     if agent_id in AGENT_REGISTRY:
-#         logging.warning(f"Agent '{agent_id}' already registered. Overwriting.")
-#     AGENT_REGISTRY[agent_id] = agent_instance
-#     logging.info(f"Agent '{agent_id}' registered with config: {agent_instance.config}")
-
-# # === Default Agents Loading ===
-
-# # Import all actual agent classes
-# from agents.crypto.binance_agent import BinanceAgent
-# from agents.crypto.coinbase_agent import CoinbaseAgent
-# from agents.equity.alpaca_agent import AlpacaAgent
-# from agents.equity.iex_agent import IEXAgent
-# from agents.news.newsapi_agent import NewsAPIAgent
-# from agents.news.rss_agent import RSSAgent
-
-# def preload_default_agents():
-#     """Preload a standard set of data agents into the registry."""
-#     register_agent("binance_agent", BinanceAgent({"name": "binance"}))
-#     register_agent("coinbase_agent", CoinbaseAgent({"name": "coinbase"}))
-#     register_agent("alpaca_agent", AlpacaAgent({"name": "alpaca"}))
-#     register_agent("iex_agent", IEXAgent({"name": "iex"}))
-#     register_agent("newsapi_agent", NewsAPIAgent({"name": "newsapi"}))
-#     register_agent("rss_agent", RSSAgent({"name": "rss"}))
 import logging
 import os
 import yaml
@@ -69,20 +26,19 @@ def register_agent(agent_id: str, agent_instance: BaseAgent):
     logging.info(f"Agent '{agent_id}' registered with config: {agent_instance.config}")
 
 # === Agent Class Imports ===
-from agent_pools.data_agent_pool.agents.crypto.binance_agent import BinanceAgent
-from agent_pools.data_agent_pool.agents.crypto.coinbase_agent import CoinbaseAgent
-from agent_pools.data_agent_pool.agents.equity.alpaca_agent import AlpacaAgent
-from agent_pools.data_agent_pool.agents.equity.iex_agent import IEXAgent
-from agent_pools.data_agent_pool.agents.news.newsapi_agent import NewsAPIAgent
-from agent_pools.data_agent_pool.agents.news.rss_agent import RSSAgent
-from agent_pools.data_agent_pool.agents.equity.polygon_agent import PolygonAgent
-from agent_pools.data_agent_pool.agents.equity.mcp_adapter import MCPAdapter
+from agents.crypto.coingecko_agent import CoinGeckoAgent
+from agents.equity.alpaca_agent import AlpacaAgent
+from agents.equity.iex_agent import IEXAgent
+from agents.equity.polygon_agent import PolygonAgent
+from agents.equity.yfinance_agent import YFinanceAgent
+from agents.news.alphavantage_agent import AlphaVantageNewsAgent
+from agents.news.newsapi_agent import NewsAPIAgent
+from agents.news.rss_agent import RSSAgent
+from agents.equity.mcp_adapter import MCPAdapter
 
-
-# === Schema Imports ===
-from agent_pools.data_agent_pool.schema.crypto_schema import BinanceConfig, CoinbaseConfig
-from agent_pools.data_agent_pool.schema.equity_schema import AlpacaConfig, IEXConfig, PolygonConfig
-from agent_pools.data_agent_pool.schema.news_schema import NewsAPIConfig, RSSConfig
+from schema.crypto_schema import BinanceConfig, CoinbaseConfig, CoinGeckoConfig
+from schema.equity_schema import AlpacaConfig, IEXConfig, PolygonConfig, YFinanceConfig
+from schema.news_schema import NewsAPIConfig, RSSConfig, AlphaVantageConfig
 
 # === Config Loader ===
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
@@ -102,12 +58,15 @@ def preload_default_agents(agent_id: str = None):
     - If agent_id is None, initialize and register all supported agents.
     """
     # crypto
-    if agent_id is None or agent_id == "binance_agent":
-        binance_cfg = BinanceConfig(**load_config("binance_agent"))
-        register_agent("binance_agent", BinanceAgent(binance_cfg))
-    if agent_id is None or agent_id == "coinbase_agent":
-        coinbase_cfg = CoinbaseConfig(**load_config("coinbase_agent"))
-        register_agent("coinbase_agent", CoinbaseAgent(coinbase_cfg))
+    # if agent_id is None or agent_id == "binance_agent":
+    #     binance_cfg = BinanceConfig(**load_config("binance_agent"))
+    #     register_agent("binance_agent", BinanceAgent(binance_cfg))
+    # if agent_id is None or agent_id == "coinbase_agent":
+    #     coinbase_cfg = CoinbaseConfig(**load_config("coinbase_agent"))
+    #     register_agent("coinbase_agent", CoinbaseAgent(coinbase_cfg))
+    if agent_id is None or agent_id == "coingecko_agent":
+        coingecko_cfg = CoinGeckoConfig(**load_config("coingecko_agent"))
+        register_agent("coingecko_agent", CoinGeckoAgent(CoinGeckoConfig))
 
     # equity
     if agent_id is None or agent_id == "alpaca_agent":
@@ -121,6 +80,9 @@ def preload_default_agents(agent_id: str = None):
         polygon_cfg = PolygonConfig(**polygon_dict)
         polygon_agent = PolygonAgent(polygon_cfg)
         register_agent("polygon_agent", polygon_agent)
+    if agent_id is None or agent_id == "yfinance_agent":
+        yfinance_cfg = YFinanceConfig(**load_config("iex_agent"))
+        register_agent("yfinance_agent", YFinanceAgent(yfinance_cfg))
 
     # news
     if agent_id is None or agent_id == "newsapi_agent":
@@ -129,6 +91,9 @@ def preload_default_agents(agent_id: str = None):
     if agent_id is None or agent_id == "rss_agent":
         rss_cfg = RSSConfig(**load_config("rss_agent"))
         register_agent("rss_agent", RSSAgent(rss_cfg))
+    if agent_id is None or agent_id == "alphavantage_agent":
+        alphavantage_cfg = AlphaVantageConfig(**load_config("alphavantage_agent"))
+        register_agent("alphavantage_agent", AlpacaAgent(alphavantage_cfg))
     
 # registry.py
 

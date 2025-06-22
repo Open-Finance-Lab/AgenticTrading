@@ -3,8 +3,8 @@ import pandas as pd
 import requests
 import os
 from datetime import datetime
-from agent_pools.data_agent_pool.registry import BaseAgent
-from agent_pools.data_agent_pool.schema.equity_schema import PolygonConfig
+from registry import BaseAgent
+from schema.equity_schema import PolygonConfig
 from .ticker_selector import select_top_tickers
 from langchain_community.chat_models import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage
