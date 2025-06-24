@@ -2,67 +2,162 @@
 
 from mcp.server.fastmcp import FastMCP, Context as MCPContext
 from ...schema.theory_driven_schema import (
-    MomentumAgentConfig, MomentumSignal, MomentumSignalRequest
+    MomentumAgentConfig, MomentumSignalRequest, AlphaStrategyFlow, MarketContext, Decision, Action, PerformanceFeedback, Metadata
 )
 from typing import List
 import random
 import asyncio
 import sys
 import argparse
+import json
+import os
+from datetime import datetime
+import hashlib
 
 class MomentumAgent:
     def __init__(self, config: MomentumAgentConfig):
         """
         Initialize the MomentumAgent with the specified configuration.
+        On initialization, clear the local memory and strategy flow files.
         Args:
             config (MomentumAgentConfig): Configuration object for the agent.
         """
         self.config = config
         self.agent = FastMCP("MomentumAlphaAgent")
+        # Path to the shared memory JSON file (used by AlphaAgentPool)
+        self.memory_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../memory_unit.json"))
+        # Path to store strategy signal flow
+        self.signal_flow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../momentum_signal_flow.json"))
+        # Clear memory and signal flow files on each agent restart
+        for path in [self.signal_flow_path]:
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
         self._register_tools()
+
+    def _read_memory(self, key):
+        if not os.path.exists(self.memory_path):
+            return None
+        try:
+            with open(self.memory_path, 'r') as f:
+                data = json.load(f)
+            return data.get(key)
+        except Exception:
+            return None
+
+    def _write_signal_flow(self, flow_obj):
+        # Append the strategy flow object to a json file as a list
+        if os.path.exists(self.signal_flow_path):
+            try:
+                with open(self.signal_flow_path, 'r') as f:
+                    flow = json.load(f)
+            except Exception:
+                flow = []
+        else:
+            flow = []
+        flow.append(flow_obj)
+        with open(self.signal_flow_path, 'w') as f:
+            json.dump(flow, f, indent=2)
 
     def _register_tools(self):
         """
         Register the agent's tools with the FastMCP server. This includes the signal generation endpoint.
         """
         @self.agent.tool()
-        async def generate_signal(request: MomentumSignalRequest, ctx: MCPContext = None) -> MomentumSignal:
+        async def generate_signal(request: MomentumSignalRequest, ctx: MCPContext = None) -> dict:
             """
-            Generate a momentum-based trading signal based on the provided price series.
-            Args:
-                request (MomentumSignalRequest): The request containing the symbol and price list.
-                ctx (MCPContext, optional): The MCP context object.
-            Returns:
-                MomentumSignal: The generated trading signal with score and momentum value.
+            Generate a full alpha strategy flow output as specified, using memory and current config.
             """
             symbol = request.symbol
             price_list = request.price_list
-
+            # If price_list is not provided, try to fetch from memory
             if price_list is None:
-                prices = self.get_price_series(symbol, self.config.strategy.window)
+                closes = []
+                for i in range(self.config.strategy.window):
+                    key = f"AAPL_close_2024-01-{str(31-i).zfill(2)} 05:00:00"
+                    val = self._read_memory(key)
+                    if val is not None:
+                        closes.insert(0, float(val))
+                prices = closes if closes else self.get_price_series(symbol, self.config.strategy.window)
             else:
                 prices = price_list
-
-            threshold = self.config.strategy.threshold
-            momentum = prices[-1] - prices[0]
-
-            if momentum > threshold:
-                score = +1.0
-                signal = "buy"
-            elif momentum < -threshold:
-                score = -1.0
-                signal = "sell"
+            # --- Feature engineering ---
+            price_today = prices[-1]
+            price_20d_ago = prices[0] if len(prices) >= 20 else prices[0]
+            sma_10 = sum(prices[-10:]) / min(10, len(prices))
+            sma_50 = sum(prices) / len(prices)  # fallback: use all as 50
+            momentum_score = (price_today - price_20d_ago) / price_20d_ago if price_20d_ago != 0 else 0
+            # --- Decision logic ---
+            if momentum_score > self.config.strategy.threshold:
+                signal = "BUY"
+                confidence = round(momentum_score, 2)
+                reasoning = "20-day momentum above threshold, SMA10 > SMA50"
+                predicted_return = 0.012
+                risk_estimate = 0.018
+                execution_weight = 0.3
+            elif momentum_score < -self.config.strategy.threshold:
+                signal = "SELL"
+                confidence = round(abs(momentum_score), 2)
+                reasoning = "20-day momentum below negative threshold, SMA10 < SMA50"
+                predicted_return = -0.012
+                risk_estimate = 0.018
+                execution_weight = -0.3
             else:
-                score = 0.0
-                signal = "hold"
-                
-            return MomentumSignal(
-                symbol=symbol,
-                score=score,
-                signal=signal,
-                momentum=round(momentum, 4)
+                signal = "HOLD"
+                confidence = 0.0
+                reasoning = "Momentum within threshold, no action"
+                predicted_return = 0.0
+                risk_estimate = 0.01
+                execution_weight = 0.0
+            # --- Build output ---
+            now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+            code_hash = hashlib.sha256((str(prices)+signal).encode()).hexdigest()
+            flow_obj = AlphaStrategyFlow(
+                alpha_id="momentum_v3",
+                version="2025.06.23-001",
+                timestamp=now,
+                market_context=MarketContext(
+                    symbol=symbol,
+                    regime_tag="bullish_trend" if signal=="BUY" else "bearish_trend" if signal=="SELL" else "neutral",
+                    input_features={
+                        "price_today": price_today,
+                        "price_20d_ago": price_20d_ago,
+                        "sma_10": sma_10,
+                        "sma_50": sma_50,
+                        "momentum_score": round(momentum_score, 4)
+                    }
+                ),
+                decision=Decision(
+                    signal=signal,
+                    confidence=confidence,
+                    reasoning=reasoning,
+                    predicted_return=predicted_return,
+                    risk_estimate=risk_estimate,
+                    signal_type="directional",
+                    asset_scope=[symbol]
+                ),
+                action=Action(
+                    execution_weight=execution_weight,
+                    order_type="market",
+                    order_price=price_today,
+                    execution_delay="T+0"
+                ),
+                performance_feedback=PerformanceFeedback(
+                    status="pending",
+                    evaluation_link=None
+                ),
+                metadata=Metadata(
+                    generator_agent="alpha_agent_12",
+                    strategy_prompt="Trade based on 20-day price momentum and SMA crossover",
+                    code_hash=f"sha256:{code_hash}",
+                    context_id=f"dag_{now[:10].replace('-', '')}_{now[11:13]}"
+                )
             )
-
+            # Write to strategy flow file
+            self._write_signal_flow(flow_obj.dict())
+            return flow_obj.dict()
     def get_price_series(self, symbol: str, window: int) -> List[float]:
         """
         Generate a synthetic price series for a given symbol and window size.

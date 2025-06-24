@@ -19,6 +19,24 @@ async def main():
             result = await session.call_tool("list_agents", {})
             print("list_agents result:", result)
 
+            # Test: List all memory keys (should include AAPL_close_... keys if autoloaded)
+            keys = await session.call_tool("list_memory_keys", {})
+            print("Memory keys:", keys)
+
+            # Test: Get a specific close price from memory
+            close_val = await session.call_tool("get_memory", {"key": "AAPL_close_2024-01-02 05:00:00"})
+            print("AAPL_close_2024-01-02_05:00:00:", close_val)
+
+            # Test: Set and get a custom value
+            await session.call_tool("set_memory", {"key": "test_key", "value": 123.45})
+            test_val = await session.call_tool("get_memory", {"key": "test_key"})
+            print("test_key:", test_val)
+
+            # Test: Delete the custom value
+            await session.call_tool("delete_memory", {"key": "test_key"})
+            deleted_val = await session.call_tool("get_memory", {"key": "test_key"})
+            print("test_key after delete:", deleted_val)
+
 if __name__ == "__main__":
     asyncio.run(main())
 
