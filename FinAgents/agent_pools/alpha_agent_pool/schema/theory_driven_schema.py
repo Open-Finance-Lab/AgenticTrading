@@ -1,7 +1,6 @@
-# agent_pools/alpha_agent_pool/schema/theory_driven_schema.py
-
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Dict, Any
 from pydantic import BaseModel, Field
+from datetime import datetime
 
 # === Input Model ===
 class MomentumSignalRequest(BaseModel):
@@ -14,20 +13,46 @@ class MomentumSignalRequest(BaseModel):
     symbol: str
     price_list: Optional[List[float]] = None
 
-# === Output Model ===
-class MomentumSignal(BaseModel):
-    """
-    Response model representing the generated momentum trading signal.
-    Attributes:
-        symbol (str): The stock or asset symbol.
-        score (float): The confidence score of the signal.
-        signal (Literal["buy", "sell", "hold"]): The trading action recommended by the agent.
-        momentum (float): The calculated momentum value.
-    """
+# === Output Model (Full Strategy Flow) ===
+class MarketContext(BaseModel):
     symbol: str
-    score: float
-    signal: Literal["buy", "sell", "hold"]
-    momentum: float
+    regime_tag: Optional[str] = None
+    input_features: Dict[str, Any]
+
+class Decision(BaseModel):
+    signal: Literal["BUY", "SELL", "HOLD"]
+    confidence: float
+    reasoning: str
+    predicted_return: float
+    risk_estimate: float
+    signal_type: Literal["directional", "allocation", "ranking"]
+    asset_scope: List[str]
+
+class Action(BaseModel):
+    execution_weight: float
+    order_type: Literal["market", "limit", "stop"]
+    order_price: float
+    execution_delay: str
+
+class PerformanceFeedback(BaseModel):
+    status: Literal["pending", "evaluated"]
+    evaluation_link: Optional[str] = None
+
+class Metadata(BaseModel):
+    generator_agent: str
+    strategy_prompt: str
+    code_hash: str
+    context_id: str
+
+class AlphaStrategyFlow(BaseModel):
+    alpha_id: str
+    version: str
+    timestamp: str
+    market_context: MarketContext
+    decision: Decision
+    action: Action
+    performance_feedback: PerformanceFeedback
+    metadata: Metadata
 
 # === Strategy Configuration Model ===
 class StrategyConfig(BaseModel):
