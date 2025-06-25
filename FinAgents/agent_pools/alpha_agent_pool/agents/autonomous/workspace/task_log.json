@@ -1,0 +1,466 @@
+[
+  {
+    "task_id": "1a361e13-129e-4e14-8999-437f1131e43d",
+    "description": "\u4ecememory\u83b7\u53d6\u76f8\u5173\u6570\u636e: \u5206\u6790AAPL\u80a1\u7968\u8d8b\u52bf\u5e76\u751f\u6210\u4ea4\u6613\u5efa\u8bae",
+    "priority": 1,
+    "status": "completed",
+    "created_at": "2025-06-24T20:32:37.616945",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": {
+      "query": "\u5206\u6790AAPL\u80a1\u7968\u8d8b\u52bf\u5e76\u751f\u6210\u4ea4\u6613\u5efa\u8bae",
+      "category": null,
+      "results": [
+        {
+          "content": "Memory content related to: \u5206\u6790AAPL\u80a1\u7968\u8d8b\u52bf\u5e76\u751f\u6210\u4ea4\u6613\u5efa\u8bae",
+          "relevance_score": 0.85,
+          "source": "historical_data",
+          "timestamp": "2025-06-24T20:32:38.147469"
+        }
+      ],
+      "total_results": 1
+    }
+  },
+  {
+    "task_id": "cd8dbb89-2de5-486c-a95e-9681424ad58e",
+    "description": "\u751f\u6210\u5206\u6790\u5de5\u5177: \u5206\u6790AAPL\u80a1\u7968\u8d8b\u52bf\u5e76\u751f\u6210\u4ea4\u6613\u5efa\u8bae",
+    "priority": 1,
+    "status": "completed",
+    "created_at": "2025-06-24T20:32:37.616991",
+    "dependencies": [],
+    "generated_code": "\ndef generated_tool_d8c55721(data):\n    \"\"\"\n    \u751f\u6210\u5206\u6790\u5de5\u5177: \u5206\u6790AAPL\u80a1\u7968\u8d8b\u52bf\u5e76\u751f\u6210\u4ea4\u6613\u5efa\u8bae\n    \n    Input format: dict with 'prices' key containing list of numbers\n    Expected output: dict with analysis results\n    \"\"\"\n    import pandas as pd\n    import numpy as np\n    from datetime import datetime\n    import json\n    \n    try:\n        # \u6570\u636e\u5904\u7406\u903b\u8f91\n        if isinstance(data, dict):\n            # \u5904\u7406\u5b57\u5178\u8f93\u5165\n            result = process_dict_data(data)\n        elif isinstance(data, list):\n            # \u5904\u7406\u5217\u8868\u8f93\u5165\n            result = process_list_data(data)\n        else:\n            # \u5904\u7406\u5176\u4ed6\u7c7b\u578b\n            result = process_generic_data(data)\n        \n        return {\n            \"success\": True,\n            \"result\": result,\n            \"timestamp\": datetime.now().isoformat(),\n            \"tool_name\": \"generated_tool_d8c55721\"\n        }\n    \n    except Exception as e:\n        return {\n            \"success\": False,\n            \"error\": str(e),\n            \"timestamp\": datetime.now().isoformat(),\n            \"tool_name\": \"generated_tool_d8c55721\"\n        }\n\ndef process_dict_data(data):\n    \"\"\"\u5904\u7406\u5b57\u5178\u683c\u5f0f\u6570\u636e\"\"\"\n    if \"prices\" in data:\n        prices = data[\"prices\"]\n        if isinstance(prices, list) and len(prices) > 1:\n            # \u8ba1\u7b97\u4ef7\u683c\u53d8\u5316\n            changes = [prices[i] - prices[i-1] for i in range(1, len(prices))]\n            return {\n                \"price_changes\": changes,\n                \"avg_change\": sum(changes) / len(changes) if changes else 0,\n                \"volatility\": np.std(changes) if changes else 0\n            }\n    return {\"processed\": True, \"data_type\": \"dict\"}\n\ndef process_list_data(data):\n    \"\"\"\u5904\u7406\u5217\u8868\u683c\u5f0f\u6570\u636e\"\"\"\n    if all(isinstance(x, (int, float)) for x in data):\n        # \u6570\u503c\u5217\u8868\n        return {\n            \"mean\": np.mean(data),\n            \"std\": np.std(data),\n            \"min\": min(data),\n            \"max\": max(data),\n            \"count\": len(data)\n        }\n    return {\"processed\": True, \"data_type\": \"list\", \"length\": len(data)}\n\ndef process_generic_data(data):\n    \"\"\"\u5904\u7406\u901a\u7528\u6570\u636e\"\"\"\n    return {\n        \"data_type\": type(data).__name__,\n        \"processed\": True,\n        \"summary\": str(data)[:100]\n    }\n",
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "193c5d98-2a55-45fc-b54f-15cdc93e1077",
+    "description": "\u6267\u884c\u5206\u6790: \u5206\u6790AAPL\u80a1\u7968\u8d8b\u52bf\u5e76\u751f\u6210\u4ea4\u6613\u5efa\u8bae",
+    "priority": 1,
+    "status": "completed",
+    "created_at": "2025-06-24T20:32:37.617000",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": {
+      "success": true,
+      "result": {
+        "success": false,
+        "error": "name 'np' is not defined",
+        "timestamp": "2025-06-24T20:32:41.174254",
+        "tool_name": "generated_tool_d8c55721"
+      },
+      "tool_name": "generated_tool_d8c55721",
+      "executed_at": "2025-06-24T20:32:41.174270"
+    }
+  },
+  {
+    "task_id": "d5cc89eb-fb8d-425c-8039-484981dc416b",
+    "description": "\u9a8c\u8bc1\u5206\u6790\u7ed3\u679c: \u5206\u6790AAPL\u80a1\u7968\u8d8b\u52bf\u5e76\u751f\u6210\u4ea4\u6613\u5efa\u8bae",
+    "priority": 1,
+    "status": "completed",
+    "created_at": "2025-06-24T20:32:37.617007",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "2b733d1f-197b-47bd-857e-0775e4eaed64",
+    "description": "\u4ecememory\u83b7\u53d6\u76f8\u5173\u6570\u636e: \u5206\u6790AAPL\u80a1\u7968\u7684\u52a8\u91cf\u6307\u6807",
+    "priority": 1,
+    "status": "completed",
+    "created_at": "2025-06-24T20:32:38.151764",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": {
+      "processed": true,
+      "timestamp": "2025-06-24T20:51:11.059886",
+      "description": "\u4ecememory\u83b7\u53d6\u76f8\u5173\u6570\u636e: \u5206\u6790AAPL\u80a1\u7968\u7684\u52a8\u91cf\u6307\u6807",
+      "processing_type": "generic"
+    }
+  },
+  {
+    "task_id": "ae51f17c-5a31-4587-ab3a-aa08c0b2c780",
+    "description": "\u751f\u6210\u5206\u6790\u5de5\u5177: \u5206\u6790AAPL\u80a1\u7968\u7684\u52a8\u91cf\u6307\u6807",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:38.151782",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "fbe136d9-882d-4b3b-aaf1-f5048d9ea231",
+    "description": "\u6267\u884c\u5206\u6790: \u5206\u6790AAPL\u80a1\u7968\u7684\u52a8\u91cf\u6307\u6807",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:38.151790",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "3c5e25b4-a81d-4085-b302-b2cb412d3893",
+    "description": "\u9a8c\u8bc1\u5206\u6790\u7ed3\u679c: \u5206\u6790AAPL\u80a1\u7968\u7684\u52a8\u91cf\u6307\u6807",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:38.151798",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "78da88fb-c7da-4180-ab84-d2157e2ea7cb",
+    "description": "\u6536\u96c6\u5386\u53f2\u6570\u636e: \u9884\u6d4b\u672a\u6765\u4e00\u5468\u7684\u80a1\u4ef7\u8d70\u52bf",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:39.157458",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "b2da993e-eb74-4078-8f34-c0813836a905",
+    "description": "\u6784\u5efa\u9884\u6d4b\u6a21\u578b: \u9884\u6d4b\u672a\u6765\u4e00\u5468\u7684\u80a1\u4ef7\u8d70\u52bf",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:39.157497",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "33ce958e-c592-41b1-86ba-ea17509f0559",
+    "description": "\u8fd0\u884c\u9884\u6d4b: \u9884\u6d4b\u672a\u6765\u4e00\u5468\u7684\u80a1\u4ef7\u8d70\u52bf",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:39.157506",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "60f48979-b6f0-460a-8393-9c0dac4642ce",
+    "description": "\u9a8c\u8bc1\u9884\u6d4b\u51c6\u786e\u6027: \u9884\u6d4b\u672a\u6765\u4e00\u5468\u7684\u80a1\u4ef7\u8d70\u52bf",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:39.157512",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "7a52b81b-17cf-40d1-9e86-ee5078eeef92",
+    "description": "\u5206\u6790\u5e02\u573a\u72b6\u6001: \u521b\u5efa\u57fa\u4e8e\u5747\u7ebf\u7684\u4ea4\u6613\u7b56\u7565",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:40.163280",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "7535eafd-5cad-4171-9bba-34e30bf879ac",
+    "description": "\u751f\u6210\u7b56\u7565\u4ee3\u7801: \u521b\u5efa\u57fa\u4e8e\u5747\u7ebf\u7684\u4ea4\u6613\u7b56\u7565",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:40.163423",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "f92cba74-1173-4689-b858-024c960d60bb",
+    "description": "\u56de\u6d4b\u7b56\u7565: \u521b\u5efa\u57fa\u4e8e\u5747\u7ebf\u7684\u4ea4\u6613\u7b56\u7565",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:40.163447",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "dcc3201c-36c9-42cf-83e2-366d1dc7576c",
+    "description": "\u4f18\u5316\u7b56\u7565\u53c2\u6570: \u521b\u5efa\u57fa\u4e8e\u5747\u7ebf\u7684\u4ea4\u6613\u7b56\u7565",
+    "priority": 1,
+    "status": "pending",
+    "created_at": "2025-06-24T20:32:40.163466",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "c3c8629b-f6b4-4d58-ad8a-6e722c5e5d9e",
+    "description": "Query memory for relevant data: Analyze AAPL price momentum and generate trading strategy",
+    "priority": 3,
+    "status": "completed",
+    "created_at": "2025-06-24T20:51:11.060448",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": {
+      "query": "Analyze AAPL price momentum and generate trading strategy",
+      "category": null,
+      "results": [
+        {
+          "content": "Historical analysis data related to: Analyze AAPL price momentum and generate trading strategy",
+          "relevance_score": 0.7548612327331957,
+          "source": "historical_analysis",
+          "timestamp": "2025-06-24T20:52:09.494397",
+          "metadata": {
+            "data_points": 409,
+            "timeframe": "1y",
+            "quality_score": 0.8311062441557538
+          }
+        }
+      ],
+      "total_results": 1,
+      "query_timestamp": "2025-06-24T20:52:09.494405"
+    }
+  },
+  {
+    "task_id": "78a129c1-6229-41f6-873e-4fa04eb41a89",
+    "description": "Generate analysis tool: Analyze AAPL price momentum and generate trading strategy",
+    "priority": 3,
+    "status": "completed",
+    "created_at": "2025-06-24T20:51:11.060469",
+    "dependencies": [],
+    "generated_code": "import pandas as pd\nimport numpy as np\nfrom datetime import datetime\nimport json\n\ndef generated_tool_b4e18ee1(data):\n    \"\"\"\n    Generate analysis tool: Analyze AAPL price momentum and generate trading strategy\n    \n    Input format: dict with financial data keys\n    Expected output: dict with analysis results and metrics\n    \n    Generated by AutonomousAgent for financial analysis tasks.\n    \"\"\"\n    \n    try:\n        # Data processing logic with financial analysis focus\n        if isinstance(data, dict):\n            result = process_financial_dict_data(data)\n        elif isinstance(data, list):\n            result = process_financial_list_data(data)\n        else:\n            result = process_generic_financial_data(data)\n        \n        return {\n            \"success\": True,\n            \"result\": result,\n            \"timestamp\": datetime.now().isoformat(),\n            \"tool_name\": \"generated_tool_b4e18ee1\",\n            \"analysis_type\": \"autonomous_generated\"\n        }\n    \n    except Exception as e:\n        return {\n            \"success\": False,\n            \"error\": str(e),\n            \"timestamp\": datetime.now().isoformat(),\n            \"tool_name\": \"generated_tool_b4e18ee1\"\n        }\n\ndef process_financial_dict_data(data):\n    \"\"\"Process dictionary format financial data with comprehensive analysis\"\"\"\n    result = {\"processed\": True, \"data_type\": \"financial_dict\"}\n    \n    if \"prices\" in data:\n        prices = data[\"prices\"]\n        if isinstance(prices, list) and len(prices) > 1:\n            # Enhanced financial analysis\n            returns = [prices[i] / prices[i-1] - 1 for i in range(1, len(prices))]\n            \n            result.update({\n                \"price_analysis\": {\n                    \"current_price\": prices[-1],\n                    \"price_change\": prices[-1] - prices[0],\n                    \"percent_change\": (prices[-1] / prices[0] - 1) * 100,\n                    \"volatility\": np.std(returns) * np.sqrt(252),\n                    \"sharpe_ratio\": np.mean(returns) / np.std(returns) * np.sqrt(252) if np.std(returns) > 0 else 0,\n                    \"max_drawdown\": calculate_max_drawdown(prices),\n                    \"technical_indicators\": calculate_technical_indicators(prices)\n                }\n            })\n    \n    return result\n\ndef process_financial_list_data(data):\n    \"\"\"Process list format financial data\"\"\"\n    if all(isinstance(x, (int, float)) for x in data):\n        # Assume price data\n        returns = [data[i] / data[i-1] - 1 for i in range(1, len(data))]\n        \n        return {\n            \"statistical_analysis\": {\n                \"mean\": np.mean(data),\n                \"std\": np.std(data),\n                \"min\": min(data),\n                \"max\": max(data),\n                \"count\": len(data)\n            },\n            \"financial_metrics\": {\n                \"total_return\": (data[-1] / data[0] - 1) * 100,\n                \"volatility\": np.std(returns) * np.sqrt(252),\n                \"var_95\": np.percentile(returns, 5),\n            }\n        }\n    \n    return {\"processed\": True, \"data_type\": \"list\", \"length\": len(data)}\n\ndef process_generic_financial_data(data):\n    \"\"\"Process generic financial data\"\"\"\n    return {\n        \"data_type\": type(data).__name__,\n        \"processed\": True,\n        \"summary\": str(data)[:100],\n        \"analysis_note\": \"Generic financial data processing applied\"\n    }\n\ndef calculate_max_drawdown(prices):\n    \"\"\"Calculate maximum drawdown from price series\"\"\"\n    if len(prices) < 2:\n        return 0.0\n    \n    peak = prices[0]\n    max_dd = 0.0\n    \n    for price in prices[1:]:\n        if price > peak:\n            peak = price\n        drawdown = (peak - price) / peak\n        max_dd = max(max_dd, drawdown)\n    \n    return max_dd\n\ndef calculate_technical_indicators(prices):\n    \"\"\"Calculate basic technical indicators\"\"\"\n    if len(prices) < 10:\n        return {\"insufficient_data\": True}\n    \n    sma_10 = np.mean(prices[-10:])\n    sma_20 = np.mean(prices[-20:]) if len(prices) >= 20 else np.mean(prices)\n    \n    return {\n        \"sma_10\": sma_10,\n        \"sma_20\": sma_20,\n        \"price_vs_sma10\": prices[-1] / sma_10 - 1,\n        \"price_vs_sma20\": prices[-1] / sma_20 - 1,\n        \"trend\": \"bullish\" if sma_10 > sma_20 else \"bearish\"\n    }\n",
+    "validation_code": null,
+    "validation_result": {
+      "tool_created": "generated_tool_b4e18ee1"
+    }
+  },
+  {
+    "task_id": "53ce8e2c-73ae-42f3-965d-22b2c87df953",
+    "description": "Execute analysis: Analyze AAPL price momentum and generate trading strategy",
+    "priority": 3,
+    "status": "completed",
+    "created_at": "2025-06-24T20:51:11.060478",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "0affa7a2-a3dd-4c66-96c8-27fe7df206ca",
+    "description": "Generate strategy flow: Analyze AAPL price momentum and generate trading strategy",
+    "priority": 3,
+    "status": "completed",
+    "created_at": "2025-06-24T20:51:11.060484",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": {
+      "strategy_flow_generated": true,
+      "alpha_id": "autonomous_181045f1"
+    }
+  },
+  {
+    "task_id": "9b6223fb-40b7-4181-9de2-ff5c264974c1",
+    "description": "Validate analysis results: Analyze AAPL price momentum and generate trading strategy",
+    "priority": 3,
+    "status": "completed",
+    "created_at": "2025-06-24T20:51:11.060490",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "aa6d19dd-af57-41c8-b918-df219f726320",
+    "description": "Query memory for relevant data: Analyze AAPL price momentum and generate trading strategy",
+    "priority": 3,
+    "status": "completed",
+    "created_at": "2025-06-24T20:53:38.801518",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": {
+      "query": "Analyze AAPL price momentum and generate trading strategy",
+      "category": null,
+      "results": [
+        {
+          "content": "Historical analysis data related to: Analyze AAPL price momentum and generate trading strategy",
+          "relevance_score": 0.745208595104808,
+          "source": "historical_analysis",
+          "timestamp": "2025-06-24T21:01:11.567285",
+          "metadata": {
+            "data_points": 421,
+            "timeframe": "1y",
+            "quality_score": 0.9339798400915592
+          }
+        }
+      ],
+      "total_results": 1,
+      "query_timestamp": "2025-06-24T21:01:11.567295"
+    }
+  },
+  {
+    "task_id": "745b5f53-d649-4344-9d69-9aa2cde48cc2",
+    "description": "Generate analysis tool: Analyze AAPL price momentum and generate trading strategy",
+    "priority": 3,
+    "status": "in_progress",
+    "created_at": "2025-06-24T20:53:38.801564",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "1b762207-f559-4916-9161-8c72f11e75e2",
+    "description": "Execute analysis: Analyze AAPL price momentum and generate trading strategy",
+    "priority": 3,
+    "status": "completed",
+    "created_at": "2025-06-24T20:53:38.801576",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "cafb3765-7e15-4480-8a53-0cd95103ded3",
+    "description": "Generate strategy flow: Analyze AAPL price momentum and generate trading strategy",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T20:53:38.801619",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "b1a89181-fc94-4c45-8758-838b24c4b62f",
+    "description": "Validate analysis results: Analyze AAPL price momentum and generate trading strategy",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T20:53:38.801652",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "ac160cb1-bef9-48af-bab8-0146894d8fb5",
+    "description": "Query memory for relevant data: Analyze AAPL stock momentum indicators and generate trading signals",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T21:01:11.369181",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "f17b99fa-5e97-4b48-8ed8-6fd0ed1dec12",
+    "description": "Generate analysis tool: Analyze AAPL stock momentum indicators and generate trading signals",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T21:01:11.369213",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "faeaf387-5557-4220-934b-1d5d40e60972",
+    "description": "Execute analysis: Analyze AAPL stock momentum indicators and generate trading signals",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T21:01:11.369223",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "e5675832-04b0-4906-a571-fc9e300b2082",
+    "description": "Generate strategy flow: Analyze AAPL stock momentum indicators and generate trading signals",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T21:01:11.369230",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "0f4e0366-122a-42a9-8e7f-1a0a311a3a39",
+    "description": "Validate analysis results: Analyze AAPL stock momentum indicators and generate trading signals",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T21:01:11.369236",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "db0500c6-12c3-4931-bdb1-cd476d76a7aa",
+    "description": "Analyze market conditions: Create a new quantitative trading strategy based on technical indicators for signal generation",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T21:01:11.566298",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "8737c0fe-878b-4cad-b577-20626e653068",
+    "description": "Generate strategy code: Create a new quantitative trading strategy based on technical indicators for signal generation",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T21:01:11.566318",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "b09bbc5b-7da5-47b1-9c53-815cdc7d91ca",
+    "description": "Backtest strategy: Create a new quantitative trading strategy based on technical indicators for signal generation",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T21:01:11.566328",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "f7d9b2b6-0351-41ac-a977-94dd66e58ae8",
+    "description": "Generate strategy flow output: Create a new quantitative trading strategy based on technical indicators for signal generation",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T21:01:11.566336",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  },
+  {
+    "task_id": "fa56f7ff-9d96-4cac-9cfe-1e1028b4a26e",
+    "description": "Optimize strategy parameters: Create a new quantitative trading strategy based on technical indicators for signal generation",
+    "priority": 3,
+    "status": "pending",
+    "created_at": "2025-06-24T21:01:11.566344",
+    "dependencies": [],
+    "generated_code": null,
+    "validation_code": null,
+    "validation_result": null
+  }
+]
