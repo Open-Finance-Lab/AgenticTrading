@@ -13,6 +13,7 @@ import csv
 from mcp.server.fastmcp import FastMCP
 from agent_pools.alpha_agent_pool.schema.theory_driven_schema import MomentumAgentConfig
 from agent_pools.alpha_agent_pool.agents.theory_driven.momentum_agent import MomentumAgent
+from agent_pools.alpha_agent_pool.agents.autonomous.autonomous_agent import AutonomousAgent
 
 class MemoryUnit:
     """
@@ -111,6 +112,10 @@ class AlphaAgentPoolMCPServer:
                 config, process = self._start_momentum_agent()
                 self.agent_registry[agent_id] = process
                 return f"Momentum agent started on port {config.execution.port}"
+            elif agent_id == "autonomous_agent":
+                process = self._start_autonomous_agent()
+                self.agent_registry[agent_id] = process
+                return f"Autonomous agent started on port 5051"
             return f"Unknown agent: {agent_id}"
 
         @self.pool_server.tool(name="list_agents", description="List all registered sub-agents.")
@@ -167,6 +172,20 @@ class AlphaAgentPoolMCPServer:
             """
             return self.memory.keys()
 
+        @self.pool_server.tool(name="send_orchestrator_input", description="Send input to autonomous agent from orchestrator.")
+        def send_orchestrator_input(instruction: str, context: dict = None) -> str:
+            """
+            Send orchestrator input to autonomous agent for self-orchestration.
+            Args:
+                instruction (str): The instruction from orchestrator.
+                context (dict): Optional context data.
+            Returns:
+                str: Response from autonomous agent.
+            """
+            # 这里可以通过MCP客户端连接到autonomous agent
+            # 目前返回确认消息
+            return f"Orchestrator input '{instruction}' sent to autonomous agent"
+
     def _start_momentum_agent(self):
         """
         Start the MomentumAgent as a separate process using its configuration file.
@@ -180,6 +199,16 @@ class AlphaAgentPoolMCPServer:
         p = multiprocessing.Process(target=run_momentum_agent, args=(cfg_dict,), daemon=True)
         p.start()
         return config, p
+
+    def _start_autonomous_agent(self):
+        """
+        Start the AutonomousAgent as a separate process.
+        Returns:
+            multiprocessing.Process: The autonomous agent process handle.
+        """
+        p = multiprocessing.Process(target=run_autonomous_agent, daemon=True)
+        p.start()
+        return p
 
     def run(self):
         """
@@ -205,6 +234,14 @@ def run_momentum_agent(config_dict):
     config = MomentumAgentConfig(**config_dict)
     agent = MomentumAgent(config)
     agent.start_mcp_server(port=config.execution.port, host="0.0.0.0", transport="sse")
+
+def run_autonomous_agent():
+    """
+    Entrypoint for running an AutonomousAgent in a separate process.
+    """
+    from agent_pools.alpha_agent_pool.agents.autonomous.autonomous_agent import AutonomousAgent
+    agent = AutonomousAgent()
+    agent.start_mcp_server(host="0.0.0.0", port=5051)
 
 if __name__ == "__main__":
     # Script entry point: start the AlphaAgentPoolMCPServer

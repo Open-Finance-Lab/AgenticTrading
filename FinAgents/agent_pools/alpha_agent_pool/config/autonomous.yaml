@@ -1,0 +1,32 @@
+# agent_pools/alpha_agent_pool/config/autonomous.yaml
+
+agent_id: "autonomous_alpha_agent"
+execution:
+  port: 5051
+  host: "0.0.0.0"
+  
+autonomous_config:
+  # 任务处理配置
+  task_processing_interval: 5  # 秒
+  max_concurrent_tasks: 3
+  task_timeout: 300  # 秒
+  
+  # 代码生成配置
+  code_generation:
+    workspace_dir: "./workspace"
+    max_tool_cache: 50
+    enable_validation: true
+    
+  # Memory连接配置
+  memory_agent:
+    host: "localhost"
+    port: 8000
+    timeout: 30
+    
+  # 任务优先级规则
+  task_priorities:
+    "分析": 3
+    "预测": 2
+    "策略": 3
+    "验证": 1
+    "默认": 1
