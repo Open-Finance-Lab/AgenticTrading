@@ -1,0 +1,1152 @@
+[
+  {
+    "event_id": "b90d9f6f-9d2d-46cc-be6f-0132a718a318",
+    "timestamp": "2025-06-25T21:21:06.060583",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_001",
+    "title": "AAPL Buy Order",
+    "content": "Executed buy order for 100 shares of AAPL at $150.25",
+    "tags": [
+      "transaction",
+      "AAPL",
+      "buy"
+    ],
+    "metadata": {
+      "symbol": "AAPL",
+      "quantity": 100,
+      "price": 150.25,
+      "total_cost": 15025.0
+    },
+    "session_id": "session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "24ff282f-89f1-45c4-8be8-1a3fb30a4e9b",
+    "timestamp": "2025-06-25T21:21:06.060971",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "market_data_agent_pool",
+    "source_agent_id": "data_collector_001",
+    "title": "AAPL Price Update",
+    "content": "Real-time price update for AAPL",
+    "tags": [
+      "market_data",
+      "price",
+      "AAPL"
+    ],
+    "metadata": {
+      "symbol": "AAPL",
+      "price": 150.75,
+      "volume": 1000000,
+      "timestamp": "2025-06-25T21:21:06.060960"
+    },
+    "session_id": "session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "f6734eb8-704a-4727-962c-a0b1aa43bf81",
+    "timestamp": "2025-06-25T21:21:06.061299",
+    "event_type": "error",
+    "log_level": "error",
+    "source_agent_pool": "portfolio_agent_pool",
+    "source_agent_id": "portfolio_manager_001",
+    "title": "Portfolio Calculation Error",
+    "content": "Failed to calculate portfolio risk metrics due to missing data",
+    "tags": [
+      "portfolio",
+      "error",
+      "risk"
+    ],
+    "metadata": {
+      "error_code": "RISK_001",
+      "missing_data": [
+        "volatility",
+        "correlation_matrix"
+      ]
+    },
+    "session_id": "session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "cbb76470-f964-420a-a1ee-97e89300248d",
+    "timestamp": "2025-06-25T21:21:06.061706",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_000",
+    "title": "BUY AAPL",
+    "content": "Executed buy order: 100 shares of AAPL at $150.00",
+    "tags": [
+      "transaction",
+      "AAPL",
+      "buy"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "AAPL",
+      "quantity": 100,
+      "price": 150.0,
+      "cost": 15000.0,
+      "timestamp": "2025-06-25T21:21:06.061665"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "7878f215-b01f-4050-9a50-7c4b221a544e",
+    "timestamp": "2025-06-25T21:21:06.061715",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_001",
+    "title": "SELL GOOGL",
+    "content": "Executed sell order: 110 shares of GOOGL at $155.00",
+    "tags": [
+      "transaction",
+      "GOOGL",
+      "sell"
+    ],
+    "metadata": {
+      "transaction_type": "sell",
+      "symbol": "GOOGL",
+      "quantity": 110,
+      "price": 155.0,
+      "cost": 17050.0,
+      "timestamp": "2025-06-25T21:21:06.061670"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3b640fa5-68f9-41df-9ae0-2b8fbdfce9b6",
+    "timestamp": "2025-06-25T21:21:06.061721",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_002",
+    "title": "BUY MSFT",
+    "content": "Executed buy order: 120 shares of MSFT at $160.00",
+    "tags": [
+      "transaction",
+      "MSFT",
+      "buy"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "MSFT",
+      "quantity": 120,
+      "price": 160.0,
+      "cost": 19200.0,
+      "timestamp": "2025-06-25T21:21:06.061673"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "16134967-a922-402c-a2a9-7930e746f390",
+    "timestamp": "2025-06-25T21:21:06.061725",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_003",
+    "title": "SELL TSLA",
+    "content": "Executed sell order: 130 shares of TSLA at $165.00",
+    "tags": [
+      "TSLA",
+      "transaction",
+      "sell"
+    ],
+    "metadata": {
+      "transaction_type": "sell",
+      "symbol": "TSLA",
+      "quantity": 130,
+      "price": 165.0,
+      "cost": 21450.0,
+      "timestamp": "2025-06-25T21:21:06.061676"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "4270d05a-b4d8-47d3-82d6-25590a4eaf26",
+    "timestamp": "2025-06-25T21:21:06.061729",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_004",
+    "title": "BUY AMZN",
+    "content": "Executed buy order: 140 shares of AMZN at $170.00",
+    "tags": [
+      "transaction",
+      "AMZN",
+      "buy"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "AMZN",
+      "quantity": 140,
+      "price": 170.0,
+      "cost": 23800.0,
+      "timestamp": "2025-06-25T21:21:06.061678"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3f9f160f-12c1-4dd4-ad1a-02b9eb2218fe",
+    "timestamp": "2025-06-25T21:21:06.061733",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "portfolio_optimization_pool",
+    "source_agent_id": "optimizer_000",
+    "title": "portfolio Optimization Completed",
+    "content": "Optimization process completed with 3 results",
+    "tags": [
+      "portfolio",
+      "optimization"
+    ],
+    "metadata": {
+      "optimization_type": "portfolio",
+      "result": {
+        "optimization_score": 0.85,
+        "iterations": 100,
+        "convergence_time": 2.5
+      },
+      "timestamp": "2025-06-25T21:21:06.061682"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3a06c644-de21-40ae-8da6-3ba4ff4a2b5d",
+    "timestamp": "2025-06-25T21:21:06.061737",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "portfolio_optimization_pool",
+    "source_agent_id": "optimizer_001",
+    "title": "risk Optimization Completed",
+    "content": "Optimization process completed with 3 results",
+    "tags": [
+      "risk",
+      "optimization"
+    ],
+    "metadata": {
+      "optimization_type": "risk",
+      "result": {
+        "optimization_score": 0.9,
+        "iterations": 150,
+        "convergence_time": 3.0
+      },
+      "timestamp": "2025-06-25T21:21:06.061685"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ec1f0088-fef4-4a4d-a4ea-02bdcc8e4981",
+    "timestamp": "2025-06-25T21:21:06.061741",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "portfolio_optimization_pool",
+    "source_agent_id": "optimizer_002",
+    "title": "cost Optimization Completed",
+    "content": "Optimization process completed with 3 results",
+    "tags": [
+      "cost",
+      "optimization"
+    ],
+    "metadata": {
+      "optimization_type": "cost",
+      "result": {
+        "optimization_score": 0.95,
+        "iterations": 200,
+        "convergence_time": 3.5
+      },
+      "timestamp": "2025-06-25T21:21:06.061687"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "cdd65a23-2601-464f-b151-22cb5ca3341c",
+    "timestamp": "2025-06-25T21:21:06.061745",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "market_data_pool",
+    "source_agent_id": "data_collector_000",
+    "title": "price_update update for AAPL",
+    "content": "Market data update: price_update for AAPL",
+    "tags": [
+      "price_update",
+      "market_data",
+      "AAPL"
+    ],
+    "metadata": {
+      "symbol": "AAPL",
+      "data_type": "price_update",
+      "data": {
+        "open": 150.0,
+        "high": 155.0,
+        "low": 148.0,
+        "close": 152.0,
+        "volume": 1000000
+      },
+      "timestamp": "2025-06-25T21:21:06.061691"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "03c0bdfe-3e67-45b9-94c2-4db030a08187",
+    "timestamp": "2025-06-25T21:21:06.061749",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "market_data_pool",
+    "source_agent_id": "data_collector_001",
+    "title": "price_update update for GOOGL",
+    "content": "Market data update: price_update for GOOGL",
+    "tags": [
+      "price_update",
+      "market_data",
+      "GOOGL"
+    ],
+    "metadata": {
+      "symbol": "GOOGL",
+      "data_type": "price_update",
+      "data": {
+        "open": 160.0,
+        "high": 165.0,
+        "low": 158.0,
+        "close": 162.0,
+        "volume": 1100000
+      },
+      "timestamp": "2025-06-25T21:21:06.061694"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3d1123e4-a588-49ee-9c4a-28711f39f856",
+    "timestamp": "2025-06-25T21:21:06.061753",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "market_data_pool",
+    "source_agent_id": "data_collector_002",
+    "title": "price_update update for MSFT",
+    "content": "Market data update: price_update for MSFT",
+    "tags": [
+      "price_update",
+      "market_data",
+      "MSFT"
+    ],
+    "metadata": {
+      "symbol": "MSFT",
+      "data_type": "price_update",
+      "data": {
+        "open": 170.0,
+        "high": 175.0,
+        "low": 168.0,
+        "close": 172.0,
+        "volume": 1200000
+      },
+      "timestamp": "2025-06-25T21:21:06.061696"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "55d60c66-9192-4ea3-97ae-2737c97f371f",
+    "timestamp": "2025-06-25T21:21:06.066430",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "demo_pool",
+    "source_agent_id": "demo_agent",
+    "title": "TSLA Buy Order",
+    "content": "Demo transaction",
+    "tags": [],
+    "metadata": {
+      "total_cost": 25000.0
+    },
+    "session_id": null,
+    "correlation_id": null
+  },
+  {
+    "event_id": "abc3eb33-bad0-4532-9667-50e85177ca51",
+    "timestamp": "2025-06-25T21:21:06.066942",
+    "event_type": "error",
+    "log_level": "error",
+    "source_agent_pool": "demo_pool",
+    "source_agent_id": "demo_agent",
+    "title": "Demo Error",
+    "content": "Demo error message",
+    "tags": [],
+    "metadata": {},
+    "session_id": null,
+    "correlation_id": null
+  },
+  {
+    "event_id": "3fdd3fb6-b8de-4523-a038-cf1c8bdf070f",
+    "timestamp": "2025-06-25T21:21:06.067477",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "demo_pool",
+    "source_agent_id": "demo_agent",
+    "title": "BUY NVDA",
+    "content": "Executed buy order: 50 shares of NVDA at $800.00",
+    "tags": [
+      "transaction",
+      "NVDA",
+      "buy"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "NVDA",
+      "quantity": 50,
+      "price": 800.0,
+      "cost": 40000.0,
+      "timestamp": "2025-06-25T21:21:06.067467"
+    },
+    "session_id": null,
+    "correlation_id": null
+  },
+  {
+    "event_id": "f916bdd2-277f-4934-8a43-db975ef81f99",
+    "timestamp": "2025-06-25T21:21:06.067483",
+    "event_type": "error",
+    "log_level": "error",
+    "source_agent_pool": "demo_pool",
+    "source_agent_id": "demo_agent",
+    "title": "validation Error",
+    "content": "Demo validation error",
+    "tags": [
+      "error",
+      "validation"
+    ],
+    "metadata": {
+      "error_type": "validation",
+      "error_message": "Demo validation error",
+      "error_details": {},
+      "timestamp": "2025-06-25T21:21:06.067470"
+    },
+    "session_id": null,
+    "correlation_id": null
+  },
+  {
+    "event_id": "e4330642-9422-4256-8f92-f376d0a27c18",
+    "timestamp": "2025-06-25T21:21:06.068100",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "market_data_collector",
+    "title": "Market Data Collection Started",
+    "content": "Collecting real-time market data for cost optimization",
+    "tags": [
+      "start",
+      "market_data",
+      "collection"
+    ],
+    "metadata": {},
+    "session_id": "tc_session_1750900866",
+    "correlation_id": "tc_workflow_1750900866"
+  },
+  {
+    "event_id": "25688d13-0dae-4179-a447-a05044854223",
+    "timestamp": "2025-06-25T21:21:06.068593",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_analyzer",
+    "title": "Transaction Cost Analysis",
+    "content": "Analyzing transaction costs for optimal execution strategy",
+    "tags": [
+      "optimization",
+      "cost_analysis"
+    ],
+    "metadata": {
+      "symbols": [
+        "AAPL",
+        "GOOGL",
+        "MSFT"
+      ],
+      "analysis_type": "slippage_impact",
+      "market_impact_threshold": 0.05
+    },
+    "session_id": "tc_session_1750900866",
+    "correlation_id": "tc_workflow_1750900866"
+  },
+  {
+    "event_id": "554aaea1-85ed-4797-bbfb-3e7d4f07b351",
+    "timestamp": "2025-06-25T21:21:06.069075",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer",
+    "title": "Cost Optimization Completed",
+    "content": "Transaction cost optimization completed with recommended execution strategy",
+    "tags": [
+      "completed",
+      "optimization",
+      "execution_strategy"
+    ],
+    "metadata": {
+      "optimal_strategy": "TWAP",
+      "expected_cost_reduction": 0.15,
+      "execution_time_horizon": 30,
+      "recommended_order_size": 1000
+    },
+    "session_id": "tc_session_1750900866",
+    "correlation_id": "tc_workflow_1750900866"
+  },
+  {
+    "event_id": "7a164bb0-ffd1-4189-b63a-409431470b91",
+    "timestamp": "2025-06-25T21:21:06.069557",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "transaction_executor",
+    "title": "BUY AAPL",
+    "content": "Executed buy order: 500 shares of AAPL at $150.25",
+    "tags": [
+      "transaction",
+      "AAPL",
+      "buy"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "AAPL",
+      "quantity": 500,
+      "price": 150.25,
+      "cost": 75125.0,
+      "timestamp": "2025-06-25T21:21:06.069550"
+    },
+    "session_id": "tc_session_1750900866",
+    "correlation_id": "tc_workflow_1750900866"
+  },
+  {
+    "event_id": "74ab32bd-7d8d-4cfa-aea0-20bd66338336",
+    "timestamp": "2025-06-25T21:21:06.070091",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "transaction_executor",
+    "title": "SELL GOOGL",
+    "content": "Executed sell order: 200 shares of GOOGL at $2750.50",
+    "tags": [
+      "transaction",
+      "GOOGL",
+      "sell"
+    ],
+    "metadata": {
+      "transaction_type": "sell",
+      "symbol": "GOOGL",
+      "quantity": 200,
+      "price": 2750.5,
+      "cost": 550100.0,
+      "timestamp": "2025-06-25T21:21:06.070084"
+    },
+    "session_id": "tc_session_1750900866",
+    "correlation_id": "tc_workflow_1750900866"
+  },
+  {
+    "event_id": "69ebb8a7-6b99-40c3-9829-aa5487cfd7e2",
+    "timestamp": "2025-06-25T21:21:06.070681",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "transaction_executor",
+    "title": "BUY MSFT",
+    "content": "Executed buy order: 300 shares of MSFT at $380.75",
+    "tags": [
+      "transaction",
+      "MSFT",
+      "buy"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "MSFT",
+      "quantity": 300,
+      "price": 380.75,
+      "cost": 114225.0,
+      "timestamp": "2025-06-25T21:21:06.070672"
+    },
+    "session_id": "tc_session_1750900866",
+    "correlation_id": "tc_workflow_1750900866"
+  },
+  {
+    "event_id": "68348f4c-e09f-408e-add5-2b941ad154d3",
+    "timestamp": "2025-06-25T21:35:59.617957",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_001",
+    "title": "AAPL Buy Order",
+    "content": "Executed buy order for 100 shares of AAPL at $150.25",
+    "tags": [
+      "AAPL",
+      "transaction",
+      "buy"
+    ],
+    "metadata": {
+      "symbol": "AAPL",
+      "quantity": 100,
+      "price": 150.25,
+      "total_cost": 15025.0
+    },
+    "session_id": "session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "9aaaf705-f9e6-41cd-a03b-553fd048320a",
+    "timestamp": "2025-06-25T21:35:59.618834",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "market_data_agent_pool",
+    "source_agent_id": "data_collector_001",
+    "title": "AAPL Price Update",
+    "content": "Real-time price update for AAPL",
+    "tags": [
+      "AAPL",
+      "price",
+      "market_data"
+    ],
+    "metadata": {
+      "symbol": "AAPL",
+      "price": 150.75,
+      "volume": 1000000,
+      "timestamp": "2025-06-25T21:35:59.618821"
+    },
+    "session_id": "session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "68a52f9e-1653-499f-b5b3-a068536a7ac2",
+    "timestamp": "2025-06-25T21:35:59.620039",
+    "event_type": "error",
+    "log_level": "error",
+    "source_agent_pool": "portfolio_agent_pool",
+    "source_agent_id": "portfolio_manager_001",
+    "title": "Portfolio Calculation Error",
+    "content": "Failed to calculate portfolio risk metrics due to missing data",
+    "tags": [
+      "error",
+      "portfolio",
+      "risk"
+    ],
+    "metadata": {
+      "error_code": "RISK_001",
+      "missing_data": [
+        "volatility",
+        "correlation_matrix"
+      ]
+    },
+    "session_id": "session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a564154d-02f8-4406-8c45-78767a5edbe2",
+    "timestamp": "2025-06-25T21:35:59.620801",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_000",
+    "title": "BUY AAPL",
+    "content": "Executed buy order: 100 shares of AAPL at $150.00",
+    "tags": [
+      "AAPL",
+      "transaction",
+      "buy"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "AAPL",
+      "quantity": 100,
+      "price": 150.0,
+      "cost": 15000.0,
+      "timestamp": "2025-06-25T21:35:59.620761"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "6a36e983-5a57-4cdc-9aa5-9767d218edc8",
+    "timestamp": "2025-06-25T21:35:59.620810",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_001",
+    "title": "SELL GOOGL",
+    "content": "Executed sell order: 110 shares of GOOGL at $155.00",
+    "tags": [
+      "GOOGL",
+      "transaction",
+      "sell"
+    ],
+    "metadata": {
+      "transaction_type": "sell",
+      "symbol": "GOOGL",
+      "quantity": 110,
+      "price": 155.0,
+      "cost": 17050.0,
+      "timestamp": "2025-06-25T21:35:59.620766"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "edb133d3-7230-4961-933a-bbfc546ce650",
+    "timestamp": "2025-06-25T21:35:59.620816",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_002",
+    "title": "BUY MSFT",
+    "content": "Executed buy order: 120 shares of MSFT at $160.00",
+    "tags": [
+      "transaction",
+      "buy",
+      "MSFT"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "MSFT",
+      "quantity": 120,
+      "price": 160.0,
+      "cost": 19200.0,
+      "timestamp": "2025-06-25T21:35:59.620769"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "5e80bec9-cf42-4828-9649-215163ccfc06",
+    "timestamp": "2025-06-25T21:35:59.620820",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_003",
+    "title": "SELL TSLA",
+    "content": "Executed sell order: 130 shares of TSLA at $165.00",
+    "tags": [
+      "TSLA",
+      "transaction",
+      "sell"
+    ],
+    "metadata": {
+      "transaction_type": "sell",
+      "symbol": "TSLA",
+      "quantity": 130,
+      "price": 165.0,
+      "cost": 21450.0,
+      "timestamp": "2025-06-25T21:35:59.620771"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "cc010598-997d-4266-8430-113602d3c7ae",
+    "timestamp": "2025-06-25T21:35:59.620824",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer_004",
+    "title": "BUY AMZN",
+    "content": "Executed buy order: 140 shares of AMZN at $170.00",
+    "tags": [
+      "transaction",
+      "buy",
+      "AMZN"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "AMZN",
+      "quantity": 140,
+      "price": 170.0,
+      "cost": 23800.0,
+      "timestamp": "2025-06-25T21:35:59.620774"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c811d178-4c53-4e1b-ad42-74444ccee8be",
+    "timestamp": "2025-06-25T21:35:59.620828",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "portfolio_optimization_pool",
+    "source_agent_id": "optimizer_000",
+    "title": "portfolio Optimization Completed",
+    "content": "Optimization process completed with 3 results",
+    "tags": [
+      "optimization",
+      "portfolio"
+    ],
+    "metadata": {
+      "optimization_type": "portfolio",
+      "result": {
+        "optimization_score": 0.85,
+        "iterations": 100,
+        "convergence_time": 2.5
+      },
+      "timestamp": "2025-06-25T21:35:59.620779"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a9be7757-f380-4835-8978-5186d363780c",
+    "timestamp": "2025-06-25T21:35:59.620832",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "portfolio_optimization_pool",
+    "source_agent_id": "optimizer_001",
+    "title": "risk Optimization Completed",
+    "content": "Optimization process completed with 3 results",
+    "tags": [
+      "optimization",
+      "risk"
+    ],
+    "metadata": {
+      "optimization_type": "risk",
+      "result": {
+        "optimization_score": 0.9,
+        "iterations": 150,
+        "convergence_time": 3.0
+      },
+      "timestamp": "2025-06-25T21:35:59.620782"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "baec45a6-c80a-49d4-8c20-c13dd1ac3903",
+    "timestamp": "2025-06-25T21:35:59.620836",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "portfolio_optimization_pool",
+    "source_agent_id": "optimizer_002",
+    "title": "cost Optimization Completed",
+    "content": "Optimization process completed with 3 results",
+    "tags": [
+      "optimization",
+      "cost"
+    ],
+    "metadata": {
+      "optimization_type": "cost",
+      "result": {
+        "optimization_score": 0.95,
+        "iterations": 200,
+        "convergence_time": 3.5
+      },
+      "timestamp": "2025-06-25T21:35:59.620784"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "8f99b892-694b-4d74-9643-0f2188ef7b2f",
+    "timestamp": "2025-06-25T21:35:59.620840",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "market_data_pool",
+    "source_agent_id": "data_collector_000",
+    "title": "price_update update for AAPL",
+    "content": "Market data update: price_update for AAPL",
+    "tags": [
+      "AAPL",
+      "price_update",
+      "market_data"
+    ],
+    "metadata": {
+      "symbol": "AAPL",
+      "data_type": "price_update",
+      "data": {
+        "open": 150.0,
+        "high": 155.0,
+        "low": 148.0,
+        "close": 152.0,
+        "volume": 1000000
+      },
+      "timestamp": "2025-06-25T21:35:59.620788"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "89574ad0-62c6-4bf1-a5d4-f43ff2ca641b",
+    "timestamp": "2025-06-25T21:35:59.620844",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "market_data_pool",
+    "source_agent_id": "data_collector_001",
+    "title": "price_update update for GOOGL",
+    "content": "Market data update: price_update for GOOGL",
+    "tags": [
+      "GOOGL",
+      "price_update",
+      "market_data"
+    ],
+    "metadata": {
+      "symbol": "GOOGL",
+      "data_type": "price_update",
+      "data": {
+        "open": 160.0,
+        "high": 165.0,
+        "low": 158.0,
+        "close": 162.0,
+        "volume": 1100000
+      },
+      "timestamp": "2025-06-25T21:35:59.620790"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a3626e01-ba94-4701-a235-d152529bd793",
+    "timestamp": "2025-06-25T21:35:59.620848",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "market_data_pool",
+    "source_agent_id": "data_collector_002",
+    "title": "price_update update for MSFT",
+    "content": "Market data update: price_update for MSFT",
+    "tags": [
+      "MSFT",
+      "price_update",
+      "market_data"
+    ],
+    "metadata": {
+      "symbol": "MSFT",
+      "data_type": "price_update",
+      "data": {
+        "open": 170.0,
+        "high": 175.0,
+        "low": 168.0,
+        "close": 172.0,
+        "volume": 1200000
+      },
+      "timestamp": "2025-06-25T21:35:59.620792"
+    },
+    "session_id": "batch_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d3021ec9-d77f-4007-b903-b0b6a739dbbf",
+    "timestamp": "2025-06-25T21:35:59.626399",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "demo_pool",
+    "source_agent_id": "demo_agent",
+    "title": "TSLA Buy Order",
+    "content": "Demo transaction",
+    "tags": [],
+    "metadata": {
+      "total_cost": 25000.0
+    },
+    "session_id": null,
+    "correlation_id": null
+  },
+  {
+    "event_id": "b42b2fd9-59e9-43b8-bbd6-77d741fe52bd",
+    "timestamp": "2025-06-25T21:35:59.629538",
+    "event_type": "error",
+    "log_level": "error",
+    "source_agent_pool": "demo_pool",
+    "source_agent_id": "demo_agent",
+    "title": "Demo Error",
+    "content": "Demo error message",
+    "tags": [],
+    "metadata": {},
+    "session_id": null,
+    "correlation_id": null
+  },
+  {
+    "event_id": "276a3680-92c9-40ae-9e5b-6909dba7d2cb",
+    "timestamp": "2025-06-25T21:35:59.630614",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "demo_pool",
+    "source_agent_id": "demo_agent",
+    "title": "BUY NVDA",
+    "content": "Executed buy order: 50 shares of NVDA at $800.00",
+    "tags": [
+      "NVDA",
+      "transaction",
+      "buy"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "NVDA",
+      "quantity": 50,
+      "price": 800.0,
+      "cost": 40000.0,
+      "timestamp": "2025-06-25T21:35:59.630596"
+    },
+    "session_id": null,
+    "correlation_id": null
+  },
+  {
+    "event_id": "e1f4777d-5c71-451f-917e-edfc53850faf",
+    "timestamp": "2025-06-25T21:35:59.630623",
+    "event_type": "error",
+    "log_level": "error",
+    "source_agent_pool": "demo_pool",
+    "source_agent_id": "demo_agent",
+    "title": "validation Error",
+    "content": "Demo validation error",
+    "tags": [
+      "validation",
+      "error"
+    ],
+    "metadata": {
+      "error_type": "validation",
+      "error_message": "Demo validation error",
+      "error_details": {},
+      "timestamp": "2025-06-25T21:35:59.630600"
+    },
+    "session_id": null,
+    "correlation_id": null
+  },
+  {
+    "event_id": "d40dbc0f-e262-4315-9da6-5431e5180131",
+    "timestamp": "2025-06-25T21:35:59.631654",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "market_data_collector",
+    "title": "Market Data Collection Started",
+    "content": "Collecting real-time market data for cost optimization",
+    "tags": [
+      "start",
+      "collection",
+      "market_data"
+    ],
+    "metadata": {},
+    "session_id": "tc_session_1750901759",
+    "correlation_id": "tc_workflow_1750901759"
+  },
+  {
+    "event_id": "6b1e0118-0907-45b2-8c55-b48b0e51c66e",
+    "timestamp": "2025-06-25T21:35:59.632574",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_analyzer",
+    "title": "Transaction Cost Analysis",
+    "content": "Analyzing transaction costs for optimal execution strategy",
+    "tags": [
+      "optimization",
+      "cost_analysis"
+    ],
+    "metadata": {
+      "symbols": [
+        "AAPL",
+        "GOOGL",
+        "MSFT"
+      ],
+      "analysis_type": "slippage_impact",
+      "market_impact_threshold": 0.05
+    },
+    "session_id": "tc_session_1750901759",
+    "correlation_id": "tc_workflow_1750901759"
+  },
+  {
+    "event_id": "9b576e4e-b2fa-4b82-8e88-528cd4649f5c",
+    "timestamp": "2025-06-25T21:35:59.633712",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_optimizer",
+    "title": "Cost Optimization Completed",
+    "content": "Transaction cost optimization completed with recommended execution strategy",
+    "tags": [
+      "completed",
+      "optimization",
+      "execution_strategy"
+    ],
+    "metadata": {
+      "optimal_strategy": "TWAP",
+      "expected_cost_reduction": 0.15,
+      "execution_time_horizon": 30,
+      "recommended_order_size": 1000
+    },
+    "session_id": "tc_session_1750901759",
+    "correlation_id": "tc_workflow_1750901759"
+  },
+  {
+    "event_id": "c3906850-847f-4162-a074-d7a034cbf454",
+    "timestamp": "2025-06-25T21:35:59.635213",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "transaction_executor",
+    "title": "BUY AAPL",
+    "content": "Executed buy order: 500 shares of AAPL at $150.25",
+    "tags": [
+      "AAPL",
+      "transaction",
+      "buy"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "AAPL",
+      "quantity": 500,
+      "price": 150.25,
+      "cost": 75125.0,
+      "timestamp": "2025-06-25T21:35:59.635200"
+    },
+    "session_id": "tc_session_1750901759",
+    "correlation_id": "tc_workflow_1750901759"
+  },
+  {
+    "event_id": "a22e13d9-631f-4da5-850a-7afaf823bedb",
+    "timestamp": "2025-06-25T21:35:59.636501",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "transaction_executor",
+    "title": "SELL GOOGL",
+    "content": "Executed sell order: 200 shares of GOOGL at $2750.50",
+    "tags": [
+      "GOOGL",
+      "transaction",
+      "sell"
+    ],
+    "metadata": {
+      "transaction_type": "sell",
+      "symbol": "GOOGL",
+      "quantity": 200,
+      "price": 2750.5,
+      "cost": 550100.0,
+      "timestamp": "2025-06-25T21:35:59.636489"
+    },
+    "session_id": "tc_session_1750901759",
+    "correlation_id": "tc_workflow_1750901759"
+  },
+  {
+    "event_id": "7dbeb031-1ac1-4b59-9b25-0bc6c3d0c95b",
+    "timestamp": "2025-06-25T21:35:59.637884",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "transaction_executor",
+    "title": "BUY MSFT",
+    "content": "Executed buy order: 300 shares of MSFT at $380.75",
+    "tags": [
+      "transaction",
+      "buy",
+      "MSFT"
+    ],
+    "metadata": {
+      "transaction_type": "buy",
+      "symbol": "MSFT",
+      "quantity": 300,
+      "price": 380.75,
+      "cost": 114225.0,
+      "timestamp": "2025-06-25T21:35:59.637870"
+    },
+    "session_id": "tc_session_1750901759",
+    "correlation_id": "tc_workflow_1750901759"
+  }
+]

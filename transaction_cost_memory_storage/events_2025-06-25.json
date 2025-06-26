@@ -1,0 +1,150 @@
+[
+  {
+    "event_id": "c01e478a-1c76-49c0-80f1-1bc2e983bb15",
+    "timestamp": "2025-06-25T21:49:03.768668",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_bridge",
+    "title": "Optimization Event",
+    "content": "Event for PORTFOLIO",
+    "tags": [],
+    "metadata": {
+      "algorithm": "TWAP",
+      "expected_savings": 5.2,
+      "execution_time": 120,
+      "confidence": 0.85
+    },
+    "session_id": "tc_test_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "24cc6077-b786-4622-94f3-592aa7ff3196",
+    "timestamp": "2025-06-25T21:49:03.768996",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_bridge",
+    "title": "Analysis Event",
+    "content": "Event for GOOGL",
+    "tags": [],
+    "metadata": {
+      "implementation_shortfall": 8.7,
+      "market_impact": 6.2,
+      "execution_quality": "good"
+    },
+    "session_id": "tc_test_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "9e36ed9e-1de5-4579-bd8a-9d4bbfac98f2",
+    "timestamp": "2025-06-25T22:11:37.166938",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_bridge",
+    "title": "Optimization Event",
+    "content": "Event for PORTFOLIO",
+    "tags": [],
+    "metadata": {
+      "algorithm": "TWAP",
+      "expected_savings": 5.2,
+      "execution_time": 120,
+      "confidence": 0.85
+    },
+    "session_id": "tc_test_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d0618359-fa68-4cc2-8077-787c5e34a86e",
+    "timestamp": "2025-06-25T22:11:37.167713",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_bridge",
+    "title": "Analysis Event",
+    "content": "Event for GOOGL",
+    "tags": [],
+    "metadata": {
+      "implementation_shortfall": 8.7,
+      "market_impact": 6.2,
+      "execution_quality": "good"
+    },
+    "session_id": "tc_test_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "e826eeb2-2339-433f-a9b5-20470fe85f31",
+    "timestamp": "2025-06-25T22:13:56.333286",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_bridge",
+    "title": "Optimization Event",
+    "content": "Event for PORTFOLIO",
+    "tags": [],
+    "metadata": {
+      "algorithm": "TWAP",
+      "expected_savings": 5.2,
+      "execution_time": 120,
+      "confidence": 0.85
+    },
+    "session_id": "tc_test_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3283d719-9717-4c79-b6f7-cdef7655feb1",
+    "timestamp": "2025-06-25T22:13:56.334018",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_bridge",
+    "title": "Analysis Event",
+    "content": "Event for GOOGL",
+    "tags": [],
+    "metadata": {
+      "implementation_shortfall": 8.7,
+      "market_impact": 6.2,
+      "execution_quality": "good"
+    },
+    "session_id": "tc_test_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "f208d354-3aa0-45be-92f0-a6c892e581a4",
+    "timestamp": "2025-06-25T22:14:41.172360",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_bridge",
+    "title": "Optimization Event",
+    "content": "Event for PORTFOLIO",
+    "tags": [],
+    "metadata": {
+      "algorithm": "TWAP",
+      "expected_savings": 5.2,
+      "execution_time": 120,
+      "confidence": 0.85
+    },
+    "session_id": "tc_test_session_001",
+    "correlation_id": null
+  },
+  {
+    "event_id": "1ada4d5f-16cb-4de6-8e7b-4d29715804f5",
+    "timestamp": "2025-06-25T22:14:41.172798",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "cost_bridge",
+    "title": "Analysis Event",
+    "content": "Event for GOOGL",
+    "tags": [],
+    "metadata": {
+      "implementation_shortfall": 8.7,
+      "market_impact": 6.2,
+      "execution_quality": "good"
+    },
+    "session_id": "tc_test_session_001",
+    "correlation_id": null
+  }
+]

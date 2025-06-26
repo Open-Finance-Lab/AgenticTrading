@@ -1,0 +1,11 @@
+{
+  "events_count": 8,
+  "last_updated": "2025-06-25T22:14:41.173407",
+  "agent_pools": [
+    "transaction_cost_agent_pool"
+  ],
+  "event_types": [
+    "optimization",
+    "transaction"
+  ]
+}

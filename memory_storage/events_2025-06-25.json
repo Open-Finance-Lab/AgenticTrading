@@ -1,0 +1,4003 @@
+[
+  {
+    "event_id": "557714e3-f15d-4c02-9231-51dcbabbd31d",
+    "timestamp": "2025-06-25T21:42:49.902392",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "test_agent",
+    "title": "AAPL Buy Order",
+    "content": "Buy 10000 shares of AAPL at $175.50",
+    "tags": [],
+    "metadata": {
+      "symbol": "AAPL",
+      "side": "buy",
+      "quantity": 10000,
+      "price": 175.5
+    },
+    "session_id": "comprehensive_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "e73a0b92-3367-4d3f-b3a9-cb39552776bf",
+    "timestamp": "2025-06-25T21:42:49.902850",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "optimizer_agent",
+    "title": "Cost Optimization",
+    "content": "TWAP optimization completed with 12.5 bps savings",
+    "tags": [],
+    "metadata": {
+      "algorithm": "twap",
+      "savings_bps": 12.5
+    },
+    "session_id": "comprehensive_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "5c159438-e79b-4f2d-a0b9-3b9daaabbcf5",
+    "timestamp": "2025-06-25T21:42:49.903112",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "market_data_pool",
+    "source_agent_id": "price_feed",
+    "title": "AAPL Price Update",
+    "content": "Price updated to $175.75",
+    "tags": [],
+    "metadata": {
+      "symbol": "AAPL",
+      "price": 175.75
+    },
+    "session_id": "comprehensive_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3e4b4577-636a-4a73-b369-27e610c02296",
+    "timestamp": "2025-06-25T21:42:50.685835",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0000",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1000,
+      "price": 100.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "db7f691e-66f1-48b8-a4e1-63d598b9b9c0",
+    "timestamp": "2025-06-25T21:42:50.686258",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0001",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1001,
+      "price": 100.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "4d425b9b-d58d-4043-8424-e762203077f4",
+    "timestamp": "2025-06-25T21:42:50.686516",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0002",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1002,
+      "price": 100.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "85628201-1ff3-4e89-ba2b-2f5d8b305375",
+    "timestamp": "2025-06-25T21:42:50.686748",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0003",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1003,
+      "price": 100.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3c2b147b-c76d-4548-984f-70480840af32",
+    "timestamp": "2025-06-25T21:42:50.686976",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0004",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1004,
+      "price": 100.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "94b9198d-d7cf-40da-9913-f8ee50d78a09",
+    "timestamp": "2025-06-25T21:42:50.687273",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0005",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1005,
+      "price": 100.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "97ee2ad9-01ca-41e6-9628-72360f3681db",
+    "timestamp": "2025-06-25T21:42:50.687595",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0006",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1006,
+      "price": 100.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d8852c43-7ce5-44ab-ab36-974fbfbe68cf",
+    "timestamp": "2025-06-25T21:42:50.687995",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0007",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1007,
+      "price": 100.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d8becd79-1342-4702-9543-f3945cfac250",
+    "timestamp": "2025-06-25T21:42:50.688586",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0008",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1008,
+      "price": 100.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "5a8e6c70-3778-45d7-a017-ec73f91cdea9",
+    "timestamp": "2025-06-25T21:42:50.688992",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0009",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1009,
+      "price": 100.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a812dc4c-b4e7-426e-be48-e869bf824a30",
+    "timestamp": "2025-06-25T21:42:50.689386",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0010",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1010,
+      "price": 101.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c35613a6-c641-4296-8c9d-8132784da215",
+    "timestamp": "2025-06-25T21:42:50.689799",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0011",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1011,
+      "price": 101.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "e833acf2-671a-4f5f-8b45-8fc2a5f2e8c3",
+    "timestamp": "2025-06-25T21:42:50.690184",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0012",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1012,
+      "price": 101.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "58c651b7-07f3-450a-bf88-a041eae2ea99",
+    "timestamp": "2025-06-25T21:42:50.690586",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0013",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1013,
+      "price": 101.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "fb56f9ed-6a4e-48a3-b834-0a0aa18936bd",
+    "timestamp": "2025-06-25T21:42:50.690988",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0014",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1014,
+      "price": 101.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "56219f6f-c61d-4f37-9d65-89937dfe2f5d",
+    "timestamp": "2025-06-25T21:42:50.691412",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0015",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1015,
+      "price": 101.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "95a6a49a-7e7b-4358-bde1-93f4ff66290b",
+    "timestamp": "2025-06-25T21:42:50.691848",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0016",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1016,
+      "price": 101.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c4578fd0-04bd-4a2b-9816-61ba8aa5afd3",
+    "timestamp": "2025-06-25T21:42:50.692290",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0017",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1017,
+      "price": 101.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "762b3dcb-9795-458b-b903-0f096918da49",
+    "timestamp": "2025-06-25T21:42:50.692735",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0018",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1018,
+      "price": 101.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "feb44365-2237-4a4f-ba75-ff6fda5ca373",
+    "timestamp": "2025-06-25T21:42:50.693192",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0019",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1019,
+      "price": 101.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "00bbd909-e68f-49e5-8f42-ec86b0a516b1",
+    "timestamp": "2025-06-25T21:42:50.693655",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0020",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1020,
+      "price": 102.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "5c0daf87-2f8d-474c-bace-654f3c41ef1f",
+    "timestamp": "2025-06-25T21:42:50.694097",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0021",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1021,
+      "price": 102.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b4e17c9b-dbf4-4d70-be86-7fe1150e1a61",
+    "timestamp": "2025-06-25T21:42:50.694576",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0022",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1022,
+      "price": 102.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "1084be94-3b94-4215-aa28-5afafe781494",
+    "timestamp": "2025-06-25T21:42:50.695038",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0023",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1023,
+      "price": 102.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "99d5544b-81ed-444c-a3a1-e1255f5818d9",
+    "timestamp": "2025-06-25T21:42:50.695493",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0024",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1024,
+      "price": 102.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "9cf7e682-e00d-4399-969f-45308b65b9e7",
+    "timestamp": "2025-06-25T21:42:50.695949",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0025",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1025,
+      "price": 102.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "0a9dec04-135e-41ea-a999-71d29a4a0ec9",
+    "timestamp": "2025-06-25T21:42:50.696429",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0026",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1026,
+      "price": 102.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "46e10ceb-aab9-4a68-8d84-b05621c707c9",
+    "timestamp": "2025-06-25T21:42:50.696922",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0027",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1027,
+      "price": 102.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "96590741-f927-4476-a8bf-590e99868c47",
+    "timestamp": "2025-06-25T21:42:50.697437",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0028",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1028,
+      "price": 102.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "fd4e2c31-8057-41d6-a787-1526d5e36d4e",
+    "timestamp": "2025-06-25T21:42:50.697948",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0029",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1029,
+      "price": 102.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a736266d-d3fe-47a8-a407-1fbe0b254dcc",
+    "timestamp": "2025-06-25T21:42:50.698713",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0030",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1030,
+      "price": 103.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ef74e2e7-eabc-4185-8c54-00794f1ea1c2",
+    "timestamp": "2025-06-25T21:42:50.699420",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0031",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1031,
+      "price": 103.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "5d6a03d0-ee9e-4f79-a078-d6a75e656000",
+    "timestamp": "2025-06-25T21:42:50.700036",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0032",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1032,
+      "price": 103.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "4aab10e4-83e4-473f-8250-192e76c154aa",
+    "timestamp": "2025-06-25T21:42:50.701223",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0033",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1033,
+      "price": 103.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "5d31f1a9-9d7b-49a4-9161-3e5630c6d450",
+    "timestamp": "2025-06-25T21:42:50.701882",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0034",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1034,
+      "price": 103.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "282853a2-1401-46e9-a90c-624e0efa1999",
+    "timestamp": "2025-06-25T21:42:50.702498",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0035",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1035,
+      "price": 103.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "7b9afc89-8a76-4ff4-9ac2-c4457403dc30",
+    "timestamp": "2025-06-25T21:42:50.703144",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0036",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1036,
+      "price": 103.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "9ca8baf8-0d14-4db2-ac69-60bcbe2c8e1c",
+    "timestamp": "2025-06-25T21:42:50.703796",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0037",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1037,
+      "price": 103.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "8337a583-a58e-48ac-bcc9-e0ede5fcb8c5",
+    "timestamp": "2025-06-25T21:42:50.704453",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0038",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1038,
+      "price": 103.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "0c0734d6-41a0-47eb-90be-589757fef287",
+    "timestamp": "2025-06-25T21:42:50.705186",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0039",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1039,
+      "price": 103.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "6c017caf-70a2-4077-b446-3ef88a223e90",
+    "timestamp": "2025-06-25T21:42:50.706020",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0040",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1040,
+      "price": 104.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "781ccc57-3929-4a33-9c37-6ccba2f9f51d",
+    "timestamp": "2025-06-25T21:42:50.706827",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0041",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1041,
+      "price": 104.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ceb6cff3-8ad1-4cf4-ba50-88625fb13f56",
+    "timestamp": "2025-06-25T21:42:50.707488",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0042",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1042,
+      "price": 104.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "905bb0c3-6189-4d2c-bfc9-5af71614bc24",
+    "timestamp": "2025-06-25T21:42:50.708146",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0043",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1043,
+      "price": 104.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "051b3f36-2a12-4e3d-8016-1b70d31b3359",
+    "timestamp": "2025-06-25T21:42:50.708882",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0044",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1044,
+      "price": 104.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "7b718eff-754a-4754-90d6-7c1e60a4015d",
+    "timestamp": "2025-06-25T21:42:50.709568",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0045",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1045,
+      "price": 104.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "270be20b-4a4b-4aed-b5b7-6af2c8a22b91",
+    "timestamp": "2025-06-25T21:42:50.710263",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0046",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1046,
+      "price": 104.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3cd33f08-1c3e-49d3-b032-19dae3db9c5d",
+    "timestamp": "2025-06-25T21:42:50.710972",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0047",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1047,
+      "price": 104.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "4067321b-279c-417c-8d05-f9a3c5643598",
+    "timestamp": "2025-06-25T21:42:50.711686",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0048",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1048,
+      "price": 104.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "30e7d4b5-196a-4a00-8d6e-c2df6e4a510e",
+    "timestamp": "2025-06-25T21:42:50.712414",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0049",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1049,
+      "price": 104.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d4dcf941-e25a-4e04-84d6-0f890ce452c8",
+    "timestamp": "2025-06-25T21:42:50.713162",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0050",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1050,
+      "price": 105.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "223c017a-33bb-4c04-af1a-7df3fd3ae421",
+    "timestamp": "2025-06-25T21:42:50.713910",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0051",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1051,
+      "price": 105.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a22ef0de-3329-42e0-8c48-b9ea02b97fc8",
+    "timestamp": "2025-06-25T21:42:50.714684",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0052",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1052,
+      "price": 105.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c8c92d48-158a-450c-b436-4dd1bfb5efe4",
+    "timestamp": "2025-06-25T21:42:50.715451",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0053",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1053,
+      "price": 105.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "e0b3ef1a-f44a-4159-9b4c-3d8f7076ddaf",
+    "timestamp": "2025-06-25T21:42:50.716499",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0054",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1054,
+      "price": 105.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "95c5a433-0ce3-4561-b98a-926045ab7f15",
+    "timestamp": "2025-06-25T21:42:50.717542",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0055",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1055,
+      "price": 105.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c77aff78-7396-45b6-acff-75663e34415d",
+    "timestamp": "2025-06-25T21:42:50.718562",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0056",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1056,
+      "price": 105.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "cc8a3826-cebd-4789-bf1f-61eebe9d9b86",
+    "timestamp": "2025-06-25T21:42:50.719531",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0057",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1057,
+      "price": 105.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "2b1cc653-6636-42f0-a782-629dbf8b4eab",
+    "timestamp": "2025-06-25T21:42:50.720426",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0058",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1058,
+      "price": 105.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "7fa0976f-2869-459a-873e-4a6bc7e74838",
+    "timestamp": "2025-06-25T21:42:50.721334",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0059",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1059,
+      "price": 105.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "867a2f87-0a0a-4a4c-93c1-00110cb58c75",
+    "timestamp": "2025-06-25T21:42:50.722316",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0060",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1060,
+      "price": 106.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b1d85af5-a2e3-44fa-b8f3-c436d6d1e351",
+    "timestamp": "2025-06-25T21:42:50.723376",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0061",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1061,
+      "price": 106.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "4c805bfb-075e-4403-ba00-53da4b17ba02",
+    "timestamp": "2025-06-25T21:42:50.724269",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0062",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1062,
+      "price": 106.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "6b56e4ac-799d-4259-9cd5-b83d19b8965b",
+    "timestamp": "2025-06-25T21:42:50.725188",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0063",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1063,
+      "price": 106.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "9a9b6473-9427-4680-855a-ee971c158047",
+    "timestamp": "2025-06-25T21:42:50.726303",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0064",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1064,
+      "price": 106.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "2c6d3020-6d5e-4074-a43c-e344aaa05b9a",
+    "timestamp": "2025-06-25T21:42:50.727388",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0065",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1065,
+      "price": 106.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "bbbc0ace-a2f5-423d-9d57-ef754db551fb",
+    "timestamp": "2025-06-25T21:42:50.728431",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0066",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1066,
+      "price": 106.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "53e7697e-27ac-4d73-9367-51a337146277",
+    "timestamp": "2025-06-25T21:42:50.729426",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0067",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1067,
+      "price": 106.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "cc61a338-6031-4775-9f7e-317133a65593",
+    "timestamp": "2025-06-25T21:42:50.730478",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0068",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1068,
+      "price": 106.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ad821bcf-535e-49ae-9ef5-3388955cf6e7",
+    "timestamp": "2025-06-25T21:42:50.731572",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0069",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1069,
+      "price": 106.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "0ed4aba9-2228-4ee5-86e2-4690fb46fcd2",
+    "timestamp": "2025-06-25T21:42:50.732661",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0070",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1070,
+      "price": 107.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "149345e8-5d51-4915-99fd-3f9345d30f35",
+    "timestamp": "2025-06-25T21:42:50.733923",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0071",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1071,
+      "price": 107.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "47485241-c6fc-40ad-a7f6-873d76c49203",
+    "timestamp": "2025-06-25T21:42:50.735108",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0072",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1072,
+      "price": 107.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "60bd48b1-9ada-4224-973d-d077f3831e3f",
+    "timestamp": "2025-06-25T21:42:50.736187",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0073",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1073,
+      "price": 107.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a0e56667-5538-400d-a350-5fd7c688b086",
+    "timestamp": "2025-06-25T21:42:50.737295",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0074",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1074,
+      "price": 107.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b212d2db-0f90-4946-85ab-49fdaf74496e",
+    "timestamp": "2025-06-25T21:42:50.738431",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0075",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1075,
+      "price": 107.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "9f85f058-7a78-4199-b366-920426d52e6c",
+    "timestamp": "2025-06-25T21:42:50.739731",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0076",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1076,
+      "price": 107.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c06f7bb8-7e71-478b-aecc-6a3c406376f1",
+    "timestamp": "2025-06-25T21:42:50.741039",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0077",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1077,
+      "price": 107.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "63a3ae2b-279d-4366-966a-efa3e6ddd49f",
+    "timestamp": "2025-06-25T21:42:50.742112",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0078",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1078,
+      "price": 107.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "0192a691-efa7-4e8a-aaff-ef2d414f248e",
+    "timestamp": "2025-06-25T21:42:50.743202",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0079",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1079,
+      "price": 107.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "12999bec-1d89-4cf9-9411-54144e416fe0",
+    "timestamp": "2025-06-25T21:42:50.744290",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0080",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1080,
+      "price": 108.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "f385217a-0154-4bd9-8a9a-957e0a100cdc",
+    "timestamp": "2025-06-25T21:42:50.745383",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0081",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1081,
+      "price": 108.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "8b13440f-ed3c-4d1d-b60a-ddd05409627f",
+    "timestamp": "2025-06-25T21:42:50.746483",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0082",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1082,
+      "price": 108.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "708f65ca-73a4-4c78-a49b-d86b24b6ae2e",
+    "timestamp": "2025-06-25T21:42:50.747592",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0083",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1083,
+      "price": 108.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "603d5d1a-6b45-472c-82e5-93d30bfff416",
+    "timestamp": "2025-06-25T21:42:50.749007",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0084",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1084,
+      "price": 108.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d65ec9fc-28a1-4539-b753-30a0bffe2440",
+    "timestamp": "2025-06-25T21:42:50.750394",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0085",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1085,
+      "price": 108.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "9efdc50d-bbc1-41b4-a215-eb3993ee5751",
+    "timestamp": "2025-06-25T21:42:50.751745",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0086",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1086,
+      "price": 108.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "88241543-028f-41ab-b64a-2531e5dc5549",
+    "timestamp": "2025-06-25T21:42:50.753062",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0087",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1087,
+      "price": 108.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "234b8a1b-29aa-4dc3-beb6-ace051fce1b0",
+    "timestamp": "2025-06-25T21:42:50.754337",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0088",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1088,
+      "price": 108.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3b2123f3-783a-42fc-a637-c161befe963a",
+    "timestamp": "2025-06-25T21:42:50.755892",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0089",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1089,
+      "price": 108.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c18abb87-99ad-4ea2-88fd-6ab195e5b1ac",
+    "timestamp": "2025-06-25T21:42:50.757124",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0090",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1090,
+      "price": 109.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ae77ce0d-f523-4034-9642-46ecc4226cf1",
+    "timestamp": "2025-06-25T21:42:50.758336",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0091",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1091,
+      "price": 109.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ded1b3ae-e490-43be-86cb-e35f4955a8de",
+    "timestamp": "2025-06-25T21:42:50.759558",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0092",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1092,
+      "price": 109.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "0cd01acd-36be-414c-9cab-afd00a223f12",
+    "timestamp": "2025-06-25T21:42:50.760805",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0093",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1093,
+      "price": 109.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "e7dc5372-0bfa-4e4c-a7a5-7eb08e1fff8b",
+    "timestamp": "2025-06-25T21:42:50.762058",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0094",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1094,
+      "price": 109.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "1970c9b3-e69c-44ec-a235-a4af55f218a2",
+    "timestamp": "2025-06-25T21:42:50.763360",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0095",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1095,
+      "price": 109.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c8dfc6c3-a203-49a3-8052-7f75ea17b96c",
+    "timestamp": "2025-06-25T21:42:50.764624",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0096",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1096,
+      "price": 109.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "6f8597c0-1bdd-4174-adc1-e0d15776fe68",
+    "timestamp": "2025-06-25T21:42:50.766123",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0097",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1097,
+      "price": 109.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "cffb51a6-dbaa-419f-9810-598d8833ca8f",
+    "timestamp": "2025-06-25T21:42:50.767524",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0098",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1098,
+      "price": 109.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "0d6156a4-e79c-4d6c-860b-21308a77ffde",
+    "timestamp": "2025-06-25T21:42:50.768906",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0099",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1099,
+      "price": 109.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "7430878b-12e9-4c9f-9a80-19337adae93d",
+    "timestamp": "2025-06-25T21:44:02.008634",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "test_agent",
+    "title": "AAPL Buy Order",
+    "content": "Buy 10000 shares of AAPL at $175.50",
+    "tags": [],
+    "metadata": {
+      "symbol": "AAPL",
+      "side": "buy",
+      "quantity": 10000,
+      "price": 175.5
+    },
+    "session_id": "comprehensive_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "4d2f9341-8b9d-4f0c-8fca-6b5803d02806",
+    "timestamp": "2025-06-25T21:44:02.011018",
+    "event_type": "optimization",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "optimizer_agent",
+    "title": "Cost Optimization",
+    "content": "TWAP optimization completed with 12.5 bps savings",
+    "tags": [],
+    "metadata": {
+      "algorithm": "twap",
+      "savings_bps": 12.5
+    },
+    "session_id": "comprehensive_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "22d0a13e-4004-4405-8a06-bb83836148c5",
+    "timestamp": "2025-06-25T21:44:02.012834",
+    "event_type": "market_data",
+    "log_level": "info",
+    "source_agent_pool": "market_data_pool",
+    "source_agent_id": "price_feed",
+    "title": "AAPL Price Update",
+    "content": "Price updated to $175.75",
+    "tags": [],
+    "metadata": {
+      "symbol": "AAPL",
+      "price": 175.75
+    },
+    "session_id": "comprehensive_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d4c8273e-e22d-4e13-985a-c08db2e0b537",
+    "timestamp": "2025-06-25T21:44:02.015725",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "batch_agent",
+    "title": "Batch Transaction 00",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1000,
+      "price": 100.0
+    },
+    "session_id": "batch_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "1e844c7d-f7bd-4067-b79c-9d603e2bc520",
+    "timestamp": "2025-06-25T21:44:02.017180",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "batch_agent",
+    "title": "Batch Transaction 01",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 2000,
+      "price": 101.0
+    },
+    "session_id": "batch_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ed8cbb2e-b4b2-4ab6-8707-be9400480f7b",
+    "timestamp": "2025-06-25T21:44:02.018591",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "batch_agent",
+    "title": "Batch Transaction 02",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 3000,
+      "price": 102.0
+    },
+    "session_id": "batch_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "61ee42a3-aaf4-4ea6-a83f-b6909dbad864",
+    "timestamp": "2025-06-25T21:44:02.020025",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "batch_agent",
+    "title": "Batch Transaction 03",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 4000,
+      "price": 103.0
+    },
+    "session_id": "batch_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "1f6e2e88-2ac6-4cc6-b54b-0608b1657d07",
+    "timestamp": "2025-06-25T21:44:02.021447",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "transaction_cost_agent_pool",
+    "source_agent_id": "batch_agent",
+    "title": "Batch Transaction 04",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 5000,
+      "price": 104.0
+    },
+    "session_id": "batch_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "e269ba85-cd0a-4161-9aad-d500fa5fbd96",
+    "timestamp": "2025-06-25T21:44:02.805233",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0000",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1000,
+      "price": 100.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "12b7819b-00ca-476f-b3d0-1dd6686ebbf6",
+    "timestamp": "2025-06-25T21:44:02.806980",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0001",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1001,
+      "price": 100.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "1be3268b-e4b8-4879-b0a3-af57c39db220",
+    "timestamp": "2025-06-25T21:44:02.808968",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0002",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1002,
+      "price": 100.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "9341dd2d-758d-4136-8da7-f4db1081b6c5",
+    "timestamp": "2025-06-25T21:44:02.810515",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0003",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1003,
+      "price": 100.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "e3463185-be6f-479a-a78c-fdb080d76dc4",
+    "timestamp": "2025-06-25T21:44:02.812012",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0004",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1004,
+      "price": 100.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "8a35d3da-2c77-44d1-bdd7-1bef4dcf3729",
+    "timestamp": "2025-06-25T21:44:02.813507",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0005",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1005,
+      "price": 100.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "f5ca41b5-f71d-4604-b295-19f36e7ac7f9",
+    "timestamp": "2025-06-25T21:44:02.815015",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0006",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1006,
+      "price": 100.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "cf600da7-5149-4954-9c60-729bd2145d57",
+    "timestamp": "2025-06-25T21:44:02.816543",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0007",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1007,
+      "price": 100.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "eb65f187-eccc-4bae-b419-9c94fad8887c",
+    "timestamp": "2025-06-25T21:44:02.818071",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0008",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1008,
+      "price": 100.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "9296fbe3-7dcd-4b16-90f1-b08f312b085a",
+    "timestamp": "2025-06-25T21:44:02.820003",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0009",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1009,
+      "price": 100.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d7ddb707-c1d8-4dc2-acd4-6a0d80ab11a6",
+    "timestamp": "2025-06-25T21:44:02.821681",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0010",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1010,
+      "price": 101.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b3fe971f-177d-4bca-8247-1b12ec2cb574",
+    "timestamp": "2025-06-25T21:44:02.823301",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0011",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1011,
+      "price": 101.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "82af5727-5d8b-4499-b1e7-cb60209ca0a7",
+    "timestamp": "2025-06-25T21:44:02.825048",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0012",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1012,
+      "price": 101.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "5332b782-7496-4a31-bee6-7bfebcb6c885",
+    "timestamp": "2025-06-25T21:44:02.826905",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0013",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1013,
+      "price": 101.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "aa6a2182-f0d4-416a-8ed2-38d9b4950606",
+    "timestamp": "2025-06-25T21:44:02.828716",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0014",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1014,
+      "price": 101.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "2a783bac-3c7b-434a-aa46-f7a0376a329c",
+    "timestamp": "2025-06-25T21:44:02.830456",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0015",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1015,
+      "price": 101.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3beacccd-2a8e-4bcb-83cc-4c36d0c5730b",
+    "timestamp": "2025-06-25T21:44:02.832148",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0016",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1016,
+      "price": 101.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "4a44ec7f-264b-4a45-93eb-161846ba9ee0",
+    "timestamp": "2025-06-25T21:44:02.834606",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0017",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1017,
+      "price": 101.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "8d5c524c-724a-4962-82c0-2853bbde89be",
+    "timestamp": "2025-06-25T21:44:02.836390",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0018",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1018,
+      "price": 101.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b0fb0ece-c245-4415-b76a-e8c8db069377",
+    "timestamp": "2025-06-25T21:44:02.838109",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0019",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1019,
+      "price": 101.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "769f4ee6-c1cb-4b09-a22f-ecdaddf1d9a2",
+    "timestamp": "2025-06-25T21:44:02.839811",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0020",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1020,
+      "price": 102.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "35e2a4ab-42b2-4c40-ad08-743b08fc0aca",
+    "timestamp": "2025-06-25T21:44:02.841732",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0021",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1021,
+      "price": 102.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "dc4e3776-1200-4da8-ad41-8337f253a46d",
+    "timestamp": "2025-06-25T21:44:02.843570",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0022",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1022,
+      "price": 102.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "42e92d7d-6c03-4aa3-8bca-f434d0fa140d",
+    "timestamp": "2025-06-25T21:44:02.845352",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0023",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1023,
+      "price": 102.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "55757651-3b9f-4a13-812c-3d8cb9aa1255",
+    "timestamp": "2025-06-25T21:44:02.847093",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0024",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1024,
+      "price": 102.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c89a5e2c-e2d2-49d0-9ef1-05143ae3b09b",
+    "timestamp": "2025-06-25T21:44:02.848876",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0025",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1025,
+      "price": 102.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "dda584da-31ba-4761-a7bc-96054adcc08f",
+    "timestamp": "2025-06-25T21:44:02.850709",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0026",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1026,
+      "price": 102.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ba097e7a-cc66-45b1-8b18-dc977593cdf4",
+    "timestamp": "2025-06-25T21:44:02.852721",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0027",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1027,
+      "price": 102.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "84b0e222-403e-4df9-9502-689155e474e7",
+    "timestamp": "2025-06-25T21:44:02.854543",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0028",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1028,
+      "price": 102.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "f6b6f0da-e744-45f2-864b-66dad3d33c54",
+    "timestamp": "2025-06-25T21:44:02.856330",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0029",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1029,
+      "price": 102.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ba58427f-99c7-4f14-b2d5-bc151b0ffd20",
+    "timestamp": "2025-06-25T21:44:02.858127",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0030",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1030,
+      "price": 103.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b4e15a96-5e7f-4ec4-bf4a-cd354c347904",
+    "timestamp": "2025-06-25T21:44:02.859928",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0031",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1031,
+      "price": 103.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "adbd4387-8141-4e46-bd63-c6274cda24f1",
+    "timestamp": "2025-06-25T21:44:02.861973",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0032",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1032,
+      "price": 103.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ae1f76e5-675b-4e9a-805d-0049f286feca",
+    "timestamp": "2025-06-25T21:44:02.864065",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0033",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1033,
+      "price": 103.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "2f28b02f-88cb-4fae-8dcd-c5adab9b6815",
+    "timestamp": "2025-06-25T21:44:02.866052",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0034",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1034,
+      "price": 103.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3ecd449b-bd7a-4a1b-a8fa-130a83ce5f7a",
+    "timestamp": "2025-06-25T21:44:02.868172",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0035",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1035,
+      "price": 103.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "7f456ac1-25bd-47db-93df-1bb66b422960",
+    "timestamp": "2025-06-25T21:44:02.870380",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0036",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1036,
+      "price": 103.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c2ade9cd-3d7c-41dd-a597-61a8bed17f1f",
+    "timestamp": "2025-06-25T21:44:02.872395",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0037",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1037,
+      "price": 103.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ee739cbb-691d-40d0-ac21-3f139e26f1bf",
+    "timestamp": "2025-06-25T21:44:02.874437",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0038",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1038,
+      "price": 103.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ecb6f053-00b9-436d-87e5-f14dab5158e2",
+    "timestamp": "2025-06-25T21:44:02.876776",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0039",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1039,
+      "price": 103.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d3dbad46-9cb7-43a9-8254-3214d5ee345c",
+    "timestamp": "2025-06-25T21:44:02.878763",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0040",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1040,
+      "price": 104.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "7c79ca1f-564b-4574-aee4-f9b37da851d3",
+    "timestamp": "2025-06-25T21:44:02.880759",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0041",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1041,
+      "price": 104.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b13e582d-3ca7-4695-998e-c19963168aa9",
+    "timestamp": "2025-06-25T21:44:02.882782",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0042",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1042,
+      "price": 104.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "4d3239ed-ee71-4fa9-8772-2b1d0d04e1a2",
+    "timestamp": "2025-06-25T21:44:02.884944",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0043",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1043,
+      "price": 104.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a39afd16-9aeb-4fc4-bc8b-94b1f7075001",
+    "timestamp": "2025-06-25T21:44:02.887078",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0044",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1044,
+      "price": 104.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c9e705c4-dcb7-497f-82d5-a4ee1aff6831",
+    "timestamp": "2025-06-25T21:44:02.889111",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0045",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1045,
+      "price": 104.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "310688a9-d3df-4bf7-a768-29fa08fb072e",
+    "timestamp": "2025-06-25T21:44:02.891451",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0046",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1046,
+      "price": 104.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "191e08ed-f85f-4582-8f2c-dcf26bda598c",
+    "timestamp": "2025-06-25T21:44:02.893485",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0047",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1047,
+      "price": 104.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d892e4f0-4fb6-41ab-a8bf-f78d1d8aa91b",
+    "timestamp": "2025-06-25T21:44:02.895724",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0048",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1048,
+      "price": 104.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "257c9dd9-ad1d-44e4-abf4-bc5d7b990ba0",
+    "timestamp": "2025-06-25T21:44:02.898037",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0049",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1049,
+      "price": 104.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ed537166-57d8-44cd-be8d-bdb34c6eb476",
+    "timestamp": "2025-06-25T21:44:02.900239",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0050",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1050,
+      "price": 105.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "0621ef4d-2c29-4d2b-bf07-e7502a9457da",
+    "timestamp": "2025-06-25T21:44:02.902540",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0051",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1051,
+      "price": 105.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "8e59b08a-7bf2-4f58-b0e7-ee2550a71968",
+    "timestamp": "2025-06-25T21:44:02.904581",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0052",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1052,
+      "price": 105.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "e7ae5788-3d53-40c3-82f9-1066cb9aec3f",
+    "timestamp": "2025-06-25T21:44:02.907044",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0053",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1053,
+      "price": 105.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "5f966aac-67cb-443b-920d-a28441c00ab8",
+    "timestamp": "2025-06-25T21:44:02.909352",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0054",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1054,
+      "price": 105.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b8299cba-d378-4520-b500-dda2ecc3ca5b",
+    "timestamp": "2025-06-25T21:44:02.911410",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0055",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1055,
+      "price": 105.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "6ed5a3e3-b683-4834-b23a-9526dc6ca09a",
+    "timestamp": "2025-06-25T21:44:02.913472",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0056",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1056,
+      "price": 105.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "42b95697-0614-4b70-a8ec-0bfa75fa177b",
+    "timestamp": "2025-06-25T21:44:02.915898",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0057",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1057,
+      "price": 105.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "e5840239-2ed6-4054-b5d3-4ba59a9d660c",
+    "timestamp": "2025-06-25T21:44:02.918357",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0058",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1058,
+      "price": 105.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "711e0969-c1e7-4b64-8ab6-9197883a80b9",
+    "timestamp": "2025-06-25T21:44:02.920581",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0059",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1059,
+      "price": 105.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "6adaab8e-97b4-4afa-86a4-7731bba20e17",
+    "timestamp": "2025-06-25T21:44:02.922694",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0060",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1060,
+      "price": 106.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "ffade04c-a3bf-4cac-a693-b318734717ea",
+    "timestamp": "2025-06-25T21:44:02.924823",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0061",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1061,
+      "price": 106.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b5a6b04b-3bd3-49b5-a75e-2b727ba87a51",
+    "timestamp": "2025-06-25T21:44:02.927385",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0062",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1062,
+      "price": 106.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "731f9d05-806e-4e24-b959-380cf2a7522e",
+    "timestamp": "2025-06-25T21:44:02.929802",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0063",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1063,
+      "price": 106.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "2514cc51-6997-4e5d-9e3f-0725de767855",
+    "timestamp": "2025-06-25T21:44:02.932061",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0064",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1064,
+      "price": 106.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3198266b-25da-4ed8-889d-87e5191f8a27",
+    "timestamp": "2025-06-25T21:44:02.934507",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0065",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1065,
+      "price": 106.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "02109913-d066-469c-9189-592131bd3e89",
+    "timestamp": "2025-06-25T21:44:02.936925",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0066",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1066,
+      "price": 106.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "12e2749a-e613-4d84-a284-d9151addcbba",
+    "timestamp": "2025-06-25T21:44:02.939145",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0067",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1067,
+      "price": 106.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "e76e97d3-7698-4965-a477-18b8d17701e3",
+    "timestamp": "2025-06-25T21:44:02.941404",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0068",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1068,
+      "price": 106.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c8ea5a6e-27c0-45e0-8bf3-a95ca8255333",
+    "timestamp": "2025-06-25T21:44:02.943724",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0069",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1069,
+      "price": 106.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "af4ac6a6-4ab0-4a11-b851-9b0f24c18d5d",
+    "timestamp": "2025-06-25T21:44:02.946263",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0070",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1070,
+      "price": 107.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "39180f9f-c8ec-49b7-85ab-ddc934d31b6c",
+    "timestamp": "2025-06-25T21:44:02.948687",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0071",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1071,
+      "price": 107.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "86cb8df8-d953-4237-8a75-176e08ffbf1f",
+    "timestamp": "2025-06-25T21:44:02.951192",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0072",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1072,
+      "price": 107.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "f53eb18e-0d78-46eb-b4fd-cbf0209e6ed7",
+    "timestamp": "2025-06-25T21:44:02.953635",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0073",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1073,
+      "price": 107.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a9996eda-bdf1-4f95-957c-83d443f9449b",
+    "timestamp": "2025-06-25T21:44:02.956036",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0074",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1074,
+      "price": 107.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "2685b20d-876a-4ee9-8005-b0ffe8a52752",
+    "timestamp": "2025-06-25T21:44:02.958842",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0075",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1075,
+      "price": 107.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "279f77d4-9587-4eb9-81f4-5586e48828fd",
+    "timestamp": "2025-06-25T21:44:02.961235",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0076",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1076,
+      "price": 107.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "5921a741-8848-4798-acf1-5e1cc7d7e783",
+    "timestamp": "2025-06-25T21:44:02.963694",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0077",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1077,
+      "price": 107.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "2beef8d3-14d1-4a9e-8327-892e504bbc46",
+    "timestamp": "2025-06-25T21:44:02.966702",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0078",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1078,
+      "price": 107.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "7ce9a684-9b37-47a9-9e33-c29c87966a8a",
+    "timestamp": "2025-06-25T21:44:02.969337",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0079",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1079,
+      "price": 107.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "650dbc19-300a-4637-b4e3-4da5932b0e38",
+    "timestamp": "2025-06-25T21:44:02.971710",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0080",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1080,
+      "price": 108.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a5c8c7d3-e6f3-4fb3-abe5-35b9441537c7",
+    "timestamp": "2025-06-25T21:44:02.974080",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0081",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1081,
+      "price": 108.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "469bc019-4628-4c03-b7a9-64b0ce6a6348",
+    "timestamp": "2025-06-25T21:44:02.976518",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0082",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1082,
+      "price": 108.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "8a089120-5ae6-426c-991a-a9829e625c3f",
+    "timestamp": "2025-06-25T21:44:02.979267",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0083",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1083,
+      "price": 108.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b22442d0-c611-4ca4-947c-b564720bc1d4",
+    "timestamp": "2025-06-25T21:44:02.981763",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0084",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1084,
+      "price": 108.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "effce0e6-7ee0-4961-b196-1f1a99c0d8fe",
+    "timestamp": "2025-06-25T21:44:02.984414",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0085",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1085,
+      "price": 108.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "b267be1e-031e-4e30-a111-db4714febd43",
+    "timestamp": "2025-06-25T21:44:02.987252",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0086",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1086,
+      "price": 108.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "cdf4d0e8-9ebb-4e88-a996-3a7d58bca232",
+    "timestamp": "2025-06-25T21:44:02.990011",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0087",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1087,
+      "price": 108.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "f0bd593c-ae5b-43e8-ab89-407e581ce33e",
+    "timestamp": "2025-06-25T21:44:02.992972",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0088",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1088,
+      "price": 108.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a64ec2d8-8276-41af-b11c-1dfba374d2aa",
+    "timestamp": "2025-06-25T21:44:02.995612",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0089",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1089,
+      "price": 108.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "a11b8974-f36b-4c26-91cb-ee61e4abec62",
+    "timestamp": "2025-06-25T21:44:02.998114",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0090",
+    "content": "Buy STOCK00",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK00",
+      "side": "buy",
+      "quantity": 1090,
+      "price": 109.0
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "7db32bac-d854-4114-9195-77f89fda655b",
+    "timestamp": "2025-06-25T21:44:03.000969",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0091",
+    "content": "Sell STOCK01",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK01",
+      "side": "sell",
+      "quantity": 1091,
+      "price": 109.1
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "aa0dee21-404b-4658-b009-8a3d2c601ad7",
+    "timestamp": "2025-06-25T21:44:03.003823",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0092",
+    "content": "Buy STOCK02",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK02",
+      "side": "buy",
+      "quantity": 1092,
+      "price": 109.2
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "40badf6a-b92b-450d-9dec-268459676cb5",
+    "timestamp": "2025-06-25T21:44:03.006352",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0093",
+    "content": "Sell STOCK03",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK03",
+      "side": "sell",
+      "quantity": 1093,
+      "price": 109.3
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "3320fdea-8866-4927-b935-f1289468c31c",
+    "timestamp": "2025-06-25T21:44:03.008879",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0094",
+    "content": "Buy STOCK04",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK04",
+      "side": "buy",
+      "quantity": 1094,
+      "price": 109.4
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "abc24a72-cf17-40bd-9e42-e48648ebf17d",
+    "timestamp": "2025-06-25T21:44:03.011791",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0095",
+    "content": "Sell STOCK05",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK05",
+      "side": "sell",
+      "quantity": 1095,
+      "price": 109.5
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "d59d573a-0742-4626-abcb-81e6648e2295",
+    "timestamp": "2025-06-25T21:44:03.014479",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0096",
+    "content": "Buy STOCK06",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK06",
+      "side": "buy",
+      "quantity": 1096,
+      "price": 109.6
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "6c2b43ca-49a8-4e9d-809d-a18570325bf5",
+    "timestamp": "2025-06-25T21:44:03.017186",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0097",
+    "content": "Sell STOCK07",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK07",
+      "side": "sell",
+      "quantity": 1097,
+      "price": 109.7
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "fc7dfaa0-db00-494d-a38b-f4d4a8aeb7b7",
+    "timestamp": "2025-06-25T21:44:03.020018",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0098",
+    "content": "Buy STOCK08",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK08",
+      "side": "buy",
+      "quantity": 1098,
+      "price": 109.8
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  },
+  {
+    "event_id": "c71663fb-5544-4dd4-9cb2-0b15abd5db64",
+    "timestamp": "2025-06-25T21:44:03.022724",
+    "event_type": "transaction",
+    "log_level": "info",
+    "source_agent_pool": "performance_test_pool",
+    "source_agent_id": "perf_agent",
+    "title": "Performance Test Transaction 0099",
+    "content": "Sell STOCK09",
+    "tags": [],
+    "metadata": {
+      "symbol": "STOCK09",
+      "side": "sell",
+      "quantity": 1099,
+      "price": 109.9
+    },
+    "session_id": "perf_test",
+    "correlation_id": null
+  }
+]

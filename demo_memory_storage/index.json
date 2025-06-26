@@ -1,0 +1,18 @@
+{
+  "events_count": 48,
+  "last_updated": "2025-06-25T21:35:59.638897",
+  "agent_pools": [
+    "portfolio_optimization_pool",
+    "portfolio_agent_pool",
+    "market_data_agent_pool",
+    "transaction_cost_agent_pool",
+    "market_data_pool",
+    "demo_pool"
+  ],
+  "event_types": [
+    "error",
+    "transaction",
+    "optimization",
+    "market_data"
+  ]
+}
