@@ -30,7 +30,6 @@ transaction_cost_agent_pool/
 ├── __init__.py                  # Package initialization
 ├── core.py                      # Core pool orchestration engine
 ├── registry.py                  # Agent registration and discovery
-├── mcp_server.py               # MCP protocol server implementation
 ├── memory_bridge.py            # Memory system integration
 ├── config_loader.py            # Configuration management
 ├── agents/                     # Transaction cost agent implementations
