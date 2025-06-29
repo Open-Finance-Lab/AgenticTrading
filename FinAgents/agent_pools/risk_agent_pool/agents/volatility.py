@@ -53,7 +53,8 @@ class VolatilityAnalyzer(BaseRiskAgent):
             analysis_type = request.get("analysis_type", "comprehensive")
             
             # Generate sample returns data
-            returns_data = self._simulate_returns_data(portfolio_data)
+            # Get actual returns data from portfolio data
+            returns_data = self._get_returns_data(portfolio_data)
             
             results = {}
             
@@ -95,18 +96,27 @@ class VolatilityAnalyzer(BaseRiskAgent):
                 "timestamp": datetime.utcnow().isoformat()
             }
     
-    def _simulate_returns_data(self, portfolio_data: Dict[str, Any]) -> np.ndarray:
-        """Simulate returns data for demonstration."""
-        # In production, this would fetch actual market data
-        np.random.seed(42)  # For reproducible results
-        returns = np.random.normal(0.0008, 0.015, 252)  # Daily returns for one year
-        
-        # Add some volatility clustering
-        for i in range(1, len(returns)):
-            if abs(returns[i-1]) > 0.02:  # If previous return was large
-                returns[i] *= 1.5  # Increase current volatility
-        
-        return returns
+    def _get_returns_data(self, portfolio_data: Dict[str, Any]) -> np.ndarray:
+        """Extract returns data from portfolio data."""
+        try:
+            # Try to extract actual returns from portfolio data
+            if "returns" in portfolio_data:
+                returns = np.array(portfolio_data["returns"])
+                if len(returns) > 0:
+                    return returns
+            
+            # If no returns data available, try to calculate from prices
+            if "prices" in portfolio_data:
+                prices = np.array(portfolio_data["prices"])
+                if len(prices) > 1:
+                    returns = np.diff(np.log(prices))
+                    return returns
+            
+            # If no valid data available, raise an error
+            raise ValueError("No valid price or returns data found in portfolio_data")
+            
+        except Exception as e:
+            raise ValueError(f"Failed to extract returns data: {str(e)}")
     
     async def _calculate_historical_volatility(self, returns: np.ndarray) -> Dict[str, Any]:
         """Calculate historical volatility for different time windows."""

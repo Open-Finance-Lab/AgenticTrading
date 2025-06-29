@@ -1,26 +1,37 @@
 # core.py
+"""
+Unified entry point for starting the Data Agent Pool MCP service.
+This module manages the lifecycle and orchestration of data agents following the alpha agent pool architecture.
 
+The DataAgentPool acts as a coordinator that connects to various data agent MCP servers:
+- PolygonAgent MCP Server (port 8002) - Market data and natural language queries
+- BinanceAgent MCP Server (port 8003) - Crypto data  
+- Other data agents as needed
+
+Architecture:
+- DataAgentPool exposes unified tools that proxy to individual agent servers
+- Agents run as independent MCP servers on different ports
+- Natural language queries are routed to appropriate agents
+- Batch operations are coordinated through the pool
+"""
 import logging
 import contextvars
 import pandas as pd
 from datetime import datetime
 from typing import Optional, Dict, Any, List
-from contextlib import asynccontextmanager
-from mcp.server.fastmcp import FastMCP
-from fastapi import FastAPI, Request
-from mcp.client.streamable_http import streamablehttp_client
-from mcp import ClientSession
 import asyncio
-import threading
-import traceback
 import os
-import socket
+import httpx
+import json
+import subprocess
+import signal
 import time
+import sys
+from pathlib import Path
 
-from agent_pools.data_agent_pool.registry import AGENT_REGISTRY, preload_default_agents
-from agent_pools.data_agent_pool.memory_bridge import record_event
-from agent_pools.data_agent_pool.agents.crypto.binance_agent import BinanceAgent
-from agent_pools.data_agent_pool.agents.equity.mcp_adapter import MCPAdapter
+from mcp.server.fastmcp import FastMCP
+from mcp.client.sse import sse_client
+from mcp import ClientSession
 
 # Configure global logging with standardized format
 logger = logging.getLogger("DataAgentPool")
@@ -33,275 +44,595 @@ handler.setFormatter(formatter)
 if not logger.handlers:
     logger.addHandler(handler)
 
-# Global context management for request tracking
-request_context: contextvars.ContextVar[Dict[str, Any]] = contextvars.ContextVar(
-    "request_context", 
-    default={}
-)
-
-class DataAgentPool:
+class DataAgentPoolMCPServer:
     """
-    DataAgentPool is the central orchestrator for managing the lifecycle, health, and unified access
-    of all data agents in the FinAgent ecosystem. It exposes a set of MCP tools for dynamic agent
-    initialization, lifecycle management, and health monitoring, enabling external orchestrators to 
-    control agent services on demand.
+    DataAgentPoolMCPServer is the central orchestrator for managing the lifecycle and unified access
+    of all data agents in the FinAgent ecosystem. It acts as a coordinator that connects to various
+    data agent MCP servers via HTTP clients.
 
     Key responsibilities:
-    - Agent lifecycle management (init, start, stop, status)
-    - Unified MCP protocol interface for orchestration
-    - Intelligent request routing and error handling
-    - Health monitoring and diagnostics
+    - Starting and managing agent processes automatically
+    - Coordinating requests to individual agent MCP servers
+    - Providing unified natural language interface for all data agents
+    - Batch processing and cross-agent operations
+    - Health monitoring and automatic restart of failed agents
+    - Graceful shutdown of all managed processes
     """
 
-    def __init__(self, pool_id: str):
+    def __init__(self, host="0.0.0.0", port=8001, auto_start_agents=True):
         """
-        Initialize a new DataAgentPool instance with the specified identifier.
+        Initialize a new DataAgentPoolMCPServer instance.
 
         Args:
-            pool_id (str): Unique identifier for this pool instance.
-
-        Note:
-            - Does NOT initialize or start any data agents by default.
-            - Only the MCP server for the pool itself is started.
+            host (str): Host address to bind the MCP server.
+            port (int): Port number to bind the MCP server.
+            auto_start_agents (bool): Whether to automatically start agent processes.
         """
-        self.pool_id = pool_id
-        self.agents = {
-            "crypto": {},
-            "equity": {},
-            "news": {}
+        self.host = host
+        self.port = port
+        self.auto_start_agents = auto_start_agents
+        self.pool_server = FastMCP("DataAgentPoolMCPServer")
+        
+        # Agent process management
+        self.agent_processes = {}
+        self.agent_configs = {
+            "polygon_agent": {
+                "endpoint": "http://localhost:8003/sse",
+                "port": 8003,
+                "start_script": self._get_polygon_start_script(),
+                "health_check_interval": 30,  # seconds
+                "max_restart_attempts": 3
+            }
+            # Future: add more agents here
         }
-        self.agent_threads = {}    # Tracks running agent MCP server threads
-        self.agent_adapters = {}   # Tracks MCPAdapter instances
-        self.agent_status = {}     # Tracks agent lifecycle status
-        self.mcp = FastMCP(f"DataAgentPool-{pool_id}", stateless_http=True)
-        logger.info(f"Initialized DataAgentPool with ID: {pool_id}")
-        logger.info(f"AGENT_REGISTRY keys: {list(AGENT_REGISTRY.keys())}")
-        self._register_mcp_endpoints()
+        
+        # Agent endpoints mapping (for backward compatibility)
+        self.agent_endpoints = {
+            agent_id: config["endpoint"] 
+            for agent_id, config in self.agent_configs.items()
+        }
+        
+        logger.info(f"Initialized DataAgentPoolMCPServer on {host}:{port}")
+        logger.info(f"Agent endpoints: {self.agent_endpoints}")
+        logger.info(f"Auto-start agents: {auto_start_agents}")
+        
+        # Setup signal handlers for graceful shutdown
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+        
+        self._register_pool_tools()
 
-    def _register_mcp_endpoints(self):
+    def _get_polygon_start_script(self) -> str:
+        """Get the path to the PolygonAgent start script."""
+        project_root = Path(__file__).parent.parent.parent.parent
+        script_path = project_root / "FinAgents" / "agent_pools" / "data_agent_pool" / "start_polygon_agent.py"
+        return str(script_path)
+
+    def _signal_handler(self, signum, frame):
+        """Handle shutdown signals gracefully."""
+        logger.info(f"Received signal {signum}, shutting down gracefully...")
+        self.shutdown()
+        sys.exit(0)
+
+    async def start_agent(self, agent_id: str) -> bool:
         """
-        Register MCP protocol tools for external orchestration and agent management.
+        Start a specific agent process.
+        
+        Args:
+            agent_id: ID of the agent to start
+            
+        Returns:
+            bool: True if started successfully, False otherwise
         """
-
-        @self.mcp.tool(name="init_agent", description="Initialize one or more data agents by agent_id(s)")
-        def init_agent(agent_id: Any = None) -> dict:
-            """
-            Dynamically initialize one or more data agents (without starting their MCP servers).
-            Args:
-                agent_id: str, list[str], or None. If None, initialize all agents.
-            """
-            initialized = []
-            already = []
-            errors = {}
-
-            # Normalize input: support str, list, or None
-            if agent_id is None:
-                agent_ids = None  # Signal to preload_default_agents to load all
-            elif isinstance(agent_id, str):
-                agent_ids = [agent_id]
-            elif isinstance(agent_id, list):
-                agent_ids = agent_id
-            else:
-                return {"status": "error", "error": "agent_id must be str, list, or None"}
-
-            try:
-                if agent_ids is None:
-                    # Initialize all agents
-                    preload_default_agents()
-                    # Register all to self.agents
-                    for aid, agent in AGENT_REGISTRY.items():
-                        if self._is_agent_initialized(aid):
-                            already.append(aid)
-                        else:
-                            agent_type = self._determine_agent_type(agent)
-                            self.agents[agent_type][aid] = agent
-                            self.agent_status[aid] = "initialized"
-                            initialized.append(aid)
-                else:
-                    for aid in agent_ids:
-                        if self._is_agent_initialized(aid):
-                            already.append(aid)
-                            continue
-                        try:
-                            preload_default_agents(aid)
-                            agent = AGENT_REGISTRY.get(aid)
-                            if not agent:
-                                errors[aid] = "not found in registry"
-                                continue
-                            agent_type = self._determine_agent_type(agent)
-                            self.agents[agent_type][aid] = agent
-                            self.agent_status[aid] = "initialized"
-                            initialized.append(aid)
-                        except Exception as e:
-                            logger.error(f"Failed to initialize agent {aid}: {e}")
-                            logger.error(traceback.format_exc())
-                            errors[aid] = str(e)
-                logger.info(f"Initialized agents: {initialized}, already: {already}, errors: {errors}")
-                return {
-                    "status": "ok",
-                    "initialized": initialized,
-                    "already_initialized": already,
-                    "errors": errors
-                }
-            except Exception as e:
-                logger.error(f"Failed to initialize agents: {e}")
-                logger.error(traceback.format_exc())
-                return {"status": "error", "error": str(e)}
-
-        @self.mcp.tool(name="start_agent_mcp", description="Start the MCPAdapter server for a given agent")
-        def start_agent_mcp(agent_id: str, port: int = None) -> dict:
-            """
-            Start the MCPAdapter server for the specified agent (on a dedicated port).
-            """
-            if self.agent_status.get(agent_id) == "running":
-                return {"status": "already_running"}
-            try:
-                agent = self._get_agent_instance(agent_id)
-                if not agent:
-                    return {"status": "error", "error": f"Agent {agent_id} not initialized"}
-                adapter = MCPAdapter(agent, name=f"{agent_id}-MCP")
-                self.agent_adapters[agent_id] = adapter
-                def run_adapter():
-                    try:
-                        if port:
-                            os.environ["PORT"] = str(port)
-                        adapter.run()
-                    except Exception as e:
-                        logger.error(f"Exception in MCPAdapter thread for {agent_id}: {e}")
-                        logger.error(traceback.format_exc())
-                t = threading.Thread(target=run_adapter, daemon=True)
-                t.start()
-                self.agent_threads[agent_id] = t
-
-                # Health Check: Wait up to 2 seconds, check if the port is listening
-                if port:
-                    for _ in range(10):
-                        time.sleep(0.2)
-                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                        try:
-                            s.settimeout(0.2)
-                            s.connect(("127.0.0.1", port))
-                            s.close()
-                            self.agent_status[agent_id] = "running"
-                            logger.info(f"Started MCP server for {agent_id} on port {port}")
-                            return {"status": "started"}
-                        except Exception:
-                            s.close()
-                    logger.error(f"Failed to start MCP server for {agent_id} on port {port}: port not open")
-                    return {"status": "error", "error": f"Port {port} not open after start"}
-                else:
-                    self.agent_status[agent_id] = "running"
-                    logger.info(f"Started MCP server for {agent_id} on default port")
-                    return {"status": "started"}
-            except Exception as e:
-                logger.error(f"Failed to start MCP server for {agent_id}: {e}")
-                logger.error(traceback.format_exc())
-                return {"status": "error", "error": str(e)}
-
-        @self.mcp.tool(name="stop_agent_mcp", description="Stop the MCPAdapter server for a given agent")
-        def stop_agent_mcp(agent_id: str) -> dict:
-            """
-            Attempt to stop the MCPAdapter server for the specified agent.
-            """
-            # Note: Actual thread/process termination is non-trivial in Python.
-            # Here we only update status for demonstration.
-            if self.agent_status.get(agent_id) != "running":
-                return {"status": "not_running"}
-            self.agent_status[agent_id] = "stopped"
-            logger.info(f"Marked MCP server for {agent_id} as stopped (manual intervention may be required)")
-            return {"status": "stopped"}
-
-        @self.mcp.tool(name="list_agents", description="List all initialized agents and their status")
-        def list_agents() -> dict:
-            """
-            List all initialized agents and their current lifecycle status.
-            """
-            return {
-                "crypto": {k: self.agent_status.get(k, "uninitialized") for k in self.agents["crypto"].keys()},
-                "equity": {k: self.agent_status.get(k, "uninitialized") for k in self.agents["equity"].keys()},
-                "news": {k: self.agent_status.get(k, "uninitialized") for k in self.agents["news"].keys()}
-            }
-
-        @self.mcp.tool(name="agent_status", description="Get the status of a specific agent")
-        def agent_status(agent_id: str) -> dict:
-            """
-            Get the current lifecycle status of the specified agent.
-            """
-            status = self.agent_status.get(agent_id, "uninitialized")
-            return {"agent_id": agent_id, "status": status}
-
-        @self.mcp.tool(name="health_check", description="Health check for DataAgentPool MCP server")
-        def health_check() -> dict:
-            """
-            Return the health status of the DataAgentPool MCP server and all managed agents.
-            """
-            return {
-                "status": "ok",
-                "timestamp": datetime.now().isoformat(),
-                "agents": self.agent_status
-            }
-
-    def _is_agent_initialized(self, agent_id: str) -> bool:
-        """
-        Check if an agent is already initialized.
-        """
-        for group in self.agents.values():
-            if agent_id in group:
+        if agent_id not in self.agent_configs:
+            logger.error(f"Unknown agent ID: {agent_id}")
+            return False
+            
+        config = self.agent_configs[agent_id]
+        
+        # Check if already running
+        if agent_id in self.agent_processes:
+            proc = self.agent_processes[agent_id]
+            if proc.poll() is None:  # Still running
+                logger.info(f"Agent {agent_id} is already running (PID: {proc.pid})")
                 return True
+                
+        try:
+            # Start the agent process
+            cmd = [
+                sys.executable, 
+                config["start_script"], 
+                "--port", str(config["port"]),
+                "--host", "0.0.0.0"
+            ]
+            
+            logger.info(f"Starting {agent_id} with command: {' '.join(cmd)}")
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True
+            )
+            
+            self.agent_processes[agent_id] = process
+            
+            # Wait a moment for the process to start
+            await asyncio.sleep(2)
+            
+            # Check if process is still running
+            if process.poll() is None:
+                logger.info(f"✅ Successfully started {agent_id} (PID: {process.pid})")
+                
+                # Wait for the MCP server to be ready
+                if await self._wait_for_agent_ready(agent_id):
+                    logger.info(f"✅ {agent_id} MCP server is ready")
+                    return True
+                else:
+                    logger.error(f"❌ {agent_id} MCP server failed to become ready")
+                    return False
+            else:
+                stdout, stderr = process.communicate()
+                logger.error(f"❌ Failed to start {agent_id}:")
+                logger.error(f"   stdout: {stdout}")
+                logger.error(f"   stderr: {stderr}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Exception starting {agent_id}: {e}")
+            return False
+
+    async def _wait_for_agent_ready(self, agent_id: str, timeout: int = 30) -> bool:
+        """
+        Wait for an agent's MCP server to be ready.
+        
+        Args:
+            agent_id: ID of the agent
+            timeout: Maximum time to wait in seconds
+            
+        Returns:
+            bool: True if agent is ready, False if timeout
+        """
+        config = self.agent_configs[agent_id]
+        endpoint = config["endpoint"]
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            try:
+                async with sse_client(endpoint, timeout=5) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        result = await session.call_tool("health_check", {})
+                        if result.content:
+                            return True
+            except Exception:
+                await asyncio.sleep(1)
+                continue
+                
         return False
 
-    def _get_agent_instance(self, agent_id: str):
+    async def stop_agent(self, agent_id: str) -> bool:
         """
-        Retrieve an agent instance by agent_id from all agent groups.
+        Stop a specific agent process.
+        
+        Args:
+            agent_id: ID of the agent to stop
+            
+        Returns:
+            bool: True if stopped successfully, False otherwise
         """
-        for group in self.agents.values():
-            if agent_id in group:
-                return group[agent_id]
-        return None
-
-    def _determine_agent_type(self, agent: Any) -> str:
-        """
-        Determine the appropriate category for a given agent instance.
-        """
-        if isinstance(agent, BinanceAgent):
-            return "crypto"
-        # Add more agent type checks as needed
-        return "equity"
-
-    @asynccontextmanager
-    async def lifespan(self, app: FastAPI):
-        """
-        Manage the lifecycle of the DataAgentPool MCP server for FastAPI.
-        """
-        logger.info(f"Starting DataAgentPool {self.pool_id}")
+        if agent_id not in self.agent_processes:
+            logger.info(f"Agent {agent_id} is not running")
+            return True
+            
+        process = self.agent_processes[agent_id]
+        
         try:
-            yield
-        finally:
-            logger.info(f"Shutting down DataAgentPool {self.pool_id}")
+            # Try graceful shutdown first
+            process.terminate()
+            
+            # Wait for graceful shutdown
+            try:
+                process.wait(timeout=10)
+                logger.info(f"✅ Gracefully stopped {agent_id}")
+            except subprocess.TimeoutExpired:
+                # Force kill if needed
+                process.kill()
+                process.wait()
+                logger.info(f"⚡ Force killed {agent_id}")
+                
+            del self.agent_processes[agent_id]
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Error stopping {agent_id}: {e}")
+            return False
+
+    async def restart_agent(self, agent_id: str) -> bool:
+        """
+        Restart a specific agent.
+        
+        Args:
+            agent_id: ID of the agent to restart
+            
+        Returns:
+            bool: True if restarted successfully, False otherwise
+        """
+        logger.info(f"🔄 Restarting agent {agent_id}...")
+        await self.stop_agent(agent_id)
+        await asyncio.sleep(1)
+        return await self.start_agent(agent_id)
+
+    async def start_all_agents(self):
+        """Start all configured agents."""
+        if not self.auto_start_agents:
+            logger.info("Auto-start agents is disabled, skipping agent startup")
+            return
+            
+        logger.info("🚀 Starting all agents...")
+        for agent_id in self.agent_configs:
+            await self.start_agent(agent_id)
+
+    def shutdown(self):
+        """Shutdown all agent processes gracefully."""
+        logger.info("🛑 Shutting down all agents...")
+        for agent_id in list(self.agent_processes.keys()):
+            asyncio.run(self.stop_agent(agent_id))
+        logger.info("✅ All agents stopped")
+
+    async def monitor_agents(self):
+        """Background task to monitor agent health and restart if needed."""
+        while True:
+            try:
+                for agent_id, config in self.agent_configs.items():
+                    if agent_id in self.agent_processes:
+                        process = self.agent_processes[agent_id]
+                        
+                        # Check if process is still alive
+                        if process.poll() is not None:
+                            logger.warning(f"⚠️ Agent {agent_id} process died, restarting...")
+                            await self.restart_agent(agent_id)
+                        else:
+                            # Check MCP server health
+                            try:
+                                endpoint = config["endpoint"]
+                                async with sse_client(endpoint, timeout=5) as (read, write):
+                                    async with ClientSession(read, write) as session:
+                                        await session.initialize()
+                                        await session.call_tool("health_check", {})
+                            except Exception as e:
+                                logger.warning(f"⚠️ Agent {agent_id} health check failed: {e}")
+                                logger.warning(f"🔄 Restarting {agent_id}...")
+                                await self.restart_agent(agent_id)
+                
+                # Wait before next check
+                await asyncio.sleep(30)  # Check every 30 seconds
+                
+            except Exception as e:
+                logger.error(f"Error in agent monitoring: {e}")
+                await asyncio.sleep(10)  # Wait before retrying
+
+    async def _call_agent_tool(self, agent_endpoint: str, tool_name: str, arguments: dict) -> dict:
+        """
+        Call a tool on a specific agent's MCP server using proper MCP SSE client.
+        
+        Args:
+            agent_endpoint: The SSE endpoint of the agent MCP server
+            tool_name: Name of the tool to call
+            arguments: Arguments to pass to the tool
+            
+        Returns:
+            dict: Response from the agent tool
+        """
+        try:
+            from mcp.client.sse import sse_client
+            from mcp import ClientSession
+            
+            async with sse_client(agent_endpoint, timeout=10) as (read, write):
+                async with ClientSession(read, write) as session:
+                    # Initialize the session
+                    await session.initialize()
+                    
+                    # Call the tool
+                    result = await session.call_tool(tool_name, arguments)
+                    
+                    # Extract the result content
+                    if result.content and len(result.content) > 0:
+                        content_item = result.content[0]
+                        if hasattr(content_item, 'text'):
+                            return json.loads(content_item.text)
+                    
+                    return {"status": "error", "error": "No content in response"}
+                    
+        except Exception as e:
+            return {"status": "error", "error": f"MCP client error: {str(e)}"}
+
+    def _register_pool_tools(self):
+        """
+        Register coordinating tools that proxy requests to individual agent MCP servers.
+        """
+        
+        @self.pool_server.tool(name="process_market_query", description="Process natural language market data queries via PolygonAgent")
+        async def process_market_query(query: str) -> dict:
+            """
+            Process natural language market data requests via PolygonAgent MCP server.
+            
+            Args:
+                query: Natural language query (e.g., "Get daily data for AAPL from 2024-01-01 to 2024-12-31")
+            
+            Returns:
+                dict: Structured response with execution plan and results
+            """
+            endpoint = self.agent_endpoints.get("polygon_agent")
+            if not endpoint:
+                return {"status": "error", "error": "PolygonAgent endpoint not configured"}
+            
+            return await self._call_agent_tool(endpoint, "process_market_query", {"query": query})
+
+        @self.pool_server.tool(name="fetch_market_data", description="Directly fetch market data via PolygonAgent")
+        async def fetch_market_data(symbol: str, start: str, end: str, interval: str = "1d") -> dict:
+            """
+            Directly fetch market data for a specific symbol via PolygonAgent MCP server.
+            
+            Args:
+                symbol: Stock symbol (e.g., 'AAPL')
+                start: Start date (YYYY-MM-DD)
+                end: End date (YYYY-MM-DD)
+                interval: Time interval (1d, 1h, etc.)
+            
+            Returns:
+                dict: Market data response
+            """
+            endpoint = self.agent_endpoints.get("polygon_agent")
+            if not endpoint:
+                return {"status": "error", "error": "PolygonAgent endpoint not configured"}
+            
+            return await self._call_agent_tool(endpoint, "fetch_market_data", {
+                "symbol": symbol,
+                "start": start,
+                "end": end,
+                "interval": interval
+            })
+
+        @self.pool_server.tool(name="get_company_info", description="Get company information via PolygonAgent")
+        async def get_company_info(symbol: str) -> dict:
+            """
+            Get company information for a specific symbol via PolygonAgent MCP server.
+            
+            Args:
+                symbol: Stock symbol (e.g., 'AAPL')
+            
+            Returns:
+                dict: Company information response
+            """
+            endpoint = self.agent_endpoints.get("polygon_agent")
+            if not endpoint:
+                return {"status": "error", "error": "PolygonAgent endpoint not configured"}
+            
+            return await self._call_agent_tool(endpoint, "get_company_info", {"symbol": symbol})
+
+        @self.pool_server.tool(name="batch_fetch_market_data", description="Batch fetch market data for multiple symbols")
+        async def batch_fetch_market_data(symbols: List[str], start: str, end: str, interval: str = "1d") -> dict:
+            """
+            Batch fetch market data for multiple symbols via natural language processing.
+            
+            Args:
+                symbols: List of stock symbols
+                start: Start date (YYYY-MM-DD)
+                end: End date (YYYY-MM-DD)
+                interval: Time interval (1d, 1h, etc.)
+            
+            Returns:
+                dict: Batch fetch results
+            """
+            endpoint = self.agent_endpoints.get("polygon_agent")
+            if not endpoint:
+                return {"status": "error", "error": "PolygonAgent endpoint not configured"}
+            
+            results = []
+            for symbol in symbols:
+                query = f"Get {interval} price data for {symbol} from {start} to {end}"
+                result = await self._call_agent_tool(endpoint, "process_market_query", {"query": query})
+                results.append({
+                    "symbol": symbol,
+                    "result": result
+                })
+            
+            return {
+                "status": "success",
+                "batch_results": results,
+                "total_symbols": len(symbols),
+                "timestamp": datetime.now().isoformat()
+            }
+
+        @self.pool_server.tool(name="list_agents", description="List all configured data agents and their endpoints.")
+        def list_agents() -> dict:
+            """
+            List all currently configured data agents and their endpoints.
+            
+            Returns:
+                dict: Agent endpoints and status
+            """
+            agent_status = {}
+            for agent_id, config in self.agent_configs.items():
+                process_info = None
+                if agent_id in self.agent_processes:
+                    proc = self.agent_processes[agent_id]
+                    process_info = {
+                        "pid": proc.pid,
+                        "running": proc.poll() is None,
+                        "returncode": proc.returncode
+                    }
+                
+                agent_status[agent_id] = {
+                    "endpoint": config["endpoint"],
+                    "port": config["port"],
+                    "process": process_info,
+                    "auto_managed": True
+                }
+            
+            return {
+                "agents": agent_status,
+                "total_agents": len(self.agent_configs)
+            }
+
+        @self.pool_server.tool(name="start_agent", description="Start a specific agent")
+        async def start_agent_tool(agent_id: str) -> dict:
+            """
+            Start a specific agent process.
+            
+            Args:
+                agent_id: ID of the agent to start (e.g., 'polygon_agent')
+            
+            Returns:
+                dict: Start operation result
+            """
+            success = await self.start_agent(agent_id)
+            return {
+                "status": "success" if success else "error",
+                "agent_id": agent_id,
+                "message": f"Agent {agent_id} {'started successfully' if success else 'failed to start'}"
+            }
+
+        @self.pool_server.tool(name="stop_agent", description="Stop a specific agent")
+        async def stop_agent_tool(agent_id: str) -> dict:
+            """
+            Stop a specific agent process.
+            
+            Args:
+                agent_id: ID of the agent to stop (e.g., 'polygon_agent')
+            
+            Returns:
+                dict: Stop operation result
+            """
+            success = await self.stop_agent(agent_id)
+            return {
+                "status": "success" if success else "error",
+                "agent_id": agent_id,
+                "message": f"Agent {agent_id} {'stopped successfully' if success else 'failed to stop'}"
+            }
+
+        @self.pool_server.tool(name="restart_agent", description="Restart a specific agent")
+        async def restart_agent_tool(agent_id: str) -> dict:
+            """
+            Restart a specific agent process.
+            
+            Args:
+                agent_id: ID of the agent to restart (e.g., 'polygon_agent')
+            
+            Returns:
+                dict: Restart operation result
+            """
+            success = await self.restart_agent(agent_id)
+            return {
+                "status": "success" if success else "error",
+                "agent_id": agent_id,
+                "message": f"Agent {agent_id} {'restarted successfully' if success else 'failed to restart'}"
+            }
+
+        @self.pool_server.tool(name="health_check", description="Health check for DataAgentPool and connected agents")
+        async def health_check() -> dict:
+            """
+            Return the health status of the DataAgentPool and all connected agent servers.
+            
+            Returns:
+                dict: Health status for pool and agents
+            """
+            agent_health = {}
+            
+            for agent_id, endpoint in self.agent_endpoints.items():
+                try:
+                    health_result = await self._call_agent_tool(endpoint, "health_check", {})
+                    agent_health[agent_id] = {
+                        "endpoint": endpoint,
+                        "status": health_result.get("status", "unknown"),
+                        "details": health_result
+                    }
+                except Exception as e:
+                    agent_health[agent_id] = {
+                        "endpoint": endpoint,
+                        "status": "error",
+                        "error": str(e)
+                    }
+            
+            return {
+                "pool_status": "ok",
+                "timestamp": datetime.now().isoformat(),
+                "agents": agent_health
+            }
+
+    async def run_async(self):
+        """
+        Async version of run that handles agent startup and monitoring.
+        """
+        try:
+            # Start all agents first
+            await self.start_all_agents()
+            
+            # Start agent monitoring in background
+            monitor_task = asyncio.create_task(self.monitor_agents())
+            
+            # Start the MCP server
+            logger.info(f"🚀 DataAgentPool MCP server ready on {self.host}:{self.port}")
+            logger.info("=== Registered MCP Pool Tools ===")
+            tools = await self.pool_server.list_tools()
+            for tool in tools:
+                logger.info(f"- {tool.name}")
+            
+            # This would typically be where we start the server
+            # But since FastMCP doesn't have an async run method, we'll run it in the sync method
+            return monitor_task
+            
+        except Exception as e:
+            logger.error(f"Error in run_async: {e}")
+            self.shutdown()
+            raise
 
     def run(self):
         """
-        Start the DataAgentPool MCP server (for standalone mode).
+        Start the MCP pool server with agent management.
         """
-        self.mcp.run(
-            transport="streamable-http",
-        )
+        logger.info(f"[DataAgentPool] MCP pool server starting on {self.host}:{self.port} ...")
+        
+        # Setup the server
+        self.pool_server.settings.host = self.host
+        self.pool_server.settings.port = self.port
+        
+        # Start agents asynchronously in background
+        if self.auto_start_agents:
+            logger.info("🔄 Starting agents...")
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # Start agents
+            startup_success = loop.run_until_complete(self.start_all_agents())
+            
+            # Start monitoring in background
+            monitor_task = loop.create_task(self.monitor_agents())
+            
+            # Close the event loop for now (FastMCP will create its own)
+            # Note: This is a compromise since FastMCP doesn't support async startup hooks
+        
+        logger.info("=== Registered MCP Pool Tools ===")
+        tools = asyncio.run(self.pool_server.list_tools())
+        for tool in tools:
+            logger.info(f"- {tool.name}")
+        
+        try:
+            # Register shutdown handler
+            import atexit
+            atexit.register(self.shutdown)
+            
+            # Start the FastMCP server
+            self.pool_server.run(transport="sse")
+        except KeyboardInterrupt:
+            logger.info("Received keyboard interrupt, shutting down...")
+            self.shutdown()
+        except Exception as e:
+            logger.error(f"Error running server: {e}")
+            self.shutdown()
+            raise
 
-    def get_fastapi_app(self) -> FastAPI:
-        """
-        返回挂载了 MCP 服务的 FastAPI 应用。
-        """
-        app = FastAPI(lifespan=self.lifespan)
-        app.mount("/mcp", self.mcp.streamable_http_app())
-        return app
-
-pool = DataAgentPool("debug-pool")
-app = pool.get_fastapi_app()
-for route in app.routes:
-    print("ROUTE:", route.path)
-# ======= Start entry =======
 if __name__ == "__main__":
-
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
-
+    # Script entry point: start the DataAgentPoolMCPServer
+    pool = DataAgentPoolMCPServer(host="0.0.0.0", port=8001)
+    pool.run()

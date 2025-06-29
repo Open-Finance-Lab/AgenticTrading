@@ -3,8 +3,8 @@ import pandas as pd
 import requests
 import os
 from datetime import datetime
-from agent_pools.data_agent_pool.registry import BaseAgent
-from agent_pools.data_agent_pool.schema.equity_schema import PolygonConfig
+from FinAgents.agent_pools.data_agent_pool.base import BaseAgent
+from FinAgents.agent_pools.data_agent_pool.schema.equity_schema import PolygonConfig
 from .ticker_selector import select_top_tickers
 from langchain_community.chat_models import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage
@@ -209,7 +209,7 @@ Do not invent or use any other tool names.
         multiplier, timespan = self.INTERVAL_MAP[interval]
 
         # Prepare API call
-        url = f"{self.api_base_url}/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start}/{end}"
+        url = f"{self.api_base_url}/v2/aggs/ticker/{symbol}/range/{multiplier}/{timespan}/{start}/{end}"
         params = {
             "adjusted": "true",
             "sort": "asc",
@@ -249,7 +249,7 @@ Do not invent or use any other tool names.
         """Add VWAP, pre/post market prices, dividends and splits."""
         for date in df.index.date:
             date_str = date.strftime('%Y-%m-%d')
-            url = f"{self.config.api.base_url.replace('/v2', '')}/v1/open-close/{symbol}/{date_str}"
+            url = f"{self.api_base_url}/v1/open-close/{symbol}/{date_str}"
             params = {"adjusted": "true", "apiKey": self.config.authentication.api_key}
             
             try:
@@ -266,7 +266,7 @@ Do not invent or use any other tool names.
     def get_company_info(self, symbol: str) -> Dict[str, Any]:
         """Get detailed company information."""
         try:
-            url = f"{self.config.api.base_url.replace('/v2', '')}/v3/reference/tickers/{symbol}"
+            url = f"{self.api_base_url}/v3/reference/tickers/{symbol}"
             params = {"apiKey": self.config.authentication.api_key}
             
             response = requests.get(url, params=params)
@@ -437,4 +437,131 @@ Do not invent or use any other tool names.
                     return func(**params)
         except Exception as e:
             raise RuntimeError(f"Strategy execution failed: {str(e)}")
+
+    def start_mcp_server(self, port: int = 8002, host: str = "0.0.0.0", transport: str = "sse"):
+        """
+        Start the MCP server for the PolygonAgent with natural language interface.
+        
+        Args:
+            port (int): The port to bind the server to. Defaults to 8002.
+            host (str): The host address to bind. Defaults to "0.0.0.0".
+            transport (str): The transport protocol to use. Defaults to "sse".
+        """
+        from mcp.server.fastmcp import FastMCP
+        
+        # Create MCP server instance
+        self.mcp_server = FastMCP("PolygonAgent")
+        
+        # Register natural language interface tool
+        @self.mcp_server.tool(name="process_market_query", description="Process natural language market data queries")
+        async def process_market_query(query: str) -> dict:
+            """
+            Process natural language market data requests.
+            
+            Args:
+                query: Natural language query (e.g., "Get daily data for AAPL from 2024-01-01 to 2024-12-31")
+            
+            Returns:
+                dict: Structured response with execution plan and results
+            """
+            try:
+                result = await self.process_intent(query)
+                return {
+                    "status": "success",
+                    "query": query,
+                    "execution_plan": result.get("execution_plan"),
+                    "result": result.get("result"),
+                    "metadata": result.get("metadata")
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "query": query,
+                    "error": str(e)
+                }
+        
+        # Register direct data fetch tool
+        @self.mcp_server.tool(name="fetch_market_data", description="Directly fetch market data for a symbol")
+        def fetch_market_data(symbol: str, start: str, end: str, interval: str = "1d") -> dict:
+            """
+            Directly fetch market data for a specific symbol.
+            
+            Args:
+                symbol: Stock symbol (e.g., 'AAPL')
+                start: Start date (YYYY-MM-DD)
+                end: End date (YYYY-MM-DD)
+                interval: Time interval (1d, 1h, etc.)
+            
+            Returns:
+                dict: Market data response
+            """
+            try:
+                df = self.fetch(symbol=symbol, start=start, end=end, interval=interval)
+                return {
+                    "status": "success",
+                    "symbol": symbol,
+                    "data": df.to_dict(orient="records"),
+                    "count": len(df)
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "symbol": symbol,
+                    "error": str(e)
+                }
+        
+        # Register company info tool
+        @self.mcp_server.tool(name="get_company_info", description="Get company information for a symbol")
+        def get_company_info_tool(symbol: str) -> dict:
+            """
+            Get company information for a specific symbol.
+            
+            Args:
+                symbol: Stock symbol (e.g., 'AAPL')
+            
+            Returns:
+                dict: Company information response
+            """
+            try:
+                info = self.get_company_info(symbol)
+                return {
+                    "status": "success", 
+                    "symbol": symbol,
+                    "company_info": info
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "symbol": symbol,
+                    "error": str(e)
+                }
+        
+        # Register health check tool
+        @self.mcp_server.tool(name="health_check", description="Health check for PolygonAgent")
+        def health_check() -> dict:
+            """
+            Return the health status of the PolygonAgent.
+            
+            Returns:
+                dict: Health status
+            """
+            return {
+                "status": "ok",
+                "agent": "PolygonAgent",
+                "timestamp": datetime.now().isoformat(),
+                "llm_enabled": getattr(self, "llm_enabled", True),
+                "api_configured": bool(self.config.authentication.api_key)
+            }
+        
+        # Start the server
+        self.mcp_server.settings.host = host
+        self.mcp_server.settings.port = port
+        print(f"Starting PolygonAgent MCP server on {host}:{port} (transport={transport}) ...")
+        print("=== Registered Tools ===")
+        import asyncio
+        tools = asyncio.run(self.mcp_server.list_tools())
+        for tool in tools:
+            print(f"- {tool.name}: {tool.description}")
+        
+        self.mcp_server.run(transport=transport)
 

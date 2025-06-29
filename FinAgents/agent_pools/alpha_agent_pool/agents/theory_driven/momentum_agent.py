@@ -1,7 +1,10 @@
 # agent_pools/alpha_agent_pool/agents/theory_driven/momentum_agent.py
 
 from mcp.server.fastmcp import FastMCP, Context as MCPContext
-from ...schema.theory_driven_schema import (
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from schema.theory_driven_schema import (
     MomentumAgentConfig, MomentumSignalRequest, AlphaStrategyFlow, MarketContext, Decision, Action, PerformanceFeedback, Metadata
 )
 from typing import List

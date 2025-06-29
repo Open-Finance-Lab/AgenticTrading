@@ -1,5 +1,5 @@
 import asyncio
-from agent_pools.data_agent_pool.core import DataAgentPool
+from FinAgents.agent_pools.data_agent_pool.core import DataAgentPool
 from dotenv import load_dotenv
 load_dotenv()
 

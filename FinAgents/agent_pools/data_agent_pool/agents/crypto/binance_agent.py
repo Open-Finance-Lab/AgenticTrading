@@ -1,8 +1,8 @@
 from typing import Dict, List, Optional, Union, Any
 import pandas as pd
 from datetime import datetime
-from agent_pools.data_agent_pool.registry import BaseAgent
-from agent_pools.data_agent_pool.schema.crypto_schema import BinanceConfig
+from FinAgents.agent_pools.data_agent_pool.base import BaseAgent
+from FinAgents.agent_pools.data_agent_pool.schema.crypto_schema import BinanceConfig
 
 class BinanceAgent(BaseAgent):
     """

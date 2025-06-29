@@ -493,7 +493,9 @@ class TransactionCostAgentPool:
         """
         try:
             logger.info(f"Starting Transaction Cost Agent Pool MCP server on {host}:{port}")
-            self.mcp.run(host=host, port=port)
+            self.mcp.settings.host = host
+            self.mcp.settings.port = port
+            self.mcp.run(transport="sse")
             
         except Exception as e:
             logger.error(f"MCP server startup failed: {str(e)}")
@@ -584,4 +586,4 @@ def create_transaction_cost_agent_pool(
 if __name__ == "__main__":
     # Example usage for testing
     pool = create_transaction_cost_agent_pool("test_pool")
-    pool.start_mcp_server(host="localhost", port=5060)
+    pool.start_mcp_server(host="localhost", port=6000)

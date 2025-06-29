@@ -47,16 +47,8 @@ import yaml
 from typing import Dict, Callable, Any
 
 # === Base Interface for All Agents ===
-class BaseAgent:
-    def __init__(self, config: dict):
-        self.config = config
-
-    def execute(self, function_name: str, inputs: dict) -> Any:
-        """Dispatch execution to agent methods dynamically."""
-        method: Callable = getattr(self, function_name, None)
-        if not method:
-            raise AttributeError(f"Function '{function_name}' not found in agent.")
-        return method(**inputs)
+# Import from base module to avoid circular dependencies
+from FinAgents.agent_pools.data_agent_pool.base import BaseAgent
 
 # === Global Agent Registry ===
 AGENT_REGISTRY: Dict[str, BaseAgent] = {}
@@ -69,20 +61,20 @@ def register_agent(agent_id: str, agent_instance: BaseAgent):
     logging.info(f"Agent '{agent_id}' registered with config: {agent_instance.config}")
 
 # === Agent Class Imports ===
-from agent_pools.data_agent_pool.agents.crypto.binance_agent import BinanceAgent
-from agent_pools.data_agent_pool.agents.crypto.coinbase_agent import CoinbaseAgent
-from agent_pools.data_agent_pool.agents.equity.alpaca_agent import AlpacaAgent
-from agent_pools.data_agent_pool.agents.equity.iex_agent import IEXAgent
-from agent_pools.data_agent_pool.agents.news.newsapi_agent import NewsAPIAgent
-from agent_pools.data_agent_pool.agents.news.rss_agent import RSSAgent
-from agent_pools.data_agent_pool.agents.equity.polygon_agent import PolygonAgent
-from agent_pools.data_agent_pool.agents.equity.mcp_adapter import MCPAdapter
+from FinAgents.agent_pools.data_agent_pool.agents.crypto.binance_agent import BinanceAgent
+from FinAgents.agent_pools.data_agent_pool.agents.crypto.coinbase_agent import CoinbaseAgent
+from FinAgents.agent_pools.data_agent_pool.agents.equity.alpaca_agent import AlpacaAgent
+from FinAgents.agent_pools.data_agent_pool.agents.equity.iex_agent import IEXAgent
+from FinAgents.agent_pools.data_agent_pool.agents.news.newsapi_agent import NewsAPIAgent
+from FinAgents.agent_pools.data_agent_pool.agents.news.rss_agent import RSSAgent
+from FinAgents.agent_pools.data_agent_pool.agents.equity.polygon_agent import PolygonAgent
+from FinAgents.agent_pools.data_agent_pool.agents.equity.mcp_adapter import MCPAdapter
 
 
 # === Schema Imports ===
-from agent_pools.data_agent_pool.schema.crypto_schema import BinanceConfig, CoinbaseConfig
-from agent_pools.data_agent_pool.schema.equity_schema import AlpacaConfig, IEXConfig, PolygonConfig
-from agent_pools.data_agent_pool.schema.news_schema import NewsAPIConfig, RSSConfig
+from FinAgents.agent_pools.data_agent_pool.schema.crypto_schema import BinanceConfig, CoinbaseConfig
+from FinAgents.agent_pools.data_agent_pool.schema.equity_schema import AlpacaConfig, IEXConfig, PolygonConfig
+from FinAgents.agent_pools.data_agent_pool.schema.news_schema import NewsAPIConfig, RSSConfig
 
 # === Config Loader ===
 CONFIG_DIR = os.path.join(os.path.dirname(__file__), "config")
