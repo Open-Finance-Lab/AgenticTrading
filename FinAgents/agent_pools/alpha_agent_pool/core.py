@@ -11,9 +11,9 @@ import asyncio
 import json
 import csv
 from mcp.server.fastmcp import FastMCP
-from agent_pools.alpha_agent_pool.schema.theory_driven_schema import MomentumAgentConfig
-from agent_pools.alpha_agent_pool.agents.theory_driven.momentum_agent import MomentumAgent
-from agent_pools.alpha_agent_pool.agents.autonomous.autonomous_agent import AutonomousAgent
+from schema.theory_driven_schema import MomentumAgentConfig
+from agents.theory_driven.momentum_agent import MomentumAgent
+from agents.autonomous.autonomous_agent import AutonomousAgent
 
 class MemoryUnit:
     """
@@ -229,8 +229,8 @@ def run_momentum_agent(config_dict):
     Args:
         config_dict (dict): Configuration dictionary for the agent.
     """
-    from agent_pools.alpha_agent_pool.schema.theory_driven_schema import MomentumAgentConfig
-    from agent_pools.alpha_agent_pool.agents.theory_driven.momentum_agent import MomentumAgent
+    from schema.theory_driven_schema import MomentumAgentConfig
+    from agents.theory_driven.momentum_agent import MomentumAgent
     config = MomentumAgentConfig(**config_dict)
     agent = MomentumAgent(config)
     agent.start_mcp_server(port=config.execution.port, host="0.0.0.0", transport="sse")
@@ -239,7 +239,7 @@ def run_autonomous_agent():
     """
     Entrypoint for running an AutonomousAgent in a separate process.
     """
-    from agent_pools.alpha_agent_pool.agents.autonomous.autonomous_agent import AutonomousAgent
+    from agents.autonomous.autonomous_agent import AutonomousAgent
     agent = AutonomousAgent()
     agent.start_mcp_server(host="0.0.0.0", port=5051)
 

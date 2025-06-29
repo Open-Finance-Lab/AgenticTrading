@@ -1,0 +1,355 @@
+# FinAgent Orchestration System Configuration
+# This file contains configuration settings for the complete FinAgent orchestration system
+
+# ============================================================================
+# Orchestrator Core Configuration
+# ============================================================================
+orchestrator:
+  # Server settings
+  host: "0.0.0.0"
+  port: 9000
+  
+  # Performance settings
+  max_concurrent_tasks: 100
+  task_timeout: 300
+  health_check_interval: 30
+  
+  # Integration endpoints
+  memory_agent_url: "http://localhost:8010"
+  
+  # Feature flags
+  enable_rl: true
+  enable_sandbox: true
+  enable_monitoring: true
+  enable_auto_scaling: false
+  
+  # Logging configuration
+  log_level: "INFO"
+  log_file: "orchestrator.log"
+  enable_structured_logging: true
+
+# ============================================================================
+# Agent Pool Configurations
+# ============================================================================
+agent_pools:
+  # Data Agent Pool - Market data ingestion and processing
+  data_agent_pool:
+    url: "http://localhost:8001"
+    enabled: true
+    timeout: 60
+    retry_attempts: 3
+    health_check_path: "/health"
+    capabilities:
+      - "market_data_fetch"
+      - "news_data_fetch"
+      - "economic_data_fetch"
+      - "alternative_data_fetch"
+    
+  # Alpha Agent Pool - Signal generation and strategy development
+  alpha_agent_pool:
+    url: "http://localhost:5050"
+    enabled: true
+    timeout: 120
+    retry_attempts: 3
+    health_check_path: "/health"
+    capabilities:
+      - "momentum_signals"
+      - "mean_reversion_signals"
+      - "pairs_trading_signals"
+      - "ml_based_signals"
+      - "autonomous_strategy_generation"
+    
+  # Risk Agent Pool - Risk assessment and management
+  risk_agent_pool:
+    url: "http://localhost:7000"
+    enabled: true
+    timeout: 90
+    retry_attempts: 3
+    health_check_path: "/health"
+    capabilities:
+      - "portfolio_risk_assessment"
+      - "var_calculation"
+      - "stress_testing"
+      - "credit_risk_analysis"
+      - "market_risk_analysis"
+    
+  # Transaction Cost Agent Pool - Execution cost analysis
+  transaction_cost_agent_pool:
+    url: "http://localhost:6000"
+    enabled: true
+    timeout: 60
+    retry_attempts: 3
+    health_check_path: "/health"
+    capabilities:
+      - "pre_trade_cost_estimation"
+      - "post_trade_analysis"
+      - "market_impact_modeling"
+      - "venue_selection_optimization"
+
+# ============================================================================
+# DAG Planner Configuration
+# ============================================================================
+dag_planner:
+  # Planning algorithm settings
+  max_planning_depth: 10
+  max_parallel_tasks: 20
+  enable_optimization: true
+  enable_caching: true
+  
+  # Task execution settings
+  default_task_timeout: 300
+  max_retry_attempts: 3
+  retry_backoff_factor: 2.0
+  
+  # Strategy templates
+  strategy_templates:
+    momentum_strategy:
+      description: "Momentum-based trading strategy"
+      required_data: ["price_data", "volume_data"]
+      required_agents: ["data_agent_pool", "alpha_agent_pool"]
+      optional_agents: ["risk_agent_pool", "transaction_cost_agent_pool"]
+      
+    mean_reversion_strategy:
+      description: "Mean reversion trading strategy"
+      required_data: ["price_data", "volatility_data"]
+      required_agents: ["data_agent_pool", "alpha_agent_pool"]
+      optional_agents: ["risk_agent_pool", "transaction_cost_agent_pool"]
+      
+    pairs_trading_strategy:
+      description: "Statistical arbitrage pairs trading"
+      required_data: ["price_data", "correlation_data"]
+      required_agents: ["data_agent_pool", "alpha_agent_pool", "risk_agent_pool"]
+      optional_agents: ["transaction_cost_agent_pool"]
+
+# ============================================================================
+# Reinforcement Learning Engine Configuration
+# ============================================================================
+rl_engine:
+  # Algorithm selection
+  algorithm: "TD3"  # Options: TD3, SAC, PPO, DDPG
+  
+  # Training hyperparameters
+  learning_rate: 0.0003
+  buffer_size: 1000000
+  batch_size: 256
+  tau: 0.005
+  gamma: 0.99
+  
+  # Algorithm-specific parameters
+  td3:
+    policy_noise: 0.2
+    noise_clip: 0.5
+    policy_freq: 2
+    target_policy_noise: 0.2
+    
+  sac:
+    alpha: 0.2
+    target_entropy_ratio: 1.0
+    automatic_entropy_tuning: true
+    
+  ppo:
+    eps_clip: 0.2
+    k_epochs: 4
+    value_coef: 0.5
+    entropy_coef: 0.01
+  
+  # Training environment settings
+  environment:
+    observation_space_dim: 50
+    action_space_dim: 10
+    max_episode_steps: 1000
+    reward_scaling: 1.0
+    
+  # Reward function configuration
+  reward_function:
+    type: "sharpe_ratio"  # Options: returns, sharpe_ratio, sortino_ratio, max_drawdown
+    risk_penalty_weight: 0.1
+    transaction_cost_penalty: 0.001
+    
+  # Training schedule
+  training:
+    total_episodes: 10000
+    evaluation_frequency: 100
+    save_frequency: 1000
+    early_stopping_patience: 500
+    learning_starts: 1000
+
+# ============================================================================
+# Sandbox Environment Configuration
+# ============================================================================
+sandbox:
+  # General settings
+  enable_backtesting: true
+  enable_stress_testing: true
+  enable_ab_testing: true
+  enable_monte_carlo: true
+  
+  # Data settings
+  data_start_date: "2020-01-01"
+  data_end_date: "2024-12-31"
+  data_frequency: "1D"  # Options: 1T, 5T, 15T, 1H, 1D
+  
+  # Trading settings
+  initial_capital: 1000000
+  commission_rate: 0.001
+  slippage_model: "linear"
+  slippage_rate: 0.0005
+  
+  # Risk management
+  max_position_size: 0.1  # 10% of portfolio
+  max_sector_exposure: 0.3  # 30% per sector
+  max_drawdown_limit: 0.2  # 20% maximum drawdown
+  
+  # Performance metrics
+  benchmark_symbol: "SPY"
+  risk_free_rate: 0.02
+  
+  # Stress testing scenarios
+  stress_scenarios:
+    market_crash:
+      description: "Market crash simulation"
+      price_shock: -0.2
+      volatility_multiplier: 3.0
+      duration_days: 30
+      
+    volatility_spike:
+      description: "Volatility spike simulation"
+      volatility_multiplier: 2.5
+      duration_days: 14
+      
+    liquidity_crisis:
+      description: "Liquidity crisis simulation"
+      spread_multiplier: 5.0
+      volume_reduction: 0.5
+      duration_days: 21
+  
+  # Monte Carlo settings
+  monte_carlo:
+    num_simulations: 1000
+    confidence_levels: [0.95, 0.99]
+    seed: 42
+
+# ============================================================================
+# Memory Agent Configuration
+# ============================================================================
+memory_agent:
+  url: "http://localhost:8010"
+  enabled: true
+  
+  # Storage settings
+  storage_backend: "file"  # Options: file, postgresql, mongodb
+  storage_path: "./data/memory_storage"
+  
+  # Indexing and retrieval
+  enable_indexing: true
+  index_fields: ["timestamp", "agent_pool", "event_type"]
+  max_query_results: 10000
+  
+  # Performance settings
+  batch_size: 1000
+  flush_interval: 60
+  compression_enabled: true
+  
+  # Event filtering
+  log_levels: ["INFO", "WARNING", "ERROR", "CRITICAL"]
+  event_types: ["EXECUTION", "SIGNAL", "RISK", "COST", "ERROR", "OPTIMIZATION"]
+
+# ============================================================================
+# Monitoring and Alerting
+# ============================================================================
+monitoring:
+  enable_prometheus: true
+  prometheus_port: 9090
+  
+  enable_grafana: true
+  grafana_port: 3000
+  
+  # Health checks
+  health_check_interval: 30
+  unhealthy_threshold: 3
+  
+  # Alerting
+  enable_alerts: true
+  alert_channels:
+    - type: "email"
+      recipients: ["admin@finagent.com"]
+    - type: "slack"
+      webhook_url: "https://hooks.slack.com/..."
+  
+  # Alert rules
+  alert_rules:
+    high_error_rate:
+      threshold: 0.05  # 5% error rate
+      window: 300  # 5 minutes
+      
+    high_latency:
+      threshold: 5000  # 5 seconds
+      window: 300
+      
+    low_success_rate:
+      threshold: 0.95  # 95% success rate
+      window: 600  # 10 minutes
+
+# ============================================================================
+# Security Configuration
+# ============================================================================
+security:
+  enable_authentication: false
+  enable_authorization: false
+  enable_encryption: false
+  
+  # API keys (for production use)
+  api_keys:
+    polygon: "${POLYGON_API_KEY}"
+    alpha_vantage: "${ALPHA_VANTAGE_API_KEY}"
+    quandl: "${QUANDL_API_KEY}"
+    openai: "${OPENAI_API_KEY}"
+  
+  # Rate limiting
+  rate_limiting:
+    enabled: true
+    requests_per_minute: 1000
+    requests_per_hour: 10000
+
+# ============================================================================
+# Development and Testing
+# ============================================================================
+development:
+  # Debug settings
+  debug_mode: true
+  verbose_logging: true
+  enable_profiling: false
+  
+  # Test data settings
+  use_synthetic_data: false
+  synthetic_data_path: "./data/synthetic"
+  
+  # Development tools
+  enable_auto_reload: true
+  enable_code_coverage: false
+
+# ============================================================================
+# Production Settings
+# ============================================================================
+production:
+  # Performance optimizations
+  enable_caching: true
+  cache_ttl: 3600
+  enable_compression: true
+  
+  # Scaling settings
+  min_replicas: 1
+  max_replicas: 10
+  cpu_threshold: 70
+  memory_threshold: 80
+  
+  # Backup and recovery
+  enable_backups: true
+  backup_interval: 86400  # Daily
+  backup_retention_days: 30
+  
+  # Disaster recovery
+  enable_disaster_recovery: false
+  dr_region: "us-west-2"
+  rpo_minutes: 60  # Recovery Point Objective
+  rto_minutes: 30  # Recovery Time Objective

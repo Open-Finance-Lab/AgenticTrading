@@ -6,8 +6,8 @@ import yaml
 from fastapi import FastAPI
 from typing import Dict, Callable, Any
 
-from agent_pools.alpha_agent_pool.schema.theory_driven_schema import MomentumAgentConfig
-from agent_pools.alpha_agent_pool.agent_service import MomentumAgentService
+from schema.theory_driven_schema import MomentumAgentConfig
+# from agent_service import MomentumAgentService  # TODO: Fix missing agent_service.py
 
 # === Base Interface for All Alpha Agents ===
 class BaseAlphaAgent:
@@ -38,11 +38,11 @@ def load_config(agent_id: str) -> dict:
 def mount_momentum_agent(app: FastAPI, agent_id: str):
     cfg_dict = load_config(agent_id)
     config = MomentumAgentConfig(**cfg_dict)
-    service = MomentumAgentService.from_schema(config)
-    ALPHA_AGENT_REGISTRY[agent_id] = service  # service implements BaseAlphaAgent-like interface
-    FASTAPI_SUBAPPS[agent_id] = service.app
-    app.mount(f"/{agent_id}", service.app)
-    logging.info(f"Mounted {agent_id} at /{agent_id}")
+    # service = MomentumAgentService.from_schema(config)  # TODO: Fix missing agent_service.py
+    # ALPHA_AGENT_REGISTRY[agent_id] = service  # service implements BaseAlphaAgent-like interface
+    # FASTAPI_SUBAPPS[agent_id] = service.app
+    # app.mount(f"/{agent_id}", service.app)
+    logging.info(f"Attempted to mount {agent_id} at /{agent_id} (disabled due to missing agent_service)")
 
 # === Unified FastAPI App ===
 app = FastAPI(title="Alpha Agent MCP Registry", version="1.0")

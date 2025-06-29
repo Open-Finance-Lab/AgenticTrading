@@ -1,5 +1,5 @@
-from agent_pools.data_agent_pool.registry import BaseAgent
-from agent_pools.data_agent_pool.schema.equity_schema import IEXConfig
+from FinAgents.agent_pools.data_agent_pool.registry import BaseAgent
+from FinAgents.agent_pools.data_agent_pool.schema.equity_schema import IEXConfig
 
 class IEXAgent(BaseAgent):
     def __init__(self, config: IEXConfig):

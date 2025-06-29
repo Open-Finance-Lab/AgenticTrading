@@ -62,7 +62,7 @@ class VaRCalculator(BaseRiskAgent):
             if "returns_data" in portfolio_data:
                 returns = np.array(portfolio_data["returns_data"])
             else:
-                returns = self._simulate_returns_data(portfolio_data)
+                returns = self._get_returns_data(portfolio_data)
             
             results = {
                 "portfolio_value": portfolio_value,
@@ -135,18 +135,27 @@ class VaRCalculator(BaseRiskAgent):
                 "timestamp": datetime.utcnow().isoformat()
             }
     
-    def _simulate_returns_data(self, portfolio_data: Dict[str, Any]) -> np.ndarray:
-        """Simulate portfolio returns for demonstration."""
-        # In production, this would calculate actual portfolio returns
-        np.random.seed(42)  # For reproducible results
-        
-        # Simulate returns with some realistic characteristics
-        base_return = 0.0008  # ~20% annualized
-        volatility = 0.015    # ~24% annualized
-        
-        # Generate returns with fat tails and some autocorrelation
-        innovations = stats.t.rvs(df=5, size=252) * volatility  # t-distribution for fat tails
-        returns = base_return + innovations
+    def _get_returns_data(self, portfolio_data: Dict[str, Any]) -> np.ndarray:
+        """Extract portfolio returns from real data."""
+        try:
+            # Try to extract actual returns from portfolio data
+            if "returns" in portfolio_data:
+                returns = np.array(portfolio_data["returns"])
+                if len(returns) > 0:
+                    return returns
+            
+            # If no returns data available, try to calculate from prices
+            if "prices" in portfolio_data:
+                prices = np.array(portfolio_data["prices"])
+                if len(prices) > 1:
+                    returns = np.diff(np.log(prices))
+                    return returns
+            
+            # If no valid data available, raise an error
+            raise ValueError("No valid price or returns data found in portfolio_data")
+            
+        except Exception as e:
+            raise ValueError(f"Failed to extract returns data: {str(e)}")
         
         # Add some autocorrelation
         for i in range(1, len(returns)):

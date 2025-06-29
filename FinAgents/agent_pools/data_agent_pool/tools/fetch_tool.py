@@ -1,6 +1,6 @@
 # data_agent_pool/tools/fetch_tool.py
 from langchain.tools import Tool
-from agent_pools.data_agent_pool.core import DataAgentPool
+from FinAgents.agent_pools.data_agent_pool.core import DataAgentPool
 from typing import Dict
 
 

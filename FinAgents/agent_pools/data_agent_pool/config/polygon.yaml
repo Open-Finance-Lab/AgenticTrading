@@ -14,4 +14,4 @@ authentication:
 constraints:
   timeout: 30
   rate_limit_per_minute: 120
-llm_enabled: false
+llm_enabled: True

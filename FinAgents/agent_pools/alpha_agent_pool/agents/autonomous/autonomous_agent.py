@@ -19,7 +19,10 @@ from pydantic import BaseModel
 import uuid
 
 # Import strategy flow schemas for output compatibility
-from ...schema.theory_driven_schema import (
+import sys
+import os
+sys.path.append(os.path.join(os.path.dirname(__file__), '..', '..'))
+from schema.theory_driven_schema import (
     AlphaStrategyFlow, MarketContext, Decision, Action, PerformanceFeedback, Metadata
 )
 
@@ -396,10 +399,9 @@ class AutonomousAgent:
         Returns:
             Complete strategy flow with trading signal
         """
-        # Simulate market data if not provided
-        if not market_data.get("prices"):
-            base_price = random.uniform(90, 150)
-            market_data["prices"] = [base_price + random.uniform(-5, 5) for _ in range(20)]
+        # Validate market data input
+        if not market_data.get("prices") or len(market_data["prices"]) == 0:
+            raise ValueError("Market data with prices is required for strategy execution")
         
         prices = market_data["prices"]
         current_price = prices[-1]
@@ -651,28 +653,15 @@ class AutonomousAgent:
             Retrieved knowledge with relevance scores and metadata
         """
         try:
-            # In production, this would connect to the actual memory agent
-            # For now, we simulate memory query results
-            mock_results = {
+            # TODO: Connect to actual memory agent when available
+            # For now, return empty results to avoid dependency on mock data
+            return {
                 "query": query,
                 "category": category,
-                "results": [
-                    {
-                        "content": f"Historical analysis data related to: {query}",
-                        "relevance_score": random.uniform(0.7, 0.95),
-                        "source": "historical_analysis",
-                        "timestamp": datetime.now().isoformat(),
-                        "metadata": {
-                            "data_points": random.randint(100, 1000),
-                            "timeframe": "1y",
-                            "quality_score": random.uniform(0.8, 1.0)
-                        }
-                    }
-                ],
-                "total_results": 1,
-                "query_timestamp": datetime.now().isoformat()
+                "results": [],
+                "timestamp": datetime.now().isoformat(),
+                "status": "memory_agent_not_connected"
             }
-            return mock_results
         except Exception as e:
             return {"error": str(e), "results": []}
 

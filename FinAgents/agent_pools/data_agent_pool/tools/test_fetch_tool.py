@@ -1,7 +1,7 @@
 # test_fetch_tool.py
 
-from agent_pools.data_agent_pool.core import DataAgentPool
-from agent_pools.data_agent_pool.tools.fetch_tool import fetch_ticker_data_tool
+from FinAgents.agent_pools.data_agent_pool.core import DataAgentPool
+from FinAgents.agent_pools.data_agent_pool.tools.fetch_tool import fetch_ticker_data_tool
 
 # 实例化 Agent Pool（内部已包含 agent 调用机制）
 pool = DataAgentPool()

@@ -3,8 +3,8 @@ import pandas as pd
 import yfinance as yf
 import os
 from datetime import datetime, timedelta
-from agent_pools.data_agent_pool.registry import BaseAgent
-from agent_pools.data_agent_pool.schema.equity_schema import YFinanceConfig
+from FinAgents.agent_pools.data_agent_pool.registry import BaseAgent
+from FinAgents.agent_pools.data_agent_pool.schema.equity_schema import YFinanceConfig
 from langchain_community.chat_models import ChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage
 from langchain.agents import Tool

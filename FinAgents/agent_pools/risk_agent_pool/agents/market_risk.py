@@ -4,7 +4,8 @@ Market Risk Analyzer - Advanced Market Risk Analysis Agent
 This agent specializes in comprehensive market risk analysis including:
 - Portfolio volatility calculation
 - Beta analysis and systematic risk
-- Value at Risk (VaR) estimation
+- Value at            # Get actual historical returns data
+            returns_data = self._get_returns_data(portfolio_data, 252)sk (VaR) estimation
 - Maximum Drawdown analysis
 - Correlation and dependency analysis
 
@@ -215,9 +216,8 @@ class MarketRiskAnalyzer(BaseRiskAgent):
                                           time_horizon: str) -> Dict[str, Any]:
         """Calculate comprehensive volatility metrics."""
         try:
-            # Simulate historical returns for demonstration
-            # In production, this would fetch actual market data
-            returns_data = self._simulate_returns_data(portfolio_data, 252)
+            # Get actual historical returns data
+            returns_data = self._get_returns_data(portfolio_data, 252)
             
             # Calculate portfolio returns
             portfolio_returns = self._calculate_portfolio_returns(returns_data, portfolio_data["weights"])
@@ -264,20 +264,30 @@ class MarketRiskAnalyzer(BaseRiskAgent):
             self.logger.error(f"Volatility calculation failed: {e}")
             return {"error": str(e)}
     
-    def _simulate_returns_data(self, portfolio_data: Dict[str, Any], periods: int) -> pd.DataFrame:
-        """Simulate historical returns data for demonstration purposes."""
-        # In production, this would fetch actual market data from a data provider
-        securities = portfolio_data["securities"]
-        
-        # Generate correlated random returns
-        num_securities = len(securities)
-        correlation_matrix = self._generate_correlation_matrix(num_securities)
-        
-        # Generate returns using multivariate normal distribution
-        mean_returns = np.random.normal(0.0008, 0.0002, num_securities)  # Daily returns around 0.08% with variation
-        returns = np.random.multivariate_normal(mean_returns, correlation_matrix * 0.0004, periods)
-        
-        return pd.DataFrame(returns, columns=securities)
+    def _get_returns_data(self, portfolio_data: Dict[str, Any], periods: int) -> pd.DataFrame:
+        """Extract actual historical returns data from portfolio data."""
+        try:
+            # Try to extract actual returns from portfolio data
+            if "returns_data" in portfolio_data:
+                returns_df = pd.DataFrame(portfolio_data["returns_data"])
+                if len(returns_df) >= periods:
+                    return returns_df.tail(periods)
+                return returns_df
+            
+            # Try to calculate returns from price data
+            if "price_data" in portfolio_data:
+                price_df = pd.DataFrame(portfolio_data["price_data"])
+                if len(price_df) > 1:
+                    returns_df = price_df.pct_change().dropna()
+                    if len(returns_df) >= periods:
+                        return returns_df.tail(periods)
+                    return returns_df
+            
+            # If no historical data available, raise an error
+            raise ValueError("Real market data connection required for risk analysis")
+            
+        except Exception as e:
+            raise ValueError(f"Failed to extract returns data: {str(e)}")
     
     def _generate_correlation_matrix(self, size: int) -> np.ndarray:
         """Generate a realistic correlation matrix."""
@@ -404,8 +414,8 @@ class MarketRiskAnalyzer(BaseRiskAgent):
                                    time_horizon: str, confidence_levels: List[float]) -> Dict[str, Any]:
         """Calculate Value at Risk using multiple methodologies."""
         try:
-            # Simulate returns data
-            returns_data = self._simulate_returns_data(portfolio_data, 252)
+            # Get returns data
+            returns_data = self._get_returns_data(portfolio_data, 252)
             portfolio_returns = self._calculate_portfolio_returns(returns_data, portfolio_data["weights"])
             
             var_results = {}
@@ -547,7 +557,7 @@ class MarketRiskAnalyzer(BaseRiskAgent):
             weights = portfolio_data["weights"]
             
             # Simulate individual security returns
-            returns_data = self._simulate_returns_data(portfolio_data, 252)
+            returns_data = self._get_returns_data(portfolio_data, 252)
             
             # Calculate marginal VaR for each security
             var_attribution = {}
@@ -586,7 +596,7 @@ class MarketRiskAnalyzer(BaseRiskAgent):
         try:
             # Simulate market and portfolio returns
             market_returns = np.random.normal(0.0008, 0.012, 252)  # Market returns
-            returns_data = self._simulate_returns_data(portfolio_data, 252)
+            returns_data = self._get_returns_data(portfolio_data, 252)
             portfolio_returns = self._calculate_portfolio_returns(returns_data, portfolio_data["weights"])
             
             # Calculate beta
@@ -631,7 +641,7 @@ class MarketRiskAnalyzer(BaseRiskAgent):
         """Calculate correlation and dependency metrics."""
         try:
             # Simulate returns data
-            returns_data = self._simulate_returns_data(portfolio_data, 252)
+            returns_data = self._get_returns_data(portfolio_data, 252)
             
             # Calculate correlation matrix
             correlation_matrix = returns_data.corr()
@@ -716,7 +726,7 @@ class MarketRiskAnalyzer(BaseRiskAgent):
         """Calculate drawdown metrics including maximum drawdown."""
         try:
             # Simulate portfolio returns
-            returns_data = self._simulate_returns_data(portfolio_data, 252)
+            returns_data = self._get_returns_data(portfolio_data, 252)
             portfolio_returns = self._calculate_portfolio_returns(returns_data, portfolio_data["weights"])
             
             # Calculate cumulative returns
@@ -785,7 +795,7 @@ class MarketRiskAnalyzer(BaseRiskAgent):
             }
             
             # Simulate base portfolio returns
-            returns_data = self._simulate_returns_data(portfolio_data, 252)
+            returns_data = self._get_returns_data(portfolio_data, 252)
             portfolio_returns = self._calculate_portfolio_returns(returns_data, portfolio_data["weights"])
             
             stress_results = {}

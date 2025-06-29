@@ -3,8 +3,8 @@ import pandas as pd
 from datetime import datetime
 import requests
 import time
-from agent_pools.data_agent_pool.registry import BaseAgent
-from agent_pools.data_agent_pool.schema.crypto_schema import CoinGeckoConfig
+from FinAgents.agent_pools.data_agent_pool.registry import BaseAgent
+from FinAgents.agent_pools.data_agent_pool.schema.crypto_schema import CoinGeckoConfig
 
 
 class CoinGeckoAgent(BaseAgent):
