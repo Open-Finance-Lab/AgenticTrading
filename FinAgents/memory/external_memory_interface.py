@@ -12,7 +12,7 @@ Key Features:
 - Extensible design for future ML/RL workflows
 
 Author: FinAgent-Orchestration Team
-Date: 2024
+Date: 2025
 """
 
 import json
