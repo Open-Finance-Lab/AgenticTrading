@@ -17,9 +17,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, List
 from mcp.server.fastmcp import FastMCP
-from schema.theory_driven_schema import MomentumAgentConfig
-from agents.theory_driven.momentum_agent import MomentumAgent
-from agents.autonomous.autonomous_agent import AutonomousAgent
+from .schema.theory_driven_schema import MomentumAgentConfig
+from .agents.theory_driven.momentum_agent import MomentumAgent
+from .agents.autonomous.autonomous_agent import AutonomousAgent
 
 # Add memory module to path
 memory_path = Path(__file__).parent.parent.parent / "memory"
@@ -172,7 +172,7 @@ class MemoryUnit:
                 logger.debug(f"Failed to log memory operation: {e}")
 
 class AlphaAgentPoolMCPServer:
-    def __init__(self, host="0.0.0.0", port=5050):
+    def __init__(self, host="0.0.0.0", port=8081):
         """
         Initialize the AlphaAgentPoolMCPServer instance with enhanced memory capabilities.
         Args:
@@ -187,7 +187,7 @@ class AlphaAgentPoolMCPServer:
         
         # Initialize memory bridge for comprehensive strategy tracking
         self.memory_bridge: Optional[AlphaAgentPoolMemoryBridge] = None
-        self._initialize_memory_bridge()
+        # Note: Memory bridge will be initialized asynchronously when needed
         
         # Automatically load static dataset into memory unit on startup, and reset memory file
         csv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/cache/AAPL_2024-01-01_2024-01-31_1d.csv"))
@@ -201,7 +201,7 @@ class AlphaAgentPoolMCPServer:
         # Initialize legacy memory agent if available
         self.memory_agent: Optional[ExternalMemoryAgent] = None
         self.session_id = None
-        self._initialize_memory_agent()
+        self._initialize_memory_agent()  # Initialize memory agent synchronously
         
         # Strategy performance tracking
         self.strategy_performance_cache = {}
@@ -236,7 +236,9 @@ class AlphaAgentPoolMCPServer:
         
         try:
             self.memory_agent = ExternalMemoryAgent()
-            self.session_id = f"alpha_pool_session_{int(asyncio.get_event_loop().time())}"
+            # Use timestamp instead of event loop time for session ID
+            import time
+            self.session_id = f"alpha_pool_session_{int(time.time())}"
             logger.info("External memory agent initialized for Alpha Agent Pool")
         except Exception as e:
             logger.error(f"Failed to initialize memory agent: {e}")
@@ -358,6 +360,65 @@ class AlphaAgentPoolMCPServer:
                 list: List of keys.
             """
             return self.memory.keys()
+
+        @self.pool_server.tool(name="process_strategy_request", description="Process strategy requests and generate alpha signals")
+        async def process_strategy_request(query: str) -> str:
+            """
+            Process natural language strategy requests and generate alpha signals.
+            
+            Args:
+                query (str): Natural language query describing the strategy request
+                
+            Returns:
+                str: JSON string containing strategy response and alpha signals
+            """
+            try:
+                # Parse symbols from query
+                symbols = []
+                if "AAPL" in query.upper():
+                    symbols.append("AAPL")
+                if "MSFT" in query.upper():
+                    symbols.append("MSFT")
+                
+                if not symbols:
+                    symbols = ["AAPL", "MSFT"]  # Default symbols
+                
+                # Extract date from query or use today
+                import re
+                from datetime import datetime
+                date_match = re.search(r'\d{4}-\d{2}-\d{2}', query)
+                date = date_match.group(0) if date_match else datetime.now().strftime('%Y-%m-%d')
+                
+                # Generate alpha signals
+                signals_result = await generate_alpha_signals(
+                    symbols=symbols,
+                    date=date,
+                    lookback_period=20,
+                    current_prices=None,
+                    strategy_context={"query": query}
+                )
+                
+                # Return structured response
+                response = {
+                    "status": "success",
+                    "request_type": "strategy_processing",
+                    "query": query,
+                    "symbols": symbols,
+                    "date": date,
+                    "alpha_signals": signals_result,
+                    "generated_at": datetime.now().isoformat()
+                }
+                
+                return json.dumps(response)
+                
+            except Exception as e:
+                error_response = {
+                    "status": "error",
+                    "error": str(e),
+                    "query": query,
+                    "generated_at": datetime.now().isoformat()
+                }
+                return json.dumps(error_response)
 
         @self.pool_server.tool(name="submit_strategy_event", description="Submit strategy flow events to memory system for tracking and analysis.")
         async def submit_strategy_event(event_type: str, strategy_id: str, event_data: dict, 
@@ -730,31 +791,35 @@ class AlphaAgentPoolMCPServer:
                         
                         # Submit signal event to memory bridge
                         if self.memory_bridge:
-                            await self.submit_strategy_event(
-                                event_type="SIGNAL_GENERATED",
-                                strategy_id="alpha_signal_generation",
-                                event_data={
-                                    "symbol": symbol,
-                                    "signal_type": signal,
-                                    "confidence": confidence,
-                                    "predicted_return": predicted_return,
-                                    "risk_estimate": risk_estimate,
-                                    "execution_weight": execution_weight,
-                                    "agent_id": "alpha_pool_generator",
-                                    "market_regime": strategy_context.get("market_regime") if strategy_context else None,
-                                    "feature_vector": {
-                                        "price": historical_prices[-1],
-                                        "momentum": (historical_prices[-1] - historical_prices[0]) / historical_prices[0] if len(historical_prices) > 1 else 0,
-                                        "volatility": self._calculate_price_volatility(historical_prices)
+                            try:
+                                await self.submit_strategy_event(
+                                    event_type="SIGNAL_GENERATED",
+                                    strategy_id="alpha_signal_generation",
+                                    event_data={
+                                        "symbol": symbol,
+                                        "signal_type": signal,
+                                        "confidence": confidence,
+                                        "predicted_return": predicted_return,
+                                        "risk_estimate": risk_estimate,
+                                        "execution_weight": execution_weight,
+                                        "agent_id": "alpha_pool_generator",
+                                        "market_regime": strategy_context.get("market_regime") if strategy_context else None,
+                                        "feature_vector": {
+                                            "price": historical_prices[-1],
+                                            "momentum": (historical_prices[-1] - historical_prices[0]) / historical_prices[0] if len(historical_prices) > 1 else 0,
+                                            "volatility": self._calculate_price_volatility(historical_prices)
+                                        }
+                                    },
+                                    metadata={
+                                        "date": date,
+                                        "lookback_period": lookback_period,
+                                        "data_source": "momentum_agent" if signal_result else "fallback"
                                     }
-                                },
-                                metadata={
-                                    "date": date,
-                                    "lookback_period": lookback_period,
-                                    "data_source": "momentum_agent" if signal_result else "fallback"
-                                }
-                            )
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to submit strategy event for {symbol}: {e}")
                         
+                        # Log individual signal generation
                         # Log individual signal generation
                         await self._log_memory_event(
                             event_type=EventType.OPTIMIZATION,
@@ -903,150 +968,107 @@ class AlphaAgentPoolMCPServer:
 
     # Helper methods for enhanced functionality
     
-    async def _log_agent_lifecycle_event(self, agent_id: str, lifecycle_event: str, details: str):
-        """Log agent lifecycle events to memory bridge"""
-        if self.memory_bridge:
-            try:
-                await self.memory_bridge._log_system_event(
-                    event_type=EventType.SYSTEM if MEMORY_AVAILABLE else "system",
-                    log_level=LogLevel.INFO if MEMORY_AVAILABLE else "info",
-                    title=f"Agent Lifecycle: {agent_id} {lifecycle_event}",
-                    content=details,
-                    metadata={
-                        "agent_id": agent_id,
-                        "lifecycle_event": lifecycle_event,
-                        "details": details,
-                        "component": "agent_pool_management"
-                    }
-                )
-            except Exception as e:
-                logger.warning(f"Failed to log agent lifecycle event: {e}")
+    def _start_momentum_agent(self):
+        """Start the momentum agent sub-service"""
+        try:
+            import subprocess
+            import threading
+            import time
+            
+            # Load momentum agent configuration
+            config_path = os.path.join(self.config_dir, "momentum_agent.yml")
+            
+            # Default configuration if file doesn't exist
+            default_config = {
+                'execution': {
+                    'host': '0.0.0.0',
+                    'port': 5052
+                },
+                'model': 'momentum_strategy',
+                'lookback_period': 20,
+                'signal_threshold': 0.05
+            }
+            
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    config_data = yaml.safe_load(f)
+            else:
+                config_data = default_config
+                
+            config = MomentumAgentConfig(**config_data)
+            
+            # Create momentum agent instance
+            momentum_agent = MomentumAgent(config)
+            
+            # Start in a separate thread
+            def run_momentum():
+                try:
+                    momentum_agent.run()
+                except Exception as e:
+                    logger.error(f"Momentum agent error: {e}")
+            
+            momentum_thread = threading.Thread(target=run_momentum, daemon=True)
+            momentum_thread.start()
+            
+            # Give it time to start
+            time.sleep(2)
+            
+            logger.info(f"Momentum agent started on port {config.execution.port}")
+            return config, momentum_thread
+            
+        except Exception as e:
+            logger.error(f"Failed to start momentum agent: {e}")
+            # Return default config and None for process
+            return MomentumAgentConfig(**{
+                'execution': {'host': '0.0.0.0', 'port': 5052},
+                'model': 'momentum_strategy',
+                'lookback_period': 20,
+                'signal_threshold': 0.05
+            }), None
 
-    async def _log_orchestrator_interaction(self, instruction: str, context: Optional[dict]):
-        """Log orchestrator interaction events"""
-        if self.memory_bridge:
-            try:
-                await self.memory_bridge._log_system_event(
-                    event_type=EventType.SYSTEM if MEMORY_AVAILABLE else "system",
-                    log_level=LogLevel.INFO if MEMORY_AVAILABLE else "info",
-                    title="Orchestrator Interaction",
-                    content=f"Received orchestrator instruction: {instruction}",
-                    metadata={
-                        "instruction": instruction,
-                        "context": context,
-                        "component": "orchestrator_interface"
-                    }
-                )
-            except Exception as e:
-                logger.warning(f"Failed to log orchestrator interaction: {e}")
+    def _start_autonomous_agent(self):
+        """Start the autonomous agent sub-service"""
+        try:
+            import subprocess
+            import threading
+            
+            # Create autonomous agent instance
+            autonomous_agent = AutonomousAgent()
+            
+            # Start in a separate thread
+            def run_autonomous():
+                try:
+                    autonomous_agent.run()
+                except Exception as e:
+                    logger.error(f"Autonomous agent error: {e}")
+            
+            autonomous_thread = threading.Thread(target=run_autonomous, daemon=True)
+            autonomous_thread.start()
+            
+            logger.info("Autonomous agent started on port 5051")
+            return autonomous_thread
+            
+        except Exception as e:
+            logger.error(f"Failed to start autonomous agent: {e}")
+            return None
 
-    def _calculate_price_volatility(self, prices: List[float]) -> float:
-        """Calculate simple price volatility from price series"""
-        if len(prices) < 2:
-            return 0.01
-        
-        returns = []
-        for i in range(1, len(prices)):
-            if prices[i-1] != 0:
-                returns.append((prices[i] - prices[i-1]) / prices[i-1])
-        
-        if not returns:
-            return 0.01
-        
-        mean_return = sum(returns) / len(returns)
-        variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
-        return variance ** 0.5
 
-    def _generate_risk_assessment(self, analytics: dict) -> dict:
-        """Generate risk assessment based on performance analytics"""
-        performance_summary = analytics.get("performance_summary", {})
-        risk_metrics = analytics.get("risk_metrics", {})
+# Main execution
+if __name__ == "__main__":
+    print("🚀 Starting Alpha Agent Pool...")
+    
+    # Create and start the server
+    try:
+        alpha_pool = AlphaAgentPoolMCPServer(host="0.0.0.0", port=8081)
         
-        risk_level = "LOW"
-        risk_factors = []
+        # Use the pool_server to run with SSE transport
+        alpha_pool.pool_server.settings.host = "0.0.0.0"
+        alpha_pool.pool_server.settings.port = 8081
         
-        # Assess based on Sharpe ratio
-        avg_sharpe = performance_summary.get("average_sharpe_ratio", 0)
-        if avg_sharpe < 0.5:
-            risk_level = "HIGH"
-            risk_factors.append("Low Sharpe ratio indicates poor risk-adjusted returns")
-        elif avg_sharpe < 1.0:
-            risk_level = "MEDIUM"
-            risk_factors.append("Moderate Sharpe ratio suggests room for improvement")
+        # Start the FastMCP server with SSE transport like data agent pool
+        alpha_pool.pool_server.run(transport="sse")
         
-        # Assess based on drawdown
-        worst_drawdown = performance_summary.get("worst_drawdown", 0)
-        if abs(worst_drawdown) > 0.2:
-            risk_level = "HIGH"
-            risk_factors.append("High maximum drawdown indicates significant downside risk")
-        elif abs(worst_drawdown) > 0.1:
-            if risk_level != "HIGH":
-                risk_level = "MEDIUM"
-            risk_factors.append("Moderate drawdown requires monitoring")
-        
-        # Assess volatility
-        avg_volatility = risk_metrics.get("average_volatility", 0)
-        if avg_volatility > 0.25:
-            risk_level = "HIGH"
-            risk_factors.append("High volatility increases portfolio risk")
-        
-        return {
-            "risk_level": risk_level,
-            "risk_factors": risk_factors,
-            "risk_score": self._calculate_risk_score(avg_sharpe, worst_drawdown, avg_volatility),
-            "recommendations": self._generate_risk_recommendations(risk_level, risk_factors)
-        }
-
-    def _calculate_risk_score(self, sharpe_ratio: float, max_drawdown: float, volatility: float) -> float:
-        """Calculate composite risk score (0-100, lower is better)"""
-        sharpe_score = max(0, (1.0 - sharpe_ratio) * 30)  # 0-30 points
-        drawdown_score = abs(max_drawdown) * 100  # 0-100 points (assuming max 100% drawdown)
-        volatility_score = min(volatility * 100, 40)  # 0-40 points
-        
-        composite_score = min(100, sharpe_score + drawdown_score + volatility_score)
-        return round(composite_score, 2)
-
-    def _generate_risk_recommendations(self, risk_level: str, risk_factors: List[str]) -> List[str]:
-        """Generate risk-specific recommendations"""
-        recommendations = []
-        
-        if risk_level == "HIGH":
-            recommendations.extend([
-                "Implement stricter position sizing rules",
-                "Consider reducing leverage or exposure",
-                "Review and enhance risk management protocols",
-                "Evaluate strategy parameters for optimization"
-            ])
-        elif risk_level == "MEDIUM":
-            recommendations.extend([
-                "Monitor risk metrics closely",
-                "Consider implementing dynamic hedging strategies",
-                "Review correlation with market factors"
-            ])
-        else:
-            recommendations.append("Current risk levels are acceptable")
-        
-        return recommendations
-
-    def _calculate_performance_grade(self, analytics: dict) -> str:
-        """Calculate overall performance grade (A-F)"""
-        performance_summary = analytics.get("performance_summary", {})
-        
-        # Weighted scoring system
-        sharpe_score = min(100, max(0, performance_summary.get("average_sharpe_ratio", 0) * 50))  # 0-100
-        accuracy_score = performance_summary.get("average_accuracy", 0) * 100  # 0-100
-        consistency_score = performance_summary.get("consistency_score", 0) * 100  # 0-100
-        
-        # Weighted average (Sharpe: 40%, Accuracy: 35%, Consistency: 25%)
-        composite_score = (sharpe_score * 0.4 + accuracy_score * 0.35 + consistency_score * 0.25)
-        
-        if composite_score >= 90:
-            return "A"
-        elif composite_score >= 80:
-            return "B"
-        elif composite_score >= 70:
-            return "C"
-        elif composite_score >= 60:
-            return "D"
-        else:
-            return "F"
+    except KeyboardInterrupt:
+        print("\n🛑 Alpha Agent Pool shutting down...")
+    except Exception as e:
+        print(f"❌ Alpha Agent Pool error: {e}")
