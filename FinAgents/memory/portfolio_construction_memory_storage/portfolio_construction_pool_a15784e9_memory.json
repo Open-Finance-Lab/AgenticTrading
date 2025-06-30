@@ -1,0 +1,258 @@
+{
+  "pool_id": "portfolio_construction_pool_a15784e9",
+  "last_updated": "2025-06-30T07:05:14.043545+00:00",
+  "memory_data": {
+    "event_1_20250630_030514": {
+      "event_type": "POOL_INITIALIZED",
+      "pool_id": "portfolio_construction_pool_a15784e9",
+      "agents_count": 8,
+      "features": {
+        "real_time_monitoring": true,
+        "external_memory": true,
+        "natural_language": true
+      },
+      "timestamp": "2025-06-30T07:05:14.020679+00:00"
+    },
+    "test_key_1": {
+      "data": "test_value_1",
+      "timestamp": "2025-06-30"
+    },
+    "operation_2_20250630_030514": {
+      "timestamp": "2025-06-30T07:05:14.021809+00:00",
+      "operation": "SET",
+      "key": "test_key_1",
+      "value_type": "dict"
+    },
+    "test_key_2": {
+      "portfolio": "AAPL",
+      "weight": 0.25
+    },
+    "operation_3_20250630_030514": {
+      "timestamp": "2025-06-30T07:05:14.021821+00:00",
+      "operation": "SET",
+      "key": "test_key_2",
+      "value_type": "dict"
+    },
+    "test_key_3": {
+      "optimization": "mean_variance",
+      "sharpe": 1.5
+    },
+    "operation_4_20250630_030514": {
+      "timestamp": "2025-06-30T07:05:14.021827+00:00",
+      "operation": "SET",
+      "key": "test_key_3",
+      "value_type": "dict"
+    },
+    "operation_5_20250630_030514": {
+      "timestamp": "2025-06-30T07:05:14.021832+00:00",
+      "operation": "GET",
+      "key": "test_key_1",
+      "value_type": "dict"
+    },
+    "operation_6_20250630_030514": {
+      "timestamp": "2025-06-30T07:05:14.021836+00:00",
+      "operation": "GET",
+      "key": "test_key_2",
+      "value_type": "dict"
+    },
+    "operation_7_20250630_030514": {
+      "timestamp": "2025-06-30T07:05:14.021840+00:00",
+      "operation": "GET",
+      "key": "test_key_3",
+      "value_type": "dict"
+    },
+    "event_8_20250630_030514": {
+      "event_type": "PORTFOLIO_CREATED",
+      "portfolio_id": "test_portfolio_001",
+      "assets": [
+        "AAPL",
+        "GOOGL",
+        "MSFT"
+      ],
+      "optimization_type": "mean_variance",
+      "timestamp": "2025-06-30T07:05:14.021897+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    },
+    "event_9_20250630_030514": {
+      "event_type": "OPTIMIZATION_COMPLETED",
+      "portfolio_id": "test_portfolio_001",
+      "sharpe_ratio": 1.25,
+      "volatility": 0.18,
+      "timestamp": "2025-06-30T07:05:14.023058+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    },
+    "event_10_20250630_030514": {
+      "event_type": "BACKTEST_STARTED",
+      "portfolio_id": "test_portfolio_001",
+      "start_date": "2024-01-01",
+      "end_date": "2024-12-31",
+      "timestamp": "2025-06-30T07:05:14.024034+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    },
+    "event_11_20250630_030514": {
+      "event_type": "TASK_STARTED",
+      "task_type": "portfolio_optimization",
+      "agent_type": "mean_variance_optimizer",
+      "use_langgraph": true,
+      "parameters": {
+        "user_input": "Create a balanced portfolio for testing memory functionality",
+        "investment_universe": [
+          "AAPL",
+          "GOOGL",
+          "MSFT",
+          "AMZN"
+        ],
+        "optimization_type": "mean_variance",
+        "use_langgraph": true,
+        "constraints": {
+          "max_weight": 0.4,
+          "min_weight": 0.1
+        }
+      },
+      "timestamp": "2025-06-30T07:05:14.025165+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    },
+    "event_12_20250630_030514": {
+      "event_type": "LANGGRAPH_TASK_EXECUTED",
+      "agent_type": "mean_variance_optimizer",
+      "status": "success",
+      "thread_id": "b83ed266-90df-4fa1-bc69-2af36d03e07f",
+      "timestamp": "2025-06-30T07:05:14.041983+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    },
+    "event_13_20250630_030514": {
+      "event_type": "TASK_COMPLETED",
+      "task_type": "portfolio_optimization",
+      "agent_type": "mean_variance_optimizer",
+      "result_status": "success",
+      "execution_time": null,
+      "use_langgraph": true,
+      "timestamp": "2025-06-30T07:05:14.043531+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    }
+  },
+  "events_log": [
+    {
+      "event_type": "POOL_INITIALIZED",
+      "pool_id": "portfolio_construction_pool_a15784e9",
+      "agents_count": 8,
+      "features": {
+        "real_time_monitoring": true,
+        "external_memory": true,
+        "natural_language": true
+      },
+      "timestamp": "2025-06-30T07:05:14.020679+00:00"
+    },
+    {
+      "timestamp": "2025-06-30T07:05:14.021809+00:00",
+      "operation": "SET",
+      "key": "test_key_1",
+      "value_type": "dict"
+    },
+    {
+      "timestamp": "2025-06-30T07:05:14.021821+00:00",
+      "operation": "SET",
+      "key": "test_key_2",
+      "value_type": "dict"
+    },
+    {
+      "timestamp": "2025-06-30T07:05:14.021827+00:00",
+      "operation": "SET",
+      "key": "test_key_3",
+      "value_type": "dict"
+    },
+    {
+      "timestamp": "2025-06-30T07:05:14.021832+00:00",
+      "operation": "GET",
+      "key": "test_key_1",
+      "value_type": "dict"
+    },
+    {
+      "timestamp": "2025-06-30T07:05:14.021836+00:00",
+      "operation": "GET",
+      "key": "test_key_2",
+      "value_type": "dict"
+    },
+    {
+      "timestamp": "2025-06-30T07:05:14.021840+00:00",
+      "operation": "GET",
+      "key": "test_key_3",
+      "value_type": "dict"
+    },
+    {
+      "event_type": "PORTFOLIO_CREATED",
+      "portfolio_id": "test_portfolio_001",
+      "assets": [
+        "AAPL",
+        "GOOGL",
+        "MSFT"
+      ],
+      "optimization_type": "mean_variance",
+      "timestamp": "2025-06-30T07:05:14.021897+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    },
+    {
+      "event_type": "OPTIMIZATION_COMPLETED",
+      "portfolio_id": "test_portfolio_001",
+      "sharpe_ratio": 1.25,
+      "volatility": 0.18,
+      "timestamp": "2025-06-30T07:05:14.023058+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    },
+    {
+      "event_type": "BACKTEST_STARTED",
+      "portfolio_id": "test_portfolio_001",
+      "start_date": "2024-01-01",
+      "end_date": "2024-12-31",
+      "timestamp": "2025-06-30T07:05:14.024034+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    },
+    {
+      "event_type": "TASK_STARTED",
+      "task_type": "portfolio_optimization",
+      "agent_type": "mean_variance_optimizer",
+      "use_langgraph": true,
+      "parameters": {
+        "user_input": "Create a balanced portfolio for testing memory functionality",
+        "investment_universe": [
+          "AAPL",
+          "GOOGL",
+          "MSFT",
+          "AMZN"
+        ],
+        "optimization_type": "mean_variance",
+        "use_langgraph": true,
+        "constraints": {
+          "max_weight": 0.4,
+          "min_weight": 0.1
+        }
+      },
+      "timestamp": "2025-06-30T07:05:14.025165+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    },
+    {
+      "event_type": "LANGGRAPH_TASK_EXECUTED",
+      "agent_type": "mean_variance_optimizer",
+      "status": "success",
+      "thread_id": "b83ed266-90df-4fa1-bc69-2af36d03e07f",
+      "timestamp": "2025-06-30T07:05:14.041983+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    },
+    {
+      "event_type": "TASK_COMPLETED",
+      "task_type": "portfolio_optimization",
+      "agent_type": "mean_variance_optimizer",
+      "result_status": "success",
+      "execution_time": null,
+      "use_langgraph": true,
+      "timestamp": "2025-06-30T07:05:14.043531+00:00",
+      "pool_id": "portfolio_construction_pool_a15784e9"
+    }
+  ],
+  "active_portfolios": {},
+  "optimization_cache": {},
+  "statistics": {
+    "total_events": 13,
+    "total_memory_entries": 16
+  }
+}
