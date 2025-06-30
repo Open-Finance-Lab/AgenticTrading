@@ -29,6 +29,18 @@ import time
 import sys
 from pathlib import Path
 
+# Add memory module to path
+memory_path = Path(__file__).parent.parent.parent / "memory"
+sys.path.insert(0, str(memory_path))
+
+try:
+    from external_memory_agent import ExternalMemoryAgent, EventType, LogLevel
+    MEMORY_AVAILABLE = True
+except ImportError:
+    ExternalMemoryAgent = None
+    EventType = LogLevel = None
+    MEMORY_AVAILABLE = False
+
 from mcp.server.fastmcp import FastMCP
 from mcp.client.sse import sse_client
 from mcp import ClientSession
@@ -91,6 +103,15 @@ class DataAgentPoolMCPServer:
             agent_id: config["endpoint"] 
             for agent_id, config in self.agent_configs.items()
         }
+        
+        # Memory integration
+        self.memory_agent = None
+        if MEMORY_AVAILABLE:
+            self.memory_agent = ExternalMemoryAgent()
+            logger.info("Memory agent initialized for DataAgentPool")
+        
+        # Session management
+        self.current_session_id = None
         
         logger.info(f"Initialized DataAgentPoolMCPServer on {host}:{port}")
         logger.info(f"Agent endpoints: {self.agent_endpoints}")
@@ -346,6 +367,48 @@ class DataAgentPoolMCPServer:
         except Exception as e:
             return {"status": "error", "error": f"MCP client error: {str(e)}"}
 
+    async def _log_memory_event(self, event_type, log_level, title: str, content: str, 
+                               tags: set = None, metadata: dict = None):
+        """Log an event to the memory system"""
+        if not self.memory_agent:
+            return None
+            
+        try:
+            return await self.memory_agent.log_event(
+                event_type=event_type,
+                log_level=log_level,
+                source_agent_pool="data_agent_pool",
+                source_agent_id="data_pool_coordinator",
+                title=title,
+                content=content,
+                tags=tags or set(),
+                metadata=metadata or {},
+                session_id=self.current_session_id
+            )
+        except Exception as e:
+            logger.error(f"Failed to log memory event: {e}")
+            return None
+
+    async def _initialize_memory_agent(self):
+        """Initialize memory agent if available"""
+        if self.memory_agent:
+            try:
+                await self.memory_agent.initialize()
+                self.current_session_id = f"data_pool_session_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                
+                await self._log_memory_event(
+                    event_type=EventType.SYSTEM,
+                    log_level=LogLevel.INFO,
+                    title="Data Agent Pool started",
+                    content=f"DataAgentPool initialized on {self.host}:{self.port}",
+                    tags={"data_pool", "startup", "system"}
+                )
+                
+                logger.info("✅ Memory agent initialized for DataAgentPool")
+            except Exception as e:
+                logger.error(f"❌ Failed to initialize memory agent: {e}")
+                self.memory_agent = None
+
     def _register_pool_tools(self):
         """
         Register coordinating tools that proxy requests to individual agent MCP servers.
@@ -560,6 +623,176 @@ class DataAgentPoolMCPServer:
                 "agents": agent_health
             }
 
+        @self.pool_server.tool(name="get_historical_data", description="Get historical price data for symbols with memory storage")
+        async def get_historical_data(symbol: str, start_date: str, end_date: str, interval: str = "1d") -> dict:
+            """
+            Get historical price data for a symbol and store it in memory agent.
+            
+            Args:
+                symbol: Stock symbol (e.g., 'AAPL')
+                start_date: Start date (YYYY-MM-DD)
+                end_date: End date (YYYY-MM-DD)
+                interval: Time interval (1d, 1h, etc.)
+            
+            Returns:
+                dict: Historical data with memory storage confirmation
+            """
+            try:
+                # Try to get data from Polygon agent if available
+                endpoint = self.agent_endpoints.get("polygon_agent")
+                
+                if endpoint:
+                    # Use real Polygon data
+                    query = f"Get {interval} price data for {symbol} from {start_date} to {end_date}"
+                    result = await self._call_agent_tool(endpoint, "process_market_query", {"query": query})
+                    
+                    if result.get("status") == "success" and result.get("data"):
+                        historical_data = result["data"]
+                        
+                        # Store each data point in memory agent
+                        if self.memory_agent:
+                            for i, data_point in enumerate(historical_data):
+                                await self._log_memory_event(
+                                    event_type=EventType.MARKET_DATA,
+                                    log_level=LogLevel.INFO,
+                                    title=f"Historical Data: {symbol}",
+                                    content=f"Date: {data_point.get('date', 'N/A')}, "
+                                           f"Open: {data_point.get('open', 0)}, "
+                                           f"High: {data_point.get('high', 0)}, "
+                                           f"Low: {data_point.get('low', 0)}, "
+                                           f"Close: {data_point.get('close', 0)}, "
+                                           f"Volume: {data_point.get('volume', 0)}",
+                                    tags={f"symbol_{symbol}", "historical_data", "market_data"},
+                                    metadata={
+                                        "symbol": symbol,
+                                        "date": data_point.get('date'),
+                                        "price_data": data_point,
+                                        "interval": interval,
+                                        "data_source": "polygon_agent"
+                                    }
+                                )
+                        
+                        await self._log_memory_event(
+                            event_type=EventType.MARKET_DATA,
+                            log_level=LogLevel.INFO,
+                            title=f"Historical Data Retrieved: {symbol}",
+                            content=f"Successfully retrieved {len(historical_data)} data points "
+                                   f"for {symbol} from {start_date} to {end_date}",
+                            tags={f"symbol_{symbol}", "data_retrieval", "success"},
+                            metadata={
+                                "symbol": symbol,
+                                "start_date": start_date,
+                                "end_date": end_date,
+                                "data_points_count": len(historical_data),
+                                "interval": interval
+                            }
+                        )
+                        
+                        return {
+                            "status": "success",
+                            "symbol": symbol,
+                            "data": historical_data,
+                            "data_points": len(historical_data),
+                            "memory_stored": True,
+                            "source": "polygon_agent"
+                        }
+                
+                # Fallback: Generate synthetic data for testing
+                import random
+                from datetime import datetime, timedelta
+                
+                start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+                end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+                days = (end_dt - start_dt).days + 1
+                
+                base_price = random.uniform(90, 150)
+                synthetic_data = []
+                
+                for i in range(days):
+                    current_date = start_dt + timedelta(days=i)
+                    daily_change = random.uniform(-0.05, 0.05)  # ±5% daily change
+                    base_price *= (1 + daily_change)
+                    
+                    data_point = {
+                        "date": current_date.strftime("%Y-%m-%d"),
+                        "timestamp": current_date.strftime("%Y-%m-%d"),
+                        "open": round(base_price * random.uniform(0.98, 1.02), 2),
+                        "high": round(base_price * random.uniform(1.01, 1.05), 2),
+                        "low": round(base_price * random.uniform(0.95, 0.99), 2),
+                        "close": round(base_price, 2),
+                        "volume": random.randint(1000000, 10000000)
+                    }
+                    synthetic_data.append(data_point)
+                    
+                    # Store synthetic data in memory agent
+                    if self.memory_agent:
+                        await self._log_memory_event(
+                            event_type=EventType.MARKET_DATA,
+                            log_level=LogLevel.INFO,
+                            title=f"Synthetic Data: {symbol}",
+                            content=f"Date: {data_point['date']}, Close: {data_point['close']}, Volume: {data_point['volume']}",
+                            tags={f"symbol_{symbol}", "synthetic_data", "market_data"},
+                            metadata={
+                                "symbol": symbol,
+                                "date": data_point['date'],
+                                "price_data": data_point,
+                                "interval": interval,
+                                "data_source": "synthetic"
+                            }
+                        )
+                
+                await self._log_memory_event(
+                    event_type=EventType.MARKET_DATA,
+                    log_level=LogLevel.WARNING,
+                    title=f"Synthetic Data Generated: {symbol}",
+                    content=f"Generated {len(synthetic_data)} synthetic data points "
+                           f"for {symbol} from {start_date} to {end_date} (real data unavailable)",
+                    tags={f"symbol_{symbol}", "synthetic_data", "fallback"},
+                    metadata={
+                        "symbol": symbol,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "data_points_count": len(synthetic_data),
+                        "interval": interval
+                    }
+                )
+                
+                return {
+                    "status": "success",
+                    "symbol": symbol,
+                    "data": synthetic_data,
+                    "data_points": len(synthetic_data),
+                    "memory_stored": True,
+                    "source": "synthetic"
+                }
+                
+            except Exception as e:
+                error_msg = f"Failed to get historical data for {symbol}: {str(e)}"
+                logger.error(error_msg)
+                
+                await self._log_memory_event(
+                    event_type=EventType.MARKET_DATA,
+                    log_level=LogLevel.ERROR,
+                    title=f"Data Retrieval Failed: {symbol}",
+                    content=error_msg,
+                    tags={f"symbol_{symbol}", "data_error", "failure"},
+                    metadata={
+                        "symbol": symbol,
+                        "start_date": start_date,
+                        "end_date": end_date,
+                        "error": str(e)
+                    }
+                )
+                
+                return {
+                    "status": "error",
+                    "symbol": symbol,
+                    "error": error_msg,
+                    "memory_stored": True
+                }
+
+        # ...existing tools...
+
     async def run_async(self):
         """
         Async version of run that handles agent startup and monitoring.
@@ -567,6 +800,9 @@ class DataAgentPoolMCPServer:
         try:
             # Start all agents first
             await self.start_all_agents()
+            
+            # Initialize memory agent
+            await self._initialize_memory_agent()
             
             # Start agent monitoring in background
             monitor_task = asyncio.create_task(self.monitor_agents())

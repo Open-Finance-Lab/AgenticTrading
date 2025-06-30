@@ -9,6 +9,7 @@ Key Features:
 - Real-time cost calculation orchestration
 - Performance monitoring and optimization
 - Scalable microservices architecture
+- External memory agent integration
 
 Author: FinAgent Development Team
 License: OpenMDW
@@ -19,6 +20,7 @@ import asyncio
 import threading
 import time
 import json
+import sys
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Union
 from contextlib import asynccontextmanager
@@ -27,6 +29,19 @@ from fastapi import FastAPI, Request
 import contextvars
 import traceback
 import os
+from pathlib import Path
+
+# Add memory module to path
+memory_path = Path(__file__).parent.parent.parent / "memory"
+sys.path.insert(0, str(memory_path))
+
+try:
+    from external_memory_agent import ExternalMemoryAgent, EventType, LogLevel
+    MEMORY_AVAILABLE = True
+except ImportError:
+    ExternalMemoryAgent = None
+    EventType = LogLevel = None
+    MEMORY_AVAILABLE = False
 
 # Initialize logger
 logger = logging.getLogger("TransactionCostAgentPool")
@@ -58,6 +73,7 @@ class TransactionCostAgentPool:
     - Intelligent request routing and load balancing
     - Performance monitoring and optimization
     - Real-time cost calculation coordination
+    - External memory agent integration
     
     The pool operates in a microservices architecture, enabling horizontal
     scaling and fault tolerance across multiple agent instances.
@@ -94,9 +110,44 @@ class TransactionCostAgentPool:
         # Register MCP endpoints
         self._register_mcp_endpoints()
         
+        # Initialize memory agent
+        self.memory_agent = None
+        self.session_id = None
+        self._initialize_memory_agent()
+
         logger.info(f"Initialized Transaction Cost Agent Pool with ID: {pool_id}")
         logger.info(f"Configuration parameters: {len(self.config)} loaded")
 
+    def _initialize_memory_agent(self):
+        """Initialize the external memory agent"""
+        if not MEMORY_AVAILABLE:
+            logger.warning("External memory agent not available")
+            return
+        
+        try:
+            self.memory_agent = ExternalMemoryAgent()
+            self.session_id = f"transaction_cost_pool_session_{int(time.time())}"
+            logger.info("External memory agent initialized for Transaction Cost Agent Pool")
+        except Exception as e:
+            logger.error(f"Failed to initialize memory agent: {e}")
+            self.memory_agent = None
+
+    async def _log_memory_event(self, event_type: str, description: str, metadata: Optional[Dict[str, Any]] = None):
+        """Log an event to the memory agent"""
+        if self.memory_agent and self.session_id:
+            try:
+                await self.memory_agent.log_event(
+                    event_type=event_type,
+                    description=description,
+                    metadata={
+                        "session_id": self.session_id,
+                        "agent_pool": "transaction_cost",
+                        **(metadata or {})
+                    }
+                )
+            except Exception as e:
+                logger.warning(f"Failed to log memory event: {e}")
+    
     def _register_mcp_endpoints(self):
         """
         Register MCP protocol tools for external orchestration and management.

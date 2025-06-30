@@ -21,6 +21,7 @@ Date: 2025
 import asyncio
 import json
 import logging
+import os
 import sqlite3
 import threading
 import uuid
@@ -220,13 +221,18 @@ class SQLiteStorageBackend(StorageBackend):
     Suitable for development, testing, and moderate production workloads.
     """
     
-    def __init__(self, db_path: str = "memory_agent.db"):
+    def __init__(self, db_path: str = None):
         """
         Initialize SQLite storage backend.
         
         Args:
-            db_path: Path to the SQLite database file
+            db_path: Path to the SQLite database file (defaults to memory/memory_agent.db)
         """
+        if db_path is None:
+            # Create default path in memory directory
+            memory_dir = os.path.dirname(os.path.abspath(__file__))
+            db_path = os.path.join(memory_dir, "memory_agent.db")
+            
         self.db_path = db_path
         self.lock = threading.Lock()
     
@@ -265,6 +271,10 @@ class SQLiteStorageBackend(StorageBackend):
         """Store a single event in the database."""
         try:
             async with aiosqlite.connect(self.db_path) as db:
+                # Handle both enum and string values for event_type and log_level
+                event_type_value = event.event_type.value if hasattr(event.event_type, 'value') else str(event.event_type)
+                log_level_value = event.log_level.value if hasattr(event.log_level, 'value') else str(event.log_level)
+                
                 await db.execute('''
                     INSERT OR REPLACE INTO memory_events 
                     (event_id, timestamp, event_type, log_level, source_agent_pool,
@@ -273,8 +283,8 @@ class SQLiteStorageBackend(StorageBackend):
                 ''', (
                     event.event_id,
                     event.timestamp.isoformat(),
-                    event.event_type.value,
-                    event.log_level.value,
+                    event_type_value,
+                    log_level_value,
                     event.source_agent_pool,
                     event.source_agent_id,
                     event.title,
@@ -299,11 +309,15 @@ class SQLiteStorageBackend(StorageBackend):
             async with aiosqlite.connect(self.db_path) as db:
                 event_data = []
                 for event in events:
+                    # Handle both enum and string values for event_type and log_level
+                    event_type_value = event.event_type.value if hasattr(event.event_type, 'value') else str(event.event_type)
+                    log_level_value = event.log_level.value if hasattr(event.log_level, 'value') else str(event.log_level)
+                    
                     event_data.append((
                         event.event_id,
                         event.timestamp.isoformat(),
-                        event.event_type.value,
-                        event.log_level.value,
+                        event_type_value,
+                        log_level_value,
                         event.source_agent_pool,
                         event.source_agent_id,
                         event.title,
@@ -552,8 +566,8 @@ class ExternalMemoryAgent:
             raise
     
     async def log_event(self,
-                       event_type: EventType,
-                       log_level: LogLevel,
+                       event_type: Union[EventType, str],
+                       log_level: Union[LogLevel, str],
                        source_agent_pool: str,
                        source_agent_id: str,
                        title: str,
@@ -568,8 +582,8 @@ class ExternalMemoryAgent:
         This is the primary method for agent pools to store their events and logs.
         
         Args:
-            event_type: Type of the event
-            log_level: Log level of the event
+            event_type: Type of the event (EventType enum or string)
+            log_level: Log level of the event (LogLevel enum or string)
             source_agent_pool: Name of the source agent pool
             source_agent_id: ID of the specific agent
             title: Brief title of the event
@@ -586,6 +600,21 @@ class ExternalMemoryAgent:
             raise RuntimeError("Memory agent not initialized. Call initialize() first.")
         
         event_id = str(uuid.uuid4())
+        
+        # Ensure event_type and log_level are proper enum objects
+        if isinstance(event_type, str):
+            try:
+                event_type = EventType(event_type.lower())
+            except ValueError:
+                logger.warning(f"Invalid event_type string '{event_type}', using default")
+                event_type = EventType.INFO
+        
+        if isinstance(log_level, str):
+            try:
+                log_level = LogLevel(log_level.lower())
+            except ValueError:
+                logger.warning(f"Invalid log_level string '{log_level}', using default")
+                log_level = LogLevel.INFO
         
         event = MemoryEvent(
             event_id=event_id,

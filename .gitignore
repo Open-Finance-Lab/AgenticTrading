@@ -2,7 +2,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
-
+logs/
 # C extensions
 *.so
 Papers/
@@ -193,3 +193,30 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+# Memory agent database files
+FinAgents/memory/*.db
+FinAgents/memory/*.sqlite
+FinAgents/memory/*.sqlite3
+memory_agent.db
+
+# Agent pool data files
+FinAgents/agent_pools/*/memory_unit.json
+FinAgents/agent_pools/*/momentum_signal_flow.json
+FinAgents/agent_pools/*/data_cache/
+FinAgents/agent_pools/*/*.db
+
+# Data cache and temporary files
+data/cache/*.csv
+data/cache/*.json
+data/temp/
+*.tmp
+data/
+
+# Log files
+*.log
+logs/
+FinAgents/**/*.log
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/

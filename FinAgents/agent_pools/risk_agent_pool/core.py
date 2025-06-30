@@ -21,6 +21,7 @@ import asyncio
 import threading
 import time
 import json
+import sys
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Union
 from contextlib import asynccontextmanager
@@ -31,6 +32,19 @@ import traceback
 import os
 import openai
 from openai import AsyncOpenAI
+from pathlib import Path
+
+# Add memory module to path
+memory_path = Path(__file__).parent.parent.parent / "memory"
+sys.path.insert(0, str(memory_path))
+
+try:
+    from external_memory_agent import ExternalMemoryAgent, EventType, LogLevel
+    MEMORY_AVAILABLE = True
+except ImportError:
+    ExternalMemoryAgent = None
+    EventType = LogLevel = None
+    MEMORY_AVAILABLE = False
 
 # Initialize logger
 logger = logging.getLogger("RiskAgentPool")
@@ -146,6 +160,11 @@ class RiskAgentPool:
         self.openai_client = self.config.get('openai_client')
         self.memory_bridge = self.config.get('memory_bridge')
         
+        # Initialize memory agent
+        self.memory_agent = None
+        self.session_id = None
+        self._initialize_memory_agent()
+        
         self.context_decompressor = None
         self.mcp_app = None
         self.fastapi_app = None
@@ -196,6 +215,36 @@ class RiskAgentPool:
                 self.logger.warning("No OpenAI API key found. Context decompression will use fallback.")
         except Exception as e:
             self.logger.error(f"Failed to initialize OpenAI client: {e}")
+    
+    def _initialize_memory_agent(self):
+        """Initialize the external memory agent"""
+        if not MEMORY_AVAILABLE:
+            self.logger.warning("External memory agent not available")
+            return
+        
+        try:
+            self.memory_agent = ExternalMemoryAgent()
+            self.session_id = f"risk_pool_session_{int(time.time())}"
+            self.logger.info("External memory agent initialized for Risk Agent Pool")
+        except Exception as e:
+            self.logger.error(f"Failed to initialize memory agent: {e}")
+            self.memory_agent = None
+    
+    async def _log_memory_event(self, event_type: str, description: str, metadata: Optional[Dict[str, Any]] = None):
+        """Log an event to the memory agent"""
+        if self.memory_agent and self.session_id:
+            try:
+                await self.memory_agent.log_event(
+                    event_type=event_type,
+                    description=description,
+                    metadata={
+                        "session_id": self.session_id,
+                        "agent_pool": "risk",
+                        **(metadata or {})
+                    }
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to log memory event: {e}")
     
     async def initialize_agents(self):
         """Initialize all risk analysis agents."""
