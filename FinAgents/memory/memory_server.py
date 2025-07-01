@@ -8,7 +8,6 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator 
 from dataclasses import dataclass
 
-
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
 NEO4J_PASSWORD = "FinOrchestration" 
@@ -25,6 +24,8 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[None]:
     if GRAPH_DB_INSTANCE and GRAPH_DB_INSTANCE.driver:
         print("🔗 [SERVER] Lifespan event: Ensuring full-text search index is created...")
         await GRAPH_DB_INSTANCE.create_memory_index()
+        print("🔗 [SERVER] Lifespan event: Ensuring structured property indexes are created...")
+        await GRAPH_DB_INSTANCE.create_structured_indexes() # --- NEW ---
     else:
         print("❌ [SERVER] Lifespan event ERROR: Could not connect to Neo4j.")
 
@@ -36,7 +37,6 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[None]:
         if GRAPH_DB_INSTANCE:
             await GRAPH_DB_INSTANCE.close()
 
-
 mcp = FastMCP(
     "Neo4jMemoryAgent",
     lifespan=app_lifespan, 
@@ -44,22 +44,26 @@ mcp = FastMCP(
     debug=True            
 )
 
-
 @mcp.tool(name="store_graph_memory",
           description="Stores a structured memory in the Neo4j graph database.")
 async def store_graph_memory(
     query: str, 
     keywords: list,
     summary: str, 
-    agent_id: str
+    agent_id: str,
+    event_type: Optional[str] = 'USER_QUERY', 
+    log_level: Optional[str] = 'INFO',
+    session_id: Optional[str] = None, 
+    correlation_id: Optional[str] = None
 ):
-
     print(f"🛠️ [SERVER] --- Tool: store_graph_memory ---")
     if not GRAPH_DB_INSTANCE:
         raise Exception("Database connection is not available.")
         
     try:
-        stored_data = await GRAPH_DB_INSTANCE.store_memory(query, keywords, summary, agent_id)
+        stored_data = await GRAPH_DB_INSTANCE.store_memory(
+            query, keywords, summary, agent_id, event_type, log_level, session_id, correlation_id
+        )
         if stored_data:
             print(f"   - ✅ [SERVER] Memory stored successfully in DB.")
             linked_count = len(stored_data.get('linked_memories', []))
@@ -73,6 +77,59 @@ async def store_graph_memory(
         print(f"   - ❌ [SERVER] ERROR during store_graph_memory: {e}")
         error_response = { "status": "error", "message": f"An internal error occurred in store_graph_memory: {str(e)}" }
         return json.dumps(error_response)
+
+# --- NEW ---
+# Tool to expose the batch storage functionality.
+@mcp.tool(name="store_graph_memories_batch",
+          description="Stores a batch of event-like memories in the Neo4j graph database. Optimized for high-throughput.")
+async def store_graph_memories_batch(events: List[Dict[str, Any]]):
+    print(f"🛠️ [SERVER] --- Tool: store_graph_memories_batch ---")
+    if not GRAPH_DB_INSTANCE:
+        raise Exception("Database connection is not available.")
+    
+    try:
+        count = await GRAPH_DB_INSTANCE.store_memories_batch(events)
+        message = f"Successfully stored {count} memories in a batch operation."
+        print(f"   - ✅ [SERVER] {message}")
+        return json.dumps({"status": "success", "stored_count": count, "message": message})
+    except Exception as e:
+        print(f"   - ❌ [SERVER] ERROR during store_graph_memories_batch: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+@mcp.tool(name="filter_graph_memories",
+          description="Filters memories based on structured criteria like time, event type, or session ID, not on semantic content.")
+async def filter_graph_memories(
+    filters: Dict[str, Any], 
+    limit: int = 100,
+    offset: int = 0
+):
+    print(f"🛠️ [SERVER] --- Tool: filter_graph_memories ---")
+    if not GRAPH_DB_INSTANCE:
+        raise Exception("Database connection is not available.")
+
+    try:
+        results = await GRAPH_DB_INSTANCE.filter_memories(filters, limit, offset)
+        message = f"Filter query returned {len(results)} memories."
+        print(f"   - ✅ [SERVER] {message}")
+        return json.dumps({"status": "success", "filtered_memories": results})
+    except Exception as e:
+        print(f"   - ❌ [SERVER] ERROR during filter_graph_memories: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
+
+@mcp.tool(name="get_graph_memory_statistics",
+          description="Retrieves operational statistics about the memories in the graph database.")
+async def get_graph_memory_statistics():
+    print(f"🛠️ [SERVER] --- Tool: get_graph_memory_statistics ---")
+    if not GRAPH_DB_INSTANCE:
+        raise Exception("Database connection is not available.")
+    
+    try:
+        stats = await GRAPH_DB_INSTANCE.get_statistics()
+        print(f"   - ✅ [SERVER] Successfully retrieved statistics.")
+        return json.dumps({"status": "success", "statistics": stats})
+    except Exception as e:
+        print(f"   - ❌ [SERVER] ERROR during get_graph_memory_statistics: {e}")
+        return json.dumps({"status": "error", "message": str(e)})
 
 
 @mcp.tool(name="retrieve_graph_memory",

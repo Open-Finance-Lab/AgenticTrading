@@ -2,7 +2,7 @@ from neo4j import GraphDatabase, AsyncGraphDatabase
 import logging
 import uuid
 from datetime import datetime
-from typing import List
+from typing import List, Dict, Any, Optional
 
 URI = "bolt://localhost:7687"
 AUTH = ("neo4j", "FinOrchestration")
@@ -37,21 +37,39 @@ class TradingGraphMemory:
             await session.run(query)
         logging.info(f"Full-text index '{index_name}' is ready.")
 
-    async def store_memory(self, query: str, keywords: List[str], summary: str, agent_id: str, similarity_threshold: float = 1.5):
+    async def create_structured_indexes(self):
+        logging.info("Ensuring structured property indexes are created...")
+        async with self.driver.session() as session:
+            await session.run("CREATE INDEX memory_event_type IF NOT EXISTS FOR (m:Memory) ON (m.event_type)")
+            await session.run("CREATE INDEX memory_log_level IF NOT EXISTS FOR (m:Memory) ON (m.log_level)")
+            await session.run("CREATE INDEX memory_session_id IF NOT EXISTS FOR (m:Memory) ON (m.session_id)")
+            await session.run("CREATE INDEX memory_agent_id IF NOT EXISTS FOR (m:Memory) ON (m.agent_id)")
+        logging.info("Structured property indexes are ready.")
+
+    async def store_memory(
+        self, query: str, keywords: List[str], summary: str, agent_id: str,
+        event_type: Optional[str] = 'USER_QUERY', log_level: Optional[str] = 'INFO',
+        session_id: Optional[str] = None, correlation_id: Optional[str] = None,
+        similarity_threshold: float = 1.25
+    ):
         memory_id = str(uuid.uuid4())
         timestamp = datetime.now().isoformat()
 
         async with self.driver.session() as session:
-            async with session.begin_transaction() as tx:
+            # CORRECTED LINE: Added 'await' before session.begin_transaction()
+            async with await session.begin_transaction() as tx:
                 create_cypher = """
                 CREATE (m:Memory {
                     query: $query, keywords: $keywords, summary: $summary, agent_id: $agent_id,
-                    memory_id: $memory_id, timestamp: $timestamp, lookup_count: 0
+                    memory_id: $memory_id, timestamp: $timestamp, lookup_count: 0,
+                    event_type: $event_type, log_level: $log_level, session_id: $session_id,
+                    correlation_id: $correlation_id
                 }) RETURN m
                 """
                 parameters = {
-                    "query": query, "keywords": keywords, "summary": summary,
-                    "agent_id": agent_id, "memory_id": memory_id, "timestamp": timestamp,
+                    "query": query, "keywords": keywords, "summary": summary, "agent_id": agent_id,
+                    "memory_id": memory_id, "timestamp": timestamp, "event_type": event_type,
+                    "log_level": log_level, "session_id": session_id, "correlation_id": correlation_id
                 }
                 result = await tx.run(create_cypher, parameters)
                 create_result = await result.single()
@@ -84,15 +102,94 @@ class TradingGraphMemory:
                     """
                     link_params = {"new_memory_id": memory_id, "similar_ids": similar_memory_ids}
                     await tx.run(link_cypher, link_params)
+            # The transaction is automatically committed on exiting the 'async with' block successfully.
 
-                await tx.commit()
-
+            node_data = dict(node)
             return {
-                'query': node['query'], 'keywords': node['keywords'], 'summary': node['summary'],
-                'metadata': { 'agent_id': node['agent_id'], 'memory_id': node['memory_id'], 'timestamp': node['timestamp'], 'lookup_count': node['lookup_count'] },
+                'query': node_data.get('query'), 'keywords': node_data.get('keywords'), 'summary': node_data.get('summary'),
+                'metadata': {k: node_data.get(k) for k in ['agent_id', 'memory_id', 'timestamp', 'lookup_count', 'event_type', 'log_level', 'session_id', 'correlation_id']},
                 'linked_memories': similar_memory_ids
             }
         return None
+
+
+
+    async def store_memories_batch(self, events: List[Dict[str, Any]]):
+        if not events:
+            return 0
+
+        for event in events:
+            event['memory_id'] = str(uuid.uuid4())
+            event['timestamp'] = datetime.now().isoformat()
+            event['lookup_count'] = 0
+
+        cypher_query = """
+        UNWIND $events AS event
+        CREATE (m:Memory)
+        SET m = event
+        RETURN count(m) as created_count
+        """
+        async with self.driver.session() as session:
+            result = await session.run(cypher_query, parameters={"events": events})
+            record = await result.single()
+            return record["created_count"] if record else 0
+
+    async def filter_memories(self, filters: Dict[str, Any], limit: int = 100, offset: int = 0):
+        where_clauses = []
+        params = {'limit': limit, 'offset': offset}
+
+        if filters.get('start_time'):
+            where_clauses.append("datetime(m.timestamp) >= datetime($start_time)")
+            params['start_time'] = filters['start_time']
+        if filters.get('end_time'):
+            where_clauses.append("datetime(m.timestamp) <= datetime($end_time)")
+            params['end_time'] = filters['end_time']
+        if filters.get('event_types'):
+            where_clauses.append("m.event_type IN $event_types")
+            params['event_types'] = filters['event_types']
+        if filters.get('log_levels'):
+            where_clauses.append("m.log_level IN $log_levels")
+            params['log_levels'] = filters['log_levels']
+        if filters.get('session_id'):
+            where_clauses.append("m.session_id = $session_id")
+            params['session_id'] = filters['session_id']
+        if filters.get('agent_id'):
+            where_clauses.append("m.agent_id = $agent_id")
+            params['agent_id'] = filters['agent_id']
+
+        where_statement = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
+
+        query = f"""
+            MATCH (m:Memory)
+            {where_statement}
+            RETURN m
+            ORDER BY m.timestamp DESC
+            SKIP $offset
+            LIMIT $limit
+        """
+
+        async with self.driver.session() as session:
+            result = await session.run(query, params)
+            return [dict(record['m']) async for record in result]
+
+    async def get_statistics(self):
+        stats = {}
+        async with self.driver.session() as session:
+            total_res = await session.run("MATCH (m:Memory) RETURN count(m) as count")
+            stats['total_memories'] = (await total_res.single())['count']
+
+            by_type_res = await session.run("""
+                MATCH (m:Memory) WHERE m.event_type IS NOT NULL
+                RETURN m.event_type as type, count(m) as count
+            """)
+            stats['memories_by_type'] = {r['type']: r['count'] async for r in by_type_res}
+
+            by_level_res = await session.run("""
+                MATCH (m:Memory) WHERE m.log_level IS NOT NULL
+                RETURN m.log_level as level, count(m) as count
+            """)
+            stats['memories_by_log_level'] = {r['level']: r['count'] async for r in by_level_res}
+        return stats
 
     async def retrieve_memory(self, search_query: str, limit: int = 5):
         cypher_query = """
