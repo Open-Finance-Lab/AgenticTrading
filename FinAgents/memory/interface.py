@@ -45,7 +45,7 @@ tools_definition = [
             },
         },
     },
-    { # --- NEW ---
+    {
         "type": "function",
         "function": {
             "name": "filter_graph_memories",
