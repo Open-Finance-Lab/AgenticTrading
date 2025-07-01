@@ -78,8 +78,9 @@ async def store_graph_memory(
         error_response = { "status": "error", "message": f"An internal error occurred in store_graph_memory: {str(e)}" }
         return json.dumps(error_response)
 
-# --- NEW ---
-# Tool to expose the batch storage functionality.
+
+
+
 @mcp.tool(name="store_graph_memories_batch",
           description="Stores a batch of event-like memories in the Neo4j graph database. Optimized for high-throughput.")
 async def store_graph_memories_batch(events: List[Dict[str, Any]]):
