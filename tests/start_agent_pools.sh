@@ -219,8 +219,7 @@ echo "   • Memory Agent: Temporarily skipped initialization"
 
 echo ""
 echo "🚀 Ready to execute natural language backtesting:"
-echo "   python tests/test_natural_language_backtest.py"
-echo "   python tests/test_chatbot_client.py"
+echo "   python tests/test_simple_llm_backtest.py"
 
 echo ""
 echo "🛑 To terminate all services:"
