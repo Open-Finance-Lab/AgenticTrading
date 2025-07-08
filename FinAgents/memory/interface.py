@@ -11,7 +11,7 @@ from mcp.client.streamable_http import streamablehttp_client
 from mcp import types as mcp_types
 
 
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '../..'))
 dotenv_path = os.path.join(project_root, '.env')
 load_dotenv(dotenv_path=dotenv_path)
 
@@ -21,21 +21,25 @@ if not OPENAI_API_KEY:
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
-MCP_SERVER_URL = "http://127.0.0.1:8000/mcp" 
+MCP_SERVER_URL = "http://127.0.0.1:8010/mcp" 
 
 tools_definition = [
     {
         "type": "function",
         "function": {
             "name": "store_graph_memory",
-            "description": "Stores a structured memory about a topic, query, or event into the Neo4j graph database.",
+            "description": "Stores a structured memory about a topic, query, or event into the Neo4j graph database. Can also be used to log agent actions or errors.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The original question or topic that this memory is about."},
+                    "query": {"type": "string", "description": "The original question or topic that this memory is about. Can be a summary of an action."},
                     "keywords": {"type": "array", "items": {"type": "string"}, "description": "A list of important keywords related to the memory."},
                     "summary": {"type": "string", "description": "A concise summary of the memory's content."},
-                    "agent_id": {"type": "string", "description": "The unique identifier of the agent storing this memory."}
+                    "agent_id": {"type": "string", "description": "The unique identifier of the agent storing this memory."},
+                    "event_type": {"type": "string", "description": "The type of event (e.g., 'USER_QUERY', 'AGENT_ACTION', 'ERROR', 'SYSTEM_LOG'). Defaults to 'USER_QUERY'."},
+                    "log_level": {"type": "string", "description": "The severity level of the event (e.g., 'INFO', 'WARNING', 'ERROR'). Defaults to 'INFO'."},
+                    "session_id": {"type": "string", "description": "An ID to group memories from the same conversational session."},
+                    "correlation_id": {"type": "string", "description": "An ID to link a chain of related events."}
                 },
                 "required": ["query", "keywords", "summary", "agent_id"],
             },
@@ -44,8 +48,43 @@ tools_definition = [
     {
         "type": "function",
         "function": {
+            "name": "filter_graph_memories",
+            "description": "Filters memories based on structured criteria like time ranges, event types, log levels, or session IDs. Use this for timeline analysis or debugging, not for semantic search.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "filters": {
+                        "type": "object",
+                        "description": "A dictionary of filters to apply.",
+                        "properties": {
+                           "start_time": {"type": "string", "format": "date-time", "description": "The inclusive start time for the filter range (ISO 8601 format)."},
+                           "end_time": {"type": "string", "format": "date-time", "description": "The inclusive end time for the filter range (ISO 8601 format)."},
+                           "event_types": {"type": "array", "items": {"type": "string"}, "description": "A list of event types to include."},
+                           "log_levels": {"type": "array", "items": {"type": "string"}, "description": "A list of log levels to include."},
+                           "session_id": {"type": "string", "description": "The specific session ID to filter by."},
+                           "agent_id": {"type": "string", "description": "The specific agent ID to filter by."}
+                        }
+                    },
+                    "limit": {"type": "integer", "description": "Maximum number of memories to return. Defaults to 100."},
+                    "offset": {"type": "integer", "description": "Number of memories to skip for pagination. Defaults to 0."}
+                },
+                "required": ["filters"]
+            }
+        }
+    },
+    { 
+        "type": "function",
+        "function": {
+            "name": "get_graph_memory_statistics",
+            "description": "Retrieves operational statistics about the memory graph, such as total memory count and breakdowns by type and log level.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "retrieve_graph_memory",
-            "description": "Retrieves memories from the Neo4j graph database using a fast, direct full-text search on keywords and summaries.",
+            "description": "Retrieves memories from the Neo4j graph database using a fast, direct full-text search on keywords and summaries. Use this for specific, keyword-based queries.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -111,7 +150,6 @@ tools_definition = [
 ]
 
 async def call_mcp_tool(session: ClientSession, tool_name: str, tool_args: Dict[str, Any]) -> Any:
-    """Helper function to call a tool on the MCP server and handle the response."""
     print(f"📞 [CLIENT] Calling MCP tool: {tool_name} with args: {json.dumps(tool_args, indent=2)}")
 
     try:
@@ -144,7 +182,6 @@ async def call_mcp_tool(session: ClientSession, tool_name: str, tool_args: Dict[
 
 
 async def run_conversation_with_tools(user_prompt: str, mcp_session: ClientSession):
-    """Orchestrates a conversation turn with OpenAI, allowing for tool calls."""
     messages = [{"role": "user", "content": user_prompt}]
     print(f"\n👤 [CLIENT] User Prompt: {user_prompt}")
 
@@ -196,7 +233,6 @@ async def run_conversation_with_tools(user_prompt: str, mcp_session: ClientSessi
 
 
 async def main():
-    """Main function to connect to the MCP server and start the chat loop."""
     print(f"[CLIENT] Attempting to connect to MCP server at {MCP_SERVER_URL}...")
     try:
         async with streamablehttp_client(MCP_SERVER_URL) as (read, write, _):
@@ -223,7 +259,7 @@ async def main():
 
     except httpx.ConnectError as e:
         print(f"❌ [CLIENT] Connection Error: Failed to connect to MCP server at {MCP_SERVER_URL}.")
-        print(f"   Is the server running? `uvicorn server:app --reload`")
+        print(f"   Is the server running? `uvicorn memory_server:app --reload`")
     except Exception as e:
         print(f"❌ [CLIENT] An unexpected error occurred during MCP client setup: {e}")
 
