@@ -439,338 +439,431 @@ class FinAgentOrchestrator:
                 "session_id": self.current_session_id
             }
 
-    async def _run_backtest_simulation(self, config: BacktestConfiguration, backtest_id: str) -> BacktestResult:
-        """
-        Run comprehensive backtest simulation using simple fallback data.
-        """
-        start_time = datetime.now()
-        
-        # Initialize simulation state
-        portfolio_value = config.initial_capital
-        positions = {symbol: 0 for symbol in config.strategy.symbols}
-        cash = config.initial_capital
-        trade_history = []
-        portfolio_values = []
-        
-        # Generate trading dates
-        trading_dates = []
-        current_date = config.start_date
-        while current_date <= config.end_date:
-            if current_date.weekday() < 5:  # Trading days only
-                trading_dates.append(current_date)
-            current_date += timedelta(days=1)
-        
-        logger.info(f"Running backtest simulation for {len(trading_dates)} trading days")
-        
-        # Simulation loop with simple market data
-        for i, date in enumerate(trading_dates):
+        @self.mcp_server.tool(name="start_agent_pool", description="Start a specific agent pool")
+        async def start_agent_pool(pool_type: str, port: int = None) -> dict:
+            """Start a specific agent pool and verify its connectivity"""
+            import subprocess
+            import time
+            import os
+            
             try:
-                # Generate simple market data
-                market_data = self._generate_simple_market_data(config.strategy.symbols, date)
+                # Map pool types to their modules and default ports
+                pool_config = {
+                    "data": {
+                        "module": "FinAgents.agent_pools.data_agent_pool.core",
+                        "port": port or 8080,
+                        "health_path": "/health"
+                    },
+                    "alpha": {
+                        "module": "FinAgents.agent_pools.alpha_agent_pool.core", 
+                        "port": port or 8081,
+                        "health_path": "/health"
+                    },
+                    "portfolio": {
+                        "module": "FinAgents.agent_pools.portfolio_construction_agent_pool.core",
+                        "port": port or 8083,
+                        "health_path": "/health"
+                    },
+                    "risk": {
+                        "module": "FinAgents.agent_pools.risk_agent_pool.core",
+                        "port": port or 8084,
+                        "health_path": "/health"
+                    },
+                    "transaction_cost": {
+                        "module": "FinAgents.agent_pools.transaction_cost_agent_pool.core",
+                        "port": port or 8085,
+                        "health_path": "/health"
+                    },
+                    "memory": {
+                        "module": "FinAgents.memory.memory_server",
+                        "port": port or 8086,
+                        "health_path": "/health"
+                    }
+                }
                 
-                # Simple signal generation (placeholder)
-                signals = []
-                for symbol in config.strategy.symbols:
-                    if symbol in market_data:
-                        # Simple momentum signal
-                        price = market_data[symbol]["close"]
-                        if i > 10:  # Need some history
-                            prev_price = portfolio_values[-1].get("market_data", {}).get(symbol, {}).get("close", price)
-                            momentum = (price - prev_price) / prev_price
-                            if momentum > 0.02:  # 2% positive momentum
-                                signals.append({
-                                    "symbol": symbol,
-                                    "action": "buy",
-                                    "confidence": min(0.8, 0.5 + abs(momentum))
-                                })
-                            elif momentum < -0.02:  # 2% negative momentum
-                                if positions.get(symbol, 0) > 0:
-                                    signals.append({
-                                        "symbol": symbol,
-                                        "action": "sell",
-                                        "confidence": min(0.8, 0.5 + abs(momentum))
-                                    })
+                if pool_type not in pool_config:
+                    return {
+                        "status": "error",
+                        "error": f"Unknown pool type: {pool_type}",
+                        "available_types": list(pool_config.keys())
+                    }
                 
-                # Execute trades
-                daily_trades = await self._execute_simple_trades(signals, market_data, positions, cash, config)
-                trade_history.extend(daily_trades)
+                config = pool_config[pool_type]
                 
-                # Update positions and cash
-                for trade in daily_trades:
-                    if trade["action"] == "buy":
-                        cash -= trade["total_cost"]
-                        positions[trade["symbol"]] = positions.get(trade["symbol"], 0) + trade["shares"]
-                    elif trade["action"] == "sell":
-                        cash += trade["total_proceeds"]
-                        positions[trade["symbol"]] = max(0, positions.get(trade["symbol"], 0) - trade["shares"])
+                # Check if already running
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=5) as client:
+                        response = await client.get(f"http://localhost:{config['port']}{config['health_path']}")
+                        if response.status_code == 200:
+                            return {
+                                "status": "already_running",
+                                "pool_type": pool_type,
+                                "port": config['port'],
+                                "message": f"{pool_type} agent pool is already running on port {config['port']}"
+                            }
+                except:
+                    pass  # Not running, proceed to start
                 
-                # Calculate portfolio value
-                current_portfolio_value = cash
-                for symbol, qty in positions.items():
-                    if symbol in market_data and qty > 0:
-                        current_portfolio_value += qty * market_data[symbol]["close"]
+                # Start the agent pool
+                workspace_dir = "/Users/lijifeng/Documents/AI_agent/FinAgent-Orchestration"
+                log_file = f"{workspace_dir}/logs/{pool_type}_agent_pool.log"
+                pid_file = f"{workspace_dir}/logs/{pool_type}_agent_pool.pid"
                 
-                portfolio_values.append({
-                    "date": date.isoformat(),
-                    "value": current_portfolio_value,
-                    "cash": cash,
-                    "positions": positions.copy(),
-                    "market_data": market_data
-                })
+                # Ensure log directory exists
+                os.makedirs(f"{workspace_dir}/logs", exist_ok=True)
                 
-                portfolio_value = current_portfolio_value
+                # Start the process
+                cmd = f"cd {workspace_dir} && python -m {config['module']} > {log_file} 2>&1 & echo $! > {pid_file}"
                 
-                # Log progress
-                if i % 50 == 0:
-                    progress = (i / len(trading_dates)) * 100
-                    logger.info(f"Backtest progress: {progress:.1f}% - Portfolio: ${portfolio_value:,.2f}")
+                process = subprocess.Popen(
+                    cmd,
+                    shell=True,
+                    cwd=workspace_dir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE
+                )
+                
+                # Give it time to start
+                await asyncio.sleep(3)
+                
+                # Verify it started successfully
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=10) as client:
+                        for attempt in range(5):
+                            try:
+                                response = await client.get(f"http://localhost:{config['port']}{config['health_path']}")
+                                if response.status_code == 200:
+                                    # Update orchestrator's agent pool connection
+                                    pool_enum_map = {
+                                        "data": AgentPoolType.DATA_AGENT_POOL,
+                                        "alpha": AgentPoolType.ALPHA_AGENT_POOL,
+                                        "portfolio": AgentPoolType.EXECUTION_AGENT_POOL,
+                                        "risk": AgentPoolType.EXECUTION_AGENT_POOL,
+                                        "transaction_cost": AgentPoolType.EXECUTION_AGENT_POOL,
+                                        "memory": AgentPoolType.MEMORY_AGENT
+                                    }
+                                    
+                                    if pool_type in pool_enum_map:
+                                        pool_enum = pool_enum_map[pool_type]
+                                        if pool_enum in self.agent_pools:
+                                            self.agent_pools[pool_enum].is_connected = True
+                                            self.agent_pools[pool_enum].last_health_check = datetime.now()
+                                    
+                                    return {
+                                        "status": "success",
+                                        "pool_type": pool_type,
+                                        "port": config['port'],
+                                        "message": f"{pool_type} agent pool started successfully",
+                                        "health_check": "passed"
+                                    }
+                            except Exception as e:
+                                if attempt < 4:
+                                    await asyncio.sleep(2)
+                                    continue
+                                else:
+                                    break
+                    
+                    # If we get here, health check failed
+                    return {
+                        "status": "started_but_unhealthy",
+                        "pool_type": pool_type,
+                        "port": config['port'],
+                        "message": f"{pool_type} agent pool started but health check failed",
+                        "log_file": log_file
+                    }
+                    
+                except Exception as e:
+                    return {
+                        "status": "start_failed",
+                        "pool_type": pool_type,
+                        "error": str(e),
+                        "log_file": log_file
+                    }
+                
+            except Exception as e:
+                logger.error(f"Failed to start {pool_type} agent pool: {e}")
+                return {
+                    "status": "error",
+                    "pool_type": pool_type,
+                    "error": str(e)
+                }
+
+        @self.mcp_server.tool(name="stop_agent_pool", description="Stop a specific agent pool")
+        async def stop_agent_pool(pool_type: str) -> dict:
+            """Stop a specific agent pool"""
+            import subprocess
+            import os
+            
+            try:
+                workspace_dir = "/Users/lijifeng/Documents/AI_agent/FinAgent-Orchestration"
+                pid_file = f"{workspace_dir}/logs/{pool_type}_agent_pool.pid"
+                
+                # Try to read PID file
+                if os.path.exists(pid_file):
+                    try:
+                        with open(pid_file, 'r') as f:
+                            pid = int(f.read().strip())
+                        
+                        # Kill the process
+                        subprocess.run(f"kill {pid}", shell=True, check=False)
+                        os.remove(pid_file)
+                        
+                        # Update orchestrator's agent pool connection
+                        pool_enum_map = {
+                            "data": AgentPoolType.DATA_AGENT_POOL,
+                            "alpha": AgentPoolType.ALPHA_AGENT_POOL,
+                            "portfolio": AgentPoolType.EXECUTION_AGENT_POOL,
+                            "risk": AgentPoolType.EXECUTION_AGENT_POOL,
+                            "transaction_cost": AgentPoolType.EXECUTION_AGENT_POOL,
+                            "memory": AgentPoolType.MEMORY_AGENT
+                        }
+                        
+                        if pool_type in pool_enum_map:
+                            pool_enum = pool_enum_map[pool_type]
+                            if pool_enum in self.agent_pools:
+                                self.agent_pools[pool_enum].is_connected = False
+                        
+                        return {
+                            "status": "success",
+                            "pool_type": pool_type,
+                            "message": f"{pool_type} agent pool stopped"
+                        }
+                    except Exception as e:
+                        return {
+                            "status": "error",
+                            "pool_type": pool_type,
+                            "error": f"Failed to stop process: {e}"
+                        }
+                else:
+                    # Try to kill by process name
+                    result = subprocess.run(
+                        f"pkill -f {pool_type}_agent_pool", 
+                        shell=True, 
+                        capture_output=True, 
+                        text=True
+                    )
+                    
+                    return {
+                        "status": "attempted",
+                        "pool_type": pool_type,
+                        "message": f"Attempted to stop {pool_type} agent pool (no PID file found)"
+                    }
                     
             except Exception as e:
-                logger.error(f"Error in backtest simulation on {date}: {e}")
-                continue
-        
-        # Calculate performance metrics
-        performance_metrics = self._calculate_performance_metrics(
-            portfolio_values, config.initial_capital, trading_dates
-        )
-        
-        risk_metrics = self._calculate_risk_metrics(portfolio_values, trade_history)
-        
-        memory_insights = await self._generate_memory_insights(backtest_id, trade_history)
-        
-        end_time = datetime.now()
-        
-        return BacktestResult(
-            backtest_id=backtest_id,
-            strategy=config.strategy,
-            configuration=config,
-            start_time=start_time,
-            end_time=end_time,
-            performance_metrics=performance_metrics,
-            trade_history=trade_history,
-            portfolio_values=portfolio_values,
-            risk_metrics=risk_metrics,
-            memory_insights=memory_insights
-        )
+                logger.error(f"Failed to stop {pool_type} agent pool: {e}")
+                return {
+                    "status": "error",
+                    "pool_type": pool_type,
+                    "error": str(e)
+                }
 
-    def _generate_simple_market_data(self, symbols: List[str], date: datetime) -> Dict[str, Dict[str, float]]:
-        """Generate simple synthetic market data"""
-        import random
-        random.seed(int(date.timestamp()) % 10000)
-        
-        base_prices = {"AAPL": 150.0, "MSFT": 300.0}
-        market_data = {}
-        
-        for symbol in symbols:
-            base = base_prices.get(symbol, 100.0)
-            days_elapsed = (date - datetime(2022, 1, 1)).days
+        @self.mcp_server.tool(name="check_agent_pool_health", description="Check health of all or specific agent pools")
+        async def check_agent_pool_health(pool_type: str = None) -> dict:
+            """Check health status of agent pools"""
+            import httpx
             
-            # Simple trend with noise
-            trend = 1 + (days_elapsed / 1095) * 0.25  # 25% growth over 3 years
-            noise = 1 + random.normalvariate(0, 0.02)  # 2% daily volatility
-            
-            price = base * trend * noise
-            
-            market_data[symbol] = {
-                "open": price * random.uniform(0.99, 1.01),
-                "high": price * random.uniform(1.0, 1.02),
-                "low": price * random.uniform(0.98, 1.0),
-                "close": price,
-                "volume": random.randint(1000000, 10000000)
+            # Define all pools and their ports
+            pools_to_check = {
+                "data": 8080,
+                "alpha": 8081, 
+                "portfolio": 8083,
+                "risk": 8084,
+                "transaction_cost": 8085,
+                "memory": 8086
             }
-        
-        return market_data
-
-    async def _execute_simple_trades(self, signals: List[Dict], market_data: Dict, 
-                                   positions: Dict, cash: float, config: BacktestConfiguration) -> List[Dict]:
-        """Execute trades based on signals"""
-        trades = []
-        
-        for signal in signals:
-            try:
-                symbol = signal.get("symbol")
-                action = signal.get("action", "hold").lower()
-                confidence = signal.get("confidence", 0.0)
-                
-                if symbol not in market_data or action == "hold":
-                    continue
-                
-                current_price = market_data[symbol]["close"]
-                
-                if action == "buy" and confidence > 0.6:
-                    # Calculate position size
-                    max_position_value = cash * 0.2  # Max 20% per position
-                    shares = int(max_position_value / current_price)
-                    
-                    if shares > 0:
-                        total_cost = shares * current_price * (1 + config.commission_rate)
-                        if total_cost <= cash:
-                            trades.append({
-                                "symbol": symbol,
-                                "action": "buy",
-                                "shares": shares,
-                                "price": current_price,
-                                "total_cost": total_cost,
-                                "confidence": confidence,
-                                "timestamp": datetime.now().isoformat()
-                            })
-                
-                elif action == "sell" and symbol in positions and positions[symbol] > 0:
-                    shares = positions[symbol]
-                    total_proceeds = shares * current_price * (1 - config.commission_rate)
-                    
-                    trades.append({
-                        "symbol": symbol,
-                        "action": "sell",
-                        "shares": shares,
-                        "price": current_price,
-                        "total_proceeds": total_proceeds,
-                        "confidence": confidence,
-                        "timestamp": datetime.now().isoformat()
-                    })
-                    
-            except Exception as e:
-                logger.error(f"Error executing trade for {signal}: {e}")
-                continue
-        
-        return trades
-
-    def _calculate_performance_metrics(self, portfolio_values: List[Dict], 
-                                     initial_capital: float, trading_dates: List[datetime]) -> Dict[str, float]:
-        """Calculate comprehensive performance metrics"""
-        if not portfolio_values:
-            return {}
-        
-        values = [pv["value"] for pv in portfolio_values]
-        returns = [(values[i] - values[i-1]) / values[i-1] for i in range(1, len(values))]
-        
-        total_return = (values[-1] - initial_capital) / initial_capital
-        
-        # Annualized return
-        days = len(trading_dates)
-        years = days / 252  # Approximate trading days per year
-        annualized_return = (1 + total_return) ** (1/years) - 1 if years > 0 else 0
-        
-        # Volatility
-        volatility = (sum(r**2 for r in returns) / len(returns))**0.5 * (252**0.5) if returns else 0
-        
-        # Sharpe ratio
-        risk_free_rate = 0.02  # Assume 2% risk-free rate
-        excess_return = annualized_return - risk_free_rate
-        sharpe_ratio = excess_return / volatility if volatility > 0 else 0
-        
-        # Maximum drawdown
-        peak = initial_capital
-        max_drawdown = 0
-        for value in values:
-            if value > peak:
-                peak = value
-            drawdown = (peak - value) / peak
-            if drawdown > max_drawdown:
-                max_drawdown = drawdown
-        
-        return {
-            "total_return": total_return,
-            "annualized_return": annualized_return,
-            "volatility": volatility,
-            "sharpe_ratio": sharpe_ratio,
-            "max_drawdown": max_drawdown,
-            "final_value": values[-1],
-            "total_days": days
-        }
-
-    def _calculate_risk_metrics(self, portfolio_values: List[Dict], trade_history: List[Dict]) -> Dict[str, float]:
-        """Calculate risk metrics"""
-        if not portfolio_values:
-            return {}
-        
-        values = [pv["value"] for pv in portfolio_values]
-        returns = [(values[i] - values[i-1]) / values[i-1] for i in range(1, len(values))]
-        
-        # Value at Risk (95%)
-        if len(returns) >= 20:
-            sorted_returns = sorted(returns)
-            var_95 = sorted_returns[int(len(returns) * 0.05)]
-        else:
-            var_95 = 0
-        
-        # Average trade size
-        trade_sizes = []
-        for trade in trade_history:
-            if "total_cost" in trade:
-                trade_sizes.append(trade["total_cost"])
-            elif "total_proceeds" in trade:
-                trade_sizes.append(trade["total_proceeds"])
-        
-        avg_trade_size = sum(trade_sizes) / len(trade_sizes) if trade_sizes else 0
-        
-        return {
-            "var_95": var_95,
-            "avg_trade_size": avg_trade_size,
-            "total_trades": len(trade_history),
-            "win_rate": self._calculate_win_rate(trade_history)
-        }
-
-    def _calculate_win_rate(self, trade_history: List[Dict]) -> float:
-        """Calculate win rate from trade history"""
-        if len(trade_history) < 2:
-            return 0.0
-        
-        # Simplified win rate calculation
-        buy_trades = [t for t in trade_history if t["action"] == "buy"]
-        sell_trades = [t for t in trade_history if t["action"] == "sell"]
-        
-        if len(buy_trades) == 0 or len(sell_trades) == 0:
-            return 0.0
-        
-        # Simplified: assume trades are profitable if sell price > avg buy price
-        avg_buy_price = sum(t["price"] for t in buy_trades) / len(buy_trades)
-        profitable_sells = len([t for t in sell_trades if t["price"] > avg_buy_price])
-        
-        return profitable_sells / len(sell_trades) if sell_trades else 0.0
-
-    async def _generate_memory_insights(self, backtest_id: str, trade_history: List[Dict]) -> Dict[str, Any]:
-        """Generate insights from memory analysis"""
-        if not self.memory_agent:
-            return {}
-        
-        try:
+            
+            if pool_type:
+                if pool_type not in pools_to_check:
+                    return {
+                        "status": "error",
+                        "error": f"Unknown pool type: {pool_type}",
+                        "available_types": list(pools_to_check.keys())
+                    }
+                pools_to_check = {pool_type: pools_to_check[pool_type]}
+            
+            results = {}
+            
+            async with httpx.AsyncClient(timeout=5) as client:
+                for pool_name, port in pools_to_check.items():
+                    try:
+                        response = await client.get(f"http://localhost:{port}/health")
+                        results[pool_name] = {
+                            "status": "healthy" if response.status_code == 200 else "unhealthy",
+                            "port": port,
+                            "response_code": response.status_code,
+                            "response_time_ms": response.elapsed.total_seconds() * 1000
+                        }
+                        
+                        # Update orchestrator's tracking
+                        pool_enum_map = {
+                            "data": AgentPoolType.DATA_AGENT_POOL,
+                            "alpha": AgentPoolType.ALPHA_AGENT_POOL,
+                            "portfolio": AgentPoolType.EXECUTION_AGENT_POOL,
+                            "risk": AgentPoolType.EXECUTION_AGENT_POOL,
+                            "transaction_cost": AgentPoolType.EXECUTION_AGENT_POOL,
+                            "memory": AgentPoolType.MEMORY_AGENT
+                        }
+                        
+                        if pool_name in pool_enum_map:
+                            pool_enum = pool_enum_map[pool_name]
+                            if pool_enum in self.agent_pools:
+                                self.agent_pools[pool_enum].is_connected = (response.status_code == 200)
+                                self.agent_pools[pool_enum].last_health_check = datetime.now()
+                            
+                    except Exception as e:
+                        results[pool_name] = {
+                            "status": "unreachable",
+                            "port": port,
+                            "error": str(e)
+                        }
+                        
+                        # Update orchestrator's tracking
+                        pool_enum_map = {
+                            "data": AgentPoolType.DATA_AGENT_POOL,
+                            "alpha": AgentPoolType.ALPHA_AGENT_POOL,
+                            "portfolio": AgentPoolType.EXECUTION_AGENT_POOL,
+                            "risk": AgentPoolType.EXECUTION_AGENT_POOL,
+                            "transaction_cost": AgentPoolType.EXECUTION_AGENT_POOL,
+                            "memory": AgentPoolType.MEMORY_AGENT
+                        }
+                        
+                        if pool_name in pool_enum_map:
+                            pool_enum = pool_enum_map[pool_name]
+                            if pool_enum in self.agent_pools:
+                                self.agent_pools[pool_enum].is_connected = False
+            
+            # Summary
+            healthy_count = len([r for r in results.values() if r["status"] == "healthy"])
+            total_count = len(results)
+            
             return {
-                "total_memory_events": self.metrics.get("memory_events_logged", 0),
-                "backtest_id": backtest_id,
-                "insights_generated": True,
-                "analysis_timestamp": datetime.now().isoformat()
+                "summary": {
+                    "healthy": healthy_count,
+                    "total": total_count,
+                    "health_percentage": (healthy_count / total_count) * 100 if total_count > 0 else 0
+                },
+                "details": results
             }
-        except Exception as e:
-            logger.error(f"Failed to generate memory insights: {e}")
-            return {}
 
-    async def start(self):
-        """Start the orchestrator MCP server"""
-        try:
-            await self.initialize()
-            logger.info(f"Starting FinAgent Orchestrator on {self.host}:{self.port}")
-            await self.mcp_server.run(host=self.host, port=self.port)
-        except Exception as e:
-            logger.error(f"Failed to start orchestrator: {e}")
-            raise
+        @self.mcp_server.tool(name="diagnose_agent_pool", description="Diagnose issues with a specific agent pool")
+        async def diagnose_agent_pool(pool_type: str) -> dict:
+            """Diagnose issues with a specific agent pool"""
+            import subprocess
+            import os
+            
+            workspace_dir = "/Users/lijifeng/Documents/AI_agent/FinAgent-Orchestration"
+            log_file = f"{workspace_dir}/logs/{pool_type}_agent_pool.log"
+            pid_file = f"{workspace_dir}/logs/{pool_type}_agent_pool.pid"
+            
+            diagnosis = {
+                "pool_type": pool_type,
+                "timestamp": datetime.now().isoformat(),
+                "checks": {}
+            }
+            
+            # Check if PID file exists
+            diagnosis["checks"]["pid_file_exists"] = os.path.exists(pid_file)
+            
+            # Check if process is running
+            if os.path.exists(pid_file):
+                try:
+                    with open(pid_file, 'r') as f:
+                        pid = int(f.read().strip())
+                    
+                    # Check if process exists
+                    result = subprocess.run(f"ps -p {pid}", shell=True, capture_output=True)
+                    diagnosis["checks"]["process_running"] = result.returncode == 0
+                    diagnosis["checks"]["pid"] = pid
+                except:
+                    diagnosis["checks"]["process_running"] = False
+                    diagnosis["checks"]["pid_file_readable"] = False
+            
+            # Check log file
+            if os.path.exists(log_file):
+                try:
+                    with open(log_file, 'r') as f:
+                        log_content = f.read()
+                    
+                    diagnosis["checks"]["log_file_exists"] = True
+                    diagnosis["checks"]["log_size_bytes"] = len(log_content)
+                    
+                    # Look for common error patterns
+                    error_patterns = {
+                        "import_error": "ImportError" in log_content or "ModuleNotFoundError" in log_content,
+                        "port_conflict": "Address already in use" in log_content or "port" in log_content.lower(),
+                        "async_error": "coroutine" in log_content and ("not awaited" in log_content or "running" in log_content),
+                        "memory_error": "MemoryError" in log_content or "out of memory" in log_content.lower(),
+                        "connection_error": "ConnectionError" in log_content or "Connection refused" in log_content,
+                        "syntax_error": "SyntaxError" in log_content,
+                        "attribute_error": "AttributeError" in log_content
+                    }
+                    
+                    diagnosis["checks"]["error_patterns"] = {k: v for k, v in error_patterns.items() if v}
+                    
+                    # Get last few lines of log
+                    log_lines = log_content.strip().split('\n')
+                    diagnosis["checks"]["last_log_lines"] = log_lines[-10:] if log_lines else []
+                    
+                except Exception as e:
+                    diagnosis["checks"]["log_file_readable"] = False
+                    diagnosis["checks"]["log_read_error"] = str(e)
+            else:
+                diagnosis["checks"]["log_file_exists"] = False
+            
+            # Check port availability
+            pool_ports = {
+                "data": 8080,
+                "alpha": 8081,
+                "portfolio": 8083, 
+                "risk": 8084,
+                "transaction_cost": 8085,
+                "memory": 8086
+            }
+            
+            if pool_type in pool_ports:
+                port = pool_ports[pool_type]
+                try:
+                    import httpx
+                    async with httpx.AsyncClient(timeout=3) as client:
+                        response = await client.get(f"http://localhost:{port}/health")
+                        diagnosis["checks"]["health_endpoint"] = {
+                            "reachable": True,
+                            "status_code": response.status_code,
+                            "healthy": response.status_code == 200
+                        }
+                except Exception as e:
+                    diagnosis["checks"]["health_endpoint"] = {
+                        "reachable": False,
+                        "error": str(e)
+                    }
+                
+                # Check if port is in use by another process
+                result = subprocess.run(f"lsof -i :{port}", shell=True, capture_output=True, text=True)
+                diagnosis["checks"]["port_in_use"] = result.returncode == 0
+                if result.returncode == 0:
+                    diagnosis["checks"]["port_usage"] = result.stdout.strip().split('\n')
+            
+            # Generate recommendations
+            recommendations = []
+            
+            if not diagnosis["checks"].get("process_running", False):
+                recommendations.append("Process is not running - try starting the agent pool")
+            
+            if diagnosis["checks"].get("error_patterns", {}).get("import_error"):
+                recommendations.append("Import errors detected - check Python path and dependencies")
+            
+            if diagnosis["checks"].get("error_patterns", {}).get("port_conflict"):
+                recommendations.append("Port conflict detected - check if another process is using the port")
+                
+            if diagnosis["checks"].get("error_patterns", {}).get("async_error"):
+                recommendations.append("Async/await errors detected - review coroutine usage")
+            
+            if not diagnosis["checks"].get("health_endpoint", {}).get("healthy", False):
+                recommendations.append("Health endpoint not responding - check server startup")
+            
+            diagnosis["recommendations"] = recommendations
+            
+            return diagnosis
 
-    async def shutdown(self):
-        """Gracefully shutdown the orchestrator"""
-        try:
-            self.status = OrchestratorStatus.SHUTDOWN
-            
-            # Shutdown task executor
-            self.task_executor.shutdown(wait=True)
-            
-            # Close memory agent connection
-            if self.memory_agent:
-                # Memory agent cleanup if needed
-                pass
-            
-            logger.info("FinAgent Orchestrator shutdown complete")
-            
-        except Exception as e:
-            logger.error(f"Error during shutdown: {e}")
-
-# End of FinAgentOrchestrator class and module

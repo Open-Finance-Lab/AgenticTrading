@@ -634,7 +634,114 @@ def create_transaction_cost_agent_pool(
     return TransactionCostAgentPool(pool_id, config)
 
 
+# Main execution - Transaction Cost Agent Pool MCP Server
 if __name__ == "__main__":
-    # Example usage for testing
-    pool = create_transaction_cost_agent_pool("test_pool")
-    pool.start_mcp_server(host="localhost", port=6000)
+    print("🚀 Starting Transaction Cost Agent Pool...")
+    
+    try:
+        from mcp.server.fastmcp import FastMCP
+        
+        # Create FastMCP server
+        tc_server = FastMCP("TransactionCostAgentPool")
+        
+        # Create transaction cost agent pool
+        tc_pool = create_transaction_cost_agent_pool("transaction_cost_pool")
+        
+        @tc_server.tool(name="process_strategy_request", description="Process transaction cost analysis strategy request")
+        async def process_strategy_request(request: dict) -> dict:
+            """Process transaction cost analysis strategy request from orchestrator"""
+            try:
+                logger.info("Processing transaction cost analysis strategy request")
+                
+                # Extract request details
+                symbols = request.get('symbols', ['AAPL', 'MSFT'])
+                date = request.get('date', datetime.now().strftime('%Y-%m-%d'))
+                trades = request.get('trades', [])
+                portfolio_weights = request.get('portfolio_weights', {})
+                
+                # Create transaction cost analysis request
+                cost_query = f"""
+                Analyze transaction costs for:
+                Symbols: {symbols}
+                Date: {date}
+                Trades: {trades}
+                Portfolio weights: {portfolio_weights}
+                
+                Please provide cost estimates, impact analysis, and optimization recommendations.
+                """
+                
+                # Use the transaction cost pool's capabilities
+                cost_results = {}
+                for symbol in symbols:
+                    # Simulate cost analysis (simplified for now)
+                    trade_volume = portfolio_weights.get(symbol, 0) * 1000000  # Assume $1M base
+                    spread_cost = trade_volume * 0.0001  # 1 bp spread
+                    market_impact = trade_volume * 0.0005  # 5 bp market impact
+                    commission = max(1.0, trade_volume * 0.00001)  # Commission
+                    
+                    cost_results[symbol] = {
+                        "spread_cost": spread_cost,
+                        "market_impact": market_impact,
+                        "commission": commission,
+                        "total_cost": spread_cost + market_impact + commission,
+                        "cost_bps": ((spread_cost + market_impact + commission) / trade_volume) * 10000 if trade_volume > 0 else 0
+                    }
+                
+                total_cost = sum(result["total_cost"] for result in cost_results.values())
+                
+                logger.info("Transaction cost analysis completed successfully")
+                return {
+                    "status": "success",
+                    "cost_breakdown": cost_results,
+                    "total_cost": total_cost,
+                    "cost_optimization": {
+                        "recommendations": [
+                            "Consider using TWAP orders for large trades",
+                            "Monitor market impact during execution",
+                            "Use dark pools for large block trades"
+                        ]
+                    },
+                    "agent_source": "transaction_cost_agent_pool",
+                    "timestamp": datetime.now().isoformat()
+                }
+                
+            except Exception as e:
+                logger.error(f"Transaction cost analysis failed: {e}")
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "agent_source": "transaction_cost_agent_pool",
+                    "timestamp": datetime.now().isoformat()
+                }
+
+        @tc_server.tool(name="ping", description="Health check ping")
+        def ping() -> str:
+            return "pong"
+
+        @tc_server.tool(name="status", description="Get transaction cost agent status")
+        def status() -> dict:
+            return {
+                "status": "running",
+                "agent_type": "transaction_cost",
+                "port": 8085,
+                "capabilities": [
+                    "cost_analysis",
+                    "market_impact_estimation",
+                    "execution_optimization",
+                    "spread_analysis"
+                ]
+            }
+        
+        # Configure and start server
+        tc_server.settings.host = "0.0.0.0"
+        tc_server.settings.port = 8085
+        
+        logger.info("Starting Transaction Cost Agent Pool on port 8085...")
+        tc_server.run(transport="sse")
+        
+    except KeyboardInterrupt:
+        print("\n🛑 Transaction Cost Agent Pool shutting down...")
+    except Exception as e:
+        print(f"❌ Transaction Cost Agent Pool error: {e}")
+        import traceback
+        traceback.print_exc()
