@@ -1,0 +1,297 @@
+[
+  {
+    "status": "success",
+    "alpha_signals": {
+      "signals": {
+        "AAPL": {
+          "alpha_id": "momentum_llm_v4",
+          "version": "2025.06.29-llm",
+          "timestamp": "2025-07-11T07:43:47Z",
+          "market_context": {
+            "symbol": "AAPL",
+            "regime_tag": "neutral",
+            "input_features": {
+              "price_current": 192.46,
+              "price_20d_ago": 192.46,
+              "sma_10": 192.46,
+              "sma_20": 192.46,
+              "momentum_score": 0.0,
+              "volatility": 0.0,
+              "analysis_source": "llm_multiframe",
+              "llm_factors": [
+                "insufficient_data",
+                "zero_momentum",
+                "neutral_volatility",
+                "indeterminate_trend",
+                "low_signal_quality"
+              ]
+            }
+          },
+          "decision": {
+            "signal": "HOLD",
+            "confidence": 0.15,
+            "reasoning": "With only a single price point and zero calculated momentum, multi-timeframe convergence cannot be determined. Signal quality is effectively nil, and there's no discernible trend or volatility edge. Risk-adjusted returns are expected to be flat, so the prudent adaptive decision is to hold until further data provides actionable momentum.",
+            "predicted_return": 0.0,
+            "risk_estimate": 0.3,
+            "signal_type": "directional",
+            "asset_scope": [
+              "AAPL"
+            ]
+          },
+          "action": {
+            "execution_weight": 0.15,
+            "order_type": "market",
+            "order_price": 192.46,
+            "execution_delay": "T+0"
+          },
+          "performance_feedback": {
+            "status": "pending",
+            "evaluation_link": null
+          },
+          "metadata": {
+            "generator_agent": "momentum_llm_agent",
+            "strategy_prompt": "LLM-powered momentum analysis with sophisticated market regime detection",
+            "code_hash": "sha256:1ffefae2b86275ca9b69feb449f5bbaeae33a9448394e4d54f7290ed03ddf1c9",
+            "context_id": "llm_dag_20250711_07"
+          }
+        }
+      }
+    }
+  },
+  {
+    "status": "success",
+    "alpha_signals": {
+      "signals": {
+        "AAPL": {
+          "alpha_id": "momentum_llm_v4",
+          "version": "2025.06.29-llm",
+          "timestamp": "2025-07-11T07:43:55Z",
+          "market_context": {
+            "symbol": "AAPL",
+            "regime_tag": "neutral",
+            "input_features": {
+              "price_current": 191.33,
+              "price_20d_ago": 192.46,
+              "sma_10": 191.895,
+              "sma_20": 191.895,
+              "momentum_score": 0.0,
+              "volatility": 0.0,
+              "analysis_source": "llm_multiframe",
+              "llm_factors": [
+                "negative short-term momentum",
+                "zero signal quality",
+                "insufficient multi-timeframe data",
+                "low volatility",
+                "mild downtrend"
+              ]
+            }
+          },
+          "decision": {
+            "signal": "SELL",
+            "confidence": 0.3,
+            "reasoning": "The 2-period momentum is modestly negative at -0.59%, with zero measured volatility and a signal quality of 0.00. Insufficient data across other timeframes prevents confirmation, resulting in low conviction. The short-term trend tilts downward, so a tactical reduction is advised.",
+            "predicted_return": -0.0059,
+            "risk_estimate": 0.2,
+            "signal_type": "directional",
+            "asset_scope": [
+              "AAPL"
+            ]
+          },
+          "action": {
+            "execution_weight": 0.3,
+            "order_type": "market",
+            "order_price": 191.33,
+            "execution_delay": "T+0"
+          },
+          "performance_feedback": {
+            "status": "pending",
+            "evaluation_link": null
+          },
+          "metadata": {
+            "generator_agent": "momentum_llm_agent",
+            "strategy_prompt": "LLM-powered momentum analysis with sophisticated market regime detection",
+            "code_hash": "sha256:2498a55f22ad17108d818c1e577c4944f2dcc48dcc33a109d1a0a75b5b5c6e72",
+            "context_id": "llm_dag_20250711_07"
+          }
+        }
+      }
+    }
+  },
+  {
+    "status": "success",
+    "alpha_signals": {
+      "signals": {
+        "AAPL": {
+          "alpha_id": "momentum_llm_v4",
+          "version": "2025.06.29-llm",
+          "timestamp": "2025-07-11T07:44:06Z",
+          "market_context": {
+            "symbol": "AAPL",
+            "regime_tag": "neutral",
+            "input_features": {
+              "price_current": 191.81,
+              "price_20d_ago": 192.46,
+              "sma_10": 191.86666666666667,
+              "sma_20": 191.86666666666667,
+              "momentum_score": 0.0,
+              "volatility": 0.004190052199402298,
+              "analysis_source": "llm_multiframe",
+              "llm_factors": [
+                "short_term_momentum",
+                "5d_price_decline",
+                "low_signal_quality",
+                "low_volatility",
+                "insufficient_data"
+              ]
+            }
+          },
+          "decision": {
+            "signal": "HOLD",
+            "confidence": 0.25,
+            "reasoning": "The 3-period momentum of +0.25% contrasts with a 5-day decline of –0.34%, and the signal quality score of 0.00 highlights insufficient data for conviction. Volatility is modest at 0.42%, indicating a stable but directionless environment. With only a single timeframe available, there is no multi‐timeframe convergence. The expected return is minimal relative to risk, so it is prudent to maintain current exposure until a clearer trend emerges.",
+            "predicted_return": 0.002,
+            "risk_estimate": 0.3,
+            "signal_type": "directional",
+            "asset_scope": [
+              "AAPL"
+            ]
+          },
+          "action": {
+            "execution_weight": 0.25,
+            "order_type": "market",
+            "order_price": 191.81,
+            "execution_delay": "T+0"
+          },
+          "performance_feedback": {
+            "status": "pending",
+            "evaluation_link": null
+          },
+          "metadata": {
+            "generator_agent": "momentum_llm_agent",
+            "strategy_prompt": "LLM-powered momentum analysis with sophisticated market regime detection",
+            "code_hash": "sha256:1e3ea10115f30eee02ab9b03cfda1929cc32a6634e2dd2dee2d1fd1886092976",
+            "context_id": "llm_dag_20250711_07"
+          }
+        }
+      }
+    }
+  },
+  {
+    "status": "success",
+    "alpha_signals": {
+      "signals": {
+        "AAPL": {
+          "alpha_id": "momentum_llm_v4",
+          "version": "2025.06.29-llm",
+          "timestamp": "2025-07-11T07:44:17Z",
+          "market_context": {
+            "symbol": "AAPL",
+            "regime_tag": "neutral",
+            "input_features": {
+              "price_current": 190.68,
+              "price_20d_ago": 192.46,
+              "sma_10": 191.57,
+              "sma_20": 191.57,
+              "momentum_score": 0.0,
+              "volatility": 0.003955117125932571,
+              "analysis_source": "llm_multiframe",
+              "llm_factors": [
+                "negative short-term momentum",
+                "5-day price decline",
+                "low signal quality",
+                "moderate volatility",
+                "insufficient multi-timeframe confirmation"
+              ]
+            }
+          },
+          "decision": {
+            "signal": "HOLD",
+            "confidence": 0.3,
+            "reasoning": "The 4-period momentum is modestly negative (-0.59%) and the 5-day change is down -0.92%, indicating a mild short-term downtrend. Volatility is moderate (0.4%), but the signal quality score is zero and there’s insufficient data for confirming across multiple timeframes. Risk-adjusted return prospects are minimal, and there’s no clear regime tilt. We therefore opt to hold and await stronger convergence or divergence signals.",
+            "predicted_return": -0.005,
+            "risk_estimate": 0.4,
+            "signal_type": "directional",
+            "asset_scope": [
+              "AAPL"
+            ]
+          },
+          "action": {
+            "execution_weight": 0.3,
+            "order_type": "market",
+            "order_price": 190.68,
+            "execution_delay": "T+0"
+          },
+          "performance_feedback": {
+            "status": "pending",
+            "evaluation_link": null
+          },
+          "metadata": {
+            "generator_agent": "momentum_llm_agent",
+            "strategy_prompt": "LLM-powered momentum analysis with sophisticated market regime detection",
+            "code_hash": "sha256:f7dfe4488cdae2e870e7cf89b5796ae1599b5c0add5bbde80c8024807ab261ad",
+            "context_id": "llm_dag_20250711_07"
+          }
+        }
+      }
+    }
+  },
+  {
+    "status": "success",
+    "alpha_signals": {
+      "signals": {
+        "AAPL": {
+          "alpha_id": "momentum_llm_v4",
+          "version": "2025.06.29-llm",
+          "timestamp": "2025-07-11T07:44:30Z",
+          "market_context": {
+            "symbol": "AAPL",
+            "regime_tag": "bearish_trend",
+            "input_features": {
+              "price_current": 188.61,
+              "price_20d_ago": 192.46,
+              "sma_10": 190.978,
+              "sma_20": 190.978,
+              "momentum_score": -0.020004156707887324,
+              "volatility": 0.004801649069638475,
+              "analysis_source": "llm_multiframe",
+              "llm_factors": [
+                "negative momentum",
+                "high trend strength",
+                "low volatility",
+                "perfect consistency",
+                "high signal quality"
+              ]
+            }
+          },
+          "decision": {
+            "signal": "SELL",
+            "confidence": 0.83,
+            "reasoning": "The optimal 5-period window shows a clear −2.00% momentum with low volatility (0.48%), perfect consistency (1.0) and high trend strength (4.17), yielding a strong signal quality (4.15/5). Shorter‐term returns (1d, 3d) also trend negative, indicating multi‐timeframe convergence on bearish momentum. Given the attractive risk‐reward (low volatility vs. reliable downward trend) and high signal quality, a tactical short position is warranted.",
+            "predicted_return": -0.015,
+            "risk_estimate": 0.3,
+            "signal_type": "directional",
+            "asset_scope": [
+              "AAPL"
+            ]
+          },
+          "action": {
+            "execution_weight": 0.83,
+            "order_type": "market",
+            "order_price": 188.61,
+            "execution_delay": "T+0"
+          },
+          "performance_feedback": {
+            "status": "pending",
+            "evaluation_link": null
+          },
+          "metadata": {
+            "generator_agent": "momentum_llm_agent",
+            "strategy_prompt": "LLM-powered momentum analysis with sophisticated market regime detection",
+            "code_hash": "sha256:d865beba6b1209111bd56209458e20ff15581d2a648591696b17724176f4fc5d",
+            "context_id": "llm_dag_20250711_07"
+          }
+        }
+      }
+    }
+  }
+]

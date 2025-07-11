@@ -26,7 +26,6 @@ import logging
 # Load environment variables from .env file
 try:
     from dotenv import load_dotenv
-    # Load .env from project root
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', '..'))
     env_path = os.path.join(project_root, '.env')
     load_dotenv(env_path)
@@ -44,7 +43,6 @@ try:
 except ImportError:
     LLM_AVAILABLE = False
     AsyncOpenAI = None
-
 
 # Configure logging: always overwrite log file on agent start
 log_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../momentum_agent.log'))
@@ -66,7 +64,7 @@ logger = logging.getLogger(__name__)
 class MomentumAgent:
     def __init__(self, config: MomentumAgentConfig):
         """
-        Initialize the MomentumAgent with LLM integration for intelligent signal generation.
+        Initialize the MomentumAgent with intelligent multi-timeframe analysis capability.
         Args:
             config (MomentumAgentConfig): Configuration object for the agent.
         """
@@ -112,49 +110,23 @@ class MomentumAgent:
     def _analyze_multiple_timeframes(self, prices: List[float]) -> Dict[str, Any]:
         """Analyze momentum across multiple timeframes to make intelligent decisions."""
         if len(prices) < 5:
-            # For insufficient data, provide a basic fallback structure
-            basic_momentum = self._calculate_momentum(prices, min(len(prices), 2)) if len(prices) >= 2 else 0.0
-            basic_volatility = self._calculate_volatility(prices) if len(prices) >= 2 else 0.1
-            return {
-                "analysis": {"insufficient_data": True},
-                "windows": [],
-                "best_window": min(5, len(prices)),
-                "selected_momentum": basic_momentum,
-                "selected_volatility": basic_volatility,
-                "windows_tested": [min(5, len(prices))],
-                "adaptive_selection": False
-            }
+            return {"analysis": "insufficient_data", "windows": [], "best_window": 5}
         
-        # Test multiple lookback windows adaptively based on data length
-        max_data = len(prices)
-        windows = [w for w in [5, 10, 15, 20, 30, 50] if w <= max_data]
-        if not windows:
-            windows = [min(5, max_data)]
-        
+        # Test multiple lookback windows intelligently
+        windows = [5, 10, 20] if len(prices) >= 20 else [5, 10] if len(prices) >= 10 else [5]
         window_analysis = {}
         
         for window in windows:
             if len(prices) >= window:
                 momentum = self._calculate_momentum(prices, window)
                 volatility = self._calculate_volatility(prices[-window:])
-                
-                # Calculate trend strength and consistency
                 trend_strength = abs(momentum) / (volatility + 1e-8)
-                
-                # Calculate trend consistency across the window
-                window_prices = prices[-window:]
-                short_term_momentum = self._calculate_momentum(window_prices, min(5, len(window_prices)))
-                consistency = 1.0 - abs(momentum - short_term_momentum) / (abs(momentum) + 1e-8)
-                
-                # Signal quality combines strength, low volatility, and consistency
-                signal_quality = trend_strength * (1 - min(volatility, 0.5)) * consistency
                 
                 window_analysis[window] = {
                     "momentum": momentum,
                     "volatility": volatility,
                     "trend_strength": trend_strength,
-                    "consistency": consistency,
-                    "signal_quality": signal_quality
+                    "signal_quality": trend_strength * (1 - min(volatility, 0.5))  # Penalize high volatility
                 }
         
         # Select best window based on signal quality
@@ -166,10 +138,9 @@ class MomentumAgent:
         return {
             "analysis": window_analysis,
             "best_window": best_window,
-            "selected_momentum": window_analysis.get(best_window, {}).get("momentum", 0.0),
-            "selected_volatility": window_analysis.get(best_window, {}).get("volatility", 0.1),
-            "windows_tested": list(windows),
-            "adaptive_selection": True
+            "selected_momentum": window_analysis.get(best_window, {}).get("momentum", 0),
+            "selected_volatility": window_analysis.get(best_window, {}).get("volatility", 0),
+            "windows_tested": list(windows)
         }
 
     async def _analyze_market_with_llm(self, symbol: str, prices: List[float], context: Dict[str, Any]) -> Dict[str, Any]:
@@ -179,7 +150,7 @@ class MomentumAgent:
             logger.warning("LLM client not initialized, using fallback analysis.")
             return self._fallback_analysis(symbol, prices, context)
 
-        # Perform multi-timeframe analysis
+        # Perform intelligent multi-timeframe analysis
         timeframe_analysis = self._analyze_multiple_timeframes(prices)
         best_window = timeframe_analysis["best_window"]
         
@@ -201,46 +172,35 @@ class MomentumAgent:
         prompt = f"""
 Analyze market data for {symbol} using intelligent multi-timeframe momentum analysis:
 
-CURRENT MARKET STATE:
-- Current Price: ${current_price:.2f}
-- Recent Price Data: {prices[-10:] if len(prices) > 10 else prices}
+Current Price: ${current_price:.2f}
+Price Data: {prices[-10:] if len(prices) > 10 else prices}
 
-MULTI-TIMEFRAME ANALYSIS RESULTS:
-- Optimal Window Selected: {best_window} periods (from candidates: {timeframe_analysis['windows_tested']})
-- Selected Momentum: {momentum:.4f} ({momentum*100:.2f}%)
+Multi-Timeframe Analysis:
+- Best Window Selected: {best_window} periods (from {timeframe_analysis['windows_tested']})
+- Selected Momentum: {momentum:.4f}
 - Price Change (5d): {price_change_5d:.2f}%
-- Total Price Change: {price_change_total:.2f}%
+- Price Change (total): {price_change_total:.2f}%
 - Volatility: {volatility:.4f}
-- Signal Quality Score: {timeframe_analysis['analysis'].get(best_window, {}).get('signal_quality', 0):.4f}
+- Window Analysis: {timeframe_analysis['analysis']}
 
-DETAILED WINDOW COMPARISON:
-{json.dumps(timeframe_analysis['analysis'], indent=2)}
+Context: {context}
 
-MARKET CONTEXT: {context}
+Provide intelligent trading signal considering:
+1. Multi-timeframe momentum convergence/divergence
+2. Risk-adjusted signal strength
+3. Market regime adaptation
 
-INTELLIGENT TRADING DECISION REQUIRED:
-As an expert quantitative analyst, provide an adaptive trading signal considering:
+Return JSON with:
+1. signal: BUY/SELL/HOLD
+2. confidence: 0.0-1.0
+3. reasoning: detailed explanation of timeframe analysis
+4. market_regime: bullish_trend/bearish_trend/neutral/volatile
+5. predicted_return: expected return estimate
+6. risk_estimate: 0.0-1.0
+7. key_factors: list of decision factors including selected timeframe
+8. selected_timeframe: {best_window}
 
-1. MULTI-TIMEFRAME CONVERGENCE: How do different timeframes align?
-2. SIGNAL QUALITY: Is the trend strong and consistent across the optimal window?
-3. RISK-ADJUSTED RETURNS: What's the expected return vs. risk?
-4. MARKET REGIME ADAPTATION: What type of market environment are we in?
-5. EXECUTION SIZING: What position size is appropriate given confidence?
-
-Return ONLY valid JSON with these fields:
-{{
-  "signal": "BUY|SELL|HOLD",
-  "confidence": 0.0-1.0,
-  "reasoning": "detailed explanation of multi-timeframe analysis and decision logic",
-  "market_regime": "bullish_trend|bearish_trend|neutral|volatile|trending",
-  "predicted_return": expected_return_estimate,
-  "risk_estimate": 0.0-1.0,
-  "key_factors": ["list", "of", "key", "decision", "factors"],
-  "selected_timeframe": {best_window},
-  "execution_weight": 0.0-1.0
-}}
-
-Focus on intelligent adaptation rather than conservative defaults. Use the multi-timeframe analysis to make nuanced decisions.
+Only return valid JSON, no additional text.
 """
 
         logger.info(f"[LLM DEBUG] Selected timeframe: {best_window}, momentum: {momentum:.4f}")
@@ -282,12 +242,12 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
             return self._fallback_analysis(symbol, prices, context)
 
     def _fallback_analysis(self, symbol: str, prices: List[float], context: Dict[str, Any]) -> Dict[str, Any]:
-        """Direct momentum analysis without conservative thresholds - let the signal speak for itself."""
+        """Fallback analysis with intelligent timeframe selection when LLM is not available."""
         if len(prices) < 2:
             return {
                 "signal": "HOLD",
                 "confidence": 0.0,
-                "reasoning": "Insufficient price data for analysis",
+                "reasoning": "Insufficient price data",
                 "market_regime": "neutral",
                 "predicted_return": 0.0,
                 "risk_estimate": 0.1,
@@ -297,62 +257,32 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
                 "selected_timeframe": 5
             }
         
-        # Use intelligent timeframe analysis
+        # Use intelligent timeframe analysis even in fallback
         timeframe_analysis = self._analyze_multiple_timeframes(prices)
         best_window = timeframe_analysis["best_window"]
         momentum = timeframe_analysis["selected_momentum"]
-        volatility = timeframe_analysis["selected_volatility"]
         
-        # DIRECT SIGNAL GENERATION - NO CONSERVATIVE THRESHOLDS
-        signal = "HOLD"
-        confidence = 0.0
-        
-        # Get trend quality safely
-        if isinstance(timeframe_analysis["analysis"], dict) and best_window in timeframe_analysis["analysis"]:
-            trend_quality = timeframe_analysis["analysis"][best_window]["signal_quality"]
-        else:
-            trend_quality = abs(momentum) / (volatility + 1e-8) * 0.5
-        
-        # DIRECT MOMENTUM-BASED SIGNALS (no arbitrary thresholds)
-        if momentum > 0.005:  # Minimal threshold - 0.5% to filter noise only
+        # Generate signal based on selected timeframe
+        if momentum > 0.02:  # 2% threshold
             signal = "BUY"
-            confidence = min(0.95, max(0.3, trend_quality * 3))  # Scale up confidence
-        elif momentum < -0.005:  # Minimal threshold - 0.5% to filter noise only  
+            confidence = min(0.8, abs(momentum) * 10)
+        elif momentum < -0.02:
             signal = "SELL"
-            confidence = min(0.95, max(0.3, trend_quality * 3))  # Scale up confidence
+            confidence = min(0.8, abs(momentum) * 10)
         else:
             signal = "HOLD"
-            confidence = max(0.2, min(0.6, trend_quality * 2))  # Base confidence for HOLD
-        
-        # Market regime based on momentum direction
-        if momentum > 0.002:
-            regime = "bullish_trend"
-        elif momentum < -0.002:
-            regime = "bearish_trend" 
-        elif volatility > 0.04:
-            regime = "volatile"
-        else:
-            regime = "neutral"
-        
-        # Build key factors
-        key_factors = [
-            f"timeframe_{best_window}",
-            f"momentum_{momentum:.4f}",
-            f"volatility_{volatility:.4f}",
-            f"quality_{trend_quality:.4f}",
-            "direct_signal_no_smoothing"
-        ]
+            confidence = 0.5
         
         return {
             "signal": signal,
             "confidence": confidence,
-            "reasoning": f"Direct momentum signal (window={best_window}): momentum={momentum:.4f}, quality={trend_quality:.4f} - No conservative smoothing applied",
-            "market_regime": regime,
-            "predicted_return": momentum * 1.0,  # Direct momentum scaling
-            "risk_estimate": min(0.9, volatility * 2),
-            "key_factors": key_factors,
-            "execution_weight": confidence,  # Use full confidence as execution weight
-            "analysis_source": "fallback_direct",
+            "reasoning": f"Multi-timeframe momentum analysis (window={best_window}): {momentum:.4f}",
+            "market_regime": "bullish_trend" if momentum > 0 else "bearish_trend" if momentum < 0 else "neutral",
+            "predicted_return": momentum * 0.1,
+            "risk_estimate": timeframe_analysis["selected_volatility"],
+            "key_factors": [f"timeframe_{best_window}", f"momentum_{momentum:.4f}"],
+            "execution_weight": confidence,
+            "analysis_source": "fallback_multiframe",
             "selected_timeframe": best_window,
             "timeframe_analysis": timeframe_analysis
         }
@@ -405,12 +335,12 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
 
     def _register_tools(self):
         """
-        Register the agent's tools with the FastMCP server with LLM-powered analysis.
+        Register the agent's tools with the FastMCP server with intelligent multi-timeframe analysis.
         """
         @self.agent.tool()
         async def generate_signal(symbol: str, price_list: Optional[List[float]] = None, ctx: MCPContext = None) -> dict:
             """
-            Generate a sophisticated alpha strategy flow using LLM analysis and real market data.
+            Generate a sophisticated alpha strategy flow using intelligent multi-timeframe LLM analysis.
             """
             request_id = f"{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             logger.info(f"[REQUEST {request_id}] generate_signal called with symbol={symbol}, price_list_length={len(price_list) if price_list else 0}")
@@ -437,56 +367,61 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
                 logger.info(f"[REQUEST {request_id}] Getting price data for {symbol}")
                 if price_list is None:
                     closes = []
-                    for i in range(self.config.strategy.window):
+                    for i in range(max(30, self.config.strategy.window)):  # Get more data for multi-timeframe analysis
                         key = f"{symbol}_close_2024-01-{str(31-i).zfill(2)} 05:00:00"
                         val = self._read_memory(key)
                         if val is not None:
                             closes.insert(0, float(val))
-                    prices = closes if closes else self._generate_synthetic_prices(symbol, self.config.strategy.window)
+                    prices = closes if closes else self._generate_synthetic_prices(symbol, 30)
                     logger.info(f"[REQUEST {request_id}] Using {'memory' if closes else 'synthetic'} price data: {len(prices)} points")
                 else:
                     prices = price_list
                     logger.info(f"[REQUEST {request_id}] Using provided price data: {len(prices)} points")
 
-                # Use LLM for intelligent analysis
+                # Use intelligent multi-timeframe LLM analysis
                 market_context_data = {
                     "symbol": symbol,
                     "timestamp": datetime.now().isoformat(),
                     "price_count": len(prices)
                 }
 
-                logger.info(f"[REQUEST {request_id}] Starting LLM analysis for {symbol}")
+                logger.info(f"[REQUEST {request_id}] Starting intelligent multi-timeframe analysis for {symbol}")
                 analysis_result = await self._analyze_market_with_llm(symbol, prices, market_context_data)
-                logger.info(f"[REQUEST {request_id}] LLM analysis result: {analysis_result}")
+                logger.info(f"[REQUEST {request_id}] Analysis result: {analysis_result}")
 
-                # Build comprehensive output using LLM insights
+                # Build comprehensive output using intelligent insights
                 now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
                 code_hash = hashlib.sha256((str(prices) + analysis_result["signal"]).encode()).hexdigest()
 
-                # Determine market regime
+                # Determine market regime based on analysis
                 regime_map = {
                     "BUY": analysis_result.get("market_regime", "bullish_trend"),
                     "SELL": analysis_result.get("market_regime", "bearish_trend"),
                     "HOLD": analysis_result.get("market_regime", "neutral")
                 }
 
+                # Enhanced input features with multi-timeframe analysis
+                input_features = {
+                    "price_current": prices[-1] if prices else 0,
+                    "price_20d_ago": prices[0] if len(prices) >= 20 else (prices[0] if prices else 0),
+                    "sma_10": sum(prices[-10:]) / min(10, len(prices)) if prices else 0,
+                    "sma_20": sum(prices[-20:]) / min(20, len(prices)) if prices else 0,
+                    "momentum_score": analysis_result.get("selected_momentum", self._calculate_momentum(prices)),
+                    "volatility": analysis_result.get("selected_volatility", self._calculate_volatility(prices)),
+                    "analysis_source": analysis_result.get("analysis_source", "unknown"),
+                    "selected_timeframe": analysis_result.get("selected_timeframe", self.config.strategy.window),
+                    "timeframe_analysis": analysis_result.get("timeframe_analysis", {}),
+                    "key_factors": analysis_result.get("key_factors", [])
+                }
+
                 flow_obj = AlphaStrategyFlow(
-                    alpha_id="momentum_llm_v4",
-                    version="2025.06.29-llm",
+                    alpha_id="momentum_intelligent_v5",
+                    version="2025.07.11-multiframe",
                     timestamp=now,
                     market_context=MarketContext(
                         symbol=symbol,
                         regime_tag=regime_map[analysis_result["signal"]],
-                        input_features={
-                            "price_current": prices[-1] if prices else 0,
-                            "price_20d_ago": prices[0] if len(prices) >= 20 else (prices[0] if prices else 0),
-                            "sma_10": sum(prices[-10:]) / min(10, len(prices)) if prices else 0,
-                            "sma_20": sum(prices[-20:]) / min(20, len(prices)) if prices else 0,
-                            "momentum_score": self._calculate_momentum(prices),
-                            "volatility": self._calculate_volatility(prices),
-                            "analysis_source": analysis_result.get("analysis_source", "unknown"),
-                            "llm_factors": analysis_result.get("key_factors", [])
-                        }
+                        input_features=input_features
                     ),
                     decision=Decision(
                         signal=analysis_result["signal"],
@@ -508,16 +443,15 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
                         evaluation_link=None
                     ),
                     metadata=Metadata(
-                        generator_agent="momentum_llm_agent",
-                        strategy_prompt="LLM-powered momentum analysis with sophisticated market regime detection",
+                        generator_agent="momentum_intelligent_agent",
+                        strategy_prompt="Intelligent multi-timeframe momentum analysis with adaptive window selection",
                         code_hash=f"sha256:{code_hash}",
-                        context_id=f"llm_dag_{now[:10].replace('-', '')}_{now[11:13]}"
+                        context_id=f"intelligent_dag_{now[:10].replace('-', '')}_{now[11:13]}"
                     )
                 )
 
                 # Write to strategy flow file
                 try:
-                    # Use model_dump() for newer Pydantic versions, fallback to dict() for older versions
                     if hasattr(flow_obj, 'model_dump'):
                         flow_dict = flow_obj.model_dump()
                     else:
@@ -527,16 +461,14 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
                     logger.warning(f"Failed to write signal flow: {e}")
 
                 try:
-                    # Use model_dump() for newer Pydantic versions, fallback to dict() for older versions
                     if hasattr(flow_obj, 'model_dump'):
                         result = flow_obj.model_dump()
                     else:
                         result = flow_obj.dict()
-                    logger.info(f"[REQUEST {request_id}] Successfully generated signal for {symbol}: {result.get('decision', {}).get('signal', 'UNKNOWN')}")
+                    logger.info(f"[REQUEST {request_id}] Successfully generated intelligent signal for {symbol}: {result.get('decision', {}).get('signal', 'UNKNOWN')}")
                     return result
                 except Exception as e:
                     logger.error(f"[REQUEST {request_id}] Error converting flow object to dict: {e}", exc_info=True)
-                    # Return a simplified response if the full object fails
                     return {
                         "signal": analysis_result.get("signal", "HOLD"),
                         "confidence": analysis_result.get("confidence", 0.0),
@@ -556,7 +488,7 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
         @self.agent.tool()
         async def analyze_market_sentiment(symbol: str, lookback_days: int = 20) -> dict:
             """
-            Analyze market sentiment using LLM for the given symbol.
+            Analyze market sentiment using intelligent multi-timeframe LLM analysis.
             """
             try:
                 # Get price data
@@ -570,7 +502,7 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
                 if not prices:
                     prices = self._generate_synthetic_prices(symbol, lookback_days)
                 
-                # Use LLM for sentiment analysis
+                # Use intelligent multi-timeframe analysis for sentiment
                 analysis = await self._analyze_market_with_llm(symbol, prices, {})
                 
                 return {
@@ -579,6 +511,7 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
                     "confidence": analysis.get("confidence", 0.0),
                     "key_factors": analysis.get("key_factors", []),
                     "reasoning": analysis.get("reasoning", ""),
+                    "selected_timeframe": analysis.get("selected_timeframe", 20),
                     "timestamp": datetime.now().isoformat(),
                     "analysis_source": analysis.get("analysis_source", "llm")
                 }
@@ -623,19 +556,19 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
         # Choose transport based on use_sse parameter
         transport = "sse" if use_sse else "stdio"
         
-        logger.info(f"Starting LLM-powered MomentumAgent MCP server on {host}:{port} with transport: {transport}")
+        logger.info(f"Starting intelligent multi-timeframe MomentumAgent MCP server on {host}:{port} with transport: {transport}")
         if self.llm_client:
-            logger.info("🤖 LLM integration enabled - using intelligent analysis")
+            logger.info("🤖 LLM integration enabled - using intelligent multi-timeframe analysis")
         else:
-            logger.warning("⚠️ LLM not available - using fallback analysis")
+            logger.warning("⚠️ LLM not available - using intelligent fallback analysis")
 
         self.agent.run(transport=transport)
 
     def __repr__(self):
         """
-        Return a string representation of the enhanced MomentumAgent.
+        Return a string representation of the intelligent MomentumAgent.
         """
-        llm_status = "LLM-enabled" if self.llm_client else "fallback-mode"
+        llm_status = "intelligent-LLM-enabled" if self.llm_client else "intelligent-fallback-mode"
         return f"<MomentumAgent id={self.config.agent_id} port={self.config.execution.port} {llm_status}>"
 
 
@@ -667,7 +600,7 @@ def main(config_dict=None):
         return
     
     import argparse
-    parser = argparse.ArgumentParser(description="Start MomentumAgent MCP server.")
+    parser = argparse.ArgumentParser(description="Start intelligent MomentumAgent MCP server.")
     parser.add_argument('--sse', action='store_true', help='Use SSE channel (default, reserved for future extension)')
     args = parser.parse_args()
 

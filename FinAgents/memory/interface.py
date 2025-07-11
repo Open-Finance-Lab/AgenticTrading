@@ -21,7 +21,7 @@ if not OPENAI_API_KEY:
 client = openai.OpenAI(api_key=OPENAI_API_KEY)
 
 
-MCP_SERVER_URL = "http://127.0.0.1:8000/mcp" 
+MCP_SERVER_URL = "http://127.0.0.1:8010/mcp" 
 
 tools_definition = [
     {
