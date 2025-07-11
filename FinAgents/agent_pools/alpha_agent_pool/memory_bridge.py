@@ -35,6 +35,13 @@ from pathlib import Path
 # Configure logging with academic formatting standards
 logger = logging.getLogger(__name__)
 
+# Check for external memory agent availability
+try:
+    from ...memory.external_memory_agent import ExternalMemoryAgent
+    MEMORY_BRIDGE_AVAILABLE = True
+except ImportError:
+    MEMORY_BRIDGE_AVAILABLE = False
+
 
 @dataclass
 class AlphaSignalRecord:
@@ -181,7 +188,7 @@ class AlphaAgentPoolMemoryBridge:
         """
         try:
             # Import external memory agent (lazy loading for dependency management)
-            from ...memory.external_memory_agent import (
+            from FinAgents.memory.external_memory_agent import (
                 ExternalMemoryAgent, EventType, LogLevel, SQLiteStorageBackend
             )
             

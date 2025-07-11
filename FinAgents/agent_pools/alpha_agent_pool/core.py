@@ -4,59 +4,175 @@ Unified entry point for starting the Alpha Agent Pool MCP service.
 This module manages the lifecycle and orchestration of multiple sub-agents within the AlphaAgentPool.
 Enhanced with comprehensive memory integration for strategy tracking and performance analytics.
 """
-import multiprocessing
 import os
-import yaml
-import threading
-import asyncio
-import json
-import csv
 import sys
+import json
+import time
+import yaml
 import logging
-from datetime import datetime, timedelta
+import asyncio
+import csv
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, TypedDict, TYPE_CHECKING
+from enum import Enum
+
 from mcp.server.fastmcp import FastMCP
-from .schema.theory_driven_schema import MomentumAgentConfig
-from .agents.theory_driven.momentum_agent import MomentumAgent
-from .agents.autonomous.autonomous_agent import AutonomousAgent
 
-# Add memory module to path
-memory_path = Path(__file__).parent.parent.parent / "memory"
-sys.path.insert(0, str(memory_path))
+# Add project root to sys.path to ensure correct module resolution
+# This is crucial for making sure imports like `FinAgents.memory...` work correctly
+# when the script is run directly or as a subprocess.
+project_root = Path(__file__).resolve().parent.parent.parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
-# Import memory bridge for alpha agent pool
+# Try to import langgraph for the planner, but don't fail if it's not there
 try:
-    from .memory_bridge import (
-        AlphaAgentPoolMemoryBridge,
-        AlphaSignalRecord,
-        StrategyPerformanceMetrics,
-        MemoryPatternRecord,
-        create_alpha_memory_bridge,
-        create_alpha_signal_record,
-        create_performance_metrics_record
-    )
-    MEMORY_BRIDGE_AVAILABLE = True
+    from langgraph.graph import StateGraph, END
+    LANGGRAPH_AVAILABLE = True
 except ImportError:
-    AlphaAgentPoolMemoryBridge = None
-    MEMORY_BRIDGE_AVAILABLE = False
+    StateGraph = None
+    END = None
+    LANGGRAPH_AVAILABLE = False
 
-try:
-    from ...memory.external_memory_agent import ExternalMemoryAgent, EventType, LogLevel
-    MEMORY_AVAILABLE = True
-except ImportError:
-    ExternalMemoryAgent = None
-    EventType = LogLevel = None
-    MEMORY_AVAILABLE = False
+# Use TYPE_CHECKING to avoid circular imports at runtime
+if TYPE_CHECKING:
+    from FinAgents.agent_pools.alpha_agent_pool.memory_bridge import AlphaAgentPoolMemoryBridge, create_alpha_memory_bridge
+    from FinAgents.memory.external_memory_interface import ExternalMemoryAgent, EventType, LogLevel
 
-# Configure logging
-logger = logging.getLogger("AlphaAgentPool")
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    handler = logging.StreamHandler()
-    formatter = logging.Formatter('[%(asctime)s] %(levelname)s - %(name)s: %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+# --- Definitions for DAG Planner and Agent Status ---
+# These are defined here but only used within the server class.
+# This avoids polluting the module's top-level namespace too much.
+
+class AgentStatus(Enum):
+    """Enumeration for agent status."""
+    RUNNING = "RUNNING"
+    STOPPED = "STOPPED"
+    UNKNOWN = "UNKNOWN"
+    ERROR = "ERROR"
+
+
+class PlannerState(TypedDict):
+    """Represents the state of the planner."""
+    command: str
+    agent_status: Dict[str, AgentStatus]
+    recovery_action: Optional[str]
+    result: str
+
+
+class CommandPlanner:
+    """
+    A DAG-based planner to decode and execute external commands,
+    monitor agent status, and perform self-regulation.
+    """
+    def __init__(self, pool_server: "AlphaAgentPoolMCPServer"):
+        self.pool_server = pool_server
+        if LANGGRAPH_AVAILABLE:
+            self.workflow = self._build_graph()
+        else:
+            self.workflow = None
+            logger.warning("langgraph not found. CommandPlanner will be disabled.")
+
+    def _build_graph(self):
+        """Builds the langgraph StateGraph."""
+        workflow = StateGraph(PlannerState)
+
+        workflow.add_node("parse_command", self.parse_command)
+        workflow.add_node("check_agent_status", self.check_agent_status)
+        workflow.add_node("execute_action", self.execute_action)
+        workflow.add_node("perform_recovery", self.perform_recovery)
+
+        workflow.set_entry_point("parse_command")
+        workflow.add_edge("parse_command", "check_agent_status")
+        workflow.add_conditional_edges(
+            "check_agent_status",
+            self.decide_next_step,
+            {
+                "execute": "execute_action",
+                "recover": "perform_recovery",
+            }
+        )
+        workflow.add_edge("execute_action", END)
+        workflow.add_edge("perform_recovery", "check_agent_status") # Re-check status after recovery
+
+        return workflow.compile()
+
+    def parse_command(self, state: PlannerState) -> PlannerState:
+        """Parses the initial command."""
+        logger.info(f"Parsing command: {state['command']}")
+        # In a real scenario, this would involve more complex NLP parsing.
+        # For now, we'll assume the command is simple, e.g., "start_agent:momentum_agent"
+        return state
+
+    def check_agent_status(self, state: PlannerState) -> PlannerState:
+        """Checks the status of all managed agents."""
+        logger.info("Checking agent status...")
+        status = self.pool_server.check_all_agents_status()
+        state["agent_status"] = status
+        
+        # Simple self-regulation logic: if any agent is stopped, plan a recovery.
+        if any(s == AgentStatus.STOPPED for s in status.values()):
+            state["recovery_action"] = "restart_stopped_agents"
+        else:
+            state["recovery_action"] = None
+        return state
+
+    def decide_next_step(self, state: PlannerState) -> str:
+        """Decides the next step based on agent status."""
+        if state.get("recovery_action"):
+            logger.warning("Agent issue detected. Planning recovery.")
+            return "recover"
+        logger.info("All agents are healthy. Proceeding with execution.")
+        return "execute"
+
+    def execute_action(self, state: PlannerState) -> PlannerState:
+        """Executes the parsed command."""
+        command = state["command"].strip()
+        logger.info(f"Executing action: {command}")
+        
+        # This is a simplified execution logic
+        try:
+            if command == "list agents":
+                # Correctly call the sync method on the pool_server instance
+                agents = self.pool_server.list_agents_sync()
+                if agents:
+                    state["result"] = f"Running agents: {', '.join(agents)}"
+                else:
+                    state["result"] = "No agents are currently running."
+            elif command.startswith("start agent"):
+                agent_id = command.split(" ", 2)[-1]
+                state["result"] = self.pool_server.start_agent_sync(agent_id)
+            elif command == "check status":
+                status_dict = self.pool_server.check_all_agents_status()
+                state["result"] = json.dumps({k: v.name for k, v in status_dict.items()})
+            else:
+                state["result"] = f"Unknown command: {command}"
+        except Exception as e:
+            logger.error(f"Error executing command '{command}': {e}")
+            state["result"] = f"Error: {e}"
+        return state
+
+    def perform_recovery(self, state: PlannerState) -> PlannerState:
+        """Performs a recovery action."""
+        action = state.get("recovery_action")
+        logger.info(f"Performing recovery action: {action}")
+        if action == "restart_stopped_agents":
+            result = self.pool_server.restart_stopped_agents()
+            state["result"] = f"Recovery attempted: {result}"
+        
+        # Clear the recovery action to avoid loops
+        state["recovery_action"] = None
+        return state
+
+    async def run(self, command: str) -> Dict:
+        """Runs the planner with a given command."""
+        if not self.workflow:
+            logger.warning("Planner not available, cannot run command.")
+            return {"error": "Planner is not available due to missing dependencies."}
+        initial_state = PlannerState(command=command, agent_status={}, recovery_action=None, result="")
+        final_state = await self.workflow.ainvoke(initial_state)
+        return final_state
+
 
 class MemoryUnit:
     """
@@ -80,22 +196,26 @@ class MemoryUnit:
 
     def _autoload_csv(self, csv_path):
         if not os.path.exists(csv_path):
+            logger.warning(f"CSV file not found for autoloading: {csv_path}")
             return
         try:
-            with open(csv_path, newline='') as csvfile:
-                reader = csv.DictReader(csvfile)
-                data_loaded = 0
+            import csv  # Import csv module here
+            with open(csv_path, 'r') as f:
+                reader = csv.DictReader(f)
                 for row in reader:
-                    date = row['timestamp']
-                    close = row['close']
-                    self.set(f"AAPL_close_{date}", close, log_event=False)
-                    data_loaded += 1
-                
-                # Log data loading event
-                if self.memory_bridge:
-                    asyncio.create_task(self._log_data_loading_event(csv_path, data_loaded))
+                    # Assuming 'timestamp' and 'close' columns exist
+                    timestamp = row.get('timestamp')
+                    close_price = row.get('close')
+                    if timestamp and close_price:
+                        # Create a unique key for each price entry
+                        key = f"AAPL_close_{timestamp.split(' ')[0]}" # Use date as part of key
+                        self.set(key, close_price, log_event=False) # Avoid logging for bulk load
+            logger.info(f"Successfully autoloaded data from {csv_path}")
+            # Asynchronously log the data loading event
+            if self.memory_bridge:
+                asyncio.create_task(self._log_data_loading_event(csv_path, len(self._data)))
         except Exception as e:
-            logger.warning(f"Failed to autoload CSV data: {e}")
+            logger.error(f"Failed to autoload CSV {csv_path}: {e}")
 
     async def _log_data_loading_event(self, csv_path: str, records_loaded: int):
         """Log data loading events to memory bridge"""
@@ -184,13 +304,17 @@ class AlphaAgentPoolMCPServer:
         self.pool_server = FastMCP("AlphaAgentPoolMCPServer")
         self.agent_registry = {}  # agent_id -> (agent, process/thread)
         self.config_dir = os.path.join(os.path.dirname(__file__), "config")
+        self.logger = logging.getLogger(__name__) # Add logger attribute
+        
+        # Initialize the Command Planner for DAG-based execution
+        self.planner = CommandPlanner(self)
         
         # Initialize memory bridge for comprehensive strategy tracking
-        self.memory_bridge: Optional[AlphaAgentPoolMemoryBridge] = None
+        self.memory_bridge: Optional["AlphaAgentPoolMemoryBridge"] = None
         # Note: Memory bridge will be initialized asynchronously when needed
         
         # Automatically load static dataset into memory unit on startup, and reset memory file
-        csv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/cache/AAPL_2024-01-01_2024-01-31_1d.csv"))
+        csv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/cache/AAPL_2022-01-01_2024-12-31_1d.csv"))
         self.memory = MemoryUnit(
             os.path.join(os.path.dirname(__file__), "memory_unit.json"), 
             autoload_csv_path=csv_path, 
@@ -199,7 +323,7 @@ class AlphaAgentPoolMCPServer:
         )
         
         # Initialize legacy memory agent if available
-        self.memory_agent: Optional[ExternalMemoryAgent] = None
+        self.memory_agent: Optional["ExternalMemoryAgent"] = None
         self.session_id = None
         self._initialize_memory_agent()  # Initialize memory agent synchronously
         
@@ -209,35 +333,193 @@ class AlphaAgentPoolMCPServer:
         
         self._register_pool_tools()
 
-    async def _initialize_memory_bridge(self):
-        """Initialize the advanced memory bridge for alpha agent pool"""
-        if not MEMORY_BRIDGE_AVAILABLE:
-            logger.warning("Memory bridge not available")
-            return
+    def _start_momentum_agent(self):
+        """
+        Starts the momentum agent as a separate process by correctly importing and instantiating it.
+        """
+        # Import agent-specific components here to avoid top-level import errors
+        from FinAgents.agent_pools.alpha_agent_pool.schema.theory_driven_schema import MomentumAgentConfig
+        from multiprocessing import Process
+
+        config_path = os.path.join(self.config_dir, "momentum.yaml")
+        with open(config_path, 'r') as f:
+            config_data = yaml.safe_load(f)
         
+        config = MomentumAgentConfig(**config_data)
+        
+        # Use a helper function to be the target of the process
+        process = Process(target=run_momentum_agent_process, args=(config,))
+        process.start()
+        return config, process
+
+    def _start_autonomous_agent(self):
+        """
+        Starts the autonomous agent as a separate process.
+        """
+        # Import agent-specific components here
+        from FinAgents.agent_pools.alpha_agent_pool.agents.autonomous.autonomous_agent import run_autonomous_agent
+        from multiprocessing import Process
+
+        process = Process(target=run_autonomous_agent)
+        process.start()
+        return process
+
+    async def _log_agent_lifecycle_event(self, agent_id: str, status: str, details: str):
+        """Log agent lifecycle events to the memory bridge."""
+        if self.memory_bridge:
+            from FinAgents.memory.external_memory_interface import EventType, LogLevel
+            try:
+                await self.memory_bridge._log_system_event(
+                    event_type=EventType.SYSTEM,
+                    log_level=LogLevel.INFO,
+                    title=f"Agent {status}: {agent_id}",
+                    content=details,
+                    metadata={
+                        "agent_id": agent_id,
+                        "status": status,
+                        "details": details
+                    }
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to log agent lifecycle event: {e}")
+
+    def _start_agent_sync(self, agent_id: str) -> str:
+        """
+        Synchronous version of start_agent logic.
+        """
+        if agent_id in self.agent_registry:
+            # Check if the process is alive, if not, remove it before restarting
+            process = self.agent_registry[agent_id]
+            if (hasattr(process, 'is_alive') and process.is_alive()) or \
+               (hasattr(process, 'poll') and process.poll() is None):
+                return f"Agent '{agent_id}' is already running."
+            else:
+                self.logger.warning(f"Found dead process for agent '{agent_id}'. Removing before restart.")
+                del self.agent_registry[agent_id]
+
+        if agent_id == "momentum_agent":
+            config, process = self._start_momentum_agent()
+            self.agent_registry[agent_id] = process
+            
+            details = f"Momentum agent started on port {config.execution.port}"
+            # Log agent startup event
+            if self.memory_bridge:
+                # Run the async logging function in a new event loop as we are in a sync context
+                try:
+                    asyncio.run(self._log_agent_lifecycle_event(
+                        agent_id, "STARTED", details
+                    ))
+                except RuntimeError: # If a loop is already running
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(self._log_agent_lifecycle_event(agent_id, "STARTED", details))
+
+            return details
+        elif agent_id == "autonomous_agent":
+            process = self._start_autonomous_agent()
+            self.agent_registry[agent_id] = process
+            
+            details = "Autonomous agent started on port 5051"
+            # Log agent startup event
+            if self.memory_bridge:
+                # Run the async logging function in a new event loop as we are in a sync context
+                try:
+                    asyncio.run(self._log_agent_lifecycle_event(
+                        agent_id, "STARTED", details
+                    ))
+                except RuntimeError:
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(self._log_agent_lifecycle_event(agent_id, "STARTED", details))
+            
+            return details
+        return f"Unknown agent: {agent_id}"
+
+    def check_agent_status(self, agent_id: str) -> AgentStatus:
+        """Checks the status of a single agent process."""
+        if agent_id not in self.agent_registry:
+            return AgentStatus.UNKNOWN
+        
+        process = self.agent_registry[agent_id]
+        if hasattr(process, 'is_alive') and process.is_alive():
+            return AgentStatus.RUNNING
+        elif hasattr(process, 'poll') and process.poll() is None:
+            return AgentStatus.RUNNING
+        else:
+            return AgentStatus.STOPPED
+
+    def check_all_agents_status(self) -> Dict[str, AgentStatus]:
+        """Checks and returns the status of all registered agents."""
+        return {agent_id: self.check_agent_status(agent_id) for agent_id in self.agent_registry.keys()}
+
+    def restart_stopped_agents(self) -> str:
+        """Scans for and attempts to restart stopped agents."""
+        restarted = []
+        for agent_id, status in self.check_all_agents_status().items():
+            if status == AgentStatus.STOPPED:
+                logger.info(f"Agent '{agent_id}' is stopped. Attempting to restart.")
+                try:
+                    # Remove the dead process from registry before restarting
+                    if agent_id in self.agent_registry:
+                        del self.agent_registry[agent_id]
+                    self.start_agent_sync(agent_id)
+                    restarted.append(agent_id)
+                except Exception as e:
+                    logger.error(f"Failed to restart agent '{agent_id}': {e}")
+        if restarted:
+            return f"Restarted agents: {', '.join(restarted)}"
+        return "No stopped agents found to restart."
+
+    def _initialize_memory_bridge(self):
+        """Initialize the advanced memory bridge for alpha agent pool"""
+        # This method is now synchronous and returns the bridge instance or None
+        # Import here to avoid top-level circular dependencies
+        from FinAgents.agent_pools.alpha_agent_pool.memory_bridge import create_alpha_memory_bridge, MEMORY_BRIDGE_AVAILABLE
+
+        if not MEMORY_BRIDGE_AVAILABLE:
+            self.logger.warning("Memory bridge not available. Continuing without it.")
+            return None
+        
+        bridge = None
         try:
-            self.memory_bridge = await create_alpha_memory_bridge(
-                config={
+            # create_alpha_memory_bridge is an async function, so we need a loop
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # This is tricky in a sync method. A better approach is to ensure
+                    # the entire startup is async, but for now, we'll try to work around it.
+                    # This might not be robust.
+                    future = asyncio.run_coroutine_threadsafe(create_alpha_memory_bridge(config={...}), loop)
+                    bridge = future.result(timeout=10)
+                else:
+                    bridge = asyncio.run(create_alpha_memory_bridge(config={...}))
+            except RuntimeError: # No event loop
+                 bridge = asyncio.run(create_alpha_memory_bridge(config={
                     "enable_pattern_learning": True,
                     "performance_tracking_enabled": True,
                     "real_time_logging": True
-                }
-            )
-            logger.info("Alpha Agent Pool Memory Bridge successfully initialized")
+                }))
+
+            self.logger.info("Alpha Agent Pool Memory Bridge successfully initialized")
+            self.memory.memory_bridge = bridge # Ensure memory unit has the bridge
         except Exception as e:
-            logger.error(f"Failed to initialize memory bridge: {e}")
-            self.memory_bridge = None
+            self.logger.error(f"Failed to initialize memory bridge: {e}")
+        
+        return bridge
 
     def _initialize_memory_agent(self):
         """Initialize the external memory agent"""
+        # Import here to avoid top-level circular dependencies
+        try:
+            from FinAgents.memory.external_memory_interface import ExternalMemoryAgent
+            MEMORY_AVAILABLE = True
+        except ImportError:
+            MEMORY_AVAILABLE = False
+
         if not MEMORY_AVAILABLE:
-            logger.warning("External memory agent not available")
+            logger.warning("External memory agent not available. Continuing without it.")
             return
         
         try:
             self.memory_agent = ExternalMemoryAgent()
-            # Use timestamp instead of event loop time for session ID
-            import time
             self.session_id = f"alpha_pool_session_{int(time.time())}"
             logger.info("External memory agent initialized for Alpha Agent Pool")
         except Exception as e:
@@ -247,6 +529,9 @@ class AlphaAgentPoolMCPServer:
     async def _log_memory_event(self, event_type, log_level, title: str, content: str, 
                                tags: set = None, metadata: Optional[Dict[str, Any]] = None):
         """Log an event to the memory agent with proper enum types"""
+        # Import here to ensure it's available
+        from FinAgents.memory.external_memory_interface import EventType, LogLevel
+
         if self.memory_agent and self.session_id:
             try:
                 await self.memory_agent.log_event(
@@ -274,47 +559,20 @@ class AlphaAgentPoolMCPServer:
         """
         @self.pool_server.tool(name="start_agent", description="Start the specified sub-agent service.")
         def start_agent(agent_id: str) -> str:
-            """
-            Start a sub-agent by agent_id. If already started, returns a status message.
-            Args:
-                agent_id (str): Identifier of the agent to start.
-            Returns:
-                str: Status message indicating the result.
-            """
-            if agent_id in self.agent_registry:
-                return f"Agent '{agent_id}' is already running."
-            if agent_id == "momentum_agent":
-                config, process = self._start_momentum_agent()
-                self.agent_registry[agent_id] = process
-                
-                # Log agent startup event
-                if self.memory_bridge:
-                    asyncio.create_task(self._log_agent_lifecycle_event(
-                        agent_id, "STARTED", f"Momentum agent started on port {config.execution.port}"
-                    ))
-                
-                return f"Momentum agent started on port {config.execution.port}"
-            elif agent_id == "autonomous_agent":
-                process = self._start_autonomous_agent()
-                self.agent_registry[agent_id] = process
-                
-                # Log agent startup event
-                if self.memory_bridge:
-                    asyncio.create_task(self._log_agent_lifecycle_event(
-                        agent_id, "STARTED", "Autonomous agent started on port 5051"
-                    ))
-                
-                return f"Autonomous agent started on port 5051"
-            return f"Unknown agent: {agent_id}"
+            return self.start_agent_sync(agent_id)
 
         @self.pool_server.tool(name="list_agents", description="List all registered sub-agents.")
         def list_agents() -> list:
-            """
-            List all currently registered sub-agents in the pool.
-            Returns:
-                list: List of agent IDs.
-            """
-            return list(self.agent_registry.keys())
+            return self.list_agents_sync()
+            
+        # Add sync versions for internal calls from planner
+        self.start_agent_sync = self._start_agent_sync
+        self.list_agents_sync = lambda: list(self.agent_registry.keys())
+
+        @self.pool_server.tool(name="get_agent_status", description="Get the status of all agents.")
+        def get_agent_status() -> Dict[str, str]:
+            """Returns the status of all registered agents as a dictionary."""
+            return {k: v.name for k, v in self.check_all_agents_status().items()}
 
         @self.pool_server.tool(name="get_memory", description="Get a value from the internal memory unit by key.")
         def get_memory(key: str):
@@ -361,10 +619,305 @@ class AlphaAgentPoolMCPServer:
             """
             return self.memory.keys()
 
+        @self.pool_server.tool(name="generate_alpha_signals", description="Generate alpha signals based on market data")
+        async def generate_alpha_signals(symbol: str = None, symbols: list = None, date: str = None, lookback_period: int = 20, price: float = None, memory: dict = None) -> dict:
+            """
+            Call the momentum_agent's generate_signal tool via SSE, passing historical price data.
+            Supports both single symbol (symbol) and multiple symbols (symbols) parameters for compatibility.
+            """
+            try:
+                from mcp.client.sse import sse_client
+                from mcp import ClientSession
+                from datetime import datetime, timedelta
+                
+                # Handle both symbol and symbols parameters for backward compatibility
+                target_symbols = []
+                if symbol:
+                    target_symbols = [symbol]
+                elif symbols:
+                    target_symbols = symbols if isinstance(symbols, list) else [symbols]
+                else:
+                    return {"status": "error", "message": "Either 'symbol' or 'symbols' parameter is required"}
+                
+                # If no date provided, use a default date from memory
+                if not date:
+                    date = "2024-01-30"  # Default date
+                
+                results = {}
+                
+                for target_symbol in target_symbols:
+                    logger.info(f"Processing symbol: {target_symbol}")
+                    # The rest of the implementation from the original function follows...
+                    # Prepare price list for the lookback period
+                    price_list = []
+                    current_price = price
+
+                    # If price is not provided, get it from memory
+                    if current_price is None:
+                        # Use the memory unit if memory dict is not provided
+                        memory_source = memory if memory is not None else self.memory
+                        price_key = f"{target_symbol}_close_{date}"
+                        current_price_str = memory_source.get(price_key) if hasattr(memory_source, 'get') else memory_source.get(price_key) if memory_source else None
+                        if not current_price_str:
+                            logger.warning(f"No price data for {target_symbol} on {date}, using default price")
+                            current_price = 100.0  # Default price if not found
+                        else:
+                            current_price = float(current_price_str)
+
+                    # Collect historical prices for the lookback period
+                    current_date_obj = datetime.strptime(date, '%Y-%m-%d')
+                    for i in range(lookback_period):
+                        past_date = current_date_obj - timedelta(days=i+1)
+                        past_date_str = past_date.strftime('%Y-%m-%d')
+                        price_key = f"{target_symbol}_close_{past_date_str}"
+                        memory_source = memory if memory is not None else self.memory
+                        if memory_source:
+                            past_price_str = memory_source.get(price_key) if hasattr(memory_source, 'get') else memory_source.get(price_key) if isinstance(memory_source, dict) else None
+                            if past_price_str:
+                                try:
+                                    price_list.append(float(past_price_str))
+                                except (ValueError, TypeError):
+                                    continue
+
+                    # The agent expects prices in chronological order, so we reverse the list
+                    price_list.reverse()
+                    # Add the current price to the end of the list
+                    price_list.append(current_price)
+
+                    logger.info(f"Calling momentum_agent with {len(price_list)} prices for symbol {target_symbol}")
+
+                    # SSE client to momentum_agent (correct port 5051 from logs)
+                    base_url = "http://127.0.0.1:5051/sse"
+                    
+                    # Initialize with a default error response
+                    response = {"signal": "HOLD", "confidence": 0.0, "error": "Unknown error"}
+                    
+                    # Try the MCP SSE client first, then fallback to simple HTTP client
+                    try:
+                        # Add better error handling and logging
+                        logger.info(f"Attempting SSE connection to {base_url} for symbol {target_symbol}")
+                        
+                        # Use a more explicit approach to handle the SSE connection
+                        try:
+                            async with sse_client(base_url, timeout=10) as (read, write):
+                                logger.info(f"SSE connection established for {target_symbol}")
+                                try:
+                                    async with ClientSession(read, write) as session:
+                                        try:
+                                            await session.initialize()
+                                            logger.info(f"SSE session initialized for {target_symbol}")
+                                            
+                                            # Create proper request parameters for momentum agent
+                                            request_params = {
+                                                "symbol": target_symbol, 
+                                                "price_list": price_list
+                                            }
+                                            
+                                            logger.info(f"Calling generate_signal tool for {target_symbol} with {len(price_list)} prices")
+                                            try:
+                                                response_parts = await session.call_tool(
+                                                    "generate_signal",
+                                                    request_params
+                                                )
+                                            except Exception as tool_error:
+                                                logger.error(f"Error during session.call_tool for {target_symbol}: {tool_error}", exc_info=True)
+                                                raise tool_error
+                                            
+                                            if response_parts and hasattr(response_parts, 'content') and response_parts.content:
+                                                content_list = response_parts.content
+                                                if len(content_list) > 0 and hasattr(content_list[0], 'text'):
+                                                    content_str = content_list[0].text
+                                                    try:
+                                                        response = json.loads(content_str)
+                                                    except json.JSONDecodeError:
+                                                        response = {"signal": "HOLD", "confidence": 0.0, "raw_response": content_str}
+                                                else:
+                                                    response = {"signal": "HOLD", "confidence": 0.0, "error": "No text in response"}
+                                            else:
+                                                response = {"signal": "HOLD", "confidence": 0.0, "error": "Empty response"}
+                                        except Exception as session_error:
+                                            logger.error(f"Error in session operations for {target_symbol}: {session_error}", exc_info=True)
+                                            raise session_error
+                                except Exception as client_session_error:
+                                    logger.error(f"Error creating ClientSession for {target_symbol}: {client_session_error}", exc_info=True)
+                                    raise client_session_error
+                        except Exception as sse_client_error:
+                            logger.error(f"Error in SSE client for {target_symbol}: {sse_client_error}", exc_info=True)
+                            raise sse_client_error
+                    
+                    except Exception as mcp_error:
+                        logger.warning(f"MCP SSE client failed for {target_symbol}: {mcp_error}")
+                        logger.info(f"Attempting fallback to simple HTTP client for {target_symbol}")
+                        
+                        # Fallback to simple HTTP client
+                        try:
+                            from .simple_momentum_client import SimpleMomentumClient
+                            simple_client = SimpleMomentumClient()
+                            response = await simple_client.call_generate_signal(target_symbol, price_list)
+                            logger.info(f"Fallback HTTP client succeeded for {target_symbol}")
+                        except Exception as fallback_error:
+                            logger.error(f"Fallback HTTP client also failed for {target_symbol}: {fallback_error}")
+                            response = {"signal": "HOLD", "confidence": 0.0, "error": f"Both MCP and HTTP failed: {mcp_error}"}
+
+                    logger.info(f"Received response from momentum_agent for {target_symbol}: {response}")
+                    results[target_symbol] = response
+                    
+                return {
+                    "status": "success",
+                    "alpha_signals": {
+                        "signals": results
+                    }
+                }
+            except Exception as top_level_error:
+                logger.error(f"Top-level error in generate_alpha_signals: {top_level_error}", exc_info=True)
+                import traceback
+                error_traceback = traceback.format_exc()
+                logger.error(f"Full top-level traceback: {error_traceback}")
+                
+                return {
+                    "status": "error",
+                    "message": f"Top-level error: {top_level_error}",
+                    "alpha_signals": {
+                        "signals": {}
+                    }
+                }
+                try:
+                    # Prepare price list for the lookback period
+                    price_list = []
+                    current_price = price
+
+                    # If price is not provided, get it from memory
+                    if current_price is None:
+                        # Use the memory unit if memory dict is not provided
+                        memory_source = memory if memory is not None else self.memory
+                        price_key = f"{target_symbol}_close_{date}"
+                        current_price_str = memory_source.get(price_key) if hasattr(memory_source, 'get') else memory_source.get(price_key) if memory_source else None
+                        if not current_price_str:
+                            logger.warning(f"No price data for {target_symbol} on {date}, using default price")
+                            current_price = 100.0  # Default price if not found
+                        else:
+                            current_price = float(current_price_str)
+
+                    # Collect historical prices for the lookback period
+                    current_date_obj = datetime.strptime(date, '%Y-%m-%d')
+                    for i in range(lookback_period):
+                        past_date = current_date_obj - timedelta(days=i+1)
+                        past_date_str = past_date.strftime('%Y-%m-%d')
+                        price_key = f"{target_symbol}_close_{past_date_str}"
+                        memory_source = memory if memory is not None else self.memory
+                        if memory_source:
+                            past_price_str = memory_source.get(price_key) if hasattr(memory_source, 'get') else memory_source.get(price_key) if isinstance(memory_source, dict) else None
+                            if past_price_str:
+                                try:
+                                    price_list.append(float(past_price_str))
+                                except (ValueError, TypeError):
+                                    continue
+
+                    # The agent expects prices in chronological order, so we reverse the list
+                    price_list.reverse()
+                    # Add the current price to the end of the list
+                    price_list.append(current_price)
+
+                    logger.info(f"Calling momentum_agent with {len(price_list)} prices for symbol {target_symbol}")
+
+                    # SSE client to momentum_agent (correct port 5051 from logs)
+                    base_url = "http://127.0.0.1:5051/sse"
+                    
+                    try:
+                        # Add better error handling and logging
+                        logger.info(f"Attempting SSE connection to {base_url} for symbol {target_symbol}")
+                        
+                        # Use a more explicit approach to handle the SSE connection
+                        try:
+                            async with sse_client(base_url, timeout=10) as (read, write):
+                                logger.info(f"SSE connection established for {target_symbol}")
+                                try:
+                                    async with ClientSession(read, write) as session:
+                                        try:
+                                            await session.initialize()
+                                            logger.info(f"SSE session initialized for {target_symbol}")
+                                            
+                                            # Create proper request parameters for momentum agent
+                                            request_params = {
+                                                "symbol": target_symbol, 
+                                                "price_list": price_list
+                                            }
+                                            
+                                            logger.info(f"Calling generate_signal tool for {target_symbol} with {len(price_list)} prices")
+                                            try:
+                                                response_parts = await session.call_tool(
+                                                    "generate_signal",
+                                                    request_params
+                                                )
+                                            except Exception as tool_error:
+                                                logger.error(f"Error during session.call_tool for {target_symbol}: {tool_error}", exc_info=True)
+                                                raise tool_error
+                                            
+                                            if response_parts and hasattr(response_parts, 'content') and response_parts.content:
+                                                content_list = response_parts.content
+                                                if len(content_list) > 0 and hasattr(content_list[0], 'text'):
+                                                    content_str = content_list[0].text
+                                                    try:
+                                                        response = json.loads(content_str)
+                                                    except json.JSONDecodeError:
+                                                        response = {"signal": "HOLD", "confidence": 0.0, "raw_response": content_str}
+                                                else:
+                                                    response = {"signal": "HOLD", "confidence": 0.0, "error": "No text in response"}
+                                            else:
+                                                response = {"signal": "HOLD", "confidence": 0.0, "error": "Empty response"}
+                                        except Exception as session_error:
+                                            logger.error(f"Error in session operations for {target_symbol}: {session_error}", exc_info=True)
+                                            raise session_error
+                                except Exception as client_session_error:
+                                    logger.error(f"Error creating ClientSession for {target_symbol}: {client_session_error}", exc_info=True)
+                                    raise client_session_error
+                        except Exception as sse_client_error:
+                            logger.error(f"Error in SSE client for {target_symbol}: {sse_client_error}", exc_info=True)
+                            raise sse_client_error
+                    
+                    except asyncio.TimeoutError:
+                        logger.error(f"Timeout connecting to momentum_agent for {target_symbol}")
+                        response = {"signal": "HOLD", "confidence": 0.0, "error": "Timeout"}
+                    except ConnectionError as e:
+                        logger.error(f"Connection error to momentum_agent for {target_symbol}: {e}")
+                        response = {"signal": "HOLD", "confidence": 0.0, "error": f"Connection error: {e}"}
+                    except Exception as e:
+                        logger.error(f"Unexpected error calling momentum_agent for {target_symbol}: {e}")
+                        
+                        # Detailed error investigation for TaskGroup errors
+                        import traceback
+                        error_traceback = traceback.format_exc()
+                        logger.error(f"Full traceback for {target_symbol}: {error_traceback}")
+                        
+                        # Attempt to extract inner exception details for TaskGroup errors
+                        if hasattr(e, '__cause__') and e.__cause__:
+                            logger.error(f"Root cause for {target_symbol}: {e.__cause__}")
+                        if hasattr(e, '__context__') and e.__context__:
+                            logger.error(f"Context for {target_symbol}: {e.__context__}")
+                        if hasattr(e, 'exceptions'):
+                            logger.error(f"TaskGroup exceptions for {target_symbol}: {e.exceptions}")
+                            
+                        response = {"signal": "HOLD", "confidence": 0.0, "error": f"Unexpected error: {e}"}
+
+                    logger.info(f"Received response from momentum_agent for {target_symbol}: {response}")
+                    results[target_symbol] = response
+                    
+                except Exception as e:
+                    logger.error(f"Error calling momentum_agent for {target_symbol}: {e}", exc_info=True)
+                    results[target_symbol] = {"status": "error", "message": str(e), "signal": "HOLD", "confidence": 0.0}
+
+            return {
+                "status": "success",
+                "alpha_signals": {
+                    "signals": results
+                }
+            }
+        
         @self.pool_server.tool(name="process_strategy_request", description="Process strategy requests and generate alpha signals")
         async def process_strategy_request(query: str) -> str:
             """
             Process natural language strategy requests and generate alpha signals.
+            This now uses the DAG planner to execute commands.
             
             Args:
                 query (str): Natural language query describing the strategy request
@@ -373,58 +926,48 @@ class AlphaAgentPoolMCPServer:
                 str: JSON string containing strategy response and alpha signals
             """
             try:
-                # Parse symbols from query
-                symbols = []
-                if "AAPL" in query.upper():
-                    symbols.append("AAPL")
-                if "MSFT" in query.upper():
-                    symbols.append("MSFT")
+                logger.info(f"Received strategy request, routing to planner: '{query}'")
+                # The query is treated as a command for the planner
+                planner_result = await self.planner.run(command=query)
                 
-                if not symbols:
-                    symbols = ["AAPL", "MSFT"]  # Default symbols
+                # Log the outcome
+                if self.memory_bridge:
+                    # Import enums here for logging
+                    from FinAgents.memory.external_memory_interface import EventType, LogLevel
+                    asyncio.create_task(self.memory_bridge._log_system_event(
+                        event_type=EventType.SYSTEM,
+                        log_level=LogLevel.INFO,
+                        title="Planner Execution Completed",
+                        content=f"Planner processed command: {query}",
+                        metadata={"result": planner_result.get("result")}
+                    ))
                 
-                # Extract date from query or use today
-                import re
-                from datetime import datetime
-                date_match = re.search(r'\d{4}-\d{2}-\d{2}', query)
-                date = date_match.group(0) if date_match else datetime.now().strftime('%Y-%m-%d')
-                
-                # Generate alpha signals
-                signals_result = await generate_alpha_signals(
-                    symbols=symbols,
-                    date=date,
-                    lookback_period=20,
-                    current_prices=None,
-                    strategy_context={"query": query}
-                )
-                
-                # Return structured response
-                response = {
+                # Ensure the output is always a JSON string
+                output = planner_result.get("result", "No result")
+                return json.dumps({
                     "status": "success",
-                    "request_type": "strategy_processing",
-                    "query": query,
-                    "symbols": symbols,
-                    "date": date,
-                    "alpha_signals": signals_result,
-                    "generated_at": datetime.now().isoformat()
-                }
-                
-                return json.dumps(response)
+                    "planner_output": output
+                })
                 
             except Exception as e:
-                error_response = {
-                    "status": "error",
-                    "error": str(e),
-                    "query": query,
-                    "generated_at": datetime.now().isoformat()
-                }
-                return json.dumps(error_response)
+                logger.error(f"Error processing strategy request with planner: {e}")
+                # Log the error
+                if self.memory_bridge:
+                    from FinAgents.memory.external_memory_interface import EventType, LogLevel
+                    asyncio.create_task(self.memory_bridge._log_system_event(
+                        event_type=EventType.SYSTEM,
+                        log_level=LogLevel.ERROR,
+                        title="Planner Execution Failed",
+                        content=f"Planner failed on command '{query}': {e}",
+                        metadata={"error": str(e)}
+                    ))
+                return json.dumps({"status": "error", "message": str(e)})
 
         @self.pool_server.tool(name="submit_strategy_event", description="Submit strategy flow events to memory system for tracking and analysis.")
         async def submit_strategy_event(event_type: str, strategy_id: str, event_data: dict, 
                                       metadata: Optional[dict] = None) -> str:
             """
-            Submit strategy flow events to the memory system for comprehensive tracking.
+            Submit a strategy flow event to the memory bridge for tracking.
             
             Args:
                 event_type: Type of strategy event (SIGNAL_GENERATED, STRATEGY_EXECUTED, PERFORMANCE_UPDATED, etc.)
@@ -435,640 +978,179 @@ class AlphaAgentPoolMCPServer:
             Returns:
                 str: Event submission confirmation with storage ID
             """
+            if not self.memory_bridge:
+                logger.warning("Memory bridge not available, cannot submit strategy event.")
+                return "Memory bridge not available"
+            
             try:
-                if not self.memory_bridge:
-                    return "Memory bridge not available - event logged locally only"
-                
-                # Process different event types appropriately
-                storage_id = None
-                
+                # Import memory schemas here
+                # Correcting the import path for schema
+                from FinAgents.agent_pools.alpha_agent_pool.memory_bridge import StrategyEventData, SignalGeneratedEvent, PerformanceUpdatedEvent
+
+                # Determine the event type and structure the data accordingly
                 if event_type == "SIGNAL_GENERATED":
-                    # Create and store alpha signal record
-                    signal_record = create_alpha_signal_record(
-                        symbol=event_data.get('symbol', 'UNKNOWN'),
-                        signal_type=event_data.get('signal_type', 'HOLD'),
-                        confidence=event_data.get('confidence', 0.0),
-                        predicted_return=event_data.get('predicted_return', 0.0),
-                        risk_estimate=event_data.get('risk_estimate', 0.01),
-                        execution_weight=event_data.get('execution_weight', 0.0),
-                        strategy_source=strategy_id,
-                        agent_id=event_data.get('agent_id', 'alpha_pool'),
-                        market_regime=event_data.get('market_regime'),
-                        feature_vector=event_data.get('feature_vector'),
-                        metadata=metadata
-                    )
-                    storage_id = await self.memory_bridge.store_alpha_signal(signal_record)
-                    
+                    event_data_structured = SignalGeneratedEvent(**event_data)
+                elif event_type == "STRATEGY_EXECUTED":
+                    event_data_structured = StrategyEventData(**event_data)
                 elif event_type == "PERFORMANCE_UPDATED":
-                    # Create and store performance metrics
-                    performance_record = create_performance_metrics_record(
-                        strategy_id=strategy_id,
-                        agent_id=event_data.get('agent_id', 'alpha_pool'),
-                        signals_generated=event_data.get('signals_generated', 0),
-                        successful_predictions=event_data.get('successful_predictions', 0),
-                        sharpe_ratio=event_data.get('sharpe_ratio', 0.0),
-                        information_ratio=event_data.get('information_ratio', 0.0),
-                        max_drawdown=event_data.get('max_drawdown', 0.0),
-                        avg_return=event_data.get('avg_return', 0.0),
-                        volatility=event_data.get('volatility', 0.01),
-                        **{k: v for k, v in event_data.items() if k not in [
-                            'agent_id', 'signals_generated', 'successful_predictions',
-                            'sharpe_ratio', 'information_ratio', 'max_drawdown', 
-                            'avg_return', 'volatility'
-                        ]}
-                    )
-                    storage_id = await self.memory_bridge.store_strategy_performance(performance_record)
-                    
+                    event_data_structured = PerformanceUpdatedEvent(**event_data)
                 else:
-                    # Generic event logging through system event logging
-                    await self.memory_bridge._log_system_event(
-                        event_type=EventType.OPTIMIZATION if MEMORY_AVAILABLE else "optimization",
-                        log_level=LogLevel.INFO if MEMORY_AVAILABLE else "info",
-                        title=f"Strategy Event: {event_type}",
-                        content=f"Strategy {strategy_id} submitted {event_type} event",
-                        metadata={
-                            "strategy_id": strategy_id,
-                            "event_type": event_type,
-                            "event_data": event_data,
-                            "metadata": metadata
-                        }
-                    )
-                    storage_id = f"system_event_{datetime.utcnow().isoformat()}"
-                
-                logger.info(f"Strategy event submitted: {event_type} for {strategy_id}")
-                return f"Event submitted successfully - Storage ID: {storage_id}"
-                
-            except Exception as e:
-                error_msg = f"Failed to submit strategy event: {str(e)}"
-                logger.error(error_msg)
-                return error_msg
+                    logger.warning(f"Unknown event type: {event_type}. Data: {event_data}")
+                    return "Unknown event type"
 
-        @self.pool_server.tool(name="retrieve_strategy_data", description="Retrieve historical strategy data and patterns from memory.")
-        async def retrieve_strategy_data(query_type: str, filters: Optional[dict] = None, 
-                                       time_range_hours: int = 24, limit: int = 100) -> dict:
-            """
-            Retrieve historical strategy data and patterns from the memory system.
-            
-            Args:
-                query_type: Type of data to retrieve (signals, performance, patterns, analytics)
-                filters: Filter criteria for data retrieval
-                time_range_hours: Time window for data retrieval (hours)
-                limit: Maximum number of records to retrieve
-            
-            Returns:
-                dict: Retrieved data with metadata and summary statistics
-            """
-            try:
-                if not self.memory_bridge:
-                    return {"error": "Memory bridge not available", "data": []}
-                
-                time_range = timedelta(hours=time_range_hours)
-                results = {"query_type": query_type, "filters": filters, "data": [], "summary": {}}
-                
-                if query_type == "signals":
-                    signals = await self.memory_bridge.retrieve_alpha_signals(
-                        filters=filters, time_range=time_range, limit=limit
-                    )
-                    results["data"] = [
-                        {
-                            "signal_id": s.signal_id,
-                            "symbol": s.symbol,
-                            "signal_type": s.signal_type,
-                            "confidence": s.confidence_score,
-                            "predicted_return": s.predicted_return,
-                            "strategy_source": s.strategy_source,
-                            "timestamp": s.timestamp.isoformat()
-                        } for s in signals
-                    ]
-                    results["summary"] = {
-                        "total_signals": len(signals),
-                        "buy_signals": len([s for s in signals if s.signal_type == "BUY"]),
-                        "sell_signals": len([s for s in signals if s.signal_type == "SELL"]),
-                        "hold_signals": len([s for s in signals if s.signal_type == "HOLD"]),
-                        "avg_confidence": sum(s.confidence_score for s in signals) / max(len(signals), 1)
-                    }
-                
-                elif query_type == "performance":
-                    # Retrieve performance analytics
-                    if filters and "strategy_id" in filters:
-                        analytics = await self.memory_bridge.get_strategy_performance_analytics(
-                            strategy_id=filters["strategy_id"],
-                            analysis_period=time_range
-                        )
-                        results["data"] = [analytics]
-                        results["summary"] = {"analytics_generated": 1}
-                    else:
-                        results["error"] = "strategy_id required for performance queries"
-                
-                elif query_type == "patterns":
-                    # Retrieve market patterns
-                    market_conditions = filters.get("market_conditions", {}) if filters else {}
-                    patterns = await self.memory_bridge.retrieve_relevant_patterns(
-                        market_conditions=market_conditions,
-                        pattern_types=filters.get("pattern_types") if filters else None,
-                        min_success_rate=filters.get("min_success_rate", 0.6) if filters else 0.6,
-                        min_significance=filters.get("min_significance", 0.05) if filters else 0.05
-                    )
-                    results["data"] = [
-                        {
-                            "pattern_id": p.pattern_id,
-                            "pattern_type": p.pattern_type,
-                            "success_rate": p.success_rate,
-                            "statistical_significance": p.statistical_significance,
-                            "pattern_frequency": p.pattern_frequency,
-                            "last_occurrence": p.last_occurrence.isoformat()
-                        } for p in patterns
-                    ]
-                    results["summary"] = {
-                        "total_patterns": len(patterns),
-                        "avg_success_rate": sum(p.success_rate for p in patterns) / max(len(patterns), 1)
-                    }
-                
-                elif query_type == "bridge_stats":
-                    # Retrieve memory bridge statistics
-                    bridge_stats = await self.memory_bridge.get_bridge_statistics()
-                    results["data"] = [bridge_stats]
-                    results["summary"] = {"stats_retrieved": True}
-                
-                else:
-                    results["error"] = f"Unknown query type: {query_type}"
-                
-                logger.info(f"Retrieved {len(results.get('data', []))} records for query type: {query_type}")
-                return results
-                
-            except Exception as e:
-                error_msg = f"Failed to retrieve strategy data: {str(e)}"
-                logger.error(error_msg)
-                return {"error": error_msg, "data": []}
-
-        @self.pool_server.tool(name="analyze_strategy_performance", description="Generate comprehensive strategy performance analysis.")
-        async def analyze_strategy_performance(strategy_id: str, analysis_period_days: int = 30,
-                                             include_recommendations: bool = True) -> dict:
-            """
-            Generate comprehensive performance analysis for a specific strategy.
-            
-            Args:
-                strategy_id: Strategy identifier for analysis
-                analysis_period_days: Number of days to include in analysis
-                include_recommendations: Whether to include actionable recommendations
-            
-            Returns:
-                dict: Comprehensive performance analysis report
-            """
-            try:
-                if not self.memory_bridge:
-                    return {"error": "Memory bridge not available for performance analysis"}
-                
-                analysis_period = timedelta(days=analysis_period_days)
-                analytics = await self.memory_bridge.get_strategy_performance_analytics(
+                # Submit the event to the memory bridge
+                storage_id = await self.memory_bridge.submit_event(
+                    event_type=event_type,
                     strategy_id=strategy_id,
-                    analysis_period=analysis_period
+                    event_data=event_data_structured,
+                    metadata=metadata
                 )
                 
-                if "error" in analytics:
-                    return analytics
-                
-                # Enhance analytics with additional insights
-                enhanced_analytics = analytics.copy()
-                enhanced_analytics.update({
-                    "analysis_metadata": {
-                        "generated_at": datetime.utcnow().isoformat(),
-                        "analysis_period_days": analysis_period_days,
-                        "strategy_id": strategy_id,
-                        "include_recommendations": include_recommendations
-                    },
-                    "risk_assessment": self._generate_risk_assessment(analytics),
-                    "performance_grade": self._calculate_performance_grade(analytics)
-                })
-                
-                logger.info(f"Generated comprehensive performance analysis for strategy: {strategy_id}")
-                return enhanced_analytics
-                
+                logger.info(f"Submitted {event_type} for strategy {strategy_id} with storage ID {storage_id}")
+                return f"Event submitted with storage ID: {storage_id}"
+            
             except Exception as e:
-                error_msg = f"Failed to analyze strategy performance: {str(e)}"
-                logger.error(error_msg)
-                return {"error": error_msg}
+                logger.error(f"Error submitting strategy event: {e}")
+                return f"Error: {e}"
 
-        @self.pool_server.tool(name="send_orchestrator_input", description="Send input to autonomous agent from orchestrator.")
-        def send_orchestrator_input(instruction: str, context: dict = None) -> str:
-            """
-            Send orchestrator input to autonomous agent for self-orchestration.
-            Args:
-                instruction (str): The instruction from orchestrator.
-                context (dict): Optional context data.
-            Returns:
-                str: Response from autonomous agent.
-            """
-            # Log orchestrator interaction event
-            if self.memory_bridge:
-                asyncio.create_task(self._log_orchestrator_interaction(instruction, context))
-            
-            # 这里可以通过MCP客户端连接到autonomous agent
-            # 目前返回确认消息
-            return f"Orchestrator input '{instruction}' sent to autonomous agent"
+    def start(self):
+        """
+        Start the MCP server, initialize the memory bridge, and pre-start required agents.
+        """
+        # Initialization is now synchronous
+        self.memory_bridge = self._initialize_memory_bridge()
 
-        @self.pool_server.tool(name="generate_alpha_signals", description="Generate alpha trading signals using available agents and real data with comprehensive memory tracking")
-        async def generate_alpha_signals(symbols: list, date: str, lookback_period: int = 20, 
-                                       current_prices: dict = None, strategy_context: dict = None) -> dict:
-            """
-            Generate alpha trading signals for given symbols using momentum and autonomous agents.
-            Enhanced with comprehensive memory tracking and strategy flow events.
-            
-            Args:
-                symbols (list): List of stock symbols
-                date (str): Current trading date 
-                lookback_period (int): Number of days to look back for signal generation
-                current_prices (dict): Current prices for symbols
-                strategy_context (dict): Additional strategy context and parameters
-            
-            Returns:
-                dict: Alpha signals for all symbols with comprehensive metadata
-            """
+        self.logger.info("Pre-starting required agents...")
+        self.start_agent_sync("momentum_agent")
+        # Give the agent a moment to initialize before starting the main server
+        time.sleep(5) 
+
+        self.logger.info(f"Starting AlphaAgentPoolMCPServer on {self.host}:{self.port}")
+        self.pool_server.settings.host = self.host
+        self.pool_server.settings.port = self.port
+        # The run method is blocking, so it will keep the server alive.
+        self.pool_server.run(transport="sse")
+
+    def stop(self):
+        """
+        Stop the MCP server and all running agents.
+        """
+        self.logger.info("Stopping AlphaAgentPoolMCPServer and all running agents...")
+        # Stop all registered agents
+        for agent_id in list(self.agent_registry.keys()):
             try:
-                # Log alpha signal generation request
-                await self._log_memory_event(
-                    event_type=EventType.OPTIMIZATION,
-                    log_level=LogLevel.INFO,
-                    title="Alpha Signal Generation Request",
-                    content=f"Generating signals for {len(symbols)} symbols on {date}",
-                    tags={"alpha_signals", "signal_generation", "request"},
-                    metadata={
-                        "symbols": symbols,
-                        "date": date,
-                        "lookback_period": lookback_period,
-                        "has_current_prices": current_prices is not None,
-                        "strategy_context": strategy_context
-                    }
-                )
+                self.logger.info(f"Stopping agent '{agent_id}'...")
+                # Forcibly terminate the process if it's still running
+                process = self.agent_registry[agent_id]
+                if hasattr(process, 'terminate'):
+                    process.terminate()
+                elif hasattr(process, 'kill'):
+                    process.kill()
                 
-                signals_result = {
-                    "status": "success",
-                    "date": date,
-                    "signals": {},
-                    "generated_by": "alpha_agent_pool",
-                    "timestamp": datetime.now().isoformat(),
-                    "strategy_metadata": strategy_context or {}
-                }
+                # Wait for the process to terminate
+                process.join(timeout=5)
                 
-                # Generate signals for each symbol
-                for symbol in symbols:
-                    try:
-                        # Get historical price data for the symbol
-                        historical_prices = []
-                        
-                        # Try to get real price data from memory or generate synthetic
-                        for i in range(lookback_period):
-                            # Try to get from memory first 
-                            price_key = f"{symbol}_close_{date}"
-                            stored_price = self.memory.get(price_key)
-                            if stored_price:
-                                historical_prices.append(float(stored_price))
-                        
-                        # If insufficient historical data, generate synthetic data
-                        if len(historical_prices) < lookback_period:
-                            import random
-                            base_price = current_prices.get(symbol, random.uniform(90, 150)) if current_prices else random.uniform(90, 150)
-                            historical_prices = []
-                            for i in range(lookback_period):
-                                daily_change = random.uniform(-0.03, 0.03)  # ±3% daily change
-                                price = base_price * (1 + daily_change)
-                                historical_prices.append(price)
-                                base_price = price
-                        
-                        # Use momentum agent if available to generate signal
-                        signal_result = None
-                        try:
-                            # Try to connect to momentum agent via MCP
-                            from mcp.client.sse import sse_client
-                            from mcp.client.session import ClientSession
-                            
-                            momentum_endpoint = "http://localhost:5052/sse"  # Momentum agent port
-                            
-                            async with sse_client(momentum_endpoint, timeout=5) as (read, write):
-                                async with ClientSession(read, write) as session:
-                                    await session.initialize()
-                                    
-                                    # Call momentum agent's generate_signal tool
-                                    signal_request = {
-                                        "symbol": symbol,
-                                        "price_list": historical_prices
-                                    }
-                                    
-                                    result = await session.call_tool("generate_signal", signal_request)
-                                    if result.content and len(result.content) > 0:
-                                        signal_result = json.loads(result.content[0].text)
-                        
-                        except Exception as e:
-                            logger.warning(f"Could not connect to momentum agent for {symbol}: {e}")
-                            # Fallback: generate signal using simple momentum logic
-                            signal_result = self._generate_fallback_momentum_signal(symbol, historical_prices)
-                        
-                        # Extract signal information
-                        if signal_result:
-                            signal = signal_result.get("decision", {}).get("signal", "HOLD")
-                            confidence = signal_result.get("decision", {}).get("confidence", 0.0)
-                            predicted_return = signal_result.get("decision", {}).get("predicted_return", 0.0)
-                            risk_estimate = signal_result.get("decision", {}).get("risk_estimate", 0.01)
-                            execution_weight = signal_result.get("action", {}).get("execution_weight", 0.0)
-                        else:
-                            # Default neutral signal
-                            signal = "HOLD"
-                            confidence = 0.0
-                            predicted_return = 0.0
-                            risk_estimate = 0.01
-                            execution_weight = 0.0
-                        
-                        signals_result["signals"][symbol] = {
-                            "signal": signal,
-                            "confidence": confidence,
-                            "predicted_return": predicted_return,
-                            "risk_estimate": risk_estimate,
-                            "execution_weight": execution_weight,
-                            "current_price": current_prices.get(symbol, historical_prices[-1]) if current_prices else historical_prices[-1],
-                            "agent_source": "momentum_agent" if signal_result else "fallback",
-                            "signal_generated_at": datetime.now().isoformat()
-                        }
-                        
-                        # Submit signal event to memory bridge
-                        if self.memory_bridge:
-                            try:
-                                await self.submit_strategy_event(
-                                    event_type="SIGNAL_GENERATED",
-                                    strategy_id="alpha_signal_generation",
-                                    event_data={
-                                        "symbol": symbol,
-                                        "signal_type": signal,
-                                        "confidence": confidence,
-                                        "predicted_return": predicted_return,
-                                        "risk_estimate": risk_estimate,
-                                        "execution_weight": execution_weight,
-                                        "agent_id": "alpha_pool_generator",
-                                        "market_regime": strategy_context.get("market_regime") if strategy_context else None,
-                                        "feature_vector": {
-                                            "price": historical_prices[-1],
-                                            "momentum": (historical_prices[-1] - historical_prices[0]) / historical_prices[0] if len(historical_prices) > 1 else 0,
-                                            "volatility": self._calculate_price_volatility(historical_prices)
-                                        }
-                                    },
-                                    metadata={
-                                        "date": date,
-                                        "lookback_period": lookback_period,
-                                        "data_source": "momentum_agent" if signal_result else "fallback"
-                                    }
-                                )
-                            except Exception as e:
-                                logger.warning(f"Failed to submit strategy event for {symbol}: {e}")
-                        
-                        # Log individual signal generation
-                        # Log individual signal generation
-                        await self._log_memory_event(
-                            event_type=EventType.OPTIMIZATION,
-                            log_level=LogLevel.INFO,
-                            title=f"Alpha Signal Generated: {symbol}",
-                            content=f"Signal: {signal}, Confidence: {confidence}, "
-                                   f"Predicted Return: {predicted_return}, Risk: {risk_estimate}",
-                            tags={f"symbol_{symbol}", "alpha_signal", "generated"},
-                            metadata={
-                                "symbol": symbol,
-                                "signal": signal,
-                                "confidence": confidence,
-                                "predicted_return": predicted_return,
-                                "risk_estimate": risk_estimate,
-                                "execution_weight": execution_weight,
-                                "date": date
-                            }
-                        )
-                        
-                    except Exception as e:
-                        logger.error(f"Error generating signal for {symbol}: {e}")
-                        # Add error signal
-                        signals_result["signals"][symbol] = {
-                            "signal": "HOLD",
-                            "confidence": 0.0,
-                            "predicted_return": 0.0,
-                            "risk_estimate": 0.05,
-                            "execution_weight": 0.0,
-                            "current_price": current_prices.get(symbol, 100.0) if current_prices else 100.0,
-                            "agent_source": "error_fallback",
-                            "error": str(e),
-                            "signal_generated_at": datetime.now().isoformat()
-                        }
-                
-                # Log overall signal generation completion
-                total_signals = len(signals_result["signals"])
-                buy_signals = len([s for s in signals_result["signals"].values() if s["signal"] == "BUY"])
-                sell_signals = len([s for s in signals_result["signals"].values() if s["signal"] == "SELL"])
-                hold_signals = len([s for s in signals_result["signals"].values() if s["signal"] == "HOLD"])
-                
-                await self._log_memory_event(
-                    event_type=EventType.OPTIMIZATION,
-                    log_level=LogLevel.INFO,
-                    title="Alpha Signals Generated",
-                    content=f"Generated {total_signals} signals: {buy_signals} BUY, {sell_signals} SELL, {hold_signals} HOLD",
-                    tags={"alpha_signals", "generation_complete", "summary"},
-                    metadata={
-                        "total_signals": total_signals,
-                        "buy_signals": buy_signals,
-                        "sell_signals": sell_signals,
-                        "hold_signals": hold_signals,
-                        "date": date,
-                        "symbols": symbols
-                    }
-                )
-                
-                # Store strategy performance if memory bridge is available
-                if self.memory_bridge and total_signals > 0:
-                    avg_confidence = sum(s.get("confidence", 0) for s in signals_result["signals"].values()) / total_signals
-                    performance_event_data = {
-                        "agent_id": "alpha_pool_generator",
-                        "signals_generated": total_signals,
-                        "successful_predictions": 0,  # Will be updated later based on actual outcomes
-                        "sharpe_ratio": 0.0,  # Placeholder - will be calculated over time
-                        "information_ratio": 0.0,
-                        "max_drawdown": 0.0,
-                        "avg_return": 0.0,
-                        "volatility": avg_confidence * 0.1,  # Rough volatility estimate
-                        "average_confidence": avg_confidence
-                    }
-                    
-                    await self.submit_strategy_event(
-                        event_type="PERFORMANCE_UPDATED",
-                        strategy_id="alpha_signal_generation",
-                        event_data=performance_event_data,
-                        metadata={
-                            "date": date,
-                            "performance_type": "signal_generation_session"
-                        }
-                    )
-                
-                return signals_result
-                
+                # Remove from registry
+                del self.agent_registry[agent_id]
+                self.logger.info(f"Agent '{agent_id}' stopped.")
             except Exception as e:
-                error_msg = f"Failed to generate alpha signals: {str(e)}"
-                logger.error(error_msg)
-                
-                await self._log_memory_event(
-                    event_type=EventType.OPTIMIZATION,
-                    log_level=LogLevel.ERROR,
-                    title="Alpha Signal Generation Failed",
-                    content=error_msg,
-                    tags={"alpha_signals", "generation_error", "failure"},
-                    metadata={
-                        "symbols": symbols,
-                        "date": date,
-                        "error": str(e)
-                    }
-                )
-                
-                return {
-                    "status": "error",
-                    "error": error_msg,
-                    "date": date,
-                    "signals": {}
-                }
+                self.logger.error(f"Error terminating agent '{agent_id}': {e}")
+        self.agent_registry.clear()
+        self.logger.info("All sub-agents stopped.")
 
-        def _generate_fallback_momentum_signal(self, symbol: str, prices: list) -> dict:
-            """Generate a simple momentum signal as fallback when momentum agent is unavailable"""
-            if len(prices) < 2:
-                return None
-                
-            # Simple momentum calculation
-            recent_price = prices[-1]
-            older_price = prices[0] if len(prices) >= 20 else prices[0]
-            momentum = (recent_price - older_price) / older_price if older_price != 0 else 0
-            
-            # Simple signal logic
-            if momentum > 0.05:  # 5% momentum threshold
-                signal = "BUY"
-                confidence = min(momentum, 1.0)
-                predicted_return = 0.02
-                execution_weight = 0.3
-            elif momentum < -0.05:
-                signal = "SELL" 
-                confidence = min(abs(momentum), 1.0)
-                predicted_return = -0.02
-                execution_weight = -0.3
-            else:
-                signal = "HOLD"
-                confidence = 0.0
-                predicted_return = 0.0
-                execution_weight = 0.0
-            
-            return {
-                "decision": {
-                    "signal": signal,
-                    "confidence": confidence,
-                    "predicted_return": predicted_return,
-                    "risk_estimate": 0.02
-                },
-                "action": {
-                    "execution_weight": execution_weight
-                }
+# Helper function to run the momentum agent in a separate process
+# This must be a top-level function to be pickleable by multiprocessing
+def run_momentum_agent_process(config):
+    """
+    The target function to run the momentum agent process.
+    It imports the agent module and calls the run_agent function with the given config.
+    """
+    from FinAgents.agent_pools.alpha_agent_pool.agents.theory_driven.momentum_agent import main as run_agent
+    import sys
+
+    # Ensure the config is serializable
+    config_dict = {
+        "execution": {
+            "host": "127.0.0.1",
+            "port": 5051,  # Use correct port from config file
+            "protocol": "http",
+            "timeout": 10
+        },
+        "logging": {
+            "level": "info",
+            "handlers": ["console", "file"],
+            "file": {
+                "filename": "momentum_agent.log",
+                "maxBytes": 10485760,  # 10 MB
+                "backupCount": 5
             }
+        },
+        "agent_id": "momentum_agent",
+        "strategy": {
+            "type": "momentum",
+            "lookback_period": 14,
+            "threshold": 0.05
+        },
+        "data": {
+            "symbol": "AAPL",
+            "frequency": "1d",
+            "start_date": "2022-01-01",
+            "end_date": "2024-12-31"
+        },
+        "performance": {
+            "tracking_enabled": True,
+            "reporting_interval": 60
+        },
+        "real_time_logging": True
+    }
 
-    # Helper methods for enhanced functionality
-    
-    def _start_momentum_agent(self):
-        """Start the momentum agent sub-service"""
-        try:
-            import subprocess
-            import threading
-            import time
-            
-            # Load momentum agent configuration
-            config_path = os.path.join(self.config_dir, "momentum_agent.yml")
-            
-            # Default configuration if file doesn't exist
-            default_config = {
-                'execution': {
-                    'host': '0.0.0.0',
-                    'port': 5052
-                },
-                'model': 'momentum_strategy',
-                'lookback_period': 20,
-                'signal_threshold': 0.05
-            }
-            
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    config_data = yaml.safe_load(f)
-            else:
-                config_data = default_config
-                
-            config = MomentumAgentConfig(**config_data)
-            
-            # Create momentum agent instance
-            momentum_agent = MomentumAgent(config)
-            
-            # Start in a separate thread
-            def run_momentum():
-                try:
-                    momentum_agent.run()
-                except Exception as e:
-                    logger.error(f"Momentum agent error: {e}")
-            
-            momentum_thread = threading.Thread(target=run_momentum, daemon=True)
-            momentum_thread.start()
-            
-            # Give it time to start
-            time.sleep(2)
-            
-            logger.info(f"Momentum agent started on port {config.execution.port}")
-            return config, momentum_thread
-            
-        except Exception as e:
-            logger.error(f"Failed to start momentum agent: {e}")
-            # Return default config and None for process
-            return MomentumAgentConfig(**{
-                'execution': {'host': '0.0.0.0', 'port': 5052},
-                'model': 'momentum_strategy',
-                'lookback_period': 20,
-                'signal_threshold': 0.05
-            }), None
+    # Override with provided config
+    config_dict.update(config)
 
-    def _start_autonomous_agent(self):
-        """Start the autonomous agent sub-service"""
-        try:
-            import subprocess
-            import threading
-            
-            # Create autonomous agent instance
-            autonomous_agent = AutonomousAgent()
-            
-            # Start in a separate thread
-            def run_autonomous():
-                try:
-                    autonomous_agent.run()
-                except Exception as e:
-                    logger.error(f"Autonomous agent error: {e}")
-            
-            autonomous_thread = threading.Thread(target=run_autonomous, daemon=True)
-            autonomous_thread.start()
-            
-            logger.info("Autonomous agent started on port 5051")
-            return autonomous_thread
-            
-        except Exception as e:
-            logger.error(f"Failed to start autonomous agent: {e}")
-            return None
+    # Run the agent with the given configuration
+    run_agent(config_dict)
 
 
-# Main execution
+def run_autonomous_agent_process():
+    """
+    The target function to run the autonomous agent process.
+    """
+    from FinAgents.agent_pools.alpha_agent_pool.agents.autonomous.autonomous_agent import run_autonomous_agent
+    run_autonomous_agent()
+
+
 if __name__ == "__main__":
-    print("🚀 Starting Alpha Agent Pool...")
+    # Setup logging
+    # Correctly determine the project root and log directory
+    project_root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+    log_dir = os.path.join(project_root_dir, "logs")
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
     
-    # Create and start the server
+    log_file = os.path.join(log_dir, "alpha_agent_pool.log")
+    
+    # Configure root logger
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler(sys.stdout) # Ensure logs go to stdout
+        ]
+    )
+    
+    logger = logging.getLogger(__name__)
+
+    # Create and run the server
+    server = None
     try:
-        alpha_pool = AlphaAgentPoolMCPServer(host="0.0.0.0", port=8081)
-        
-        # Use the pool_server to run with SSE transport
-        alpha_pool.pool_server.settings.host = "0.0.0.0"
-        alpha_pool.pool_server.settings.port = 8081
-        
-        # Start the FastMCP server with SSE transport like data agent pool
-        alpha_pool.pool_server.run(transport="sse")
-        
+        logger.info("Initializing Alpha Agent Pool MCP Server...")
+        server = AlphaAgentPoolMCPServer()
+        logger.info("Starting server...")
+        server.start()
     except KeyboardInterrupt:
-        print("\n🛑 Alpha Agent Pool shutting down...")
-    except Exception as e:
-        print(f"❌ Alpha Agent Pool error: {e}")
+        logger.info("Shutdown signal received. Stopping server...")
+    finally:
+        if server:
+            server.stop()
+        logger.info("Server has been stopped.")
