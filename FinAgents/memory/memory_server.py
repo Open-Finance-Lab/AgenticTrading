@@ -1,5 +1,5 @@
 from mcp.server.fastmcp import FastMCP
-from database import TradingGraphMemory
+from .database import TradingGraphMemory
 import uuid
 import json
 from typing import Dict, Any, Optional, List
