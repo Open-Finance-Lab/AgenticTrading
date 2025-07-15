@@ -64,6 +64,281 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 class MomentumAgent:
+    def run_rl_backtest_and_update(self, strategy_flow_path: str, market_data_path: str, rl_method: str = "q_learning", learning_rate: float = 0.1, baseline: float = 0.0, feedback_days: int = 10, initial_cash: float = 100000.0):
+        """
+        Run a backtest using given strategy flow and market data, then update RL policy automatically.
+        Args:
+            strategy_flow_path (str): Path to strategy flow JSON file.
+            market_data_path (str): Path to market data CSV file.
+            rl_method (str): "q_learning" or "policy_gradient".
+            learning_rate (float): RL learning rate.
+            baseline (float): Baseline for policy gradient.
+            feedback_days (int): Number of feedbacks to use for RL update.
+            initial_cash (float): Initial cash for backtest.
+        """
+        import json
+        import os
+        import logging
+        import matplotlib.pyplot as plt
+        from datetime import datetime
+        import numpy as np
+        logger = logging.getLogger(__name__)
+        # 1. Run backtest using Backtrader
+        try:
+            import pandas as pd
+            import backtrader as bt
+            import backtrader.feeds as btfeeds
+            # Load signals
+            with open(strategy_flow_path, 'r', encoding='utf-8') as f:
+                flow = json.load(f)
+            signals = []
+            for entry in flow:
+                try:
+                    signal_info = entry['alpha_signals']['signals']['AAPL']
+                    signal = signal_info['decision']['signal']
+                    weight = signal_info['action'].get('execution_weight', signal_info['decision'].get('confidence', 0.0))
+                    confidence = signal_info['decision'].get('confidence', 0.0)
+                    predicted_return = signal_info['decision'].get('predicted_return', None)
+                    selected_timeframe = signal_info.get('selected_timeframe', None)
+                    signals.append({'signal': signal, 'execution_weight': weight, 'confidence': confidence, 'predicted_return': predicted_return, 'selected_timeframe': selected_timeframe})
+                except Exception as e:
+                    continue
+            # Load market data
+            market_df = pd.read_csv(market_data_path)
+            # Use 'timestamp' if present, else 'date'
+            if 'timestamp' in market_df.columns:
+                market_df['timestamp'] = pd.to_datetime(market_df['timestamp'])
+                market_df.set_index('timestamp', inplace=True)
+                logger.info(f"[RL] Market data loaded with 'timestamp' column, {len(market_df)} rows.")
+            elif 'date' in market_df.columns:
+                market_df['date'] = pd.to_datetime(market_df['date'])
+                market_df.set_index('date', inplace=True)
+                logger.info(f"[RL] Market data loaded with 'date' column, {len(market_df)} rows.")
+            else:
+                logger.error("[RL] Market data missing both 'timestamp' and 'date' columns!")
+                return None
+            # Fill missing OHLCV columns with close price or 1
+            for col in ['open', 'high', 'low', 'close', 'volume']:
+                if col not in market_df.columns:
+                    if 'price' in market_df.columns:
+                        market_df[col] = market_df['price']
+                    else:
+                        market_df[col] = 1
+            market_df['volume'] = market_df['volume'].fillna(1)
+            bt_df = market_df[['open', 'high', 'low', 'close', 'volume']].copy()
+            data = btfeeds.PandasData(dataname=bt_df)
+            # Backtrader strategy
+            class StrategyFlowBacktest(bt.Strategy):
+                params = (('signal_data', None),)
+                def __init__(self):
+                    self.signal_data = self.params.signal_data
+                    self.order = None
+                    self.bar_index = 0
+                    self.log_records = []
+                    self.prev_value = None
+                    self.trade_count = 0
+                    self.win_count = 0
+                    self.last_trade_price = None
+                    self.equity_curve = []
+                def next(self):
+                    if self.bar_index >= len(self.signal_data):
+                        self.bar_index += 1
+                        return
+                    signal_info = self.signal_data[self.bar_index]
+                    self.bar_index += 1
+                    signal = signal_info.get("signal", "HOLD")
+                    confidence = signal_info.get("confidence", 0.0)
+                    predicted_return = signal_info.get("predicted_return", None)
+                    price = self.datas[0].close[0]
+                    position = self.position.size
+                    trade_executed = False
+                    # 优化信号执行逻辑：只在持仓为0时BUY，持仓>0时SELL
+                    if signal == "BUY" and position == 0:
+                        size = int(self.broker.getvalue() / price)
+                        if size > 0:
+                            self.order = self.buy(size=size)
+                            trade_executed = True
+                            self.trade_count += 1
+                            self.last_trade_price = price
+                    elif signal == "SELL" and position > 0:
+                        self.order = self.sell(size=position)
+                        trade_executed = True
+                        self.trade_count += 1
+                        if self.last_trade_price is not None and price > self.last_trade_price:
+                            self.win_count += 1
+                        self.last_trade_price = None
+                    # Calculate daily return
+                    if self.prev_value is None:
+                        self.prev_value = self.broker.getvalue()
+                    cur_value = self.broker.getvalue()
+                    daily_return = (cur_value - self.prev_value) / self.prev_value if self.prev_value else 0.0
+                    self.prev_value = cur_value
+                    self.equity_curve.append(cur_value)
+                    self.log_records.append({
+                        'bar_index': self.bar_index,
+                        'signal': signal,
+                        'confidence': confidence,
+                        'predicted_return': predicted_return,
+                        'price': price,
+                        'position': position,
+                        'target_ratio': None,
+                        'portfolio_value': cur_value,
+                        'daily_return': daily_return,
+                        'selected_timeframe': signal_info.get('selected_timeframe', None),
+                        'trade_executed': trade_executed
+                    })
+                def stop(self):
+                    predicted_returns = []
+                    actual_returns = []
+                    confidences = []
+                    for rec in self.log_records:
+                        if rec['predicted_return'] is not None:
+                            predicted_returns.append(rec['predicted_return'])
+                            actual_returns.append(rec['daily_return'])
+                            confidences.append(rec['confidence'])
+                    ic = np.corrcoef(predicted_returns, actual_returns)[0,1] if len(predicted_returns) > 1 else None
+                    ic_mean = np.mean(ic) if ic is not None else None
+                    ic_std = np.std(ic) if ic is not None else None
+                    ir = ic_mean / ic_std if ic_mean is not None and ic_std and ic_std != 0 else None
+                    self.ic = ic
+                    self.ir = ir
+                    self.log_records_summary = {
+                        'ic': ic,
+                        'ir': ir,
+                        'log_records': self.log_records,
+                        'num_trades': self.trade_count,
+                        'win_rate': (self.win_count / self.trade_count) if self.trade_count > 0 else None
+                    }
+                    # 可视化回测结果
+                    try:
+                        plot_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../alpha_agent_pool/data'))
+                        if not os.path.exists(plot_dir):
+                            os.makedirs(plot_dir)
+                        fig, ax = plt.subplots(figsize=(10, 5))
+                        ax.plot(self.equity_curve, label='Equity Curve')
+                        ax.set_title('RL Backtest Equity Curve')
+                        ax.set_xlabel('Bar Index')
+                        ax.set_ylabel('Portfolio Value')
+                        ax.legend()
+                        plot_path = os.path.join(plot_dir, f"comprehensive_rl_backtest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+                        fig.savefig(plot_path)
+                        plt.close(fig)
+                        self.plot_path = plot_path
+                        logger.info(f"RL backtest plot saved: {plot_path}")
+                    except Exception as e:
+                        logger.warning(f"Failed to plot RL backtest equity curve: {e}")
+            cerebro = bt.Cerebro()
+            cerebro.broker.setcash(initial_cash)
+            cerebro.adddata(data)
+            cerebro.addstrategy(StrategyFlowBacktest, signal_data=signals)
+            result = cerebro.run()
+            strat = result[0]
+            ic = getattr(strat, 'ic', None)
+            ir = getattr(strat, 'ir', None)
+            log_records = getattr(strat, 'log_records', [])
+            log_summary = getattr(strat, 'log_records_summary', {})
+            plot_path = getattr(strat, 'plot_path', None)
+            # 保存完整策略流和回测历史
+            history_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../alpha_agent_pool/data'))
+            if not os.path.exists(history_dir):
+                os.makedirs(history_dir)
+            strategy_flow_save = os.path.join(history_dir, f"strategy_flow_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+            backtest_history_save = os.path.join(history_dir, f"backtest_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+            try:
+                with open(strategy_flow_save, 'w') as f:
+                    json.dump(flow, f, indent=2)
+                with open(backtest_history_save, 'w') as f:
+                    json.dump(log_records, f, indent=2)
+                logger.info(f"Saved strategy flow: {strategy_flow_save}")
+                logger.info(f"Saved backtest history: {backtest_history_save}")
+            except Exception as e:
+                logger.warning(f"Failed to save strategy flow or backtest history: {e}")
+            # 2. RL update
+            backtest_results = {
+                "IC": ic,
+                "IR": ir,
+                "log_records": log_records,
+                "num_trades": log_summary.get('num_trades', 0),
+                "win_rate": log_summary.get('win_rate', None),
+                "plot_path": plot_path,
+                "strategy_flow_path": strategy_flow_save,
+                "backtest_history_path": backtest_history_save
+            }
+            self.learn_from_backtest(backtest_results)
+            if rl_method == "q_learning":
+                self.rl_update_policy(learning_rate=learning_rate)
+            elif rl_method == "policy_gradient":
+                self.rl_policy_gradient_update(baseline=baseline, learning_rate=learning_rate)
+            logger.info(f"[RL] RL backtest results: IC={ic}, IR={ir}, log_records={len(log_records)}")
+            logger.info(f"[RL] RL update complete. Current window: {getattr(self.config.strategy, 'window', None)}")
+            return backtest_results
+        except Exception as e:
+            logger.error(f"RL backtest and update failed: {e}")
+            return None
+    def rl_update_policy(self, learning_rate: float = 0.1):
+        """
+        Advanced RL-style: Q-learning update for window selection.
+        Each window is treated as an action, and Q-values are updated based on observed returns.
+        This enables the agent to learn a policy for selecting the optimal momentum window over time.
+        """
+        # Initialize Q-table if not present
+        if not hasattr(self, 'window_q_table'):
+            self.window_q_table = {}
+
+        # Use feedback history to update Q-values
+        for feedback in self.feedback_history[-10:]:  # Use last 10 feedbacks for stability
+            window_stats = feedback.get('window_stats', {})
+            for w, stats in window_stats.items():
+                reward = stats['avg_return']
+                old_q = self.window_q_table.get(w, 0.0)
+                # Q-learning update: Q(s,a) = Q(s,a) + lr * (reward - Q(s,a))
+                new_q = old_q + learning_rate * (reward - old_q)
+                self.window_q_table[w] = new_q
+
+        # Select window with highest Q-value
+        if self.window_q_table:
+            best_q_window = max(self.window_q_table.keys(), key=lambda w: self.window_q_table[w])
+            if hasattr(self.config.strategy, 'window'):
+                self.config.strategy.window = best_q_window
+                logger.info(f"[RL-Q] Updated agent window to {best_q_window} using Q-learning policy.")
+
+    def rl_policy_gradient_update(self, baseline: float = 0.0, learning_rate: float = 0.05):
+        """
+        Advanced RL-style: Policy gradient update for window selection.
+        Each window is assigned a probability, updated based on its advantage (return - baseline).
+        """
+        # Initialize policy if not present
+        if not hasattr(self, 'window_policy'):
+            self.window_policy = {}
+
+        # Collect returns for each window
+        window_returns = {}
+        for feedback in self.feedback_history[-10:]:
+            window_stats = feedback.get('window_stats', {})
+            for w, stats in window_stats.items():
+                window_returns.setdefault(w, []).append(stats['avg_return'])
+
+        # Compute mean returns and update probabilities
+        total = 0.0
+        for w, returns in window_returns.items():
+            mean_ret = sum(returns) / len(returns) if returns else 0.0
+            advantage = mean_ret - baseline
+            old_prob = self.window_policy.get(w, 1.0)
+            new_prob = max(0.01, old_prob + learning_rate * advantage)
+            self.window_policy[w] = new_prob
+            total += new_prob
+
+        # Normalize probabilities
+        for w in self.window_policy:
+            self.window_policy[w] /= total if total > 0 else 1.0
+
+        # Sample window according to policy (softmax)
+        import random
+        windows, probs = zip(*self.window_policy.items())
+        chosen_window = random.choices(windows, weights=probs, k=1)[0]
+        if hasattr(self.config.strategy, 'window'):
+            self.config.strategy.window = chosen_window
+            logger.info(f"[RL-PG] Updated agent window to {chosen_window} using policy gradient.")
     def __init__(self, config: MomentumAgentConfig):
         """
         Initialize the MomentumAgent with LLM integration for intelligent signal generation.
@@ -91,6 +366,93 @@ class MomentumAgent:
                     pass
                     
         self._register_tools()
+
+        # Feedback history for RL-style learning
+        self.feedback_history = []
+        self.feedback_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../momentum_agent_feedback.json"))
+
+    def learn_from_backtest(self, backtest_results: dict):
+        """
+        Learn from backtest results to improve momentum signal generation.
+        Args:
+            backtest_results (dict): Detailed per-bar logs and factor metrics (IC/IR, etc.)
+        """
+        import os
+        # Extract key metrics from backtest results
+        log_records = backtest_results.get("log_records", [])
+        ic = backtest_results.get("IC", None)
+        ir = backtest_results.get("IR", None)
+        signal_stats = backtest_results.get("signal_stats", {})
+
+        # 统计每个window的收益
+        window_performance = {}
+        for r in log_records:
+            w = r.get("selected_timeframe")
+            ret = r.get("daily_return", 0)
+            if w is not None:
+                if w not in window_performance:
+                    window_performance[w] = {"returns": [], "count": 0}
+                window_performance[w]["returns"].append(ret)
+                window_performance[w]["count"] += 1
+
+        # 计算每个window的平均收益
+        window_stats = {w: {
+            "avg_return": (sum(d["returns"]) / len(d["returns"]) if d["returns"] else 0),
+            "count": d["count"]
+        } for w, d in window_performance.items()}
+
+        # 选择最佳window（可扩展为IC/IR标准）
+        best_window = None
+        if window_stats:
+            best_window = max(window_stats.keys(), key=lambda w: window_stats[w]["avg_return"])
+
+        summary = {
+            "IC": ic,
+            "IR": ir,
+            "signal_stats": signal_stats,
+            "num_trades": len([r for r in log_records if r.get("trade_executed", False)]),
+            "win_rate": signal_stats.get("win_rate", None),
+            "avg_return": signal_stats.get("avg_return", None),
+            "momentum_windows": list(set(r.get("selected_timeframe") for r in log_records if "selected_timeframe" in r)),
+            "window_stats": window_stats,
+            "best_window": best_window,
+            "feedback_time": datetime.utcnow().isoformat() + "Z"
+        }
+
+        # 自动更新agent window
+        if best_window is not None and hasattr(self.config.strategy, 'window'):
+            self.config.strategy.window = best_window
+            logger.info(f"[RL] Auto-updated agent window to {best_window} based on backtest RL feedback.")
+
+        # 保存反馈到history和文件
+        self.feedback_history.append(summary)
+        try:
+            with open(self.feedback_path, "w") as f:
+                json.dump(self.feedback_history, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to write feedback history: {e}")
+
+        # 额外保存反馈和完整策略流到alpha_agent_pool/data目录
+        try:
+            data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../alpha_agent_pool/data'))
+            if not os.path.exists(data_dir):
+                os.makedirs(data_dir)
+            # 保存反馈
+            feedback_save = os.path.join(data_dir, f"momentum_agent_feedback_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json")
+            with open(feedback_save, "w") as f:
+                json.dump(summary, f, indent=2)
+            # 保存完整策略流（由generate_signal生成的flow）
+            if hasattr(self, 'signal_flow_path') and os.path.exists(self.signal_flow_path):
+                import shutil
+                flow_save = os.path.join(data_dir, f"strategy_flow_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json")
+                shutil.copy(self.signal_flow_path, flow_save)
+                logger.info(f"[LEARN] Saved strategy flow to {flow_save}")
+            logger.info(f"[LEARN] Saved feedback to {feedback_save}")
+        except Exception as e:
+            logger.warning(f"Failed to save feedback/strategy flow to data dir: {e}")
+
+        logger.info(f"[LEARN] Feedback summary saved: IC={ic}, IR={ir}, win_rate={summary['win_rate']}")
+        return summary
 
     def _initialize_llm(self):
         """Initialize the LLM client for intelligent analysis."""
@@ -173,17 +535,41 @@ class MomentumAgent:
         }
 
     async def _analyze_market_with_llm(self, symbol: str, prices: List[float], context: Dict[str, Any]) -> Dict[str, Any]:
-        """Use LLM to analyze market conditions with intelligent multi-timeframe analysis."""
+        """
+        Use LLM to analyze market conditions with intelligent multi-timeframe analysis and RL-style feedback integration.
+        RL-style learning: inject recent backtest feedback into the prompt and adapt agent parameters.
+        """
         logger.info(f"[DEBUG] Entering _analyze_market_with_llm for symbol={symbol}, num_prices={len(prices)}")
         if not self.llm_client:
             logger.warning("LLM client not initialized, using fallback analysis.")
             return self._fallback_analysis(symbol, prices, context)
 
-        # Perform multi-timeframe analysis
+        # Step 1: RL-style feedback integration
+        feedback_summary = self.feedback_history[-1] if self.feedback_history else None
+        feedback_text = ""
+        if feedback_summary:
+            feedback_text = (
+                f"\nRECENT BACKTEST FEEDBACK:\n"
+                f"- Information Coefficient (IC): {feedback_summary.get('IC', 'N/A')}\n"
+                f"- Information Ratio (IR): {feedback_summary.get('IR', 'N/A')}\n"
+                f"- Win Rate: {feedback_summary.get('win_rate', 'N/A')}\n"
+                f"- Average Return: {feedback_summary.get('avg_return', 'N/A')}\n"
+                f"- Momentum Windows Used: {feedback_summary.get('momentum_windows', [])}\n"
+                f"- Feedback Time: {feedback_summary.get('feedback_time', 'N/A')}\n"
+                f"- Signal Stats: {json.dumps(feedback_summary.get('signal_stats', {}), indent=2)}\n"
+                f"\nPlease adapt your momentum factor mining and signal logic to maximize IC/IR and win rate, and avoid windows or factors that performed poorly."
+            )
+
+        # Step 2: RL-style parameter adaptation
+        if feedback_summary and feedback_summary.get('momentum_windows'):
+            preferred_windows = feedback_summary['momentum_windows']
+            if hasattr(self.config.strategy, 'window') and preferred_windows:
+                self.config.strategy.window = preferred_windows[-1]
+                logger.info(f"[RL] Updated preferred momentum window to {self.config.strategy.window} based on feedback.")
+
+        # Step 3: Multi-timeframe analysis (re-run after possible window update)
         timeframe_analysis = self._analyze_multiple_timeframes(prices)
         best_window = timeframe_analysis["best_window"]
-        
-        # Prepare comprehensive market analysis
         if len(prices) >= 2:
             current_price = prices[-1]
             price_change_5d = (prices[-1] - prices[-min(5, len(prices))]) / prices[-min(5, len(prices))] * 100
@@ -197,7 +583,7 @@ class MomentumAgent:
             volatility = 0
             momentum = 0
 
-        # Create intelligent prompt with multi-timeframe context
+        # Step 4: Construct LLM prompt with feedback
         prompt = f"""
 Analyze market data for {symbol} using intelligent multi-timeframe momentum analysis:
 
@@ -217,6 +603,7 @@ DETAILED WINDOW COMPARISON:
 {json.dumps(timeframe_analysis['analysis'], indent=2)}
 
 MARKET CONTEXT: {context}
+{feedback_text}
 
 INTELLIGENT TRADING DECISION REQUIRED:
 As an expert quantitative analyst, provide an adaptive trading signal considering:
@@ -226,6 +613,7 @@ As an expert quantitative analyst, provide an adaptive trading signal considerin
 3. RISK-ADJUSTED RETURNS: What's the expected return vs. risk?
 4. MARKET REGIME ADAPTATION: What type of market environment are we in?
 5. EXECUTION SIZING: What position size is appropriate given confidence?
+6. RL FEEDBACK: Use the above backtest feedback to improve your momentum factor mining and signal logic.
 
 Return ONLY valid JSON with these fields:
 {{
@@ -240,7 +628,7 @@ Return ONLY valid JSON with these fields:
   "execution_weight": 0.0-1.0
 }}
 
-Focus on intelligent adaptation rather than conservative defaults. Use the multi-timeframe analysis to make nuanced decisions.
+Focus on intelligent adaptation and RL-style learning. Use the multi-timeframe analysis and feedback to make nuanced decisions.
 """
 
         logger.info(f"[LLM DEBUG] Selected timeframe: {best_window}, momentum: {momentum:.4f}")
@@ -497,12 +885,12 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
                         signal_type="directional",
                         asset_scope=[symbol]
                     ),
-                    action=Action(
-                        execution_weight=analysis_result["execution_weight"],
-                        order_type="market",
-                        order_price=prices[-1] if prices else 0,
-                        execution_delay="T+0"
-                    ),
+                    # action=Action(
+                    #     execution_weight=analysis_result["execution_weight"],
+                    #     order_type="market",
+                    #     order_price=prices[-1] if prices else 0,
+                    #     execution_delay="T+0"
+                    # ),
                     performance_feedback=PerformanceFeedback(
                         status="pending",
                         evaluation_link=None
@@ -515,8 +903,18 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
                     )
                 )
 
-                # Write to strategy flow file
+                # Write to strategy flow file, always use the best window (alpha factor) if available
                 try:
+                    # 动态替换 input_features 里的 window/factor 为最佳 window
+                    best_window = None
+                    if hasattr(self.config.strategy, 'window'):
+                        best_window = self.config.strategy.window
+                    # 如果 analysis_result 里有 best_window，优先用
+                    if 'best_window' in analysis_result:
+                        best_window = analysis_result['best_window']
+                    # 更新 input_features 里的 window（如果有）
+                    if best_window is not None:
+                        flow_obj.market_context.input_features['selected_timeframe'] = best_window
                     # Use model_dump() for newer Pydantic versions, fallback to dict() for older versions
                     if hasattr(flow_obj, 'model_dump'):
                         flow_dict = flow_obj.model_dump()
@@ -591,6 +989,69 @@ Focus on intelligent adaptation rather than conservative defaults. Use the multi
                     "error": str(e),
                     "timestamp": datetime.now().isoformat()
                 }
+
+        @self.agent.tool()
+        async def run_rl_backtest_and_update(symbol: str, market_data: list, lookback_period: int = 30, initial_cash: float = 100000.0) -> dict:
+            """
+            Run RL backtest and update agent policy for a given symbol and market data.
+            All signals are generated by LLM or direct momentum analysis, no hardcoded logic.
+            Args:
+                symbol (str): The symbol to backtest.
+                market_data (list): List of dicts with 'date' and 'price'.
+                lookback_period (int): Lookback window for momentum.
+                initial_cash (float): Initial cash for backtest.
+            Returns:
+                dict: RL backtest and update results.
+            """
+            import pandas as pd
+            import tempfile
+            import json
+            try:
+                # Prepare market data CSV
+                df = pd.DataFrame(market_data)
+                with tempfile.NamedTemporaryFile(mode='w+', suffix='.csv', delete=False) as f:
+                    df.to_csv(f.name, index=False)
+                    market_data_path = f.name
+                # Generate signals using LLM or direct momentum analysis
+                prices = [entry['price'] for entry in market_data]
+                dummy_flow = []
+                # For each bar, use all available prices up到当前bar
+                for i, entry in enumerate(market_data):
+                    price_list = prices[:i+1]
+                    # Prefer LLM if available, fallback to direct momentum
+                    if self.llm_client:
+                        analysis_result = await self._analyze_market_with_llm(symbol, price_list, {"date": entry.get("date", "")})
+                    else:
+                        analysis_result = self._fallback_analysis(symbol, price_list, {"date": entry.get("date", "")})
+                    dummy_flow.append({
+                        "alpha_signals": {
+                            "signals": {
+                                symbol: {
+                                    "decision": {
+                                        "signal": analysis_result.get("signal", "HOLD"),
+                                        "confidence": analysis_result.get("confidence", 0.0),
+                                        "predicted_return": analysis_result.get("predicted_return", 0.0),
+                                        "reasoning": analysis_result.get("reasoning", "")
+                                    },
+                                    "action": {
+                                        "execution_weight": analysis_result.get("execution_weight", 0.0)
+                                    },
+                                    "selected_timeframe": analysis_result.get("selected_timeframe", lookback_period)
+                                }
+                            }
+                        }
+                    })
+                with tempfile.NamedTemporaryFile(mode='w+', suffix='.json', delete=False) as f:
+                    json.dump(dummy_flow, f)
+                    strategy_flow_path = f.name
+                # Call internal RL backtest and update
+                results = self.run_rl_backtest_and_update(strategy_flow_path, market_data_path, rl_method="q_learning", learning_rate=0.1, baseline=0.0, feedback_days=10, initial_cash=initial_cash)
+                return {"status": "success", "results": results}
+            except Exception as e:
+                logger.error(f"Error in run_rl_backtest_and_update tool: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                return {"status": "error", "message": str(e)}
 
     def _generate_synthetic_prices(self, symbol: str, window: int) -> List[float]:
         """

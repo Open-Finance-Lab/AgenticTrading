@@ -24,7 +24,7 @@ from mcp.client.sse import sse_client
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -139,7 +139,7 @@ class AlphaAgentPoolClient:
         return await self._call_tool("process_strategy_request", {"query": query})
 
     async def generate_alpha_signals(self, symbols: list, date: str, lookback_period: int, price: float = None) -> dict:
-        """使用 agent pool 生成 alpha 信号"""
+        """Generate alpha signals using agent pool"""
         params = {
             "symbols": symbols,
             "date": date,
@@ -156,34 +156,34 @@ class AlphaAgentPoolClient:
         return await self._call_tool("generate_signal", params)
 
 async def run_backtest_with_agent_pool(csv_path: str, symbol: str, lookback_days: int):
-    """使用 Alpha Agent Pool 运行回测"""
-    logger.info("\n🚦 Alpha Agent Pool 回测: %s", symbol)
+    """Run backtest using Alpha Agent Pool"""
+    logger.info("\n🚦 Alpha Agent Pool backtest: %s", symbol)
     
-    # 从CSV加载回测日期和价格
+    # Load backtest dates and prices from CSV
     market_data = load_csv_dates(csv_path, date_col="timestamp", price_col="close")
-    logger.info("数据点数量: %d", len(market_data))
+    logger.info("Number of data points: %d", len(market_data))
     if not market_data:
-        logger.error("未能从 %s 加载任何数据", csv_path)
+        logger.error("Failed to load any data from %s", csv_path)
         return
 
-    # 初始化 Alpha Agent Pool 客户端
+    # Initialize Alpha Agent Pool client
     client = AlphaAgentPoolClient()
 
-    # 在回测前，先测试一下 planner 的基本功能
-    logger.info("\n🧪 测试 Command Planner 功能...")
+    # Test planner functionality before backtest
+    logger.info("\n🧪 Testing Command Planner functionality...")
     try:
         list_agents_response = await client.process_strategy_request("list agents")
-        logger.info("`list agents` 命令的响应: %s", list_agents_response)
+        logger.info("Response to `list agents` command: %s", list_agents_response)
         
-        # 检查是否有 agent 正在运行
+        # Check if any agent is running
         if list_agents_response and "No agents are currently running" in list_agents_response.get("planner_output", ""):
-             logger.warning("没有 agent 在运行。回测可能无法生成信号。")
+             logger.warning("No agent is running. Backtest may not generate signals.")
 
     except Exception as e:
-        logger.error(f"测试 planner 功能时出错: {e}")
+        logger.error(f"Error testing planner functionality: {e}")
 
 
-    # 使用 'generate_alpha_signals' 工具运行回测
+    # Run backtest using 'generate_alpha_signals' tool
     logger.info("Starting backtest using 'generate_alpha_signals'...")
     
     signal_counts = {"BUY": 0, "SELL": 0, "HOLD": 0}
@@ -196,7 +196,7 @@ async def run_backtest_with_agent_pool(csv_path: str, symbol: str, lookback_days
             symbols=[symbol],
             date=date,
             lookback_period=lookback_days,
-            price=float(price)  # 传递价格
+            price=float(price)  # Pass price
         )
         
         logger.info("Raw response from generate_alpha_signals for date %s: %s", date, signals)
@@ -206,12 +206,15 @@ async def run_backtest_with_agent_pool(csv_path: str, symbol: str, lookback_days
             for s, data in signal_data.items():
                 signal_counts[data["signal"]] += 1
         else:
-            logger.warning("未能为日期 %s 生成信号或生成失败: %s", date, signals.get("message", "无详细信息") if signals else "无响应")
+            logger.warning("Failed to generate signal for date %s or generation failed: %s", date, signals.get("message", "No details") if signals else "No response")
 
-    logger.info("\n信号统计: BUY=%d, SELL=%d, HOLD=%d", signal_counts["BUY"], signal_counts["SELL"], signal_counts["HOLD"])
+    logger.info("\nSignal statistics: BUY=%d, SELL=%d, HOLD=%d", signal_counts["BUY"], signal_counts["SELL"], signal_counts["HOLD"])
 
 async def main():
-    """主函数，运行测试"""
+    """
+    Main function to run tests for Alpha Agent Pool client.
+    All comments and docstrings are in English. This function also tests the new RL backtest/update method.
+    """
     parser = argparse.ArgumentParser(description="Alpha Agent Pool Test Client")
     parser.add_argument("--dataset_path", type=str, help="Path to the dataset CSV file or directory.")
     parser.add_argument("--symbol", type=str, default="AAPL", help="Stock symbol to test.")
@@ -219,6 +222,7 @@ async def main():
     parser.add_argument("--strategy_flow", type=str, help="Path to existing strategy flow JSON file to execute trades from.")
     parser.add_argument("--initial_cash", type=float, default=100000, help="Initial cash for trading simulation.")
     args = parser.parse_args()
+
 
     # If strategy flow file is provided, execute trades directly from it
     if args.strategy_flow:
@@ -230,7 +234,7 @@ async def main():
         )
         return
 
-    # If no dataset path provided but no strategy flow either, show help
+    # If no dataset path provided and no strategy flow, show help
     if not args.dataset_path:
         parser.print_help()
         logger.error("--dataset_path is required when not using --strategy_flow")
@@ -238,319 +242,58 @@ async def main():
 
     client = AlphaAgentPoolClient()
 
-    # --- 1. 测试 process_strategy_request 工具 ---
-    logger.info("\n--- [Test 1] 测试 process_strategy_request 工具 ---")
+    # --- 1. Test process_strategy_request tool ---
+    logger.info("\n--- [Test 1] Test process_strategy_request tool ---")
     response = await client.process_strategy_request("test")
     logger.info(f"Response: {response}")
 
-    # --- 2. 测试 generate_alpha_signals 工具 ---
-    logger.info("\n--- [Test 2] 测试 generate_alpha_signals 工具 ---")
+    # --- 2. Test generate_alpha_signals tool ---
+    logger.info("\n--- [Test 2] Test generate_alpha_signals tool ---")
     signals = await client.generate_alpha_signals([args.symbol], "2023-01-01", args.lookback)
     logger.info(f"Signals: {signals}")
 
-    # --- 3. 使用 planner 列出 agent ---
-    logger.info("\n--- [Test 3] 使用 Planner 列出运行中的 Agent ---")
+    # --- 3. Use planner to list running agents ---
+    logger.info("\n--- [Test 3] Use Planner to list running agents ---")
     planner_response = await client.process_strategy_request("list agents")
     if planner_response:
-        logger.info(f"Planner 响应: {planner_response}")
+        logger.info(f"Planner response: {planner_response}")
     else:
-        logger.error("未能从 planner 获取响应")
+        logger.error("Failed to get response from planner")
 
-    # --- 4. 运行回测 ---
-    logger.info(f"\n--- [Test 4] 针对 {args.symbol} 运行信号生成回测 ---")
-    
-    # 确定是单个文件还是目录
+    # --- 4. Test RL backtest and update method ---
+    logger.info(f"\n--- [Test 4] Run RL backtest and update for {args.symbol} ---")
+
+    # Determine if input is a single file or directory
     if os.path.isdir(args.dataset_path):
         csv_file = os.path.join(args.dataset_path, f"{args.symbol}_2022-01-01_2024-12-31_1d.csv")
     else:
         csv_file = args.dataset_path
 
+    # Load market data
     backtest_data = load_csv_dates(csv_file)
     if not backtest_data:
-        logger.error(f"未能从 {csv_file} 加载回测数据。正在中止。")
+        logger.error(f"Failed to load backtest data from {csv_file}. Aborting.")
         return
 
-    # 保存策略流并回测
-    strategy_flows = []
-    for data_point in backtest_data:
-        date = data_point["date"]
-        price = data_point["price"]
-        signal = await client.generate_alpha_signals(
-            symbols=[args.symbol],
-            date=date,
-            lookback_period=args.lookback,
-            price=float(price)
+    # --- NEW RL BACKTEST/UPDATE TEST ---
+    # This tests the agent's RL learning loop and feedback-driven optimization
+    logger.info(f"\n--- [Test 5] Testing RL backtest and policy update ---")
+    try:
+        # The following assumes the agent pool exposes a tool named 'run_rl_backtest_and_update'
+        rl_result = await client._call_tool(
+            "run_rl_backtest_and_update",
+            {
+                "symbol": args.symbol,
+                "market_data": backtest_data,
+                "lookback_period": args.lookback,
+                "initial_cash": args.initial_cash
+            }
         )
-        # 提取策略流
-        if signal and signal.get("status") == "success":
-            alpha_signals = signal.get("alpha_signals", {}).get("signals", {})
-            flow = alpha_signals.get(args.symbol) or next(iter(alpha_signals.values()), {})
-            flow["date"] = date
-            flow["price"] = price
-            strategy_flows.append(flow)
-        logger.info("Date: %s, Signal: %s", date, signal)
+        logger.info(f"RL backtest and update result: {rl_result}")
+    except Exception as e:
+        logger.error(f"Error running RL backtest and update: {e}")
 
-    # 保存为json
-    with open(f"strategy_flow_{args.symbol}.json", "w", encoding="utf-8") as f:
-        json.dump(strategy_flows, f, ensure_ascii=False, indent=2)
-    logger.info(f"策略流已保存到 strategy_flow_{args.symbol}.json")
-
-    # Enhanced backtest logic with proper position management based on strategy signals
-    initial_cash = 100000
-    cash = initial_cash
-    position = 0.0  # Number of shares held
-    equity_curve = []
-    trade_log = []
-    
-    # Track strategy state
-    last_signal = "HOLD"
-    current_position_ratio = 0.0  # Current position as ratio of portfolio
-    
-    for i, flow in enumerate(strategy_flows):
-        price = flow["price"]
-        date = flow["date"]
-        signal = flow.get("signal", "HOLD")
-        confidence = flow.get("confidence", 0.0)
-        execution_weight = flow.get("execution_weight", 0.0)
-        
-        # Calculate current portfolio value
-        portfolio_value = cash + position * price
-        current_position_ratio = (position * price) / portfolio_value if portfolio_value > 0 else 0
-        
-        # Determine target position based on signal and confidence
-        target_position_ratio = 0.0
-        
-        if signal == "BUY":
-            # For BUY signals, calculate position size based on confidence
-            # Use execution_weight directly as target position ratio (already 0-1)
-            target_position_ratio = min(0.95, max(0.0, execution_weight))
-            
-        elif signal == "SELL":
-            # For SELL signals, reduce or close position
-            if confidence > 0.6:
-                target_position_ratio = 0.0  # Close position for high confidence sells
-            else:
-                # Partial reduction based on confidence
-                reduction_factor = confidence * 0.5
-                target_position_ratio = current_position_ratio * (1 - reduction_factor)
-                
-        elif signal == "HOLD":
-            # For HOLD, maintain current position unless adjustment needed
-            target_position_ratio = current_position_ratio
-        
-        # Apply trade threshold - only trade if change is significant
-        position_change = abs(target_position_ratio - current_position_ratio)
-        
-        # Lower threshold for more active trading
-        if position_change > 0.05:  # Trade if position change > 5%
-            # Calculate target number of shares
-            target_shares = (portfolio_value * target_position_ratio) / price if price > 0 else 0
-            shares_to_trade = target_shares - position
-            
-            # Execute trades
-            if shares_to_trade > 0.01:  # BUY
-                # Calculate maximum shares we can afford
-                max_affordable = cash / price
-                actual_shares = min(shares_to_trade, max_affordable)
-                
-                if actual_shares > 0.01:
-                    cost = actual_shares * price
-                    position += actual_shares
-                    cash -= cost
-                    
-                    trade_log.append({
-                        "date": date,
-                        "action": "BUY",
-                        "shares": actual_shares,
-                        "price": price,
-                        "cost": cost,
-                        "signal": signal,
-                        "confidence": confidence,
-                        "target_ratio": target_position_ratio,
-                        "portfolio_value": portfolio_value
-                    })
-                    
-            elif shares_to_trade < -0.01:  # SELL
-                # Sell shares
-                shares_to_sell = min(abs(shares_to_trade), position)
-                
-                if shares_to_sell > 0.01:
-                    proceeds = shares_to_sell * price
-                    position -= shares_to_sell
-                    cash += proceeds
-                    
-                    trade_log.append({
-                        "date": date,
-                        "action": "SELL", 
-                        "shares": shares_to_sell,
-                        "price": price,
-                        "proceeds": proceeds,
-                        "signal": signal,
-                        "confidence": confidence,
-                        "target_ratio": target_position_ratio,
-                        "portfolio_value": portfolio_value
-                    })
-        
-        # Record portfolio value
-        final_portfolio_value = cash + position * price
-        equity_curve.append(final_portfolio_value)
-        last_signal = signal
-    
-    # Log trade summary
-    logger.info(f"\n=== Trade Summary ===")
-    logger.info(f"Total trades executed: {len(trade_log)}")
-    buy_trades = [t for t in trade_log if t['action'] == 'BUY']
-    sell_trades = [t for t in trade_log if t['action'] == 'SELL']
-    logger.info(f"Buy trades: {len(buy_trades)}, Sell trades: {len(sell_trades)}")
-    
-    if trade_log:
-        logger.info(f"First trade: {trade_log[0]['date']} - {trade_log[0]['action']} {trade_log[0]['shares']:.2f} shares at ${trade_log[0]['price']:.2f}")
-        logger.info(f"Last trade: {trade_log[-1]['date']} - {trade_log[-1]['action']} {trade_log[-1]['shares']:.2f} shares at ${trade_log[-1]['price']:.2f}")
-    
-    logger.info(f"Final position: {position:.2f} shares, Cash: ${cash:.2f}")
-    logger.info(f"Final portfolio value: ${equity_curve[-1]:.2f}")
-    
-    # Save trade log
-    with open(f"trade_log_{args.symbol}.json", "w", encoding="utf-8") as f:
-        json.dump(trade_log, f, ensure_ascii=False, indent=2)
-    logger.info(f"Trade log saved to trade_log_{args.symbol}.json")
-
-    # Calculate enhanced performance metrics
-    import numpy as np
-    
-    if len(equity_curve) < 2:
-        logger.error("Insufficient data for performance calculation")
-        return
-        
-    equity_array = np.array(equity_curve)
-    
-    # Basic metrics
-    total_return = (equity_array[-1] - equity_array[0]) / equity_array[0] * 100
-    trading_days = len(equity_array)
-    annualized_return = (equity_array[-1] / equity_array[0]) ** (252 / max(1, trading_days)) - 1
-    annualized_return_pct = annualized_return * 100
-    
-    # Calculate daily returns
-    daily_returns = np.diff(equity_array) / equity_array[:-1]
-    daily_returns = daily_returns[~np.isnan(daily_returns)]  # Remove NaN values
-    
-    if len(daily_returns) > 1:
-        # Sharpe ratio (assuming risk-free rate = 0)
-        sharpe_ratio = np.mean(daily_returns) / (np.std(daily_returns) + 1e-8) * np.sqrt(252)
-        
-        # Maximum drawdown
-        cumulative_returns = np.cumprod(1 + daily_returns)
-        running_max = np.maximum.accumulate(cumulative_returns)
-        drawdown = (cumulative_returns - running_max) / running_max
-        max_drawdown = np.min(drawdown) * 100
-        
-        # Win rate (percentage of positive trading days)
-        win_rate = (daily_returns > 0).sum() / len(daily_returns) * 100
-        
-        # Volatility
-        volatility = np.std(daily_returns) * np.sqrt(252) * 100
-    else:
-        sharpe_ratio = 0
-        max_drawdown = 0
-        win_rate = 0
-        volatility = 0
-    
-    # Trading metrics
-    total_trades = len(trade_log)
-    profitable_trades = 0
-    total_profit = 0
-    total_loss = 0
-    
-    # Calculate trade P&L (simplified - based on portfolio value changes around trades)
-    for i, trade in enumerate(trade_log):
-        if trade['action'] == 'SELL' and i > 0:
-            # Find corresponding buy trade(s) - simplified assumption
-            prev_buys = [t for t in trade_log[:i] if t['action'] == 'BUY']
-            if prev_buys:
-                avg_buy_price = sum(t['price'] for t in prev_buys) / len(prev_buys)
-                pnl = (trade['price'] - avg_buy_price) * trade['shares']
-                total_profit += max(0, pnl)
-                total_loss += min(0, pnl)
-                if pnl > 0:
-                    profitable_trades += 1
-    
-    trade_win_rate = (profitable_trades / max(1, len(sell_trades))) * 100 if sell_trades else 0
-    
-    print(f"\n===== Enhanced Backtest Performance Report =====")
-    print(f"📊 Portfolio Performance:")
-    print(f"   Initial Capital:    ${initial_cash:,.2f}")
-    print(f"   Final Value:        ${equity_array[-1]:,.2f}")
-    print(f"   Total Return:       {total_return:.2f}%")
-    print(f"   Annualized Return:  {annualized_return_pct:.2f}%")
-    print(f"   Sharpe Ratio:       {sharpe_ratio:.3f}")
-    print(f"   Max Drawdown:       {max_drawdown:.2f}%")
-    print(f"   Volatility:         {volatility:.2f}%")
-    print(f"   Win Rate (Days):    {win_rate:.1f}%")
-    print(f"")
-    print(f"🔄 Trading Activity:")
-    print(f"   Total Trades:       {total_trades}")
-    print(f"   Buy Orders:         {len(buy_trades)}")
-    print(f"   Sell Orders:        {len(sell_trades)}")
-    print(f"   Trade Win Rate:     {trade_win_rate:.1f}%")
-    print(f"   Final Position:     {position:.2f} shares")
-    print(f"   Cash Remaining:     ${cash:,.2f}")
-    print(f"")
-    print(f"💰 P&L Summary:")
-    print(f"   Gross Profit:       ${total_profit:,.2f}")
-    print(f"   Gross Loss:         ${total_loss:,.2f}")
-    print(f"   Net P&L:            ${total_profit + total_loss:,.2f}")
-    print(f"=" * 50)
-
-    # Enhanced visualization with trade markers
-    import matplotlib.pyplot as plt
-    dates = [flow["date"] for flow in strategy_flows]
-    
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
-    
-    # Plot 1: Portfolio equity curve
-    ax1.plot(dates, equity_array, label="Portfolio Value", linewidth=2, color='blue')
-    
-    # Mark buy/sell trades on the equity curve
-    for trade in trade_log:
-        trade_date = trade['date']
-        if trade_date in dates:
-            idx = dates.index(trade_date)
-            if trade['action'] == 'BUY':
-                ax1.scatter(trade_date, equity_array[idx], color='green', marker='^', s=50, alpha=0.7)
-            else:  # SELL
-                ax1.scatter(trade_date, equity_array[idx], color='red', marker='v', s=50, alpha=0.7)
-    
-    ax1.set_title(f"Portfolio Performance: {args.symbol} (Green=Buy, Red=Sell)")
-    ax1.set_ylabel("Portfolio Value ($)")
-    ax1.legend()
-    ax1.grid(True, alpha=0.3)
-    
-    # Plot 2: Price and signals
-    prices = [flow["price"] for flow in strategy_flows]
-    ax2.plot(dates, prices, label="Stock Price", linewidth=1, color='black')
-    
-    # Color background based on signals
-    for i, flow in enumerate(strategy_flows):
-        signal = flow.get("signal", "HOLD")
-        if signal == "BUY":
-            ax2.axvspan(dates[i], dates[min(i+1, len(dates)-1)], alpha=0.2, color='green')
-        elif signal == "SELL":
-            ax2.axvspan(dates[i], dates[min(i+1, len(dates)-1)], alpha=0.2, color='red')
-    
-    ax2.set_xlabel("Date")
-    ax2.set_ylabel("Stock Price ($)")
-    ax2.set_title("Stock Price with Signal Background (Green=Buy, Red=Sell)")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    
-    # Rotate x-axis labels for better readability
-    plt.setp(ax1.xaxis.get_majorticklabels(), rotation=45)
-    plt.setp(ax2.xaxis.get_majorticklabels(), rotation=45)
-    
-    plt.tight_layout()
-    plt.savefig(f"backtest_equity_{args.symbol}.png", dpi=150, bbox_inches='tight')
-    plt.show()
-    logger.info(f"Enhanced backtest analysis saved to backtest_equity_{args.symbol}.png")
+    # Optionally, you can add more assertions or checks here to validate RL learning impact
 
 async def execute_trades_from_strategy_flow(strategy_flow_file: str, symbol: str, initial_cash: float = 100000):
     """
@@ -915,3 +658,6 @@ def create_trading_visualization(strategy_flows, trade_log, equity_curve, symbol
         logger.warning("Matplotlib not available, skipping visualization")
     except Exception as e:
         logger.error(f"Error creating visualization: {e}")
+
+if __name__ == "__main__":
+    asyncio.run(main())

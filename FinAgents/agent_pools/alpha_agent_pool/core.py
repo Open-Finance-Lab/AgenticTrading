@@ -19,6 +19,9 @@ from enum import Enum
 
 from mcp.server.fastmcp import FastMCP
 
+# Global flag for memory agent availability
+MEMORY_AVAILABLE = False
+
 # Add project root to sys.path to ensure correct module resolution
 # This is crucial for making sure imports like `FinAgents.memory...` work correctly
 # when the script is run directly or as a subprocess.
@@ -508,6 +511,7 @@ class AlphaAgentPoolMCPServer:
     def _initialize_memory_agent(self):
         """Initialize the external memory agent"""
         # Import here to avoid top-level circular dependencies
+        global MEMORY_AVAILABLE
         try:
             from FinAgents.memory.external_memory_interface import ExternalMemoryAgent
             MEMORY_AVAILABLE = True
@@ -517,7 +521,6 @@ class AlphaAgentPoolMCPServer:
         if not MEMORY_AVAILABLE:
             logger.warning("External memory agent not available. Continuing without it.")
             return
-        
         try:
             self.memory_agent = ExternalMemoryAgent()
             self.session_id = f"alpha_pool_session_{int(time.time())}"
@@ -574,6 +577,29 @@ class AlphaAgentPoolMCPServer:
             """Returns the status of all registered agents as a dictionary."""
             return {k: v.name for k, v in self.check_all_agents_status().items()}
 
+        @self.pool_server.tool(name="momentum_health", description="Check the health of the momentum agent.")
+        async def momentum_health() -> dict:
+            """
+            Returns health status of the momentum agent, including process status and agent endpoint check.
+            """
+            import httpx
+            status = self.check_agent_status("momentum_agent").name
+            endpoint = "http://127.0.0.1:5051/health"
+            endpoint_status = "unknown"
+            try:
+                async with httpx.AsyncClient(timeout=3.0) as client:
+                    resp = await client.get(endpoint)
+                    if resp.status_code == 200:
+                        endpoint_status = "healthy"
+                    else:
+                        endpoint_status = f"unhealthy ({resp.status_code})"
+            except Exception as e:
+                endpoint_status = f"error: {e}"
+            return {
+                "process_status": status,
+                "endpoint_status": endpoint_status
+            }
+
         @self.pool_server.tool(name="get_memory", description="Get a value from the internal memory unit by key.")
         def get_memory(key: str):
             """
@@ -620,7 +646,7 @@ class AlphaAgentPoolMCPServer:
             return self.memory.keys()
 
         @self.pool_server.tool(name="generate_alpha_signals", description="Generate alpha signals based on market data")
-        async def generate_alpha_signals(symbol: str = None, symbols: list = None, date: str = None, lookback_period: int = 20, price: float = None, memory: dict = None) -> dict:
+        async def generate_alpha_signals(symbol: str = None, symbols: list = None, date: str = None, lookback_period: int = 20, price: Optional[float] = None, memory: dict = None) -> dict:
             """
             Call the momentum_agent's generate_signal tool via SSE, passing historical price data.
             Supports both single symbol (symbol) and multiple symbols (symbols) parameters for compatibility.
@@ -647,22 +673,22 @@ class AlphaAgentPoolMCPServer:
                 
                 for target_symbol in target_symbols:
                     logger.info(f"Processing symbol: {target_symbol}")
-                    # The rest of the implementation from the original function follows...
-                    # Prepare price list for the lookback period
                     price_list = []
                     current_price = price
-
-                    # If price is not provided, get it from memory
-                    if current_price is None:
-                        # Use the memory unit if memory dict is not provided
+                    # Ensure price is not None and is a float
+                    if current_price is None or not isinstance(current_price, (float, int)):
                         memory_source = memory if memory is not None else self.memory
                         price_key = f"{target_symbol}_close_{date}"
                         current_price_str = memory_source.get(price_key) if hasattr(memory_source, 'get') else memory_source.get(price_key) if memory_source else None
-                        if not current_price_str:
-                            logger.warning(f"No price data for {target_symbol} on {date}, using default price")
-                            current_price = 100.0  # Default price if not found
+                        if current_price_str is None:
+                            logger.warning(f"No price data for {target_symbol} on {date}, using default price 100.0")
+                            current_price = 100.0
                         else:
-                            current_price = float(current_price_str)
+                            try:
+                                current_price = float(current_price_str)
+                            except Exception:
+                                logger.warning(f"Price data for {target_symbol} on {date} is not a valid float, using default price 100.0")
+                                current_price = 100.0
 
                     # Collect historical prices for the lookback period
                     current_date_obj = datetime.strptime(date, '%Y-%m-%d')
@@ -688,16 +714,11 @@ class AlphaAgentPoolMCPServer:
 
                     # SSE client to momentum_agent (correct port 5051 from logs)
                     base_url = "http://127.0.0.1:5051/sse"
-                    
                     # Initialize with a default error response
                     response = {"signal": "HOLD", "confidence": 0.0, "error": "Unknown error"}
-                    
                     # Try the MCP SSE client first, then fallback to simple HTTP client
                     try:
-                        # Add better error handling and logging
                         logger.info(f"Attempting SSE connection to {base_url} for symbol {target_symbol}")
-                        
-                        # Use a more explicit approach to handle the SSE connection
                         try:
                             async with sse_client(base_url, timeout=10) as (read, write):
                                 logger.info(f"SSE connection established for {target_symbol}")
@@ -706,13 +727,10 @@ class AlphaAgentPoolMCPServer:
                                         try:
                                             await session.initialize()
                                             logger.info(f"SSE session initialized for {target_symbol}")
-                                            
-                                            # Create proper request parameters for momentum agent
                                             request_params = {
-                                                "symbol": target_symbol, 
+                                                "symbol": target_symbol,
                                                 "price_list": price_list
                                             }
-                                            
                                             logger.info(f"Calling generate_signal tool for {target_symbol} with {len(price_list)} prices")
                                             try:
                                                 response_parts = await session.call_tool(
@@ -722,7 +740,6 @@ class AlphaAgentPoolMCPServer:
                                             except Exception as tool_error:
                                                 logger.error(f"Error during session.call_tool for {target_symbol}: {tool_error}", exc_info=True)
                                                 raise tool_error
-                                            
                                             if response_parts and hasattr(response_parts, 'content') and response_parts.content:
                                                 content_list = response_parts.content
                                                 if len(content_list) > 0 and hasattr(content_list[0], 'text'):
@@ -744,14 +761,12 @@ class AlphaAgentPoolMCPServer:
                         except Exception as sse_client_error:
                             logger.error(f"Error in SSE client for {target_symbol}: {sse_client_error}", exc_info=True)
                             raise sse_client_error
-                    
                     except Exception as mcp_error:
                         logger.warning(f"MCP SSE client failed for {target_symbol}: {mcp_error}")
                         logger.info(f"Attempting fallback to simple HTTP client for {target_symbol}")
-                        
-                        # Fallback to simple HTTP client
                         try:
-                            from .simple_momentum_client import SimpleMomentumClient
+                            # Use absolute import to avoid relative import error
+                            from FinAgents.agent_pools.alpha_agent_pool.simple_momentum_client import SimpleMomentumClient
                             simple_client = SimpleMomentumClient()
                             response = await simple_client.call_generate_signal(target_symbol, price_list)
                             logger.info(f"Fallback HTTP client succeeded for {target_symbol}")
@@ -761,7 +776,7 @@ class AlphaAgentPoolMCPServer:
 
                     logger.info(f"Received response from momentum_agent for {target_symbol}: {response}")
                     results[target_symbol] = response
-                    
+
                 return {
                     "status": "success",
                     "alpha_signals": {
@@ -773,7 +788,6 @@ class AlphaAgentPoolMCPServer:
                 import traceback
                 error_traceback = traceback.format_exc()
                 logger.error(f"Full top-level traceback: {error_traceback}")
-                
                 return {
                     "status": "error",
                     "message": f"Top-level error: {top_level_error}",
@@ -781,6 +795,47 @@ class AlphaAgentPoolMCPServer:
                         "signals": {}
                     }
                 }
+
+        @self.pool_server.tool(name="run_rl_backtest_and_update", description="Run RL backtest and update agent policy for a given symbol and market data.")
+        async def run_rl_backtest_and_update(symbol: str, market_data: list, lookback_period: int = 30, initial_cash: float = 100000.0) -> dict:
+            """
+            Remotely call the momentum agent's RL backtest and policy update tool via SSE.
+            Args:
+                symbol (str): The symbol to backtest.
+                market_data (list): List of dicts with 'date' and 'price'.
+                lookback_period (int): Lookback window for momentum.
+                initial_cash (float): Initial cash for backtest.
+            Returns:
+                dict: RL backtest and update results.
+            """
+            try:
+                from mcp.client.sse import sse_client
+                from mcp import ClientSession
+                base_url = "http://127.0.0.1:5051/sse"
+                logger.info(f"Connecting to momentum_agent for RL backtest/update: {symbol}")
+                async with sse_client(base_url, timeout=15) as (read, write):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        params = {
+                            "symbol": symbol,
+                            "market_data": market_data,
+                            "lookback_period": lookback_period,
+                            "initial_cash": initial_cash
+                        }
+                        logger.info(f"Calling run_rl_backtest_and_update tool for {symbol}")
+                        response_parts = await session.call_tool("run_rl_backtest_and_update", params)
+                        if response_parts and hasattr(response_parts, 'content') and response_parts.content:
+                            content_list = response_parts.content
+                            if len(content_list) > 0 and hasattr(content_list[0], 'text'):
+                                content_str = content_list[0].text
+                                try:
+                                    return json.loads(content_str)
+                                except Exception:
+                                    return {"status": "error", "raw_response": content_str}
+                        return {"status": "error", "message": "No response from momentum agent."}
+            except Exception as e:
+                logger.error(f"Error in run_rl_backtest_and_update: {e}", exc_info=True)
+                return {"status": "error", "message": str(e)}
         
         @self.pool_server.tool(name="process_strategy_request", description="Process strategy requests and generate alpha signals")
         async def process_strategy_request(query: str) -> str:

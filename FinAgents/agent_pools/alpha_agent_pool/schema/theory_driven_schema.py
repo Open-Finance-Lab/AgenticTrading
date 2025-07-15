@@ -50,7 +50,7 @@ class AlphaStrategyFlow(BaseModel):
     timestamp: str
     market_context: MarketContext
     decision: Decision
-    action: Action
+    # action: Action
     performance_feedback: PerformanceFeedback
     metadata: Metadata
 
