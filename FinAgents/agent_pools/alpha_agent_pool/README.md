@@ -22,26 +22,8 @@ This README provides instructions for setting up the Neo4j database, installing 
 
 ---
 
-## 2. Python Environment Setup
 
-### **A. Create and Activate a Virtual Environment**
-```sh
-python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-```
-
-### **B. Install Dependencies**
-```sh
-pip install -r requirements.txt
-```
-- You may also need to install `uvicorn` for running the server:
-```sh
-pip install uvicorn
-```
-
----
-
-## 3. Running the Memory Server
+## 2. Running the Memory Server
 
 From the project root directory, run:
 ```sh
@@ -52,7 +34,7 @@ uvicorn FinAgents.memory.memory_server:app --reload --port 8010
 
 ---
 
-## 4. Testing the Alpha Agent Memory Client
+## 3. Testing the Alpha Agent Memory Client
 
 ### **A. Run the Test Script**
 From the project root, run:
@@ -69,7 +51,7 @@ python -m FinAgents.agent_pools.alpha_agent_pool.alpha_memory_client
 
 ---
 
-## 5. Troubleshooting
+## 4. Troubleshooting
 
 - **ModuleNotFoundError: No module named 'FinAgents'**
   - Make sure you are running commands from the project root and using `-m` for module execution.
