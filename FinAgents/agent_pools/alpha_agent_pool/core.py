@@ -1,4 +1,3 @@
-# core.py
 """
 Unified entry point for starting the Alpha Agent Pool MCP service.
 This module manages the lifecycle and orchestration of multiple sub-agents within the AlphaAgentPool.
@@ -39,6 +38,7 @@ except ImportError:
 if TYPE_CHECKING:
     from FinAgents.agent_pools.alpha_agent_pool.memory_bridge import AlphaAgentPoolMemoryBridge, create_alpha_memory_bridge
     from FinAgents.memory.external_memory_interface import ExternalMemoryAgent, EventType, LogLevel
+    from FinAgents.agent_pools.alpha_agent_pool.alpha_memory_client import AlphaMemoryClient
 
 # --- Definitions for DAG Planner and Agent Status ---
 # These are defined here but only used within the server class.
@@ -313,6 +313,9 @@ class AlphaAgentPoolMCPServer:
         self.memory_bridge: Optional["AlphaAgentPoolMemoryBridge"] = None
         # Note: Memory bridge will be initialized asynchronously when needed
         
+        # Initialize AlphaMemoryClient for MCP-based memory logging
+        self.alpha_memory_client = AlphaMemoryClient(agent_id="alpha_agent_pool_server")
+        
         # Automatically load static dataset into memory unit on startup, and reset memory file
         csv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/cache/AAPL_2022-01-01_2024-12-31_1d.csv"))
         self.memory = MemoryUnit(
@@ -552,6 +555,18 @@ class AlphaAgentPoolMCPServer:
             except Exception as e:
                 logger.warning(f"Failed to log memory event: {e}")
 
+    async def store_event_in_memory(self, event_type, summary, keywords, details, log_level="INFO", session_id=None, correlation_id=None):
+        """Store an event in the MCP memory server using AlphaMemoryClient."""
+        return await self.alpha_memory_client.store_event(
+            event_type=event_type,
+            summary=summary,
+            keywords=keywords,
+            details=details,
+            log_level=log_level,
+            session_id=session_id,
+            correlation_id=correlation_id
+        )
+
     def _register_pool_tools(self):
         """
         Register management tools for the agent pool, including starting and listing sub-agents.
@@ -559,7 +574,17 @@ class AlphaAgentPoolMCPServer:
         """
         @self.pool_server.tool(name="start_agent", description="Start the specified sub-agent service.")
         def start_agent(agent_id: str) -> str:
-            return self.start_agent_sync(agent_id)
+            result = self.start_agent_sync(agent_id)
+            # Log the event asynchronously to the MCP memory server
+            asyncio.create_task(
+                self.alpha_memory_client.store_event(
+                    event_type="AGENT_ACTION",
+                    summary=f"Started agent {agent_id}",
+                    keywords=["start_agent", agent_id],
+                    details={"agent_id": agent_id, "result": result}
+                )
+            )
+            return result
 
         @self.pool_server.tool(name="list_agents", description="List all registered sub-agents.")
         def list_agents() -> list:
