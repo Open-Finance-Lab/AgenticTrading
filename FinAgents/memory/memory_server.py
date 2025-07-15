@@ -1,16 +1,16 @@
 from mcp.server.fastmcp import FastMCP
-from database import TradingGraphMemory 
+from database import TradingGraphMemory
 import uuid
-import json 
+import json
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 from contextlib import asynccontextmanager
-from collections.abc import AsyncIterator 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "FinOrchestration" 
+NEO4J_PASSWORD = "FinOrchestration"
 
 GRAPH_DB_INSTANCE: Optional[TradingGraphMemory] = None
 
@@ -18,14 +18,14 @@ GRAPH_DB_INSTANCE: Optional[TradingGraphMemory] = None
 async def app_lifespan(server: FastMCP) -> AsyncIterator[None]:
     global GRAPH_DB_INSTANCE
     print("🚀 [SERVER] Lifespan event: Initializing application context.")
-    
+
     GRAPH_DB_INSTANCE = TradingGraphMemory(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-    
+
     if GRAPH_DB_INSTANCE and GRAPH_DB_INSTANCE.driver:
         print("🔗 [SERVER] Lifespan event: Ensuring full-text search index is created...")
         await GRAPH_DB_INSTANCE.create_memory_index()
         print("🔗 [SERVER] Lifespan event: Ensuring structured property indexes are created...")
-        await GRAPH_DB_INSTANCE.create_structured_indexes() # --- NEW ---
+        await GRAPH_DB_INSTANCE.create_structured_indexes()
     else:
         print("❌ [SERVER] Lifespan event ERROR: Could not connect to Neo4j.")
 
@@ -39,27 +39,27 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[None]:
 
 mcp = FastMCP(
     "Neo4jMemoryAgent",
-    lifespan=app_lifespan, 
-    stateless_http=True,  
-    debug=True            
+    lifespan=app_lifespan,
+    stateless_http=True,
+    debug=True
 )
 
 @mcp.tool(name="store_graph_memory",
           description="Stores a structured memory in the Neo4j graph database.")
 async def store_graph_memory(
-    query: str, 
+    query: str,
     keywords: list,
-    summary: str, 
+    summary: str,
     agent_id: str,
-    event_type: Optional[str] = 'USER_QUERY', 
+    event_type: Optional[str] = 'USER_QUERY',
     log_level: Optional[str] = 'INFO',
-    session_id: Optional[str] = None, 
+    session_id: Optional[str] = None,
     correlation_id: Optional[str] = None
 ):
     print(f"🛠️ [SERVER] --- Tool: store_graph_memory ---")
     if not GRAPH_DB_INSTANCE:
         raise Exception("Database connection is not available.")
-        
+
     try:
         stored_data = await GRAPH_DB_INSTANCE.store_memory(
             query, keywords, summary, agent_id, event_type, log_level, session_id, correlation_id
@@ -68,7 +68,7 @@ async def store_graph_memory(
             print(f"   - ✅ [SERVER] Memory stored successfully in DB.")
             linked_count = len(stored_data.get('linked_memories', []))
             message = f"Memory stored in Neo4j graph and linked to {linked_count} similar memories."
-            
+
             response_data = { "status": "success", "message": message, "stored_memory": stored_data }
             return json.dumps(response_data)
         else:
@@ -77,9 +77,6 @@ async def store_graph_memory(
         print(f"   - ❌ [SERVER] ERROR during store_graph_memory: {e}")
         error_response = { "status": "error", "message": f"An internal error occurred in store_graph_memory: {str(e)}" }
         return json.dumps(error_response)
-
-
-
 
 @mcp.tool(name="store_graph_memories_batch",
           description="Stores a batch of event-like memories in the Neo4j graph database. Optimized for high-throughput.")
@@ -139,11 +136,12 @@ async def retrieve_graph_memory(
     search_query: str, 
     limit: int = 5
 ):
-
     print(f"🛠️ [SERVER] --- Tool: retrieve_graph_memory ---")
     if not GRAPH_DB_INSTANCE:
-        raise Exception("Database connection is not available.")
-        
+        print("   - ❌ [SERVER] ERROR: Database connection is not available.")
+        error_response = { "status": "error", "message": "Database connection is not available." }
+        return json.dumps(error_response)
+
     try:
         search_results = await GRAPH_DB_INSTANCE.retrieve_memory(search_query, limit)
         print(f"   - ✅ [SERVER] Retrieved {len(search_results)} memories from DB.")
@@ -151,7 +149,8 @@ async def retrieve_graph_memory(
         return json.dumps(response_data)
     except Exception as e:
         print(f"   - ❌ [SERVER] ERROR during retrieve_graph_memory: {e}")
-        error_response = { "status": "error", "message": f"An internal error occurred in retrieve_graph_memory: {str(e)}" }
+        error_message = f"An internal error occurred in retrieve_graph_memory: {str(e)}"
+        error_response = { "status": "error", "message": error_message, "exception_type": type(e).__name__ }
         return json.dumps(error_response)
 
 @mcp.tool(name="retrieve_memory_with_expansion",
