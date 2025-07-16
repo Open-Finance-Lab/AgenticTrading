@@ -198,30 +198,38 @@ class TradingGraphMemory:
         """
         params = {"search_query": search_query, "limit": limit}
         processed_results = []
-        
+
         async with self.driver.session() as session:
-            result = await session.run(cypher_query, params)
-            result_records = [record async for record in result]
+            try:
+                # Execute the primary search query
+                result = await session.run(cypher_query, params)
+                result_records = [record async for record in result]
 
-            if not result_records:
-                return []
+                if not result_records:
+                    return []
 
-            retrieved_ids = []
-            for record in result_records:
-                node = record.data()['node']
-                score = record.data()['score']
-                retrieved_ids.append(node['memory_id'])
-                processed_results.append({
-                    'score': score,
-                    'memory': {
-                        'query': node['query'], 'keywords': node['keywords'], 'summary': node['summary'],
-                        'metadata': { 'agent_id': node['agent_id'], 'memory_id': node['memory_id'], 'timestamp': node['timestamp'], 'lookup_count': node.get('lookup_count', 0) + 1 },
-                    },
-                })
-            
-            increment_query = "UNWIND $memory_ids AS mem_id MATCH (m:Memory {memory_id: mem_id}) SET m.lookup_count = coalesce(m.lookup_count, 0) + 1"
-            write_result = await session.run(increment_query, {"memory_ids": retrieved_ids})
-            await write_result.consume()
+                retrieved_ids = []
+                for record in result_records:
+                    node = record.data()['node']
+                    score = record.data()['score']
+                    retrieved_ids.append(node['memory_id'])
+                    processed_results.append({
+                        'score': score,
+                        'memory': {
+                            'query': node['query'], 'keywords': node['keywords'], 'summary': node['summary'],
+                            'metadata': { 'agent_id': node['agent_id'], 'memory_id': node['memory_id'], 'timestamp': node['timestamp'], 'lookup_count': node.get('lookup_count', 0) + 1 },
+                        },
+                    })
+
+                # Increment lookup count for retrieved memories
+                increment_query = "UNWIND $memory_ids AS mem_id MATCH (m:Memory {memory_id: mem_id}) SET m.lookup_count = coalesce(m.lookup_count, 0) + 1"
+                write_result = await session.run(increment_query, {"memory_ids": retrieved_ids})
+                await write_result.consume()
+
+            except Exception as e:
+                logging.error(f"Error during retrieve_memory for query '{search_query}': {e}")
+                # Re-raise the exception after logging, so it can be caught by the MCP tool wrapper
+                raise
 
         logging.info(f"Retrieved {len(processed_results)} memories for query: '{search_query}'")
         return processed_results
