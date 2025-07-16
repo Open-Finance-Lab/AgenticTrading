@@ -15,9 +15,6 @@ class AlphaMemoryClient:
         self.agent_id = agent_id
 
     async def store_event(self, event_type: str, summary: str, keywords: List[str], details: Dict[str, Any], log_level: str = "INFO", session_id: Optional[str] = None, correlation_id: Optional[str] = None):
-        """
-        Store a structured event (transaction, info, etc.) in the memory agent.
-        """
         tool_args = {
             "query": str(details),
             "keywords": keywords,
@@ -33,9 +30,6 @@ class AlphaMemoryClient:
                 return await call_mcp_tool(session, "store_graph_memory", tool_args)
 
     async def store_error(self, summary: str, details: Dict[str, Any], keywords: List[str] = None, session_id: Optional[str] = None, correlation_id: Optional[str] = None):
-        """
-        Store an error event in the memory agent.
-        """
         return await self.store_event(
             event_type="ERROR",
             summary=summary,
@@ -47,9 +41,6 @@ class AlphaMemoryClient:
         )
 
     async def store_action(self, summary: str, details: Dict[str, Any], keywords: List[str] = None, session_id: Optional[str] = None, correlation_id: Optional[str] = None):
-        """
-        Store a generic agent action in the memory agent.
-        """
         return await self.store_event(
             event_type="AGENT_ACTION",
             summary=summary,
@@ -61,9 +52,6 @@ class AlphaMemoryClient:
         )
 
     async def retrieve_events(self, search_query: str, limit: int = 10):
-        """
-        Retrieve events from the memory agent using a full-text search.
-        """
         tool_args = {
             "search_query": search_query,
             "limit": limit
@@ -73,9 +61,6 @@ class AlphaMemoryClient:
                 return await call_mcp_tool(session, "retrieve_graph_memory", tool_args)
 
     async def retrieve_expanded(self, search_query: str, limit: int = 10):
-        """
-        Retrieve events and their related memories using expansion.
-        """
         tool_args = {
             "search_query": search_query,
             "limit": limit
@@ -85,9 +70,6 @@ class AlphaMemoryClient:
                 return await call_mcp_tool(session, "retrieve_memory_with_expansion", tool_args)
 
     async def filter_events(self, filters: Dict[str, Any], limit: int = 100, offset: int = 0):
-        """
-        Filter events using structured criteria (time, event_type, log_level, etc.).
-        """
         tool_args = {
             "filters": filters,
             "limit": limit,
@@ -95,5 +77,4 @@ class AlphaMemoryClient:
         }
         async with streamablehttp_client(MCP_SERVER_URL) as (read, write, _):
             async with ClientSession(read, write) as session:
-                return await call_mcp_tool(session, "filter_graph_memories", tool_args)
-
+                return await call_mcp_tool(session, "filter_graph_memories", tool_args) 
