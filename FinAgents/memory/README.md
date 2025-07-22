@@ -59,7 +59,7 @@ Both clients require the MCP memory server to be running and accessible (default
 Start the server with:
 
 ```sh
-uvicorn FinAgents.memory.memory_server:app --reload
+uvicorn FinAgents.memory.memory_server:app --port 8010 --reload
 ```
 
 Ensure Neo4j is running and accessible with the correct credentials.
