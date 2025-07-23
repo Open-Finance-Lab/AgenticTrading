@@ -21,6 +21,28 @@ from mcp.server.fastmcp import FastMCP
 # Global flag for memory agent availability
 MEMORY_AVAILABLE = False
 
+# Try to import A2A memory coordinator
+try:
+    from .a2a_memory_coordinator import (
+        AlphaPoolA2AMemoryCoordinator, 
+        initialize_pool_coordinator, 
+        get_pool_coordinator,
+        shutdown_pool_coordinator
+    )
+    A2A_COORDINATOR_AVAILABLE = True
+except ImportError:
+    A2A_COORDINATOR_AVAILABLE = False
+
+# Try to import enhanced MCP lifecycle management
+try:
+    from .enhanced_mcp_lifecycle import (
+        EnhancedMCPLifecycleManager,
+        create_enhanced_mcp_server
+    )
+    ENHANCED_MCP_AVAILABLE = True
+except ImportError:
+    ENHANCED_MCP_AVAILABLE = False
+
 # Add project root to sys.path to ensure correct module resolution
 # This is crucial for making sure imports like `FinAgents.memory...` work correctly
 # when the script is run directly or as a subprocess.
@@ -295,22 +317,44 @@ class MemoryUnit:
                 logger.debug(f"Failed to log memory operation: {e}")
 
 class AlphaAgentPoolMCPServer:
-    def __init__(self, host="0.0.0.0", port=8081):
+    def __init__(self, host="0.0.0.0", port=8081, enable_enhanced_lifecycle=True):
         """
         Initialize the AlphaAgentPoolMCPServer instance with enhanced memory capabilities.
         Args:
             host (str): Host address to bind the MCP server.
             port (int): Port number to bind the MCP server.
+            enable_enhanced_lifecycle (bool): Whether to enable enhanced MCP lifecycle management.
         """
         self.host = host
         self.port = port
-        self.pool_server = FastMCP("AlphaAgentPoolMCPServer")
+        self.enable_enhanced_lifecycle = enable_enhanced_lifecycle
+        
+        # Initialize enhanced MCP server or fallback to basic FastMCP
+        if enable_enhanced_lifecycle and ENHANCED_MCP_AVAILABLE:
+            self.pool_server, self.lifecycle_manager = create_enhanced_mcp_server(
+                pool_id=f"alpha_pool_{port}"
+            )
+            self.logger = logging.getLogger(__name__)
+            self.logger.info("Enhanced MCP lifecycle management enabled")
+        else:
+            self.pool_server = FastMCP("AlphaAgentPoolMCPServer")
+            self.lifecycle_manager = None
+            self.logger = logging.getLogger(__name__)
+            if enable_enhanced_lifecycle:
+                self.logger.warning("Enhanced MCP lifecycle management not available, using basic MCP")
+        
         self.agent_registry = {}  # agent_id -> (agent, process/thread)
         self.config_dir = os.path.join(os.path.dirname(__file__), "config")
-        self.logger = logging.getLogger(__name__) # Add logger attribute
         
         # Initialize the Command Planner for DAG-based execution
         self.planner = CommandPlanner(self)
+        
+        # Initialize A2A Memory Coordinator for pool-level memory operations
+        self.a2a_coordinator: Optional["AlphaPoolA2AMemoryCoordinator"] = None
+        if A2A_COORDINATOR_AVAILABLE:
+            self.logger.info("A2A Memory Coordinator available, will initialize during startup")
+        else:
+            self.logger.warning("A2A Memory Coordinator not available, falling back to legacy memory")
         
         # Initialize memory bridge for comprehensive strategy tracking
         self.memory_bridge: Optional["AlphaAgentPoolMemoryBridge"] = None
@@ -964,12 +1008,62 @@ class AlphaAgentPoolMCPServer:
 
     def start(self):
         """
-        Start the MCP server, initialize the memory bridge, and pre-start required agents.
+        Start the MCP server, initialize memory systems, and pre-start required agents.
         """
-        # Initialization is now synchronous
+        # Initialize enhanced lifecycle manager if available
+        if self.lifecycle_manager:
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self.lifecycle_manager.initialize())
+                loop.close()
+                self.logger.info("✅ Enhanced MCP lifecycle manager initialized successfully")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to initialize enhanced MCP lifecycle manager: {e}")
+        
+        # Initialize A2A Memory Coordinator
+        if A2A_COORDINATOR_AVAILABLE:
+            try:
+                # Initialize A2A coordinator asynchronously in a new event loop
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                self.a2a_coordinator = loop.run_until_complete(
+                    initialize_pool_coordinator(
+                        pool_id="alpha_agent_pool",
+                        memory_url="http://127.0.0.1:8010"
+                    )
+                )
+                loop.close()
+                self.logger.info("✅ A2A Memory Coordinator initialized successfully")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to initialize A2A Memory Coordinator: {e}")
+                self.a2a_coordinator = None
+        
+        # Initialize legacy memory bridge
         self.memory_bridge = self._initialize_memory_bridge()
 
         self.logger.info("Pre-starting required agents...")
+        
+        # Register momentum agent with A2A coordinator if available
+        if self.a2a_coordinator:
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(
+                    self.a2a_coordinator.register_agent(
+                        agent_id="momentum_agent",
+                        agent_type="theory_driven_momentum",
+                        agent_config={"window": 20, "strategy_type": "momentum"}
+                    )
+                )
+                loop.close()
+                self.logger.info("✅ Momentum agent registered with A2A coordinator")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Failed to register momentum agent with A2A coordinator: {e}")
+        
         self.start_agent_sync("momentum_agent")
         # Give the agent a moment to initialize before starting the main server
         time.sleep(5) 
@@ -985,6 +1079,31 @@ class AlphaAgentPoolMCPServer:
         Stop the MCP server and all running agents.
         """
         self.logger.info("Stopping AlphaAgentPoolMCPServer and all running agents...")
+        
+        # Stop enhanced lifecycle manager if available
+        if self.lifecycle_manager:
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(self.lifecycle_manager.shutdown())
+                loop.close()
+                self.logger.info("✅ Enhanced MCP lifecycle manager shut down successfully")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to shutdown enhanced MCP lifecycle manager: {e}")
+        
+        # Stop A2A Memory Coordinator if available
+        if self.a2a_coordinator:
+            try:
+                import asyncio
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(shutdown_pool_coordinator())
+                loop.close()
+                self.logger.info("✅ A2A Memory Coordinator shut down successfully")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to shutdown A2A Memory Coordinator: {e}")
+        
         # Stop all registered agents
         for agent_id in list(self.agent_registry.keys()):
             try:

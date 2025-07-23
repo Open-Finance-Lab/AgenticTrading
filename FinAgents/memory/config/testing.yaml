@@ -1,0 +1,129 @@
+environment: testing
+
+# Database Configuration
+database:
+  uri: "bolt://localhost:7687"
+  username: "neo4j"
+  password: "finagent123"
+  database: "finagent_test"
+  max_connection_pool_size: 5
+  connection_timeout: 30
+  max_retry_time: 30
+  encrypted: false
+  trust: "TRUST_ALL_CERTIFICATES"
+  enable_intelligent_indexing: true
+  memory_cache_size: 100
+  semantic_search_enabled: true
+
+# Server Configuration
+server:
+  host: "0.0.0.0"
+  port: 8001
+  debug: true
+  log_level: "INFO"
+  cors_enabled: true
+  cors_origins: ["*"]
+  workers: 1
+  max_connections: 100
+  keepalive_timeout: 5
+  api_key_required: false
+  api_key: null
+
+# Memory Configuration
+memory:
+  graph_memory_enabled: true
+  vector_memory_enabled: true
+  cache_enabled: true
+  max_nodes: 1000
+  max_relationships: 5000
+  auto_cleanup_enabled: true
+  cleanup_interval_hours: 1
+  vector_dimension: 384
+  similarity_threshold: 0.7
+  max_vectors: 1000
+  indexing_enabled: true
+  auto_index_creation: true
+  index_update_interval: 60
+
+# MCP Configuration
+mcp:
+  transport_type: "stdio"
+  protocol_version: "2024-11-05"
+  enable_all_tools: true
+  enabled_tools: []
+  tool_timeout: 10
+  max_concurrent_operations: 5
+  operation_timeout: 30
+
+# A2A Configuration
+a2a:
+  websocket_enabled: true
+  real_time_enabled: true
+  max_message_history: 100
+  message_retention_hours: 1
+  broadcast_enabled: true
+  max_concurrent_agents: 10
+  agent_timeout_minutes: 5
+  heartbeat_interval: 10
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_enabled: true
+  file_path: "logs/finagent_test.log"
+  max_file_size: "5MB"
+  backup_count: 3
+  database_log_level: "INFO"
+  server_log_level: "INFO"
+  memory_log_level: "INFO"
+
+# Global Settings
+project_name: "FinAgent"
+version: "2.0.0"
+api_prefix: "/api/v1"
+
+# Port Configuration for Different Servers
+ports:
+  memory_server: 8001
+  mcp_server: 8011
+  a2a_server: 8021
+  
+# Database Initialization Settings
+database_init:
+  auto_create_indexes: true
+  auto_create_constraints: true
+  clear_on_startup: true  # Clear test database on startup
+  seed_data_enabled: true
+  backup_before_init: false
+  
+  # Required indexes
+  required_indexes:
+    - name: "memory_search_index"
+      type: "fulltext"
+      labels: ["Memory"]
+      properties: ["summary", "keywords"]
+    - name: "memory_event_type_index"
+      type: "btree"
+      labels: ["Memory"]
+      properties: ["event_type"]
+    - name: "memory_agent_id_index"
+      type: "btree"
+      labels: ["Memory"]
+      properties: ["agent_id"]
+      
+  # Required constraints
+  required_constraints:
+    - name: "memory_id_unique"
+      type: "uniqueness"
+      labels: ["Memory"]
+      properties: ["memory_id"]
+      
+  # Test seed data
+  seed_data:
+    - memory_id: "test_memory_001"
+      query: "Test query for development"
+      keywords: ["test", "development", "sample"]
+      summary: "Sample memory for testing purposes"
+      agent_id: "test_agent"
+      event_type: "TEST"

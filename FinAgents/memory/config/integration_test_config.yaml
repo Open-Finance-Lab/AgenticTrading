@@ -1,0 +1,118 @@
+# FinAgent A2A Memory Integration Configuration
+# This file contains the configuration for the complete testing pipeline
+
+# Neo4j Database Configuration
+neo4j:
+  uri: "bolt://localhost:7687"
+  username: "neo4j"
+  password: "finagent123"  # Change this to your Neo4j password
+  database: "finagent"
+  
+  # Connection settings
+  max_connection_lifetime: 3600
+  max_connection_pool_size: 50
+  connection_acquisition_timeout: 60
+
+# Memory Agent Configuration
+memory_agent:
+  url: "http://127.0.0.1:8010"
+  timeout: 30
+  retry_attempts: 3
+  retry_delay: 1.0
+  
+  # MCP Protocol settings
+  mcp:
+    protocol_version: "2024-11-05"
+    capabilities:
+      - "logging"
+      - "progress"
+      - "resources"
+      - "tools"
+
+# Alpha Agent Pool Configuration
+alpha_pool:
+  url: "http://127.0.0.1:8081"
+  pool_id: "alpha_pool_001"
+  
+  # Agent configuration
+  agents:
+    momentum_agent:
+      enabled: true
+      memory_integration: true
+      a2a_protocol: true
+      
+  # Performance settings
+  performance:
+    max_concurrent_agents: 10
+    memory_sync_interval: 60
+    health_check_interval: 30
+
+# A2A Protocol Configuration
+a2a_protocol:
+  # Official A2A toolkit settings
+  toolkit:
+    enabled: true
+    fallback_to_http: true
+    
+  # Communication settings
+  communication:
+    timeout: 30
+    max_retries: 3
+    retry_delay: 2.0
+    
+  # Memory coordination
+  coordination:
+    pool_level: true
+    cross_agent_learning: true
+    performance_aggregation: true
+
+# Testing Configuration
+testing:
+  # Test execution settings
+  execution:
+    timeout_per_test: 60
+    parallel_tests: false
+    verbose_output: true
+    
+  # Test data settings
+  test_data:
+    create_sample_data: true
+    cleanup_after_tests: false
+    preserve_database: true
+    
+  # Performance testing
+  performance:
+    load_test_duration: 300  # 5 minutes
+    concurrent_requests: 10
+    measurement_interval: 5
+
+# Logging Configuration
+logging:
+  level: "INFO"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # File logging
+  file:
+    enabled: true
+    path: "logs/integration_test.log"
+    max_size_mb: 100
+    backup_count: 5
+    
+  # Console logging
+  console:
+    enabled: true
+    colorized: true
+
+# Environment Configuration
+environment:
+  # Development settings
+  development:
+    debug_mode: true
+    hot_reload: false
+    mock_external_services: false
+    
+  # Production settings  
+  production:
+    debug_mode: false
+    ssl_verify: true
+    security_headers: true

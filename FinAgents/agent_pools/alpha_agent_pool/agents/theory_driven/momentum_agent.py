@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../'
 from schema.theory_driven_schema import (
     MomentumAgentConfig, MomentumSignalRequest, AlphaStrategyFlow, MarketContext, Decision, Action, PerformanceFeedback, Metadata
 )
+from .a2a_client import AlphaAgentA2AClient, create_alpha_pool_a2a_client, A2AProtocolError
 from typing import List, Dict, Any, Optional
 import asyncio
 import sys
@@ -341,39 +342,44 @@ class MomentumAgent:
             logger.info(f"[RL-PG] Updated agent window to {chosen_window} using policy gradient.")
     def __init__(self, config: MomentumAgentConfig):
         """
-        Initialize the MomentumAgent with LLM integration for intelligent signal generation.
+        Initialize the MomentumAgent with A2A protocol integration for memory communication.
+        
         Args:
             config (MomentumAgentConfig): Configuration object for the agent.
         """
         self.config = config
         self.agent = FastMCP("MomentumAlphaAgent")
         
+        # Initialize A2A client for communication with memory agent through alpha pool
+        self.a2a_client = create_alpha_pool_a2a_client(
+            agent_pool_id="alpha_agent_pool",
+            memory_url="http://127.0.0.1:8010"
+        )
+        
         # Initialize LLM client
         self.llm_client = None
         self._initialize_llm()
         
-        # Path to the shared memory JSON file (used by AlphaAgentPool)
-        self.memory_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../memory_unit.json"))
-        # Path to store strategy signal flow
+        # Path to store strategy signal flow (local fallback)
         self.signal_flow_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../momentum_signal_flow.json"))
         
-        # Clear memory and signal flow files on each agent restart
-        for path in [self.signal_flow_path]:
-            if os.path.exists(path):
-                try:
-                    os.remove(path)
-                except Exception:
-                    pass
+        # Clear signal flow file on agent restart
+        if os.path.exists(self.signal_flow_path):
+            try:
+                os.remove(self.signal_flow_path)
+            except Exception:
+                pass
                     
         self._register_tools()
 
-        # Feedback history for RL-style learning
+        # Feedback history for RL-style learning (now stored in A2A memory)
         self.feedback_history = []
-        self.feedback_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../momentum_agent_feedback.json"))
+        
+        logger.info("MomentumAgent initialized with A2A memory integration")
 
-    def learn_from_backtest(self, backtest_results: dict):
+    async def learn_from_backtest(self, backtest_results: dict):
         """
-        Learn from backtest results to improve momentum signal generation.
+        Learn from backtest results and store insights using A2A protocol.
         Args:
             backtest_results (dict): Detailed per-bar logs and factor metrics (IC/IR, etc.)
         """
@@ -384,7 +390,7 @@ class MomentumAgent:
         ir = backtest_results.get("IR", None)
         signal_stats = backtest_results.get("signal_stats", {})
 
-        # 统计每个window的收益
+        # Analyze window performance for strategy adaptation
         window_performance = {}
         for r in log_records:
             w = r.get("selected_timeframe")
@@ -395,18 +401,19 @@ class MomentumAgent:
                 window_performance[w]["returns"].append(ret)
                 window_performance[w]["count"] += 1
 
-        # 计算每个window的平均收益
+        # Calculate average returns for each window
         window_stats = {w: {
             "avg_return": (sum(d["returns"]) / len(d["returns"]) if d["returns"] else 0),
             "count": d["count"]
         } for w, d in window_performance.items()}
 
-        # 选择最佳window（可扩展为IC/IR标准）
+        # Select best performing window for strategy optimization
         best_window = None
         if window_stats:
             best_window = max(window_stats.keys(), key=lambda w: window_stats[w]["avg_return"])
 
-        summary = {
+        # Prepare performance metrics for storage
+        performance_metrics = {
             "IC": ic,
             "IR": ir,
             "signal_stats": signal_stats,
@@ -416,43 +423,118 @@ class MomentumAgent:
             "momentum_windows": list(set(r.get("selected_timeframe") for r in log_records if "selected_timeframe" in r)),
             "window_stats": window_stats,
             "best_window": best_window,
-            "feedback_time": datetime.utcnow().isoformat() + "Z"
+            "feedback_time": datetime.utcnow().isoformat() + "Z",
+            "total_log_records": len(log_records)
         }
 
-        # 自动更新agent window
+        # Auto-update agent window based on performance
         if best_window is not None and hasattr(self.config.strategy, 'window'):
+            old_window = getattr(self.config.strategy, 'window', None)
             self.config.strategy.window = best_window
-            logger.info(f"[RL] Auto-updated agent window to {best_window} based on backtest RL feedback.")
+            logger.info(f"[RL] Auto-updated agent window from {old_window} to {best_window} based on backtest feedback.")
 
-        # 保存反馈到history和文件
-        self.feedback_history.append(summary)
+        # Store performance results using A2A protocol
         try:
-            with open(self.feedback_path, "w") as f:
-                json.dump(self.feedback_history, f, indent=2)
+            async with self.a2a_client as client:
+                # Store strategy performance metrics
+                strategy_id = f"momentum_strategy_{self.config.agent_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                await client.store_strategy_performance(
+                    agent_id=self.config.agent_id,
+                    strategy_id=strategy_id,
+                    performance_metrics=performance_metrics
+                )
+                
+                # Store learning feedback for RL adaptation
+                learning_feedback = {
+                    "window_adaptation": {
+                        "old_window": old_window,
+                        "new_window": best_window,
+                        "window_performance": window_stats
+                    },
+                    "strategy_metrics": performance_metrics,
+                    "adaptation_timestamp": datetime.utcnow().isoformat()
+                }
+                
+                await client.store_learning_feedback(
+                    agent_id=self.config.agent_id,
+                    feedback_type="MOMENTUM_WINDOW_ADAPTATION",
+                    feedback_data=learning_feedback
+                )
+                
+                logger.info(f"[A2A] Successfully stored backtest results and learning feedback via A2A protocol")
+                
         except Exception as e:
-            logger.warning(f"Failed to write feedback history: {e}")
+            logger.warning(f"[A2A] Failed to store results via A2A protocol: {e}")
+            
+            # Fallback to local storage
+            self.feedback_history.append(performance_metrics)
+            try:
+                feedback_path = os.path.join(os.path.dirname(__file__), "../../momentum_agent_feedback.json")
+                with open(feedback_path, "w") as f:
+                    json.dump(self.feedback_history, f, indent=2)
+                logger.info(f"[FALLBACK] Stored feedback locally at {feedback_path}")
+            except Exception as local_e:
+                logger.error(f"[FALLBACK] Failed to store feedback locally: {local_e}")
 
-        # 额外保存反馈和完整策略流到alpha_agent_pool/data目录
+        # Additional local data backup for analysis
         try:
-            data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../alpha_agent_pool/data'))
+            data_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../data'))
             if not os.path.exists(data_dir):
                 os.makedirs(data_dir)
-            # 保存反馈
+            
+            # Save detailed feedback with timestamp
             feedback_save = os.path.join(data_dir, f"momentum_agent_feedback_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json")
             with open(feedback_save, "w") as f:
-                json.dump(summary, f, indent=2)
-            # 保存完整策略流（由generate_signal生成的flow）
+                json.dump(performance_metrics, f, indent=2)
+            
+            # Save strategy flow if available
             if hasattr(self, 'signal_flow_path') and os.path.exists(self.signal_flow_path):
                 import shutil
                 flow_save = os.path.join(data_dir, f"strategy_flow_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json")
                 shutil.copy(self.signal_flow_path, flow_save)
-                logger.info(f"[LEARN] Saved strategy flow to {flow_save}")
-            logger.info(f"[LEARN] Saved feedback to {feedback_save}")
+                logger.info(f"[BACKUP] Saved strategy flow to {flow_save}")
+            
+            logger.info(f"[BACKUP] Saved detailed feedback to {feedback_save}")
+            
         except Exception as e:
-            logger.warning(f"Failed to save feedback/strategy flow to data dir: {e}")
+            logger.warning(f"[BACKUP] Failed to save backup data: {e}")
 
-        logger.info(f"[LEARN] Feedback summary saved: IC={ic}, IR={ir}, win_rate={summary['win_rate']}")
-        return summary
+        logger.info(f"[LEARN] Feedback processing completed: IC={ic}, IR={ir}, win_rate={performance_metrics.get('win_rate')}")
+        return performance_metrics
+    
+    async def _store_signal_via_a2a(self, 
+                                   symbol: str, 
+                                   signal: str, 
+                                   confidence: float, 
+                                   reasoning: str, 
+                                   market_context: Dict[str, Any], 
+                                   request_id: str):
+        """
+        Store trading signal event via A2A protocol (non-blocking).
+        
+        Args:
+            symbol: Trading symbol
+            signal: Trading signal (BUY/SELL/HOLD)
+            confidence: Signal confidence score
+            reasoning: Signal reasoning
+            market_context: Market context data
+            request_id: Request identifier for correlation
+        """
+        try:
+            async with self.a2a_client as client:
+                await client.store_alpha_signal_event(
+                    agent_id=self.config.agent_id,
+                    signal=signal,
+                    confidence=confidence,
+                    symbol=symbol,
+                    reasoning=reasoning,
+                    market_context=market_context,
+                    correlation_id=request_id
+                )
+                logger.info(f"[A2A] Successfully stored signal event for {symbol} via A2A protocol")
+        except Exception as e:
+            logger.warning(f"[A2A] Failed to store signal event via A2A protocol: {e}")
+            # Continue execution without breaking the main signal generation flow
 
     def _initialize_llm(self):
         """Initialize the LLM client for intelligent analysis."""
@@ -930,6 +1012,17 @@ Focus on intelligent adaptation and RL-style learning. Use the multi-timeframe a
                         result = flow_obj.model_dump()
                     else:
                         result = flow_obj.dict()
+                    
+                    # Store signal event using A2A protocol
+                    asyncio.create_task(self._store_signal_via_a2a(
+                        symbol=symbol,
+                        signal=analysis_result["signal"],
+                        confidence=analysis_result["confidence"],
+                        reasoning=analysis_result["reasoning"],
+                        market_context=market_context_data,
+                        request_id=request_id
+                    ))
+                    
                     logger.info(f"[REQUEST {request_id}] Successfully generated signal for {symbol}: {result.get('decision', {}).get('signal', 'UNKNOWN')}")
                     return result
                 except Exception as e:
