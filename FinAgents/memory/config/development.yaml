@@ -1,0 +1,124 @@
+environment: development
+
+# Database Configuration
+database:
+  uri: "bolt://localhost:7687"
+  username: "neo4j"
+  password: "finagent123"
+  database: "finagent"
+  max_connection_pool_size: 10
+  connection_timeout: 30
+  max_retry_time: 30
+  encrypted: false
+  trust: "TRUST_ALL_CERTIFICATES"
+  enable_intelligent_indexing: true
+  memory_cache_size: 1000
+  semantic_search_enabled: true
+
+# Server Configuration
+server:
+  host: "0.0.0.0"
+  port: 8000
+  debug: true
+  log_level: "DEBUG"
+  cors_enabled: true
+  cors_origins: ["*"]
+  workers: 1
+  max_connections: 1000
+  keepalive_timeout: 5
+  api_key_required: false
+  api_key: null
+
+# Memory Configuration
+memory:
+  graph_memory_enabled: true
+  vector_memory_enabled: true
+  cache_enabled: true
+  max_nodes: 10000
+  max_relationships: 50000
+  auto_cleanup_enabled: true
+  cleanup_interval_hours: 24
+  vector_dimension: 384
+  similarity_threshold: 0.7
+  max_vectors: 10000
+  indexing_enabled: true
+  auto_index_creation: true
+  index_update_interval: 300
+
+# MCP Configuration
+mcp:
+  transport_type: "stdio"
+  protocol_version: "2024-11-05"
+  enable_all_tools: true
+  enabled_tools: []
+  tool_timeout: 30
+  max_concurrent_operations: 10
+  operation_timeout: 60
+
+# A2A Configuration
+a2a:
+  websocket_enabled: true
+  real_time_enabled: true
+  max_message_history: 1000
+  message_retention_hours: 24
+  broadcast_enabled: true
+  max_concurrent_agents: 100
+  agent_timeout_minutes: 30
+  heartbeat_interval: 30
+
+# Logging Configuration
+logging:
+  level: "DEBUG"
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  file_enabled: true
+  file_path: "logs/finagent_dev.log"
+  max_file_size: "10MB"
+  backup_count: 5
+  database_log_level: "INFO"
+  server_log_level: "DEBUG"
+  memory_log_level: "DEBUG"
+
+# Global Settings
+project_name: "FinAgent"
+version: "2.0.0"
+api_prefix: "/api/v1"
+
+# Port Configuration for Different Servers
+ports:
+  memory_server: 8000
+  mcp_server: 8001
+  a2a_server: 8002
+  
+# Database Initialization Settings
+database_init:
+  auto_create_indexes: true
+  auto_create_constraints: true
+  clear_on_startup: false
+  seed_data_enabled: false
+  backup_before_init: true
+  
+  # Required indexes
+  required_indexes:
+    - name: "memory_search_index"
+      type: "fulltext"
+      labels: ["Memory"]
+      properties: ["summary", "keywords"]
+    - name: "memory_event_type_index"
+      type: "btree"
+      labels: ["Memory"]
+      properties: ["event_type"]
+    - name: "memory_agent_id_index"
+      type: "btree"
+      labels: ["Memory"]
+      properties: ["agent_id"]
+    - name: "memory_timestamp_index"
+      type: "btree"
+      labels: ["Memory"]
+      properties: ["timestamp"]
+      
+  # Required constraints
+  required_constraints:
+    - name: "memory_id_unique"
+      type: "uniqueness"
+      labels: ["Memory"]
+      properties: ["memory_id"]
