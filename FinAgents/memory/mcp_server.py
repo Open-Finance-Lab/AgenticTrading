@@ -59,7 +59,7 @@ MCP_SERVER_VERSION = "2.0.0"
 DATABASE_CONFIG = {
     "uri": "bolt://localhost:7687",
     "username": "neo4j", 
-    "password": "FinOrchestration",
+    "password": "finagent123",
     "database": "neo4j"
 }
 
@@ -286,8 +286,88 @@ if MCP_AVAILABLE and UNIFIED_COMPONENTS_AVAILABLE:
             logger.error(f"❌ MCP create_relationship failed: {e}")
             return json.dumps({"status": "error", "message": str(e)})
     
-    # Create app instance
-    app = mcp_server.streamable_http_app()
+    # Create app with proper MCP protocol support
+    # FastMCP creates its own ASGI app that handles MCP protocol
+    base_app = mcp_server.streamable_http_app()
+    
+    # Create a custom ASGI app that wraps the MCP app and adds our endpoints
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.responses import JSONResponse as StarletteJSONResponse
+    import json as json_module
+    
+    async def health_endpoint(request):
+        """Health check endpoint for monitoring."""
+        try:
+            check_interface_manager = interface_manager
+            if not check_interface_manager:
+                check_interface_manager = create_interface_manager(DATABASE_CONFIG)
+                await check_interface_manager.initialize()
+            
+            if check_interface_manager:
+                return StarletteJSONResponse({
+                    "status": "healthy",
+                    "service": MCP_SERVER_NAME,
+                    "version": MCP_SERVER_VERSION,
+                    "timestamp": datetime.now().isoformat(),
+                    "protocol": "Model Context Protocol",
+                    "database": "connected"
+                })
+            else:
+                return StarletteJSONResponse({
+                    "status": "unhealthy", 
+                    "service": MCP_SERVER_NAME,
+                    "version": MCP_SERVER_VERSION,
+                    "timestamp": datetime.now().isoformat(),
+                    "error": "Interface manager not initialized"
+                }, status_code=503)
+        except Exception as e:
+            return StarletteJSONResponse({
+                "status": "unhealthy",
+                "service": MCP_SERVER_NAME, 
+                "version": MCP_SERVER_VERSION,
+                "timestamp": datetime.now().isoformat(),
+                "error": str(e)
+            }, status_code=503)
+    
+    async def root_endpoint(request):
+        """Root endpoint information."""
+        return StarletteJSONResponse({
+            "service": MCP_SERVER_NAME,
+            "version": MCP_SERVER_VERSION,
+            "protocol": "Model Context Protocol",
+            "note": "This is a Model Context Protocol server. Use MCP client to interact.",
+            "tools": [
+                "store_memory",
+                "retrieve_memory", 
+                "semantic_search",
+                "get_statistics",
+                "health_check",
+                "create_relationship"
+            ]
+        })
+    
+    # Custom ASGI application that handles both MCP and HTTP endpoints
+    class CombinedApp:
+        def __init__(self, mcp_app, additional_routes):
+            self.mcp_app = mcp_app
+            self.route_app = Starlette(routes=additional_routes)
+        
+        async def __call__(self, scope, receive, send):
+            # Check if this is a request for our custom endpoints
+            if scope["type"] == "http":
+                path = scope["path"]
+                if path in ["/health", "/"]:
+                    return await self.route_app(scope, receive, send)
+            
+            # Otherwise, pass to MCP app
+            return await self.mcp_app(scope, receive, send)
+    
+    # Create the combined application
+    app = CombinedApp(base_app, [
+        Route("/", root_endpoint),
+        Route("/health", health_endpoint),
+    ])
     
     # ═══════════════════════════════════════════════════════════════════════════════════
     # SERVER INFORMATION AND UTILITIES

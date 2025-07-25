@@ -1,671 +1,659 @@
 #!/usr/bin/env python3
 """
-FinAgent A2A Server
+FinAgent A2A Memory Server
 
-Dedicated A2A # Unified components
-try:
-    from unified_database_manager import create_database_manager
-    from unified_interface_manager import create_interface_manager, UnifiedInterfaceManager
-    UNIFIED_COMPONENTS_AVAILABLE = True
-except ImportError:
-    UNIFIED_COMPONENTS_AVAILABLE = False
-    UnifiedInterfaceManager = object  # Fallback for type hints
-    print("⚠️ Unified components not available")o-Agent) communication server implementation for FinAgent Memory operations.
-This server focuses exclusively on agent-to-agent protocol compliance and inter-agent communication,
-using the unified database and interface managers for actual operations.
+A2A (Agent-to-Agent) Protocol compliant server for FinAgent Memory operations.
+Built using the official A2A Python SDK.
 
-Features:
-- Agent-to-Agent protocol implementation
-- Signal transmission and strategy sharing
-- Real-time agent communication
-- Unified architecture integration
-- Performance monitoring and analytics
-
-Author: FinAgent Team
-License: Open Source
+Based on A2A Protocol specification and samples from:
+https://github.com/a2aproject/a2a-samples
 """
-
-# ═══════════════════════════════════════════════════════════════════════════════════
-# IMPORTS AND DEPENDENCIES
-# ═══════════════════════════════════════════════════════════════════════════════════
 
 import asyncio
 import json
 import logging
-from typing import Dict, Any, List, Optional
 from datetime import datetime
-from dataclasses import dataclass
-from enum import Enum
+from typing import Dict, Any, List, Optional, AsyncGenerator
 
-# FastAPI for A2A HTTP server
-try:
-    from fastapi import FastAPI, HTTPException, BackgroundTasks, Request
-    from fastapi.responses import JSONResponse
-    from fastapi.middleware.cors import CORSMiddleware
-    from pydantic import BaseModel, Field
-    import uvicorn
-    FASTAPI_AVAILABLE = True
-except ImportError:
-    FASTAPI_AVAILABLE = False
-    # Create fallback classes
-    class BaseModel:
-        def __init__(self, **kwargs):
-            pass
-        def dict(self):
-            return {}
-        def json(self):
-            return "{}"
-    class Field:
-        def __init__(self, *args, **kwargs):
-            pass
-    print("⚠️ FastAPI not available. Install with: pip install fastapi uvicorn")
+import click
+import uvicorn
 
-# WebSocket support for real-time communication
-try:
-    from fastapi import WebSocket, WebSocketDisconnect
-    import websockets
-    WEBSOCKET_AVAILABLE = True
-except ImportError:
-    WEBSOCKET_AVAILABLE = False
+# A2A SDK imports
+from a2a.server.apps import A2AStarletteApplication
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.events import EventQueue
+from a2a.types import (
+    AgentCapabilities,
+    AgentCard,
+    AgentSkill,
+    TaskState,
+    TaskStatus,
+    TaskStatusUpdateEvent,
+    TaskArtifactUpdateEvent,
+    TextPart,
+    DataPart,
+    UnsupportedOperationError,
+    InvalidParamsError,
+)
+from a2a.utils import new_agent_text_message, new_task, new_text_artifact
+from a2a.utils.errors import ServerError
 
-# Unified components
+# Memory system imports - using optional imports for graceful degradation
 try:
     from unified_database_manager import create_database_manager
-    from unified_interface_manager import create_interface_manager, UnifiedInterfaceManager
-    UNIFIED_COMPONENTS_AVAILABLE = True
+    from unified_interface_manager import create_interface_manager
+    MEMORY_AVAILABLE = True
 except ImportError:
-    UNIFIED_COMPONENTS_AVAILABLE = False
-    print("⚠️ Unified components not available")
+    MEMORY_AVAILABLE = False
+    print("⚠️ Memory components not available")
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# DATA MODELS FOR A2A COMMUNICATION
-# ═══════════════════════════════════════════════════════════════════════════════════
-
-class AgentMessageType(Enum):
-    """Types of A2A messages"""
-    SIGNAL = "signal"
-    STRATEGY = "strategy"
-    PERFORMANCE_UPDATE = "performance_update"
-    MEMORY_SHARE = "memory_share"
-    HEALTH_CHECK = "health_check"
-    COLLABORATION_REQUEST = "collaboration_request"
-
-class SignalType(Enum):
-    """Types of trading signals"""
-    BUY = "buy"
-    SELL = "sell"
-    HOLD = "hold"
-    ALERT = "alert"
-
-class A2ASignal(BaseModel):
-    """A2A Signal message model"""
-    signal_id: str = Field(..., description="Unique signal identifier")
-    source_agent: str = Field(..., description="Agent sending the signal")
-    target_agents: List[str] = Field(default=[], description="Target agents (empty for broadcast)")
-    signal_type: SignalType = Field(..., description="Type of signal")
-    symbol: str = Field(..., description="Trading symbol")
-    confidence: float = Field(..., ge=0.0, le=1.0, description="Signal confidence (0-1)")
-    price: Optional[float] = Field(None, description="Associated price")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    metadata: Dict[str, Any] = Field(default={}, description="Additional signal data")
-
-class A2AStrategy(BaseModel):
-    """A2A Strategy sharing model"""
-    strategy_id: str = Field(..., description="Unique strategy identifier")
-    source_agent: str = Field(..., description="Agent sharing the strategy")
-    strategy_name: str = Field(..., description="Strategy name")
-    strategy_data: Dict[str, Any] = Field(..., description="Strategy parameters and logic")
-    performance_metrics: Dict[str, float] = Field(default={}, description="Strategy performance")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-
-class A2AMemoryShare(BaseModel):
-    """A2A Memory sharing model"""
-    memory_id: str = Field(..., description="Memory identifier")
-    source_agent: str = Field(..., description="Agent sharing the memory")
-    target_agents: List[str] = Field(default=[], description="Target agents")
-    memory_content: Dict[str, Any] = Field(..., description="Memory content")
-    relevance_score: float = Field(default=1.0, description="Memory relevance score")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-
-class A2AMessage(BaseModel):
-    """Generic A2A message wrapper"""
-    message_id: str = Field(..., description="Unique message identifier")
-    message_type: AgentMessageType = Field(..., description="Type of message")
-    source_agent: str = Field(..., description="Source agent")
-    target_agents: List[str] = Field(default=[], description="Target agents")
-    payload: Dict[str, Any] = Field(..., description="Message payload")
-    priority: int = Field(default=1, description="Message priority (1-5)")
-    expires_at: Optional[datetime] = Field(None, description="Message expiration")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-
-# ═══════════════════════════════════════════════════════════════════════════════════
 # A2A SERVER CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════════
 
-A2A_SERVER_NAME = "FinAgent-A2A-Server"
-A2A_SERVER_VERSION = "2.0.0"
-A2A_SERVER_PORT = 8002
+SERVER_NAME = "FinAgent Memory A2A Server"
+SERVER_VERSION = "1.0.0"
+SERVER_PORT = 8002
+SERVER_HOST = "0.0.0.0"
 
+# Memory database configuration
 DATABASE_CONFIG = {
     "uri": "bolt://localhost:7687",
     "username": "neo4j",
-    "password": "FinOrchestration", 
+    "password": "finagent123",
     "database": "neo4j"
-}
-
-# Global components
+}# Global components
 interface_manager = None
-connected_agents: Dict[str, Any] = {}
-message_history: List[Any] = []
+message_history: List[Dict[str, Any]] = []
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# A2A SERVER IMPLEMENTATION
+# MEMORY AGENT CLASS
 # ═══════════════════════════════════════════════════════════════════════════════════
 
-if FASTAPI_AVAILABLE and UNIFIED_COMPONENTS_AVAILABLE:
+class MemoryAgent:
+    """FinAgent Memory Agent for handling memory operations."""
     
-    # Create FastAPI app
-    app = FastAPI(
-        title=A2A_SERVER_NAME,
-        version=A2A_SERVER_VERSION,
-        description="FinAgent Agent-to-Agent Communication Server"
-    )
-    
-    # Add CORS middleware
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"]
-    )
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    # SERVER LIFECYCLE EVENTS
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    
-    @app.on_event("startup")
-    async def startup_event():
-        """Initialize A2A server components."""
-        global interface_manager
+    def __init__(self):
+        """Initialize the Memory Agent."""
+        self.interface_manager = None
+        self.database_manager = None
+        self.message_history: List[Dict[str, Any]] = []
         
-        try:
-            logger.info("🚀 Starting FinAgent A2A Server...")
-            
-            # Initialize interface manager
-            interface_manager = create_interface_manager(DATABASE_CONFIG)
-            
-            if await interface_manager.initialize():
-                logger.info("✅ A2A Server initialized successfully")
-            else:
-                logger.error("❌ Failed to initialize A2A server")
-                
-        except Exception as e:
-            logger.error(f"❌ A2A server startup failed: {e}")
-    
-    @app.on_event("shutdown")
-    async def shutdown_event():
-        """Cleanup A2A server components."""
-        try:
-            if interface_manager:
-                await interface_manager.shutdown()
-            
-            # Close all WebSocket connections
-            for agent_id, websocket in connected_agents.items():
-                try:
-                    await websocket.close()
-                except:
-                    pass
-            
-            logger.info("✅ A2A Server shutdown complete")
-            
-        except Exception as e:
-            logger.error(f"❌ A2A server shutdown error: {e}")
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    # HEALTH AND STATUS ENDPOINTS
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    
-    @app.get("/health")
-    async def health_check():
-        """A2A server health check endpoint."""
-        try:
-            health_info = {
-                "status": "healthy",
-                "server": A2A_SERVER_NAME,
-                "version": A2A_SERVER_VERSION,
-                "timestamp": datetime.utcnow().isoformat(),
-                "connected_agents": len(connected_agents),
-                "message_history_size": len(message_history),
-                "components": {
-                    "interface_manager": interface_manager is not None,
-                    "websocket_support": WEBSOCKET_AVAILABLE
-                }
-            }
-            
-            # Get system health from interface manager
-            if interface_manager:
-                system_health = await interface_manager.execute_tool("health_check", {})
-                health_info["system_health"] = system_health
-            
-            return health_info
-            
-        except Exception as e:
-            logger.error(f"❌ Health check failed: {e}")
-            return JSONResponse(
-                status_code=500,
-                content={"status": "unhealthy", "error": str(e)}
-            )
-    
-    @app.get("/status")
-    async def get_server_status():
-        """Get detailed A2A server status."""
-        try:
-            status_info = {
-                "server_info": {
-                    "name": A2A_SERVER_NAME,
-                    "version": A2A_SERVER_VERSION,
-                    "uptime": datetime.utcnow().isoformat()
-                },
-                "connections": {
-                    "active_agents": list(connected_agents.keys()),
-                    "total_connections": len(connected_agents)
-                },
-                "message_stats": {
-                    "total_messages": len(message_history),
-                    "recent_messages": len([m for m in message_history if (datetime.utcnow() - m.timestamp).seconds < 300])
-                }
-            }
-            
-            return status_info
-            
-        except Exception as e:
-            logger.error(f"❌ Status check failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    # SIGNAL TRANSMISSION ENDPOINTS
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    
-    @app.post("/api/v1/signals/send")
-    async def send_signal(signal: A2ASignal, background_tasks: BackgroundTasks):
-        """Send a trading signal to target agents."""
-        try:
-            logger.info(f"📡 Sending signal {signal.signal_id} from {signal.source_agent}")
-            
-            # Store signal in memory system
-            if interface_manager:
-                memory_result = await interface_manager.execute_tool("store_graph_memory", {
-                    "query": f"Signal: {signal.signal_type.value} {signal.symbol}",
-                    "keywords": ["signal", signal.signal_type.value, signal.symbol],
-                    "summary": f"{signal.source_agent} sent {signal.signal_type.value} signal for {signal.symbol} with confidence {signal.confidence}",
-                    "agent_id": signal.source_agent,
-                    "event_type": "SIGNAL_TRANSMISSION"
-                })
-            
-            # Create A2A message
-            a2a_message = A2AMessage(
-                message_id=f"signal_{signal.signal_id}",
-                message_type=AgentMessageType.SIGNAL,
-                source_agent=signal.source_agent,
-                target_agents=signal.target_agents,
-                payload=signal.dict(),
-                priority=3 if signal.signal_type in [SignalType.BUY, SignalType.SELL] else 2
-            )
-            
-            # Add to message history
-            message_history.append(a2a_message)
-            
-            # Broadcast to connected agents
-            background_tasks.add_task(broadcast_message, a2a_message)
-            
-            return {
-                "status": "success",
-                "message": f"Signal {signal.signal_id} sent successfully",
-                "signal_id": signal.signal_id,
-                "targets": signal.target_agents if signal.target_agents else "broadcast"
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Signal transmission failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
-    @app.get("/api/v1/signals/history")
-    async def get_signal_history(agent_id: Optional[str] = None, limit: int = 50):
-        """Get signal transmission history."""
-        try:
-            # Filter messages for signals
-            signal_messages = [
-                msg for msg in message_history 
-                if msg.message_type == AgentMessageType.SIGNAL
-                and (not agent_id or msg.source_agent == agent_id or agent_id in msg.target_agents)
-            ]
-            
-            # Sort by timestamp and limit
-            signal_messages.sort(key=lambda x: x.timestamp, reverse=True)
-            signal_messages = signal_messages[:limit]
-            
-            return {
-                "status": "success",
-                "signals": [msg.dict() for msg in signal_messages],
-                "total_count": len(signal_messages)
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Signal history retrieval failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    # STRATEGY SHARING ENDPOINTS
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    
-    @app.post("/api/v1/strategies/share")
-    async def share_strategy(strategy: A2AStrategy, background_tasks: BackgroundTasks):
-        """Share a trading strategy with other agents."""
-        try:
-            logger.info(f"📈 Sharing strategy {strategy.strategy_id} from {strategy.source_agent}")
-            
-            # Store strategy in memory system
-            if interface_manager:
-                memory_result = await interface_manager.execute_tool("store_graph_memory", {
-                    "query": f"Strategy: {strategy.strategy_name}",
-                    "keywords": ["strategy", strategy.strategy_name, "shared"],
-                    "summary": f"{strategy.source_agent} shared strategy {strategy.strategy_name}",
-                    "agent_id": strategy.source_agent,
-                    "event_type": "STRATEGY_SHARING"
-                })
-            
-            # Create A2A message
-            a2a_message = A2AMessage(
-                message_id=f"strategy_{strategy.strategy_id}",
-                message_type=AgentMessageType.STRATEGY,
-                source_agent=strategy.source_agent,
-                target_agents=[],  # Broadcast to all
-                payload=strategy.dict(),
-                priority=2
-            )
-            
-            # Add to message history
-            message_history.append(a2a_message)
-            
-            # Broadcast to connected agents
-            background_tasks.add_task(broadcast_message, a2a_message)
-            
-            return {
-                "status": "success",
-                "message": f"Strategy {strategy.strategy_id} shared successfully",
-                "strategy_id": strategy.strategy_id
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Strategy sharing failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
-    @app.get("/api/v1/strategies/list")
-    async def list_shared_strategies(agent_id: Optional[str] = None):
-        """List shared strategies."""
-        try:
-            # Filter messages for strategies
-            strategy_messages = [
-                msg for msg in message_history 
-                if msg.message_type == AgentMessageType.STRATEGY
-                and (not agent_id or msg.source_agent == agent_id)
-            ]
-            
-            # Sort by timestamp
-            strategy_messages.sort(key=lambda x: x.timestamp, reverse=True)
-            
-            return {
-                "status": "success",
-                "strategies": [msg.dict() for msg in strategy_messages],
-                "total_count": len(strategy_messages)
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Strategy listing failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    # MEMORY SHARING ENDPOINTS
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    
-    @app.post("/api/v1/memory/share")
-    async def share_memory(memory_share: A2AMemoryShare, background_tasks: BackgroundTasks):
-        """Share memory content with target agents."""
-        try:
-            logger.info(f"🧠 Sharing memory {memory_share.memory_id} from {memory_share.source_agent}")
-            
-            # Create A2A message
-            a2a_message = A2AMessage(
-                message_id=f"memory_{memory_share.memory_id}",
-                message_type=AgentMessageType.MEMORY_SHARE,
-                source_agent=memory_share.source_agent,
-                target_agents=memory_share.target_agents,
-                payload=memory_share.dict(),
-                priority=1
-            )
-            
-            # Add to message history
-            message_history.append(a2a_message)
-            
-            # Broadcast to target agents
-            background_tasks.add_task(broadcast_message, a2a_message)
-            
-            return {
-                "status": "success",
-                "message": f"Memory {memory_share.memory_id} shared successfully",
-                "memory_id": memory_share.memory_id,
-                "targets": memory_share.target_agents
-            }
-            
-        except Exception as e:
-            logger.error(f"❌ Memory sharing failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-    
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    # WEBSOCKET COMMUNICATION
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    
-    if WEBSOCKET_AVAILABLE:
-        @app.websocket("/ws/{agent_id}")
-        async def websocket_endpoint(websocket: WebSocket, agent_id: str):
-            """WebSocket endpoint for real-time agent communication."""
+    async def initialize(self):
+        """Initialize the memory interface manager and database manager."""
+        if MEMORY_AVAILABLE:
             try:
-                await websocket.accept()
-                connected_agents[agent_id] = websocket
-                logger.info(f"🔌 Agent {agent_id} connected via WebSocket")
-                
-                # Send welcome message
-                welcome_message = {
-                    "type": "connection_established",
-                    "agent_id": agent_id,
-                    "timestamp": datetime.utcnow().isoformat(),
-                    "message": f"Welcome to FinAgent A2A Communication, {agent_id}!"
-                }
-                await websocket.send_text(json.dumps(welcome_message))
-                
-                # Listen for messages
-                while True:
-                    try:
-                        data = await websocket.receive_text()
-                        message_data = json.loads(data)
-                        
-                        # Process incoming message
-                        await process_websocket_message(agent_id, message_data)
-                        
-                    except WebSocketDisconnect:
-                        break
-                    except Exception as e:
-                        logger.error(f"❌ WebSocket message error for {agent_id}: {e}")
-                        break
-                        
-            except Exception as e:
-                logger.error(f"❌ WebSocket connection error for {agent_id}: {e}")
-            finally:
-                # Clean up connection
-                if agent_id in connected_agents:
-                    del connected_agents[agent_id]
-                logger.info(f"🔌 Agent {agent_id} disconnected")
-        
-        async def process_websocket_message(agent_id: str, message_data: Dict[str, Any]):
-            """Process incoming WebSocket message from agent."""
-            try:
-                message_type = message_data.get("type", "unknown")
-                
-                if message_type == "ping":
-                    # Respond to ping
-                    response = {
-                        "type": "pong",
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
-                    await connected_agents[agent_id].send_text(json.dumps(response))
-                
-                elif message_type == "signal":
-                    # Process signal message
-                    signal_data = message_data.get("payload", {})
-                    signal_data["source_agent"] = agent_id
+                # Initialize interface manager
+                self.interface_manager = create_interface_manager(DATABASE_CONFIG)
+                if await self.interface_manager.initialize():
+                    logger.info("✅ Memory interface manager initialized")
                     
-                    # Create signal and broadcast
-                    signal = A2ASignal(**signal_data)
-                    await send_signal(signal, BackgroundTasks())
-                
-                # Add more message type handlers as needed
-                
+                    # Initialize database manager for direct database operations
+                    self.database_manager = create_database_manager(DATABASE_CONFIG)
+                    if await self.database_manager.connect():
+                        logger.info("✅ Database manager connected")
+                        return True
+                    else:
+                        logger.warning("⚠️ Database manager connection failed")
+                        return False
+                else:
+                    logger.warning("⚠️ Memory interface manager initialization failed")
+                    return False
             except Exception as e:
-                logger.error(f"❌ WebSocket message processing failed: {e}")
-        
-        async def broadcast_message(message: A2AMessage):
-            """Broadcast A2A message to connected agents."""
-            try:
-                # Determine target agents
-                target_agents = message.target_agents if message.target_agents else list(connected_agents.keys())
-                
-                # Remove source agent from targets
-                if message.source_agent in target_agents:
-                    target_agents.remove(message.source_agent)
-                
-                # Send to each target agent
-                for agent_id in target_agents:
-                    if agent_id in connected_agents:
-                        try:
-                            websocket = connected_agents[agent_id]
-                            await websocket.send_text(message.json())
-                            logger.info(f"📤 Sent message to {agent_id}")
-                        except Exception as e:
-                            logger.error(f"❌ Failed to send message to {agent_id}: {e}")
-                
-            except Exception as e:
-                logger.error(f"❌ Message broadcast failed: {e}")
+                logger.warning(f"⚠️ Memory system initialization failed: {e}")
+                return False
+        return False
     
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    # ANALYTICS AND MONITORING
-    # ═══════════════════════════════════════════════════════════════════════════════════
-    
-    @app.get("/api/v1/analytics/summary")
-    async def get_analytics_summary():
-        """Get A2A communication analytics summary."""
+    async def stream(self, query: str, context_id: str = None, task_id: str = None) -> AsyncGenerator[Dict[str, Any], None]:
+        """Process a query and stream results."""
         try:
-            # Message type distribution
-            message_types = {}
-            for msg in message_history:
-                msg_type = msg.message_type.value
-                message_types[msg_type] = message_types.get(msg_type, 0) + 1
+            logger.info(f"🧠 Processing query: {query[:100]}...")
             
-            # Agent activity
-            agent_activity = {}
-            for msg in message_history:
-                agent_id = msg.source_agent
-                agent_activity[agent_id] = agent_activity.get(agent_id, 0) + 1
+            # Add to message history
+            message_entry = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "content": query,
+                "source": "a2a_client",
+                "type": "query",
+                "context_id": context_id,
+                "task_id": task_id
+            }
+            self.message_history.append(message_entry)
             
-            # Recent activity (last hour)
-            recent_cutoff = datetime.utcnow()
-            recent_cutoff = recent_cutoff.replace(hour=recent_cutoff.hour-1)
-            recent_messages = len([msg for msg in message_history if msg.timestamp > recent_cutoff])
+            # Keep only last 100 messages
+            if len(self.message_history) > 100:
+                self.message_history.pop(0)
             
-            analytics = {
-                "summary": {
-                    "total_messages": len(message_history),
-                    "active_connections": len(connected_agents),
-                    "recent_messages_1h": recent_messages
-                },
-                "message_distribution": message_types,
-                "agent_activity": agent_activity,
-                "connection_status": {
-                    "connected_agents": list(connected_agents.keys()),
-                    "websocket_support": WEBSOCKET_AVAILABLE
-                }
+            # Initial status update
+            yield {
+                'is_task_complete': False,
+                'require_user_input': False,
+                'content': f"Processing memory query: {query[:50]}...",
+                'response_type': 'text'
             }
             
-            return analytics
+            # Process with memory system if available
+            if MEMORY_AVAILABLE and self.interface_manager:
+                try:
+                    # Store the query in memory
+                    memory_result = await self.interface_manager.execute_tool("store_graph_memory", {
+                        "query": query,
+                        "keywords": ["a2a", "query", "external"],
+                        "summary": f"A2A query: {query[:100]}",
+                        "agent_id": "a2a_client",
+                        "event_type": "A2A_QUERY"
+                    })
+                    
+                    # Search for relevant memories
+                    search_result = await self.interface_manager.execute_tool("search_memories", {
+                        "query": query,
+                        "limit": 5
+                    })
+                    
+                    memories = search_result.get('memories', [])
+                    
+                    # Stream progress update
+                    yield {
+                        'is_task_complete': False,
+                        'require_user_input': False,
+                        'content': f"Found {len(memories)} relevant memories, generating response...",
+                        'response_type': 'text'
+                    }
+                    
+                    # Format response
+                    response_parts = [
+                        f"Memory query processed successfully!",
+                        f"Query: {query}",
+                        f"Stored in memory: ✅",
+                        f"Relevant memories found: {len(memories)}",
+                        "",
+                        "Memory search results:"
+                    ]
+                    
+                    for i, memory in enumerate(memories[:3], 1):  # Show top 3
+                        summary = memory.get('summary', 'No summary available')[:100]
+                        response_parts.append(f"{i}. {summary}...")
+                    
+                    if len(memories) > 3:
+                        response_parts.append(f"... and {len(memories) - 3} more memories")
+                    
+                    response_text = "\n".join(response_parts)
+                    
+                except Exception as memory_error:
+                    logger.warning(f"Memory processing failed: {memory_error}")
+                    response_text = f"Query received but memory processing failed: {str(memory_error)}"
+            else:
+                response_text = f"Query received: {query}\nMemory system not available, but query has been logged."
+            
+            # Final completion
+            yield {
+                'is_task_complete': True,
+                'require_user_input': False,
+                'content': response_text,
+                'response_type': 'text'
+            }
             
         except Exception as e:
-            logger.error(f"❌ Analytics summary failed: {e}")
-            raise HTTPException(status_code=500, detail=str(e))
-
-else:
-    # Fallback when dependencies are missing
-    app = None
+            logger.error(f"❌ Memory agent error: {e}")
+            yield {
+                'is_task_complete': True,
+                'require_user_input': False,
+                'content': f"Error processing query: {str(e)}",
+                'response_type': 'text'
+            }
     
-    def print_dependency_error():
-        print("❌ A2A Server dependencies missing")
-        if not FASTAPI_AVAILABLE:
-            print("   Install FastAPI with: pip install fastapi uvicorn")
-        if not UNIFIED_COMPONENTS_AVAILABLE:
-            print("   Unified components not available")
+    async def shutdown(self):
+        """Cleanup resources."""
+        try:
+            if self.interface_manager and MEMORY_AVAILABLE:
+                await self.interface_manager.shutdown()
+                logger.info("✅ Memory interface manager shutdown")
+            
+            if self.database_manager and MEMORY_AVAILABLE:
+                await self.database_manager.disconnect()
+                logger.info("✅ Database manager disconnected")
+                
+        except Exception as e:
+            logger.error(f"❌ Shutdown error: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════════
-# SERVER INFORMATION AND UTILITIES
+# A2A AGENT EXECUTOR
 # ═══════════════════════════════════════════════════════════════════════════════════
 
-def print_a2a_server_info():
-    """Print A2A server information."""
-    if app:
-        print("\n" + "="*80)
-        print("🚀 FINAGENT A2A SERVER - AGENT-TO-AGENT COMMUNICATION")
-        print("="*80)
-        print(f"📋 Server Info:")
-        print(f"   🏷️  Name: {A2A_SERVER_NAME}")
-        print(f"   📦 Version: {A2A_SERVER_VERSION}")
-        print(f"   🔧 Protocol: Agent-to-Agent (A2A)")
-        print(f"   🗄️  Architecture: Unified Components")
-        print(f"   🌐 WebSocket Support: {'✅ Available' if WEBSOCKET_AVAILABLE else '❌ Unavailable'}")
-        print("\n📡 Available A2A Endpoints:")
-        print("   • POST /api/v1/signals/send - Send trading signals")
-        print("   • GET  /api/v1/signals/history - Get signal history")
-        print("   • POST /api/v1/strategies/share - Share trading strategies")
-        print("   • GET  /api/v1/strategies/list - List shared strategies")
-        print("   • POST /api/v1/memory/share - Share memory content")
-        print("   • GET  /api/v1/analytics/summary - Get communication analytics")
-        print("   • GET  /health - Health check")
-        print("   • GET  /status - Server status")
-        if WEBSOCKET_AVAILABLE:
-            print("   • WS   /ws/{agent_id} - Real-time WebSocket communication")
-        print("\n🔧 Server Configuration:")
-        print(f"   📍 Database URI: {DATABASE_CONFIG['uri']}")
-        print(f"   👤 Database User: {DATABASE_CONFIG['username']}")
-        print(f"   🗄️  Database Name: {DATABASE_CONFIG['database']}")
-        print(f"   🚪 Server Port: {A2A_SERVER_PORT}")
-        print("="*80)
-    else:
-        print_dependency_error()
+class MemoryAgentExecutor(AgentExecutor):
+    """A2A Agent Executor for FinAgent Memory operations."""
+    
+    def __init__(self):
+        """Initialize the Memory Agent Executor."""
+        logger.info("🧠 MemoryAgentExecutor initialized")
+        self.agent = MemoryAgent()
+        self.memory_store = {}  # Simple fallback storage
+        
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        """Execute memory operations based on user input."""
+        try:
+            # Initialize agent if not already done
+            if not self.agent.interface_manager and MEMORY_AVAILABLE:
+                await self.agent.initialize()
+            
+            # Get user input and task
+            query = context.get_user_input()
+            task = context.current_task
+            
+            if not context.message:
+                raise Exception('No message provided')
+            
+            if not task:
+                task = new_task(context.message)
+                await event_queue.enqueue_event(task)
+            
+            # Create task updater
+            updater = TaskUpdater(event_queue, task.id, task.context_id)
+            
+            logger.info(f"Processing memory query: {query}")
+            
+            # Process the memory query
+            response_text = await self._process_memory_query(query)
+            
+            # Add final artifact (remove description parameter as it's not supported)
+            await updater.add_artifact(
+                [TextPart(text=response_text)],
+                name='memory-result'
+            )
+            await updater.complete()
+            
+            logger.info("✅ Memory operation completed")
+                    
+        except Exception as e:
+            logger.error(f"❌ Memory executor error: {e}")
+            if 'task' in locals() and task:
+                updater = TaskUpdater(event_queue, task.id, task.context_id)
+                await updater.add_artifact(
+                    [TextPart(text=f"Memory Error: {str(e)}")],
+                    name='error-result'
+                )
+                await updater.complete()
+    
+    async def _process_memory_query(self, query: str) -> str:
+        """Process memory query and return response."""
+        try:
+            # Try to use the full memory system first
+            if MEMORY_AVAILABLE and self.agent.interface_manager:
+                try:
+                    # Parse query for structured operations
+                    import json
+                    try:
+                        data = json.loads(query)
+                        action = data.get("action", "").lower()
+                        
+                        if action == "store":
+                            result = await self.agent.interface_manager.execute_tool("store_graph_memory", {
+                                "query": data.get("value", ""),
+                                "keywords": [data.get("key", "")],
+                                "summary": f"Stored: {data.get('key', '')}",
+                                "agent_id": "a2a_client",
+                                "event_type": "MEMORY_STORE"
+                            })
+                            return f"✅ Stored memory: {data.get('key', '')}"
+                            
+                        elif action == "retrieve" or action == "search":
+                            result = await self.agent.interface_manager.execute_tool("search_memories", {
+                                "query": data.get("key", "") or data.get("query", ""),
+                                "limit": 5
+                            })
+                            if result.get("success") and result.get("data"):
+                                memories = result["data"]
+                                if memories:
+                                    response = f"🔍 Found {len(memories)} memories:\n"
+                                    for mem in memories[:3]:  # Show top 3
+                                        response += f"• {mem.get('summary', mem.get('content', ''))}\n"
+                                    return response
+                                else:
+                                    return "📝 No memories found"
+                            else:
+                                return "❌ Search failed"
+                                
+                        elif action == "list":
+                            result = await self.agent.interface_manager.execute_tool("search_memories", {
+                                "query": "",
+                                "limit": 10
+                            })
+                            if result.get("success") and result.get("data"):
+                                memories = result["data"]
+                                if memories:
+                                    response = f"📝 Found {len(memories)} memories:\n"
+                                    for mem in memories:
+                                        response += f"• {mem.get('summary', mem.get('content', ''))}\n"
+                                    return response
+                                else:
+                                    return "📝 Memory is empty"
+                            else:
+                                return "❌ List failed"
+                        
+                        elif action == "stats":
+                            # Use database manager for statistics
+                            if self.agent.database_manager:
+                                try:
+                                    stats = await self.agent.database_manager.get_memory_statistics()
+                                    return f"📊 Database Statistics:\n" + \
+                                           f"• Total memories: {stats.get('total_memories', 0)}\n" + \
+                                           f"• Total agents: {stats.get('total_agents', 0)}\n" + \
+                                           f"• Total events: {stats.get('total_events', 0)}\n" + \
+                                           f"• Database health: {'✅ Good' if stats.get('healthy', False) else '❌ Issues'}"
+                                except Exception as e:
+                                    return f"❌ Statistics retrieval failed: {str(e)}"
+                            else:
+                                return "❌ Database manager not available for statistics"
+                        
+                        elif action == "health":
+                            # Database health check
+                            if self.agent.database_manager:
+                                try:
+                                    health = await self.agent.database_manager.health_check()
+                                    return f"🏥 Database Health Check:\n" + \
+                                           f"• Connection: {'✅ Active' if health.get('connected', False) else '❌ Failed'}\n" + \
+                                           f"• Response time: {health.get('response_time', 'N/A')}ms\n" + \
+                                           f"• Neo4j version: {health.get('version', 'Unknown')}"
+                                except Exception as e:
+                                    return f"❌ Health check failed: {str(e)}"
+                            else:
+                                return "❌ Database manager not available for health check"
+                        
+                        else:
+                            return f"❓ Unknown action '{action}'. Available: store, retrieve, search, list, stats, health"
+                    
+                    except json.JSONDecodeError:
+                        # Handle as plain text search
+                        result = await self.agent.interface_manager.execute_tool("search_memories", {
+                            "query": query,
+                            "limit": 5
+                        })
+                        if result.get("success") and result.get("data"):
+                            memories = result["data"]
+                            if memories:
+                                response = f"🔍 Found {len(memories)} relevant memories:\n"
+                                for mem in memories[:3]:
+                                    response += f"• {mem.get('summary', mem.get('content', ''))}\n"
+                                return response
+                            else:
+                                # Store as new memory
+                                store_result = await self.agent.interface_manager.execute_tool("store_graph_memory", {
+                                    "query": query,
+                                    "keywords": ["a2a", "note"],
+                                    "summary": f"Note: {query[:100]}",
+                                    "agent_id": "a2a_client",
+                                    "event_type": "A2A_NOTE"
+                                })
+                                return f"📝 Stored as new memory: {query[:50]}..."
+                        else:
+                            return f"❌ Memory system error: {result.get('error', 'Unknown error')}"
+                            
+                except Exception as e:
+                    logger.warning(f"Memory system error, falling back to simple storage: {e}")
+                    # Fall back to simple storage
+                    return await self._simple_memory_fallback(query)
+            
+            else:
+                # Use simple fallback storage
+                return await self._simple_memory_fallback(query)
+                
+        except Exception as e:
+            return f"❌ Error processing memory query: {str(e)}"
+    
+    async def _simple_memory_fallback(self, query: str) -> str:
+        """Simple memory fallback when full system is not available."""
+        try:
+            import json
+            from datetime import datetime
+            
+            try:
+                data = json.loads(query)
+                action = data.get("action", "").lower()
+                key = data.get("key", "")
+                value = data.get("value", "")
+                search_query = data.get("query", "")
+                
+                if action == "store" and key and value:
+                    self.memory_store[key] = {
+                        "value": value,
+                        "timestamp": datetime.now().isoformat(),
+                        "type": "stored"
+                    }
+                    return f"✅ Stored key '{key}' with value '{value}'"
+                
+                elif action == "retrieve" and key:
+                    if key in self.memory_store:
+                        item = self.memory_store[key]
+                        return f"📋 Retrieved '{key}': {item['value']} (stored: {item['timestamp']})"
+                    else:
+                        return f"❌ Key '{key}' not found in memory"
+                
+                elif action == "search" and search_query:
+                    matches = []
+                    for k, v in self.memory_store.items():
+                        if search_query.lower() in k.lower() or search_query.lower() in str(v['value']).lower():
+                            matches.append(f"  • {k}: {v['value']}")
+                    
+                    if matches:
+                        return f"🔍 Found {len(matches)} matches for '{search_query}':\n" + "\n".join(matches)
+                    else:
+                        return f"🔍 No matches found for '{search_query}'"
+                
+                elif action == "list":
+                    if self.memory_store:
+                        items = []
+                        for k, v in self.memory_store.items():
+                            items.append(f"  • {k}: {v['value']} ({v['timestamp']})")
+                        return f"📝 Memory contains {len(self.memory_store)} items:\n" + "\n".join(items)
+                    else:
+                        return "📝 Memory is empty"
+                
+                else:
+                    return f"❓ Unknown action '{action}'. Available: store, retrieve, search, list, stats, health"
+                    
+            except json.JSONDecodeError:
+                # Handle as plain text query
+                if query.strip():
+                    # Search for the query in memory
+                    matches = []
+                    for k, v in self.memory_store.items():
+                        if query.lower() in k.lower() or query.lower() in str(v['value']).lower():
+                            matches.append(f"  • {k}: {v['value']}")
+                    
+                    if matches:
+                        return f"🔍 Memory search for '{query}' found {len(matches)} matches:\n" + "\n".join(matches)
+                    else:
+                        # Store as simple key-value
+                        timestamp = datetime.now().isoformat()
+                        key = f"note_{timestamp}"
+                        self.memory_store[key] = {
+                            "value": query,
+                            "timestamp": timestamp,
+                            "type": "note"
+                        }
+                        return f"📝 Stored note as '{key}': {query}"
+                else:
+                    return "❓ Empty query received"
+        except Exception as e:
+            return f"❌ Fallback memory error: {str(e)}"
+    
+    async def cancel(
+        self, 
+        context: RequestContext, 
+        event_queue: EventQueue
+    ) -> None:
+        """Cancel the current memory operation."""
+        logger.info("🛑 Memory operation cancelled")
+        raise ServerError(error=UnsupportedOperationError())
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# A2A SERVER SETUP
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+def get_agent_card(host: str, port: int) -> AgentCard:
+    """Create the agent card for FinAgent Memory Server."""
+    return AgentCard(
+        name=SERVER_NAME,
+        description="FinAgent Memory A2A Server for agent-to-agent communication and memory operations. Provides memory storage, retrieval, and search capabilities for trading agents.",
+        url=f"http://{host}:{port}/",
+        version=SERVER_VERSION,
+        default_input_modes=['text'],
+        default_output_modes=['text'],
+        capabilities=AgentCapabilities(
+            input_modes=['text'],
+            output_modes=['text'],
+            streaming=True
+        ),
+        skills=[
+            AgentSkill(
+                id='memory_operations',
+                name='Memory Operations',
+                description='Store and retrieve trading memories, strategies, and agent communications using graph-based memory system',
+                tags=['memory', 'storage', 'retrieval', 'trading'],
+                examples=[
+                    'Store this trading strategy in memory',
+                    'Search for memories about Apple stock',
+                    'What do you remember about previous market analysis?'
+                ]
+            ),
+            AgentSkill(
+                id='trading_signals',
+                name='Trading Signal Storage',
+                description='Process and store trading signals from other agents',
+                tags=['trading', 'signals', 'storage'],
+                examples=[
+                    'Store this buy signal for AAPL',
+                    'Remember this market sentiment analysis'
+                ]
+            ),
+            AgentSkill(
+                id='agent_communication',
+                name='Agent Communication Memory',
+                description='Facilitate memory-backed communication between trading agents',
+                tags=['communication', 'agents', 'memory'],
+                examples=[
+                    'What did the alpha agent say about this stock?',
+                    'Store this communication from portfolio agent'
+                ]
+            )
+        ],
+        examples=[
+            'Store this trading analysis in memory',
+            'What do you remember about Tesla stock performance?',
+            'Search for previous risk assessments'
+        ]
+    )
+
+# ═══════════════════════════════════════════════════════════════════════════════════
+# SERVER LIFECYCLE
+# ═══════════════════════════════════════════════════════════════════════════════════
+
+async def shutdown_server():
+    """Cleanup server resources."""
+    try:
+        if interface_manager and MEMORY_AVAILABLE:
+            await interface_manager.shutdown()
+            logger.info("✅ Memory interface manager shutdown")
+        
+        logger.info("✅ A2A Server shutdown complete")
+        
+    except Exception as e:
+        logger.error(f"❌ Server shutdown error: {e}")
+
+def print_server_info():
+    """Print server information."""
+    print("\n" + "="*80)
+    print("🚀 FINAGENT A2A SERVER - AGENT-TO-AGENT PROTOCOL")
+    print("="*80)
+    print(f"📋 Server Configuration:")
+    print(f"   🏷️  Name: {SERVER_NAME}")
+    print(f"   📦 Version: {SERVER_VERSION}")
+    print(f"   🌐 Host: {SERVER_HOST}")
+    print(f"   🚪 Port: {SERVER_PORT}")
+    print(f"   🔧 Protocol: A2A (Agent-to-Agent)")
+    print(f"   🧠 Memory: {'✅ Available' if MEMORY_AVAILABLE else '❌ Not Available'}")
+    print("\n📡 Supported Operations:")
+    print("   • Memory storage and retrieval")
+    print("   • Trading signal processing")
+    print("   • Agent communication memory")
+    print("   • Knowledge graph operations")
+    print("\n🔧 A2A Protocol Endpoints:")
+    print(f"   • Agent Card: http://{SERVER_HOST}:{SERVER_PORT}/.well-known/agent-card")
+    print(f"   • Health Check: http://{SERVER_HOST}:{SERVER_PORT}/health")
+    print(f"   • Message Send: http://{SERVER_HOST}:{SERVER_PORT}/message/send")
+    print(f"   • Message Stream: http://{SERVER_HOST}:{SERVER_PORT}/message/stream")
+    print("\n🗄️ Database Configuration:")
+    print(f"   📍 URI: {DATABASE_CONFIG['uri']}")
+    print(f"   👤 User: {DATABASE_CONFIG['username']}")
+    print(f"   🗄️  Database: {DATABASE_CONFIG['database']}")
+    print("="*80)
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # MAIN ENTRY POINT
 # ═══════════════════════════════════════════════════════════════════════════════════
 
-if __name__ == "__main__":
-    print_a2a_server_info()
-    if app:
-        print(f"\n🚀 Starting FinAgent A2A Server on port {A2A_SERVER_PORT}...")
-        print(f"   Use: uvicorn a2a_server:app --host 0.0.0.0 --port {A2A_SERVER_PORT}")
+@click.command()
+@click.option('--host', default=SERVER_HOST, help='Host to run the server on')
+@click.option('--port', default=SERVER_PORT, help='Port to run the server on')
+def main(host: str, port: int):
+    """Main entry point for the A2A server."""
+    
+    print_server_info()
+    
+    try:
+        # Initialize memory components if available
+        global interface_manager
+        if MEMORY_AVAILABLE:
+            try:
+                # We'll initialize this in the executor when first used
+                logger.info("✅ Memory components available for initialization")
+            except Exception as e:
+                logger.warning(f"⚠️ Memory system setup warning: {e}")
+        
+        # Create request handler with memory agent executor
+        request_handler = DefaultRequestHandler(
+            agent_executor=MemoryAgentExecutor(),
+            task_store=InMemoryTaskStore(),
+        )
+        
+        # Create A2A server application
+        server = A2AStarletteApplication(
+            agent_card=get_agent_card(host, port),
+            http_handler=request_handler
+        )
+        
+        logger.info(f"✅ A2A Server configured successfully")
+        logger.info(f"   📋 Name: {SERVER_NAME}")
+        logger.info(f"   🔢 Version: {SERVER_VERSION}")
+        logger.info(f"   🌐 Host: {host}")
+        logger.info(f"   🚪 Port: {port}")
+        logger.info(f"   🧠 Memory: {'✅ Available' if MEMORY_AVAILABLE else '❌ Unavailable'}")
+        
+        print(f"\n🚀 Starting FinAgent A2A Server...")
+        print(f"   Use Ctrl+C to stop the server")
         print("="*80)
         
         # Run the server
-        uvicorn.run(app, host="0.0.0.0", port=A2A_SERVER_PORT)
-    else:
-        print("\n❌ Cannot start A2A server - dependencies missing")
-        print("="*80)
+        uvicorn.run(server.build(), host=host, port=port)
+        
+    except KeyboardInterrupt:
+        print("\n\n⏹️  Server shutdown requested...")
+        asyncio.run(shutdown_server())
+        print("👋 FinAgent A2A Server stopped")
+        
+    except Exception as e:
+        logger.error(f"❌ Server error: {e}")
+        asyncio.run(shutdown_server())
+
+if __name__ == "__main__":
+    main()

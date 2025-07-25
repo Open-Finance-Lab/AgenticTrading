@@ -35,23 +35,23 @@ from pathlib import Path
 
 # Import unified components
 try:
-    from FinAgents.memory.unified_database_manager import UnifiedDatabaseManager, TradingGraphMemory, create_database_manager
-    from FinAgents.memory.unified_interface_manager import UnifiedInterfaceManager, create_interface_manager
+    from unified_database_manager import UnifiedDatabaseManager, TradingGraphMemory, create_database_manager
+    from unified_interface_manager import UnifiedInterfaceManager, create_interface_manager
     UNIFIED_COMPONENTS_AVAILABLE = True
 except ImportError:
     # Fallback to original database for compatibility
-    from FinAgents.memory.database import TradingGraphMemory
+    from database import TradingGraphMemory
     UNIFIED_COMPONENTS_AVAILABLE = False
 
 # Import intelligent indexer and stream processor
 try:
-    from FinAgents.memory.intelligent_memory_indexer import IntelligentMemoryIndexer
+    from intelligent_memory_indexer import IntelligentMemoryIndexer
     INTELLIGENT_INDEXER_AVAILABLE = True
 except ImportError:
     INTELLIGENT_INDEXER_AVAILABLE = False
 
 try:
-    from FinAgents.memory.realtime_stream_processor import StreamProcessor, ReactiveMemoryManager
+    from realtime_stream_processor import StreamProcessor, ReactiveMemoryManager
     STREAM_PROCESSOR_AVAILABLE = True
 except ImportError:
     STREAM_PROCESSOR_AVAILABLE = False
@@ -62,7 +62,7 @@ except ImportError:
 
 NEO4J_URI = "bolt://localhost:7687"
 NEO4J_USER = "neo4j"
-NEO4J_PASSWORD = "FinOrchestration"
+NEO4J_PASSWORD = "finagent123"
 
 # Global instances for unified architecture
 UNIFIED_DATABASE_MANAGER: Optional[UnifiedDatabaseManager] = None
@@ -1033,7 +1033,7 @@ async def health_check():
 # ═══════════════════════════════════════════════════════════════════════════════════
 
 from starlette.routing import Route
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, Response
 
 app = mcp.streamable_http_app()
 
@@ -1056,8 +1056,74 @@ async def health_handler(request):
             "error": str(e)
         }, status_code=500)
 
-# Add health route to the app
+# Add documentation handler
+async def docs_handler(request):
+    """API documentation handler for Starlette."""
+    docs_html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>FinAgent Memory Server - API Documentation</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
+            .container { max-width: 800px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+            h2 { color: #34495e; border-bottom: 1px solid #ecf0f1; padding-bottom: 5px; }
+            .endpoint { background: #ecf0f1; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #3498db; }
+            .method { background: #27ae60; color: white; padding: 3px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; }
+            .path { font-family: monospace; background: #34495e; color: white; padding: 2px 6px; border-radius: 3px; }
+            .description { margin-top: 8px; color: #7f8c8d; }
+            .status { padding: 2px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; }
+            .online { background: #27ae60; color: white; }
+            .note { background: #f39c12; color: white; padding: 10px; border-radius: 5px; margin: 15px 0; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🧠 FinAgent Memory Server</h1>
+            <p><span class="status online">ONLINE</span> - Enhanced Memory Management System</p>
+            
+            <h2>📡 Available Endpoints</h2>
+            
+            <div class="endpoint">
+                <span class="method">GET</span> <span class="path">/health</span>
+                <div class="description">System health check with detailed component status</div>
+            </div>
+            
+            <div class="endpoint">
+                <span class="method">GET</span> <span class="path">/docs</span>
+                <div class="description">This API documentation page</div>
+            </div>
+            
+            <div class="note">
+                <strong>Note:</strong> This server uses the Model Context Protocol (MCP) for advanced AI-native communication. 
+                Most memory operations are handled through MCP tools rather than traditional REST endpoints.
+            </div>
+            
+            <h2>🔧 System Architecture</h2>
+            <ul>
+                <li><strong>Protocol:</strong> Model Context Protocol (MCP)</li>
+                <li><strong>Database:</strong> Neo4j Graph Database</li>
+                <li><strong>Features:</strong> Intelligent memory storage, semantic search, relationship mapping</li>
+                <li><strong>Integration:</strong> Works with MCP Server (Port 8001) and A2A Server (Port 8002)</li>
+            </ul>
+            
+            <h2>📊 Quick Status</h2>
+            <p>For detailed system status, visit: <a href="/health">/health</a></p>
+            
+            <hr>
+            <p style="text-align: center; color: #95a5a6; font-size: 14px;">
+                FinAgent Memory Server v2.0.0 | Enhanced Architecture
+            </p>
+        </div>
+    </body>
+    </html>
+    """
+    return Response(docs_html, media_type="text/html")
+
+# Add routes to the app
 app.router.routes.append(Route("/health", health_handler, methods=["GET"]))
+app.router.routes.append(Route("/docs", docs_handler, methods=["GET"]))
 
 # ═══════════════════════════════════════════════════════════════════════════════════
 # DEVELOPMENT AND TESTING UTILITIES

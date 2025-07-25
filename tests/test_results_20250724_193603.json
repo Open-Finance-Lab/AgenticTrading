@@ -1,0 +1,134 @@
+{
+  "total_tests": 17,
+  "passed_tests": 17,
+  "failed_tests": 0,
+  "success_rate": 100.0,
+  "duration": 0.07467484474182129,
+  "connectivity": {
+    "memory": true,
+    "mcp": true,
+    "a2a": true
+  },
+  "timestamp": "2025-07-24T23:36:04.005972+00:00",
+  "test_results": [
+    {
+      "test_name": "Memory Server Port 8000",
+      "passed": true,
+      "details": "Health endpoint responding",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.938307+00:00"
+    },
+    {
+      "test_name": "MCP Server Port 8001",
+      "passed": true,
+      "details": "MCP server online (protocol-compliant response)",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.940288+00:00"
+    },
+    {
+      "test_name": "A2A Server Port 8002",
+      "passed": true,
+      "details": "A2A server responding (405 expected for GET)",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.942076+00:00"
+    },
+    {
+      "test_name": "Memory Server Health Check",
+      "passed": true,
+      "details": "Status: healthy",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.943614+00:00"
+    },
+    {
+      "test_name": "Memory Server Documentation",
+      "passed": true,
+      "details": "Documentation endpoint not available (normal behavior)",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.945360+00:00"
+    },
+    {
+      "test_name": "MCP Server Connectivity",
+      "passed": true,
+      "details": "MCP server online (protocol-compliant response)",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.947238+00:00"
+    },
+    {
+      "test_name": "MCP Tools List",
+      "passed": true,
+      "details": "MCP tools available (store_memory, retrieve_memory, etc.)",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.953613+00:00"
+    },
+    {
+      "test_name": "MCP Health Check Tool",
+      "passed": true,
+      "details": "Health check tool executed successfully",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.958919+00:00"
+    },
+    {
+      "test_name": "MCP Statistics Tool",
+      "passed": true,
+      "details": "Statistics tool executed successfully",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.966707+00:00"
+    },
+    {
+      "test_name": "MCP Store Memory Tool",
+      "passed": true,
+      "details": "Store tool executed (response format may vary)",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.972884+00:00"
+    },
+    {
+      "test_name": "MCP Retrieve Memory Tool",
+      "passed": true,
+      "details": "Memory retrieval tool executed successfully",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.977519+00:00"
+    },
+    {
+      "test_name": "A2A Server Connectivity",
+      "passed": true,
+      "details": "A2A server responding (405 Method Not Allowed expected)",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.979525+00:00"
+    },
+    {
+      "test_name": "A2A Simple Message",
+      "passed": true,
+      "details": "Status: completed",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.982237+00:00"
+    },
+    {
+      "test_name": "A2A Store Operation",
+      "passed": true,
+      "details": "Status: completed",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.984060+00:00"
+    },
+    {
+      "test_name": "A2A Retrieve Operation",
+      "passed": true,
+      "details": "Status: completed",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.985712+00:00"
+    },
+    {
+      "test_name": "A2A Health Check",
+      "passed": true,
+      "details": "Status: completed",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:03.987649+00:00"
+    },
+    {
+      "test_name": "A2A Performance Test",
+      "passed": true,
+      "details": "10/10 ops in 0.02s (550.3 ops/s)",
+      "error": "",
+      "timestamp": "2025-07-24T23:36:04.005928+00:00"
+    }
+  ]
+}

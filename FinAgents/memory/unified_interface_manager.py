@@ -48,7 +48,7 @@ except ImportError:
     OPENAI_AVAILABLE = False
 
 # Database manager import
-from .unified_database_manager import UnifiedDatabaseManager, create_database_manager
+from unified_database_manager import UnifiedDatabaseManager, create_database_manager
 
 # Configure logging
 logger = logging.getLogger(__name__)

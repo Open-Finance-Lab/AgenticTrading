@@ -584,24 +584,33 @@ def create_enhanced_mcp_server(pool_id: str = "alpha_pool") -> tuple[FastMCP, En
     # Create the lifecycle manager
     lifecycle_manager = EnhancedMCPLifecycleManager(mcp, pool_id)
     
-    # Add request monitoring middleware
-    original_handle_request = mcp._handle_request
-    
-    async def enhanced_handle_request(request: JSONRPCMessage) -> None:
-        start_time = time.time()
-        request_id = str(request.id) if hasattr(request, 'id') else "unknown"
-        method = getattr(request, 'method', 'unknown')
-        
-        try:
-            result = await original_handle_request(request)
-            duration = time.time() - start_time
-            lifecycle_manager.record_request(request_id, method, duration, True)
-            return result
-        except Exception as e:
-            duration = time.time() - start_time
-            lifecycle_manager.record_request(request_id, method, duration, False)
-            raise
-    
-    mcp._handle_request = enhanced_handle_request
+    # Add request monitoring middleware (simplified due to FastMCP API changes)
+    try:
+        # Try to access the internal MCP server if available
+        if hasattr(mcp, '_mcp_server') and hasattr(mcp._mcp_server, '_handle_request'):
+            original_handle_request = mcp._mcp_server._handle_request
+            
+            async def enhanced_handle_request(request: JSONRPCMessage) -> None:
+                start_time = time.time()
+                request_id = str(request.id) if hasattr(request, 'id') else "unknown"
+                method = getattr(request, 'method', 'unknown')
+                
+                try:
+                    result = await original_handle_request(request)
+                    duration = time.time() - start_time
+                    lifecycle_manager.record_request(request_id, method, duration, True)
+                    return result
+                except Exception as e:
+                    duration = time.time() - start_time
+                    lifecycle_manager.record_request(request_id, method, duration, False, str(e))
+                    raise
+            
+            mcp._mcp_server._handle_request = enhanced_handle_request
+            logger.info("Request monitoring middleware installed successfully")
+        else:
+            # Fallback: just log that monitoring is not available
+            logger.warning("Request monitoring unavailable due to FastMCP API changes")
+    except Exception as e:
+        logger.warning(f"Failed to setup request monitoring: {e}")
     
     return mcp, lifecycle_manager
