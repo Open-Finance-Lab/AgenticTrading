@@ -350,11 +350,9 @@ class MomentumAgent:
         self.config = config
         self.agent = FastMCP("MomentumAlphaAgent")
         
-        # Initialize A2A client for communication with memory agent through alpha pool
-        self.a2a_client = create_alpha_pool_a2a_client(
-            agent_pool_id="alpha_agent_pool",
-            memory_url="http://127.0.0.1:8010"
-        )
+        # Initialize A2A client lazily to avoid async issues during init
+        self.a2a_client = None
+        self._a2a_initialized = False
         
         # Initialize LLM client
         self.llm_client = None
@@ -376,6 +374,20 @@ class MomentumAgent:
         self.feedback_history = []
         
         logger.info("MomentumAgent initialized with A2A memory integration")
+
+    async def _initialize_a2a_client(self):
+        """Initialize A2A client asynchronously to avoid blocking during __init__."""
+        if not self._a2a_initialized:
+            try:
+                self.a2a_client = await create_alpha_pool_a2a_client(
+                    agent_pool_id="alpha_agent_pool",
+                    memory_url="http://127.0.0.1:8010"
+                )
+                self._a2a_initialized = True
+                logger.info("✅ A2A client initialized successfully")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to initialize A2A client: {e}")
+                self.a2a_client = None
 
     async def learn_from_backtest(self, backtest_results: dict):
         """
@@ -435,14 +447,18 @@ class MomentumAgent:
 
         # Store performance results using A2A protocol
         try:
-            async with self.a2a_client as client:
-                # Store strategy performance metrics
-                strategy_id = f"momentum_strategy_{self.config.agent_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
-                await client.store_strategy_performance(
-                    agent_id=self.config.agent_id,
-                    strategy_id=strategy_id,
-                    performance_metrics=performance_metrics
-                )
+            # Ensure A2A client is initialized
+            await self._initialize_a2a_client()
+            
+            if self.a2a_client:
+                async with self.a2a_client as client:
+                    # Store strategy performance metrics
+                    strategy_id = f"momentum_strategy_{self.config.agent_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                    await client.store_strategy_performance(
+                        agent_id=self.config.agent_id,
+                        strategy_id=strategy_id,
+                        performance_metrics=performance_metrics
+                    )
                 
                 # Store learning feedback for RL adaptation
                 learning_feedback = {
@@ -521,17 +537,21 @@ class MomentumAgent:
             request_id: Request identifier for correlation
         """
         try:
-            async with self.a2a_client as client:
-                await client.store_alpha_signal_event(
-                    agent_id=self.config.agent_id,
-                    signal=signal,
-                    confidence=confidence,
-                    symbol=symbol,
-                    reasoning=reasoning,
-                    market_context=market_context,
-                    correlation_id=request_id
-                )
-                logger.info(f"[A2A] Successfully stored signal event for {symbol} via A2A protocol")
+            # Ensure A2A client is initialized
+            await self._initialize_a2a_client()
+            
+            if self.a2a_client:
+                async with self.a2a_client as client:
+                    await client.store_alpha_signal_event(
+                        agent_id=self.config.agent_id,
+                        signal=signal,
+                        confidence=confidence,
+                        symbol=symbol,
+                        reasoning=reasoning,
+                        market_context=market_context,
+                        correlation_id=request_id
+                    )
+                    logger.info(f"[A2A] Successfully stored signal event for {symbol} via A2A protocol")
         except Exception as e:
             logger.warning(f"[A2A] Failed to store signal event via A2A protocol: {e}")
             # Continue execution without breaking the main signal generation flow

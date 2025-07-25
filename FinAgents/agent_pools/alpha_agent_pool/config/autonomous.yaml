@@ -2,7 +2,7 @@
 
 agent_id: "autonomous_alpha_agent"
 execution:
-  port: 5051
+  port: 5052  # Changed from 5051 to avoid conflict with momentum agent
   host: "0.0.0.0"
   
 autonomous_config:

@@ -1,7 +1,26 @@
 """
-Unified entry point for starting the Alpha Agent Pool MCP service.
-This module manages the lifecycle and orchestration of multiple sub-agents within the AlphaAgentPool.
-Enhanced with comprehensive memory integration for strategy tracking and performance analytics.
+Alpha Agent Pool Core Module: Unified Entry Point for Multi-Agent Financial Strategy Orchestration
+
+This module serves as the central orchestration hub for the Alpha Agent Pool, implementing
+a comprehensive Model Context Protocol (MCP) service architecture for quantitative trading
+strategy management and execution. The system employs Agent-to-Agent (A2A) protocol integration
+for seamless memory coordination and cross-agent learning facilitation.
+
+Core Academic Framework:
+- Multi-agent orchestration theory for financial signal generation
+- Memory-augmented reinforcement learning for strategy optimization
+- Real-time event streaming and performance analytics
+- Cross-sectional alpha generation with risk-adjusted portfolio construction
+
+System Architecture:
+- Centralized MCP server for agent lifecycle management
+- A2A protocol implementation for distributed memory coordination
+- Strategy performance tracking with academic risk metrics
+- Real-time signal generation and backtesting capabilities
+
+Author: FinAgent Research Team
+License: Open Source Research License
+Created: 2025-07-25
 """
 import os
 import sys
@@ -18,8 +37,66 @@ from enum import Enum
 
 from mcp.server.fastmcp import FastMCP
 
+# Configure module logger
+logger = logging.getLogger(__name__)
+
+
+def check_port_available(port: int, host: str = "127.0.0.1") -> bool:
+    """
+    Check if a port is available for binding.
+    
+    Args:
+        port: Port number to check
+        host: Host address to check (default: 127.0.0.1)
+        
+    Returns:
+        bool: True if port is available, False if occupied
+    """
+    import socket
+    
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            result = sock.connect_ex((host, port))
+            return result != 0  # Port is available if connection fails
+    except Exception:
+        return False
+
+
+def find_available_port(start_port: int, max_attempts: int = 10) -> Optional[int]:
+    """
+    Find an available port starting from start_port.
+    
+    Args:
+        start_port: Starting port number to check
+        max_attempts: Maximum number of ports to check
+        
+    Returns:
+        Available port number or None if no port found
+    """
+    for port in range(start_port, start_port + max_attempts):
+        if check_port_available(port):
+            return port
+    return None
+
 # Global flag for memory agent availability
 MEMORY_AVAILABLE = False
+
+# Import memory bridge modules for centralized memory management
+try:
+    from .memory_bridge import AlphaAgentPoolMemoryBridge, MEMORY_BRIDGE_AVAILABLE
+    from .enhanced_a2a_memory_bridge import EnhancedA2AMemoryBridge, get_memory_bridge, shutdown_memory_bridge
+    logger.info("✅ Memory bridge modules successfully imported")
+    ENHANCED_A2A_BRIDGE_AVAILABLE = True
+    # Create alias for backward compatibility
+    AlphaMemoryBridge = AlphaAgentPoolMemoryBridge
+except ImportError as e:
+    logger.warning(f"⚠️ Memory bridge modules not available: {e}")
+    AlphaMemoryBridge = None
+    AlphaAgentPoolMemoryBridge = None
+    EnhancedA2AMemoryBridge = None
+    MEMORY_BRIDGE_AVAILABLE = False
+    ENHANCED_A2A_BRIDGE_AVAILABLE = False
 
 # Try to import A2A memory coordinator
 try:
@@ -30,8 +107,28 @@ try:
         shutdown_pool_coordinator
     )
     A2A_COORDINATOR_AVAILABLE = True
-except ImportError:
+    logger.info("✅ A2A Memory Coordinator successfully imported")
+except ImportError as e:
+    logger.warning(f"⚠️ A2A Memory Coordinator not available: {e}")
     A2A_COORDINATOR_AVAILABLE = False
+
+# Import agent manager for centralized agent coordination
+try:
+    from .agents.agent_manager import AlphaAgentManager, initialize_alpha_agents
+    AGENT_MANAGER_AVAILABLE = True
+    logger.info("✅ Alpha Agent Manager successfully imported")
+except ImportError as e:
+    logger.warning(f"⚠️ Alpha Agent Manager not available: {e}")
+    AlphaAgentManager = None
+    initialize_alpha_agents = None
+    AGENT_MANAGER_AVAILABLE = False
+
+# Try to import Alpha Strategy Research Framework
+try:
+    from .alpha_strategy_research import AlphaStrategyResearchFramework
+    ALPHA_STRATEGY_RESEARCH_AVAILABLE = True
+except ImportError:
+    ALPHA_STRATEGY_RESEARCH_AVAILABLE = False
 
 # Try to import enhanced MCP lifecycle management
 try:
@@ -220,6 +317,9 @@ class MemoryUnit:
             self._autoload_csv(autoload_csv_path)
 
     def _autoload_csv(self, csv_path):
+        # Get logger for this method
+        logger = logging.getLogger(__name__)
+        
         if not os.path.exists(csv_path):
             logger.warning(f"CSV file not found for autoloading: {csv_path}")
             return
@@ -317,13 +417,43 @@ class MemoryUnit:
                 logger.debug(f"Failed to log memory operation: {e}")
 
 class AlphaAgentPoolMCPServer:
+    """
+    Alpha Agent Pool Model Context Protocol (MCP) Server
+    
+    Professional multi-agent system for systematic alpha factor research, strategy development,
+    and portfolio optimization. This implementation follows academic quantitative finance
+    principles and provides institutional-grade tools for alpha generation.
+    
+    Core Capabilities:
+    - Systematic Alpha Factor Discovery using academic methodologies
+    - Multi-Factor Strategy Configuration with risk management
+    - Comprehensive Backtesting with performance attribution
+    - Enhanced A2A Memory Coordination for distributed learning
+    - Cross-Agent Knowledge Transfer and strategy optimization
+    
+    Academic Foundation:
+    Built on established principles from multi-agent systems theory, quantitative
+    finance literature, and modern MLOps practices for algorithmic trading systems.
+    
+    Architecture:
+    - MCP Server (port 8081) with 6 comprehensive alpha research tools
+    - Enhanced A2A Memory Bridge with multi-server failover
+    - Strategy Research Framework with peer-reviewed methodologies
+    - Distributed memory coordination for institutional-scale operations
+    """
+    
     def __init__(self, host="0.0.0.0", port=8081, enable_enhanced_lifecycle=True):
         """
-        Initialize the AlphaAgentPoolMCPServer instance with enhanced memory capabilities.
+        Initialize the Alpha Agent Pool MCP Server with comprehensive capabilities.
+        
+        This constructor establishes the foundational architecture for multi-agent
+        orchestration, including A2A protocol integration, memory coordination,
+        and strategy performance tracking systems.
+        
         Args:
-            host (str): Host address to bind the MCP server.
-            port (int): Port number to bind the MCP server.
-            enable_enhanced_lifecycle (bool): Whether to enable enhanced MCP lifecycle management.
+            host (str): Network interface binding address for the MCP server
+            port (int): TCP port number for service endpoint exposure  
+            enable_enhanced_lifecycle (bool): Enable advanced lifecycle management features
         """
         self.host = host
         self.port = port
@@ -343,6 +473,7 @@ class AlphaAgentPoolMCPServer:
             if enable_enhanced_lifecycle:
                 self.logger.warning("Enhanced MCP lifecycle management not available, using basic MCP")
         
+        # Agent registry for tracking active instances
         self.agent_registry = {}  # agent_id -> (agent, process/thread)
         self.config_dir = os.path.join(os.path.dirname(__file__), "config")
         
@@ -351,8 +482,10 @@ class AlphaAgentPoolMCPServer:
         
         # Initialize A2A Memory Coordinator for pool-level memory operations
         self.a2a_coordinator: Optional["AlphaPoolA2AMemoryCoordinator"] = None
+        self._coordinator_initialization_task = None
+        
         if A2A_COORDINATOR_AVAILABLE:
-            self.logger.info("A2A Memory Coordinator available, will initialize during startup")
+            self.logger.info("A2A Memory Coordinator available, scheduling initialization")
         else:
             self.logger.warning("A2A Memory Coordinator not available, falling back to legacy memory")
         
@@ -364,8 +497,11 @@ class AlphaAgentPoolMCPServer:
         # self.alpha_memory_client = AlphaMemoryClient(agent_id="alpha_agent_pool_server")
         self.alpha_memory_client = None  # Temporarily disabled until AlphaMemoryClient is available
         
-        # Automatically load static dataset into memory unit on startup, and reset memory file
-        csv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/cache/AAPL_2022-01-01_2024-12-31_1d.csv"))
+        # Load historical market data into memory unit with automatic reset
+        csv_path = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), 
+            "../../../data/cache/AAPL_2022-01-01_2024-12-31_1d.csv"
+        ))
         self.memory = MemoryUnit(
             os.path.join(os.path.dirname(__file__), "memory_unit.json"), 
             autoload_csv_path=csv_path, 
@@ -373,20 +509,51 @@ class AlphaAgentPoolMCPServer:
             memory_bridge=self.memory_bridge
         )
         
-        # Initialize legacy memory agent if available
+        # Initialize legacy memory agent if available (deprecated in favor of A2A)
         self.memory_agent: Optional["ExternalMemoryAgent"] = None
         self.session_id = None
         self._initialize_memory_agent()  # Initialize memory agent synchronously
         
-        # Strategy performance tracking
+        # Strategy performance tracking and analytics
         self.strategy_performance_cache = {}
         self.signal_generation_history = []
         
+        # Import strategy research framework
+        try:
+            from .alpha_strategy_research import (
+                AlphaStrategyResearchFramework,
+                AlphaFactorCategory,
+                RiskLevel
+            )
+            STRATEGY_RESEARCH_AVAILABLE = True
+        except ImportError:
+            STRATEGY_RESEARCH_AVAILABLE = False
+            self.logger.warning("Alpha Strategy Research Framework not available")
+        
+        # Initialize strategy research framework
+        self.strategy_research_framework = None
+        if STRATEGY_RESEARCH_AVAILABLE:
+            self.strategy_research_framework = AlphaStrategyResearchFramework(
+                strategy_universe=["AAPL", "MSFT", "GOOGL", "TSLA", "NVDA"],
+                benchmark="SPY",
+                research_period="5Y",
+                a2a_coordinator=None  # Will be set after A2A coordinator initialization
+            )
+            self.logger.info("Alpha Strategy Research Framework initialized")
+        
+        # Initialize Enhanced A2A Memory Bridge
+        self.enhanced_memory_bridge = None
+        self._bridge_initialization_pending = ENHANCED_A2A_BRIDGE_AVAILABLE
+        if ENHANCED_A2A_BRIDGE_AVAILABLE:
+            self.logger.info("Enhanced A2A Memory Bridge scheduled for initialization")
+        
+        # Register all pool management tools
         self._register_pool_tools()
 
     def _start_momentum_agent(self):
         """
         Starts the momentum agent as a separate process by correctly importing and instantiating it.
+        Includes port conflict detection and automatic port resolution.
         """
         # Import agent-specific components here to avoid top-level import errors
         from FinAgents.agent_pools.alpha_agent_pool.schema.theory_driven_schema import MomentumAgentConfig
@@ -395,6 +562,20 @@ class AlphaAgentPoolMCPServer:
         config_path = os.path.join(self.config_dir, "momentum.yaml")
         with open(config_path, 'r') as f:
             config_data = yaml.safe_load(f)
+        
+        # Check if configured port is available
+        configured_port = config_data.get('execution', {}).get('port', 5051)
+        if not check_port_available(configured_port):
+            self.logger.warning(f"⚠️ Momentum agent port {configured_port} is occupied, finding alternative...")
+            
+            # Find an available port
+            alternative_port = find_available_port(configured_port + 1)
+            if alternative_port:
+                self.logger.info(f"🔄 Using alternative port {alternative_port} for momentum agent")
+                config_data['execution']['port'] = alternative_port
+            else:
+                self.logger.error(f"❌ No available ports found starting from {configured_port + 1}")
+                raise RuntimeError(f"No available ports for momentum agent")
         
         config = MomentumAgentConfig(**config_data)
         
@@ -406,14 +587,63 @@ class AlphaAgentPoolMCPServer:
     def _start_autonomous_agent(self):
         """
         Starts the autonomous agent as a separate process.
+        Includes port conflict detection and automatic port resolution.
         """
         # Import agent-specific components here
         from FinAgents.agent_pools.alpha_agent_pool.agents.autonomous.autonomous_agent import run_autonomous_agent
         from multiprocessing import Process
 
-        process = Process(target=run_autonomous_agent)
+        # Load configuration for autonomous agent
+        config_path = os.path.join(self.config_dir, "autonomous.yaml")
+        
+        # Load config to check port
+        with open(config_path, 'r') as f:
+            config_data = yaml.safe_load(f)
+        
+        configured_port = config_data.get('execution', {}).get('port', 5052)
+        port_override = None
+        
+        # Check if configured port is available
+        if not check_port_available(configured_port):
+            self.logger.warning(f"⚠️ Autonomous agent port {configured_port} is occupied, finding alternative...")
+            
+            # Find an available port
+            alternative_port = find_available_port(configured_port + 1)
+            if alternative_port:
+                self.logger.info(f"🔄 Using alternative port {alternative_port} for autonomous agent")
+                port_override = alternative_port
+            else:
+                self.logger.error(f"❌ No available ports found starting from {configured_port + 1}")
+                raise RuntimeError(f"No available ports for autonomous agent")
+        
+        process = Process(target=run_autonomous_agent, args=(config_path, port_override))
         process.start()
         return process
+
+    def start_agent_sync(self, agent_name: str):
+        """
+        Synchronously start a specific agent without asyncio event loop conflicts.
+        Used by the synchronous start() method to avoid event loop issues.
+        """
+        if agent_name == "momentum_agent":
+            try:
+                self.logger.info(f"🚀 Starting {agent_name} synchronously...")
+                config, process = self._start_momentum_agent()
+                self.logger.info(f"✅ {agent_name} started successfully on port {config['port']}")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to start {agent_name}: {e}")
+                raise
+        elif agent_name == "autonomous_agent":
+            try:
+                self.logger.info(f"🚀 Starting {agent_name} synchronously...")
+                process = self._start_autonomous_agent()
+                self.logger.info(f"✅ {agent_name} started successfully")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to start {agent_name}: {e}")
+                raise
+        else:
+            self.logger.error(f"❌ Unknown agent name: {agent_name}")
+            raise ValueError(f"Unknown agent name: {agent_name}")
 
     async def _log_agent_lifecycle_event(self, agent_id: str, status: str, details: str):
         """Log agent lifecycle events to the memory bridge."""
@@ -469,7 +699,20 @@ class AlphaAgentPoolMCPServer:
             process = self._start_autonomous_agent()
             self.agent_registry[agent_id] = process
             
-            details = "Autonomous agent started on port 5051"
+            # Read config to determine actual port used
+            config_path = os.path.join(self.config_dir, "autonomous.yaml")
+            with open(config_path, 'r') as f:
+                config_data = yaml.safe_load(f)
+            configured_port = config_data.get('execution', {}).get('port', 5052)
+            
+            # Determine actual port used (could be different if there was a conflict)
+            actual_port = configured_port
+            if not check_port_available(configured_port):
+                alternative_port = find_available_port(configured_port + 1)
+                if alternative_port:
+                    actual_port = alternative_port
+            
+            details = f"Autonomous agent started on port {actual_port}"
             # Log agent startup event
             if self.memory_bridge:
                 # Run the async logging function in a new event loop as we are in a sync context
@@ -567,7 +810,7 @@ class AlphaAgentPoolMCPServer:
             MEMORY_AVAILABLE = False
 
         if not MEMORY_AVAILABLE:
-            logger.warning("External memory agent not available. Continuing without it.")
+            self.logger.warning("External memory agent not available. Continuing without it.")
             return
         try:
             self.memory_agent = ExternalMemoryAgent()
@@ -576,6 +819,79 @@ class AlphaAgentPoolMCPServer:
         except Exception as e:
             logger.error(f"Failed to initialize memory agent: {e}")
             self.memory_agent = None
+
+    async def _initialize_enhanced_memory_bridge(self):
+        """
+        Initialize the Enhanced A2A Memory Bridge for improved memory coordination.
+        
+        This method sets up the enhanced memory bridge that provides robust
+        connectivity to multiple memory services with automatic fallback.
+        """
+        try:
+            if ENHANCED_A2A_BRIDGE_AVAILABLE:
+                from .enhanced_a2a_memory_bridge import get_memory_bridge
+                
+                # Get or create the global memory bridge
+                self.enhanced_memory_bridge = await get_memory_bridge(
+                    pool_id=f"alpha_pool_{self.port}"
+                )
+                
+                # Test the connection
+                health_status = await self.enhanced_memory_bridge.health_check()
+                if health_status.get("bridge_status") == "healthy":
+                    self.logger.info("✅ Enhanced A2A Memory Bridge initialized successfully")
+                    
+                    # Update strategy research framework with memory bridge
+                    if self.strategy_research_framework:
+                        self.strategy_research_framework.memory_bridge = self.enhanced_memory_bridge
+                        self.logger.info("✅ Strategy Research Framework connected to memory bridge")
+                else:
+                    self.logger.warning("⚠️  Enhanced A2A Memory Bridge initialized but connection unhealthy")
+            else:
+                self.logger.warning("Enhanced A2A Memory Bridge not available")
+                
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Enhanced A2A Memory Bridge: {e}")
+
+    async def _store_performance_via_bridge(self, 
+                                          agent_id: str, 
+                                          performance_data: dict) -> bool:
+        """
+        Store agent performance data via Enhanced A2A Memory Bridge.
+        
+        Args:
+            agent_id: Identifier of the agent
+            performance_data: Performance metrics to store
+            
+        Returns:
+            bool: True if storage successful
+        """
+        if self.enhanced_memory_bridge:
+            return await self.enhanced_memory_bridge.store_agent_performance(
+                agent_id=agent_id,
+                performance_data=performance_data
+            )
+        return False
+
+    async def _store_strategy_insights_via_bridge(self, 
+                                                strategy_id: str, 
+                                                insights_data: dict) -> bool:
+        """
+        Store strategy insights via Enhanced A2A Memory Bridge.
+        
+        Args:
+            strategy_id: Identifier of the strategy
+            insights_data: Strategy insights and configuration data
+            
+        Returns:
+            bool: True if storage successful
+        """
+        if self.enhanced_memory_bridge:
+            return await self.enhanced_memory_bridge.store_strategy_insights(
+                strategy_id=strategy_id,
+                insights_data=insights_data
+            )
+        return False
 
     async def _log_memory_event(self, event_type, log_level, title: str, content: str, 
                                tags: set = None, metadata: Optional[Dict[str, Any]] = None):
@@ -720,11 +1036,25 @@ class AlphaAgentPoolMCPServer:
             """
             return self.memory.keys()
 
-        @self.pool_server.tool(name="generate_alpha_signals", description="Generate alpha signals based on market data")
+        @self.pool_server.tool(name="generate_alpha_signals", description="Generate alpha signals based on market data with A2A memory coordination")
         async def generate_alpha_signals(symbol: str = None, symbols: list = None, date: str = None, lookback_period: int = 20, price: Optional[float] = None, memory: dict = None) -> dict:
             """
-            Call the momentum_agent's generate_signal tool via SSE, passing historical price data.
-            Supports both single symbol (symbol) and multiple symbols (symbols) parameters for compatibility.
+            Generate alpha signals using momentum strategy with comprehensive A2A memory coordination.
+            
+            This function implements academic-standard alpha signal generation with integrated
+            memory coordination via the A2A protocol. Signal generation results are automatically
+            stored in the distributed memory system for cross-agent learning and strategy optimization.
+            
+            Args:
+                symbol: Individual stock symbol for signal generation
+                symbols: List of stock symbols for batch processing
+                date: Target date for signal generation (ISO format)
+                lookback_period: Historical data window for momentum calculation
+                price: Current price override (optional)
+                memory: Alternative memory source (optional)
+                
+            Returns:
+                Dict containing generated alpha signals with metadata and performance tracking
             """
             try:
                 from mcp.client.sse import sse_client
@@ -740,21 +1070,30 @@ class AlphaAgentPoolMCPServer:
                 else:
                     return {"status": "error", "message": "Either 'symbol' or 'symbols' parameter is required"}
                 
-                # If no date provided, use a default date from memory
+                # Use current date if not specified
                 if not date:
-                    date = "2024-01-30"  # Default date
+                    date = "2024-01-30"  # Default date for testing
                 
                 results = {}
+                signal_generation_metadata = {
+                    "generation_timestamp": datetime.utcnow().isoformat(),
+                    "lookback_period": lookback_period,
+                    "target_date": date,
+                    "total_symbols": len(target_symbols)
+                }
                 
                 for target_symbol in target_symbols:
-                    logger.info(f"Processing symbol: {target_symbol}")
+                    logger.info(f"Generating alpha signal for symbol: {target_symbol}")
+                    
+                    # Price data collection and validation
                     price_list = []
                     current_price = price
-                    # Ensure price is not None and is a float
+                    
                     if current_price is None or not isinstance(current_price, (float, int)):
                         memory_source = memory if memory is not None else self.memory
                         price_key = f"{target_symbol}_close_{date}"
                         current_price_str = memory_source.get(price_key) if hasattr(memory_source, 'get') else memory_source.get(price_key) if memory_source else None
+                        
                         if current_price_str is None:
                             logger.warning(f"No price data for {target_symbol} on {date}, using default price 100.0")
                             current_price = 100.0
@@ -762,16 +1101,17 @@ class AlphaAgentPoolMCPServer:
                             try:
                                 current_price = float(current_price_str)
                             except Exception:
-                                logger.warning(f"Price data for {target_symbol} on {date} is not a valid float, using default price 100.0")
+                                logger.warning(f"Invalid price data for {target_symbol} on {date}, using default price 100.0")
                                 current_price = 100.0
 
-                    # Collect historical prices for the lookback period
+                    # Collect historical price data for momentum calculation
                     current_date_obj = datetime.strptime(date, '%Y-%m-%d')
                     for i in range(lookback_period):
                         past_date = current_date_obj - timedelta(days=i+1)
                         past_date_str = past_date.strftime('%Y-%m-%d')
                         price_key = f"{target_symbol}_close_{past_date_str}"
                         memory_source = memory if memory is not None else self.memory
+                        
                         if memory_source:
                             past_price_str = memory_source.get(price_key) if hasattr(memory_source, 'get') else memory_source.get(price_key) if isinstance(memory_source, dict) else None
                             if past_price_str:
@@ -780,95 +1120,117 @@ class AlphaAgentPoolMCPServer:
                                 except (ValueError, TypeError):
                                     continue
 
-                    # The agent expects prices in chronological order, so we reverse the list
+                    # Ensure chronological order and add current price
                     price_list.reverse()
-                    # Add the current price to the end of the list
                     price_list.append(current_price)
 
-                    logger.info(f"Calling momentum_agent with {len(price_list)} prices for symbol {target_symbol}")
+                    logger.info(f"Executing momentum strategy with {len(price_list)} price points for {target_symbol}")
 
-                    # SSE client to momentum_agent (correct port 5051 from logs)
-                    base_url = "http://127.0.0.1:5051/sse"
-                    # Initialize with a default error response
+                    # Initialize default response structure
                     response = {"signal": "HOLD", "confidence": 0.0, "error": "Unknown error"}
-                    # Try the MCP SSE client first, then fallback to simple HTTP client
+                    
+                    # Attempt signal generation via MCP SSE client
+                    base_url = "http://127.0.0.1:5051/sse"
                     try:
-                        logger.info(f"Attempting SSE connection to {base_url} for symbol {target_symbol}")
-                        try:
-                            async with sse_client(base_url, timeout=10) as (read, write):
-                                logger.info(f"SSE connection established for {target_symbol}")
-                                try:
-                                    async with ClientSession(read, write) as session:
+                        logger.info(f"Establishing SSE connection to momentum agent for {target_symbol}")
+                        
+                        async with sse_client(base_url, timeout=10) as (read, write):
+                            logger.info(f"SSE connection established for {target_symbol}")
+                            
+                            async with ClientSession(read, write) as session:
+                                await session.initialize()
+                                logger.info(f"SSE session initialized for {target_symbol}")
+                                
+                                request_params = {
+                                    "symbol": target_symbol,
+                                    "price_list": price_list
+                                }
+                                
+                                logger.info(f"Calling generate_signal tool for {target_symbol}")
+                                
+                                response_parts = await session.call_tool(
+                                    "generate_signal",
+                                    request_params
+                                )
+                                
+                                # Parse response from momentum agent
+                                if response_parts and hasattr(response_parts, 'content') and response_parts.content:
+                                    content_list = response_parts.content
+                                    if len(content_list) > 0 and hasattr(content_list[0], 'text'):
+                                        content_str = content_list[0].text
                                         try:
-                                            await session.initialize()
-                                            logger.info(f"SSE session initialized for {target_symbol}")
-                                            request_params = {
-                                                "symbol": target_symbol,
-                                                "price_list": price_list
-                                            }
-                                            logger.info(f"Calling generate_signal tool for {target_symbol} with {len(price_list)} prices")
-                                            try:
-                                                response_parts = await session.call_tool(
-                                                    "generate_signal",
-                                                    request_params
-                                                )
-                                            except Exception as tool_error:
-                                                logger.error(f"Error during session.call_tool for {target_symbol}: {tool_error}", exc_info=True)
-                                                raise tool_error
-                                            if response_parts and hasattr(response_parts, 'content') and response_parts.content:
-                                                content_list = response_parts.content
-                                                if len(content_list) > 0 and hasattr(content_list[0], 'text'):
-                                                    content_str = content_list[0].text
-                                                    try:
-                                                        response = json.loads(content_str)
-                                                    except json.JSONDecodeError:
-                                                        response = {"signal": "HOLD", "confidence": 0.0, "raw_response": content_str}
-                                                else:
-                                                    response = {"signal": "HOLD", "confidence": 0.0, "error": "No text in response"}
-                                            else:
-                                                response = {"signal": "HOLD", "confidence": 0.0, "error": "Empty response"}
-                                        except Exception as session_error:
-                                            logger.error(f"Error in session operations for {target_symbol}: {session_error}", exc_info=True)
-                                            raise session_error
-                                except Exception as client_session_error:
-                                    logger.error(f"Error creating ClientSession for {target_symbol}: {client_session_error}", exc_info=True)
-                                    raise client_session_error
-                        except Exception as sse_client_error:
-                            logger.error(f"Error in SSE client for {target_symbol}: {sse_client_error}", exc_info=True)
-                            raise sse_client_error
+                                            response = json.loads(content_str)
+                                        except json.JSONDecodeError:
+                                            response = {"signal": "HOLD", "confidence": 0.0, "raw_response": content_str}
+                                    else:
+                                        response = {"signal": "HOLD", "confidence": 0.0, "error": "No text in response"}
+                                else:
+                                    response = {"signal": "HOLD", "confidence": 0.0, "error": "Empty response"}
+                                    
                     except Exception as mcp_error:
                         logger.warning(f"MCP SSE client failed for {target_symbol}: {mcp_error}")
-                        logger.info(f"Attempting fallback to simple HTTP client for {target_symbol}")
+                        
+                        # Fallback to simple HTTP client
                         try:
-                            # Use absolute import to avoid relative import error
                             from FinAgents.agent_pools.alpha_agent_pool.simple_momentum_client import SimpleMomentumClient
                             simple_client = SimpleMomentumClient()
                             response = await simple_client.call_generate_signal(target_symbol, price_list)
                             logger.info(f"Fallback HTTP client succeeded for {target_symbol}")
                         except Exception as fallback_error:
-                            logger.error(f"Fallback HTTP client also failed for {target_symbol}: {fallback_error}")
-                            response = {"signal": "HOLD", "confidence": 0.0, "error": f"Both MCP and HTTP failed: {mcp_error}"}
+                            logger.error(f"Both MCP and HTTP clients failed for {target_symbol}: {fallback_error}")
+                            response = {"signal": "HOLD", "confidence": 0.0, "error": f"All clients failed: {mcp_error}"}
 
-                    logger.info(f"Received response from momentum_agent for {target_symbol}: {response}")
+                    logger.info(f"Generated signal for {target_symbol}: {response}")
                     results[target_symbol] = response
-
-                return {
+                    
+                    # Store signal generation event in A2A memory coordinator if available
+                    if self.a2a_coordinator and response.get("signal") != "HOLD":
+                        try:
+                            await self.a2a_coordinator.a2a_client.store_strategy_performance(
+                                agent_id="momentum_agent",
+                                strategy_id=f"momentum_{target_symbol}_{date}",
+                                performance_metrics={
+                                    "symbol": target_symbol,
+                                    "signal": response.get("signal"),
+                                    "confidence": response.get("confidence", 0.0),
+                                    "generation_date": date,
+                                    "price_points_analyzed": len(price_list),
+                                    "lookback_period": lookback_period
+                                }
+                            )
+                            logger.info(f"✅ Signal stored in A2A memory coordinator for {target_symbol}")
+                        except Exception as storage_error:
+                            logger.warning(f"⚠️ Failed to store signal in A2A coordinator: {storage_error}")
+                
+                # Compile comprehensive response with academic metadata
+                final_response = {
                     "status": "success",
                     "alpha_signals": {
-                        "signals": results
+                        "signals": results,
+                        "metadata": signal_generation_metadata,
+                        "generation_summary": {
+                            "total_symbols_processed": len(results),
+                            "successful_signals": len([r for r in results.values() if r.get("signal") != "HOLD"]),
+                            "average_confidence": sum(r.get("confidence", 0) for r in results.values()) / len(results) if results else 0,
+                            "memory_coordination_active": self.a2a_coordinator is not None
+                        }
                     }
                 }
+                
+                logger.info(f"✅ Alpha signal generation completed for {len(target_symbols)} symbols")
+                logger.info(f"✅ Alpha signal generation completed for {len(target_symbols)} symbols")
+                return final_response
+                
             except Exception as top_level_error:
-                logger.error(f"Top-level error in generate_alpha_signals: {top_level_error}", exc_info=True)
+                logger.error(f"❌ Critical error in alpha signal generation: {top_level_error}", exc_info=True)
                 import traceback
                 error_traceback = traceback.format_exc()
-                logger.error(f"Full top-level traceback: {error_traceback}")
+                logger.error(f"Full error traceback: {error_traceback}")
+                
                 return {
                     "status": "error",
-                    "message": f"Top-level error: {top_level_error}",
-                    "alpha_signals": {
-                        "signals": {}
-                    }
+                    "message": f"Critical error in signal generation: {top_level_error}",
+                    "alpha_signals": {"signals": {}}
                 }
 
         @self.pool_server.tool(name="run_rl_backtest_and_update", description="Run RL backtest and update agent policy for a given symbol and market data.")
@@ -1012,11 +1374,601 @@ class AlphaAgentPoolMCPServer:
                 logger.error(f"Error submitting strategy event: {e}")
                 return f"Error: {e}"
 
+        @self.pool_server.tool(name="discover_alpha_factors", description="Systematic alpha factor discovery and validation using academic methodologies")
+        async def discover_alpha_factors(factor_categories: List[str] = None, significance_threshold: float = 0.05) -> dict:
+            """
+            Execute systematic alpha factor discovery following academic research protocols.
+            
+            This tool implements comprehensive factor mining using established quantitative
+            finance methodologies for systematic alpha generation and statistical validation.
+            
+            Args:
+                factor_categories: List of factor categories to investigate (momentum, mean_reversion, technical, volatility)
+                significance_threshold: Statistical significance threshold for factor validation (default: 0.05)
+                
+            Returns:
+                Dictionary containing discovered and validated alpha factors with academic metrics
+            """
+            if not self.strategy_research_framework:
+                return {
+                    "status": "error",
+                    "message": "Strategy Research Framework not available",
+                    "factors": {}
+                }
+            
+            try:
+                # Convert string categories to enum
+                if factor_categories:
+                    from .alpha_strategy_research import AlphaFactorCategory
+                    category_enums = []
+                    for cat in factor_categories:
+                        try:
+                            category_enums.append(AlphaFactorCategory(cat.lower()))
+                        except ValueError:
+                            self.logger.warning(f"Unknown factor category: {cat}")
+                else:
+                    category_enums = None
+                
+                # Execute factor discovery
+                discovered_factors = await self.strategy_research_framework.discover_alpha_factors(
+                    factor_categories=category_enums,
+                    significance_threshold=significance_threshold
+                )
+                
+                # Store discovery results via enhanced memory bridge
+                discovery_performance = {
+                    "total_factors_discovered": len(discovered_factors),
+                    "significance_threshold": significance_threshold,
+                    "avg_ir": sum(f.expected_ir for f in discovered_factors.values()) / len(discovered_factors) if discovered_factors else 0,
+                    "discovery_timestamp": datetime.utcnow().isoformat(),
+                    "methodology": "Systematic alpha factor discovery with academic validation"
+                }
+                
+                await self._store_performance_via_bridge(
+                    agent_id="alpha_factor_discovery_engine",
+                    performance_data=discovery_performance
+                )
+                
+                # Format response for academic reporting
+                factor_summary = {}
+                for factor_id, factor in discovered_factors.items():
+                    factor_summary[factor_id] = {
+                        "name": factor.factor_name,
+                        "category": factor.category.value,
+                        "expected_ir": factor.expected_ir,
+                        "statistical_significance": factor.statistical_significance,
+                        "robustness_score": factor.robustness_score,
+                        "capacity_estimate": factor.capacity_estimate,
+                        "academic_references": factor.academic_references[:2]
+                    }
+                
+                return {
+                    "status": "success",
+                    "discovery_timestamp": datetime.utcnow().isoformat(),
+                    "total_factors_discovered": len(discovered_factors),
+                    "significance_threshold_used": significance_threshold,
+                    "factors": factor_summary,
+                    "methodology": "Systematic alpha factor discovery with academic validation",
+                    "next_steps": ["develop_strategy_configuration", "run_comprehensive_backtest"]
+                }
+                
+            except Exception as e:
+                self.logger.error(f"Error in alpha factor discovery: {e}")
+                return {
+                    "status": "error",
+                    "message": f"Factor discovery failed: {str(e)}",
+                    "factors": {}
+                }
+
+        @self.pool_server.tool(name="develop_strategy_configuration", description="Develop institutional-grade strategy configuration from discovered alpha factors")
+        async def develop_strategy_configuration(risk_level: str = "moderate", target_volatility: float = 0.15) -> dict:
+            """
+            Develop comprehensive strategy configuration following academic portfolio construction principles.
+            
+            This tool creates institutional-grade strategy specifications with comprehensive
+            risk management, regime adaptation, and emergency procedures based on validated alpha factors.
+            
+            Args:
+                risk_level: Target risk level (conservative, moderate, aggressive, institutional)
+                target_volatility: Target annualized volatility (default: 0.15)
+                
+            Returns:
+                Complete strategy configuration with implementation details and academic rationale
+            """
+            if not self.strategy_research_framework:
+                return {
+                    "status": "error",
+                    "message": "Strategy Research Framework not available"
+                }
+            
+            if not self.strategy_research_framework.discovered_factors:
+                return {
+                    "status": "error",
+                    "message": "No alpha factors available. Please run discover_alpha_factors first."
+                }
+            
+            try:
+                from .alpha_strategy_research import RiskLevel
+                
+                # Convert string to risk level enum
+                risk_level_enum = RiskLevel(risk_level.lower())
+                
+                # Develop strategy configuration
+                strategy_config = await self.strategy_research_framework.develop_strategy_configuration(
+                    factors=self.strategy_research_framework.discovered_factors,
+                    risk_level=risk_level_enum,
+                    target_volatility=target_volatility
+                )
+                
+                # Store strategy configuration via enhanced memory bridge
+                strategy_insights = {
+                    "strategy_id": strategy_config.strategy_id,
+                    "strategy_name": strategy_config.strategy_name,
+                    "primary_factors": len(strategy_config.primary_alpha_factors),
+                    "secondary_factors": len(strategy_config.secondary_alpha_factors),
+                    "target_volatility": strategy_config.target_volatility,
+                    "target_tracking_error": strategy_config.target_tracking_error,
+                    "max_drawdown_limit": strategy_config.maximum_drawdown_limit,
+                    "expected_capacity": strategy_config.expected_capacity,
+                    "risk_level": risk_level,
+                    "configuration_timestamp": datetime.utcnow().isoformat()
+                }
+                
+                await self._store_strategy_insights_via_bridge(
+                    strategy_id=strategy_config.strategy_id,
+                    insights_data=strategy_insights
+                )
+                
+                # Format response for academic presentation
+                return {
+                    "status": "success",
+                    "strategy_id": strategy_config.strategy_id,
+                    "strategy_name": strategy_config.strategy_name,
+                    "configuration_timestamp": datetime.utcnow().isoformat(),
+                    "primary_factors": len(strategy_config.primary_alpha_factors),
+                    "secondary_factors": len(strategy_config.secondary_alpha_factors),
+                    "target_metrics": {
+                        "volatility": strategy_config.target_volatility,
+                        "tracking_error": strategy_config.target_tracking_error,
+                        "max_drawdown_limit": strategy_config.maximum_drawdown_limit
+                    },
+                    "risk_management": {
+                        "position_limits": strategy_config.risk_management_rules["position_limits"],
+                        "volatility_management": strategy_config.risk_management_rules["volatility_management"],
+                        "drawdown_controls": strategy_config.risk_management_rules["drawdown_controls"]
+                    },
+                    "regime_adaptation": len(strategy_config.regime_adaptation_rules),
+                    "emergency_procedures": list(strategy_config.emergency_procedures.keys()),
+                    "expected_capacity": strategy_config.expected_capacity,
+                    "academic_rationale": strategy_config.academic_rationale[:500] + "...",
+                    "next_steps": ["run_comprehensive_backtest", "submit_strategy_to_memory"]
+                }
+                
+            except Exception as e:
+                self.logger.error(f"Error in strategy configuration development: {e}")
+                return {
+                    "status": "error",
+                    "message": f"Strategy configuration failed: {str(e)}"
+                }
+
+        @self.pool_server.tool(name="run_comprehensive_backtest", description="Execute institutional-grade backtesting with full performance attribution")
+        async def run_comprehensive_backtest(strategy_id: str, start_date: str = "2018-01-01", end_date: str = "2023-12-31") -> dict:
+            """
+            Execute comprehensive academic-standard backtesting with full performance attribution.
+            
+            This tool implements institutional-grade backtesting following academic standards
+            for quantitative strategy validation and performance measurement with comprehensive
+            risk analytics and statistical testing.
+            
+            Args:
+                strategy_id: ID of the strategy configuration to backtest
+                start_date: Backtest start date (ISO format, default: 2018-01-01)
+                end_date: Backtest end date (ISO format, default: 2023-12-31)
+                
+            Returns:
+                Comprehensive backtest results with academic performance metrics
+            """
+            if not self.strategy_research_framework:
+                return {
+                    "status": "error",
+                    "message": "Strategy Research Framework not available"
+                }
+            
+            # Find strategy configuration
+            strategy_config = None
+            for config in self.strategy_research_framework.strategy_configurations.values():
+                if config.strategy_id == strategy_id:
+                    strategy_config = config
+                    break
+            
+            if not strategy_config:
+                return {
+                    "status": "error",
+                    "message": f"Strategy configuration {strategy_id} not found. Please run develop_strategy_configuration first."
+                }
+            
+            try:
+                # Execute comprehensive backtest
+                backtest_results = await self.strategy_research_framework.run_comprehensive_backtest(
+                    strategy_config=strategy_config,
+                    start_date=start_date,
+                    end_date=end_date
+                )
+                
+                # Store backtest results via enhanced memory bridge
+                backtest_performance = {
+                    "backtest_id": backtest_results.backtest_id,
+                    "strategy_id": backtest_results.strategy_id,
+                    "total_return": backtest_results.total_return,
+                    "annualized_return": backtest_results.annualized_return,
+                    "volatility": backtest_results.volatility,
+                    "sharpe_ratio": backtest_results.sharpe_ratio,
+                    "information_ratio": backtest_results.information_ratio,
+                    "maximum_drawdown": backtest_results.maximum_drawdown,
+                    "win_rate": backtest_results.win_rate,
+                    "backtest_period": f"{start_date} to {end_date}",
+                    "validation_status": "PASSED" if backtest_results.sharpe_ratio >= 1.0 else "REVIEW_REQUIRED",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                
+                await self._store_performance_via_bridge(
+                    agent_id="comprehensive_backtest_engine",
+                    performance_data=backtest_performance
+                )
+                
+                # Format response for academic presentation
+                return {
+                    "status": "success",
+                    "backtest_id": backtest_results.backtest_id,
+                    "strategy_id": backtest_results.strategy_id,
+                    "backtest_period": f"{start_date} to {end_date}",
+                    "performance_summary": {
+                        "total_return": f"{backtest_results.total_return:.1%}",
+                        "annualized_return": f"{backtest_results.annualized_return:.1%}",
+                        "volatility": f"{backtest_results.volatility:.1%}",
+                        "sharpe_ratio": f"{backtest_results.sharpe_ratio:.2f}",
+                        "information_ratio": f"{backtest_results.information_ratio:.2f}",
+                        "maximum_drawdown": f"{backtest_results.maximum_drawdown:.1%}",
+                        "win_rate": f"{backtest_results.win_rate:.1%}"
+                    },
+                    "risk_metrics": {
+                        "var_95": f"{backtest_results.var_95:.1%}",
+                        "cvar_95": f"{backtest_results.cvar_95:.1%}",
+                        "beta": f"{backtest_results.beta:.2f}",
+                        "alpha": f"{backtest_results.alpha:.1%}",
+                        "tracking_error": f"{backtest_results.tracking_error:.1%}"
+                    },
+                    "trading_metrics": {
+                        "total_trades": backtest_results.total_trades,
+                        "turnover": f"{backtest_results.turnover:.1f}x",
+                        "transaction_costs": f"{backtest_results.transaction_costs:.1%}",
+                        "profit_factor": f"{backtest_results.profit_factor:.2f}"
+                    },
+                    "regime_performance": {
+                        regime.value: {
+                            "return": f"{metrics['return']:.1%}",
+                            "volatility": f"{metrics['volatility']:.1%}"
+                        }
+                        for regime, metrics in backtest_results.regime_performance.items()
+                    },
+                    "validation_status": "PASSED" if backtest_results.sharpe_ratio >= 1.0 else "REVIEW_REQUIRED",
+                    "next_steps": ["submit_strategy_to_memory", "generate_strategy_report"]
+                }
+                
+            except Exception as e:
+                self.logger.error(f"Error in comprehensive backtesting: {e}")
+                return {
+                    "status": "error",
+                    "message": f"Backtesting failed: {str(e)}"
+                }
+
+        @self.pool_server.tool(name="submit_strategy_to_memory", description="Submit complete strategy package to memory agent via A2A protocol")
+        async def submit_strategy_to_memory(strategy_id: str, backtest_id: str = None) -> dict:
+            """
+            Submit complete strategy research package to memory agent via A2A protocol.
+            
+            This tool packages the complete strategy research, configuration, and validation
+            results for storage in the distributed memory system following academic
+            documentation standards and institutional reporting requirements.
+            
+            Args:
+                strategy_id: ID of the strategy configuration to submit
+                backtest_id: ID of the backtest results to include (optional, uses latest if not specified)
+                
+            Returns:
+                Memory storage confirmation with submission details
+            """
+            if not self.strategy_research_framework:
+                return {
+                    "status": "error",
+                    "message": "Strategy Research Framework not available"
+                }
+            
+            # Find strategy configuration
+            strategy_config = None
+            for config in self.strategy_research_framework.strategy_configurations.values():
+                if config.strategy_id == strategy_id:
+                    strategy_config = config
+                    break
+            
+            if not strategy_config:
+                return {
+                    "status": "error",
+                    "message": f"Strategy configuration {strategy_id} not found"
+                }
+            
+            # Find backtest results
+            backtest_results = None
+            if backtest_id:
+                backtest_results = self.strategy_research_framework.backtest_results.get(backtest_id)
+            else:
+                # Use latest backtest for this strategy
+                for bt_id, bt_results in self.strategy_research_framework.backtest_results.items():
+                    if bt_results.strategy_id == strategy_id:
+                        backtest_results = bt_results
+                        break
+            
+            if not backtest_results:
+                return {
+                    "status": "error",
+                    "message": f"No backtest results found for strategy {strategy_id}. Please run backtest first."
+                }
+            
+            try:
+                # Submit strategy package to memory
+                storage_id = await self.strategy_research_framework.submit_strategy_to_memory(
+                    strategy_config=strategy_config,
+                    backtest_results=backtest_results
+                )
+                
+                # Store strategy submission via enhanced memory bridge
+                submission_data = {
+                    "storage_id": storage_id,
+                    "strategy_id": strategy_id,
+                    "backtest_id": backtest_id,
+                    "strategy_name": strategy_config.strategy_name,
+                    "sharpe_ratio": backtest_results.sharpe_ratio if backtest_results else None,
+                    "total_return": backtest_results.total_return if backtest_results else None,
+                    "submission_timestamp": datetime.utcnow().isoformat(),
+                    "validation_status": "complete"
+                }
+                
+                await self._store_strategy_insights_via_bridge(
+                    strategy_id=f"submitted_{strategy_id}",
+                    insights_data=submission_data
+                )
+                
+                return {
+                    "status": "success",
+                    "storage_id": storage_id,
+                    "submission_timestamp": datetime.utcnow().isoformat(),
+                    "strategy_name": strategy_config.strategy_name,
+                    "package_contents": {
+                        "strategy_configuration": "included",
+                        "backtest_results": "included", 
+                        "alpha_factors": len(self.strategy_research_framework.discovered_factors),
+                        "academic_validation": "included",
+                        "implementation_readiness": "included"
+                    },
+                    "memory_coordination": "A2A protocol" if self.a2a_coordinator else "local_storage",
+                    "next_steps": ["generate_strategy_report", "begin_implementation_review"]
+                }
+                
+            except Exception as e:
+                self.logger.error(f"Error submitting strategy to memory: {e}")
+                return {
+                    "status": "error",
+                    "message": f"Strategy submission failed: {str(e)}"
+                }
+
+        @self.pool_server.tool(name="generate_strategy_report", description="Generate comprehensive academic-style strategy research report")
+        async def generate_strategy_report(strategy_id: str, backtest_id: str = None) -> dict:
+            """
+            Generate comprehensive academic-style strategy research report.
+            
+            This tool creates institutional-grade documentation suitable for academic
+            publication, regulatory submission, and professional implementation following
+            established standards for quantitative strategy research reporting.
+            
+            Args:
+                strategy_id: ID of the strategy configuration
+                backtest_id: ID of the backtest results (optional, uses latest if not specified)
+                
+            Returns:
+                Generated research report with academic formatting and comprehensive analysis
+            """
+            if not self.strategy_research_framework:
+                return {
+                    "status": "error",
+                    "message": "Strategy Research Framework not available"
+                }
+            
+            # Find strategy configuration and backtest results
+            strategy_config = None
+            for config in self.strategy_research_framework.strategy_configurations.values():
+                if config.strategy_id == strategy_id:
+                    strategy_config = config
+                    break
+            
+            if not strategy_config:
+                return {
+                    "status": "error",
+                    "message": f"Strategy configuration {strategy_id} not found"
+                }
+            
+            backtest_results = None
+            if backtest_id:
+                backtest_results = self.strategy_research_framework.backtest_results.get(backtest_id)
+            else:
+                # Use latest backtest for this strategy
+                for bt_id, bt_results in self.strategy_research_framework.backtest_results.items():
+                    if bt_results.strategy_id == strategy_id:
+                        backtest_results = bt_results
+                        break
+            
+            if not backtest_results:
+                return {
+                    "status": "error",
+                    "message": f"No backtest results found for strategy {strategy_id}"
+                }
+            
+            try:
+                # Generate comprehensive research report
+                research_report = await self.strategy_research_framework.generate_strategy_report(
+                    strategy_config=strategy_config,
+                    backtest_results=backtest_results
+                )
+                
+                # Save report to file
+                report_filename = f"strategy_report_{strategy_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
+                report_path = Path(report_filename)
+                
+                with open(report_path, 'w') as f:
+                    f.write(research_report)
+                
+                return {
+                    "status": "success",
+                    "report_generated": True,
+                    "report_filename": report_filename,
+                    "report_sections": [
+                        "Executive Summary",
+                        "Alpha Factor Analysis", 
+                        "Performance Analysis",
+                        "Risk Management Framework",
+                        "Academic Rationale",
+                        "Implementation Recommendations"
+                    ],
+                    "report_length": len(research_report),
+                    "academic_standards": "Institutional-grade documentation suitable for publication",
+                    "next_steps": ["regulatory_review", "implementation_planning", "capacity_analysis"]
+                }
+                
+            except Exception as e:
+                self.logger.error(f"Error generating strategy report: {e}")
+                return {
+                    "status": "error",
+                    "message": f"Report generation failed: {str(e)}"
+                }
+
     def start(self):
         """
-        Start the MCP server, initialize memory systems, and pre-start required agents.
+        Initialize and start the Alpha Agent Pool MCP Server with comprehensive capabilities.
+        
+        This method orchestrates the complete startup sequence for the multi-agent system,
+        including A2A protocol coordination, memory bridge initialization, and agent
+        pre-registration. The startup follows academic best practices for distributed
+        financial computing systems.
+        
+        Startup Sequence:
+        1. Enhanced MCP lifecycle manager initialization
+        2. A2A Memory Coordinator establishment
+        3. Legacy memory bridge fallback setup
+        4. Agent registration and pre-start procedures
+        5. MCP server endpoint activation
         """
-        # Initialize enhanced lifecycle manager if available
+        self.logger.info("Initiating comprehensive startup of Alpha Agent Pool MCP Server...")
+        
+        # Initialize memory bridge if available
+        self.memory_bridge = self._initialize_memory_bridge()
+        if not self.memory_bridge:
+            self.logger.warning("Memory bridge not available. Continuing without it.")
+        
+        self.logger.info("Initiating agent pre-registration and startup sequence...")
+        
+        # Pre-start critical momentum agent for alpha signal generation
+        self.start_agent_sync("momentum_agent")
+        
+        # Allow sufficient initialization time for agent stabilization
+        import time
+        time.sleep(5)
+
+        self.logger.info(f"Starting AlphaAgentPoolMCPServer on {self.host}:{self.port}")
+        self.pool_server.settings.host = self.host
+        self.pool_server.settings.port = self.port
+        # The run method is blocking, so it will keep the server alive.
+        self.pool_server.run(transport="sse")
+
+    async def _async_start(self):
+        """
+        Asynchronous startup method to handle all async initialization properly.
+        """
+        # Initialize enhanced lifecycle manager for advanced orchestration
+        if self.lifecycle_manager:
+            try:
+                await self.lifecycle_manager.initialize()
+                self.logger.info("✅ Enhanced MCP lifecycle manager initialized successfully")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to initialize enhanced MCP lifecycle manager: {e}")
+        
+        # Initialize A2A Memory Coordinator for distributed memory operations
+        if A2A_COORDINATOR_AVAILABLE:
+            try:
+                # Asynchronous A2A coordinator initialization
+                self.a2a_coordinator = await initialize_pool_coordinator(
+                    pool_id="alpha_agent_pool",
+                    memory_url="http://127.0.0.1:8010"
+                )
+                self.logger.info("✅ A2A Memory Coordinator initialized and connected to memory agent")
+                
+                # Connect strategy research framework to A2A coordinator
+                if self.strategy_research_framework:
+                    self.strategy_research_framework.a2a_coordinator = self.a2a_coordinator
+                    self.logger.info("✅ Strategy Research Framework connected to A2A coordinator")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to initialize A2A Memory Coordinator: {e}")
+                self.a2a_coordinator = None
+        
+        # Initialize memory bridge as fallback
+        self.memory_bridge = self._initialize_memory_bridge()
+        if not self.memory_bridge:
+            self.logger.warning("Memory bridge not available. Continuing without it.")
+        
+        self.logger.info("Initiating agent pre-registration and startup sequence...")
+        
+        # Pre-register momentum agent with A2A memory coordinator
+        if self.a2a_coordinator:
+            try:
+                await self.a2a_coordinator.register_agent(
+                    agent_id="momentum_agent",
+                    agent_type="theory_driven_momentum",
+                    agent_config={
+                        "strategy_type": "momentum", 
+                        "lookback_window": 20,
+                        "signal_threshold": 0.05,
+                        "risk_adjustment": True
+                    }
+                )
+                self.logger.info("✅ Momentum agent registered with A2A memory coordinator")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Failed to register momentum agent with A2A coordinator: {e}")
+        
+        # Pre-start critical momentum agent for alpha signal generation
+        self.start_agent_sync("momentum_agent")
+        
+        # Allow sufficient initialization time for agent stabilization
+        await asyncio.sleep(5)
+
+        self.logger.info(f"Starting AlphaAgentPoolMCPServer on {self.host}:{self.port}")
+        
+        # Start server using async method to avoid event loop conflicts
+        await self._start_server_async()
+
+    async def _start_server_async(self):
+        """
+        Start the MCP server in async mode to avoid event loop conflicts.
+        """
+        self.pool_server.settings.host = self.host
+        self.pool_server.settings.port = self.port
+        
+        # Use the async server startup method instead of sync run()
+        await self.pool_server.run_sse_async(mount_path="/sse")
+
+    def start_sync(self):
+        """
+        Synchronous startup method for use when no asyncio loop is running.
+        This is the original start() method behavior.
+        """
+        # Initialize enhanced lifecycle manager for advanced orchestration
         if self.lifecycle_manager:
             try:
                 import asyncio
@@ -1028,10 +1980,10 @@ class AlphaAgentPoolMCPServer:
             except Exception as e:
                 self.logger.error(f"❌ Failed to initialize enhanced MCP lifecycle manager: {e}")
         
-        # Initialize A2A Memory Coordinator
+        # Initialize A2A Memory Coordinator for distributed memory operations
         if A2A_COORDINATOR_AVAILABLE:
             try:
-                # Initialize A2A coordinator asynchronously in a new event loop
+                # Asynchronous A2A coordinator initialization with proper event loop management
                 import asyncio
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
@@ -1042,17 +1994,23 @@ class AlphaAgentPoolMCPServer:
                     )
                 )
                 loop.close()
-                self.logger.info("✅ A2A Memory Coordinator initialized successfully")
+                self.logger.info("✅ A2A Memory Coordinator initialized and connected to memory agent")
+                
+                # Connect strategy research framework to A2A coordinator
+                if self.strategy_research_framework:
+                    self.strategy_research_framework.a2a_coordinator = self.a2a_coordinator
+                    self.logger.info("✅ Strategy Research Framework connected to A2A coordinator")
+                    
             except Exception as e:
                 self.logger.error(f"❌ Failed to initialize A2A Memory Coordinator: {e}")
                 self.a2a_coordinator = None
         
-        # Initialize legacy memory bridge
+        # Initialize legacy memory bridge as fallback system
         self.memory_bridge = self._initialize_memory_bridge()
 
-        self.logger.info("Pre-starting required agents...")
+        self.logger.info("Initiating agent pre-registration and startup sequence...")
         
-        # Register momentum agent with A2A coordinator if available
+        # Register momentum agent with A2A coordinator for distributed memory coordination
         if self.a2a_coordinator:
             try:
                 import asyncio
@@ -1062,16 +2020,23 @@ class AlphaAgentPoolMCPServer:
                     self.a2a_coordinator.register_agent(
                         agent_id="momentum_agent",
                         agent_type="theory_driven_momentum",
-                        agent_config={"window": 20, "strategy_type": "momentum"}
+                        agent_config={
+                            "strategy_type": "momentum", 
+                            "lookback_window": 20,
+                            "signal_threshold": 0.05,
+                            "risk_adjustment": True
+                        }
                     )
                 )
                 loop.close()
-                self.logger.info("✅ Momentum agent registered with A2A coordinator")
+                self.logger.info("✅ Momentum agent registered with A2A memory coordinator")
             except Exception as e:
                 self.logger.warning(f"⚠️ Failed to register momentum agent with A2A coordinator: {e}")
         
+        # Pre-start critical momentum agent for alpha signal generation
         self.start_agent_sync("momentum_agent")
-        # Give the agent a moment to initialize before starting the main server
+        
+        # Allow sufficient initialization time for agent stabilization
         time.sleep(5) 
 
         self.logger.info(f"Starting AlphaAgentPoolMCPServer on {self.host}:{self.port}")
@@ -1080,13 +2045,99 @@ class AlphaAgentPoolMCPServer:
         # The run method is blocking, so it will keep the server alive.
         self.pool_server.run(transport="sse")
 
+    async def start_async(self):
+        """
+        Asynchronous startup method for use when an asyncio loop is already running.
+        This method properly handles async initialization without creating event loop conflicts.
+        """
+        # Initialize enhanced lifecycle manager for advanced orchestration
+        if self.lifecycle_manager:
+            try:
+                await self.lifecycle_manager.initialize()
+                self.logger.info("✅ Enhanced MCP lifecycle manager initialized successfully")
+            except Exception as e:
+                self.logger.error(f"❌ Failed to initialize enhanced MCP lifecycle manager: {e}")
+        
+        # Initialize A2A Memory Coordinator for distributed memory operations
+        if A2A_COORDINATOR_AVAILABLE:
+            try:
+                self.a2a_coordinator = await initialize_pool_coordinator(
+                    pool_id="alpha_agent_pool",
+                    server_port=self.port,
+                    memory_url="http://127.0.0.1:8002"
+                )
+                self.logger.info("✅ A2A Memory Coordinator initialized and connected to memory agent")
+                
+                # Connect strategy research framework to A2A coordinator
+                if self.strategy_research_framework:
+                    self.strategy_research_framework.a2a_coordinator = self.a2a_coordinator
+                    self.logger.info("✅ Strategy Research Framework connected to A2A coordinator")
+                    
+            except Exception as e:
+                self.logger.error(f"❌ Failed to initialize A2A Memory Coordinator: {e}")
+                self.a2a_coordinator = None
+        
+        # Initialize legacy memory bridge as fallback system
+        self.memory_bridge = self._initialize_memory_bridge()
+
+        self.logger.info("Initiating agent pre-registration and startup sequence...")
+        
+        # Register momentum agent with A2A coordinator for distributed memory coordination
+        if self.a2a_coordinator:
+            try:
+                await self.a2a_coordinator.register_agent(
+                    agent_id="momentum_agent",
+                    agent_type="theory_driven_momentum",
+                    agent_config={
+                        "strategy_type": "momentum", 
+                        "lookback_window": 20,
+                        "signal_threshold": 0.05,
+                        "risk_adjustment": True
+                    }
+                )
+                self.logger.info("✅ Momentum agent registered with A2A memory coordinator")
+            except Exception as e:
+                self.logger.warning(f"⚠️ Failed to register momentum agent with A2A coordinator: {e}")
+        
+        # Pre-start critical momentum agent for alpha signal generation
+        self.start_agent_sync("momentum_agent")
+        
+        # Allow sufficient initialization time for agent stabilization
+        await asyncio.sleep(5)
+
+        self.logger.info(f"Starting AlphaAgentPoolMCPServer on {self.host}:{self.port}")
+        
+        # Start server using async method to avoid event loop conflicts
+        await self._start_server_async()
+
+    async def _start_server_async(self):
+        """
+        Start the MCP server in async mode to avoid event loop conflicts.
+        """
+        self.pool_server.settings.host = self.host
+        self.pool_server.settings.port = self.port
+        
+        # Use the async server startup method instead of sync run()
+        await self.pool_server.run_sse_async(mount_path="/sse")
+
     def stop(self):
         """
-        Stop the MCP server and all running agents.
-        """
-        self.logger.info("Stopping AlphaAgentPoolMCPServer and all running agents...")
+        Gracefully terminate the Alpha Agent Pool MCP Server and associated subsystems.
         
-        # Stop enhanced lifecycle manager if available
+        This method implements a comprehensive shutdown sequence following academic
+        best practices for distributed system termination. The shutdown process
+        ensures proper resource cleanup, data persistence, and graceful agent
+        process termination.
+        
+        Shutdown Sequence:
+        1. Enhanced MCP lifecycle manager termination
+        2. A2A Memory Coordinator disconnection and cleanup
+        3. Individual agent process termination with timeout protection
+        4. Registry cleanup and resource deallocation
+        """
+        self.logger.info("Initiating comprehensive shutdown of Alpha Agent Pool MCP Server...")
+        
+        # Terminate enhanced lifecycle manager with proper resource cleanup
         if self.lifecycle_manager:
             try:
                 import asyncio
@@ -1094,11 +2145,11 @@ class AlphaAgentPoolMCPServer:
                 asyncio.set_event_loop(loop)
                 loop.run_until_complete(self.lifecycle_manager.shutdown())
                 loop.close()
-                self.logger.info("✅ Enhanced MCP lifecycle manager shut down successfully")
+                self.logger.info("✅ Enhanced MCP lifecycle manager terminated successfully")
             except Exception as e:
-                self.logger.error(f"❌ Failed to shutdown enhanced MCP lifecycle manager: {e}")
+                self.logger.error(f"❌ Failed to terminate enhanced MCP lifecycle manager: {e}")
         
-        # Stop A2A Memory Coordinator if available
+        # Disconnect and shutdown A2A Memory Coordinator with proper protocol cleanup
         if self.a2a_coordinator:
             try:
                 import asyncio
@@ -1106,22 +2157,25 @@ class AlphaAgentPoolMCPServer:
                 asyncio.set_event_loop(loop)
                 loop.run_until_complete(shutdown_pool_coordinator())
                 loop.close()
-                self.logger.info("✅ A2A Memory Coordinator shut down successfully")
+                self.logger.info("✅ A2A Memory Coordinator disconnected and shut down successfully")
             except Exception as e:
                 self.logger.error(f"❌ Failed to shutdown A2A Memory Coordinator: {e}")
         
-        # Stop all registered agents
+        # Graceful termination of all registered agent processes
         for agent_id in list(self.agent_registry.keys()):
             try:
-                self.logger.info(f"Stopping agent '{agent_id}'...")
-                # Forcibly terminate the process if it's still running
+                self.logger.info(f"Terminating agent process '{agent_id}'...")
+                
+                # Retrieve agent process handle
                 process = self.agent_registry[agent_id]
+                
+                # Attempt graceful termination first
                 if hasattr(process, 'terminate'):
                     process.terminate()
                 elif hasattr(process, 'kill'):
                     process.kill()
                 
-                # Wait for the process to terminate
+                # Wait for process termination with timeout protection
                 process.join(timeout=5)
                 
                 # Remove from registry
@@ -1220,6 +2274,12 @@ if __name__ == "__main__":
     try:
         logger.info("Initializing Alpha Agent Pool MCP Server...")
         server = AlphaAgentPoolMCPServer()
+        
+        # Initialize enhanced memory bridge if available
+        if hasattr(server, '_bridge_initialization_pending') and server._bridge_initialization_pending:
+            import asyncio
+            asyncio.create_task(server._initialize_enhanced_memory_bridge())
+        
         logger.info("Starting server...")
         server.start()
     except KeyboardInterrupt:

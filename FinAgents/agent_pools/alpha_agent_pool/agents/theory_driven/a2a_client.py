@@ -68,7 +68,7 @@ class AlphaAgentA2AClient:
     
     def __init__(self, 
                  agent_pool_id: str,
-                 memory_agent_base_url: str = "http://127.0.0.1:8010",
+                 memory_agent_base_url: str = "http://127.0.0.1:8002",
                  timeout: float = 30.0,
                  max_retries: int = 3):
         """
@@ -145,10 +145,38 @@ class AlphaAgentA2AClient:
             return True
             
         except Exception as e:
-            logger.error(f"Failed to establish A2A connection: {e}")
+            logger.error(f"Error connecting to memory agent: {e}")
             self.is_connected = False
+            return False
+            
+    async def healthcheck(self) -> bool:
+        """
+        Perform health check on A2A connection to memory agent.
+        
+        This method implements comprehensive health validation following
+        academic standards for distributed system monitoring and validation.
+        
+        Returns:
+            bool: True if connection is healthy, False otherwise
+        """
+        try:
+            if not self.is_connected:
+                return False
+                
+            # Test basic connectivity
             if self.http_client:
-                await self.http_client.aclose()
+                response = await self.http_client.get(
+                    f"{self.memory_agent_base_url}/health",
+                    timeout=5.0
+                )
+                if response.status_code == 200:
+                    self.last_heartbeat = datetime.utcnow()
+                    return True
+                    
+            return False
+            
+        except Exception as e:
+            logger.warning(f"A2A health check failed: {e}")
             return False
     
     async def disconnect(self):

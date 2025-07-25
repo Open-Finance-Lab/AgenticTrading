@@ -1181,3 +1181,41 @@ if __name__ == "__main__":
 if __name__ == "__main__":
     agent = AutonomousAgent()
     agent.start_mcp_server()
+
+
+def run_autonomous_agent(config_path: str = None, port_override: int = None):
+    """
+    Entry point function for running autonomous agent from multiprocessing.
+    
+    This function loads configuration and starts the autonomous agent server.
+    It's designed to be called from the core agent pool for process-based execution.
+    
+    Args:
+        config_path: Path to configuration file (optional)
+        port_override: Override port if provided (for conflict resolution)
+    """
+    try:
+        import yaml
+        import os
+        
+        # Load configuration from file if provided
+        if config_path and os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config_data = yaml.safe_load(f)
+            
+            host = config_data.get('execution', {}).get('host', '0.0.0.0')
+            port = port_override or config_data.get('execution', {}).get('port', 5052)
+        else:
+            # Default configuration
+            host = "0.0.0.0"
+            port = port_override or 5052  # Updated default port to avoid conflict
+        
+        print(f"[AutonomousAgent] Starting with config - Host: {host}, Port: {port}")
+        
+        agent = AutonomousAgent()
+        agent.start_mcp_server(host=host, port=port)
+        
+    except Exception as e:
+        print(f"[AutonomousAgent] Failed to start: {e}")
+        import traceback
+        traceback.print_exc()
