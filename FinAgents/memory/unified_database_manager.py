@@ -443,18 +443,29 @@ class UnifiedDatabaseManager:
                 
                 memories = []
                 for record in result:
-                    memory = {
-                        "memory_id": record["memory_id"],
-                        "agent_id": record["agent_id"],
-                        "memory_type": record["memory_type"],
-                        "content": json.loads(record["content"]) if record["content"] else {},
-                        "summary": record["summary"],
-                        "keywords": record["keywords"],
-                        "timestamp": record["timestamp"].isoformat() if record["timestamp"] else None,
-                        "event_type": record["event_type"],
-                        "lookup_count": record["lookup_count"]
-                    }
-                    memories.append(memory)
+                    try:
+                        # Safely extract all required fields from record
+                        memory = {
+                            "memory_id": record.get("memory_id", ""),
+                            "agent_id": record.get("agent_id", ""),
+                            "memory_type": record.get("memory_type", ""),
+                            "content": json.loads(record["content"]) if record.get("content") else {},
+                            "summary": record.get("summary", ""),
+                            "keywords": record.get("keywords", []),
+                            "timestamp": record["timestamp"].isoformat() if record.get("timestamp") else None,
+                            "event_type": record.get("event_type", ""),
+                            "lookup_count": record.get("lookup_count", 0)
+                        }
+                        
+                        # Only add memory if it has essential fields
+                        if memory["memory_id"]:
+                            memories.append(memory)
+                        else:
+                            logger.debug("⚠️ Skipping memory record with missing memory_id")
+                            
+                    except Exception as record_error:
+                        logger.debug(f"⚠️ Error processing memory record: {record_error}")
+                        continue
                 
                 return memories
                 
@@ -628,7 +639,14 @@ class UnifiedDatabaseManager:
                 """
                 
                 result = session.run(stats_query)
-                basic_stats = result.single()
+                basic_stats_record = result.single()
+                
+                # Safely extract basic statistics
+                basic_stats = {
+                    "memory_count": basic_stats_record.get("memory_count", 0) if basic_stats_record else 0,
+                    "agent_count": basic_stats_record.get("agent_count", 0) if basic_stats_record else 0,
+                    "relationship_count": basic_stats_record.get("relationship_count", 0) if basic_stats_record else 0
+                }
                 
                 # Get memory type distribution
                 type_query = """
@@ -639,20 +657,24 @@ class UnifiedDatabaseManager:
                 result = session.run(type_query)
                 memory_types = {}
                 for record in result:
-                    memory_types[record["type"]] = record["count"]
+                    if record.get("type") and record.get("count") is not None:
+                        memory_types[record["type"]] = record["count"]
                 
-                # Get agent activity
+                # Get agent activity (using agent_id property instead of CREATED relationship)
                 activity_query = """
-                MATCH (a:Agent)-[:CREATED]->(m:Memory)
-                RETURN a.agent_id as agent, count(m) as activity
+                MATCH (m:Memory)
+                WHERE m.agent_id IS NOT NULL
+                WITH m.agent_id as agent, count(m) as activity
                 ORDER BY activity DESC
                 LIMIT 10
+                RETURN agent, activity
                 """
                 
                 result = session.run(activity_query)
                 agent_activity = {}
                 for record in result:
-                    agent_activity[record["agent"]] = record["activity"]
+                    if record.get("agent") and record.get("activity") is not None:
+                        agent_activity[record["agent"]] = record["activity"]
                 
                 return {
                     "total_memories": basic_stats["memory_count"] or 0,
@@ -871,21 +893,29 @@ class UnifiedDatabaseManager:
             
             similar_memories = []
             for record in result:
-                similar_id = record["memory_id"]
-                
-                # Create SIMILAR_TO relationship
-                link_query = """
-                MATCH (m1:Memory {memory_id: $memory_id})
-                MATCH (m2:Memory {memory_id: $similar_id})
-                CREATE (m1)-[:SIMILAR_TO {created_at: datetime(), similarity_type: 'keyword'}]->(m2)
-                """
-                
-                session.run(link_query, {
-                    "memory_id": memory_id,
-                    "similar_id": similar_id
-                })
-                
-                similar_memories.append(similar_id)
+                try:
+                    # Safely extract memory_id from record
+                    if "memory_id" in record and record["memory_id"]:
+                        similar_id = record["memory_id"]
+                        
+                        # Create SIMILAR_TO relationship
+                        link_query = """
+                        MATCH (m1:Memory {memory_id: $memory_id})
+                        MATCH (m2:Memory {memory_id: $similar_id})
+                        CREATE (m1)-[:SIMILAR_TO {created_at: datetime(), similarity_type: 'keyword'}]->(m2)
+                        """
+                        
+                        session.run(link_query, {
+                            "memory_id": memory_id,
+                            "similar_id": similar_id
+                        })
+                        
+                        similar_memories.append(similar_id)
+                    else:
+                        logger.debug("⚠️ Record missing memory_id field")
+                except Exception as record_error:
+                    logger.debug(f"⚠️ Error processing similar memory record: {record_error}")
+                    continue
             
             return similar_memories
             
@@ -1007,7 +1037,7 @@ def create_database_manager(config: Optional[Dict[str, Any]] = None) -> UnifiedD
     return UnifiedDatabaseManager(
         uri=config.get("uri", "bolt://localhost:7687"),
         username=config.get("username", "neo4j"),
-        password=config.get("password", "FinOrchestration"),
+        password=config.get("password", "finagent123"),
         database=config.get("database", "neo4j"),
         max_connection_lifetime=config.get("max_connection_lifetime", 3600),
         max_connection_pool_size=config.get("max_connection_pool_size", 50)

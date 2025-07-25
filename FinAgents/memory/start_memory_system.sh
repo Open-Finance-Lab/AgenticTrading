@@ -117,22 +117,30 @@ start_a2a_server() {
     
     # Start server in background
     nohup python a2a_server.py --host 0.0.0.0 --port $A2A_PORT > "$LOG_DIR/a2a_server.log" 2>&1 &
-    echo $! >> "$PID_FILE"
+    local server_pid=$!
+    echo $server_pid >> "$PID_FILE"
     
-    # Wait for server to start
-    sleep 3
+    print_info "Server started with PID: $server_pid"
     
-    # Check if server started successfully
-    if check_server_status $A2A_PORT "A2A Memory Server"; then
-        print_success "A2A Memory Server started successfully!"
-        echo -e "${CYAN}📡 Server URL: http://localhost:$A2A_PORT${NC}"
-        echo -e "${CYAN}📋 Agent Card: http://localhost:$A2A_PORT/.well-known/agent-card${NC}"
-        echo -e "${CYAN}📄 Logs: $LOG_DIR/a2a_server.log${NC}"
-    else
-        print_error "Failed to start A2A Memory Server"
-        print_info "Check logs: tail -f $LOG_DIR/a2a_server.log"
-        return 1
-    fi
+    # Wait for server to start with timeout
+    local timeout=15
+    local count=0
+    while [ $count -lt $timeout ]; do
+        if check_server_status $A2A_PORT "A2A Memory Server" >/dev/null 2>&1; then
+            print_success "A2A Memory Server started successfully!"
+            echo -e "${CYAN}📡 Server URL: http://localhost:$A2A_PORT${NC}"
+            echo -e "${CYAN}📋 Agent Card: http://localhost:$A2A_PORT/.well-known/agent-card${NC}"
+            echo -e "${CYAN}📄 Logs: $LOG_DIR/a2a_server.log${NC}"
+            return 0
+        fi
+        sleep 1
+        count=$((count + 1))
+        print_info "Waiting for server to start... ($count/$timeout)"
+    done
+    
+    print_error "Failed to start A2A Memory Server (timeout after ${timeout}s)"
+    print_info "Check logs: tail -f $LOG_DIR/a2a_server.log"
+    return 1
 }
 
 start_mcp_server() {
@@ -148,22 +156,30 @@ start_mcp_server() {
     
     # Start server in background
     nohup uvicorn mcp_server:app --host 0.0.0.0 --port $MCP_PORT > "$LOG_DIR/mcp_server.log" 2>&1 &
-    echo $! >> "$PID_FILE"
+    local server_pid=$!
+    echo $server_pid >> "$PID_FILE"
     
-    # Wait for server to start
-    sleep 3
+    print_info "Server started with PID: $server_pid"
     
-    # Check if server started successfully
-    if check_server_status $MCP_PORT "MCP Memory Server"; then
-        print_success "MCP Memory Server started successfully!"
-        echo -e "${CYAN}📡 Server URL: http://localhost:$MCP_PORT${NC}"
-        echo -e "${CYAN}📋 Health Check: http://localhost:$MCP_PORT/health${NC}"
-        echo -e "${CYAN}📄 Logs: $LOG_DIR/mcp_server.log${NC}"
-    else
-        print_error "Failed to start MCP Memory Server"
-        print_info "Check logs: tail -f $LOG_DIR/mcp_server.log"
-        return 1
-    fi
+    # Wait for server to start with timeout
+    local timeout=15
+    local count=0
+    while [ $count -lt $timeout ]; do
+        if check_server_status $MCP_PORT "MCP Memory Server" >/dev/null 2>&1; then
+            print_success "MCP Memory Server started successfully!"
+            echo -e "${CYAN}📡 Server URL: http://localhost:$MCP_PORT${NC}"
+            echo -e "${CYAN}📋 Health Check: http://localhost:$MCP_PORT/health${NC}"
+            echo -e "${CYAN}📄 Logs: $LOG_DIR/mcp_server.log${NC}"
+            return 0
+        fi
+        sleep 1
+        count=$((count + 1))
+        print_info "Waiting for server to start... ($count/$timeout)"
+    done
+    
+    print_error "Failed to start MCP Memory Server (timeout after ${timeout}s)"
+    print_info "Check logs: tail -f $LOG_DIR/mcp_server.log"
+    return 1
 }
 
 start_memory_server() {
@@ -179,22 +195,30 @@ start_memory_server() {
     
     # Start server in background
     nohup uvicorn memory_server:app --host 0.0.0.0 --port $MEMORY_PORT > "$LOG_DIR/memory_server.log" 2>&1 &
-    echo $! >> "$PID_FILE"
+    local server_pid=$!
+    echo $server_pid >> "$PID_FILE"
     
-    # Wait for server to start
-    sleep 3
+    print_info "Server started with PID: $server_pid"
     
-    # Check if server started successfully
-    if check_server_status $MEMORY_PORT "Memory Server"; then
-        print_success "Memory Server started successfully!"
-        echo -e "${CYAN}📡 Server URL: http://localhost:$MEMORY_PORT${NC}"
-        echo -e "${CYAN}📋 Health Check: http://localhost:$MEMORY_PORT/health${NC}"
-        echo -e "${CYAN}📄 Logs: $LOG_DIR/memory_server.log${NC}"
-    else
-        print_error "Failed to start Memory Server"
-        print_info "Check logs: tail -f $LOG_DIR/memory_server.log"
-        return 1
-    fi
+    # Wait for server to start with timeout
+    local timeout=15
+    local count=0
+    while [ $count -lt $timeout ]; do
+        if check_server_status $MEMORY_PORT "Memory Server" >/dev/null 2>&1; then
+            print_success "Memory Server started successfully!"
+            echo -e "${CYAN}📡 Server URL: http://localhost:$MEMORY_PORT${NC}"
+            echo -e "${CYAN}📋 Health Check: http://localhost:$MEMORY_PORT/health${NC}"
+            echo -e "${CYAN}📄 Logs: $LOG_DIR/memory_server.log${NC}"
+            return 0
+        fi
+        sleep 1
+        count=$((count + 1))
+        print_info "Waiting for server to start... ($count/$timeout)"
+    done
+    
+    print_error "Failed to start Memory Server (timeout after ${timeout}s)"
+    print_info "Check logs: tail -f $LOG_DIR/memory_server.log"
+    return 1
 }
 
 start_all_servers() {

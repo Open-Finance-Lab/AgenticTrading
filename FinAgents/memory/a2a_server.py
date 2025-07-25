@@ -65,12 +65,10 @@ SERVER_HOST = "0.0.0.0"
 # Memory database configuration
 DATABASE_CONFIG = {
     "uri": "bolt://localhost:7687",
-    "username": "neo4j", 
-    "password": "FinOrchestration",
+    "username": "neo4j",
+    "password": "finagent123",
     "database": "neo4j"
-}
-
-# Global components
+}# Global components
 interface_manager = None
 message_history: List[Dict[str, Any]] = []
 
