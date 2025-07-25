@@ -35,23 +35,23 @@ from pathlib import Path
 
 # Import unified components
 try:
-    from FinAgents.memory.unified_database_manager import UnifiedDatabaseManager, TradingGraphMemory, create_database_manager
-    from FinAgents.memory.unified_interface_manager import UnifiedInterfaceManager, create_interface_manager
+    from unified_database_manager import UnifiedDatabaseManager, TradingGraphMemory, create_database_manager
+    from unified_interface_manager import UnifiedInterfaceManager, create_interface_manager
     UNIFIED_COMPONENTS_AVAILABLE = True
 except ImportError:
     # Fallback to original database for compatibility
-    from FinAgents.memory.database import TradingGraphMemory
+    from database import TradingGraphMemory
     UNIFIED_COMPONENTS_AVAILABLE = False
 
 # Import intelligent indexer and stream processor
 try:
-    from FinAgents.memory.intelligent_memory_indexer import IntelligentMemoryIndexer
+    from intelligent_memory_indexer import IntelligentMemoryIndexer
     INTELLIGENT_INDEXER_AVAILABLE = True
 except ImportError:
     INTELLIGENT_INDEXER_AVAILABLE = False
 
 try:
-    from FinAgents.memory.realtime_stream_processor import StreamProcessor, ReactiveMemoryManager
+    from realtime_stream_processor import StreamProcessor, ReactiveMemoryManager
     STREAM_PROCESSOR_AVAILABLE = True
 except ImportError:
     STREAM_PROCESSOR_AVAILABLE = False

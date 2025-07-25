@@ -360,8 +360,9 @@ class AlphaAgentPoolMCPServer:
         self.memory_bridge: Optional["AlphaAgentPoolMemoryBridge"] = None
         # Note: Memory bridge will be initialized asynchronously when needed
         
-        # Initialize AlphaMemoryClient for MCP-based memory logging
-        self.alpha_memory_client = AlphaMemoryClient(agent_id="alpha_agent_pool_server")
+        # Initialize AlphaMemoryClient for MCP-based memory logging (temporarily disabled)
+        # self.alpha_memory_client = AlphaMemoryClient(agent_id="alpha_agent_pool_server")
+        self.alpha_memory_client = None  # Temporarily disabled until AlphaMemoryClient is available
         
         # Automatically load static dataset into memory unit on startup, and reset memory file
         csv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../data/cache/AAPL_2022-01-01_2024-12-31_1d.csv"))
@@ -604,6 +605,10 @@ class AlphaAgentPoolMCPServer:
 
     async def store_event_in_memory(self, event_type, summary, keywords, details, log_level="INFO", session_id=None, correlation_id=None):
         """Store an event in the MCP memory server using AlphaMemoryClient."""
+        if self.alpha_memory_client is None:
+            logger.warning("AlphaMemoryClient not available, skipping event storage")
+            return {"status": "skipped", "reason": "client_not_available"}
+            
         return await self.alpha_memory_client.store_event(
             event_type=event_type,
             summary=summary,
@@ -623,14 +628,15 @@ class AlphaAgentPoolMCPServer:
         def start_agent(agent_id: str) -> str:
             result = self.start_agent_sync(agent_id)
             # Log the event asynchronously to the MCP memory server
-            asyncio.create_task(
-                self.alpha_memory_client.store_event(
-                    event_type="AGENT_ACTION",
-                    summary=f"Started agent {agent_id}",
-                    keywords=["start_agent", agent_id],
-                    details={"agent_id": agent_id, "result": result}
+            if self.alpha_memory_client is not None:
+                asyncio.create_task(
+                    self.alpha_memory_client.store_event(
+                        event_type="AGENT_ACTION",
+                        summary=f"Started agent {agent_id}",
+                        keywords=["start_agent", agent_id],
+                        details={"agent_id": agent_id, "result": result}
+                    )
                 )
-            )
             return result
 
         @self.pool_server.tool(name="list_agents", description="List all registered sub-agents.")

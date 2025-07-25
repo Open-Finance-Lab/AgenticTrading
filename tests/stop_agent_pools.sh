@@ -47,17 +47,21 @@ stop_agent_pool() {
     fi
 }
 
-# Terminate all agent pools
+# Terminate memory services first (to avoid dependency issues)
+echo "🧠 Terminating Memory Services..."
+stop_agent_pool "memory_services"
+
+echo ""
+echo "📊 Terminating Agent Pool Services..."
 stop_agent_pool "data_agent_pool"
 stop_agent_pool "alpha_agent_pool"
 stop_agent_pool "portfolio_agent_pool"
 stop_agent_pool "transaction_cost_agent_pool"
 stop_agent_pool "risk_agent_pool"
-# stop_agent_pool "memory_agent"  # Temporarily skip memory agent
 
 echo ""
 echo "🧹 Cleaning temporary files..."
-rm -f logs/*.pid
+rm -f "${PROJECT_ROOT}/logs"/*.pid
 
 echo ""
 echo "✅ All FinAgent services have been terminated"

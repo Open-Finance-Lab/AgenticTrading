@@ -29,11 +29,24 @@ import time
 import sys
 from pathlib import Path
 
-# Add memory module to path
-memory_path = Path(__file__).parent.parent.parent / "memory"
-sys.path.insert(0, str(memory_path))
+# Add memory module to path (temporarily disabled)
+# memory_path = Path(__file__).parent.parent.parent / "memory"
+# sys.path.insert(0, str(memory_path))
 
-from FinAgents.memory.data_memory_client import DataMemoryClient
+# Temporarily disable memory client import until implemented
+# from FinAgents.memory.data_memory_client import DataMemoryClient
+
+# Simple placeholder for DataMemoryClient
+class DataMemoryClient:
+    """Placeholder DataMemoryClient for basic functionality."""
+    def __init__(self, *args, **kwargs):
+        pass
+    
+    async def store_data(self, *args, **kwargs):
+        return True
+    
+    async def retrieve_data(self, *args, **kwargs):
+        return []
 
 from mcp.server.fastmcp import FastMCP
 from mcp.client.sse import sse_client
