@@ -549,6 +549,14 @@ async def create_alpha_pool_a2a_client(agent_pool_id: str,
         Configured AlphaAgentA2AClient instance
     """
     client = AlphaAgentA2AClient(agent_pool_id=agent_pool_id, memory_agent_base_url=memory_url)
+    
     # Ensure HTTP client is initialized for immediate use
-    await client._init_http_client()
+    try:
+        await client._init_http_client()
+    except Exception as e:
+        logger.error(f"Failed to initialize HTTP client for A2A client: {e}")
+        raise
+
+    # Log the initialization details
+    logger.info(f"A2A client created for pool {agent_pool_id} with memory URL {memory_url}")
     return client

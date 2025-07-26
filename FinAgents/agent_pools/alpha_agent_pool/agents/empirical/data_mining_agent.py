@@ -66,17 +66,19 @@ class DataMiningAgent:
     - Predictive modeling for return forecasting
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, coordinator=None, config: Optional[Dict[str, Any]] = None):
         """
         Initialize Data Mining Agent with configuration parameters.
         
         Args:
+            coordinator: Agent coordinator for cross-agent communication
             config: Configuration dictionary containing:
                 - lookback_window: Historical data window (default: 50)
                 - n_clusters: Number of pattern clusters (default: 5)
                 - min_confidence: Minimum confidence threshold (default: 0.6)
                 - feature_selection: List of features to use (default: comprehensive)
         """
+        self.coordinator = coordinator
         self.config = config or {}
         self.lookback_window = self.config.get('lookback_window', 50)
         self.n_clusters = self.config.get('n_clusters', 5)
@@ -94,6 +96,46 @@ class DataMiningAgent:
         
         logger.info(f"DataMiningAgent initialized with lookback_window={self.lookback_window}, "
                    f"n_clusters={self.n_clusters}")
+    
+    async def initialize(self):
+        """Initialize the agent asynchronously."""
+        logger.info("🔧 Initializing Data Mining Agent")
+        # Add any async initialization logic here
+        logger.info("✅ Data Mining Agent initialization completed")
+    
+    async def get_health_status(self) -> str:
+        """Get agent health status."""
+        return "healthy"
+    
+    async def shutdown(self):
+        """Shutdown the agent."""
+        logger.info("🛑 Shutting down Data Mining Agent")
+    
+    async def mine_alpha_patterns(self, symbols: List[str], significance_threshold: float = 0.05) -> Dict[str, Any]:
+        """Mine alpha patterns from data."""
+        logger.info(f"⛏️ Mining alpha patterns for {len(symbols)} symbols")
+        
+        # Mock implementation for testing
+        factors_discovered = []
+        for i, symbol in enumerate(symbols):
+            factors_discovered.append({
+                "symbol": symbol,
+                "factor_name": f"volume_price_correlation_{symbol.lower()}",
+                "category": "volume",
+                "significance": 0.03 + (i * 0.01),
+                "strength": 0.15 + (i * 0.05),
+                "confidence": 0.85 - (i * 0.02)
+            })
+            
+        return {
+            "agent_id": "data_mining_agent",
+            "factors_discovered": factors_discovered,
+            "performance": {
+                "patterns_found": len(factors_discovered),
+                "execution_duration": 0.5,
+                "success_rate": 0.90
+            }
+        }
     
     def engineer_features(self, data: pd.DataFrame) -> pd.DataFrame:
         """

@@ -25,36 +25,58 @@ Created: 2025-07-25
 # Core server and orchestration components
 from .core import AlphaAgentPoolMCPServer
 
-# A2A protocol integration components
-try:
-    from .a2a_memory_coordinator import (
-        AlphaPoolA2AMemoryCoordinator,
-        initialize_pool_coordinator,
-        get_pool_coordinator,
-        shutdown_pool_coordinator
-    )
-    A2A_COMPONENTS_AVAILABLE = True
-except ImportError:
-    A2A_COMPONENTS_AVAILABLE = False
+# Memory client components
+from .alpha_memory_client import AlphaMemoryClient
+from .simple_momentum_client import SimpleMomentumClient
 
-# Memory bridge and integration components
+# Agent coordinator components
 try:
-    from .memory_bridge import (
-        AlphaAgentPoolMemoryBridge,
-        create_alpha_memory_bridge,
-        AlphaSignalRecord,
-        StrategyPerformanceMetrics
+    from .agent_coordinator import (
+        AlphaAgentCoordinator,
+        get_agent_coordinator,
+        shutdown_agent_coordinator
     )
-    MEMORY_BRIDGE_AVAILABLE = True
+    AGENT_COORDINATOR_AVAILABLE = True
 except ImportError:
-    MEMORY_BRIDGE_AVAILABLE = False
+    AGENT_COORDINATOR_AVAILABLE = False
 
-# Testing and validation components
+# Agent manager components
 try:
-    from .a2a_integration_test import A2AIntegrationTestSuite
-    INTEGRATION_TESTS_AVAILABLE = True
+    from .agents.agent_manager import AlphaAgentManager
+    AGENT_MANAGER_AVAILABLE = True
 except ImportError:
-    INTEGRATION_TESTS_AVAILABLE = False
+    AGENT_MANAGER_AVAILABLE = False
+
+# A2A protocol integration components (deprecated)
+# try:
+#     from .a2a_memory_coordinator import (
+#         AlphaPoolA2AMemoryCoordinator,
+#         initialize_pool_coordinator,
+#         get_pool_coordinator,
+#         shutdown_pool_coordinator
+#     )
+#     A2A_COMPONENTS_AVAILABLE = True
+# except ImportError:
+#     A2A_COMPONENTS_AVAILABLE = False
+
+# Memory bridge components (deprecated)
+# try:
+#     from .memory_bridge import (
+#         AlphaAgentPoolMemoryBridge,
+#         create_alpha_memory_bridge,
+#         AlphaSignalRecord,
+#         StrategyPerformanceMetrics
+#     )
+#     MEMORY_BRIDGE_AVAILABLE = True
+# except ImportError:
+#     MEMORY_BRIDGE_AVAILABLE = False
+
+# Testing and validation components (deprecated)
+# try:
+#     from .a2a_integration_test import A2AIntegrationTestSuite
+#     INTEGRATION_TESTS_AVAILABLE = True
+# except ImportError:
+#     INTEGRATION_TESTS_AVAILABLE = False
 
 # Package metadata
 __version__ = "1.0.0"
@@ -66,25 +88,21 @@ __all__ = [
     # Core server
     "AlphaAgentPoolMCPServer",
     
-    # A2A coordination (if available)
-    "AlphaPoolA2AMemoryCoordinator",
-    "initialize_pool_coordinator", 
-    "get_pool_coordinator",
-    "shutdown_pool_coordinator",
+    # Memory client components
+    "AlphaMemoryClient",
+    "SimpleMomentumClient",
     
-    # Memory bridge (if available)
-    "AlphaAgentPoolMemoryBridge",
-    "create_alpha_memory_bridge",
-    "AlphaSignalRecord",
-    "StrategyPerformanceMetrics",
+    # Agent coordinator (if available)
+    "AlphaAgentCoordinator",
+    "get_agent_coordinator",
+    "shutdown_agent_coordinator",
     
-    # Testing framework (if available)
-    "A2AIntegrationTestSuite",
+    # Agent manager (if available)
+    "AlphaAgentManager",
     
     # Availability flags
-    "A2A_COMPONENTS_AVAILABLE",
-    "MEMORY_BRIDGE_AVAILABLE", 
-    "INTEGRATION_TESTS_AVAILABLE"
+    "AGENT_COORDINATOR_AVAILABLE",
+    "AGENT_MANAGER_AVAILABLE"
 ]
 
 # Module-level availability reporting
@@ -96,9 +114,10 @@ def get_available_components():
         Dict containing availability status of optional components
     """
     return {
-        "a2a_coordination": A2A_COMPONENTS_AVAILABLE,
-        "memory_bridge": MEMORY_BRIDGE_AVAILABLE,
-        "integration_tests": INTEGRATION_TESTS_AVAILABLE,
+        "agent_coordinator": AGENT_COORDINATOR_AVAILABLE,
+        "agent_manager": AGENT_MANAGER_AVAILABLE,
+        "memory_client": True,  # Always available
+        "momentum_client": True,  # Always available
         "core_server": True  # Always available
     }
 

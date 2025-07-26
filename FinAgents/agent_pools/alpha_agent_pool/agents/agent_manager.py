@@ -48,16 +48,14 @@ class AlphaAgentManager:
     - Academic-standard research methodology coordination
     """
     
-    def __init__(self, memory_bridge=None, enhanced_a2a_bridge=None):
+    def __init__(self, agent_coordinator=None):
         """
         Initialize the Alpha Agent Manager.
         
         Args:
-            memory_bridge: Primary memory bridge for agent coordination
-            enhanced_a2a_bridge: Enhanced A2A memory bridge for cross-agent learning
+            agent_coordinator: Agent coordinator for cross-agent communication
         """
-        self.memory_bridge = memory_bridge
-        self.enhanced_a2a_bridge = enhanced_a2a_bridge
+        self.agent_coordinator = agent_coordinator
         
         # Initialize agent registry
         self.agents: Dict[str, Any] = {}
@@ -84,8 +82,7 @@ class AlphaAgentManager:
             # Momentum Agent
             try:
                 self.agents['momentum'] = MomentumAgent(
-                    memory_bridge=self.memory_bridge,
-                    enhanced_bridge=self.enhanced_a2a_bridge
+                    coordinator=self.agent_coordinator
                 )
                 await self.agents['momentum'].initialize()
                 self.agent_status['momentum'] = 'active'
@@ -98,8 +95,7 @@ class AlphaAgentManager:
             # Mean Reversion Agent
             try:
                 self.agents['mean_reversion'] = MeanReversionAgent(
-                    memory_bridge=self.memory_bridge,
-                    enhanced_bridge=self.enhanced_a2a_bridge
+                    coordinator=self.agent_coordinator
                 )
                 await self.agents['mean_reversion'].initialize()
                 self.agent_status['mean_reversion'] = 'active'
@@ -115,8 +111,7 @@ class AlphaAgentManager:
             # Data Mining Agent
             try:
                 self.agents['data_mining'] = DataMiningAgent(
-                    memory_bridge=self.memory_bridge,
-                    enhanced_bridge=self.enhanced_a2a_bridge
+                    coordinator=self.agent_coordinator
                 )
                 await self.agents['data_mining'].initialize()
                 self.agent_status['data_mining'] = 'active'
@@ -129,8 +124,7 @@ class AlphaAgentManager:
             # ML Pattern Agent
             try:
                 self.agents['ml_pattern'] = MLPatternAgent(
-                    memory_bridge=self.memory_bridge,
-                    enhanced_bridge=self.enhanced_a2a_bridge
+                    coordinator=self.agent_coordinator
                 )
                 await self.agents['ml_pattern'].initialize()
                 self.agent_status['ml_pattern'] = 'active'
@@ -146,8 +140,7 @@ class AlphaAgentManager:
             # Autonomous Agent
             try:
                 self.agents['autonomous'] = AutonomousAgent(
-                    memory_bridge=self.memory_bridge,
-                    enhanced_bridge=self.enhanced_a2a_bridge
+                    coordinator=self.agent_coordinator
                 )
                 await self.agents['autonomous'].initialize()
                 self.agent_status['autonomous'] = 'active'
@@ -287,10 +280,10 @@ class AlphaAgentManager:
             
             logger.info(f"🎯 Alpha research workflow completed: {workflow_id}")
             
-            # Store workflow results in memory bridge
-            if self.enhanced_a2a_bridge:
+            # Store workflow results in agent coordinator
+            if self.agent_coordinator:
                 try:
-                    await self.enhanced_a2a_bridge.store_agent_performance(
+                    await self.agent_coordinator.store_agent_performance(
                         agent_id="alpha_agent_manager",
                         performance_data={
                             "workflow_id": workflow_id,
@@ -302,7 +295,7 @@ class AlphaAgentManager:
                             ).total_seconds()
                         }
                     )
-                    logger.info("✅ Workflow results stored in memory bridge")
+                    logger.info("✅ Workflow results stored in agent coordinator")
                 except Exception as e:
                     logger.warning(f"⚠️ Failed to store workflow results: {e}")
             
@@ -401,8 +394,7 @@ class AlphaAgentManager:
             "total_agents": len(self.agents),
             "active_agents": sum(1 for status in self.agent_status.values() if status == 'active'),
             "agent_details": {},
-            "memory_bridge_status": "connected" if self.memory_bridge else "disconnected",
-            "enhanced_bridge_status": "connected" if self.enhanced_a2a_bridge else "disconnected"
+            "coordinator_status": "connected" if self.agent_coordinator else "disconnected"
         }
         
         for agent_name, agent in self.agents.items():
@@ -444,9 +436,9 @@ class AlphaAgentManager:
 
 
 # Convenience functions for direct agent management
-async def initialize_alpha_agents(memory_bridge=None, enhanced_bridge=None) -> AlphaAgentManager:
+async def initialize_alpha_agents(coordinator=None) -> AlphaAgentManager:
     """Initialize and return a fully configured Alpha Agent Manager."""
-    manager = AlphaAgentManager(memory_bridge=memory_bridge, enhanced_a2a_bridge=enhanced_bridge)
+    manager = AlphaAgentManager(agent_coordinator=coordinator)
     await manager.initialize_agents()
     return manager
 

@@ -361,9 +361,9 @@ class MemoryUnit:
                         key = f"AAPL_close_{timestamp.split(' ')[0]}" # Use date as part of key
                         self.set(key, close_price, log_event=False) # Avoid logging for bulk load
             logger.info(f"Successfully autoloaded data from {csv_path}")
-            # Asynchronously log the data loading event (memory bridge functionality disabled)
-            # if self.memory_bridge:
-            #     asyncio.create_task(self._log_data_loading_event(csv_path, len(self._data)))
+            # Asynchronously log the data loading event
+            # if self.memory_bridge:  # Memory bridge functionality disabled
+                asyncio.create_task(self._log_data_loading_event(csv_path, len(self._data)))
         except Exception as e:
             logger.error(f"Failed to autoload CSV {csv_path}: {e}")
 
@@ -610,11 +610,8 @@ class AlphaAgentPoolMCPServer:
         
         config = MomentumAgentConfig(**config_data)
         
-        # Convert config to dictionary for process serialization
-        config_dict = config.model_dump()
-        
         # Use a helper function to be the target of the process
-        process = Process(target=run_momentum_agent_process, args=(config_dict,))
+        process = Process(target=run_momentum_agent_process, args=(config,))
         process.start()
         return config, process
 
@@ -680,37 +677,23 @@ class AlphaAgentPoolMCPServer:
             raise ValueError(f"Unknown agent name: {agent_name}")
 
     async def _log_agent_lifecycle_event(self, agent_id: str, status: str, details: str):
-        """Log agent lifecycle events to the agent coordinator and local logs."""
-        try:
-            # Log to local logger with structured format
-            log_message = f"Agent {status}: {agent_id} - {details}"
-            self.logger.info(log_message)
-            
-            # If agent coordinator is available, store as performance data
-            if hasattr(self, 'agent_coordinator') and self.agent_coordinator:
-                performance_data = {
-                    "agent_id": agent_id,
-                    "event_type": "lifecycle",
-                    "status": status,
-                    "details": details,
-                    "timestamp": datetime.now().isoformat(),
-                    "source": "alpha_agent_pool"
-                }
-                
-                # Store lifecycle event as agent performance for tracking
-                # Use try-except to handle event loop issues gracefully
-                try:
-                    await self.agent_coordinator.store_agent_performance(
-                        agent_id=agent_id,
-                        performance_data=performance_data
-                    )
-                except Exception as storage_error:
-                    # Log storage error but don't fail the main operation
-                    self.logger.warning(f"Failed to store lifecycle event to coordinator: {storage_error}")
-                
-        except Exception as e:
-            self.logger.warning(f"Failed to log agent lifecycle event: {e}")
-            # Continue execution - logging failure should not break agent operations
+        """Log agent lifecycle events to the memory bridge."""
+        # if self.memory_bridge:  # Memory bridge functionality disabled
+            from FinAgents.memory.external_memory_interface import EventType, LogLevel
+            try:
+                await self.memory_bridge._log_system_event(
+                    event_type=EventType.SYSTEM,
+                    log_level=LogLevel.INFO,
+                    title=f"Agent {status}: {agent_id}",
+                    content=details,
+                    metadata={
+                        "agent_id": agent_id,
+                        "status": status,
+                        "details": details
+                    }
+                )
+            except Exception as e:
+                self.logger.warning(f"Failed to log agent lifecycle event: {e}")
 
     def _start_agent_sync(self, agent_id: str) -> str:
         """
@@ -731,25 +714,16 @@ class AlphaAgentPoolMCPServer:
             self.agent_registry[agent_id] = process
             
             details = f"Momentum agent started on port {config.execution.port}"
-            # Log agent startup event using agent coordinator (safe async handling)
-            try:
-                # Create a task for async logging without blocking
-                import threading
-                if threading.current_thread() is threading.main_thread():
-                    try:
-                        loop = asyncio.get_running_loop()
-                        # If there's a running loop, schedule the task
-                        loop.create_task(self._log_agent_lifecycle_event(agent_id, "STARTED", details))
-                    except RuntimeError:
-                        # No running loop, just log locally
-                        self.logger.info(f"Agent lifecycle event: {agent_id} - STARTED - {details}")
-                else:
-                    # Not in main thread, just log locally
-                    self.logger.info(f"Agent lifecycle event: {agent_id} - STARTED - {details}")
-            except Exception as log_error:
-                # Fallback to simple logging
-                self.logger.info(f"Agent lifecycle event: {agent_id} - STARTED - {details}")
-                self.logger.debug(f"Async logging failed: {log_error}")
+            # Log agent startup event (memory bridge functionality disabled)
+            # # if self.memory_bridge:  # Memory bridge functionality disabled
+            #     # Run the async logging function in a new event loop as we are in a sync context
+            #     try:
+            #         asyncio.run(self._log_agent_lifecycle_event(
+            #             agent_id, "STARTED", details
+            #         ))
+            #     except RuntimeError: # If a loop is already running
+            #         loop = asyncio.get_event_loop()
+            #         loop.create_task(self._log_agent_lifecycle_event(agent_id, "STARTED", details))
 
             return details
         elif agent_id == "autonomous_agent":
@@ -770,25 +744,16 @@ class AlphaAgentPoolMCPServer:
                     actual_port = alternative_port
             
             details = f"Autonomous agent started on port {actual_port}"
-            # Log agent startup event using agent coordinator (safe async handling)
-            try:
-                # Create a task for async logging without blocking
-                import threading
-                if threading.current_thread() is threading.main_thread():
-                    try:
-                        loop = asyncio.get_running_loop()
-                        # If there's a running loop, schedule the task
-                        loop.create_task(self._log_agent_lifecycle_event(agent_id, "STARTED", details))
-                    except RuntimeError:
-                        # No running loop, just log locally
-                        self.logger.info(f"Agent lifecycle event: {agent_id} - STARTED - {details}")
-                else:
-                    # Not in main thread, just log locally
-                    self.logger.info(f"Agent lifecycle event: {agent_id} - STARTED - {details}")
-            except Exception as log_error:
-                # Fallback to simple logging
-                self.logger.info(f"Agent lifecycle event: {agent_id} - STARTED - {details}")
-                self.logger.debug(f"Async logging failed: {log_error}")
+            # Log agent startup event
+            # if self.memory_bridge:  # Memory bridge functionality disabled
+                # Run the async logging function in a new event loop as we are in a sync context
+                try:
+                    asyncio.run(self._log_agent_lifecycle_event(
+                        agent_id, "STARTED", details
+                    ))
+                except RuntimeError:
+                    loop = asyncio.get_event_loop()
+                    loop.create_task(self._log_agent_lifecycle_event(agent_id, "STARTED", details))
             
             return details
         return f"Unknown agent: {agent_id}"
@@ -861,166 +826,24 @@ class AlphaAgentPoolMCPServer:
         return coordinator
 
     def _initialize_memory_agent(self):
-        """Initialize the external memory agent without blocking startup"""
+        """Initialize the external memory agent"""
         # Import here to avoid top-level circular dependencies
         global MEMORY_AVAILABLE
-        
-        # First try to import and create the ExternalMemoryAgent class
         try:
-            # Import required components
-            import httpx
-            from mcp.client.session import ClientSession
-            from mcp.client.streamable_http import streamablehttp_client
-            from enum import Enum
-            import time
-            
-            # Define event types and log levels for memory operations
-            class EventType(Enum):
-                USER_QUERY = "USER_QUERY"
-                AGENT_ACTION = "AGENT_ACTION"
-                SYSTEM = "SYSTEM"
-                ERROR = "ERROR"
-                STRATEGY = "STRATEGY"
-                FACTOR_DISCOVERY = "FACTOR_DISCOVERY"
-            
-            class LogLevel(Enum):
-                DEBUG = "DEBUG"
-                INFO = "INFO"
-                WARNING = "WARNING"
-                ERROR = "ERROR"
-            
-            # Create ExternalMemoryAgent class
-            class ExternalMemoryAgent:
-                """
-                External Memory Agent for Alpha Agent Pool
-                
-                Provides interface for storing and retrieving memory data
-                via the unified memory system MCP server.
-                """
-                
-                def __init__(self, mcp_server_url: str = "http://127.0.0.1:8000/mcp"):
-                    self.mcp_server_url = mcp_server_url
-                    self.session = None
-                    self.client = None
-                    self.logger = logging.getLogger(__name__)
-                    
-                async def initialize_session(self):
-                    """Initialize MCP session with memory server - non-blocking"""
-                    if self.session:
-                        return True  # Already initialized
-                    
-                    try:
-                        # Don't block startup - just try once with short timeout
-                        timeout = 1.0  # Very short timeout for startup
-                        
-                        try:
-                            await asyncio.wait_for(self._do_initialize(), timeout=timeout)
-                            self.logger.info("✅ Memory session initialized successfully")
-                            return True
-                        except asyncio.TimeoutError:
-                            self.logger.debug(f"Memory session initialization timed out (will retry later)")
-                            return False
-                            
-                    except Exception as e:
-                        self.logger.debug(f"Memory session initialization failed: {e} (will retry later)")
-                        return False
-                
-                async def _do_initialize(self):
-                    """Actual initialization logic"""
-                    self.client = streamablehttp_client(self.mcp_server_url)
-                    read, write, _ = await self.client.__aenter__()
-                    self.session = ClientSession(read, write)
-                    await self.session.initialize()
-                
-                async def log_event(self, event_type: EventType, log_level: LogLevel,
-                                  source_agent_pool: str, source_agent_id: str,
-                                  title: str, content: str, tags: set = None,
-                                  metadata: dict = None, session_id: str = None):
-                    """Log an event to the memory system with lazy session initialization"""
-                    try:
-                        # Prepare event data first
-                        event_data = {
-                            "query": title,
-                            "keywords": list(tags) if tags else [source_agent_pool, source_agent_id],
-                            "summary": content,
-                            "agent_id": source_agent_id,
-                            "event_type": event_type.value if hasattr(event_type, 'value') else str(event_type),
-                            "log_level": log_level.value if hasattr(log_level, 'value') else str(log_level),
-                            "session_id": session_id or f"alpha_pool_{int(time.time())}",
-                            **(metadata or {})
-                        }
-                        
-                        # Try to initialize session on first use if not already initialized
-                        if not self.session:
-                            session_init_success = await self.initialize_session()
-                            if not session_init_success:
-                                # Fallback: log locally if memory system is not available
-                                self.logger.info(f"Memory event (local): {title} - {content}")
-                                return {"status": "logged_locally", "reason": "no_session"}
-                        
-                        # Store event in memory system if session is available
-                        if self.session:
-                            try:
-                                result = await self.session.call_tool("store_graph_memory", event_data)
-                                return {"status": "success", "result": result}
-                            except Exception as tool_error:
-                                self.logger.debug(f"Memory tool call failed: {tool_error}")
-                                # Fallback to local logging
-                                self.logger.info(f"Memory event (local): {title} - {content}")
-                                return {"status": "logged_locally", "reason": "tool_error"}
-                        else:
-                            # Fallback: just log locally if memory system is not available
-                            self.logger.info(f"Memory event (local): {title} - {content}")
-                            return {"status": "logged_locally", "reason": "session_unavailable"}
-                            
-                    except Exception as e:
-                        # Always fallback to local logging
-                        self.logger.debug(f"Failed to log event to memory system: {e}")
-                        self.logger.info(f"Memory event (local): {title} - {content}")
-                        return {"status": "logged_locally", "reason": "error", "error": str(e)}
-                
-                async def store_strategy_data(self, strategy_id: str, strategy_data: dict):
-                    """Store strategy-related data"""
-                    return await self.log_event(
-                        event_type=EventType.STRATEGY,
-                        log_level=LogLevel.INFO,
-                        source_agent_pool="alpha_agent_pool",
-                        source_agent_id="strategy_manager",
-                        title=f"Strategy Data: {strategy_id}",
-                        content=f"Stored strategy data for {strategy_id}",
-                        tags={strategy_id, "strategy", "alpha_factor"},
-                        metadata=strategy_data
-                    )
-                
-                async def store_factor_discovery(self, factor_id: str, factor_data: dict):
-                    """Store alpha factor discovery data"""
-                    return await self.log_event(
-                        event_type=EventType.FACTOR_DISCOVERY,
-                        log_level=LogLevel.INFO,
-                        source_agent_pool="alpha_agent_pool",
-                        source_agent_id="factor_discovery",
-                        title=f"Alpha Factor Discovery: {factor_id}",
-                        content=f"Discovered alpha factor {factor_id}",
-                        tags={factor_id, "alpha_factor", "discovery"},
-                        metadata=factor_data
-                    )
-            
-            # Create the memory agent instance (no session initialization during startup)
+            from FinAgents.memory.external_memory_interface import ExternalMemoryAgent
+            MEMORY_AVAILABLE = True
+        except ImportError:
+            MEMORY_AVAILABLE = False
+
+        if not MEMORY_AVAILABLE:
+            self.logger.warning("External memory agent not available. Continuing without it.")
+            return
+        try:
             self.memory_agent = ExternalMemoryAgent()
             self.session_id = f"alpha_pool_session_{int(time.time())}"
-            
-            # Don't initialize session during startup to avoid blocking
-            self.logger.info("✅ External memory agent created (session will be initialized on demand)")
-            
-            MEMORY_AVAILABLE = True
-            
-        except ImportError as e:
-            self.logger.warning(f"Memory dependencies not available: {e}")
-            MEMORY_AVAILABLE = False
-            self.memory_agent = None
+            logger.info("External memory agent initialized for Alpha Agent Pool")
         except Exception as e:
-            self.logger.error(f"Failed to create memory agent: {e}")  
-            MEMORY_AVAILABLE = False
+            logger.error(f"Failed to initialize memory agent: {e}")
             self.memory_agent = None
 
     async def _initialize_enhanced_memory_bridge(self):
@@ -1099,9 +922,11 @@ class AlphaAgentPoolMCPServer:
     async def _log_memory_event(self, event_type, log_level, title: str, content: str, 
                                tags: set = None, metadata: Optional[Dict[str, Any]] = None):
         """Log an event to the memory agent with proper enum types"""
+        # Import here to ensure it's available
+        from FinAgents.memory.external_memory_interface import EventType, LogLevel
+
         if self.memory_agent and self.session_id:
             try:
-                # Use the event type and log level directly since they're now defined locally
                 await self.memory_agent.log_event(
                     event_type=event_type,
                     log_level=log_level,
@@ -1118,10 +943,7 @@ class AlphaAgentPoolMCPServer:
                     session_id=self.session_id
                 )
             except Exception as e:
-                self.logger.warning(f"Failed to log memory event: {e}")
-        else:
-            # Fallback to local logging
-            self.logger.info(f"Memory event (local): {title} - {content}")
+                logger.warning(f"Failed to log memory event: {e}")
 
     async def store_event_in_memory(self, event_type, summary, keywords, details, log_level="INFO", session_id=None, correlation_id=None):
         """Store an event in the MCP memory server using AlphaMemoryClient."""
@@ -1495,17 +1317,17 @@ class AlphaAgentPoolMCPServer:
                 # The query is treated as a command for the planner
                 planner_result = await self.planner.run(command=query)
                 
-                # Log the outcome (memory bridge functionality disabled)
-                # if self.memory_bridge:
-                #     # Import enums here for logging
-                #     from FinAgents.memory.external_memory_interface import EventType, LogLevel
-                #     asyncio.create_task(self.memory_bridge._log_system_event(
-                #         event_type=EventType.SYSTEM,
-                #         log_level=LogLevel.INFO,
-                #         title="Planner Execution Completed",
-                #         content=f"Planner processed command: {query}",
-                #         metadata={"result": planner_result.get("result")}
-                #     ))
+                # Log the outcome
+                # if self.memory_bridge:  # Memory bridge functionality disabled
+                    # Import enums here for logging
+                    from FinAgents.memory.external_memory_interface import EventType, LogLevel
+                    asyncio.create_task(self.memory_bridge._log_system_event(
+                        event_type=EventType.SYSTEM,
+                        log_level=LogLevel.INFO,
+                        title="Planner Execution Completed",
+                        content=f"Planner processed command: {query}",
+                        metadata={"result": planner_result.get("result")}
+                    ))
                 
                 # Ensure the output is always a JSON string
                 output = planner_result.get("result", "No result")
@@ -1516,26 +1338,26 @@ class AlphaAgentPoolMCPServer:
                 
             except Exception as e:
                 logger.error(f"Error processing strategy request with planner: {e}")
-                # Log the error (memory bridge functionality disabled)
-                # if self.memory_bridge:
-                #     from FinAgents.memory.external_memory_interface import EventType, LogLevel
-                #     asyncio.create_task(self.memory_bridge._log_system_event(
-                #         event_type=EventType.SYSTEM,
-                #         log_level=LogLevel.ERROR,
-                #         title="Planner Execution Failed",
-                #         content=f"Planner failed on command '{query}': {e}",
-                #         metadata={"error": str(e)}
-                #     ))
+                # Log the error
+                # if self.memory_bridge:  # Memory bridge functionality disabled
+                    from FinAgents.memory.external_memory_interface import EventType, LogLevel
+                    asyncio.create_task(self.memory_bridge._log_system_event(
+                        event_type=EventType.SYSTEM,
+                        log_level=LogLevel.ERROR,
+                        title="Planner Execution Failed",
+                        content=f"Planner failed on command '{query}': {e}",
+                        metadata={"error": str(e)}
+                    ))
                 return json.dumps({"status": "error", "message": str(e)})
 
         @self.pool_server.tool(name="submit_strategy_event", description="Submit strategy flow events to memory system for tracking and analysis.")
         async def submit_strategy_event(event_type: str, strategy_id: str, event_data: dict, 
                                       metadata: Optional[dict] = None) -> str:
             """
-            Submit a strategy flow event to the memory system for tracking.
+            Submit a strategy flow event to the memory bridge for tracking.
             
             Args:
-                event_type: Type of strategy event (SIGNAL_GENERATED, STRATEGY_EXECUTED, PERFORMANCE_UPDATED, ALPHA_FACTOR_DISCOVERY etc.)
+                event_type: Type of strategy event (SIGNAL_GENERATED, STRATEGY_EXECUTED, PERFORMANCE_UPDATED, etc.)
                 strategy_id: Unique identifier for the strategy
                 event_data: Core event data including signals, performance metrics, etc.
                 metadata: Additional contextual information
@@ -1543,41 +1365,43 @@ class AlphaAgentPoolMCPServer:
             Returns:
                 str: Event submission confirmation with storage ID
             """
+            if not self.memory_bridge:
+                logger.warning("Memory bridge not available, cannot submit strategy event.")
+                return "Memory bridge not available"
+            
             try:
-                if self.memory_agent:
-                    # Determine event type based on string input
-                    if event_type == "ALPHA_FACTOR_DISCOVERY":
-                        result = await self.memory_agent.store_factor_discovery(
-                            factor_id=strategy_id,
-                            factor_data={
-                                "event_data": event_data,
-                                "metadata": metadata or {},
-                                "timestamp": datetime.now().isoformat()
-                            }
-                        )
-                    else:
-                        result = await self.memory_agent.store_strategy_data(
-                            strategy_id=strategy_id,
-                            strategy_data={
-                                "event_type": event_type,
-                                "event_data": event_data,
-                                "metadata": metadata or {},
-                                "timestamp": datetime.now().isoformat()
-                            }
-                        )
-                    
-                    # Log the submission
-                    self.logger.info(f"✅ Strategy event submitted: {event_type} for {strategy_id}")
-                    return f"Event stored successfully: {event_type} for {strategy_id}"
+                # Import memory schemas here (deprecated)
+                # from FinAgents.agent_pools.alpha_agent_pool.memory_bridge import StrategyEventData, SignalGeneratedEvent, PerformanceUpdatedEvent
+                
+                # Memory bridge functionality disabled
+                self.logger.warning("Memory bridge functionality has been disabled")
+                return "Memory bridge functionality disabled"
+
+                # Determine the event type and structure the data accordingly
+                if event_type == "SIGNAL_GENERATED":
+                    event_data_structured = SignalGeneratedEvent(**event_data)
+                elif event_type == "STRATEGY_EXECUTED":
+                    event_data_structured = StrategyEventData(**event_data)
+                elif event_type == "PERFORMANCE_UPDATED":
+                    event_data_structured = PerformanceUpdatedEvent(**event_data)
                 else:
-                    # Fallback: log locally
-                    self.logger.info(f"📝 Strategy event (local): {event_type} - {strategy_id}")
-                    return f"Event logged locally: {event_type} for {strategy_id}"
-                    
+                    logger.warning(f"Unknown event type: {event_type}. Data: {event_data}")
+                    return "Unknown event type"
+
+                # Submit the event to the memory bridge
+                storage_id = await self.memory_bridge.submit_event(
+                    event_type=event_type,
+                    strategy_id=strategy_id,
+                    event_data=event_data_structured,
+                    metadata=metadata
+                )
+                
+                logger.info(f"Submitted {event_type} for strategy {strategy_id} with storage ID {storage_id}")
+                return f"Event submitted with storage ID: {storage_id}"
+            
             except Exception as e:
-                error_msg = f"Failed to submit strategy event: {e}"
-                self.logger.error(error_msg)
-                return f"Error: {error_msg}"
+                logger.error(f"Error submitting strategy event: {e}")
+                return f"Error: {e}"
 
         @self.pool_server.tool(name="discover_alpha_factors", description="Systematic alpha factor discovery and validation using academic methodologies")
         async def discover_alpha_factors(factor_categories: List[str] = None, significance_threshold: float = 0.05) -> dict:
@@ -2073,30 +1897,86 @@ class AlphaAgentPoolMCPServer:
                 Storage confirmation with metadata
             """
             try:
-                # Memory bridge functionality disabled, using local storage
-                if not hasattr(self, '_analysis_storage'):
-                    self._analysis_storage = {}
-                
-                storage_key = f"analysis_results_{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-                self._analysis_storage[storage_key] = {
-                    "symbol": symbol,
-                    "timestamp": datetime.now().isoformat(),
-                    "factors_data": factors_data,
-                    "strategy_data": strategy_data,
-                    "backtest_results": backtest_results,
-                    "analysis_type": "momentum_comprehensive"
-                }
-                
-                self.logger.info(f"Analysis results stored locally for {symbol}")
-                
-                return {
-                    "status": "success",
-                    "message": f"Analysis results stored locally for {symbol}",
-                    "storage_key": storage_key,
-                    "stored_components": ["factors_data", "strategy_data", "backtest_results"],
-                    "timestamp": datetime.now().isoformat(),
-                    "storage_type": "local_fallback"
-                }
+                # Store data via memory bridge if available
+                # if self.memory_bridge:  # Memory bridge functionality disabled
+                    storage_key = f"analysis_results_{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    
+                    analysis_package = {
+                        "symbol": symbol,
+                        "timestamp": datetime.now().isoformat(),
+                        "factors_data": factors_data,
+                        "strategy_data": strategy_data,
+                        "backtest_results": backtest_results,
+                        "analysis_type": "momentum_comprehensive"
+                    }
+                    
+                    # Store via memory bridge using appropriate method
+                    try:
+                        if hasattr(self.memory_bridge, 'store_alpha_signal'):
+                            # Create a signal record for storage
+                            signal_record = {
+                                "signal_id": storage_key,
+                                "symbol": symbol,
+                                "signal_type": "momentum_analysis", 
+                                "confidence_score": 0.8,  # Default confidence
+                                "generation_timestamp": datetime.now().isoformat(),
+                                "signal_data": analysis_package,
+                                "metadata": {
+                                    "analysis_type": "comprehensive_momentum",
+                                    "components": ["factors", "strategy", "backtest"]
+                                }
+                            }
+                            
+                            # For now, store in local cache since memory bridge interface needs refactoring
+                            if not hasattr(self, '_analysis_storage'):
+                                self._analysis_storage = {}
+                            self._analysis_storage[storage_key] = analysis_package
+                            
+                        else:
+                            # Fallback - store locally
+                            if not hasattr(self, '_analysis_storage'):
+                                self._analysis_storage = {}
+                            self._analysis_storage[storage_key] = analysis_package
+                    except Exception as bridge_error:
+                        self.logger.warning(f"Memory bridge storage failed: {bridge_error}, using local storage")
+                        if not hasattr(self, '_analysis_storage'):
+                            self._analysis_storage = {}
+                        self._analysis_storage[storage_key] = analysis_package
+                    
+                    self.logger.info(f"Analysis results stored for {symbol} with key: {storage_key}")
+                    
+                    return {
+                        "status": "success",
+                        "message": f"Analysis results stored successfully for {symbol}",
+                        "storage_key": storage_key,
+                        "stored_components": ["factors_data", "strategy_data", "backtest_results"],
+                        "timestamp": datetime.now().isoformat()
+                    }
+                else:
+                    # Fallback to local memory storage
+                    if not hasattr(self, '_analysis_storage'):
+                        self._analysis_storage = {}
+                    
+                    storage_key = f"analysis_results_{symbol}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                    self._analysis_storage[storage_key] = {
+                        "symbol": symbol,
+                        "timestamp": datetime.now().isoformat(),
+                        "factors_data": factors_data,
+                        "strategy_data": strategy_data,
+                        "backtest_results": backtest_results,
+                        "analysis_type": "momentum_comprehensive"
+                    }
+                    
+                    self.logger.info(f"Analysis results stored locally for {symbol}")
+                    
+                    return {
+                        "status": "success",
+                        "message": f"Analysis results stored locally for {symbol}",
+                        "storage_key": storage_key,
+                        "stored_components": ["factors_data", "strategy_data", "backtest_results"],
+                        "timestamp": datetime.now().isoformat(),
+                        "storage_type": "local_fallback"
+                    }
                     
             except Exception as e:
                 self.logger.error(f"Error storing analysis results for {symbol}: {e}")
@@ -2451,44 +2331,44 @@ def run_momentum_agent_process(config):
     from FinAgents.agent_pools.alpha_agent_pool.agents.theory_driven.momentum_agent import main as run_agent
     import sys
 
-    def convert_to_dict_recursive(obj):
-        """Recursively convert objects to dictionaries for Pydantic validation."""
-        if isinstance(obj, dict):
-            return {k: convert_to_dict_recursive(v) for k, v in obj.items()}
-        elif hasattr(obj, 'model_dump'):
-            # Pydantic model
-            return obj.model_dump()
-        elif hasattr(obj, '__dict__') and not isinstance(obj, type):
-            return {k: convert_to_dict_recursive(v) for k, v in vars(obj).items()}
-        elif isinstance(obj, (list, tuple)):
-            return [convert_to_dict_recursive(item) for item in obj]
-        else:
-            return obj
+    # Ensure the config is serializable
+    config_dict = {
+        "execution": {
+            "host": "127.0.0.1",
+            "port": 5051,  # Use correct port from config file
+            "protocol": "http",
+            "timeout": 10
+        },
+        "logging": {
+            "level": "info",
+            "handlers": ["console", "file"],
+            "file": {
+                "filename": "momentum_agent.log",
+                "maxBytes": 10485760,  # 10 MB
+                "backupCount": 5
+            }
+        },
+        "agent_id": "momentum_agent",
+        "strategy": {
+            "type": "momentum",
+            "lookback_period": 14,
+            "threshold": 0.05
+        },
+        "data": {
+            "symbol": "AAPL",
+            "frequency": "1d",
+            "start_date": "2022-01-01",
+            "end_date": "2024-12-31"
+        },
+        "performance": {
+            "tracking_enabled": True,
+            "reporting_interval": 60
+        },
+        "real_time_logging": True
+    }
 
-    # Convert config to proper dictionary format
-    if hasattr(config, 'model_dump'):
-        # If it's already a Pydantic model, convert to dict
-        config_dict = config.model_dump()
-    elif hasattr(config, '__dict__'):
-        # Convert object attributes to dictionary
-        config_dict = convert_to_dict_recursive(config)
-    else:
-        # It's already a dictionary or None
-        config_dict = config if config else {}
-        
-    # Ensure required structure exists with proper nested dictionaries
-    if 'agent_id' not in config_dict:
-        config_dict['agent_id'] = 'momentum_agent'
-    if 'strategy' not in config_dict:
-        config_dict['strategy'] = {"window": 14, "threshold": 0.05}
-    if 'execution' not in config_dict:
-        config_dict['execution'] = {"port": 5051}
-    
-    # Ensure strategy and execution are dictionaries, not objects
-    if hasattr(config_dict.get('strategy'), '__dict__'):
-        config_dict['strategy'] = convert_to_dict_recursive(config_dict['strategy'])
-    if hasattr(config_dict.get('execution'), '__dict__'):
-        config_dict['execution'] = convert_to_dict_recursive(config_dict['execution'])
+    # Override with provided config
+    config_dict.update(config)
 
     # Run the agent with the given configuration
     run_agent(config_dict)

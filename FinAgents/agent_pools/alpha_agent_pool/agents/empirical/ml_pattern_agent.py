@@ -65,17 +65,19 @@ class MLPatternAgent:
     - Predictive pattern modeling
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, coordinator=None, config: Optional[Dict[str, Any]] = None):
         """
         Initialize ML Pattern Agent with configuration parameters.
         
         Args:
+            coordinator: Agent coordinator for cross-agent communication
             config: Configuration dictionary containing:
                 - sequence_length: Pattern sequence length (default: 30)
                 - confidence_threshold: Minimum confidence for signals (default: 0.7)
                 - n_estimators: Number of ensemble estimators (default: 100)
                 - pattern_templates: Pre-defined pattern templates
         """
+        self.coordinator = coordinator
         self.config = config or {}
         self.sequence_length = self.config.get('sequence_length', 30)
         self.confidence_threshold = self.config.get('confidence_threshold', 0.7)
@@ -90,6 +92,46 @@ class MLPatternAgent:
         
         logger.info(f"MLPatternAgent initialized with sequence_length={self.sequence_length}, "
                    f"ML_available={self.ml_available}")
+    
+    async def initialize(self):
+        """Initialize the agent asynchronously."""
+        logger.info("🔧 Initializing ML Pattern Agent")
+        # Add any async initialization logic here
+        logger.info("✅ ML Pattern Agent initialization completed")
+    
+    async def get_health_status(self) -> str:
+        """Get agent health status."""
+        return "healthy"
+    
+    async def shutdown(self):
+        """Shutdown the agent."""
+        logger.info("🛑 Shutting down ML Pattern Agent")
+    
+    async def discover_ml_patterns(self, symbols: List[str], pattern_complexity: str = "moderate") -> Dict[str, Any]:
+        """Discover ML patterns in the data."""
+        logger.info(f"🤖 Discovering ML patterns for {len(symbols)} symbols")
+        
+        # Mock implementation for testing
+        factors_discovered = []
+        for i, symbol in enumerate(symbols):
+            factors_discovered.append({
+                "symbol": symbol,
+                "factor_name": f"ml_pattern_{symbol.lower()}",
+                "category": "technical",
+                "pattern_type": "neural_network",
+                "strength": 0.70 + (i * 0.05),
+                "confidence": 0.88 - (i * 0.03)
+            })
+            
+        return {
+            "agent_id": "ml_pattern_agent",
+            "factors_discovered": factors_discovered,
+            "performance": {
+                "patterns_found": len(factors_discovered),
+                "execution_duration": 0.8,
+                "success_rate": 0.87
+            }
+        }
     
     def _initialize_ml_components(self) -> bool:
         """Initialize ML components with fallback for missing dependencies."""

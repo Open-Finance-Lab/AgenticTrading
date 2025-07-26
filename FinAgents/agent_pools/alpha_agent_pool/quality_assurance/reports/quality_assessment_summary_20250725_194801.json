@@ -1,0 +1,20 @@
+{
+  "timestamp": "2025-07-25T19:48:01.935324",
+  "overall_grade": "F",
+  "overall_score": 9.227956484694456,
+  "passed_tests": 1,
+  "total_tests": 53,
+  "component_scores": {
+    "factor_quality": 0.0,
+    "backtesting": 17.426521615648188,
+    "interaction": 20.0,
+    "validation": 0.0
+  },
+  "recommendations": [
+    "Overall quality score is below acceptable threshold. Comprehensive review of factor methodology required.",
+    "Factors with low quality detected: momentum_5d, mean_reversion_20d, relative_strength, volatility_factor, momentum_5d_ranked, mean_reversion_20d_ranked, relative_strength_ranked, volatility_factor_ranked. Consider feature engineering or alternative factor construction.",
+    "Low Sharpe ratio factors: momentum_5d, mean_reversion_20d, relative_strength, volatility_factor, momentum_5d_ranked, mean_reversion_20d_ranked, relative_strength_ranked, volatility_factor_ranked. Review signal strength and position sizing.",
+    "High drawdown factors: mean_reversion_20d, mean_reversion_20d_ranked. Implement additional risk controls.",
+    "Agent interaction tests showing instability. Review A2A protocol implementation and memory coordination."
+  ]
+}

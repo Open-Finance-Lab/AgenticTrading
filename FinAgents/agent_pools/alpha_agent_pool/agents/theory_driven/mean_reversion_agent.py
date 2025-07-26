@@ -48,17 +48,19 @@ class MeanReversionAgent:
     - Risk-based position sizing
     """
     
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, coordinator=None, config: Optional[Dict[str, Any]] = None):
         """
         Initialize Mean Reversion Agent with configuration parameters.
         
         Args:
+            coordinator: Agent coordinator for cross-agent communication
             config: Configuration dictionary containing:
                 - lookback_window: Period for mean calculation (default: 20)
                 - z_threshold: Z-score threshold for signal generation (default: 2.0)
                 - min_periods: Minimum periods required for calculation (default: 10)
                 - volatility_adjustment: Whether to adjust for volatility (default: True)
         """
+        self.coordinator = coordinator
         self.config = config or {}
         self.lookback_window = self.config.get('lookback_window', 20)
         self.z_threshold = self.config.get('z_threshold', 2.0)
@@ -67,6 +69,46 @@ class MeanReversionAgent:
         
         logger.info(f"MeanReversionAgent initialized with lookback_window={self.lookback_window}, "
                    f"z_threshold={self.z_threshold}")
+    
+    async def initialize(self):
+        """Initialize the agent asynchronously."""
+        logger.info("🔧 Initializing Mean Reversion Agent")
+        # Add any async initialization logic here
+        logger.info("✅ Mean Reversion Agent initialization completed")
+    
+    async def get_health_status(self) -> str:
+        """Get agent health status."""
+        return "healthy"
+    
+    async def shutdown(self):
+        """Shutdown the agent."""
+        logger.info("🛑 Shutting down Mean Reversion Agent")
+    
+    async def discover_mean_reversion_factors(self, symbols: List[str], lookback_period: int = 20) -> Dict[str, Any]:
+        """Discover mean reversion factors for given symbols."""
+        logger.info(f"🔍 Discovering mean reversion factors for {len(symbols)} symbols")
+        
+        # Mock implementation for testing
+        factors_discovered = []
+        for i, symbol in enumerate(symbols):
+            factors_discovered.append({
+                "symbol": symbol,
+                "factor_name": f"mean_reversion_{symbol.lower()}",
+                "category": "mean_reversion",
+                "z_score": 2.1 + (i * 0.2),
+                "strength": 0.65 + (i * 0.1),
+                "confidence": 0.80 - (i * 0.05)
+            })
+        
+        return {
+            "agent_id": "mean_reversion_agent",
+            "factors_discovered": factors_discovered,
+            "performance": {
+                "factors_found": len(factors_discovered),
+                "execution_duration": 0.5,
+                "success_rate": 0.95
+            }
+        }
     
     def calculate_mean_reversion_signal(self, 
                                       price_data: pd.Series, 

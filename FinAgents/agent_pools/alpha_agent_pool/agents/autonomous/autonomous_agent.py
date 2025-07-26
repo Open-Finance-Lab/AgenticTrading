@@ -12,11 +12,15 @@ import hashlib
 import random
 import importlib.util
 import time
+import logging
 from typing import Dict, Any, List, Optional, Union
 from datetime import datetime
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel
 import uuid
+
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Import strategy flow schemas for output compatibility
 import sys
@@ -60,19 +64,22 @@ class AutonomousAgent:
     enabling complex multi-step analysis workflows.
     """
     
-    def __init__(self, agent_id: str = "autonomous_alpha_agent"):
+    def __init__(self, coordinator=None, agent_id: str = "autonomous_alpha_agent"):
         """
         Initialize the AutonomousAgent with core components and processing capabilities.
         
         Args:
+            coordinator: Agent coordinator for cross-agent communication
             agent_id: Unique identifier for this agent instance
             
         The initialization process establishes:
+        - Agent coordinator for cross-agent communication
         - MCP server instance for external communication
         - Persistent workspace for code generation and task management
         - Background task processing thread for autonomous operation
         - Core tool registry for external interface
         """
+        self.coordinator = coordinator
         self.agent_id = agent_id
         self.mcp_server = FastMCP(f"AutonomousAgent_{agent_id}")
         self.task_queue: List[Task] = []
@@ -95,6 +102,53 @@ class AutonomousAgent:
         self.task_processor_thread = threading.Thread(target=self._autonomous_task_processor, daemon=True)
         self.task_processor_running = True
         self.task_processor_thread.start()
+        
+        logger.info(f"AutonomousAgent {agent_id} initialized successfully")
+    
+    async def initialize(self):
+        """Initialize the agent asynchronously."""
+        logger.info("🔧 Initializing Autonomous Agent")
+        # Add any async initialization logic here
+        logger.info("✅ Autonomous Agent initialization completed")
+    
+    async def get_health_status(self) -> str:
+        """Get agent health status."""
+        return "healthy"
+    
+    async def shutdown(self):
+        """Shutdown the agent."""
+        logger.info("🛑 Shutting down Autonomous Agent")
+        self.task_processor_running = False
+        if hasattr(self, 'task_processor_thread'):
+            self.task_processor_thread.join(timeout=1.0)
+    
+    async def autonomous_alpha_discovery(self, research_context: Dict[str, Any]) -> Dict[str, Any]:
+        """Perform autonomous alpha discovery."""
+        logger.info("🤖 Starting autonomous alpha discovery")
+        
+        # Mock implementation for testing
+        symbols = research_context.get("symbols", [])
+        factors_discovered = []
+        
+        for i, symbol in enumerate(symbols):
+            factors_discovered.append({
+                "symbol": symbol,
+                "factor_name": f"autonomous_factor_{symbol.lower()}",
+                "category": "autonomous",
+                "discovery_method": "self_learning",
+                "strength": 0.72 + (i * 0.04),
+                "confidence": 0.83 - (i * 0.02)
+            })
+            
+        return {
+            "agent_id": "autonomous_agent",
+            "factors_discovered": factors_discovered,
+            "performance": {
+                "autonomous_discoveries": len(factors_discovered),
+                "execution_duration": 1.2,
+                "success_rate": 0.85
+            }
+        }
 
     def _load_tasks(self):
         """

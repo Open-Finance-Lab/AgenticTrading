@@ -1,33 +1,23 @@
 #!/bin/bash
 
-# Alpha Agent Pool Startup Script with Enhanced Process Management
-# 
-# This script starts the Alpha Agent Pool MCP Server with comprehensive process
-# tracking and graceful shutdown capabilities. All agent processes are monitored
-# and cleaned up automatically when the script terminates.
-#
-# Features:
-# - Process ID tracking for all spawned agents
-# - Port conflict detection and automatic resolution
-# - Comprehensive cleanup on termination (SIGINT, SIGTERM, SIGQUIT)
-# - Enhanced logging and status reporting
-# - Robust signal handling for graceful shutdown
-#
-# Author: FinAgent Research Team
-# Enhanced: 2025-07-25
+# Alpha Agent Pool Startup Script
+# ================================
+# Simplified script to start the Alpha Agent Pool MCP Server
 
-set -e  # Exit on any error
+set -e
 
-# Color definitions for output
-RED='\033[0;31m'
+# Color definitions
 GREEN='\033[0;32m'
+RED='\033[0;31m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-PURPLE='\033[0;35m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+PURPLE='\033[0;35m'
+NC='\033[0m'
 
-# Project configuration
+# Configuration
+ALPHA_POOL_PORT=8081
+PROJECT_ROOT=$(cd "$(dirname "$0")/../../.." && pwd)
 PROJECT_ROOT="/Users/lijifeng/Documents/AI_agent/FinAgent-Orchestration"
 ALPHA_POOL_DIR="${PROJECT_ROOT}/FinAgents/agent_pools/alpha_agent_pool"
 LOG_DIR="${PROJECT_ROOT}/logs"
