@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 FinAgent Unified Interface Manager
 

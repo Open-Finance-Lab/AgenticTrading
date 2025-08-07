@@ -1,4 +1,3 @@
-#!/bin/bash
 
 # FinAgent Memory System - One-Click Startup Script
 # 

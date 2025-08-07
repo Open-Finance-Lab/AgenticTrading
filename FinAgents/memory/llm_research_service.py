@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 LLM Research Service - Memory Analysis and Research Module
 =========================================================

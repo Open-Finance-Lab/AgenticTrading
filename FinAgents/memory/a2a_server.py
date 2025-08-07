@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 FinAgent A2A Memory Server
 
