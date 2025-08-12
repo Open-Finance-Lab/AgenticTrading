@@ -40,19 +40,7 @@ from mcp.server.fastmcp import FastMCP
 # Configure module logger first
 logger = logging.getLogger(__name__)
 
-# Import enhanced SSE error handling
-try:
-    from .sse_error_handler import create_enhanced_mcp_server as create_sse_enhanced_server
-    SSE_ERROR_HANDLING_AVAILABLE = True
-except ImportError:
-    SSE_ERROR_HANDLING_AVAILABLE = False
-
-# Import and apply SSE connection patch
-try:
-    from . import sse_connection_patch
-    logger.info("✅ SSE connection patch loaded successfully")
-except ImportError as e:
-    logger.warning(f"⚠️ SSE connection patch not available: {e}")
+# Note: SSE error handler and connection patch have been removed from the codebase.
 
 
 def check_port_available(port: int, host: str = "127.0.0.1") -> bool:
@@ -183,8 +171,7 @@ except ImportError:
 # Use TYPE_CHECKING to avoid circular imports at runtime
 if TYPE_CHECKING:
     # from FinAgents.agent_pools.alpha_agent_pool.memory_bridge import AlphaAgentPoolMemoryBridge, create_alpha_memory_bridge
-    from FinAgents.memory.external_memory_interface import ExternalMemoryAgent, EventType, LogLevel
-    from FinAgents.agent_pools.alpha_agent_pool.alpha_memory_client import AlphaMemoryClient
+    pass
 
 # --- Definitions for DAG Planner and Agent Status ---
 # These are defined here but only used within the server class.
@@ -372,8 +359,8 @@ class MemoryUnit:
         if self.memory_bridge and hasattr(self.memory_bridge, '_log_system_event'):
             try:
                 await self.memory_bridge._log_system_event(
-                    event_type=EventType.SYSTEM if MEMORY_AVAILABLE else "system",
-                    log_level=LogLevel.INFO if MEMORY_AVAILABLE else "info",
+                    event_type="system",
+                    log_level="info",
                     title="Historical Data Loaded",
                     content=f"Loaded {records_loaded} historical data records from {os.path.basename(csv_path)}",
                     metadata={
@@ -427,8 +414,8 @@ class MemoryUnit:
         if self.memory_bridge and hasattr(self.memory_bridge, '_log_system_event'):
             try:
                 await self.memory_bridge._log_system_event(
-                    event_type=EventType.SYSTEM if MEMORY_AVAILABLE else "system",
-                    log_level=LogLevel.DEBUG if MEMORY_AVAILABLE else "debug",
+                    event_type="system",
+                    log_level="debug",
                     title=f"Memory Unit Operation: {operation}",
                     content=f"Performed {operation} operation on key '{key}'",
                     metadata={
@@ -442,6 +429,26 @@ class MemoryUnit:
                 logger.debug(f"Failed to log memory operation: {e}")
 
 class AlphaAgentPoolMCPServer:
+    async def _ensure_a2a_coordinator(self) -> bool:
+        """Ensure A2A memory coordinator is available. Returns True if ready."""
+        if self.a2a_coordinator is not None:
+            return True
+        if not A2A_COORDINATOR_AVAILABLE:
+            return False
+        try:
+            # Only import and initialize when necessary
+            if 'initialize_pool_coordinator' in globals():
+                try:
+                    # Best-effort init bound to this pool id
+                    self.a2a_coordinator = await initialize_pool_coordinator(pool_id=f"alpha_pool_{self.port}")  # type: ignore[name-defined]
+                    return self.a2a_coordinator is not None
+                except Exception as e:
+                    self.logger.warning(f"A2A coordinator init failed: {e}")
+                    return False
+        except Exception as e:
+            self.logger.warning(f"A2A coordinator init exception: {e}")
+            return False
+        return False
     """
     Alpha Agent Pool Model Context Protocol (MCP) Server
     
@@ -484,19 +491,13 @@ class AlphaAgentPoolMCPServer:
         self.port = port
         self.enable_enhanced_lifecycle = enable_enhanced_lifecycle
         
-        # Initialize enhanced MCP server with SSE error handling or fallback to basic FastMCP
+        # Initialize enhanced MCP server if available; otherwise fallback to basic FastMCP
         if enable_enhanced_lifecycle and ENHANCED_MCP_AVAILABLE:
             self.pool_server, self.lifecycle_manager = create_enhanced_mcp_server(
                 pool_id=f"alpha_pool_{port}"
             )
             self.logger = logging.getLogger(__name__)
             self.logger.info("Enhanced MCP lifecycle management enabled")
-        elif SSE_ERROR_HANDLING_AVAILABLE:
-            # Use SSE error handling even without enhanced lifecycle
-            self.pool_server = create_sse_enhanced_server("AlphaAgentPoolMCPServer")
-            self.lifecycle_manager = None
-            self.logger = logging.getLogger(__name__)
-            self.logger.info("SSE error handling enabled for MCP server")
         else:
             self.pool_server = FastMCP("AlphaAgentPoolMCPServer")
             self.lifecycle_manager = None
@@ -525,23 +526,11 @@ class AlphaAgentPoolMCPServer:
         # Note: Memory bridge will be initialized asynchronously when needed
         
         # Initialize AlphaMemoryClient for MCP-based memory logging (temporarily disabled)
-        # self.alpha_memory_client = AlphaMemoryClient(agent_id="alpha_agent_pool_server")
+        # self.alpha_memory_client = AlphaMemoryClient(agent_id="alpha_agent_pool")
         self.alpha_memory_client = None  # Temporarily disabled until AlphaMemoryClient is available
         
-        # Load historical market data into memory unit with automatic reset
-        csv_path = os.path.abspath(os.path.join(
-            os.path.dirname(__file__), 
-            "../../../data/cache/AAPL_2022-01-01_2024-12-31_1d.csv"
-        ))
-        self.memory = MemoryUnit(
-            os.path.join(os.path.dirname(__file__), "memory_unit.json"), 
-            autoload_csv_path=csv_path, 
-            reset_on_init=True,
-            memory_bridge=None  # Memory bridge functionality removed
-        )
-        
         # Initialize legacy memory agent if available (deprecated in favor of A2A)
-        self.memory_agent: Optional["ExternalMemoryAgent"] = None
+        self.memory_agent: Optional[Any] = None
         self.session_id = None
         self._initialize_memory_agent()  # Initialize memory agent synchronously
         
@@ -587,7 +576,7 @@ class AlphaAgentPoolMCPServer:
         Includes port conflict detection and automatic port resolution.
         """
         # Import agent-specific components here to avoid top-level import errors
-        from FinAgents.agent_pools.alpha_agent_pool.schema.theory_driven_schema import MomentumAgentConfig
+        from .schema.theory_driven_schema import MomentumAgentConfig
         from multiprocessing import Process
 
         config_path = os.path.join(self.config_dir, "momentum.yaml")
@@ -612,8 +601,18 @@ class AlphaAgentPoolMCPServer:
         
         # Convert config to dictionary for process serialization
         config_dict = config.model_dump()
-        
-        # Use a helper function to be the target of the process
+
+        # Resolve the momentum agent entry point with fallbacks
+        # NOTE: prefer theory_driven.momentum_agent.main; fall back to legacy path if needed.
+        try:
+            from .agents.theory_driven.momentum_agent import main as run_momentum_agent_process  # type: ignore
+        except Exception:
+            try:
+                from .agents.momentum.momentum_agent import run_momentum_agent_process  # type: ignore
+            except Exception as _imp_err:
+                self.logger.error(f"Unable to import momentum agent entrypoint: {_imp_err}")
+                raise
+
         process = Process(target=run_momentum_agent_process, args=(config_dict,))
         process.start()
         return config, process
@@ -624,7 +623,7 @@ class AlphaAgentPoolMCPServer:
         Includes port conflict detection and automatic port resolution.
         """
         # Import agent-specific components here
-        from FinAgents.agent_pools.alpha_agent_pool.agents.autonomous.autonomous_agent import run_autonomous_agent
+        from .agents.autonomous.autonomous_agent import run_autonomous_agent
         from multiprocessing import Process
 
         # Load configuration for autonomous agent
@@ -663,7 +662,7 @@ class AlphaAgentPoolMCPServer:
             try:
                 self.logger.info(f"🚀 Starting {agent_name} synchronously...")
                 config, process = self._start_momentum_agent()
-                self.logger.info(f"✅ {agent_name} started successfully on port {config['port']}")
+                self.logger.info(f"✅ {agent_name} started successfully on port {config.execution.port}")
             except Exception as e:
                 self.logger.error(f"❌ Failed to start {agent_name}: {e}")
                 raise
@@ -833,7 +832,7 @@ class AlphaAgentPoolMCPServer:
         # This method is now synchronous and returns the coordinator instance or None
         # Import here to avoid top-level circular dependencies
         try:
-            from FinAgents.agent_pools.alpha_agent_pool.agent_coordinator import get_agent_coordinator
+            from .agent_coordinator import get_agent_coordinator
         except ImportError:
             self.logger.warning("Agent coordinator not available. Continuing without it.")
             return None
@@ -1023,6 +1022,70 @@ class AlphaAgentPoolMCPServer:
             MEMORY_AVAILABLE = False
             self.memory_agent = None
 
+    # NOTE: Local MemoryUnit is deprecated; A2A memory coordinator is now the default.
+
+    async def _a2a_fetch_close_price(self, symbol: str, iso_date: str) -> Optional[float]:
+        """Fetch a single day's close price via the A2A memory coordinator. Returns None if unavailable.
+        Tries multiple client methods for compatibility."""
+        # Ensure coordinator is ready
+        await self._ensure_a2a_coordinator()
+        if not self.a2a_coordinator:
+            return None
+        client = getattr(self.a2a_coordinator, 'a2a_client', None)
+        if not client:
+            return None
+
+        # Try dedicated time-series style APIs first
+        for method_name in ("get_timeseries", "timeseries", "get_price", "fetch_price"):
+            method = getattr(client, method_name, None)
+            if callable(method):
+                try:
+                    data = await method(symbol=symbol, start=iso_date, end=iso_date, fields=["close"])  # type: ignore
+                    if isinstance(data, dict):
+                        if iso_date in data and isinstance(data[iso_date], dict) and "close" in data[iso_date]:
+                            return float(data[iso_date]["close"])
+                        arr = data.get("data") if hasattr(data, "get") else None
+                        if isinstance(arr, list) and arr:
+                            row = arr[0]
+                            if isinstance(row, dict) and "close" in row:
+                                return float(row["close"])
+                    elif isinstance(data, list) and data:
+                        row = data[0]
+                        if isinstance(row, dict) and "close" in row:
+                            return float(row["close"])
+                except Exception:
+                    pass
+
+        # Fallback: generic search + get(pointer)
+        search = getattr(client, "search", None)
+        getf = getattr(client, "get", None)
+        if callable(search) and callable(getf):
+            try:
+                q = {"symbol": symbol, "date": iso_date, "field": "close", "type": "timeseries"}
+                res = await search(q, k=1, filters={"symbol": symbol, "date": iso_date})
+                if isinstance(res, list) and res:
+                    pointer = res[0].get("pointer")
+                    if pointer:
+                        doc = await getf(pointer)
+                        if isinstance(doc, dict):
+                            for k in ("close", "Close", "adj_close", "price"):
+                                if k in doc:
+                                    return float(doc[k])
+            except Exception:
+                return None
+        return None
+
+    async def _a2a_fetch_close_series(self, symbol: str, dates: List[str]) -> Dict[str, float]:
+        """Batch fetch close prices for multiple dates via A2A. Missing dates are omitted."""
+        # Ensure coordinator is ready
+        await self._ensure_a2a_coordinator()
+        out: Dict[str, float] = {}
+        for d in dates:
+            v = await self._a2a_fetch_close_price(symbol, d)
+            if v is not None:
+                out[d] = v
+        return out
+    
     async def _initialize_enhanced_memory_bridge(self):
         """
         Initialize the Agent Coordinator for improved agent coordination.
@@ -1195,50 +1258,65 @@ class AlphaAgentPoolMCPServer:
                 "endpoint_status": endpoint_status
             }
 
-        @self.pool_server.tool(name="get_memory", description="Get a value from the internal memory unit by key.")
-        def get_memory(key: str):
-            """
-            Retrieve a value from the memory unit by key.
-            Args:
-                key (str): The key to retrieve.
-            Returns:
-                The value associated with the key, or None if not found.
-            """
-            return self.memory.get(key)
+        @self.pool_server.tool(name="get_memory", description="Get a value by key via A2A memory if supported.")
+        async def get_memory(key: str):
+            """Compatibility shim: try A2A KV get; return None if unsupported."""
+            await self._ensure_a2a_coordinator()
+            if self.a2a_coordinator and getattr(self.a2a_coordinator, 'a2a_client', None):
+                client = self.a2a_coordinator.a2a_client
+                for m in ("kv_get", "get_kv", "get"):
+                    fn = getattr(client, m, None)
+                    if callable(fn):
+                        try:
+                            return await fn(key)
+                        except Exception:
+                            break
+            return None
 
-        @self.pool_server.tool(name="set_memory", description="Set a value in the internal memory unit by key.")
-        def set_memory(key: str, value):
-            """
-            Set a value in the memory unit by key.
-            Args:
-                key (str): The key to set.
-                value: The value to store.
-            Returns:
-                str: Status message.
-            """
-            self.memory.set(key, value)
-            return "OK"
+        @self.pool_server.tool(name="set_memory", description="Set a key-value via A2A memory if supported.")
+        async def set_memory(key: str, value):
+            """Compatibility shim: try A2A KV set; returns 'OK' or 'SKIPPED'."""
+            await self._ensure_a2a_coordinator()
+            if self.a2a_coordinator and getattr(self.a2a_coordinator, 'a2a_client', None):
+                client = self.a2a_coordinator.a2a_client
+                for m in ("kv_set", "set_kv", "set"):
+                    fn = getattr(client, m, None)
+                    if callable(fn):
+                        try:
+                            await fn(key, value)
+                            return "OK"
+                        except Exception:
+                            break
+            return "SKIPPED"
 
-        @self.pool_server.tool(name="delete_memory", description="Delete a key from the internal memory unit.")
-        def delete_memory(key: str):
-            """
-            Delete a key from the memory unit.
-            Args:
-                key (str): The key to delete.
-            Returns:
-                str: Status message.
-            """
-            self.memory.delete(key)
-            return "OK"
+        @self.pool_server.tool(name="delete_memory", description="Delete a key via A2A memory if supported.")
+        async def delete_memory(key: str):
+            await self._ensure_a2a_coordinator()
+            if self.a2a_coordinator and getattr(self.a2a_coordinator, 'a2a_client', None):
+                client = self.a2a_coordinator.a2a_client
+                for m in ("kv_delete", "delete_kv", "delete"):
+                    fn = getattr(client, m, None)
+                    if callable(fn):
+                        try:
+                            await fn(key)
+                            return "OK"
+                        except Exception:
+                            break
+            return "SKIPPED"
 
-        @self.pool_server.tool(name="list_memory_keys", description="List all keys in the internal memory unit.")
-        def list_memory_keys():
-            """
-            List all keys currently stored in the memory unit.
-            Returns:
-                list: List of keys.
-            """
-            return self.memory.keys()
+        @self.pool_server.tool(name="list_memory_keys", description="List keys via A2A memory if supported.")
+        async def list_memory_keys():
+            await self._ensure_a2a_coordinator()
+            if self.a2a_coordinator and getattr(self.a2a_coordinator, 'a2a_client', None):
+                client = self.a2a_coordinator.a2a_client
+                for m in ("kv_keys", "list_keys", "keys"):
+                    fn = getattr(client, m, None)
+                    if callable(fn):
+                        try:
+                            return await fn()
+                        except Exception:
+                            break
+            return []
 
         @self.pool_server.tool(name="generate_alpha_signals", description="Generate alpha signals based on market data with A2A memory coordination")
         async def generate_alpha_signals(symbol: str = None, symbols: list = None, date: str = None, lookback_period: int = 20, price: Optional[float] = None, memory: dict = None) -> dict:
@@ -1293,40 +1371,28 @@ class AlphaAgentPoolMCPServer:
                     price_list = []
                     current_price = price
                     
+                    # Resolve current price: prefer explicit `price`, otherwise fetch via A2A
+                    current_price = price
                     if current_price is None or not isinstance(current_price, (float, int)):
-                        memory_source = memory if memory is not None else self.memory
-                        price_key = f"{target_symbol}_close_{date}"
-                        current_price_str = memory_source.get(price_key) if hasattr(memory_source, 'get') else memory_source.get(price_key) if memory_source else None
-                        
-                        if current_price_str is None:
-                            logger.warning(f"No price data for {target_symbol} on {date}, using default price 100.0")
+                        fetched = await self._a2a_fetch_close_price(target_symbol, date)
+                        if fetched is None:
+                            logger.warning(f"No price found via A2A for {target_symbol} {date}, using default 100.0")
                             current_price = 100.0
                         else:
-                            try:
-                                current_price = float(current_price_str)
-                            except Exception:
-                                logger.warning(f"Invalid price data for {target_symbol} on {date}, using default price 100.0")
-                                current_price = 100.0
+                            current_price = float(fetched)
 
-                    # Collect historical price data for momentum calculation
-                    current_date_obj = datetime.strptime(date, '%Y-%m-%d')
-                    for i in range(lookback_period):
-                        past_date = current_date_obj - timedelta(days=i+1)
-                        past_date_str = past_date.strftime('%Y-%m-%d')
-                        price_key = f"{target_symbol}_close_{past_date_str}"
-                        memory_source = memory if memory is not None else self.memory
-                        
-                        if memory_source:
-                            past_price_str = memory_source.get(price_key) if hasattr(memory_source, 'get') else memory_source.get(price_key) if isinstance(memory_source, dict) else None
-                            if past_price_str:
-                                try:
-                                    price_list.append(float(past_price_str))
-                                except (ValueError, TypeError):
-                                    continue
+                    # Collect historical prices via A2A
+                    from datetime import datetime as _dt, timedelta as _td
+                    price_list = []
+                    current_date_obj = _dt.strptime(date, '%Y-%m-%d')
+                    hist_dates = [(current_date_obj - _td(days=i+1)).strftime('%Y-%m-%d') for i in range(lookback_period)]
+                    hist_map = await self._a2a_fetch_close_series(target_symbol, hist_dates)
+                    for d in hist_dates:
+                        if d in hist_map:
+                            price_list.append(float(hist_map[d]))
 
-                    # Ensure chronological order and add current price
-                    price_list.reverse()
-                    price_list.append(current_price)
+                    # Append current price at the end (chronological order assumed)
+                    price_list.append(float(current_price))
 
                     logger.info(f"Executing momentum strategy with {len(price_list)} price points for {target_symbol}")
 
@@ -1375,14 +1441,14 @@ class AlphaAgentPoolMCPServer:
                         logger.warning(f"MCP SSE client failed for {target_symbol}: {mcp_error}")
                         
                         # Fallback to simple HTTP client
-                        try:
-                            from FinAgents.agent_pools.alpha_agent_pool.simple_momentum_client import SimpleMomentumClient
-                            simple_client = SimpleMomentumClient()
-                            response = await simple_client.call_generate_signal(target_symbol, price_list)
-                            logger.info(f"Fallback HTTP client succeeded for {target_symbol}")
-                        except Exception as fallback_error:
-                            logger.error(f"Both MCP and HTTP clients failed for {target_symbol}: {fallback_error}")
-                            response = {"signal": "HOLD", "confidence": 0.0, "error": f"All clients failed: {mcp_error}"}
+                        # try:
+                        #     from .simple_momentum_client import SimpleMomentumClient
+                        #     simple_client = SimpleMomentumClient()
+                        #     response = await simple_client.call_generate_signal(target_symbol, price_list)
+                        #     logger.info(f"Fallback HTTP client succeeded for {target_symbol}")
+                        # except Exception as fallback_error:
+                        #     logger.error(f"Both MCP and HTTP clients failed for {target_symbol}: {fallback_error}")
+                        #     response = {"signal": "HOLD", "confidence": 0.0, "error": f"All clients failed: {mcp_error}"}
 
                     logger.info(f"Generated signal for {target_symbol}: {response}")
                     results[target_symbol] = response
@@ -1421,7 +1487,6 @@ class AlphaAgentPoolMCPServer:
                     }
                 }
                 
-                logger.info(f"✅ Alpha signal generation completed for {len(target_symbols)} symbols")
                 logger.info(f"✅ Alpha signal generation completed for {len(target_symbols)} symbols")
                 return final_response
                 
@@ -2218,163 +2283,6 @@ class AlphaAgentPoolMCPServer:
         # Use the async server startup method instead of sync run()
         await self.pool_server.run_sse_async(mount_path="/sse")
 
-    def start_sync(self):
-        """
-        Synchronous startup method for use when no asyncio loop is running.
-        This is the original start() method behavior.
-        """
-        # Initialize enhanced lifecycle manager for advanced orchestration
-        if self.lifecycle_manager:
-            try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(self.lifecycle_manager.initialize())
-                loop.close()
-                self.logger.info("✅ Enhanced MCP lifecycle manager initialized successfully")
-            except Exception as e:
-                self.logger.error(f"❌ Failed to initialize enhanced MCP lifecycle manager: {e}")
-        
-        # Initialize A2A Memory Coordinator for distributed memory operations
-        if A2A_COORDINATOR_AVAILABLE:
-            try:
-                # Asynchronous A2A coordinator initialization with proper event loop management
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                self.a2a_coordinator = loop.run_until_complete(
-                    initialize_pool_coordinator(
-                        pool_id="alpha_agent_pool",
-                        memory_url="http://127.0.0.1:8010"
-                    )
-                )
-                loop.close()
-                self.logger.info("✅ A2A Memory Coordinator initialized and connected to memory agent")
-                
-                # Connect strategy research framework to A2A coordinator
-                if self.strategy_research_framework:
-                    self.strategy_research_framework.a2a_coordinator = self.a2a_coordinator
-                    self.logger.info("✅ Strategy Research Framework connected to A2A coordinator")
-                    
-            except Exception as e:
-                self.logger.error(f"❌ Failed to initialize A2A Memory Coordinator: {e}")
-                self.a2a_coordinator = None
-        
-        # Initialize legacy memory bridge as fallback system
-        self.agent_coordinator = self._initialize_agent_coordinator()
-
-        self.logger.info("Initiating agent pre-registration and startup sequence...")
-        
-        # Register momentum agent with A2A coordinator for distributed memory coordination
-        if self.a2a_coordinator:
-            try:
-                import asyncio
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    self.a2a_coordinator.register_agent(
-                        agent_id="momentum_agent",
-                        agent_type="theory_driven_momentum",
-                        agent_config={
-                            "strategy_type": "momentum", 
-                            "lookback_window": 20,
-                            "signal_threshold": 0.05,
-                            "risk_adjustment": True
-                        }
-                    )
-                )
-                loop.close()
-                self.logger.info("✅ Momentum agent registered with A2A memory coordinator")
-            except Exception as e:
-                self.logger.warning(f"⚠️ Failed to register momentum agent with A2A coordinator: {e}")
-        
-        # Pre-start critical momentum agent for alpha signal generation
-        self.start_agent_sync("momentum_agent")
-        
-        # Allow sufficient initialization time for agent stabilization
-        time.sleep(5) 
-
-        self.logger.info(f"Starting AlphaAgentPoolMCPServer on {self.host}:{self.port}")
-        self.pool_server.settings.host = self.host
-        self.pool_server.settings.port = self.port
-        # The run method is blocking, so it will keep the server alive.
-        self.pool_server.run(transport="sse")
-
-    async def start_async(self):
-        """
-        Asynchronous startup method for use when an asyncio loop is already running.
-        This method properly handles async initialization without creating event loop conflicts.
-        """
-        # Initialize enhanced lifecycle manager for advanced orchestration
-        if self.lifecycle_manager:
-            try:
-                await self.lifecycle_manager.initialize()
-                self.logger.info("✅ Enhanced MCP lifecycle manager initialized successfully")
-            except Exception as e:
-                self.logger.error(f"❌ Failed to initialize enhanced MCP lifecycle manager: {e}")
-        
-        # Initialize A2A Memory Coordinator for distributed memory operations
-        if A2A_COORDINATOR_AVAILABLE:
-            try:
-                self.a2a_coordinator = await initialize_pool_coordinator(
-                    pool_id="alpha_agent_pool",
-                    server_port=self.port,
-                    memory_url="http://127.0.0.1:8002"
-                )
-                self.logger.info("✅ A2A Memory Coordinator initialized and connected to memory agent")
-                
-                # Connect strategy research framework to A2A coordinator
-                if self.strategy_research_framework:
-                    self.strategy_research_framework.a2a_coordinator = self.a2a_coordinator
-                    self.logger.info("✅ Strategy Research Framework connected to A2A coordinator")
-                    
-            except Exception as e:
-                self.logger.error(f"❌ Failed to initialize A2A Memory Coordinator: {e}")
-                self.a2a_coordinator = None
-        
-        # Initialize legacy memory bridge as fallback system
-        self.agent_coordinator = self._initialize_agent_coordinator()
-
-        self.logger.info("Initiating agent pre-registration and startup sequence...")
-        
-        # Register momentum agent with A2A coordinator for distributed memory coordination
-        if self.a2a_coordinator:
-            try:
-                await self.a2a_coordinator.register_agent(
-                    agent_id="momentum_agent",
-                    agent_type="theory_driven_momentum",
-                    agent_config={
-                        "strategy_type": "momentum", 
-                        "lookback_window": 20,
-                        "signal_threshold": 0.05,
-                        "risk_adjustment": True
-                    }
-                )
-                self.logger.info("✅ Momentum agent registered with A2A memory coordinator")
-            except Exception as e:
-                self.logger.warning(f"⚠️ Failed to register momentum agent with A2A coordinator: {e}")
-        
-        # Pre-start critical momentum agent for alpha signal generation
-        self.start_agent_sync("momentum_agent")
-        
-        # Allow sufficient initialization time for agent stabilization
-        await asyncio.sleep(5)
-
-        self.logger.info(f"Starting AlphaAgentPoolMCPServer on {self.host}:{self.port}")
-        
-        # Start server using async method to avoid event loop conflicts
-        await self._start_server_async()
-
-    async def _start_server_async(self):
-        """
-        Start the MCP server in async mode to avoid event loop conflicts.
-        """
-        self.pool_server.settings.host = self.host
-        self.pool_server.settings.port = self.port
-        
-        # Use the async server startup method instead of sync run()
-        await self.pool_server.run_sse_async(mount_path="/sse")
-
     def stop(self):
         """
         Gracefully terminate the Alpha Agent Pool MCP Server and associated subsystems.
@@ -2448,7 +2356,7 @@ def run_momentum_agent_process(config):
     The target function to run the momentum agent process.
     It imports the agent module and calls the run_agent function with the given config.
     """
-    from FinAgents.agent_pools.alpha_agent_pool.agents.theory_driven.momentum_agent import main as run_agent
+    from .agents.theory_driven.momentum_agent import main as run_agent
     import sys
 
     def convert_to_dict_recursive(obj):
@@ -2498,7 +2406,7 @@ def run_autonomous_agent_process():
     """
     The target function to run the autonomous agent process.
     """
-    from FinAgents.agent_pools.alpha_agent_pool.agents.autonomous.autonomous_agent import run_autonomous_agent
+    from .agents.autonomous.autonomous_agent import run_autonomous_agent
     run_autonomous_agent()
 
 

@@ -27,7 +27,7 @@ from .core import AlphaAgentPoolMCPServer
 
 # Memory client components
 from .alpha_memory_client import AlphaMemoryClient
-from .simple_momentum_client import SimpleMomentumClient
+# from .simple_momentum_client import SimpleMomentumClient
 
 # Agent coordinator components
 try:
@@ -90,7 +90,7 @@ __all__ = [
     
     # Memory client components
     "AlphaMemoryClient",
-    "SimpleMomentumClient",
+    # "SimpleMomentumClient",
     
     # Agent coordinator (if available)
     "AlphaAgentCoordinator",
