@@ -10,10 +10,20 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../')))
-from schema.theory_driven_schema import (
-    MomentumAgentConfig, MomentumSignalRequest, AlphaStrategyFlow, MarketContext, Decision, Action, PerformanceFeedback, Metadata
-)
-from .a2a_client import AlphaAgentA2AClient, create_alpha_pool_a2a_client, A2AProtocolError
+
+# Try absolute imports first, fallback to relative
+try:
+    from schema.theory_driven_schema import (
+        MomentumAgentConfig, MomentumSignalRequest, AlphaStrategyFlow, MarketContext, Decision, Action, PerformanceFeedback, Metadata
+    )
+    from agents.theory_driven.a2a_client import AlphaAgentA2AClient, create_alpha_pool_a2a_client, A2AProtocolError
+except ImportError:
+    # Fallback to relative imports
+    from schema.theory_driven_schema import (
+        MomentumAgentConfig, MomentumSignalRequest, AlphaStrategyFlow, MarketContext, Decision, Action, PerformanceFeedback, Metadata
+    )
+    from .a2a_client import AlphaAgentA2AClient, create_alpha_pool_a2a_client, A2AProtocolError
+
 from typing import List, Dict, Any, Optional
 import asyncio
 import sys
@@ -350,8 +360,17 @@ class MomentumAgent:
         """
         self.coordinator = coordinator
         
-        # Import the required schema classes
-        from ...schema.theory_driven_schema import StrategyConfig, ExecutionConfig
+        # Import the required schema classes using absolute imports
+        try:
+            from schema.theory_driven_schema import StrategyConfig, ExecutionConfig
+        except ImportError:
+            # Fallback to relative import if absolute fails
+            import sys
+            from pathlib import Path
+            schema_dir = Path(__file__).parent.parent.parent / "schema"
+            if str(schema_dir) not in sys.path:
+                sys.path.insert(0, str(schema_dir))
+            from schema.theory_driven_schema import StrategyConfig, ExecutionConfig
         
         self.config = config or MomentumAgentConfig(
             agent_id="momentum_agent",
@@ -496,7 +515,7 @@ class MomentumAgent:
             "momentum_windows": list(set(r.get("selected_timeframe") for r in log_records if "selected_timeframe" in r)),
             "window_stats": window_stats,
             "best_window": best_window,
-            "feedback_time": datetime.utcnow().isoformat() + "Z",
+                            "feedback_time": datetime.now().isoformat() + "Z",
             "total_log_records": len(log_records)
         }
 
@@ -514,7 +533,7 @@ class MomentumAgent:
             if self.a2a_client:
                 async with self.a2a_client as client:
                     # Store strategy performance metrics
-                    strategy_id = f"momentum_strategy_{self.config.agent_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+                    strategy_id = f"momentum_strategy_{self.config.agent_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
                     await client.store_strategy_performance(
                         agent_id=self.config.agent_id,
                         strategy_id=strategy_id,
@@ -529,7 +548,7 @@ class MomentumAgent:
                         "window_performance": window_stats
                     },
                     "strategy_metrics": performance_metrics,
-                    "adaptation_timestamp": datetime.utcnow().isoformat()
+                    "adaptation_timestamp": datetime.now().isoformat()
                 }
                 
                 await client.store_learning_feedback(
@@ -560,14 +579,14 @@ class MomentumAgent:
                 os.makedirs(data_dir)
             
             # Save detailed feedback with timestamp
-            feedback_save = os.path.join(data_dir, f"momentum_agent_feedback_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json")
+            feedback_save = os.path.join(data_dir, f"momentum_agent_feedback_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
             with open(feedback_save, "w") as f:
                 json.dump(performance_metrics, f, indent=2)
             
             # Save strategy flow if available
             if hasattr(self, 'signal_flow_path') and os.path.exists(self.signal_flow_path):
                 import shutil
-                flow_save = os.path.join(data_dir, f"strategy_flow_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.json")
+                flow_save = os.path.join(data_dir, f"strategy_flow_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
                 shutil.copy(self.signal_flow_path, flow_save)
                 logger.info(f"[BACKUP] Saved strategy flow to {flow_save}")
             
@@ -921,17 +940,16 @@ Focus on intelligent adaptation and RL-style learning. Use the multi-timeframe a
         return (current_price - past_price) / past_price if past_price != 0 else 0.0
 
     def _calculate_volatility(self, prices: List[float]) -> float:
-        """Calculate price volatility."""
+        """Calculate volatility from price series."""
         if len(prices) < 2:
             return 0.0
         
-        returns = [(prices[i] - prices[i-1]) / prices[i-1] for i in range(1, len(prices)) if prices[i-1] != 0]
+        returns = [(prices[i] - prices[i-1]) / prices[i-1] for i in range(1, len(prices))]
         if not returns:
             return 0.0
         
-        mean_return = sum(returns) / len(returns)
-        variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
-        return variance ** 0.5
+        import statistics
+        return statistics.pstdev(returns) if len(returns) > 1 else 0.0
 
     def _read_memory(self, key: str):
         """Read a value from the shared memory unit."""
@@ -1011,7 +1029,7 @@ Focus on intelligent adaptation and RL-style learning. Use the multi-timeframe a
                 logger.info(f"[REQUEST {request_id}] LLM analysis result: {analysis_result}")
 
                 # Build comprehensive output using LLM insights
-                now = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+                now = datetime.now().replace(microsecond=0).isoformat() + "Z"
                 code_hash = hashlib.sha256((str(prices) + analysis_result["signal"]).encode()).hexdigest()
 
                 # Determine market regime
@@ -1226,6 +1244,234 @@ Focus on intelligent adaptation and RL-style learning. Use the multi-timeframe a
                 import traceback
                 logger.error(traceback.format_exc())
                 return {"status": "error", "message": str(e)}
+
+    async def generate_alpha_signals(self, symbol: str = None, symbols: List[str] = None, 
+                                   date: str = None, lookback_period: int = 20, 
+                                   price: Optional[float] = None, memory: dict = None) -> dict:
+        """
+        Generate alpha signals using momentum strategy with LLM analysis.
+        
+        Args:
+            symbol: Single symbol to analyze
+            symbols: List of symbols to analyze
+            date: Date for analysis (default: current date)
+            lookback_period: Lookback period for momentum calculation
+            price: Current price (optional, will fetch if not provided)
+            memory: A2A memory context for enhanced analysis
+            
+        Returns:
+            dict: Alpha signals with confidence and reasoning
+        """
+        try:
+            target_symbols = [symbol] if symbol else (symbols if isinstance(symbols, list) else ["AAPL"])
+            if not target_symbols:
+                return {"status": "error", "message": "Either 'symbol' or 'symbols' parameter is required"}
+            
+            if not date:
+                from datetime import datetime
+                date = datetime.now().isoformat()
+            
+            results = {}
+            
+            for sym in target_symbols:
+                # Get market data from A2A memory if available
+                market_context = {}
+                if memory and self.a2a_client:
+                    try:
+                        market_data = await self.a2a_client.retrieve({
+                            "type": "market_data",
+                            "symbol": sym,
+                            "date": date
+                        })
+                        if market_data and "data" in market_data:
+                            market_context = market_data["data"]
+                    except Exception as e:
+                        logger.warning(f"Failed to retrieve market data from A2A memory: {e}")
+                
+                # Generate signal using LLM if available, otherwise use momentum strategy
+                if self.llm_client and market_context:
+                    signal = await self._generate_llm_signal(sym, market_context, lookback_period)
+                else:
+                    signal = await self._generate_momentum_signal(sym, lookback_period)
+                
+                results[sym] = signal
+            
+            return {
+                "status": "success", 
+                "alpha_signals": {
+                    "signals": results, 
+                    "metadata": {
+                        "generation_timestamp": datetime.now().isoformat(),
+                        "lookback_period": lookback_period,
+                        "total_symbols": len(target_symbols),
+                        "agent_id": self.config.agent_id,
+                        "strategy": "momentum"
+                    }
+                }
+            }
+            
+        except Exception as e:
+            logger.error(f"Error generating alpha signals: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def _generate_llm_signal(self, symbol: str, market_context: dict, lookback_period: int) -> dict:
+        """Generate signal using LLM analysis."""
+        try:
+            # Prepare context for LLM
+            context = f"""
+            Symbol: {symbol}
+            Lookback Period: {lookback_period} days
+            Market Context: {json.dumps(market_context, indent=2)}
+            
+            Analyze the momentum and generate a trading signal (BUY/SELL/HOLD) with confidence level.
+            Consider:
+            1. Price momentum over the lookback period
+            2. Volume trends
+            3. Market volatility
+            4. Technical indicators
+            
+            Return a JSON response with:
+            - signal: BUY/SELL/HOLD
+            - confidence: 0.0-1.0
+            - reasoning: brief explanation
+            - predicted_return: expected return percentage
+            - execution_weight: position size (0.0-1.0)
+            """
+            
+            response = await self.llm_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": context}],
+                temperature=0.1,
+                max_tokens=500
+            )
+            
+            content = response.choices[0].message.content
+            # Try to parse JSON from response
+            try:
+                import re
+                json_match = re.search(r'\{.*\}', content, re.DOTALL)
+                if json_match:
+                    parsed = json.loads(json_match.group())
+                    return {
+                        "signal": parsed.get("signal", "HOLD"),
+                        "confidence": float(parsed.get("confidence", 0.5)),
+                        "reasoning": parsed.get("reasoning", "LLM analysis"),
+                        "predicted_return": float(parsed.get("predicted_return", 0.0)),
+                        "execution_weight": float(parsed.get("execution_weight", 0.5)),
+                        "timestamp": datetime.now().isoformat(),
+                        "symbol": symbol,
+                        "analysis_method": "llm"
+                    }
+            except Exception:
+                pass
+            
+            # Fallback to structured parsing
+            signal = "HOLD"
+            confidence = 0.5
+            if "BUY" in content.upper():
+                signal = "BUY"
+                confidence = 0.7
+            elif "SELL" in content.upper():
+                signal = "SELL"
+                confidence = 0.7
+            
+            return {
+                "signal": signal,
+                "confidence": confidence,
+                "reasoning": content[:200],
+                "predicted_return": 0.0,
+                "execution_weight": 0.5,
+                "timestamp": datetime.now().isoformat(),
+                "symbol": symbol,
+                "analysis_method": "llm"
+            }
+            
+        except Exception as e:
+            logger.error(f"LLM signal generation failed: {e}")
+            return await self._generate_momentum_signal(symbol, lookback_period)
+    
+    async def _generate_momentum_signal(self, symbol: str, lookback_period: int) -> dict:
+        """Generate signal using momentum strategy with LLM enhancement if available."""
+        try:
+            # First try to use LLM if available
+            if self.llm_client:
+                try:
+                    # Generate synthetic price data for LLM analysis
+                    prices = self._generate_synthetic_prices(symbol, lookback_period + 1)
+                    
+                    if len(prices) < lookback_period + 1:
+                        return {"error": "insufficient_data"}
+                    
+                    # Calculate momentum for context
+                    current_price = prices[-1]
+                    past_price = prices[-1 - lookback_period]
+                    momentum = (current_price - past_price) / past_price if past_price != 0 else 0.0
+                    
+                    # Create market context for LLM
+                    market_context = {
+                        "symbol": symbol,
+                        "current_price": current_price,
+                        "past_price": past_price,
+                        "momentum": momentum,
+                        "lookback_period": lookback_period,
+                        "price_history": prices[-10:],  # Last 10 prices
+                        "volatility": self._calculate_volatility(prices[-20:]) if len(prices) >= 20 else 0.0
+                    }
+                    
+                    # Use LLM for signal generation
+                    signal = await self._generate_llm_signal(symbol, market_context, lookback_period)
+                    if signal and "error" not in signal:
+                        signal["analysis_method"] = "llm"
+                        return signal
+                    
+                except Exception as e:
+                    logger.warning(f"LLM signal generation failed, falling back to momentum: {e}")
+            
+            # Fallback to basic momentum strategy
+            prices = self._generate_synthetic_prices(symbol, lookback_period + 1)
+            
+            if len(prices) < lookback_period + 1:
+                return {"error": "insufficient_data"}
+            
+            # Calculate momentum
+            current_price = prices[-1]
+            past_price = prices[-1 - lookback_period]
+            momentum = (current_price - past_price) / past_price if past_price != 0 else 0.0
+            
+            # Generate signal based on momentum
+            if momentum > 0.02:  # 2% positive momentum
+                signal = "BUY"
+                confidence = min(0.95, 0.5 + abs(momentum) * 10)
+            elif momentum < -0.02:  # 2% negative momentum
+                signal = "SELL"
+                confidence = min(0.95, 0.5 + abs(momentum) * 10)
+            else:
+                signal = "HOLD"
+                confidence = 0.5
+            
+            return {
+                "signal": signal,
+                "confidence": round(confidence, 3),
+                "reasoning": f"{lookback_period}-day momentum: {momentum:.3f}",
+                "predicted_return": round(momentum * 100, 3),
+                "execution_weight": min(0.8, abs(momentum) * 5),
+                "timestamp": datetime.now().isoformat(),
+                "symbol": symbol,
+                "analysis_method": "momentum"
+            }
+            
+        except Exception as e:
+            logger.error(f"Momentum signal generation failed: {e}")
+            return {
+                "signal": "HOLD",
+                "confidence": 0.0,
+                "reasoning": f"Error: {str(e)}",
+                "predicted_return": 0.0,
+                "execution_weight": 0.0,
+                "timestamp": datetime.now().isoformat(),
+                "symbol": symbol,
+                "analysis_method": "error"
+            }
 
     def _generate_synthetic_prices(self, symbol: str, window: int) -> List[float]:
         """

@@ -58,7 +58,7 @@ class AlphaMemoryClient:
                 "event_type": event_type,
                 "log_level": log_level,
                 "details": details,
-                "timestamp": datetime.utcnow().isoformat()
+                "timestamp": datetime.now().isoformat()
             }
             
             if session_id:

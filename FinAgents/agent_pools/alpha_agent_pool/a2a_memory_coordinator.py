@@ -131,7 +131,7 @@ class AlphaPoolA2AMemoryCoordinator:
             "agent_id": agent_id,
             "agent_type": agent_type,
             "config": agent_config,
-            "registration_time": datetime.utcnow().isoformat(),
+            "registration_time": datetime.now().isoformat(),
             "status": "active"
         }
         
@@ -160,7 +160,7 @@ class AlphaPoolA2AMemoryCoordinator:
         """
         pool_metrics = {
             "pool_id": self.pool_id,
-            "analysis_timestamp": datetime.utcnow().isoformat(),
+            "analysis_timestamp": datetime.now().isoformat(),
             "total_agents": len(self.registered_agents),
             "active_agents": len([a for a in self.registered_agents.values() if a["status"] == "active"]),
             "agent_performance": {}
@@ -186,7 +186,7 @@ class AlphaPoolA2AMemoryCoordinator:
             try:
                 await self.a2a_client.store_strategy_performance(
                     agent_id=self.pool_id,
-                    strategy_id=f"pool_aggregated_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
+                    strategy_id=f"pool_aggregated_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
                     performance_metrics=pool_metrics
                 )
                 logger.info("[A2A] Stored pool aggregated performance via A2A protocol")
@@ -241,7 +241,7 @@ class AlphaPoolA2AMemoryCoordinator:
             "source_agent": source_agent_id,
             "target_agents": target_agent_ids,
             "learning_pattern": learning_pattern,
-            "transfer_timestamp": datetime.utcnow().isoformat(),
+            "transfer_timestamp": datetime.now().isoformat(),
             "pool_id": self.pool_id
         }
         

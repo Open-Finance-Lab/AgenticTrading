@@ -788,7 +788,7 @@ class AlphaStrategyResearchFramework:
         # Compile comprehensive strategy package
         strategy_package = {
             "package_id": f"strategy_pkg_{uuid.uuid4().hex[:8]}",
-            "submission_timestamp": datetime.utcnow().isoformat(),
+            "submission_timestamp": datetime.now().isoformat(),
             "strategy_configuration": asdict(strategy_config),
             "backtest_results": asdict(backtest_results),
             "alpha_factors": {fid: asdict(factor) for fid, factor in self.discovered_factors.items()},
@@ -864,7 +864,7 @@ class AlphaStrategyResearchFramework:
         report_sections = [
             "# Alpha Strategy Research Report",
             f"## Strategy: {strategy_config.strategy_name}",
-            f"**Generated:** {datetime.utcnow().isoformat()}",
+            f"**Generated:** {datetime.now().isoformat()}",
             f"**Strategy ID:** {strategy_config.strategy_id}",
             "",
             "## Executive Summary",

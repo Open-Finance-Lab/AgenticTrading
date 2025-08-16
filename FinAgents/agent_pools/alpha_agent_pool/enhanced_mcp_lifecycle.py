@@ -13,6 +13,7 @@ from typing import Dict, Any, List, Optional, Set
 from enum import Enum
 from dataclasses import dataclass, asdict
 from contextlib import asynccontextmanager
+import os
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import JSONRPCMessage, RequestId
@@ -102,7 +103,7 @@ class EnhancedMCPLifecycleManager:
         """
         self.mcp_server = mcp_server
         self.pool_id = pool_id
-        self.start_time = datetime.utcnow()
+        self.start_time = datetime.now()
         
         # Agent management
         self.agents: Dict[str, AgentMetrics] = {}
@@ -139,9 +140,10 @@ class EnhancedMCPLifecycleManager:
         # Initialize A2A coordinator if available
         try:
             from .a2a_memory_coordinator import initialize_pool_coordinator, get_pool_coordinator
+            memory_url = os.getenv("ALPHA_POOL_MEMORY_URL", "http://127.0.0.1:8010")
             self.a2a_coordinator = await initialize_pool_coordinator(
                 pool_id=self.pool_id,
-                memory_url="http://127.0.0.1:8010"  # Should be configurable
+                memory_url=memory_url
             )
             logger.info("A2A coordinator initialized successfully")
         except Exception as e:
@@ -196,7 +198,7 @@ class EnhancedMCPLifecycleManager:
                     agent_id=agent_id,
                     state=AgentState.INITIALIZING,
                     health_status=HealthStatus.UNKNOWN,
-                    last_heartbeat=datetime.utcnow(),
+                    last_heartbeat=datetime.now(),
                     total_requests=0,
                     failed_requests=0,
                     average_response_time=0.0,
@@ -442,7 +444,7 @@ class EnhancedMCPLifecycleManager:
             while not self.shutdown_event.is_set():
                 try:
                     # Update heartbeat
-                    self.agents[agent_id].last_heartbeat = datetime.utcnow()
+                    self.agents[agent_id].last_heartbeat = datetime.now()
                     self.agents[agent_id].uptime_seconds = time.time() - start_time
                     
                     # Simulate some work
@@ -484,7 +486,7 @@ class EnhancedMCPLifecycleManager:
     
     async def _perform_health_checks(self):
         """Perform health checks on all agents."""
-        current_time = datetime.utcnow()
+        current_time = datetime.now()
         stale_threshold = timedelta(seconds=60)  # 1 minute
         
         for agent_id, metrics in self.agents.items():
@@ -509,7 +511,7 @@ class EnhancedMCPLifecycleManager:
         running_agents = sum(1 for state in self.agent_states.values() if state == AgentState.RUNNING)
         healthy_agents = sum(1 for metrics in self.agents.values() if metrics.health_status == HealthStatus.HEALTHY)
         total_requests = sum(metrics.total_requests for metrics in self.agents.values())
-        uptime = (datetime.utcnow() - self.start_time).total_seconds()
+        uptime = (datetime.now() - self.start_time).total_seconds()
         
         return PoolMetrics(
             pool_id=self.pool_id,
@@ -525,7 +527,7 @@ class EnhancedMCPLifecycleManager:
     def record_request(self, request_id: str, method: str, duration: float, success: bool):
         """Record a request for performance tracking."""
         request_record = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "request_id": request_id,
             "method": method,
             "duration_ms": duration * 1000,

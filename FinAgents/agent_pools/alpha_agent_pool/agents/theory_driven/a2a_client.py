@@ -140,7 +140,7 @@ class AlphaAgentA2AClient:
             await self._test_connection()
             
             self.is_connected = True
-            self.last_heartbeat = datetime.utcnow()
+            self.last_heartbeat = datetime.now()
             logger.info(f"A2A connection established for alpha agent pool {self.agent_pool_id}")
             return True
             
@@ -170,7 +170,7 @@ class AlphaAgentA2AClient:
                     timeout=5.0
                 )
                 if response.status_code == 200:
-                    self.last_heartbeat = datetime.utcnow()
+                    self.last_heartbeat = datetime.now()
                     return True
                     
             return False
@@ -235,7 +235,7 @@ class AlphaAgentA2AClient:
             "symbol": symbol,
             "reasoning": reasoning,
             "market_context": market_context,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "event_type": "ALPHA_SIGNAL"
         }
         
@@ -287,7 +287,7 @@ class AlphaAgentA2AClient:
             "agent_id": agent_id,
             "strategy_id": strategy_id,
             "performance_metrics": performance_metrics,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "event_type": "STRATEGY_PERFORMANCE"
         }
         
@@ -383,7 +383,7 @@ class AlphaAgentA2AClient:
             "agent_id": agent_id,
             "feedback_type": feedback_type,
             "feedback_data": feedback_data,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "event_type": "LEARNING_FEEDBACK"
         }
         
@@ -497,7 +497,7 @@ class AlphaAgentA2AClient:
             )
             
             if response.status_code == 200:
-                self.last_heartbeat = datetime.utcnow()
+                self.last_heartbeat = datetime.now()
                 return response.json()
             else:
                 raise A2AProtocolError(f"HTTP {response.status_code}: {response.text}")
@@ -527,7 +527,7 @@ class AlphaAgentA2AClient:
         """
         try:
             await self._test_connection()
-            self.last_heartbeat = datetime.utcnow()
+            self.last_heartbeat = datetime.now()
             return True
         except Exception as e:
             logger.warning(f"A2A healthcheck failed: {e}")

@@ -156,7 +156,7 @@ class AlphaAgentCoordinator:
                         "type": "agent_performance",
                         "agent_id": agent_id,
                         "pool_id": self.pool_id,
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now().isoformat(),
                         "data": performance_data,
                         "correlation_id": str(uuid.uuid4())
                     }
@@ -217,7 +217,7 @@ class AlphaAgentCoordinator:
                         "type": "strategy_insights",
                         "strategy_id": strategy_id,
                         "pool_id": self.pool_id,
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now().isoformat(),
                         "data": insights_data,
                         "correlation_id": str(uuid.uuid4())
                     }
@@ -276,7 +276,7 @@ class AlphaAgentCoordinator:
                         "query": query,
                         "pool_id": self.pool_id,
                         "limit": limit,
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now().isoformat(),
                         "correlation_id": str(uuid.uuid4())
                     }
                 }
@@ -332,7 +332,7 @@ class AlphaAgentCoordinator:
                     "message": {
                         "type": "cross_agent_learning",
                         "pool_id": self.pool_id,
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now().isoformat(),
                         "data": learning_data,
                         "correlation_id": str(uuid.uuid4())
                     }
@@ -368,7 +368,7 @@ class AlphaAgentCoordinator:
         health_data = {
             "bridge_status": "healthy" if self.is_connected else "disconnected",
             "preferred_server": self.preferred_server,
-            "last_health_check": datetime.utcnow().isoformat(),
+            "last_health_check": datetime.now().isoformat(),
             "operation_stats": self.operation_stats.copy()
         }
         
@@ -381,7 +381,7 @@ class AlphaAgentCoordinator:
                 health_data["server_responsive"] = False
                 health_data["server_error"] = str(e)
         
-        self.last_health_check = datetime.utcnow()
+        self.last_health_check = datetime.now()
         return health_data
     
     async def get_memory_statistics(self) -> Dict[str, Any]:

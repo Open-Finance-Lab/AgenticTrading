@@ -302,7 +302,7 @@ logging.basicConfig(
 
 def main():
     try:
-        from FinAgents.agent_pools.alpha_agent_pool.core import AlphaAgentPoolMCPServer
+        from FinAgents.agent_pools.alpha_agent_pool.demo_decoupled_system import AlphaAgentPoolMCPServer
         
         print('🔗 Creating Alpha Agent Pool MCP Server instance...')
         

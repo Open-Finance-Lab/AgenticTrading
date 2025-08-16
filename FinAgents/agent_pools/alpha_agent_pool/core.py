@@ -1318,6 +1318,114 @@ class AlphaAgentPoolMCPServer:
                             break
             return []
 
+        # Decoupled orchestrator submission tool (keeps external semantics intact)
+        @self.pool_server.tool(name="submit_task", description="Submit an AlphaTaskDTO to the Orchestrator")
+        def submit_task(taskDTO: dict) -> dict:
+            """Validate DTO and delegate to decoupled orchestrator layer."""
+            try:
+                from .corepkg.domain.models import AlphaTask
+                from .corepkg.services.planner import Planner
+                from .corepkg.services.executor import Executor
+                from .corepkg.services.orchestrator import Orchestrator
+                from .adapters.feature.simple_feature_adapter import SimpleFeatureAdapter
+
+                # Build orchestrator singleton lazily
+                if not hasattr(self, "_decoupled_orchestrator"):
+                    feature_port = SimpleFeatureAdapter()
+
+                    async def _strategy_call(tool_name: str, params: dict):
+                        # Delegate to existing momentum agent via A2A/memory-aware path if needed
+                        # For now, return a unified no-op HOLD signal to preserve interface
+                        return {
+                            "signals": [
+                                {
+                                    "signal_id": f"sig_{params.get('strategy_id','unknown')}",
+                                    "strategy_id": params.get("strategy_id", "unknown"),
+                                    "ts": datetime.now().isoformat(),
+                                    "symbol": params.get("market_ctx", {}).get("symbol", "UNKNOWN"),
+                                    "direction": "HOLD",
+                                    "strength": 0.0,
+                                    "confidence": 0.0,
+                                }
+                            ]
+                        }
+
+                    from .adapters.mcp_client.strategy_adapter import MCPStrategyClientAdapter
+                    strategy_port = MCPStrategyClientAdapter(_strategy_call)
+
+                    planner = Planner()
+                    executor = Executor(feature_port=feature_port, strategy_port=strategy_port, memory_port=None)
+                    self._decoupled_orchestrator = Orchestrator(planner=planner, executor=executor)
+
+                # Validate/construct immutable task
+                task = AlphaTask(
+                    task_id=taskDTO["task_id"],
+                    strategy_id=taskDTO["strategy_id"],
+                    market_ctx=taskDTO.get("market_ctx", {}),
+                    time_window=taskDTO.get("time_window", {}),
+                    features_req=taskDTO.get("features_req", []),
+                    risk_hint=taskDTO.get("risk_hint"),
+                    idempotency_key=taskDTO.get("idempotency_key"),
+                )
+                ack = self._decoupled_orchestrator.submit(task)
+                return {"status": ack.status, "task_id": ack.task_id, "idempotency_key": ack.idempotency_key}
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
+        @self.pool_server.tool(name="get_task_status", description="Get status of a submitted task")
+        def get_task_status(task_id: str) -> dict:
+            """Get the current status of a task using the decoupled orchestrator."""
+            try:
+                if not hasattr(self, "_decoupled_orchestrator"):
+                    return {"status": "error", "message": "Orchestrator not initialized"}
+                
+                status = self._decoupled_orchestrator.get_task_status(task_id)
+                if status:
+                    return {"status": "success", "task_status": status}
+                else:
+                    return {"status": "not_found", "message": f"Task {task_id} not found"}
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
+        @self.pool_server.tool(name="cancel_task", description="Cancel a pending or running task")
+        def cancel_task(task_id: str) -> dict:
+            """Cancel a task using the decoupled orchestrator."""
+            try:
+                if not hasattr(self, "_decoupled_orchestrator"):
+                    return {"status": "error", "message": "Orchestrator not initialized"}
+                
+                cancelled = self._decoupled_orchestrator.cancel_task(task_id)
+                if cancelled:
+                    return {"status": "success", "message": f"Task {task_id} cancelled"}
+                else:
+                    return {"status": "failed", "message": f"Task {task_id} could not be cancelled"}
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
+        @self.pool_server.tool(name="list_active_tasks", description="List all currently active tasks")
+        def list_active_tasks() -> dict:
+            """List active tasks using the decoupled orchestrator."""
+            try:
+                if not hasattr(self, "_decoupled_orchestrator"):
+                    return {"status": "error", "message": "Orchestrator not initialized"}
+                
+                active_tasks = self._decoupled_orchestrator.list_active_tasks()
+                return {"status": "success", "active_tasks": active_tasks}
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
+        @self.pool_server.tool(name="get_orchestrator_metrics", description="Get orchestrator performance metrics")
+        def get_orchestrator_metrics() -> dict:
+            """Get orchestrator metrics using the decoupled system."""
+            try:
+                if not hasattr(self, "_decoupled_orchestrator"):
+                    return {"status": "error", "message": "Orchestrator not initialized"}
+                
+                metrics = self._decoupled_orchestrator.get_task_metrics()
+                return {"status": "success", "metrics": metrics}
+            except Exception as e:
+                return {"status": "error", "message": str(e)}
+
         @self.pool_server.tool(name="generate_alpha_signals", description="Generate alpha signals based on market data with A2A memory coordination")
         async def generate_alpha_signals(symbol: str = None, symbols: list = None, date: str = None, lookback_period: int = 20, price: Optional[float] = None, memory: dict = None) -> dict:
             """
@@ -1358,7 +1466,7 @@ class AlphaAgentPoolMCPServer:
                 
                 results = {}
                 signal_generation_metadata = {
-                    "generation_timestamp": datetime.utcnow().isoformat(),
+                    "generation_timestamp": datetime.now().isoformat(),
                     "lookback_period": lookback_period,
                     "target_date": date,
                     "total_symbols": len(target_symbols)
@@ -1690,7 +1798,7 @@ class AlphaAgentPoolMCPServer:
                     "total_factors_discovered": len(discovered_factors),
                     "significance_threshold": significance_threshold,
                     "avg_ir": sum(f.expected_ir for f in discovered_factors.values()) / len(discovered_factors) if discovered_factors else 0,
-                    "discovery_timestamp": datetime.utcnow().isoformat(),
+                    "discovery_timestamp": datetime.now().isoformat(),
                     "methodology": "Systematic alpha factor discovery with academic validation"
                 }
                 
@@ -1714,7 +1822,7 @@ class AlphaAgentPoolMCPServer:
                 
                 return {
                     "status": "success",
-                    "discovery_timestamp": datetime.utcnow().isoformat(),
+                    "discovery_timestamp": datetime.now().isoformat(),
                     "total_factors_discovered": len(discovered_factors),
                     "significance_threshold_used": significance_threshold,
                     "factors": factor_summary,
@@ -1781,7 +1889,7 @@ class AlphaAgentPoolMCPServer:
                     "max_drawdown_limit": strategy_config.maximum_drawdown_limit,
                     "expected_capacity": strategy_config.expected_capacity,
                     "risk_level": risk_level,
-                    "configuration_timestamp": datetime.utcnow().isoformat()
+                    "configuration_timestamp": datetime.now().isoformat()
                 }
                 
                 await self._store_strategy_insights_via_bridge(
@@ -1794,7 +1902,7 @@ class AlphaAgentPoolMCPServer:
                     "status": "success",
                     "strategy_id": strategy_config.strategy_id,
                     "strategy_name": strategy_config.strategy_name,
-                    "configuration_timestamp": datetime.utcnow().isoformat(),
+                    "configuration_timestamp": datetime.now().isoformat(),
                     "primary_factors": len(strategy_config.primary_alpha_factors),
                     "secondary_factors": len(strategy_config.secondary_alpha_factors),
                     "target_metrics": {
@@ -1878,7 +1986,7 @@ class AlphaAgentPoolMCPServer:
                     "win_rate": backtest_results.win_rate,
                     "backtest_period": f"{start_date} to {end_date}",
                     "validation_status": "PASSED" if backtest_results.sharpe_ratio >= 1.0 else "REVIEW_REQUIRED",
-                    "timestamp": datetime.utcnow().isoformat()
+                    "timestamp": datetime.now().isoformat()
                 }
                 
                 await self._store_performance_via_bridge(
@@ -1999,7 +2107,7 @@ class AlphaAgentPoolMCPServer:
                     "strategy_name": strategy_config.strategy_name,
                     "sharpe_ratio": backtest_results.sharpe_ratio if backtest_results else None,
                     "total_return": backtest_results.total_return if backtest_results else None,
-                    "submission_timestamp": datetime.utcnow().isoformat(),
+                    "submission_timestamp": datetime.now().isoformat(),
                     "validation_status": "complete"
                 }
                 
@@ -2011,7 +2119,7 @@ class AlphaAgentPoolMCPServer:
                 return {
                     "status": "success",
                     "storage_id": storage_id,
-                    "submission_timestamp": datetime.utcnow().isoformat(),
+                    "submission_timestamp": datetime.now().isoformat(),
                     "strategy_name": strategy_config.strategy_name,
                     "package_contents": {
                         "strategy_configuration": "included",
@@ -2090,7 +2198,7 @@ class AlphaAgentPoolMCPServer:
                 )
                 
                 # Save report to file
-                report_filename = f"strategy_report_{strategy_id}_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.md"
+                report_filename = f"strategy_report_{strategy_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
                 report_path = Path(report_filename)
                 
                 with open(report_path, 'w') as f:

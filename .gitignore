@@ -220,3 +220,9 @@ FinAgents/**/*.log
 
 # Jupyter notebook checkpoints
 .ipynb_checkpoints/
+
+FinAgents/agent_pools/alpha_agent_pool/qlib/qlib_data/
+FinAgents/agent_pools/alpha_agent_pool/qlib/enhanced_visualizations/
+FinAgents/agent_pools/alpha_agent_pool/agents/theory_driven/BTC_agent
+FinAgents/agent_pools/alpha_agent_pool/agents/theory_driven/mlruns/
+FinAgents/agent_pools/alpha_agent_pool/agents/20_factors/

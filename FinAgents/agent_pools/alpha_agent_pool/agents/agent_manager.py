@@ -170,7 +170,7 @@ class AlphaAgentManager:
         Returns:
             Comprehensive alpha research results from all agents
         """
-        workflow_id = f"alpha_research_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}"
+        workflow_id = f"alpha_research_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         logger.info(f"🚀 Starting alpha research workflow: {workflow_id}")
         
         research_params = research_parameters or {
@@ -182,7 +182,7 @@ class AlphaAgentManager:
         
         workflow_results = {
             "workflow_id": workflow_id,
-            "start_timestamp": datetime.utcnow().isoformat(),
+            "start_timestamp": datetime.now().isoformat(),
             "research_parameters": research_params,
             "agent_results": {},
             "consolidated_insights": {},
@@ -275,7 +275,7 @@ class AlphaAgentManager:
                 workflow_results["agent_results"]
             )
             
-            workflow_results["completion_timestamp"] = datetime.utcnow().isoformat()
+            workflow_results["completion_timestamp"] = datetime.now().isoformat()
             workflow_results["status"] = "completed"
             
             logger.info(f"🎯 Alpha research workflow completed: {workflow_id}")
@@ -305,7 +305,7 @@ class AlphaAgentManager:
             logger.error(f"❌ Critical error in alpha research workflow: {e}")
             workflow_results["status"] = "failed"
             workflow_results["error"] = str(e)
-            workflow_results["completion_timestamp"] = datetime.utcnow().isoformat()
+            workflow_results["completion_timestamp"] = datetime.now().isoformat()
             return workflow_results
     
     async def _consolidate_alpha_insights(self, agent_results: Dict[str, Any]) -> Dict[str, Any]:
@@ -390,7 +390,7 @@ class AlphaAgentManager:
     async def get_agent_status_report(self) -> Dict[str, Any]:
         """Get comprehensive status report for all managed agents."""
         report = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "total_agents": len(self.agents),
             "active_agents": sum(1 for status in self.agent_status.values() if status == 'active'),
             "agent_details": {},
