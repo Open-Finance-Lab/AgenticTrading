@@ -46,7 +46,7 @@ class AlphaPoolA2AMemoryCoordinator:
     
     def __init__(self, 
                  pool_id: str = "alpha_agent_pool",
-                 memory_agent_url: str = "http://127.0.0.1:8010",
+                 memory_agent_url: str = "http://127.0.0.1:8002",
                  coordination_interval: float = 60.0):
         """
         Initialize the A2A memory coordinator.
@@ -89,8 +89,12 @@ class AlphaPoolA2AMemoryCoordinator:
         # Connect to memory agent via A2A protocol
         if self.a2a_client:
             try:
-                async with self.a2a_client as client:
+                # Use direct connection instead of async context manager
+                connection_success = await self.a2a_client.connect()
+                if connection_success:
                     logger.info("Successfully connected to memory agent via A2A protocol")
+                else:
+                    logger.warning("A2A connection failed, using fallback methods")
             except Exception as e:
                 logger.error(f"Failed to connect to memory agent: {e}")
         
@@ -127,7 +131,7 @@ class AlphaPoolA2AMemoryCoordinator:
             "agent_id": agent_id,
             "agent_type": agent_type,
             "config": agent_config,
-            "registration_time": datetime.utcnow().isoformat(),
+            "registration_time": datetime.now().isoformat(),
             "status": "active"
         }
         
@@ -136,12 +140,11 @@ class AlphaPoolA2AMemoryCoordinator:
         # Store registration in memory via A2A protocol
         if self.a2a_client:
             try:
-                async with self.a2a_client as client:
-                    await client.store_learning_feedback(
-                        agent_id=agent_id,
-                        feedback_type="AGENT_REGISTRATION",
-                        feedback_data=registration_data
-                    )
+                await self.a2a_client.store_learning_feedback(
+                    agent_id=agent_id,
+                    feedback_type="AGENT_REGISTRATION",
+                    feedback_data=registration_data
+                )
                 logger.info(f"[A2A] Registered agent {agent_id} via A2A protocol")
             except Exception as e:
                 logger.warning(f"[A2A] Failed to store agent registration: {e}")
@@ -157,7 +160,7 @@ class AlphaPoolA2AMemoryCoordinator:
         """
         pool_metrics = {
             "pool_id": self.pool_id,
-            "analysis_timestamp": datetime.utcnow().isoformat(),
+            "analysis_timestamp": datetime.now().isoformat(),
             "total_agents": len(self.registered_agents),
             "active_agents": len([a for a in self.registered_agents.values() if a["status"] == "active"]),
             "agent_performance": {}
@@ -181,12 +184,11 @@ class AlphaPoolA2AMemoryCoordinator:
         # Store aggregated metrics via A2A protocol
         if self.a2a_client:
             try:
-                async with self.a2a_client as client:
-                    await client.store_strategy_performance(
-                        agent_id=self.pool_id,
-                        strategy_id=f"pool_aggregated_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}",
-                        performance_metrics=pool_metrics
-                    )
+                await self.a2a_client.store_strategy_performance(
+                    agent_id=self.pool_id,
+                    strategy_id=f"pool_aggregated_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+                    performance_metrics=pool_metrics
+                )
                 logger.info("[A2A] Stored pool aggregated performance via A2A protocol")
             except Exception as e:
                 logger.warning(f"[A2A] Failed to store pool performance: {e}")
@@ -211,15 +213,14 @@ class AlphaPoolA2AMemoryCoordinator:
             return []
         
         try:
-            async with self.a2a_client as client:
-                insights = await client.retrieve_strategy_insights(
-                    search_query=query,
-                    limit=limit
-                )
-                
-                logger.info(f"[A2A] Retrieved {len(insights)} cross-agent insights")
-                return insights
-                
+            insights = await self.a2a_client.retrieve_strategy_insights(
+                search_query=query,
+                limit=limit
+            )
+            
+            logger.info(f"[A2A] Retrieved {len(insights)} cross-agent insights")
+            return insights
+            
         except Exception as e:
             logger.error(f"[A2A] Failed to retrieve cross-agent insights: {e}")
             return []
@@ -240,18 +241,17 @@ class AlphaPoolA2AMemoryCoordinator:
             "source_agent": source_agent_id,
             "target_agents": target_agent_ids,
             "learning_pattern": learning_pattern,
-            "transfer_timestamp": datetime.utcnow().isoformat(),
+            "transfer_timestamp": datetime.now().isoformat(),
             "pool_id": self.pool_id
         }
         
         if self.a2a_client:
             try:
-                async with self.a2a_client as client:
-                    await client.store_learning_feedback(
-                        agent_id=self.pool_id,
-                        feedback_type="CROSS_AGENT_LEARNING_TRANSFER",
-                        feedback_data=transfer_data
-                    )
+                await self.a2a_client.store_learning_feedback(
+                    agent_id=self.pool_id,
+                    feedback_type="CROSS_AGENT_LEARNING_TRANSFER",
+                    feedback_data=transfer_data
+                )
                 logger.info(f"[A2A] Facilitated learning transfer from {source_agent_id} to {len(target_agent_ids)} agents")
             except Exception as e:
                 logger.warning(f"[A2A] Failed to store learning transfer: {e}")
@@ -310,7 +310,7 @@ def get_pool_coordinator() -> Optional[AlphaPoolA2AMemoryCoordinator]:
 
 
 async def initialize_pool_coordinator(pool_id: str = "alpha_agent_pool",
-                                    memory_url: str = "http://127.0.0.1:8010") -> AlphaPoolA2AMemoryCoordinator:
+                                    memory_url: str = "http://127.0.0.1:8002") -> AlphaPoolA2AMemoryCoordinator:
     """
     Initialize the global pool coordinator.
     

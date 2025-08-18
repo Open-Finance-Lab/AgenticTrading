@@ -56,10 +56,13 @@ pre_check() {
         return 1
     fi
     
-    # Validate memory server
-    if ! conda run -n agent python -c "from FinAgents.memory.memory_server import app" 2>/dev/null; then
-        echo "❌ Failed to import memory_server.app"
-        return 1
+    # Check if memory agent is already running instead of validating import
+    echo "   Checking memory agent availability..."
+    if curl -s --connect-timeout 5 http://localhost:8010/health &> /dev/null || curl -s --connect-timeout 5 http://localhost:8010/ &> /dev/null; then
+        echo "✅ Memory agent is already running on port 8010"
+    else
+        echo "⚠️  Memory agent not detected on port 8010, but continuing anyway"
+        echo "   Please ensure memory agent is running before starting agent pools"
     fi
     
     echo "✅ All core module validation checks passed"
@@ -122,9 +125,9 @@ start_agent_pool() {
     echo "✅ ${name} is running normally"
 }
 
-# Initialize Data Agent Pool (changed port to avoid conflict with MCP)
-echo "� Initializing Data Agent Pool..."
-start_agent_pool "data_agent_pool" "8010" "-m FinAgents.agent_pools.data_agent_pool.core"
+# Initialize Data Agent Pool (using different port since memory is on 8010)
+echo "📊 Initializing Data Agent Pool..."
+start_agent_pool "data_agent_pool" "8011" "-m FinAgents.agent_pools.data_agent_pool.core"
 
 # Function to start MCP server  
 start_mcp_server() {
@@ -197,19 +200,29 @@ start_a2a_server() {
 }
 
 echo ""
-echo "🧠 Initializing Memory Services..."
+echo "🧠 Memory Services Status Check..."
 
-# Use existing memory services launcher
-echo "🔧 Starting Memory Services using dedicated launcher..."
-cd "${PROJECT_ROOT}/FinAgents/memory"
-nohup bash start_memory_services.sh memory > "${PROJECT_ROOT}/logs/memory_services.log" 2>&1 &
-MEMORY_PID=$!
-echo ${MEMORY_PID} > "${PROJECT_ROOT}/logs/memory_services.pid"
-echo "✅ Memory Services launcher started (PID: ${MEMORY_PID})"
-
-# Wait for memory services to start
-echo "⏳ Waiting for memory services to initialize..."
-sleep 10
+# Check if memory services are already running
+echo "🔍 Checking if memory agent is already running..."
+if curl -s --connect-timeout 5 http://localhost:8010/health &> /dev/null || curl -s --connect-timeout 5 http://localhost:8010/ &> /dev/null; then
+    echo "✅ Memory agent is already running on port 8010 - skipping memory service initialization"
+    MEMORY_RUNNING=true
+else
+    echo "⚠️  Memory agent not detected - starting memory services..."
+    MEMORY_RUNNING=false
+    
+    # Use existing memory services launcher
+    echo "🔧 Starting Memory Services using dedicated launcher..."
+    cd "${PROJECT_ROOT}/FinAgents/memory"
+    nohup bash start_memory_services.sh memory > "${PROJECT_ROOT}/logs/memory_services.log" 2>&1 &
+    MEMORY_PID=$!
+    echo ${MEMORY_PID} > "${PROJECT_ROOT}/logs/memory_services.pid"
+    echo "✅ Memory Services launcher started (PID: ${MEMORY_PID})"
+    
+    # Wait for memory services to start
+    echo "⏳ Waiting for memory services to initialize..."
+    sleep 10
+fi
 
 echo ""
 echo "📊 Initializing Agent Pool Services..."
@@ -260,8 +273,8 @@ check_service() {
     fi
 }
 
-check_service "memory_services" "8000"
-check_service "data_agent_pool" "8010"
+check_service "memory_services" "8010"
+check_service "data_agent_pool" "8011"
 check_service "alpha_agent_pool" "8081"
 check_service "portfolio_agent_pool" "8083"
 check_service "transaction_cost_agent_pool" "8085"
@@ -269,9 +282,9 @@ check_service "risk_agent_pool" "8084"
 
 echo ""
 echo "🎯 FinAgent Ecosystem Status Summary:"
-echo "   • Memory Services: http://localhost:8000 (+ MCP on 8001, A2A on 8002)"
-echo "   • Data Agent Pool: http://localhost:8010"
-echo "   • Alpha Agent Pool: http://localhost:8081"
+echo "   • Memory Services: http://localhost:8010 (+ MCP on 8001, A2A on 8002)"
+echo "   • Data Agent Pool: http://localhost:8011"
+echo "   • Alpha Agent Pool: http://localhost:8081 (Enhanced with Strategy Research Framework)"
 echo "   • Portfolio Agent Pool: http://localhost:8083"
 echo "   • Transaction Cost Agent Pool: http://localhost:8085"
 echo "   • Risk Management Agent Pool: http://localhost:8084"

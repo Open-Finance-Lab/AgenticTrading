@@ -68,7 +68,7 @@ class AlphaAgentA2AClient:
     
     def __init__(self, 
                  agent_pool_id: str,
-                 memory_agent_base_url: str = "http://127.0.0.1:8010",
+                 memory_agent_base_url: str = "http://127.0.0.1:8002",
                  timeout: float = 30.0,
                  max_retries: int = 3):
         """
@@ -140,15 +140,43 @@ class AlphaAgentA2AClient:
             await self._test_connection()
             
             self.is_connected = True
-            self.last_heartbeat = datetime.utcnow()
+            self.last_heartbeat = datetime.now()
             logger.info(f"A2A connection established for alpha agent pool {self.agent_pool_id}")
             return True
             
         except Exception as e:
-            logger.error(f"Failed to establish A2A connection: {e}")
+            logger.error(f"Error connecting to memory agent: {e}")
             self.is_connected = False
+            return False
+            
+    async def healthcheck(self) -> bool:
+        """
+        Perform health check on A2A connection to memory agent.
+        
+        This method implements comprehensive health validation following
+        academic standards for distributed system monitoring and validation.
+        
+        Returns:
+            bool: True if connection is healthy, False otherwise
+        """
+        try:
+            if not self.is_connected:
+                return False
+                
+            # Test basic connectivity
             if self.http_client:
-                await self.http_client.aclose()
+                response = await self.http_client.get(
+                    f"{self.memory_agent_base_url}/health",
+                    timeout=5.0
+                )
+                if response.status_code == 200:
+                    self.last_heartbeat = datetime.now()
+                    return True
+                    
+            return False
+            
+        except Exception as e:
+            logger.warning(f"A2A health check failed: {e}")
             return False
     
     async def disconnect(self):
@@ -207,7 +235,7 @@ class AlphaAgentA2AClient:
             "symbol": symbol,
             "reasoning": reasoning,
             "market_context": market_context,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "event_type": "ALPHA_SIGNAL"
         }
         
@@ -259,7 +287,7 @@ class AlphaAgentA2AClient:
             "agent_id": agent_id,
             "strategy_id": strategy_id,
             "performance_metrics": performance_metrics,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "event_type": "STRATEGY_PERFORMANCE"
         }
         
@@ -355,7 +383,7 @@ class AlphaAgentA2AClient:
             "agent_id": agent_id,
             "feedback_type": feedback_type,
             "feedback_data": feedback_data,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now().isoformat(),
             "event_type": "LEARNING_FEEDBACK"
         }
         
@@ -469,7 +497,7 @@ class AlphaAgentA2AClient:
             )
             
             if response.status_code == 200:
-                self.last_heartbeat = datetime.utcnow()
+                self.last_heartbeat = datetime.now()
                 return response.json()
             else:
                 raise A2AProtocolError(f"HTTP {response.status_code}: {response.text}")
@@ -499,7 +527,7 @@ class AlphaAgentA2AClient:
         """
         try:
             await self._test_connection()
-            self.last_heartbeat = datetime.utcnow()
+            self.last_heartbeat = datetime.now()
             return True
         except Exception as e:
             logger.warning(f"A2A healthcheck failed: {e}")
@@ -521,6 +549,14 @@ async def create_alpha_pool_a2a_client(agent_pool_id: str,
         Configured AlphaAgentA2AClient instance
     """
     client = AlphaAgentA2AClient(agent_pool_id=agent_pool_id, memory_agent_base_url=memory_url)
+    
     # Ensure HTTP client is initialized for immediate use
-    await client._init_http_client()
+    try:
+        await client._init_http_client()
+    except Exception as e:
+        logger.error(f"Failed to initialize HTTP client for A2A client: {e}")
+        raise
+
+    # Log the initialization details
+    logger.info(f"A2A client created for pool {agent_pool_id} with memory URL {memory_url}")
     return client

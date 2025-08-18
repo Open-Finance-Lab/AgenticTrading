@@ -1,0 +1,145 @@
+# Alpha Pool Gateway Configuration
+# Configuration file for the Alpha Agent Pool Gateway
+
+gateway:
+  # Network configuration
+  host: "0.0.0.0"
+  port: 8082
+  max_connections: 100
+  request_timeout: 30
+  
+  # Gateway behavior
+  enable_internal_pool: true
+  auto_reconnect: true
+  reconnect_interval: 5
+  max_reconnect_attempts: 3
+  
+  # Performance settings
+  connection_pool_size: 10
+  task_timeout: 60
+  batch_size: 100
+
+# Internal agent endpoints
+internal_agents:
+  momentum_agent:
+    endpoint: "http://127.0.0.1:5051/mcp"
+    description: "Momentum-based trading strategy agent"
+    capabilities:
+      - "generate_momentum_signal"
+      - "calculate_momentum_indicators"
+      - "backtest_momentum_strategy"
+    required: true
+    
+  autonomous_agent:
+    endpoint: "http://127.0.0.1:5052/mcp"
+    description: "Autonomous trading decision agent"
+    capabilities:
+      - "autonomous_trading_decision"
+      - "risk_assessment"
+      - "portfolio_optimization"
+    required: false
+    
+  alpha_pool_server:
+    endpoint: "http://127.0.0.1:8081/mcp"
+    description: "Core alpha agent pool server"
+    capabilities:
+      - "generate_alpha_signals"
+      - "coordinate_agents"
+      - "manage_strategies"
+    required: true
+
+# Memory and coordination settings
+memory:
+  # A2A memory coordination
+  enable_a2a_coordinator: true
+  coordinator_pool_id: "alpha_pool_gateway"
+  memory_sync_interval: 300  # seconds
+  
+  # Local memory unit
+  memory_file: "gateway_memory.json"
+  memory_backup_interval: 3600  # seconds
+  max_memory_size: 1000000  # bytes
+  
+  # External memory integration
+  external_memory_server: "http://127.0.0.1:8000/mcp"
+  enable_external_memory: false
+
+# Strategy orchestration
+orchestration:
+  # Default task settings
+  default_task_timeout: 120  # seconds
+  max_concurrent_tasks: 10
+  task_retry_attempts: 2
+  
+  # Strategy generation settings
+  default_lookback_period: 20
+  default_timeframe: "1d"
+  supported_strategy_types:
+    - "momentum"
+    - "mean_reversion"
+    - "breakout"
+    - "pairs_trading"
+  
+  # Signal aggregation settings
+  signal_aggregation_method: "weighted_average"
+  confidence_threshold: 0.6
+  minimum_agents_for_consensus: 2
+
+# Monitoring and health checks
+monitoring:
+  # Health check settings
+  health_check_interval: 30  # seconds
+  agent_ping_timeout: 5  # seconds
+  max_error_count: 5
+  
+  # Performance metrics
+  enable_metrics_collection: true
+  metrics_retention_hours: 24
+  performance_log_interval: 300  # seconds
+  
+  # Alerting (future implementation)
+  enable_alerting: false
+  alert_thresholds:
+    error_rate: 0.1
+    response_time: 5.0
+    agent_downtime: 300
+
+# Logging configuration
+logging:
+  level: "INFO"  # DEBUG, INFO, WARN, ERROR
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # File logging
+  enable_file_logging: true
+  log_file: "logs/gateway.log"
+  max_log_size: 10485760  # 10MB
+  backup_count: 5
+  
+  # Structured logging
+  enable_structured_logging: true
+  log_json_format: false
+
+# Security settings (future implementation)
+security:
+  enable_authentication: false
+  enable_authorization: false
+  api_key_header: "X-API-Key"
+  allowed_origins: ["*"]
+  rate_limiting:
+    requests_per_minute: 100
+    burst_size: 10
+
+# Development and debugging
+development:
+  debug_mode: false
+  enable_profiling: false
+  mock_internal_agents: false
+  simulation_mode: false
+
+# Feature flags
+features:
+  enable_advanced_orchestration: true
+  enable_multi_symbol_processing: true
+  enable_real_time_streaming: false
+  enable_backtesting_coordination: true
+  enable_risk_management: true
