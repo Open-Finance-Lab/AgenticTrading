@@ -59,17 +59,17 @@ class RealETFDataLoader:
                         returns = df['Close'].pct_change().dropna()
                         etf_data[symbol] = returns
                         
-                        print(f"✅ Loaded real {symbol} data: {len(returns)} return observations")
+                        print(f" Loaded real {symbol} data: {len(returns)} return observations")
                     else:
-                        print(f"⚠️  Empty data for {symbol}")
+                        print(f" Empty data for {symbol}")
                         
                 else:
-                    print(f"❌ File not found for {symbol}: {file_path}")
+                    print(f" File not found for {symbol}: {file_path}")
                     # Fallback to synthetic data for missing symbols
                     etf_data[symbol] = self._generate_fallback_data(symbol)
                     
             except Exception as e:
-                print(f"❌ Error loading {symbol}: {e}")
+                print(f" Error loading {symbol}: {e}")
                 # Fallback to synthetic data on error
                 etf_data[symbol] = self._generate_fallback_data(symbol)
         
@@ -109,7 +109,7 @@ class RealETFDataLoader:
         
         # Ensure we have Close prices
         if 'Close' not in df.columns:
-            print(f"⚠️  No Close column found for {symbol}, columns: {df.columns.tolist()}")
+            print(f" No Close column found for {symbol}, columns: {df.columns.tolist()}")
             return pd.DataFrame()
         
         return df.sort_index()
@@ -117,7 +117,7 @@ class RealETFDataLoader:
     def _generate_fallback_data(self, symbol: str) -> pd.Series:
         """Generate synthetic fallback data for missing symbols"""
         
-        print(f"🔄 Generating synthetic fallback data for {symbol}")
+        print(f" Generating synthetic fallback data for {symbol}")
         
         # Create date range
         dates = pd.date_range('2024-01-01', '2024-12-31', freq='D')
@@ -167,7 +167,7 @@ def create_enhanced_output_processor_with_real_data(output_format):
                 self.output_format.etf_data_source == "qlib_data" and
                 hasattr(self.output_format, 'etf_data_directory')):
                 
-                print("📊 Loading REAL ETF data from qlib_data directory...")
+                print(" Loading REAL ETF data from qlib_data directory...")
                 
                 # Determine data type based on ETF symbols
                 bitcoin_etfs = ["IBIT", "FBTC", "GBTC"]
@@ -186,13 +186,13 @@ def create_enhanced_output_processor_with_real_data(output_format):
                 real_etf_data = self.real_data_loader.load_real_etf_data()
                 
                 if real_etf_data:
-                    print(f"✅ Successfully loaded real data for {len(real_etf_data)} ETFs")
+                    print(f" Successfully loaded real data for {len(real_etf_data)} ETFs")
                     return real_etf_data
                 else:
-                    print("⚠️  No real ETF data loaded, falling back to synthetic data")
+                    print(" No real ETF data loaded, falling back to synthetic data")
             
             # Fallback to original synthetic data loading
-            print("🔄 Using synthetic ETF data (fallback)")
+            print(" Using synthetic ETF data (fallback)")
             return super().load_etf_data()
     
     return EnhancedOutputProcessor(output_format)
@@ -226,9 +226,9 @@ def patch_framework_with_real_data_support():
     complete_framework.BacktestingFramework.__init__ = enhanced_init
     complete_framework.BacktestingFramework.run_complete_backtest = enhanced_run_complete_backtest
     
-    print("🔧 Framework patched with real ETF data support!")
+    print(" Framework patched with real ETF data support!")
 
 if __name__ == "__main__":
     # Apply the patch when this module is imported
     patch_framework_with_real_data_support()
-    print("✅ Real data support module loaded!")
+    print(" Real data support module loaded!")

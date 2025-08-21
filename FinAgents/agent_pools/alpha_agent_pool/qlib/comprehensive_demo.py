@@ -784,11 +784,11 @@ alpha_models = [
 factor_adapters = [FactorInputAdapter(factor) for factor in alpha_factors]
 model_adapters = [ModelInputAdapter(model) for model in alpha_models]
 
-print("🚀 Starting Comprehensive Alpha Factor and Model Evaluation...")
-print(f"📊 Instruments: {config.instruments}")
-print(f"📅 Date range: 2022-08-01 to 2023-12-31")
-print(f"📈 Alpha Factors to evaluate: {len(factor_adapters)}")
-print(f"🤖 ML Models to evaluate: {len(model_adapters)}")
+print(" Starting Comprehensive Alpha Factor and Model Evaluation...")
+print(f" Instruments: {config.instruments}")
+print(f" Date range: 2022-08-01 to 2023-12-31")
+print(f" Alpha Factors to evaluate: {len(factor_adapters)}")
+print(f" ML Models to evaluate: {len(model_adapters)}")
 print("="*80)
 
 # Prepare data once for all evaluations
@@ -798,14 +798,14 @@ data = backtester.prepare_data(
     end_date="2023-12-31"
 )
 
-print(f"✅ Data loaded: {data.shape[0]} observations across {len(config.instruments)} instruments")
+print(f" Data loaded: {data.shape[0]} observations across {len(config.instruments)} instruments")
 
 # Alpha Factor Evaluation
 print("\n" + "="*40 + " ALPHA FACTOR EVALUATION " + "="*40)
 
 factor_results = []
 for i, factor_adapter in enumerate(factor_adapters):
-    print(f"\n🔍 Evaluating Factor {i+1}/{len(factor_adapters)}: {factor_adapter.factor_name}")
+    print(f"\n Evaluating Factor {i+1}/{len(factor_adapters)}: {factor_adapter.factor_name}")
     
     try:
         result = factor_evaluator.evaluate_factor(
@@ -839,7 +839,7 @@ for i, factor_adapter in enumerate(factor_adapters):
                     print(f"- Rank IC: {rank_ic:.4f}")
     
     except Exception as e:
-        print(f"❌ Error evaluating factor {factor_adapter.factor_name}: {e}")
+        print(f" Error evaluating factor {factor_adapter.factor_name}: {e}")
         factor_results.append(None)
 
 # Model Evaluation
@@ -847,7 +847,7 @@ print("\n" + "="*40 + " ML MODEL EVALUATION " + "="*40)
 
 model_results = []
 for i, model_adapter in enumerate(model_adapters):
-    print(f"\n🤖 Evaluating Model {i+1}/{len(model_adapters)}: {model_adapter.model_name}")
+    print(f"\n Evaluating Model {i+1}/{len(model_adapters)}: {model_adapter.model_name}")
     
     try:
         result = model_evaluator.evaluate_model(
@@ -877,12 +877,12 @@ for i, model_adapter in enumerate(model_adapters):
                 print(f"- Direction Accuracy: N/A")
     
     except Exception as e:
-        print(f"❌ Error evaluating model {model_adapter.model_name}: {e}")
+        print(f" Error evaluating model {model_adapter.model_name}: {e}")
         model_results.append(None)
 
 # Comprehensive Summary
 print("\n" + "="*80)
-print("📊 COMPREHENSIVE EVALUATION SUMMARY")
+print(" COMPREHENSIVE EVALUATION SUMMARY")
 print("="*80)
 
 # Factor summary
@@ -913,13 +913,13 @@ for i, result in enumerate(model_results):
         else:
             rejected_models.append((model_name, result))
 
-print(f"\n📈 ALPHA FACTOR RESULTS:")
+print(f"\n ALPHA FACTOR RESULTS:")
 print(f"- Total factors evaluated: {len(alpha_factors)}")
 print(f"- Accepted factors: {len(accepted_factors)}")
 print(f"- Rejected factors: {len(rejected_factors)}")
 
 if accepted_factors:
-    print(f"\n✅ ACCEPTED ALPHA FACTORS:")
+    print(f"\n ACCEPTED ALPHA FACTORS:")
     for factor_name, result in accepted_factors:
         metrics = result.get('metrics')
         if metrics:
@@ -927,13 +927,13 @@ if accepted_factors:
             print(f"    - Annual Return: {getattr(metrics, 'annual_return', 0):.2%}")
             print(f"    - Sharpe Ratio: {getattr(metrics, 'sharpe_ratio', 0):.2f}")
 
-print(f"\n🤖 ML MODEL RESULTS:")
+print(f"\n ML MODEL RESULTS:")
 print(f"- Total models evaluated: {len(alpha_models)}")
 print(f"- Accepted models: {len(accepted_models)}")
 print(f"- Rejected models: {len(rejected_models)}")
 
 if accepted_models:
-    print(f"\n✅ ACCEPTED ML MODELS:")
+    print(f"\n ACCEPTED ML MODELS:")
     for model_name, result in accepted_models:
         metrics = result.get('metrics')
         if metrics:
@@ -947,7 +947,7 @@ if accepted_models:
                 print(f"    - Accuracy: N/A")
 
 # Comparison table
-print(f"\n📊 PERFORMANCE COMPARISON TABLE:")
+print(f"\n PERFORMANCE COMPARISON TABLE:")
 print(f"{'Type':<8} {'Name':<20} {'Return':<8} {'Sharpe':<8} {'Status':<10}")
 print("-" * 60)
 
@@ -959,7 +959,7 @@ for i, result in enumerate(factor_results):
         if metrics:
             ret = getattr(metrics, 'annual_return', 0)
             sharpe = getattr(metrics, 'sharpe_ratio', 0)
-            status = "✅ PASS" if result.get('is_accepted', False) else "❌ FAIL"
+            status = " PASS" if result.get('is_accepted', False) else " FAIL"
             print(f"{'Factor':<8} {factor_name:<20} {ret:<8.2%} {sharpe:<8.2f} {status:<10}")
 
 # Models
@@ -970,14 +970,14 @@ for i, result in enumerate(model_results):
         if metrics:
             ret = getattr(metrics, 'annual_return', 0)
             sharpe = getattr(metrics, 'sharpe_ratio', 0)
-            status = "✅ PASS" if result.get('is_accepted', False) else "❌ FAIL"
+            status = " PASS" if result.get('is_accepted', False) else " FAIL"
             print(f"{'Model':<8} {model_name:<20} {ret:<8.2%} {sharpe:<8.2f} {status:<10}")
 
 # Final recommendations
-print(f"\n🎯 STRATEGIC RECOMMENDATIONS:")
+print(f"\n STRATEGIC RECOMMENDATIONS:")
 
 if accepted_factors or accepted_models:
-    print("✅ Successful Strategies Found!")
+    print(" Successful Strategies Found!")
     
     if accepted_factors:
         best_factor = max(accepted_factors, key=lambda x: getattr(x[1].get('metrics'), 'sharpe_ratio', 0))
@@ -989,15 +989,15 @@ if accepted_factors or accepted_models:
         print(f"   🏆 Best ML Model: {best_model[0]}")
         print(f"       Sharpe Ratio: {getattr(best_model[1].get('metrics'), 'sharpe_ratio', 0):.2f}")
     
-    print("\n📋 Next Steps:")
+    print("\n Next Steps:")
     print("   1. Deploy best-performing strategies in paper trading")
     print("   2. Implement risk management and position sizing")
     print("   3. Monitor performance in live market conditions")
     print("   4. Consider ensemble approaches combining top factors/models")
 
 else:
-    print("❌ No strategies passed acceptance criteria.")
-    print("\n📋 Improvement Suggestions:")
+    print(" No strategies passed acceptance criteria.")
+    print("\n Improvement Suggestions:")
     print("   1. Relax acceptance criteria for initial testing")
     print("   2. Expand feature engineering and factor research")
     print("   3. Implement more sophisticated model architectures")
@@ -1005,5 +1005,5 @@ else:
     print("   5. Optimize hyperparameters using systematic search")
 
 print("\n" + "="*80)
-print("🎉 Comprehensive Alpha Factor and Model Evaluation Complete!")
+print("- Comprehensive Alpha Factor and Model Evaluation Complete!")
 print("="*80)

@@ -102,11 +102,17 @@ class ModelInput:
     # Model parameters
     hyperparameters: Dict[str, Any]
     
+    # Target variable configuration
+    target_type: str = "market_neutral"  # "absolute_return", "excess_return", "market_neutral"
+    
     # Training configuration
     training_method: str = "rolling"  # "rolling", "expanding", "fixed"
     training_period: int = 252  # Days for training
     validation_period: int = 63  # Days for validation
     rebalance_frequency: str = "monthly"  # "daily", "weekly", "monthly", "quarterly"
+    # Retraining / walk-forward settings
+    retrain_frequency: Optional[str] = None  # e.g. None, 'hourly', 'daily', 'weekly'
+    retrain_step_periods: Optional[int] = None  # explicit step in rebalance-period units (overrides retrain_frequency)
     
     # Feature engineering
     feature_engineering: Optional[Dict[str, Any]] = None
@@ -155,6 +161,28 @@ class StrategyInput:
     
     # Signal generation
     signal_threshold: float = 0.0  # Threshold for signal generation (default: 0.0)
+    
+    # Single stock trading parameters (new additions for enhanced position management)
+    min_holding_days: int = 3  # Minimum days to hold a position before selling
+    min_holding_hours: float = 0.25  # Minimum hours to hold a position for hourly rebalancing (15 minutes default)
+    min_signal_strength: float = 0.01  # Minimum prediction strength required to enter position
+    position_sizing_method: str = "dynamic"  # "fixed", "dynamic", "volatility_adjusted", "signal_scaled"
+    max_consecutive_losses: int = 3  # Maximum consecutive losing trades before strategy pause
+    profit_taking_threshold: float = 0.1  # Take profit at 10% gain (if enabled)
+    stop_loss_threshold: float = -0.05  # Stop loss at 5% loss (if enabled)
+    
+    # Continuous position sizing parameters
+    use_continuous_positions: bool = True  # Enable continuous position sizing instead of binary 0/1
+    max_position_weight: float = 1.0  # Maximum position weight (100% for single stock)
+    min_position_weight: float = 0.0  # Minimum position weight (0% = no position)
+    signal_scaling_factor: float = 1.0  # Factor to scale signal strength to position size
+    position_decay_rate: float = 0.95  # Daily decay rate for position sizing (0.95 = 5% daily decay)
+    signal_smoothing_window: int = 3  # Window for signal smoothing to reduce noise
+    
+    # Long-short strategy parameters
+    max_leverage: float = 2.0  # Maximum gross leverage (e.g., 2.0 = 100% long + 100% short)
+    target_leverage: float = 1.5  # Target gross leverage for optimal risk-return
+    long_short_balance: float = 0.5  # Long bias (0.5 = neutral, >0.5 = long bias, <0.5 = short bias)
     
     # Transaction costs
     transaction_cost: float = 0.001  # 0.1% per trade
@@ -346,12 +374,19 @@ EXAMPLE_MODEL_INPUT = ModelInput(
 )
 
 EXAMPLE_STRATEGY_INPUT = StrategyInput(
-    strategy_name="long_only_equity",
+    strategy_name="enhanced_long_only_single_stock",
     strategy_type="long_only",
     position_method="factor_weight",
     max_position_size=0.05,
-    num_positions=50,
-    rebalance_frequency="monthly",
+    num_positions=1,  # Single stock strategy
+    rebalance_frequency="weekly",  # More frequent rebalancing for single stock
+    signal_threshold=0.01,  # Require 1% signal strength
+    min_holding_days=5,  # Hold positions for at least 5 days
+    min_signal_strength=0.015,  # Require 1.5% minimum signal strength to enter
+    position_sizing_method="fixed",  # Fixed position sizing
+    max_consecutive_losses=3,  # Stop after 3 consecutive losses
+    profit_taking_threshold=0.08,  # Take profit at 8% gain
+    stop_loss_threshold=-0.04,  # Stop loss at 4% loss
     transaction_cost=0.001,
     benchmark_symbols=["SPY", "QQQ", "IWM"]
 )

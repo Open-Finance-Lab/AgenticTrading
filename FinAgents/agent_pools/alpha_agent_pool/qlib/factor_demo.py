@@ -430,7 +430,7 @@ print(f"- Accepted factors: {len(accepted_factors)}")
 print(f"- Rejected factors: {len(rejected_factors)}")
 
 if accepted_factors:
-    print(f"\n✅ ACCEPTED FACTORS:")
+    print(f"\n ACCEPTED FACTORS:")
     for factor_name, result in accepted_factors:
         metrics = result.get('metrics')
         if metrics:
@@ -440,7 +440,7 @@ if accepted_factors:
             print(f"    - Annual Return: {getattr(metrics, 'annual_return', 0):.2%}")
 
 if rejected_factors:
-    print(f"\n❌ REJECTED FACTORS:")
+    print(f"\n REJECTED FACTORS:")
     for factor_name, result in rejected_factors:
         metrics = result.get('metrics')
         if metrics:
@@ -451,7 +451,7 @@ if rejected_factors:
 
 # 7. Factor comparison analysis
 if len(all_results) > 1:
-    print(f"\n📊 FACTOR COMPARISON:")
+    print(f"\n FACTOR COMPARISON:")
     print(f"{'Factor Name':<15} {'IC':<8} {'Sharpe':<8} {'Return':<8} {'Status':<10}")
     print("-" * 55)
     
@@ -463,10 +463,10 @@ if len(all_results) > 1:
                 ic = getattr(metrics, 'ic_mean', 0)
                 sharpe = getattr(metrics, 'sharpe_ratio', 0)
                 ret = getattr(metrics, 'annual_return', 0)
-                status = "✅ PASS" if result.get('is_accepted', False) else "❌ FAIL"
+                status = " PASS" if result.get('is_accepted', False) else " FAIL"
                 print(f"{factor_name:<15} {ic:<8.4f} {sharpe:<8.2f} {ret:<8.2%} {status:<10}")
 
-print(f"\n🎯 RECOMMENDATION:")
+print(f"\n RECOMMENDATION:")
 if accepted_factors:
     best_factor = max(accepted_factors, key=lambda x: getattr(x[1].get('metrics'), 'ic_mean', 0))
     print(f"Best performing factor: {best_factor[0]}")

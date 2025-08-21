@@ -200,7 +200,7 @@ def main():
         
         # Test data access
         if test_data_access():
-            print("✅ Data setup complete - ready for backtesting!")
+            print(" Data setup complete - ready for backtesting!")
             return True
     
     print("\nReal data download failed. Creating sample data for testing...")
@@ -208,10 +208,10 @@ def main():
     # Create sample data as fallback
     if setup_qlib_with_sample_data():
         if test_data_access():
-            print("✅ Sample data setup complete - ready for testing!")
+            print(" Sample data setup complete - ready for testing!")
             return True
     
-    print("\n⚠️  Data setup failed. You can still test the pipeline logic with synthetic data.")
+    print("\n Data setup failed. You can still test the pipeline logic with synthetic data.")
     print("Check the test_basic.py script for pipeline testing without external data.")
     
     return False
