@@ -48,11 +48,48 @@ class PerformanceMetrics:
     beta: float
     alpha: float
     
+    # Additional trading metrics
+    total_trades: int
+    turnover_rate: float
+    hit_ratio: float  # Percentage of profitable trades
+    
+    # Risk-adjusted metrics
+    treynor_ratio: float
+    tracking_error: float
+    downside_deviation: float
+    
+    # Factor-specific metrics
+    factor_turnover: float
+    max_position_weight: float
+    avg_num_positions: float
+    
+    # Tail risk metrics
+    skewness: float
+    kurtosis: float
+    max_consecutive_losses: int
+    
     # Comparison metrics (vs benchmark)
     excess_return: float
-    tracking_error: float
     up_capture: float
     down_capture: float
+    
+    # Additional hourly-specific metrics for comprehensive analysis
+    turnover_hourly: float = 0.0
+    turnover_annual: float = 0.0
+    cost_ratio: float = 0.0
+    gross_return: float = 0.0
+    net_return: float = 0.0
+    r_squared: float = 0.0
+    hit_ratio_hourly: float = 0.0
+    hit_ratio_daily: float = 0.0
+    concentration_hhi: float = 0.0  # Herfindahl-Hirschman Index for position concentration
+    top3_weight_ratio: float = 0.0
+    top5_weight_ratio: float = 0.0
+    recovery_time_days: float = 0.0
+    # Inferred temporal metadata for annualization
+    periods_per_year: int = 252
+    n_periods: int = 0
+    avg_per_day: float = 0.0
 
 
 class OutputProcessor:
@@ -73,7 +110,8 @@ class OutputProcessor:
                                strategy_positions: pd.DataFrame,
                                factor_values: Optional[pd.DataFrame] = None,
                                model_predictions: Optional[pd.Series] = None,
-                               benchmark_data: Optional[Dict[str, pd.Series]] = None) -> Dict[str, Any]:
+                               benchmark_data: Optional[Dict[str, pd.Series]] = None,
+                               test_start_date: Optional[pd.Timestamp] = None) -> Dict[str, Any]:
         """
         Main method to process all backtest results
         
@@ -93,6 +131,43 @@ class OutputProcessor:
         # Calculate performance metrics
         strategy_metrics = self.calculate_performance_metrics(strategy_returns)
         results['strategy_metrics'] = strategy_metrics
+        
+        # Robustly clean factor_values: parse date, preserve symbol, coerce to numeric, drop all-NaN cols
+        if factor_values is not None:
+            try:
+                fv = factor_values.copy()
+                # Normalize column names
+                fv.columns = [c.strip() if isinstance(c, str) else c for c in fv.columns]
+
+                # If there's a date column, ensure it's datetime and set as index
+                if 'date' in fv.columns:
+                    fv['date'] = pd.to_datetime(fv['date'], errors='coerce')
+                    fv = fv.set_index('date')
+
+                # Preserve symbol column if present
+                symbol_col = None
+                if 'symbol' in fv.columns:
+                    symbol_col = fv['symbol'].copy()
+                    fv = fv.drop(columns=['symbol'])
+
+                # Replace empty strings with NaN, then coerce all remaining cols to numeric
+                fv = fv.replace(['', ' '], np.nan)
+                for col in fv.columns:
+                    fv[col] = pd.to_numeric(fv[col], errors='coerce')
+
+                # Drop columns that are entirely NaN
+                fv = fv.loc[:, fv.notna().any(axis=0)]
+
+                # If nothing numeric remains, drop factor_values to avoid chart errors
+                if fv.shape[1] == 0:
+                    factor_values = None
+                else:
+                    # restore symbol column if it existed
+                    if symbol_col is not None:
+                        fv['symbol'] = symbol_col
+                    factor_values = fv
+            except Exception:
+                factor_values = None
         
         # Load and calculate benchmark metrics
         if benchmark_data is None:
@@ -124,7 +199,7 @@ class OutputProcessor:
             
         # Generate charts
         chart_paths = self.generate_all_charts(strategy_returns, benchmark_data, 
-                                             strategy_positions, factor_values)
+                            strategy_positions, factor_values, test_start_date)
         results['chart_paths'] = chart_paths
         
         # Save raw data
@@ -148,10 +223,29 @@ class OutputProcessor:
                 # Take the first column as Series
                 returns = returns.iloc[:, 0]
         
+        # Infer periods per year from timestamp index when possible (handles hourly/daily)
+        periods_per_year = 252
+        try:
+            if isinstance(returns.index, pd.DatetimeIndex) and len(returns) > 0:
+                counts = pd.Series(1, index=returns.index).groupby(returns.index.date).sum()
+                avg_per_day = counts.mean()
+                inferred = int(round(avg_per_day * 252))
+                if inferred > 0:
+                    periods_per_year = inferred
+        except Exception:
+            periods_per_year = 252
+
         # Basic return metrics
-        total_return = (1 + returns).cumprod().iloc[-1] - 1
-        annual_return = (1 + returns.mean()) ** 252 - 1
-        volatility = returns.std() * np.sqrt(252)
+        clean_returns = returns.dropna()
+        total_return = (1 + clean_returns).cumprod().iloc[-1] - 1
+        # Geometric annualization based on cumulative return and observed number of periods
+        n_periods = len(clean_returns)
+        if n_periods > 0 and total_return > -1:
+            annual_return = (1 + total_return) ** (periods_per_year / n_periods) - 1
+        else:
+            # Fallback to arithmetic mean annualization
+            annual_return = (1 + returns.mean()) ** periods_per_year - 1
+        volatility = clean_returns.std() * np.sqrt(periods_per_year)
         
         # Ensure metrics are scalars for comparison
         if hasattr(total_return, 'item'):
@@ -187,9 +281,17 @@ class OutputProcessor:
         positive_returns = returns[returns > 0]
         negative_returns = returns[returns < 0]
         
-        win_rate = len(positive_returns) / len(returns) if len(returns) > 0 else 0
         average_win = positive_returns.mean() if len(positive_returns) > 0 else 0
         average_loss = negative_returns.mean() if len(negative_returns) > 0 else 0
+
+        # Compute win rate over actual trading periods (ignore zero returns which often indicate no position)
+        nonzero_returns = returns[returns != 0]
+        if len(nonzero_returns) > 0:
+            win_rate = (nonzero_returns > 0).mean()
+            total_trades = len(nonzero_returns)
+        else:
+            win_rate = len(positive_returns) / len(returns) if len(returns) > 0 else 0
+            total_trades = len(returns)
         
         # Ensure trading metrics are scalars
         if hasattr(average_win, 'item'):
@@ -200,11 +302,38 @@ class OutputProcessor:
         
         # Advanced metrics
         downside_returns = returns[returns < 0]
-        downside_volatility = downside_returns.std() * np.sqrt(252)
+        downside_volatility = downside_returns.std() * np.sqrt(periods_per_year)
         # Ensure downside_volatility is a scalar
         if hasattr(downside_volatility, 'item'):
             downside_volatility = downside_volatility.item()
         sortino_ratio = annual_return / downside_volatility if downside_volatility > 0 else 0
+
+        # Additional trading metrics
+        hit_ratio = win_rate  # Same as win rate for period-based analysis
+
+        # Risk-adjusted metrics
+        downside_deviation = downside_volatility
+        treynor_ratio = 0  # Will be calculated with beta comparison
+
+        # Tail risk metrics
+        skewness = returns.skew() if len(returns) > 3 else 0
+        kurtosis = returns.kurtosis() if len(returns) > 3 else 0
+
+        # Ensure tail risk metrics are scalars
+        if hasattr(skewness, 'item'):
+            skewness = skewness.item()
+        if hasattr(kurtosis, 'item'):
+            kurtosis = kurtosis.item()
+
+        # Calculate consecutive losses
+        consecutive_losses = 0
+        max_consecutive_losses = 0
+        for ret in returns:
+            if ret < 0:
+                consecutive_losses += 1
+                max_consecutive_losses = max(max_consecutive_losses, consecutive_losses)
+            else:
+                consecutive_losses = 0
         
         return PerformanceMetrics(
             total_return=total_return,
@@ -223,11 +352,138 @@ class OutputProcessor:
             information_ratio=0,  # Will be calculated in comparison
             beta=0,  # Will be calculated in comparison
             alpha=0,  # Will be calculated in comparison
-            excess_return=0,  # Will be calculated in comparison
+
+            # New additional metrics
+            total_trades=total_trades,
+            turnover_rate=0,  # Will be calculated with position data
+            hit_ratio=hit_ratio,
+            treynor_ratio=treynor_ratio,
             tracking_error=0,  # Will be calculated in comparison
+            downside_deviation=downside_deviation,
+            factor_turnover=0,  # Will be calculated with position data
+            max_position_weight=0,  # Will be calculated with position data
+            avg_num_positions=0,  # Will be calculated with position data
+            skewness=skewness,
+            kurtosis=kurtosis,
+            max_consecutive_losses=max_consecutive_losses,
+            
+            # Comparison metrics (vs benchmark)
+            excess_return=0,  # Will be calculated in comparison
             up_capture=0,  # Will be calculated in comparison
-            down_capture=0  # Will be calculated in comparison
+            down_capture=0,  # Will be calculated in comparison
+            
+            # Additional hourly-specific metrics
+            turnover_hourly=0.0,
+            turnover_annual=0.0,
+            cost_ratio=0.0,
+            gross_return=total_return,
+            net_return=total_return,
+            r_squared=0.0,
+            hit_ratio_hourly=hit_ratio,
+            hit_ratio_daily=hit_ratio,
+            concentration_hhi=0.0,
+            top3_weight_ratio=0.0,
+            top5_weight_ratio=0.0,
+            recovery_time_days=0.0,
+            periods_per_year=periods_per_year,
+            n_periods=n_periods,
+            avg_per_day=float(avg_per_day) if 'avg_per_day' in locals() else 0.0
         )
+    
+    def enhance_metrics_with_positions(self, metrics: PerformanceMetrics,
+                                      positions: pd.DataFrame) -> PerformanceMetrics:
+        """Enhance performance metrics with position-specific calculations"""
+        if positions is None or len(positions) == 0:
+            return metrics
+
+        # Calculate turnover rates
+        position_changes = positions.diff().abs().sum(axis=1)
+        turnover_hourly = position_changes.mean()
+
+        # Annualize turnover using inferred periods_per_year if available
+        ppy = getattr(metrics, 'periods_per_year', 252)
+        hourly_factor = ppy / 252.0
+        turnover_annual = turnover_hourly * hourly_factor * 24  # approximate annualization
+
+        # Calculate max position weight
+        max_position = positions.abs().max().max()
+
+        # Calculate average number of positions
+        non_zero_positions = (positions != 0).sum(axis=1)
+        avg_positions = non_zero_positions.mean()
+
+        # Factor turnover (same as turnover rate for now)
+        factor_turnover = turnover_hourly
+
+        # Calculate concentration metrics
+        squared_weights = positions ** 2
+        hhi = squared_weights.sum(axis=1).mean()
+
+        # Top N position concentration
+        abs_positions = positions.abs()
+        sorted_positions = abs_positions.apply(lambda x: x.sort_values(ascending=False), axis=1)
+
+        top3_weight_ratio = 0.0
+        top5_weight_ratio = 0.0
+        if len(positions.columns) >= 3:
+            top3_weights = sorted_positions.iloc[:, :3].sum(axis=1)
+            top3_weight_ratio = top3_weights.mean()
+        if len(positions.columns) >= 5:
+            top5_weights = sorted_positions.iloc[:, :5].sum(axis=1)
+            top5_weight_ratio = top5_weights.mean()
+
+        # Create updated metrics with position data (preserve existing metrics values)
+        updated_metrics = PerformanceMetrics(
+            total_return=metrics.total_return,
+            annual_return=metrics.annual_return,
+            volatility=metrics.volatility,
+            sharpe_ratio=metrics.sharpe_ratio,
+            calmar_ratio=metrics.calmar_ratio,
+            max_drawdown=metrics.max_drawdown,
+            var_95=metrics.var_95,
+            cvar_95=metrics.cvar_95,
+            win_rate=metrics.win_rate,
+            profit_factor=metrics.profit_factor,
+            average_win=metrics.average_win,
+            average_loss=metrics.average_loss,
+            sortino_ratio=metrics.sortino_ratio,
+            information_ratio=metrics.information_ratio,
+            beta=metrics.beta,
+            alpha=metrics.alpha,
+            total_trades=metrics.total_trades,
+            turnover_rate=turnover_hourly,
+            hit_ratio=metrics.hit_ratio,
+            treynor_ratio=metrics.treynor_ratio,
+            tracking_error=metrics.tracking_error,
+            downside_deviation=metrics.downside_deviation,
+            factor_turnover=factor_turnover,
+            max_position_weight=max_position,
+            avg_num_positions=avg_positions,
+            skewness=metrics.skewness,
+            kurtosis=metrics.kurtosis,
+            max_consecutive_losses=metrics.max_consecutive_losses,
+            excess_return=metrics.excess_return,
+            up_capture=metrics.up_capture,
+            down_capture=metrics.down_capture,
+
+            # Updated hourly-specific metrics
+            turnover_hourly=turnover_hourly,
+            turnover_annual=turnover_annual,
+            cost_ratio=metrics.cost_ratio,
+            gross_return=metrics.gross_return,
+            net_return=metrics.net_return,
+            r_squared=metrics.r_squared,
+            hit_ratio_hourly=metrics.hit_ratio_hourly,
+            hit_ratio_daily=metrics.hit_ratio_daily,
+            concentration_hhi=hhi,
+            top3_weight_ratio=top3_weight_ratio,
+            top5_weight_ratio=top5_weight_ratio,
+            recovery_time_days=metrics.recovery_time_days,
+            periods_per_year=getattr(metrics, 'periods_per_year', 252),
+            n_periods=getattr(metrics, 'n_periods', 0)
+        )
+
+        return updated_metrics
     
     def load_etf_data(self) -> Dict[str, pd.Series]:
         """Load ETF benchmark data from qlib_data directory"""
@@ -288,6 +544,60 @@ class OutputProcessor:
                     returns = np.random.normal(0.0003, 0.014, len(dates))
                 etf_data[symbol] = pd.Series(returns, index=dates)
         
+        return etf_data
+    
+    def load_hourly_etf_data(self, start_date: str = None, end_date: str = None) -> Dict[str, pd.Series]:
+        """Load ETF hourly benchmark data for strategy comparison"""
+        
+        # Path to the ETF data directory
+        data_dir = "/Users/lijifeng/Documents/AI_agent/FinAgent-Orchestration/FinAgents/agent_pools/alpha_agent_pool/qlib/qlib_data/etf_backup"
+        
+        etf_data = {}
+        etf_symbols = ['SPY', 'QQQ', 'IWM', 'VTI']
+        
+        for symbol in etf_symbols:
+            try:
+                # Load hourly data
+                file_path = os.path.join(data_dir, f"{symbol}_hourly.csv")
+                
+                if os.path.exists(file_path):
+                    # Read CSV file
+                    df = pd.read_csv(file_path)
+                    
+                    # Convert Datetime column and handle timezone
+                    df['Datetime'] = pd.to_datetime(df['Datetime'], utc=True).dt.tz_convert(None)
+                    df.set_index('Datetime', inplace=True)
+                    
+                    # Filter to realistic date range - no future data beyond current date
+                    import datetime
+                    current_date = datetime.datetime.now()
+                    max_reasonable_date = pd.Timestamp('2024-12-31')  # Set reasonable upper bound
+                    
+                    # Apply date filtering
+                    if start_date and end_date:
+                        filter_end = min(pd.to_datetime(end_date), max_reasonable_date)
+                        mask = (df.index >= start_date) & (df.index <= filter_end)
+                        df = df[mask]
+                    else:
+                        # Default filtering to remove unrealistic future dates
+                        mask = df.index <= max_reasonable_date
+                        df = df[mask]
+                    
+                    # Calculate hourly returns from Close prices
+                    close_prices = df['Close']
+                    hourly_returns = close_prices.pct_change().dropna()
+                    
+                    # Store returns data
+                    etf_data[symbol] = hourly_returns
+                    
+                    print(f" Loaded hourly ETF {symbol}: {len(hourly_returns)} periods, "
+                          f"from {hourly_returns.index.min()} to {hourly_returns.index.max()}")
+                else:
+                    print(f"Hourly data file not found: {file_path}")
+                    
+            except Exception as e:
+                print(f"Could not load hourly ETF data for {symbol}: {e}")
+                
         return etf_data
     
     def generate_comparison_analysis(self, strategy_returns: pd.Series, 
@@ -418,26 +728,40 @@ class OutputProcessor:
     def generate_all_charts(self, strategy_returns: pd.Series,
                           benchmark_data: Dict[str, pd.Series],
                           strategy_positions: pd.DataFrame,
-                          factor_values: Optional[pd.DataFrame]) -> Dict[str, str]:
+                          factor_values: Optional[pd.DataFrame],
+                          test_start_date: Optional[pd.Timestamp] = None) -> Dict[str, str]:
         """Generate all visualization charts"""
         
         chart_paths = {}
+        # Quick guard: if no chart flags are enabled, skip chart generation
+        chart_flags = [
+            self.output_format.generate_performance_chart,
+            self.output_format.generate_drawdown_chart,
+            self.output_format.generate_rolling_metrics_chart,
+            getattr(self.output_format, 'generate_correlation_matrix', False),
+            getattr(self.output_format, 'generate_excess_return_chart', False),
+            getattr(self.output_format, 'generate_signal_analysis_chart', False),
+            getattr(self.output_format, 'generate_monthly_heatmap', False),
+            getattr(self.output_format, 'generate_return_distribution', False)
+        ]
+        if not any(chart_flags):
+            return chart_paths
         
         if self.output_format.generate_performance_chart:
-            chart_paths['performance'] = self._create_performance_chart(strategy_returns, benchmark_data)
+            chart_paths['performance'] = self._create_performance_chart(strategy_returns, benchmark_data, test_start_date)
             
         if self.output_format.generate_drawdown_chart:
-            chart_paths['drawdown'] = self._create_drawdown_chart(strategy_returns, benchmark_data)
+            chart_paths['drawdown'] = self._create_drawdown_chart(strategy_returns, benchmark_data, test_start_date)
             
         if self.output_format.generate_rolling_metrics_chart:
-            chart_paths['rolling_metrics'] = self._create_rolling_metrics_chart(strategy_returns, benchmark_data)
+            chart_paths['rolling_metrics'] = self._create_rolling_metrics_chart(strategy_returns, benchmark_data, test_start_date)
             
         if self.output_format.generate_correlation_matrix and factor_values is not None:
             chart_paths['correlation'] = self._create_correlation_matrix(factor_values)
             
         # NEW: Excess return comparison chart
         if self.output_format.generate_excess_return_chart:
-            chart_paths['excess_return'] = self._create_excess_return_chart(strategy_returns, benchmark_data)
+            chart_paths['excess_return'] = self._create_excess_return_chart(strategy_returns, benchmark_data, test_start_date)
             
         # NEW: Strategy signal analysis chart
         if self.output_format.generate_signal_analysis_chart and strategy_positions is not None:
@@ -445,44 +769,95 @@ class OutputProcessor:
             
         # Additional advanced visualizations
         chart_paths.update(self._create_advanced_visualizations(strategy_returns, benchmark_data, 
-                                                               strategy_positions, factor_values))
+                                                               strategy_positions, factor_values, test_start_date))
+        
+        # New comprehensive charts for hourly analysis audit
+        chart_paths['rolling_drawdown'] = self._create_rolling_drawdown_chart(strategy_returns, test_start_date)
+        chart_paths['return_distribution'] = self._create_return_distribution_chart(strategy_returns, benchmark_data, test_start_date)
+        chart_paths['up_down_capture'] = self._create_up_down_capture_chart(strategy_returns, benchmark_data, test_start_date)
             
         return chart_paths
     
     def _create_performance_chart(self, strategy_returns: pd.Series, 
-                                benchmark_data: Dict[str, pd.Series]) -> str:
-        """Create cumulative performance comparison chart"""
+                                benchmark_data: Dict[str, pd.Series],
+                                test_start_date: Optional[pd.Timestamp] = None) -> str:
+        """Create cumulative performance comparison chart from test period start"""
         
         fig = go.Figure()
         
+        # Filter returns to show only test period if test_start_date is provided
+        if test_start_date is not None:
+            # Filter strategy returns to test period only
+            test_strategy_returns = strategy_returns[strategy_returns.index >= test_start_date]
+            chart_title = f'Cumulative Performance Comparison (Test Period from {test_start_date.strftime("%Y-%m-%d")})'
+        else:
+            # Use all data if no test start date provided
+            test_strategy_returns = strategy_returns
+            chart_title = 'Cumulative Performance Comparison (Full Period)'
+        
+        # Calculate cumulative returns starting from test period (ensuring start at 1.0)
+        # Use fillna(0) to handle any missing values and ensure clean calculation
+        clean_strategy_returns = test_strategy_returns.fillna(0)
+        
+        # Calculate cumulative returns and normalize to start from 1.0
+        strategy_cumulative = (1 + clean_strategy_returns).cumprod()
+        # Normalize to start from 1.0 by dividing by the first value
+        if len(strategy_cumulative) > 0 and strategy_cumulative.iloc[0] != 0:
+            strategy_cumulative = strategy_cumulative / strategy_cumulative.iloc[0]
+        
         # Strategy performance
-        strategy_cumulative = (1 + strategy_returns).cumprod()
         fig.add_trace(go.Scatter(
             x=strategy_cumulative.index,
             y=strategy_cumulative.values,
             mode='lines',
-            name='Strategy',
-            line=dict(color='blue', width=2)
+            name='Ours',
+            line=dict(color='blue', width=3),
+            hovertemplate='<b>Ours</b><br>' +
+                         'Date: %{x}<br>' +
+                         'Cumulative Return: %{y:.3f}<extra></extra>'
         ))
         
-        # Benchmark performances
-        colors = ['red', 'green', 'orange', 'purple', 'brown']
+        # Benchmark performances - also filter to test period
+        colors = ['#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#ff9896']
         for i, (etf_symbol, etf_returns) in enumerate(benchmark_data.items()):
-            aligned_returns = etf_returns.reindex(strategy_returns.index).fillna(0)
+            # Align with strategy returns index and ensure same date range
+            aligned_returns = etf_returns.reindex(clean_strategy_returns.index).fillna(0)
+            
+            # Calculate cumulative returns for benchmark and normalize to start from 1.0
             etf_cumulative = (1 + aligned_returns).cumprod()
+            # Normalize to start from 1.0 by dividing by the first value
+            if len(etf_cumulative) > 0 and etf_cumulative.iloc[0] != 0:
+                etf_cumulative = etf_cumulative / etf_cumulative.iloc[0]
+            
             fig.add_trace(go.Scatter(
                 x=etf_cumulative.index,
                 y=etf_cumulative.values,
                 mode='lines',
                 name=etf_symbol,
-                line=dict(color=colors[i % len(colors)])
+                line=dict(color=colors[i % len(colors)], width=2),
+                hovertemplate=f'<b>{etf_symbol}</b><br>' +
+                             'Date: %{x}<br>' +
+                             'Cumulative Return: %{y:.3f}<extra></extra>'
             ))
         
+        # Add horizontal line at 1.0 for reference
+        fig.add_hline(y=1.0, line_dash="dash", line_color="gray", 
+                     annotation_text="Starting Value = 1.0")
+        
         fig.update_layout(
-            title='Cumulative Performance Comparison',
+            title=chart_title,
             xaxis_title='Date',
-            yaxis_title='Cumulative Return',
-            hovermode='x unified'
+            yaxis_title='Cumulative Return (Starting Value = 1.0)',
+            hovermode='x unified',
+            legend=dict(
+                yanchor="top",
+                y=0.99,
+                xanchor="left",
+                x=0.01,
+                bgcolor="rgba(255,255,255,0.8)",
+                bordercolor="rgba(0,0,0,0.2)",
+                borderwidth=1
+            )
         )
         
         file_path = os.path.join(self.output_format.output_directory, "performance_chart.html")
@@ -490,7 +865,8 @@ class OutputProcessor:
         return file_path
     
     def _create_drawdown_chart(self, strategy_returns: pd.Series,
-                             benchmark_data: Dict[str, pd.Series]) -> str:
+                             benchmark_data: Dict[str, pd.Series],
+                             test_start_date: Optional[pd.Timestamp] = None) -> str:
         """Create drawdown comparison chart"""
         
         fig = go.Figure()
@@ -510,7 +886,7 @@ class OutputProcessor:
         ))
         
         # Add benchmark drawdowns
-        colors = ['red', 'green', 'orange', 'purple']
+        colors = ['#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#ff9896']
         for i, (etf_symbol, etf_returns) in enumerate(benchmark_data.items()):
             aligned_returns = etf_returns.reindex(strategy_returns.index).fillna(0)
             etf_cumulative = (1 + aligned_returns).cumprod()
@@ -537,15 +913,29 @@ class OutputProcessor:
         return file_path
     
     def _create_rolling_metrics_chart(self, strategy_returns: pd.Series,
-                                    benchmark_data: Dict[str, pd.Series]) -> str:
+                                    benchmark_data: Dict[str, pd.Series],
+                                    test_start_date: Optional[pd.Timestamp] = None) -> str:
         """Create rolling Sharpe ratio chart"""
-        
-        window = 252  # 1 year rolling window
-        
+        # Infer periods-per-year and choose rolling window dynamically so charts work for intraday/hourly data
+        ppy = 252
+        try:
+            if isinstance(strategy_returns.index, pd.DatetimeIndex) and len(strategy_returns) > 0:
+                counts = pd.Series(1, index=strategy_returns.index).groupby(strategy_returns.index.date).sum()
+                avg_per_day = counts.mean()
+                inferred = int(round(avg_per_day * 252))
+                if inferred > 0:
+                    ppy = inferred
+        except Exception:
+            ppy = 252
+
+        # Use a rolling window equal to one "year" of periods (inferred) but cap to available data length
+        window = int(min(max(1, ppy), max(1, len(strategy_returns))))
+
         fig = go.Figure()
-        
-        # Strategy rolling Sharpe
-        strategy_rolling_sharpe = strategy_returns.rolling(window).mean() / strategy_returns.rolling(window).std() * np.sqrt(252)
+
+        # Strategy rolling Sharpe (use inferred annualization)
+        strategy_rolling_sharpe = (strategy_returns.rolling(window, min_periods=1).mean() /
+                                   strategy_returns.rolling(window, min_periods=1).std()) * np.sqrt(ppy)
         
         fig.add_trace(go.Scatter(
             x=strategy_rolling_sharpe.index,
@@ -556,10 +946,11 @@ class OutputProcessor:
         ))
         
         # Benchmark rolling Sharpe
-        colors = ['red', 'green', 'orange', 'purple']
+        colors = ['#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#ff9896']
         for i, (etf_symbol, etf_returns) in enumerate(benchmark_data.items()):
             aligned_returns = etf_returns.reindex(strategy_returns.index).fillna(0)
-            etf_rolling_sharpe = aligned_returns.rolling(window).mean() / aligned_returns.rolling(window).std() * np.sqrt(252)
+            etf_rolling_sharpe = (aligned_returns.rolling(window, min_periods=1).mean() /
+                                  aligned_returns.rolling(window, min_periods=1).std()) * np.sqrt(ppy)
             
             fig.add_trace(go.Scatter(
                 x=etf_rolling_sharpe.index,
@@ -581,8 +972,15 @@ class OutputProcessor:
     
     def _create_correlation_matrix(self, factor_values: pd.DataFrame) -> str:
         """Create factor correlation matrix heatmap"""
-        
-        correlation_matrix = factor_values.corr()
+        # Keep only numeric columns for correlation
+        if factor_values is None:
+            raise ValueError('factor_values is None')
+        numeric_cols = factor_values.select_dtypes(include=[np.number]).columns.tolist()
+        dropped = [c for c in factor_values.columns if c not in numeric_cols]
+        if dropped:
+            print('Dropping non-numeric factor columns for correlation:', dropped)
+        fv_numeric = factor_values[numeric_cols]
+        correlation_matrix = fv_numeric.corr()
         
         fig = px.imshow(
             correlation_matrix,
@@ -596,14 +994,19 @@ class OutputProcessor:
         return file_path
     
     def _create_excess_return_chart(self, strategy_returns: pd.Series, 
-                                  benchmark_data: Dict[str, pd.Series]) -> str:
-        """Create excess return comparison chart"""
+                                  benchmark_data: Dict[str, pd.Series],
+                                  test_start_date: Optional[pd.Timestamp] = None) -> str:
+        """Create excess return comparison chart from test period start"""
+        
+        # Calculate adaptive rolling window first to use in titles
+        data_length = len(strategy_returns)
+        rolling_window = min(30, max(5, data_length // 3))  # Adaptive window: 5-30 days
         
         fig = make_subplots(
             rows=3, cols=1,
             subplot_titles=(
                 'Strategy vs Benchmarks: Cumulative Returns Comparison', 
-                'Rolling 30-Day Returns Comparison',
+                f'Rolling {rolling_window}-Day Returns Comparison',
                 'Strategy Excess Returns vs Benchmarks'
             ),
             row_heights=[0.33, 0.33, 0.34],
@@ -613,10 +1016,30 @@ class OutputProcessor:
                    [{"secondary_y": False}]]
         )
         
-        colors = ['red', 'green', 'orange', 'purple', 'brown', 'pink']
+        # Extended color palette for consistent coloring across charts
+        colors = [
+            '#ff7f0e',  # Orange  
+            '#2ca02c',  # Green
+            '#d62728',  # Red
+            '#9467bd',  # Purple
+            '#8c564b',  # Brown
+            '#e377c2',  # Pink
+            '#7f7f7f',  # Gray
+            '#bcbd22',  # Olive
+            '#17becf',  # Cyan
+            '#ff9896'   # Light Red
+        ]
         
-        # Calculate strategy cumulative performance for comparison
-        strategy_cumulative = (1 + strategy_returns).cumprod()
+        # Filter returns to test period if test_start_date is provided
+        if test_start_date is not None:
+            test_strategy_returns = strategy_returns[strategy_returns.index >= test_start_date]
+            chart_subtitle = f'Test Period Analysis from {test_start_date.strftime("%Y-%m-%d")}'
+        else:
+            test_strategy_returns = strategy_returns
+            chart_subtitle = 'Full Period Analysis'
+        
+        # Calculate strategy cumulative performance for comparison (starting from test period)
+        strategy_cumulative = (1 + test_strategy_returns).cumprod()
         
         # First subplot: Add strategy performance first
         fig.add_trace(go.Scatter(
@@ -630,16 +1053,18 @@ class OutputProcessor:
                          'Cumulative Return: %{y:.2f}%<extra></extra>'
         ), row=1, col=1)
         
-        # Second subplot: Add strategy rolling returns
-        strategy_rolling = strategy_returns.rolling(30).mean()
+        # Second subplot: Add strategy rolling returns (adaptive window)
+        # Use the pre-calculated rolling window from above
+        
+        strategy_rolling = test_strategy_returns.rolling(rolling_window, min_periods=1).mean()
         fig.add_trace(go.Scatter(
             x=strategy_rolling.index,
             y=strategy_rolling.values * 100,  # Convert to percentage
             mode='lines',
-            name='Strategy 30D',
+            name=f'Strategy {rolling_window}D',
             line=dict(color='blue', width=3),
-            showlegend=False,
-            hovertemplate='<b>Strategy 30D</b><br>' +
+            showlegend=True,
+            hovertemplate=f'<b>Strategy {rolling_window}D</b><br>' +
                          'Date: %{x}<br>' +
                          'Rolling Return: %{y:.2f}%<extra></extra>'
         ), row=2, col=1)
@@ -647,12 +1072,12 @@ class OutputProcessor:
         # Calculate and plot benchmark comparisons
         excess_stats = {}
         for i, (etf_symbol, etf_returns) in enumerate(benchmark_data.items()):
-            # Align data
-            aligned_benchmark = etf_returns.reindex(strategy_returns.index).fillna(0)
+            # Align data to test period
+            aligned_benchmark = etf_returns.reindex(test_strategy_returns.index).fillna(0)
             benchmark_cumulative = (1 + aligned_benchmark).cumprod()
             
-            # Calculate excess returns for stats
-            excess_returns = strategy_returns - aligned_benchmark
+            # Calculate excess returns for stats (using test period data)
+            excess_returns = test_strategy_returns - aligned_benchmark
             cumulative_excess = excess_returns.cumsum()
             
             # Store stats for summary
@@ -674,27 +1099,27 @@ class OutputProcessor:
                              'Cumulative Return: %{y:.2f}%<extra></extra>'
             ), row=1, col=1)
             
-            # Second subplot: Benchmark rolling returns
-            benchmark_rolling = aligned_benchmark.rolling(30).mean()
+            # Second subplot: Benchmark rolling returns (adaptive window)
+            benchmark_rolling = aligned_benchmark.rolling(rolling_window, min_periods=1).mean()
             fig.add_trace(go.Scatter(
                 x=benchmark_rolling.index,
                 y=benchmark_rolling.values * 100,  # Convert to percentage
                 mode='lines',
-                name=f'{etf_symbol} 30D',
+                name=f'{etf_symbol} {rolling_window}D',
                 line=dict(color=colors[i % len(colors)], width=2, dash='dot'),
-                showlegend=False,
-                hovertemplate=f'<b>{etf_symbol} 30D</b><br>' +
+                showlegend=True,
+                hovertemplate=f'<b>{etf_symbol} {rolling_window}D</b><br>' +
                              'Date: %{x}<br>' +
                              'Rolling Return: %{y:.2f}%<extra></extra>'
             ), row=2, col=1)
         
         # Third subplot: Excess returns analysis
         for i, (etf_symbol, etf_returns) in enumerate(benchmark_data.items()):
-            # Align data
-            aligned_benchmark = etf_returns.reindex(strategy_returns.index).fillna(0)
+            # Align data to test period
+            aligned_benchmark = etf_returns.reindex(test_strategy_returns.index).fillna(0)
             
-            # Calculate excess returns
-            excess_returns = strategy_returns - aligned_benchmark
+            # Calculate excess returns (using test period data)
+            excess_returns = test_strategy_returns - aligned_benchmark
             cumulative_excess = excess_returns.cumsum()
             
             fig.add_trace(go.Scatter(
@@ -721,7 +1146,7 @@ class OutputProcessor:
         
         fig.update_layout(
             title={
-                'text': f'Strategy vs Benchmarks Performance Analysis<br><sub>{summary_text}</sub>',
+                'text': f'Strategy vs Benchmarks Performance Analysis - {chart_subtitle}<br><sub>{summary_text}</sub>',
                 'x': 0.5,
                 'xanchor': 'center',
                 'y': 0.98
@@ -746,7 +1171,7 @@ class OutputProcessor:
         fig.update_xaxes(title_text="Date", row=3, col=1)
         
         fig.update_yaxes(title_text="Cumulative Return (%)", row=1, col=1)
-        fig.update_yaxes(title_text="30-Day Rolling Return (%)", row=2, col=1)
+        fig.update_yaxes(title_text=f"{rolling_window}-Day Rolling Return (%)", row=2, col=1)
         fig.update_yaxes(title_text="Cumulative Excess Return (%)", row=3, col=1)
         
         file_path = os.path.join(self.output_format.output_directory, "excess_return_chart.html")
@@ -761,17 +1186,20 @@ class OutputProcessor:
             rows=4, cols=1,
             subplot_titles=(
                 'Portfolio Weight Distribution Over Time', 
-                'Signal Change Frequency', 
-                'Strategy Returns vs Signal Strength',
-                'Cumulative Strategy Performance vs Buy-and-Hold'
+                'Daily Turnover Analysis', 
+                'Strategy Returns Distribution',
+                'Cumulative Strategy Performance'
             ),
             row_heights=[0.25, 0.25, 0.25, 0.25],
-            vertical_spacing=0.12,
+            vertical_spacing=0.15,  # Increased spacing for bottom legend
             specs=[[{"secondary_y": False}],
                    [{"secondary_y": False}],
                    [{"secondary_y": False}],
                    [{"secondary_y": False}]]
         )
+        
+        # Update subplot title font sizes
+        fig.update_annotations(font_size=16)
         
         # Prepare data
         if isinstance(strategy_positions, pd.DataFrame):
@@ -781,7 +1209,19 @@ class OutputProcessor:
                     continue
                     
                 weights = strategy_positions[symbol]
-                colors_cycle = ['blue', 'red', 'green', 'orange', 'purple']
+                # Extended color palette for up to 10 stocks with distinct colors
+                colors_cycle = [
+                    '#1f77b4',  # Blue
+                    '#ff7f0e',  # Orange  
+                    '#2ca02c',  # Green
+                    '#d62728',  # Red
+                    '#9467bd',  # Purple
+                    '#8c564b',  # Brown
+                    '#e377c2',  # Pink
+                    '#7f7f7f',  # Gray
+                    '#bcbd22',  # Olive
+                    '#17becf'   # Cyan
+                ]
                 
                 fig.add_trace(go.Scatter(
                     x=strategy_positions.index,
@@ -796,51 +1236,47 @@ class OutputProcessor:
             # Add zero line for reference
             fig.add_hline(y=0, line_dash="dash", line_color="gray", row=1, col=1)
             
-            # Second subplot: Signal change frequency
+            # Second subplot: Daily turnover analysis
             weight_changes = strategy_positions.diff().abs().sum(axis=1)
+            # Remove first NaN value
+            weight_changes = weight_changes.dropna()
             
-            fig.add_trace(go.Bar(
-                x=weight_changes.index,
-                y=weight_changes,
-                name='Position Change Magnitude',
-                marker_color='lightcoral',
-                opacity=0.7,
-                showlegend=False
-            ), row=2, col=1)
-            
-            # Third subplot: Strategy returns vs signal strength
-            if len(strategy_returns) > 1:
-                # Get current period signals and next period returns
-                total_weights = strategy_positions.abs().sum(axis=1)
-                current_returns = strategy_returns
+            if len(weight_changes) > 0:
+                fig.add_trace(go.Scatter(
+                    x=weight_changes.index,
+                    y=weight_changes,
+                    mode='lines+markers',
+                    name='Daily Turnover',
+                    line=dict(color='lightcoral', width=2),
+                    marker=dict(size=4),
+                    showlegend=True
+                ), row=2, col=1)
                 
-                # Align data
-                common_index = total_weights.index.intersection(current_returns.index)
-                if len(common_index) > 10:
-                    aligned_weights = total_weights.loc[common_index]
-                    aligned_returns = current_returns.loc[common_index]
-                    
-                    # Color points by return magnitude
-                    fig.add_trace(go.Scatter(
-                        x=aligned_weights,
-                        y=aligned_returns,
-                        mode='markers',
-                        name='Signal Strength vs Returns',
-                        marker=dict(
-                            color=aligned_returns,
-                            colorscale='RdYlGn',
-                            showscale=True,
-                            colorbar=dict(
-                                title="Daily Return",
-                                x=1.02,
-                                len=0.3,
-                                y=0.4
-                            ),
-                            size=8,
-                            opacity=0.7
-                        ),
-                        showlegend=False
-                    ), row=3, col=1)
+                # Add mean turnover line
+                mean_turnover = weight_changes.mean()
+                fig.add_hline(y=mean_turnover, line_dash="dash", line_color="red", 
+                             annotation_text=f"Mean: {mean_turnover:.2%}", row=2, col=1)
+            
+            # Third subplot: Strategy returns distribution
+            if len(strategy_returns) > 1:
+                # Create histogram of strategy returns
+                fig.add_trace(go.Histogram(
+                    x=strategy_returns,
+                    nbinsx=50,
+                    name='Return Distribution',
+                    marker_color='skyblue',
+                    opacity=0.7,
+                    showlegend=True
+                ), row=3, col=1)
+                
+                # Add vertical lines for mean and median
+                mean_return = strategy_returns.mean()
+                median_return = strategy_returns.median()
+                
+                fig.add_vline(x=mean_return, line_dash="dash", line_color="red",
+                             annotation_text=f"Mean: {mean_return:.4f}", row=3, col=1)
+                fig.add_vline(x=median_return, line_dash="dot", line_color="blue",
+                             annotation_text=f"Median: {median_return:.4f}", row=3, col=1)
             
             # Fourth subplot: Cumulative performance comparison
             strategy_cumulative = (1 + strategy_returns).cumprod()
@@ -872,34 +1308,80 @@ class OutputProcessor:
                     showlegend=True
                 ), row=4, col=1)
         
-        # Update layout
+        # Update layout with improved legend and larger fonts
         fig.update_layout(
             title={
                 'text': 'Strategy Signal Analysis Dashboard',
                 'x': 0.5,
-                'xanchor': 'center'
+                'xanchor': 'center',
+                'font': {'size': 20}  # Larger title font
             },
-            height=1200,
+            height=1300,  # Increased height to accommodate bottom legend
             showlegend=True,
             legend=dict(
                 orientation="h",
-                yanchor="bottom",
-                y=1.02,
-                xanchor="right",
-                x=1
-            )
+                yanchor="top",
+                y=-0.05,  # Place legend at bottom of chart
+                xanchor="center",
+                x=0.5,
+                font={'size': 14},  # Larger legend font
+                bgcolor="rgba(255,255,255,0.8)",  # Semi-transparent background
+                bordercolor="lightgray",
+                borderwidth=1
+            ),
+            font={'size': 12}  # Increase overall font size
         )
         
-        # Update axes labels
-        fig.update_xaxes(title_text="Date", row=1, col=1)
-        fig.update_xaxes(title_text="Date", row=2, col=1)
-        fig.update_xaxes(title_text="Signal Strength (Absolute Weight)", row=3, col=1)
-        fig.update_xaxes(title_text="Date", row=4, col=1)
+        # Update axes labels with larger fonts
+        fig.update_xaxes(
+            title_text="Date", 
+            title_font={'size': 14},
+            tickfont={'size': 12},
+            row=1, col=1
+        )
+        fig.update_xaxes(
+            title_text="Date", 
+            title_font={'size': 14},
+            tickfont={'size': 12},
+            row=2, col=1
+        )
+        fig.update_xaxes(
+            title_text="Signal Strength (Absolute Weight)", 
+            title_font={'size': 14},
+            tickfont={'size': 12},
+            row=3, col=1
+        )
+        fig.update_xaxes(
+            title_text="Date", 
+            title_font={'size': 14},
+            tickfont={'size': 12},
+            row=4, col=1
+        )
         
-        fig.update_yaxes(title_text="Position Weight", row=1, col=1)
-        fig.update_yaxes(title_text="Change Magnitude", row=2, col=1)
-        fig.update_yaxes(title_text="Daily Return", row=3, col=1)
-        fig.update_yaxes(title_text="Cumulative Return", row=4, col=1)
+        fig.update_yaxes(
+            title_text="Position Weight", 
+            title_font={'size': 14},
+            tickfont={'size': 12},
+            row=1, col=1
+        )
+        fig.update_yaxes(
+            title_text="Change Magnitude", 
+            title_font={'size': 14},
+            tickfont={'size': 12},
+            row=2, col=1
+        )
+        fig.update_yaxes(
+            title_text="Daily Return", 
+            title_font={'size': 14},
+            tickfont={'size': 12},
+            row=3, col=1
+        )
+        fig.update_yaxes(
+            title_text="Cumulative Return", 
+            title_font={'size': 14},
+            tickfont={'size': 12},
+            row=4, col=1
+        )
         
         file_path = os.path.join(self.output_format.output_directory, "signal_analysis_chart.html")
         fig.write_html(file_path)
@@ -962,53 +1444,60 @@ class OutputProcessor:
             spy_metrics = benchmark_metrics['SPY']
             
             if strategy_metrics.sharpe_ratio > spy_metrics.sharpe_ratio:
-                insights.append(f"✅ Strategy outperformed SPY on risk-adjusted basis (Sharpe: {strategy_metrics.sharpe_ratio:.2f} vs {spy_metrics.sharpe_ratio:.2f})")
+                insights.append(f" Strategy outperformed SPY on risk-adjusted basis (Sharpe: {strategy_metrics.sharpe_ratio:.2f} vs {spy_metrics.sharpe_ratio:.2f})")
             else:
-                insights.append(f"❌ Strategy underperformed SPY on risk-adjusted basis (Sharpe: {strategy_metrics.sharpe_ratio:.2f} vs {spy_metrics.sharpe_ratio:.2f})")
+                insights.append(f" Strategy underperformed SPY on risk-adjusted basis (Sharpe: {strategy_metrics.sharpe_ratio:.2f} vs {spy_metrics.sharpe_ratio:.2f})")
                 
             if strategy_metrics.annual_return > spy_metrics.annual_return:
-                insights.append(f"✅ Strategy delivered higher annual returns ({strategy_metrics.annual_return:.2%} vs {spy_metrics.annual_return:.2%})")
+                insights.append(f" Strategy delivered higher annual returns ({strategy_metrics.annual_return:.2%} vs {spy_metrics.annual_return:.2%})")
             else:
-                insights.append(f"❌ Strategy delivered lower annual returns ({strategy_metrics.annual_return:.2%} vs {spy_metrics.annual_return:.2%})")
+                insights.append(f" Strategy delivered lower annual returns ({strategy_metrics.annual_return:.2%} vs {spy_metrics.annual_return:.2%})")
         
         # Risk assessment
         if strategy_metrics.max_drawdown < -0.2:
-            insights.append(f"⚠️ High maximum drawdown: {strategy_metrics.max_drawdown:.2%}")
+            insights.append(f"High maximum drawdown: {strategy_metrics.max_drawdown:.2%}")
         else:
-            insights.append(f"✅ Reasonable maximum drawdown: {strategy_metrics.max_drawdown:.2%}")
+            insights.append(f" Reasonable maximum drawdown: {strategy_metrics.max_drawdown:.2%}")
             
         # Win rate assessment
         if strategy_metrics.win_rate > 0.55:
-            insights.append(f"✅ Good win rate: {strategy_metrics.win_rate:.2%}")
+            insights.append(f" Good win rate: {strategy_metrics.win_rate:.2%}")
         elif strategy_metrics.win_rate < 0.45:
-            insights.append(f"⚠️ Low win rate: {strategy_metrics.win_rate:.2%}")
+            insights.append(f"Low win rate: {strategy_metrics.win_rate:.2%}")
         else:
             insights.append(f"➖ Average win rate: {strategy_metrics.win_rate:.2%}")
+        
+        # Include inferred temporal metadata for auditability if present
+        if hasattr(strategy_metrics, 'periods_per_year') and hasattr(strategy_metrics, 'n_periods'):
+            ppy = getattr(strategy_metrics, 'periods_per_year')
+            npds = getattr(strategy_metrics, 'n_periods')
+            insights.append(f"Temporal inference: periods_per_year={ppy}, n_periods={npds}")
         
         return "<ul>" + "".join([f"<li>{insight}</li>" for insight in insights]) + "</ul>"
     
     def _create_advanced_visualizations(self, strategy_returns: pd.Series,
                                       benchmark_data: Dict[str, pd.Series],
                                       strategy_positions: pd.DataFrame,
-                                      factor_values: Optional[pd.DataFrame]) -> Dict[str, str]:
+                                      factor_values: Optional[pd.DataFrame],
+                                      test_start_date: Optional[pd.Timestamp] = None) -> Dict[str, str]:
         """Create additional advanced visualizations"""
         
         chart_paths = {}
         
         # 1. Monthly Returns Heatmap
-        chart_paths['monthly_heatmap'] = self._create_monthly_returns_heatmap(strategy_returns, benchmark_data)
+        chart_paths['monthly_heatmap'] = self._create_monthly_returns_heatmap(strategy_returns, benchmark_data, test_start_date)
         
         # 2. Risk-Return Scatter Plot
-        chart_paths['risk_return_scatter'] = self._create_risk_return_scatter(strategy_returns, benchmark_data)
+        chart_paths['risk_return_scatter'] = self._create_risk_return_scatter(strategy_returns, benchmark_data, test_start_date)
         
         # 3. Rolling Beta Chart
-        chart_paths['rolling_beta'] = self._create_rolling_beta_chart(strategy_returns, benchmark_data)
+        chart_paths['rolling_beta'] = self._create_rolling_beta_chart(strategy_returns, benchmark_data, test_start_date)
         
         # 4. Underwater Plot (Drawdown)
-        chart_paths['underwater_plot'] = self._create_underwater_plot(strategy_returns, benchmark_data)
+        chart_paths['underwater_plot'] = self._create_underwater_plot(strategy_returns, benchmark_data, test_start_date)
         
         # 5. Return Distribution Histogram
-        chart_paths['return_distribution'] = self._create_return_distribution(strategy_returns, benchmark_data)
+        chart_paths['return_distribution'] = self._create_return_distribution(strategy_returns, benchmark_data, test_start_date)
         
         # 6. Position Concentration Chart
         if strategy_positions is not None:
@@ -1019,12 +1508,13 @@ class OutputProcessor:
             chart_paths['factor_exposure_lines'] = self._create_factor_exposure_lines(factor_values)
         
         # 8. Performance Attribution Chart
-        chart_paths['performance_attribution'] = self._create_performance_attribution(strategy_returns, benchmark_data)
+        chart_paths['performance_attribution'] = self._create_performance_attribution(strategy_returns, benchmark_data, test_start_date)
         
         return chart_paths
     
     def _create_monthly_returns_heatmap(self, strategy_returns: pd.Series,
-                                      benchmark_data: Dict[str, pd.Series]) -> str:
+                                      benchmark_data: Dict[str, pd.Series],
+                                      test_start_date: Optional[pd.Timestamp] = None) -> str:
         """Create monthly returns heatmap"""
         
         # Calculate monthly returns
@@ -1078,7 +1568,8 @@ class OutputProcessor:
         return file_path
     
     def _create_risk_return_scatter(self, strategy_returns: pd.Series,
-                                  benchmark_data: Dict[str, pd.Series]) -> str:
+                                  benchmark_data: Dict[str, pd.Series],
+                                  test_start_date: Optional[pd.Timestamp] = None) -> str:
         """Create risk-return scatter plot"""
         
         fig = go.Figure()
@@ -1099,7 +1590,7 @@ class OutputProcessor:
         ))
         
         # Add benchmark points
-        colors = ['red', 'green', 'orange', 'purple', 'brown']
+        colors = ['#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#ff9896']
         for i, (etf_symbol, etf_returns) in enumerate(benchmark_data.items()):
             aligned_returns = etf_returns.reindex(strategy_returns.index).fillna(0)
             etf_annual_return = (1 + aligned_returns.mean()) ** 252 - 1
@@ -1128,7 +1619,8 @@ class OutputProcessor:
         return file_path
     
     def _create_rolling_beta_chart(self, strategy_returns: pd.Series,
-                                 benchmark_data: Dict[str, pd.Series]) -> str:
+                                 benchmark_data: Dict[str, pd.Series],
+                                 test_start_date: Optional[pd.Timestamp] = None) -> str:
         """Create rolling beta chart against market benchmark"""
         
         fig = go.Figure()
@@ -1186,7 +1678,8 @@ class OutputProcessor:
         return file_path
     
     def _create_underwater_plot(self, strategy_returns: pd.Series,
-                              benchmark_data: Dict[str, pd.Series]) -> str:
+                              benchmark_data: Dict[str, pd.Series],
+                              test_start_date: Optional[pd.Timestamp] = None) -> str:
         """Create underwater plot showing drawdown periods"""
         
         fig = go.Figure()
@@ -1207,7 +1700,7 @@ class OutputProcessor:
         ))
         
         # Add benchmark underwater plots
-        colors = ['red', 'green', 'orange']
+        colors = ['#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#ff9896']
         for i, (etf_symbol, etf_returns) in enumerate(list(benchmark_data.items())[:3]):
             aligned_returns = etf_returns.reindex(strategy_returns.index).fillna(0)
             etf_cumulative = (1 + aligned_returns).cumprod()
@@ -1235,7 +1728,8 @@ class OutputProcessor:
         return file_path
     
     def _create_return_distribution(self, strategy_returns: pd.Series,
-                                  benchmark_data: Dict[str, pd.Series]) -> str:
+                                  benchmark_data: Dict[str, pd.Series],
+                                  test_start_date: Optional[pd.Timestamp] = None) -> str:
         """Create return distribution histogram"""
         
         fig = make_subplots(
@@ -1351,7 +1845,7 @@ class OutputProcessor:
             # If no multi-index, just use the DataFrame as is (time series)
             factor_means = factor_values
         
-        colors = ['blue', 'red', 'green', 'orange', 'purple']
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
         
         for i, factor_name in enumerate(factor_means.columns):
             fig.add_trace(go.Scatter(
@@ -1374,7 +1868,8 @@ class OutputProcessor:
         return file_path
     
     def _create_performance_attribution(self, strategy_returns: pd.Series,
-                                      benchmark_data: Dict[str, pd.Series]) -> str:
+                                      benchmark_data: Dict[str, pd.Series],
+                                      test_start_date: Optional[pd.Timestamp] = None) -> str:
         """Create performance attribution analysis"""
         
         fig = make_subplots(
@@ -1465,3 +1960,542 @@ class OutputProcessor:
         file_path = os.path.join(self.output_format.output_directory, "performance_attribution.html")
         fig.write_html(file_path)
         return file_path
+    
+    def _create_rolling_drawdown_chart(self, strategy_returns: pd.Series, test_start_date: pd.Timestamp = None) -> str:
+        """Create rolling drawdown analysis chart for hourly strategy audit"""
+        
+        # Calculate cumulative returns and drawdowns
+        cumulative_returns = (1 + strategy_returns).cumprod()
+        running_max = cumulative_returns.expanding().max()
+        drawdown = (cumulative_returns - running_max) / running_max
+        
+        # Calculate rolling max drawdowns (1 week and 1 month windows)
+        rolling_1w_dd = drawdown.rolling(window=24*7).min()  # 1 week in hours
+        rolling_1m_dd = drawdown.rolling(window=24*30).min()  # 1 month in hours
+        
+        # Calculate recovery time
+        recovery_periods = []
+        in_drawdown = False
+        dd_start = None
+        
+        for i, dd in enumerate(drawdown):
+            if dd < -0.001 and not in_drawdown:  # Start of drawdown
+                in_drawdown = True
+                dd_start = i
+            elif dd >= -0.001 and in_drawdown:  # End of drawdown (recovery)
+                recovery_time = i - dd_start
+                recovery_periods.append(recovery_time)
+                in_drawdown = False
+        
+        avg_recovery_hours = np.mean(recovery_periods) if recovery_periods else 0
+        avg_recovery_days = avg_recovery_hours / 24
+        
+        fig = make_subplots(
+            rows=3, cols=1,
+            subplot_titles=(
+                'Cumulative Returns vs Rolling Peak',
+                'Drawdown Series with Recovery Analysis',
+                'Rolling Maximum Drawdown (1W & 1M Windows)'
+            ),
+            vertical_spacing=0.12,
+            row_heights=[0.35, 0.35, 0.3]
+        )
+        
+        # First subplot: Cumulative returns and running peak
+        fig.add_trace(
+            go.Scatter(
+                x=cumulative_returns.index,
+                y=cumulative_returns.values,
+                name='Cumulative Returns',
+                line=dict(color='blue', width=2)
+            ),
+            row=1, col=1
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=running_max.index,
+                y=running_max.values,
+                name='Running Peak',
+                line=dict(color='green', width=1, dash='dash')
+            ),
+            row=1, col=1
+        )
+        
+        # Second subplot: Drawdown series with recovery zones
+        fig.add_trace(
+            go.Scatter(
+                x=drawdown.index,
+                y=drawdown.values * 100,  # Convert to percentage
+                name='Drawdown %',
+                fill='tonexty',
+                fillcolor='rgba(255, 0, 0, 0.3)',
+                line=dict(color='red', width=1)
+            ),
+            row=2, col=1
+        )
+        
+        # Add horizontal line at -1% for reference
+        fig.add_hline(y=-1.0, line_dash="dot", line_color="gray", 
+                     annotation_text="1% DD Level", row=2, col=1)
+        
+        # Third subplot: Rolling max drawdowns
+        fig.add_trace(
+            go.Scatter(
+                x=rolling_1w_dd.index,
+                y=rolling_1w_dd.values * 100,
+                name='1-Week Max DD',
+                line=dict(color='orange', width=2)
+            ),
+            row=3, col=1
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=rolling_1m_dd.index,
+                y=rolling_1m_dd.values * 100,
+                name='1-Month Max DD',
+                line=dict(color='red', width=2)
+            ),
+            row=3, col=1
+        )
+        
+        # Add test start date line if provided
+        if test_start_date:
+            for row_num in [1, 2, 3]:
+                # Simplified shape addition without subplot-specific yref
+                if row_num == 1:  # Only add to first subplot to avoid complex yref issues
+                    fig.add_shape(
+                        type="line",
+                        x0=test_start_date, x1=test_start_date,
+                        y0=0, y1=1,
+                        yref="paper",
+                        line=dict(dash="dash", color="gray", width=2)
+                    )
+                # Add annotation separately
+                if row_num == 1:  # Only add annotation to first subplot to avoid clutter
+                    fig.add_annotation(
+                        x=test_start_date,
+                        y=0.9,
+                        yref="paper",
+                        text="Test Start",
+                        showarrow=False,
+                        font=dict(color="gray", size=10)
+                    )
+        
+        # Update layout
+        fig.update_layout(
+            title=f'Rolling Drawdown Analysis - Hourly Strategy<br><sub>Avg Recovery Time: {avg_recovery_days:.1f} days</sub>',
+            height=900,
+            showlegend=True,
+            template='plotly_white'
+        )
+        
+        # Update y-axes
+        fig.update_yaxes(title_text="Cumulative Value", row=1, col=1)
+        fig.update_yaxes(title_text="Drawdown (%)", row=2, col=1)
+        fig.update_yaxes(title_text="Max Drawdown (%)", row=3, col=1)
+        
+        # Update x-axes
+        fig.update_xaxes(title_text="Date", row=3, col=1)
+        
+        # Save chart
+        import os
+        chart_path = os.path.join(self.output_format.output_directory, "rolling_drawdown_analysis.html")
+        fig.write_html(str(chart_path))
+        print(f"💹 Rolling drawdown analysis chart saved: {chart_path}")
+        
+        return str(chart_path)
+    
+    def _create_return_distribution_chart(self, strategy_returns: pd.Series, 
+                                        benchmark_data: Dict[str, pd.Series],
+                                        test_start_date: pd.Timestamp = None) -> str:
+        """Create return distribution analysis chart with skewness and kurtosis"""
+        
+        # Calculate distribution statistics
+        strategy_stats = {
+            'mean': strategy_returns.mean() * 100,  # Convert to percentage
+            'std': strategy_returns.std() * 100,
+            'skew': strategy_returns.skew(),
+            'kurt': strategy_returns.kurtosis(),
+            'var_95': strategy_returns.quantile(0.05) * 100,
+            'var_99': strategy_returns.quantile(0.01) * 100
+        }
+        
+        # Get benchmark comparison if available
+        benchmark_stats = {}
+        if 'SPY' in benchmark_data:
+            spy_returns = benchmark_data['SPY'].reindex(strategy_returns.index).fillna(0)
+            benchmark_stats = {
+                'mean': spy_returns.mean() * 100,
+                'std': spy_returns.std() * 100,
+                'skew': spy_returns.skew(),
+                'kurt': spy_returns.kurtosis(),
+                'var_95': spy_returns.quantile(0.05) * 100,
+                'var_99': spy_returns.quantile(0.01) * 100
+            }
+        
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                'Return Distribution Histogram',
+                'Q-Q Plot vs Normal Distribution', 
+                'Rolling Skewness (24H Window)',
+                'Rolling Kurtosis (24H Window)'
+            ),
+            specs=[[{"secondary_y": False}, {"secondary_y": False}],
+                   [{"secondary_y": False}, {"secondary_y": False}]]
+        )
+        
+        # 1. Return distribution histogram
+        fig.add_trace(
+            go.Histogram(
+                x=strategy_returns * 100,
+                nbinsx=50,
+                name='Strategy Returns',
+                opacity=0.7,
+                marker_color='blue'
+            ),
+            row=1, col=1
+        )
+        
+        if benchmark_stats:
+            fig.add_trace(
+                go.Histogram(
+                    x=spy_returns * 100,
+                    nbinsx=50,
+                    name='SPY Returns',
+                    opacity=0.5,
+                    marker_color='red'
+                ),
+                row=1, col=1
+            )
+        
+        # Add VaR lines
+        fig.add_vline(x=strategy_stats['var_95'], line_dash="dash", line_color="red",
+                     annotation_text=f"VaR 95%: {strategy_stats['var_95']:.2f}%", row=1, col=1)
+        fig.add_vline(x=strategy_stats['mean'], line_dash="dot", line_color="green",
+                     annotation_text=f"Mean: {strategy_stats['mean']:.3f}%", row=1, col=1)
+        
+        # 2. Q-Q Plot vs Normal
+        from scipy import stats
+        theoretical_quantiles = stats.norm.ppf(np.linspace(0.01, 0.99, len(strategy_returns)))
+        sample_quantiles = np.sort(strategy_returns)
+        
+        fig.add_trace(
+            go.Scatter(
+                x=theoretical_quantiles,
+                y=sample_quantiles,
+                mode='markers',
+                name='Q-Q Plot',
+                marker=dict(size=4, color='blue', opacity=0.6)
+            ),
+            row=1, col=2
+        )
+        
+        # Add reference line for perfect normal distribution
+        min_val, max_val = min(theoretical_quantiles), max(theoretical_quantiles)
+        fig.add_trace(
+            go.Scatter(
+                x=[min_val, max_val],
+                y=[min_val * strategy_returns.std() + strategy_returns.mean(), 
+                   max_val * strategy_returns.std() + strategy_returns.mean()],
+                mode='lines',
+                name='Normal Reference',
+                line=dict(dash='dash', color='red')
+            ),
+            row=1, col=2
+        )
+        
+        # 3. Rolling skewness
+        rolling_skew = strategy_returns.rolling(window=24).apply(lambda x: x.skew())  # 24-hour window
+        fig.add_trace(
+            go.Scatter(
+                x=rolling_skew.index,
+                y=rolling_skew.values,
+                mode='lines',
+                name='Rolling Skewness',
+                line=dict(color='purple', width=2)
+            ),
+            row=2, col=1
+        )
+        
+        fig.add_hline(y=0, line_dash="dot", line_color="gray", 
+                     annotation_text="Symmetric", row=2, col=1)
+        
+        # 4. Rolling kurtosis
+        rolling_kurt = strategy_returns.rolling(window=24).apply(lambda x: x.kurtosis())  # 24-hour window
+        fig.add_trace(
+            go.Scatter(
+                x=rolling_kurt.index,
+                y=rolling_kurt.values,
+                mode='lines',
+                name='Rolling Kurtosis',
+                line=dict(color='orange', width=2)
+            ),
+            row=2, col=2
+        )
+        
+        fig.add_hline(y=3, line_dash="dot", line_color="gray", 
+                     annotation_text="Normal Kurtosis", row=2, col=2)
+        
+        # Add test start date line for time series plots
+        if test_start_date:
+            for row_num, col_num in [(2, 1), (2, 2)]:
+                y_axis_ref = f"y{(row_num-1)*2 + col_num}"
+                fig.add_shape(
+                    type="line",
+                    x0=test_start_date, x1=test_start_date,
+                    y0=0, y1=1,
+                    yref=f"{y_axis_ref} domain",
+                    line=dict(dash="dash", color="gray", width=2),
+                    row=row_num, col=col_num
+                )
+        
+        # Update layout
+        title_text = f'Return Distribution Analysis - Hourly Strategy<br>'
+        title_text += f'<sub>Mean: {strategy_stats["mean"]:.3f}%, Std: {strategy_stats["std"]:.3f}%, '
+        title_text += f'Skew: {strategy_stats["skew"]:.2f}, Kurt: {strategy_stats["kurt"]:.2f}</sub>'
+        
+        fig.update_layout(
+            title=title_text,
+            height=800,
+            showlegend=True,
+            template='plotly_white'
+        )
+        
+        # Update axes labels
+        fig.update_xaxes(title_text="Return (%)", row=1, col=1)
+        fig.update_yaxes(title_text="Frequency", row=1, col=1)
+        fig.update_xaxes(title_text="Theoretical Quantiles", row=1, col=2)
+        fig.update_yaxes(title_text="Sample Quantiles", row=1, col=2)
+        fig.update_xaxes(title_text="Date", row=2, col=1)
+        fig.update_yaxes(title_text="Skewness", row=2, col=1)
+        fig.update_xaxes(title_text="Date", row=2, col=2)
+        fig.update_yaxes(title_text="Kurtosis", row=2, col=2)
+        
+        # Save chart
+        chart_path = os.path.join(self.output_format.output_directory, "return_distribution_analysis.html")
+        fig.write_html(str(chart_path))
+        print(f" Return distribution analysis chart saved: {chart_path}")
+        
+        return str(chart_path)
+    
+    def _create_up_down_capture_chart(self, strategy_returns: pd.Series,
+                                    benchmark_data: Dict[str, pd.Series],
+                                    test_start_date: pd.Timestamp = None) -> str:
+        """Create up/down capture analysis chart"""
+        
+        if 'SPY' not in benchmark_data:
+            print("No SPY benchmark data available for up/down capture analysis")
+            return ""
+        
+        spy_returns = benchmark_data['SPY'].reindex(strategy_returns.index).fillna(0)
+        
+        # Calculate rolling up/down capture ratios
+        window = 24 * 7  # 1 week rolling window
+        rolling_up_capture = []
+        rolling_down_capture = []
+        dates = []
+        
+        for i in range(window, len(strategy_returns)):
+            end_idx = i
+            start_idx = i - window
+            
+            strategy_window = strategy_returns.iloc[start_idx:end_idx]
+            benchmark_window = spy_returns.iloc[start_idx:end_idx]
+            
+            # Up market periods
+            up_market = benchmark_window > 0
+            if up_market.sum() > 5:  # Need at least 5 observations
+                up_capture = strategy_window[up_market].mean() / benchmark_window[up_market].mean()
+                rolling_up_capture.append(up_capture)
+            else:
+                rolling_up_capture.append(np.nan)
+            
+            # Down market periods  
+            down_market = benchmark_window < 0
+            if down_market.sum() > 5:  # Need at least 5 observations
+                down_capture = strategy_window[down_market].mean() / benchmark_window[down_market].mean()
+                rolling_down_capture.append(down_capture)
+            else:
+                rolling_down_capture.append(np.nan)
+            
+            dates.append(strategy_returns.index[end_idx])
+        
+        # Create scatter plot of strategy vs benchmark returns
+        up_market_mask = spy_returns > 0
+        down_market_mask = spy_returns < 0
+        
+        fig = make_subplots(
+            rows=2, cols=2,
+            subplot_titles=(
+                'Strategy vs Benchmark Returns (Scatter)',
+                'Rolling Up/Down Capture Ratios',
+                'Up Market Performance Distribution',
+                'Down Market Performance Distribution'
+            ),
+            specs=[[{"secondary_y": False}, {"secondary_y": False}],
+                   [{"secondary_y": False}, {"secondary_y": False}]]
+        )
+        
+        # 1. Scatter plot of returns
+        fig.add_trace(
+            go.Scatter(
+                x=spy_returns[up_market_mask] * 100,
+                y=strategy_returns[up_market_mask] * 100,
+                mode='markers',
+                name='Up Market',
+                marker=dict(color='green', opacity=0.6, size=4)
+            ),
+            row=1, col=1
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=spy_returns[down_market_mask] * 100,
+                y=strategy_returns[down_market_mask] * 100,
+                mode='markers',
+                name='Down Market',
+                marker=dict(color='red', opacity=0.6, size=4)
+            ),
+            row=1, col=1
+        )
+        
+        # Add diagonal reference line
+        min_ret, max_ret = min(spy_returns.min(), strategy_returns.min()) * 100, max(spy_returns.max(), strategy_returns.max()) * 100
+        fig.add_trace(
+            go.Scatter(
+                x=[min_ret, max_ret],
+                y=[min_ret, max_ret],
+                mode='lines',
+                name='1:1 Line',
+                line=dict(dash='dash', color='gray')
+            ),
+            row=1, col=1
+        )
+        
+        # 2. Rolling capture ratios
+        dates_series = pd.Series(dates)
+        up_capture_series = pd.Series(rolling_up_capture, index=dates)
+        down_capture_series = pd.Series(rolling_down_capture, index=dates)
+        
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=rolling_up_capture,
+                mode='lines',
+                name='Up Capture',
+                line=dict(color='green', width=2)
+            ),
+            row=1, col=2
+        )
+        
+        fig.add_trace(
+            go.Scatter(
+                x=dates,
+                y=rolling_down_capture,
+                mode='lines',
+                name='Down Capture',
+                line=dict(color='red', width=2)
+            ),
+            row=1, col=2
+        )
+        
+        fig.add_hline(y=1.0, line_dash="dot", line_color="gray", 
+                     annotation_text="100% Capture", row=1, col=2)
+        
+        # 3. Up market distribution
+        up_strategy = strategy_returns[up_market_mask] * 100
+        up_benchmark = spy_returns[up_market_mask] * 100
+        
+        fig.add_trace(
+            go.Histogram(
+                x=up_strategy,
+                nbinsx=30,
+                name='Strategy (Up)',
+                opacity=0.7,
+                marker_color='green'
+            ),
+            row=2, col=1
+        )
+        
+        fig.add_trace(
+            go.Histogram(
+                x=up_benchmark,
+                nbinsx=30,
+                name='SPY (Up)',
+                opacity=0.5,
+                marker_color='lightgreen'
+            ),
+            row=2, col=1
+        )
+        
+        # 4. Down market distribution
+        down_strategy = strategy_returns[down_market_mask] * 100
+        down_benchmark = spy_returns[down_market_mask] * 100
+        
+        fig.add_trace(
+            go.Histogram(
+                x=down_strategy,
+                nbinsx=30,
+                name='Strategy (Down)',
+                opacity=0.7,
+                marker_color='red'
+            ),
+            row=2, col=2
+        )
+        
+        fig.add_trace(
+            go.Histogram(
+                x=down_benchmark,
+                nbinsx=30,
+                name='SPY (Down)',
+                opacity=0.5,
+                marker_color='lightcoral'
+            ),
+            row=2, col=2
+        )
+        
+        # Add test start date line for time series
+        if test_start_date:
+            fig.add_shape(
+                type="line",
+                x0=test_start_date, x1=test_start_date,
+                y0=0, y1=1,
+                yref="y2 domain",
+                line=dict(dash="dash", color="gray", width=2),
+                row=1, col=2
+            )
+        
+        # Calculate overall capture ratios
+        overall_up_capture = strategy_returns[up_market_mask].mean() / spy_returns[up_market_mask].mean() if spy_returns[up_market_mask].mean() != 0 else 0
+        overall_down_capture = strategy_returns[down_market_mask].mean() / spy_returns[down_market_mask].mean() if spy_returns[down_market_mask].mean() != 0 else 0
+        
+        # Update layout
+        title_text = f'Up/Down Capture Analysis - Hourly Strategy<br>'
+        title_text += f'<sub>Overall Up Capture: {overall_up_capture:.2f}, Down Capture: {overall_down_capture:.2f}</sub>'
+        
+        fig.update_layout(
+            title=title_text,
+            height=800,
+            showlegend=True,
+            template='plotly_white'
+        )
+        
+        # Update axes labels
+        fig.update_xaxes(title_text="Benchmark Return (%)", row=1, col=1)
+        fig.update_yaxes(title_text="Strategy Return (%)", row=1, col=1)
+        fig.update_xaxes(title_text="Date", row=1, col=2)
+        fig.update_yaxes(title_text="Capture Ratio", row=1, col=2)
+        fig.update_xaxes(title_text="Return (%)", row=2, col=1)
+        fig.update_yaxes(title_text="Frequency", row=2, col=1)
+        fig.update_xaxes(title_text="Return (%)", row=2, col=2)
+        fig.update_yaxes(title_text="Frequency", row=2, col=2)
+        
+        # Save chart
+        chart_path = os.path.join(self.output_format.output_directory, "up_down_capture_analysis.html")
+        fig.write_html(str(chart_path))
+        print(f" Up/down capture analysis chart saved: {chart_path}")
+        
+        return str(chart_path)

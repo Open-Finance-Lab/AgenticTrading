@@ -515,7 +515,7 @@ print(f"- Accepted models: {len(accepted_models)}")
 print(f"- Rejected models: {len(rejected_models)}")
 
 if accepted_models:
-    print(f"\n✅ ACCEPTED MODELS:")
+    print(f"\n ACCEPTED MODELS:")
     for model_name, result in accepted_models:
         metrics = result.get('metrics')
         if metrics:
@@ -525,7 +525,7 @@ if accepted_models:
             print(f"    - Direction Accuracy: {getattr(metrics, 'accuracy', 0):.2%}")
 
 if rejected_models:
-    print(f"\n❌ REJECTED MODELS:")
+    print(f"\n REJECTED MODELS:")
     for model_name, result in rejected_models:
         metrics = result.get('metrics')
         if metrics:
@@ -536,7 +536,7 @@ if rejected_models:
 
 # Model comparison analysis
 if len(all_results) > 1:
-    print(f"\n📊 MODEL COMPARISON:")
+    print(f"\n MODEL COMPARISON:")
     print(f"{'Model Name':<20} {'Return':<8} {'Sharpe':<8} {'Accuracy':<10} {'MSE':<10} {'Status':<10}")
     print("-" * 70)
     
@@ -550,10 +550,10 @@ if len(all_results) > 1:
                 sharpe = getattr(metrics, 'sharpe_ratio', 0)
                 accuracy = getattr(metrics, 'accuracy', 0)
                 mse = model_metrics.get('mse', 0)
-                status = "✅ PASS" if result.get('is_accepted', False) else "❌ FAIL"
+                status = " PASS" if result.get('is_accepted', False) else " FAIL"
                 print(f"{model_name:<20} {ret:<8.2%} {sharpe:<8.2f} {accuracy:<10.2%} {mse:<10.6f} {status:<10}")
 
-print(f"\n🎯 RECOMMENDATION:")
+print(f"\n RECOMMENDATION:")
 if accepted_models:
     best_model = max(accepted_models, key=lambda x: getattr(x[1].get('metrics'), 'sharpe_ratio', 0))
     print(f"Best performing model: {best_model[0]}")

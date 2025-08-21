@@ -1,4 +1,4 @@
-# 🚀 Comprehensive Quantitative Backtesting Framework
+#  Comprehensive Quantitative Backtesting Framework
 
 A professional quantitative investment backtesting framework that supports comprehensive evaluation of Alpha factors and machine learning models. This framework integrates the complete workflow from data processing, factor calculation, model training, backtesting validation to performance evaluation.
 
@@ -8,16 +8,16 @@ A professional quantitative investment backtesting framework that supports compr
 
 ## ✨ Key Features
 
-- **🎯 Alpha Factor Evaluation**: Support for technical indicators, momentum, mean reversion, and various Alpha factors
-- **🤖 Machine Learning Models**: Integrated mainstream ML models including LightGBM, Random Forest
-- **📊 Information Coefficient (IC) Analysis**: Complete IC calculation and statistical analysis
-- **⚡ Unified Backtesting Interface**: Standardized backtesting pipeline for both factors and models
-- **📈 Benchmark Comparison**: Detailed comparative analysis with market benchmarks
-- **🎨 Visualization Reports**: Rich charts and analytical reports
-- **🔧 Modular Design**: Easy to extend and customize
-- **📋 Acceptance Criteria**: Automated validation with configurable acceptance thresholds
+- ** Alpha Factor Evaluation**: Support for technical indicators, momentum, mean reversion, and various Alpha factors
+- ** Machine Learning Models**: Integrated mainstream ML models including LightGBM, Random Forest
+- ** Information Coefficient (IC) Analysis**: Complete IC calculation and statistical analysis
+- ** Unified Backtesting Interface**: Standardized backtesting pipeline for both factors and models
+- ** Benchmark Comparison**: Detailed comparative analysis with market benchmarks
+- ** Visualization Reports**: Rich charts and analytical reports
+- ** Modular Design**: Easy to extend and customize
+- ** Acceptance Criteria**: Automated validation with configurable acceptance thresholds
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 qlib/
@@ -40,7 +40,7 @@ qlib/
 ```
 - **🖼️ Enhanced Visualization & Comparison Pipeline**: `enhanced_visualization_demo.py` provides advanced visual analytics, including performance attribution, risk-return scatter plots, rolling metrics, and strategy-vs-benchmark comparison. It generates interactive HTML reports and charts for deeper insight into factor/model performance and portfolio risk.
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### 4. Run Enhanced Visualization Demo
 
@@ -78,7 +78,7 @@ python setup_data_download.py
 python comprehensive_demo.py
 ```
 
-## 📈 Data Preparation
+##  Data Preparation
 ## 🖼️ Enhanced Visualization Demo
 
 ### File: `enhanced_visualization_demo.py`
@@ -155,7 +155,7 @@ Date,Open,High,Low,Close,Volume,Dividends,Stock Splits
    - Data consistency validation
    - Date range verification
 
-## 🎯 Alpha Factor Evaluation
+##  Alpha Factor Evaluation
 
 ### Built-in Alpha Factors
 
@@ -247,7 +247,7 @@ acceptance_criteria = StandardAcceptanceCriteria(
 )
 ```
 
-## 🤖 Machine Learning Model Evaluation
+##  Machine Learning Model Evaluation
 
 ### Supported Models
 
@@ -361,7 +361,7 @@ model_acceptance = StandardAcceptanceCriteria(
 )
 ```
 
-## 📊 Benchmark Comparison
+##  Benchmark Comparison
 
 ### Benchmark Strategy
 
@@ -416,13 +416,13 @@ def calculate_attribution(strategy_returns, benchmark_returns):
 
 #### Example Results Analysis
 ```
-📊 PERFORMANCE COMPARISON TABLE:
+ PERFORMANCE COMPARISON TABLE:
 Type     Name                 Return   Sharpe   Status    
 ------------------------------------------------------------
-Factor   mean_reversion_10d   11.43%   1.15     ✅ PASS    
-Factor   rsi_divergence       13.61%   1.56     ✅ PASS    
-Model    alpha_lgb_model      43.65%   1.33     ✅ PASS    
-Model    alpha_rf_model       65.85%   2.01     ✅ PASS    
+Factor   mean_reversion_10d   11.43%   1.15      PASS    
+Factor   rsi_divergence       13.61%   1.56      PASS    
+Model    alpha_lgb_model      43.65%   1.33      PASS    
+Model    alpha_rf_model       65.85%   2.01      PASS    
 ```
 
 **Interpretation:**
@@ -430,7 +430,7 @@ Model    alpha_rf_model       65.85%   2.01     ✅ PASS
 - **alpha_rf_model**: Top performer with 65.85% return and 2.01 Sharpe
 - Both show strong risk-adjusted performance above acceptance thresholds
 
-## 🎯 Strategy Deployment Guidelines
+##  Strategy Deployment Guidelines
 
 ### Production Recommendations
 
@@ -530,23 +530,23 @@ python comprehensive_demo.py
 
 Expected output:
 ```
-🚀 Starting Comprehensive Alpha Factor and Model Evaluation...
-📊 Instruments: ['AAPL', 'MSFT', 'GOOGL']
-📈 Alpha Factors to evaluate: 6
-🤖 ML Models to evaluate: 2
+ Starting Comprehensive Alpha Factor and Model Evaluation...
+ Instruments: ['AAPL', 'MSFT', 'GOOGL']
+ Alpha Factors to evaluate: 6
+ ML Models to evaluate: 2
 
-✅ ACCEPTED ALPHA FACTORS:
+ ACCEPTED ALPHA FACTORS:
   • mean_reversion_10d - Annual Return: 11.43%, Sharpe: 1.15
   • rsi_divergence - Annual Return: 13.61%, Sharpe: 1.56
 
-✅ ACCEPTED ML MODELS:
+ ACCEPTED ML MODELS:
   • alpha_lgb_model - Annual Return: 43.65%, Sharpe: 1.33
   • alpha_rf_model - Annual Return: 65.85%, Sharpe: 2.01
 
-🎉 Comprehensive Alpha Factor and Model Evaluation Complete!
+- Comprehensive Alpha Factor and Model Evaluation Complete!
 ```
 
-## 🔧 Configuration Options
+##  Configuration Options
 
 ### Data Configuration
 
@@ -629,7 +629,7 @@ Warning: No further splits with positive gain, best_split=0
 - Reduce `n_estimators` and `max_depth`
 - Add regularization (`lambda_l1`, `lambda_l2`)
 
-## 📚 Advanced Topics
+##  Advanced Topics
 
 ### Custom Factor Development
 
@@ -678,7 +678,7 @@ class EnsembleModel:
         return sum(predictions)
 ```
 
-## 📈 Performance Monitoring
+##  Performance Monitoring
 
 ### Factor Decay Detection
 
@@ -726,6 +726,6 @@ For questions and support, please open an issue in the GitHub repository or cont
 
 ---
 
-**🎯 Happy Backtesting! 🚀**
+** Happy Backtesting! **
 
-**⚠️ Disclaimer**: This framework is for educational and research purposes only. It does not constitute investment advice. Please consult with professional financial advisors for actual investment decisions.
+**Disclaimer**: This framework is for educational and research purposes only. It does not constitute investment advice. Please consult with professional financial advisors for actual investment decisions.

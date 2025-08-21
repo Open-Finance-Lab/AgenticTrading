@@ -322,8 +322,32 @@ class ResultProcessor:
         
         # Basic return metrics
         cumulative_return = (1 + returns_clean).prod() - 1
-        annual_return = (1 + returns_clean.mean()) ** 252 - 1
-        volatility = returns_clean.std() * np.sqrt(252)
+
+        # Infer periods-per-year from data if possible (handles intraday/hourly correctly)
+        periods_per_year = None
+        try:
+            if hasattr(returns_clean.index, 'date'):
+                df_idx = pd.Series(1, index=returns_clean.index)
+                counts_per_day = df_idx.groupby(returns_clean.index.date).sum()
+                avg_per_day = float(counts_per_day.mean()) if len(counts_per_day) > 0 else 1.0
+                periods_per_year = max(int(round(avg_per_day * 252)), 1)
+        except Exception:
+            periods_per_year = None
+
+        if periods_per_year is None:
+            periods_per_year = 252
+
+        # Annualize cumulative return geometrically using observed periods
+        n_periods = len(returns_clean)
+        try:
+            if cumulative_return <= -1:
+                annual_return = -1.0
+            else:
+                annual_return = (1 + cumulative_return) ** (periods_per_year / max(n_periods, 1)) - 1
+        except Exception:
+            annual_return = (1 + returns_clean.mean()) ** periods_per_year - 1
+
+        volatility = returns_clean.std() * np.sqrt(periods_per_year)
         
         # Sharpe ratio
         sharpe_ratio = annual_return / volatility if volatility > 0 else 0.0
@@ -333,14 +357,14 @@ class ResultProcessor:
         rolling_max = cumulative.expanding().max()
         drawdown = (cumulative - rolling_max) / rolling_max
         max_drawdown = drawdown.min()
-        
-        # Downside risk
+
+        # Downside risk (annualized using inferred periods_per_year)
         negative_returns = returns_clean[returns_clean < 0]
-        downside_risk = negative_returns.std() * np.sqrt(252) if len(negative_returns) > 0 else 0.0
-        
+        downside_risk = negative_returns.std() * np.sqrt(periods_per_year) if len(negative_returns) > 0 else 0.0
+
         # Calmar ratio
         calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown != 0 else 0.0
-        
+
         return EvaluationMetrics(
             annual_return=annual_return,
             cumulative_return=cumulative_return,
