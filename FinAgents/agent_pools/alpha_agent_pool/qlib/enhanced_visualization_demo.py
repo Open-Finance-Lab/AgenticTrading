@@ -35,7 +35,7 @@ def run_enhanced_visualization_demo():
         end_date="2024-12-31",               # Backtest end date 
         required_fields=["open", "high", "low", "close", "volume"],  # Required OHLCV fields
         universe="custom_list",              # Universe type: custom symbol list
-        custom_symbols=["AAPL", "MSFT", "GOOGL", "JPM", "TSLA", "NVDA", "META"],  # 7-stock portfolio for intraday visualization
+        custom_symbols=["AAPL", "MSFT", "GOOGL", "JPM", "TSLA", "NVDA", "META"], #,"AVGO","BAC","COST"],  # 7-stock portfolio for intraday visualization
         adjust_price=True,                   # Apply price adjustments for splits/dividends
         fill_method="ffill",                 # Forward fill missing data
         min_periods=24                       # 24 hours minimum for hourly data
