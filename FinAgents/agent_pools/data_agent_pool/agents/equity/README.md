@@ -67,3 +67,30 @@ The agent is designed for easy extension. To add new data operations, implement 
 ---
 
 **This architecture enables robust, interpretable, and flexible financial data workflows, bridging API-driven and natural language-driven paradigms in quantitative research.**
+
+## Using the yfinance MCP server locally
+
+This directory also contains a simple Model Context Protocol (MCP) server backed by
+`yfinance`. Combine it with the OpenAI Agents Python SDK to let an agent call the
+server's `get_stock_metric` and `get_historical_data` tools.
+
+1. Install dependencies (the OpenAI SDK provides the `agents` package)::
+
+   pip install openai yfinance
+
+2. Set your OpenAI API key in the environment::
+
+   export OPENAI_API_KEY="sk-..."
+
+3. Run the demo script, which spawns the MCP server over stdio and issues an
+   example query through an agent::
+
+   python use_yfinance_mcp.py --symbol AAPL --metric marketCap --period 6mo
+
+Override the agent's request by setting `YFINANCE_AGENT_PROMPT` before launching
+the script. The CLI supports `--start`/`--end` to specify explicit date ranges
+and now instructs the agent to store the CSV on the MCP server side. When the
+managed prompt is used, the tool writes the data to disk (default `./outputs`,
+configurable via `--output-dir`) and the agent replies with JSON summarising the
+completed steps, metric value, and the saved file path. The helper script parses
+that JSON, confirms the tasks, and prints a short preview of the stored CSV.
