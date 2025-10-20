@@ -2,7 +2,7 @@
 Overview
 =============================
 
-.. figure:: FinProtocol.jpg
+.. figure:: FinProtocol.png
    :align: center
    :width: 90%
 
