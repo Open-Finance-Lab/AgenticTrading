@@ -1,9 +1,9 @@
 """
 Custom Agent framework supporting OpenAI Function Calling for Alpha Research.
-🧠 2025 修正版:
-- 兼容 openai>=1.0 SDK
-- 自动识别工具函数参数（基于 inspect.signature）
-- 自动传入 context
+🧠 2025 Revision:
+- Compatible with openai>=1.0 SDK
+- Automatically detects tool function parameters (based on inspect.signature)
+- Automatically passes context
 """
 
 import os
@@ -13,10 +13,10 @@ from openai import OpenAI
 
 
 # ==============================
-# 工具函数装饰器
+# Tool function decorator
 # ==============================
 def function_tool(func, name=None, description=None):
-    """将Python函数封装为可调用工具"""
+    """Wrap a Python function as a callable tool"""
     func.is_tool = True
     func.name = name or func.__name__
     func.description = description or func.__doc__ or "No description available"
@@ -24,11 +24,11 @@ def function_tool(func, name=None, description=None):
 
 
 # ==============================
-# Agent 类定义
+# Agent class definition
 # ==============================
 class Agent:
     """
-    通用智能体类：支持 OpenAI Function Calling 自动执行工具。
+    General-purpose agent class supporting OpenAI Function Calling with automatic tool execution.
     """
 
     def __init__(self, name="Agent", instructions="", model="gpt-4o-mini", tools=None):
@@ -39,14 +39,14 @@ class Agent:
         self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     def _find_tool(self, name):
-        """在注册的工具中查找函数"""
+        """Find a tool by name in the registered tool list"""
         for t in self.tools:
             if t.__name__ == name or getattr(t, "name", None) == name:
                 return t
         return None
 
     def _build_tool_schema(self, func):
-        """自动生成函数参数 JSON Schema"""
+        """Automatically generate JSON schema for function parameters"""
         sig = inspect.signature(func)
         params = {}
         required = []
@@ -55,7 +55,7 @@ class Agent:
             if name in ("ctx", "self"):
                 continue
 
-            # 推断参数类型
+            # Infer parameter type
             ptype = "string"
             if param.annotation == int:
                 ptype = "integer"
@@ -79,13 +79,13 @@ class Agent:
         }
 
     def run(self, user_request, context=None, max_turns=10):
-        """核心执行逻辑：GPT规划 → 自动调用工具 → 汇总输出"""
-        print(f"\n🤖 [Agent] 启动: {self.name}")
-        print(f"[Agent] 模型: {self.model}")
-        print(f"[Agent] 用户请求: {user_request[:200]}...")
-        print(f"[Agent] 可用工具数量: {len(self.tools)}")
+        """Core execution logic: GPT planning → automatic tool execution → result aggregation"""
+        print(f"\n[Agent] Starting: {self.name}")
+        print(f"[Agent] Model: {self.model}")
+        print(f"[Agent] User request: {user_request[:200]}...")
+        print(f"[Agent] Number of available tools: {len(self.tools)}")
 
-        # 初始对话上下文
+        # Initial conversation context
         messages = [
             {"role": "system", "content": self.instructions},
             {"role": "user", "content": user_request},
@@ -93,7 +93,7 @@ class Agent:
 
         for turn in range(max_turns):
             try:
-                # 自动构建工具schema
+                # Automatically build tool schemas
                 tool_schemas = [
                     {
                         "type": "function",
@@ -106,7 +106,7 @@ class Agent:
                     for t in self.tools
                 ]
 
-                # 发送请求
+                # Send request
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=messages,
@@ -114,12 +114,12 @@ class Agent:
                     tool_choice="auto",
                 )
             except Exception as e:
-                print(f"❌ OpenAI API 调用失败: {e}")
-                return f"❌ OpenAI API 调用失败: {e}"
+                print(f"OpenAI API call failed: {e}")
+                return f"OpenAI API call failed: {e}"
 
             msg = response.choices[0].message
 
-            # 检查是否调用了工具
+            # Check if a tool was called
             if hasattr(msg, "tool_calls") and msg.tool_calls:
                 for call in msg.tool_calls:
                     name = call.function.name
@@ -130,33 +130,33 @@ class Agent:
                     except Exception:
                         args = {}
 
-                    print(f"\n🧰 调用工具: {name} | 参数: {args}")
+                    print(f"\n[Tool] Invoked: {name} | Args: {args}")
 
                     tool = self._find_tool(name)
                     if not tool:
-                        print(f"⚠️ 工具 {name} 未注册。")
+                        print(f"[Warning] Tool {name} not registered.")
                         continue
 
                     try:
                         result = tool(context, **args) if context else tool(**args)
-                        print(f"✅ 工具执行成功: {name}")
+                        print(f"[Success] Tool executed: {name}")
 
-                        # 将结果反馈给模型
+                        # Feed the result back to the model
                         messages.append({
                             "role": "assistant",
-                            "content": f"工具 {name} 执行结果: {str(result)[:1000]}"
+                            "content": f"Tool {name} result: {str(result)[:1000]}"
                         })
                     except Exception as e:
-                        print(f"❌ 工具执行失败: {name} - {e}")
+                        print(f"[Error] Tool execution failed: {name} - {e}")
                         messages.append({
                             "role": "assistant",
                             "content": f"Error running {name}: {e}"
                         })
 
             else:
-                # 模型生成最终结果
+                # Model produced the final output
                 final_output = msg.content or ""
-                print("\n🧾 模型最终输出：\n", final_output[:800])
+                print("\n[Output] Final model response:\n", final_output[:800])
                 return final_output
 
-        return "✅ 执行完成（达到最大轮数）"
+        return "Execution complete (maximum turns reached)"
