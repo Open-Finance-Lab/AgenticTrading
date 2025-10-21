@@ -1,6 +1,6 @@
 """
-Alpha Research Agent - 基于 OpenAI Agents SDK 构建 (修正版)
-支持新版 openai>=1.0 API 和自动 context 传递
+Alpha Research Agent - Built on OpenAI Agents SDK (Revised Version)
+Supports openai>=1.0 API and automatic context passing.
 """
 
 import os
@@ -15,20 +15,20 @@ import qlib
 from qlib.data import D
 from qlib.contrib.data.handler import Alpha158
 
-# ✅ 引入修复后的 Agent
+# ✅ Import the revised Agent class
 from agents import Agent, function_tool
 
-# 你的自定义工具模块（请确保路径正确）
+# Custom toolkits (ensure correct import paths)
 from alpha_analysis_toolkit import AlphaAnalysisToolkit
 from alpha_visualization_toolkit import AlphaVisualizationToolkit
 
 
 # ============================================================================
-# 数据结构定义
+# Data Structure Definitions
 # ============================================================================
 
 class FactorPerformance(BaseModel):
-    """因子预期表现"""
+    """Expected factor performance"""
     market_regime: str
     confidence_level: float
     expected_sharpe: float
@@ -38,7 +38,7 @@ class FactorPerformance(BaseModel):
 
 
 class FactorProposal(BaseModel):
-    """单个因子建议"""
+    """Single factor proposal"""
     factor_name: str
     description: str
     formula: str
@@ -50,7 +50,7 @@ class FactorProposal(BaseModel):
 
 
 class AlphaFactorResponse(BaseModel):
-    """LLM结构化因子建议响应"""
+    """Structured response for factor proposals"""
     factor_proposals: List[FactorProposal]
     market_summary: str
     risk_assessment: str
@@ -60,11 +60,11 @@ class AlphaFactorResponse(BaseModel):
 
 
 # ============================================================================
-# Context类：存储执行状态
+# Context Class
 # ============================================================================
 
 class AlphaResearchContext:
-    """Alpha研究上下文"""
+    """Alpha research execution context"""
     def __init__(self):
         self.current_asset: Optional[str] = None
         self.market_data: Optional[pd.DataFrame] = None
@@ -104,15 +104,15 @@ class AlphaResearchContext:
 
 
 # ============================================================================
-# 工具函数（装饰为 function_tool）
+# Tool Functions (decorated with @function_tool)
 # ============================================================================
 
 @function_tool
 def load_and_analyze_data(ctx: AlphaResearchContext, csv_path: str, qlib_format: bool = False):
-    """加载并分析资产数据，计算技术指标和信号"""
+    """Load and analyze asset data, compute technical indicators and signals"""
     start = datetime.now()
     try:
-        print(f"🔧 加载数据: {csv_path}")
+        print(f"Loading data: {csv_path}")
         data = AlphaAnalysisToolkit.load_asset_data(csv_path, data_format="csv")
         data = AlphaAnalysisToolkit.preprocess_data(data, qlib_format=qlib_format)
         indicators = AlphaAnalysisToolkit.calculate_technical_indicators(data)
@@ -128,16 +128,16 @@ def load_and_analyze_data(ctx: AlphaResearchContext, csv_path: str, qlib_format:
         }
 
         summary = (
-            f"✅ 数据加载成功: {csv_path}\n"
-            f"📊 行数={len(data)} | 指标={len(indicators)} | 信号={len(signals)}\n"
-            f"⚠️ 年化波动率={risk.get('volatility', 0):.2%} | Sharpe={risk.get('sharpe_ratio', 0):.2f}"
+            f"Data loaded successfully: {csv_path}\n"
+            f"Rows={len(data)} | Indicators={len(indicators)} | Signals={len(signals)}\n"
+            f"Volatility={risk.get('volatility', 0):.2%} | Sharpe={risk.get('sharpe_ratio', 0):.2f}"
         )
 
         ctx.log_function_call("load_and_analyze_data", {"csv_path": csv_path}, summary,
                               (datetime.now() - start).total_seconds())
         return summary
     except Exception as e:
-        return f"❌ 加载失败: {e}"
+        return f"Data loading failed: {e}"
 
 
 @function_tool
@@ -146,7 +146,7 @@ def load_qlib_factors(ctx: AlphaResearchContext,
                       start_date: str = "2022-08-16",
                       end_date: str = "2024-12-31"):
     """
-    用 Alpha158 Handler 计算并评估 IC/IR（正确方式）
+    Compute and evaluate IC/IR using Alpha158 handler
     """
     from qlib.data.dataset import DatasetH
     from qlib.contrib.data.handler import Alpha158
@@ -157,9 +157,9 @@ def load_qlib_factors(ctx: AlphaResearchContext,
         feats_dir = os.path.join(provider_uri, "features")
         inst_list = sorted([d for d in os.listdir(feats_dir)
                             if os.path.isdir(os.path.join(feats_dir, d))])
-        print(f"检测到 {len(inst_list)} 支股票: {inst_list[:5]} ...")
+        print(f"Detected {len(inst_list)} stocks: {inst_list[:5]} ...")
 
-        # === 1) 构建 DatasetH ===
+        # === 1) Build DatasetH ===
         handler_cfg = {
             "class": "Alpha158",
             "module_path": "qlib.contrib.data.handler",
@@ -177,9 +177,9 @@ def load_qlib_factors(ctx: AlphaResearchContext,
         valid_cols = [c for c in feat_df.columns
                       if feat_df[c].dropna().std() > 0 and feat_df[c].notna().sum() > 50]
         feat_df = feat_df[valid_cols]
-        print(f"有效因子数: {len(valid_cols)}")
+        print(f"Valid factors: {len(valid_cols)}")
 
-        # === 2) 未来一天收益 ===
+        # === 2) Next-day return ===
         close = (D.features(instruments=inst_list, fields=["$close"],
                             start_time=start_date, end_time=end_date, freq="day")
                  .reset_index().set_index(["datetime", "instrument"]))
@@ -188,7 +188,7 @@ def load_qlib_factors(ctx: AlphaResearchContext,
         panel = feat_df.join(ret_fwd, how="inner").replace([np.inf, -np.inf], np.nan).dropna(subset=["ret_fwd"])
         gb = panel.groupby(level=0)
 
-        # === 3) 计算 IC/IR ===
+        # === 3) Compute IC/IR ===
         records = []
         for f in valid_cols:
             ic_by_day = gb.apply(lambda g: g[f].corr(g["ret_fwd"], method="spearman")).dropna()
@@ -202,8 +202,8 @@ def load_qlib_factors(ctx: AlphaResearchContext,
         ctx.analysis_results["qlib_factors"] = perf_df
 
         summary = f"""
-✅ 成功计算 {len(perf_df)} 个 Alpha158 因子表现
-前5名（按IR排序）:
+Successfully computed {len(perf_df)} Alpha158 factor performances
+Top 5 (by IR):
 {perf_df.head(5).to_string(index=False)}
 """
         ctx.log_function_call("load_qlib_factors",
@@ -213,19 +213,18 @@ def load_qlib_factors(ctx: AlphaResearchContext,
         return summary
 
     except Exception as e:
-        error_msg = f"❌ 加载 Alpha158 因子失败: {e}"
+        error_msg = f"Failed to load Alpha158 factors: {e}"
         ctx.log_function_call("load_qlib_factors", {}, error_msg, 0)
         print(error_msg)
         return error_msg
 
 
-
 @function_tool
 def propose_alpha_factors(ctx: AlphaResearchContext):
-    """根据Qlib结果提出Alpha因子建议"""
+    """Propose alpha factors based on Qlib results"""
     perf_df = ctx.analysis_results.get("qlib_factors")
     if perf_df is None or perf_df.empty:
-        return "⚠️ 请先运行 load_qlib_factors()"
+        return "Please run load_qlib_factors() first."
     ctx.factor_proposals = perf_df.head(5).to_dict("records")
     result = "\n".join(
         [f"{i+1}. {r['factor']} | IC={r['IC']:.3f} | IR={r['IR']:.2f}"
@@ -237,28 +236,28 @@ def propose_alpha_factors(ctx: AlphaResearchContext):
 
 @function_tool
 def generate_iteration_report(ctx: AlphaResearchContext, iteration_number: int = 1):
-    """生成迭代报告"""
+    """Generate iteration report"""
     ctx.iteration_count = iteration_number
     report = f"""
-📋 研究报告 #{iteration_number}
-资产: {ctx.current_asset}
-分析结果: {len(ctx.analysis_results)}
-可视化图表: {len(ctx.visualizations)}
-因子建议: {len(ctx.factor_proposals)}
-执行步骤: {len(ctx.execution_log)}
+Research Report #{iteration_number}
+Asset: {ctx.current_asset}
+Analysis results: {len(ctx.analysis_results)}
+Visualizations: {len(ctx.visualizations)}
+Factor proposals: {len(ctx.factor_proposals)}
+Execution steps: {len(ctx.execution_log)}
 """
     path = ctx.save_session_log()
-    report += f"📄 日志保存: {path}"
+    report += f"Log saved: {path}"
     ctx.log_function_call("generate_iteration_report", {"iteration_number": iteration_number}, report, 0)
     return report
 
 
 # ============================================================================
-# Alpha Research Agent 主类
+# Alpha Research Agent
 # ============================================================================
 
 class AlphaResearchAgent:
-    """Alpha研究智能体 - 执行完整Alpha分析流程"""
+    """Alpha Research Agent - executes a full alpha analysis workflow"""
 
     def __init__(self):
         self.context = AlphaResearchContext()
@@ -266,12 +265,12 @@ class AlphaResearchAgent:
             name="AlphaResearchAgent",
             model="gpt-4o-mini",
             instructions="""
-你是一名专业的量化研究助理。你可以调用工具:
+You are a professional quantitative research assistant. You can call the following tools:
 - load_and_analyze_data
 - load_qlib_factors
 - propose_alpha_factors
 - generate_iteration_report
-请基于数据进行完整分析。
+Please perform a full alpha research workflow.
 """,
             tools=[
                 load_and_analyze_data,
@@ -282,110 +281,107 @@ class AlphaResearchAgent:
         )
 
     async def run_analysis(self, user_request: str):
-        """异步运行分析任务"""
-        print(f"\n🚀 开始Alpha研究分析 | Session {self.context.session_id}\n")
+        """Run the analysis asynchronously"""
+        print(f"\nStarting Alpha Research Analysis | Session {self.context.session_id}\n")
         result_text = self.agent.run(user_request, context=self.context)
         log_path = self.context.save_session_log()
-        print(f"\n✅ 分析完成 | 日志: {log_path}\n")
+        print(f"\nAnalysis complete | Log: {log_path}\n")
         return result_text
 
     def run_analysis_sync(self, user_request: str):
-        """同步执行版本"""
+        """Synchronous execution"""
         return asyncio.run(self.run_analysis(user_request))
 
     def summarize_with_llm(self):
         """
-        使用 LLM 对当前 context 的分析结果进行总结。
+        Use the LLM to summarize current analysis results.
         """
-        # 从 context 里提取关键信息
         risk = self.context.analysis_results.get("risk_metrics", {})
         factor_df = self.context.analysis_results.get("qlib_factors")
 
-        # 生成提示词（prompt）
+        # Construct the LLM prompt
         text_prompt = f"""
-你是一名量化研究助理。以下是一次Alpha研究任务的结果。
+You are a quantitative research assistant. Below are the results from an alpha research session.
 
-【1️⃣ 数据分析结果】
-年化波动率: {risk.get('volatility', '未知')}
-夏普比率: {risk.get('sharpe_ratio', '未知')}
-其它指标: {risk}
+[1] Data Analysis Results
+Volatility: {risk.get('volatility', 'Unknown')}
+Sharpe Ratio: {risk.get('sharpe_ratio', 'Unknown')}
+Other metrics: {risk}
 
-【2️⃣ Alpha因子表现（前10个）】
-{factor_df.head(10).to_string(index=False) if factor_df is not None else '暂无因子数据'}
+[2] Alpha Factor Performance (Top 10)
+{factor_df.head(10).to_string(index=False) if factor_df is not None else 'No factor data available'}
 
-请你帮我完成以下分析：
-- 简要总结市场特征；
-- 分析这些因子的代表意义；
-- 指出哪些因子组合可能有用；
-- 给出改进方向或进一步研究建议。
+Please provide:
+- A short summary of market characteristics
+- Analysis of what these factors represent
+- Which combinations may be useful
+- Suggestions for improvement or further research
 """
 
-        print("\n🧠 调用 LLM 进行分析总结 ...")
+        print("\nCalling LLM for analysis summary ...")
 
-        # 使用 OpenAI 客户端调用模型
         try:
             response = self.agent.client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role": "system", "content": "你是一位专业的量化研究分析师，擅长Alpha因子分析。"},
+                    {"role": "system", "content": "You are a professional quantitative analyst specializing in alpha factor research."},
                     {"role": "user", "content": text_prompt},
                 ],
             )
             summary_text = response.choices[0].message.content
-            print("\n📊 LLM 分析结果:\n", summary_text[:1500])
+            print("\nLLM Summary:\n", summary_text[:1500])
             return summary_text
         except Exception as e:
-            print(f"❌ LLM 调用失败: {e}")
-            return f"❌ LLM 调用失败: {e}"
+            print(f"LLM call failed: {e}")
+            return f"LLM call failed: {e}"
 
     def run_complete_workflow(self, csv_path: str, user_input: str = ""):
         """
-        完整执行Alpha研究流程：
-        1. 调用工具执行分析；
-        2. 调用LLM进行总结分析；
-        3. 输出完整报告。
+        Execute a full alpha research workflow:
+        1. Run analysis tools
+        2. Use LLM for summarization
+        3. Generate a final combined report
         """
         prompt = f"""
-请对 {csv_path} 进行完整alpha研究，包括:
-1. 调用 load_and_analyze_data
-2. 调用 load_qlib_factors
-3. 调用 propose_alpha_factors
-4. 生成第1次迭代报告
+Perform a complete alpha research on {csv_path}, including:
+1. Call load_and_analyze_data
+2. Call load_qlib_factors
+3. Call propose_alpha_factors
+4. Generate the first iteration report
 {user_input}
 """
 
-        # === (1) 执行分析 ===
+        # Step 1: Run analysis
         base_result = self.run_analysis_sync(prompt)
 
-        # === (2) 让 LLM 总结 ===
+        # Step 2: Summarize with LLM
         llm_summary = self.summarize_with_llm()
 
-        # === (3) 合并输出 ===
-        final_report = base_result + "\n\n======\n📈 LLM总结分析：\n" + llm_summary
-        print("\n✅ 完整报告生成完成。")
+        # Step 3: Combine results
+        final_report = base_result + "\n\n======\nLLM Summary:\n" + llm_summary
+        print("\nFinal report generated successfully.")
         return final_report
 
 
 # ============================================================================
-# 主入口
+# Main Entry Point
 # ============================================================================
 
 def main():
-    """测试入口"""
+    """Test entry point"""
     import qlib
     qlib.init(provider_uri="/content/AgenticTradng/qlib_data/stock_custom_day", region="us")
     agent = AlphaResearchAgent()
     report = agent.run_complete_workflow(
         "/content/AgenticTradng/qlib_data/stock_backup/XOM_daily.csv",
-        user_input="进行技术分析与因子建议"
+        user_input="Perform technical analysis and factor proposal"
     )
 
-    # 打印最终总结
+    # Print final report
     print("\n\n============================")
-    print("📄 最终综合报告（含LLM分析）")
+    print("Final Combined Report (with LLM Summary)")
     print("============================\n")
     print(report)
-
 
 
 if __name__ == "__main__":
