@@ -356,7 +356,7 @@ If you use this system or build upon it in your research, please cite the follow
 ```bibtex
 @inproceedings{orchestration_finagents_2025,
    title     = {Orchestration Framework for Financial Agents: From Algorithmic Trading to Agentic Trading},
-   author    = {[Your Name] and [Co-authors TBD]},
+   author    = {Jifeng Li et al.},
    booktitle = {NeurIPS 2025 Workshop on Generative AI in Finance},
    year      = {2025},
    note      = {To appear}
