@@ -1,24 +1,19 @@
 """
-Alpha Research Agent - Built on OpenAI Agents SDK (Revised Version)
-Supports openai>=1.0 API and automatic context passing.
+Alpha Research Agent - 基于OpenAI Agents SDK构建
+集成AlphaAnalysisToolkit和AlphaVisualizationToolkit
 """
-
 import os
 import asyncio
 import json
-from datetime import datetime
 from typing import Dict, List, Any, Optional
+from datetime import datetime
 import pandas as pd
 from pydantic import BaseModel
-import numpy as np
-import qlib
-from qlib.data import D
-from qlib.contrib.data.handler import Alpha158
 
-# ✅ Import the revised Agent class
-from agents import Agent, function_tool
+# OpenAI Agents SDK imports (本地agents.py已重命名为local_agents.py)
+from agents import Agent, Runner, function_tool, RunContextWrapper
 
-# Custom toolkits (ensure correct import paths)
+# 导入工具包
 from alpha_analysis_toolkit import AlphaAnalysisToolkit
 from alpha_visualization_toolkit import AlphaVisualizationToolkit
 
