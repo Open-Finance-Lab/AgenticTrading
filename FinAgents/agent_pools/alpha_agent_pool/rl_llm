@@ -1,0 +1,197 @@
+import warnings, numpy as np, pandas as pd
+warnings.filterwarnings("ignore")
+np.random.seed(42)
+
+import yfinance as yf
+import ta
+import matplotlib as mpl
+mpl.rcParams['font.family'] = 'DejaVu Sans'
+
+from stable_baselines3 import PPO
+from stable_baselines3.common.vec_env import DummyVecEnv
+
+# ---------- Parameters ----------
+TICKERS     = ["AAPL"]
+START, END  = "2016-01-01", "2021-01-01"
+SPLIT_STR   = "2020-01-01"
+TOTAL_STEPS = 30_000
+
+# Candidate technical factors
+TECHS = [
+    # Momentum / Trend
+    "ret_1d","ret_5d","ret_21d","sma_5","sma_20","ema_12","ema_26",
+    "macd","macd_signal","macd_hist",
+    # Volatility / Risk
+    "atr_14","realized_vol_21",
+    # Volume & Price
+    "obv","mfi",
+    # Overbought/Oversold / Bandwidth
+    "rsi","boll_%b",
+]
+
+# LLM Reward-Shaping Parameters
+LLM_MODEL   = "gpt-4o-mini"
+ALPHA       = 0.2
+BETA        = 0.001
+EMA_GAMMA   = 0.9
+CALL_EVERY  = 100         # call every N steps
+
+# Rank-Nudge Parameters
+NUDGE_STRENGTH   = 0.15   # epsilon for multiplicative adjustment (1±ε)
+NUDGE_MIN_CONF   = 0.20   # lower bound for confidence
+NUDGE_MAX_CONF   = 1.00   # upper bound for confidence
+NUDGE_EMA_GAMMA  = 0.90   # EMA smoothing for LLM mask
+
+# ---------- Utility ----------
+def normalize_ohlcv(df_in: pd.DataFrame) -> pd.DataFrame:
+    """Ensure OHLCV column names are standardized."""
+    cols = {str(c).lower(): c for c in df_in.columns}
+    need = ["open","high","low","close","volume"]
+    found = {}
+    for k in need:
+        if k in cols: found[k] = cols[k]
+    if len(found) < len(need):
+        for k in need:
+            if k not in found:
+                cands = [orig for low, orig in cols.items() if k in low]
+                if cands: found[k] = cands[-1]
+    if len(found) < len(need):
+        raise KeyError(f"Missing columns: {[k for k in need if k not in found]} | actual: {list(df_in.columns)}")
+    out = df_in[[found["open"], found["high"], found["low"], found["close"], found["volume"]]].copy()
+    out.columns = ["open","high","low","close","volume"]
+    return out
+
+# ---------- Download Data ----------
+dfs = []
+for tic in TICKERS:
+    raw = yf.Ticker(tic).history(start=START, end=END, auto_adjust=False)
+    raw = raw.reset_index()
+    raw.columns = [str(c) for c in raw.columns]
+    raw = raw.rename(columns={"Date":"date"})
+    ohlcv = normalize_ohlcv(raw)
+    d = pd.concat([raw[["date"]].reset_index(drop=True), ohlcv.reset_index(drop=True)], axis=1)
+    d["tic"] = tic
+    dfs.append(d)
+
+df = pd.concat(dfs, ignore_index=True)
+df.columns = [str(c) for c in df.columns]
+df = df.loc[:, ~pd.Index(df.columns).duplicated()]
+df["date"] = pd.to_datetime(df["date"], utc=True).dt.tz_convert("America/New_York").dt.tz_localize(None)
+for c in ["open","high","low","close","volume"]:
+    df[c] = pd.to_numeric(df[c], errors="coerce")
+df = df.sort_values(["tic","date"]).reset_index(drop=True)
+
+# ---------- Compute Factors ----------
+def _add_indicators_safe(g: pd.DataFrame) -> pd.DataFrame:
+    g = g.copy()
+    close = g["close"].astype(float)
+    high  = g["high"].astype(float)
+    low   = g["low"].astype(float)
+    vol   = g["volume"].astype(float)
+
+    # Momentum / Moving Averages
+    g["ret_1d"]  = close.pct_change(1)
+    g["ret_5d"]  = close.pct_change(5)
+    g["ret_21d"] = close.pct_change(21)
+    g["sma_5"]   = close.rolling(5).mean()
+    g["sma_20"]  = close.rolling(20).mean()
+    ema12 = close.ewm(span=12, adjust=False).mean()
+    ema26 = close.ewm(span=26, adjust=False).mean()
+    g["ema_12"]  = ema12
+    g["ema_26"]  = ema26
+    g["macd"]    = ema12 - ema26
+    g["macd_signal"] = g["macd"].ewm(span=9, adjust=False).mean()
+    g["macd_hist"]   = g["macd"] - g["macd_signal"]
+
+    # Volatility / Risk
+    g["atr_14"] = ta.volatility.AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
+    g["realized_vol_21"] = close.pct_change().rolling(21).std()
+
+    # Volume Indicators
+    g["obv"] = ta.volume.OnBalanceVolumeIndicator(close=close, volume=vol).on_balance_volume()
+    try:
+        g["mfi"] = ta.volume.MFIIndicator(high=high, low=low, close=close, volume=vol, window=14).money_flow_index()
+    except Exception:
+        g["mfi"] = np.nan
+
+    # Overbought/Oversold
+    g["rsi"] = ta.momentum.RSIIndicator(close=close, window=14).rsi()
+    bb = ta.volatility.BollingerBands(close=close, window=20, window_dev=2)
+    g["boll_%b"] = (close - bb.bollinger_lband()) / (bb.bollinger_hband() - bb.bollinger_lband())
+
+    # Rolling z-score normalization (remove scale differences)
+    win = 252
+    for c in TECHS:
+        x = g[c].astype("float64")
+        m = x.rolling(win).mean()
+        s = x.rolling(win).std().replace(0, np.nan)
+        g[c] = (x - m) / (s + 1e-9)
+    return g
+
+df = df.groupby("tic", group_keys=False).apply(_add_indicators_safe).reset_index(drop=True)
+df = df.dropna(subset=TECHS).reset_index(drop=True)
+
+print("All factor columns ready:", set(TECHS).issubset(df.columns))
+print(df[["date","tic","close"] + TECHS[:5]].head())
+
+# ---------- Train/Test Split ----------
+SPLIT_DATE = pd.Timestamp(SPLIT_STR)
+train_df = df[df["date"] < SPLIT_DATE].reset_index(drop=True)
+trade_df = df[df["date"] >= SPLIT_DATE].reset_index(drop=True)
+
+# ---------- FinRL Environment ----------
+try:
+    from finrl.env.env_stock_trading import StockTradingEnv
+except Exception:
+    from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+
+import inspect
+stock_dim   = train_df["tic"].nunique()
+state_space = 1 + 2 * stock_dim + len(TECHS) * stock_dim
+buy_cost_arr  = np.array([1e-3] * stock_dim, dtype=float)
+sell_cost_arr = np.array([1e-3] * stock_dim, dtype=float)
+
+base = dict(
+    hmax=100,
+    initial_amount=100000,
+    buy_cost_pct=buy_cost_arr,
+    sell_cost_pct=sell_cost_arr,
+    reward_scaling=1e-4,
+    state_space=state_space,
+    tech_indicator_list=TECHS,
+    print_verbosity=10,
+)
+maybe = {
+    "stock_dim": stock_dim,
+    "action_space": stock_dim,
+    "num_stock_shares": np.zeros(stock_dim, dtype=float),
+    "turbulence_threshold": None,
+    "risk_indicator_col": "turbulence",
+    "make_plots": False,
+    "day": 0,
+    "initial": True,
+    "previous_state": [],
+    "model_name": "",
+    "mode": "",
+    "iteration": "",
+    "list_ticker": sorted(train_df["tic"].unique().tolist()),
+    "random_start": False,
+}
+def build_env(df_in):
+    sig = inspect.signature(StockTradingEnv.__init__)
+    allowed = set(sig.parameters.keys())
+    kwargs = {k: v for k, v in {**base, **maybe}.items() if k in allowed}
+    return StockTradingEnv(df=df_in, **kwargs)
+
+e_train_base = build_env(train_df)
+e_trade_base = build_env(trade_df)
+
+def to_vec(env_obj):
+    """Convert to StableBaselines vectorized environment."""
+    if hasattr(env_obj, "get_sb_env"):
+        try:
+            vec, _ = env_obj.get_sb_env()
+            return vec
+        except Exception:
+            pass
+    return DummyVecEnv([lambda: env_obj])
