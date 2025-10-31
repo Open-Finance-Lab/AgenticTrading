@@ -21,6 +21,7 @@ FinAgent Orchestration Documentation
 
    intro/overview
    intro/motivation
+   intro/prompt_design
 
 .. toctree::
    :maxdepth: 2
