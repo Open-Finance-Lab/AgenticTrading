@@ -378,7 +378,7 @@ This project is licensed under the terms specified in the [LICENSE](LICENSE) fil
 ## 🔗 Related Work & References
 
 ### Quantitative Finance Frameworks
-- Liu et al., [FinRL: Deep Reinforcement Learning Framework for Automated Stock Trading](https://arxiv.org/abs/2011.09607), AAAI 2021
+- Liu et al., [FinRL: Deep Reinforcement Learning Framework for Automated Stock Trading](https://arxiv.org/abs/2011.09607), NeurIPS DRL Workshop 2021
 - Zipline: [Algorithmic Trading Library](https://github.com/quantopian/zipline)
 - Backtrader: [Python Backtesting Library](https://www.backtrader.com/)
 
