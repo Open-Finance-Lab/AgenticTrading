@@ -1,5 +1,4 @@
 # ============================================================
-# AlphaQuant (ICLR-2025 style, Named & Persistent Version)
 # LLM + LightGBM + Rolling Backtest + Feedback Loop
 # ============================================================
 
