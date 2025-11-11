@@ -35,6 +35,18 @@ The Alpha Agent Pool operates on the foundation of **multi-agent reinforcement l
 3. **Confidence Calibration**: Bayesian updating mechanisms for signal reliability assessment
 4. **Temporal Consistency**: State-space models for maintaining strategic coherence across time horizons
 
+AlphaAgentFramework with LLM
+=============================
+
+The **AlphaQuant** framework integrates a language model (LLM) with a rolling backtesting pipeline to autonomously generate and refine 
+financial time-series features.
+
+In each iteration, the LLM proposes several PyTorch functions :math:`f_i(r_t)` that transform log returns into interpretable signals 
+(e.g., momentum, volatility, mean reversion).  Each feature is validated and evaluated through rolling cross-validation with a LightGBM regressor, producing metrics such as **MAE**, **Spearman correlation**, and **nDCG**.
+
+All evaluation metrics are returned to the LLM, which interprets them holistically and decides how to adjust feature generation in the next round.  
+This feedback-driven process allows the system to iteratively evolve toward features with stronger predictive and economic relevance, bridging human-style reasoning and quantitative model performance.
+
 Mathematical Formulation
 ------------------------
 
