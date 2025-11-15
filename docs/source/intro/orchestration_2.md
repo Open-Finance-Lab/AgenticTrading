@@ -1,6 +1,6 @@
 # Orchestration Overview: End-to-End Agentic Trading Pipeline
 
-![Orchestration Diagram](docs/source/intro/orchestration%202.png)
+![Orchestration Diagram](orchestration_2.png)
 
 This diagram illustrates the end-to-end agentic trading pipeline that underlies our prompt design. The Data Agent sits at the left of the workflow and supplies a standardized market dataset that is fanned out to both the Alpha Agent and the Risk Agent.
 
