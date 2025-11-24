@@ -365,7 +365,7 @@ If you use this system or build upon it in your research, please cite the follow
 
 Plain-text citation:
 
-"[Your Name] et al. Orchestration Framework for Financial Agents: From Algorithmic Trading to Agentic Trading. NeurIPS 2025 Workshop on Generative AI in Finance (to appear)."
+"Jifeng Li et al. Orchestration Framework for Financial Agents: From Algorithmic Trading to Agentic Trading. NeurIPS 2025 Workshop on Generative AI in Finance (to appear)."
 
 ---
 
