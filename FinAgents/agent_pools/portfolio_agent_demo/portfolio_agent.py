@@ -182,18 +182,21 @@ class PortfolioAgent:
     def __init__(
         self,
         name: str = "PortfolioAgent",
-        model: str = "gpt-4o-mini"
+        model: str = "gpt-4o-mini",
+        mode: str = "backtest"  # 'backtest' or 'paper_trading'
     ):
         self.name = name
         self.model = model
+        self.mode = mode
         
         self.tools = [
             construct_portfolio
         ]
         
-        instructions = """
+        instructions = f"""
         You are a Portfolio Agent responsible for constructing investment portfolios.
         Your goal is to maximize returns while managing risk and minimizing transaction costs.
+        Current Mode: {self.mode.upper()}
         
         You follow the Algorithmic Trading Review paper's interface:
         1. Receive Alpha Signals (predictions)
@@ -221,7 +224,8 @@ class PortfolioAgent:
         self,
         alpha_signals: Dict[str, float],
         risk_signals: Dict[str, Any],
-        transaction_costs: Dict[str, float]
+        transaction_costs: Dict[str, float],
+        current_portfolio: Optional[Dict[str, float]] = None
     ) -> Dict[str, Any]:
         """
         Direct inference method to construct portfolio.
@@ -229,7 +233,8 @@ class PortfolioAgent:
         return construct_portfolio(
             alpha_signals=alpha_signals,
             risk_signals=risk_signals,
-            transaction_costs=transaction_costs
+            transaction_costs=transaction_costs,
+            current_portfolio=current_portfolio
         )
 
 if __name__ == "__main__":

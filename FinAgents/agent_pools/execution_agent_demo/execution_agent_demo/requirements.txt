@@ -1,0 +1,7 @@
+openai-agents
+alpaca-py
+pandas
+numpy
+requests
+python-dotenv
+
