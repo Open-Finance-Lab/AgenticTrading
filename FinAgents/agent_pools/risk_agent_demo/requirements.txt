@@ -1,0 +1,16 @@
+# Risk Signal Agent Demo - Requirements
+
+# Core dependencies
+pandas>=1.5.0
+numpy>=1.23.0
+
+# OpenAI SDK for agent functionality
+openai>=1.0.0
+
+# Optional: For advanced risk calculations
+scipy>=1.9.0
+
+# Optional: For data visualization (if needed)
+matplotlib>=3.5.0
+seaborn>=0.12.0
+
