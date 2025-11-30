@@ -12,31 +12,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger("ExecutionAgent")
 
 # Try to import OpenAI Agents SDK
-try:
-    from agents import Agent, Runner, function_tool
-except ImportError:
-    logger.warning("OpenAI Agents SDK not found. Using mock implementation.")
-    
-    def function_tool(func):
-        func.is_tool = True
-        return func
-
-    class Agent:
-        def __init__(self, name, instructions, model="gpt-4o-mini", tools=None):
-            self.name = name
-            self.instructions = instructions
-            self.model = model
-            self.tools = tools or []
-
-        def run(self, request, context=None):
-            # Mock execution logic
-            logger.info(f"Mock Agent {self.name} received request: {request}")
-            return "Mock execution completed."
-
-    class Runner:
-        @staticmethod
-        def run_sync(agent, request, context=None):
-            return agent.run(request, context)
+from agents import Agent, Runner, function_tool
 
 # Try to import Alpaca SDK
 try:

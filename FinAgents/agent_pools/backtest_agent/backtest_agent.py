@@ -2357,416 +2357,245 @@ class BacktestAgent(Agent):
         
         return ic_results
     
+    def _calculate_cost_adjusted_sharpe(self, results, cost_analysis):
+        """Calculate cost-adjusted Sharpe ratio"""
+        original_sharpe = results['performance_metrics'].get('sharpe_ratio', 0)
+        cost_drag = cost_analysis['impact_on_returns'].get('cost_drag', 0)
+        return original_sharpe * (1 - cost_drag * 10)  # Simplified adjustment
+
     def run_simple_backtest_paper_interface(self, predictions, start_time="2023-01-01", 
                                             end_time="2023-12-31", look_back_period=20, 
                                             investment_horizon=5, topk=50, 
                                             risk_thresholds=None, transaction_costs=None,
                                             data_cleaning_rules=None, plot_results=True,
-                                            output_dir=None):
+                                            output_dir=None, total_capital=100000.0,
+                                            market_data=None):
         """
-        Simple backtest function following paper interface design
-        
-        Based on Algorithmic Trading Review paper, this function implements:
-        - Pre-trade Analysis: Alpha Model (predictions), Risk Model, Transaction Cost Model
-        - Portfolio Construction: Based on predictions and risk constraints
-        - Trade Execution: Simulated execution with transaction costs
-        - Post-trade Analysis: Performance metrics and visualizations
-        
-        Args:
-            predictions: pd.Series with MultiIndex (datetime, instrument) containing prediction scores
-            start_time: Backtest start date (YYYY-MM-DD)
-            end_time: Backtest end date (YYYY-MM-DD)
-            look_back_period: Time window for calculating pre-trade metrics (days)
-            investment_horizon: Position holding period (days)
-            topk: Number of top stocks to select
-            risk_thresholds: Dict with risk constraints (e.g., {'max_position_size': 0.1, 'max_drawdown': 0.15})
-            transaction_costs: Dict with cost parameters (e.g., {'open_cost': 0.0005, 'close_cost': 0.0015})
-            data_cleaning_rules: Dict with cleaning rules (e.g., {'remove_extreme_returns': True, 'threshold': 3.0})
-            plot_results: Whether to generate visualization plots
-            output_dir: Directory to save plots (if None, plots are shown but not saved)
-            
-        Returns:
-            dict: Backtest results with performance metrics and optional visualizations
+        Simple backtest function following paper interface design.
+        Now implements full value-based accounting and rebalancing.
         """
-        print("🚀 Running simple backtest with paper interface design")
+        print("🚀 Running simple backtest with value-based accounting")
         print(f"   Period: {start_time} to {end_time}")
-        print(f"   Look-back: {look_back_period} days, Horizon: {investment_horizon} days")
+        print(f"   Capital: ${total_capital:,.2f}")
         
         try:
             # Default parameters
             if risk_thresholds is None:
-                risk_thresholds = {
-                    'max_position_size': 0.1,
-                    'max_drawdown': 0.15,
-                    'var_limit': 0.02
-                }
-            
+                risk_thresholds = {'max_position_size': 0.1}
             if transaction_costs is None:
-                transaction_costs = {
-                    'open_cost': 0.0005,
-                    'close_cost': 0.0015,
-                    'slippage': 0.0005
-                }
+                transaction_costs = {'open_cost': 0.0005, 'close_cost': 0.0015, 'slippage': 0.0}
             
-            if data_cleaning_rules is None:
-                data_cleaning_rules = {
-                    'remove_extreme_returns': True,
-                    'threshold': 3.0  # Remove returns > 3 standard deviations
-                }
+            cost_rate = transaction_costs.get('open_cost', 0.0005) + transaction_costs.get('close_cost', 0.0005)
             
-            # Step 1: Data Cleaning (as per paper)
-            if predictions is None:
-                # Generate sample predictions for demonstration
-                dates = pd.date_range(start=start_time, end=end_time, freq='D')
-                instruments = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA', 'META', 'NVDA', 'BRK-B', 'JNJ', 'V']
+            # 1. Prepare Market Data
+            price_lookup = {}
+            universe = set()
+            
+            if market_data is not None:
+                md = market_data.copy()
+                if isinstance(md.index, pd.MultiIndex): md = md.reset_index()
+                col_map = {c: c.lower() for c in md.columns}
+                md = md.rename(columns=col_map)
+                if 'instrument' in md.columns: md = md.rename(columns={'instrument': 'symbol'})
+                if 'datetime' in md.columns: md = md.rename(columns={'datetime': 'date'})
                 
-                prediction_data = []
-                for date in dates:
-                    for instrument in instruments:
-                        prediction_data.append({
-                            'datetime': date,
-                            'instrument': instrument,
-                            'score': np.random.randn()
-                        })
-                
-                pred_df = pd.DataFrame(prediction_data)
-                pred_df = pred_df.set_index(['datetime', 'instrument'])['score']
-                predictions = pred_df
+                if 'close' in md.columns and 'symbol' in md.columns and 'date' in md.columns:
+                    md['date'] = pd.to_datetime(md['date'])
+                    # Drop duplicates
+                    md = md.drop_duplicates(subset=['date', 'symbol'])
+                    # Create lookup (date, symbol) -> price
+                    price_pivot = md.pivot(index='date', columns='symbol', values='close')
+                    universe = set(md['symbol'].unique())
+                    
+                    # Forward fill prices
+                    price_pivot = price_pivot.fillna(method='ffill')
+                    
+                    # Convert to dict for O(1) access
+                    price_lookup = price_pivot.to_dict(orient='index') # {date: {sym: price}}
             
-            # Apply data cleaning if needed
-            if data_cleaning_rules.get('remove_extreme_returns', False):
-                # This would be applied to actual returns data, not predictions
-                # For now, we'll note it in the results
-                pass
+            if not price_lookup:
+                print("⚠️  No market data prices found. Cannot run value-based backtest.")
+                return {'status': 'error', 'message': 'No price data'}
+
+            # 2. Align Dates
+            valid_dates = sorted(list(price_lookup.keys()))
+            dates = [d for d in valid_dates if pd.to_datetime(start_time) <= d <= pd.to_datetime(end_time)]
             
-            # Step 2: Portfolio Construction (Alpha Model + Risk Model)
-            # Select top k stocks based on predictions
-            portfolio_returns = []
-            portfolio_positions = []
-            daily_costs = []  # Track daily transaction costs
-            dates = sorted(predictions.index.get_level_values('datetime').unique())
+            if not dates:
+                return {'status': 'error', 'message': 'No dates in range'}
+
+            # 3. Simulation Loop
+            cash = total_capital
+            holdings = {sym: 0.0 for sym in universe} # shares
+            portfolio_history = []
             
-            previous_stocks = set()  # Track previous day's holdings
-            position_size = 0.0  # Initialize position size variable
-            last_rebalance_date = None  # Track last rebalancing date
+            last_rebalance_idx = -999
             
-            # Initialize random seed for return generation (for reproducibility)
-            # Note: This ensures returns are deterministic but independent of predictions
-            return_rng = np.random.RandomState(seed=42)
+            # Debug predictions index
+            preds_lookup = {}
+            if hasattr(predictions, 'index'):
+                if isinstance(predictions.index, pd.MultiIndex):
+                    preds_df = predictions.reset_index()
+                    if preds_df.shape[1] == 3:
+                         preds_df.columns = ['date', 'symbol', 'score']
+                    else:
+                         preds_df.columns = ['date', 'symbol', 'score'] 
+                else:
+                    preds_df = predictions.reset_index()
+                    
+                preds_df['date'] = pd.to_datetime(preds_df['date'])
+                preds_df = preds_df.drop_duplicates(subset=['date', 'symbol'])
+                preds_lookup = preds_df.pivot(index='date', columns='symbol', values='score').to_dict(orient='index')
             
             for i, date in enumerate(dates):
-                # Get predictions for this date
-                if date in predictions.index.get_level_values('datetime'):
-                    date_predictions = predictions.loc[date].sort_values(ascending=False)
+                # Current Prices
+                daily_prices = price_lookup.get(date, {})
+                if not daily_prices: continue
+                
+                # Calculate Equity (Mark to Market)
+                stock_value = sum(holdings.get(sym, 0.0) * daily_prices.get(sym, 0.0) for sym in universe)
+                total_equity = cash + stock_value
+                
+                # Rebalance Logic
+                daily_cost = 0.0
+                
+                if i - last_rebalance_idx >= investment_horizon:
+                    last_rebalance_idx = i
                     
-                    # Select top k (Alpha Model output)
-                    selected_stocks = set(date_predictions.head(min(topk, len(date_predictions))).index.tolist())
+                    # 1. Get Signal Scores for this date
+                    scores = preds_lookup.get(date, {})
                     
-                    # Apply risk constraints (Risk Model)
-                    # For simplicity, equal weight with max position size constraint
-                    num_stocks = len(selected_stocks)
-                    if num_stocks == 0:
-                        portfolio_returns.append(0.0)
-                        daily_costs.append(0.0)
-                        portfolio_positions.append({
-                            'date': date,
-                            'stocks': [],
-                            'position_size': 0.0
-                        })
-                        continue
+                    # 2. Construct Target Portfolio (Top K Equal Weight)
+                    valid_scores = {s: sc for s, sc in scores.items() if s in universe and not np.isnan(sc)}
                     
-                    # Calculate equal weight (ensure total weight = 1.0)
-                    position_size = 1.0 / num_stocks
-                    # Apply max position size constraint if needed
-                    if position_size > risk_thresholds.get('max_position_size', 0.1):
-                        position_size = risk_thresholds.get('max_position_size', 0.1)
-                        # Adjust number of stocks to fit within max position size
-                        max_stocks = int(1.0 / position_size)
-                        if num_stocks > max_stocks:
-                            # Keep only top max_stocks
-                            selected_stocks = set(list(selected_stocks)[:max_stocks])
-                            num_stocks = len(selected_stocks)
-                            position_size = 1.0 / num_stocks
+                    target_weights = {sym: 0.0 for sym in universe}
                     
-                    # Apply investment_horizon: only rebalance every N days
-                    # This reduces transaction costs for strategies with longer holding periods
-                    should_rebalance = False
-                    if i == 0:
-                        # First day: always rebalance
-                        should_rebalance = True
-                        last_rebalance_date = date
-                    elif last_rebalance_date is not None:
-                        # Check if we should rebalance based on investment_horizon
-                        days_since_rebalance = (date - last_rebalance_date).days
-                        if days_since_rebalance >= investment_horizon:
-                            should_rebalance = True
-                            last_rebalance_date = date
-                    
-                    # Calculate daily transaction cost
-                    # Only pay costs when rebalancing
-                    if should_rebalance:
-                        if i == 0:
-                            # First day: pay opening cost for all positions
-                            trades_today = len(selected_stocks)
-                        else:
-                            # Rebalancing: only pay for stocks that changed
-                            stocks_to_close = previous_stocks - selected_stocks
-                            stocks_to_open = selected_stocks - previous_stocks
-                            trades_today = len(stocks_to_close) + len(stocks_to_open)
-                    else:
-                        # No rebalancing: keep previous positions, no trades
-                        selected_stocks = previous_stocks.copy()
-                        num_stocks = len(selected_stocks)
-                        if num_stocks > 0:
-                            position_size = 1.0 / num_stocks
-                        trades_today = 0
-                    
-                    # Transaction cost calculation
-                    # Cost is applied as a percentage of the traded value
-                    # For rebalancing: we only pay cost on the portion of portfolio that is traded
-                    if num_stocks > 0 and trades_today > 0:
-                        # Cost rate = (trades_today / num_stocks) * cost_per_trade
-                        # This represents the cost relative to portfolio value
-                        # Example: if 10 out of 20 stocks change, cost = (10/20) * 0.002 = 0.001 (0.1%)
-                        trade_proportion = min(trades_today / num_stocks, 1.0)  # Cap at 1.0
-                        daily_cost_rate = trade_proportion * (transaction_costs['open_cost'] + transaction_costs['close_cost'])
-                    else:
-                        daily_cost_rate = 0.0
-                    daily_costs.append(daily_cost_rate)
-                    
-                    # Simulate portfolio return based on current holdings
-                    # For demonstration: generate synthetic returns
-                    # In real implementation, use actual market data from qlib
-                    if len(selected_stocks) > 0:
-                        # Generate returns for each stock in current holdings
-                        # For random noise signals, returns should also be random with zero mean (no predictive power)
-                        # For real signals, this would use actual stock returns
-                        stock_returns = []
-                        for stock in selected_stocks:
-                            # Generate return based on stock and date (deterministic but independent of prediction)
-                            # This simulates real market returns that are independent of our predictions
-                            # For random noise signals: zero mean return (no systematic bias)
-                            # For real signals: would use actual stock returns from market data
-                            # Using hash ensures same stock+date always gets same return (reproducibility)
-                            stock_date_seed = hash(str(stock) + str(date)) % (2**31)
-                            stock_rng = np.random.RandomState(seed=stock_date_seed)
-                            stock_return = stock_rng.normal(0.0, 0.015)  # Zero mean, 1.5% daily volatility
-                            stock_returns.append(stock_return)
+                    if valid_scores:
+                        sorted_assets = sorted(valid_scores.items(), key=lambda x: x[1], reverse=True)
+                        selected = [s for s, sc in sorted_assets[:topk] if sc > 0]
                         
-                        # Portfolio return is equal-weighted average of holdings
-                        # Since we use equal weights that sum to 1.0, just take the mean
-                        daily_return = np.mean(stock_returns)
-                    else:
-                        daily_return = 0.0
+                        if selected:
+                            weight = 1.0 / len(selected)
+                            weight = min(weight, risk_thresholds.get('max_position_size', 1.0))
+                            
+                            for sym in selected:
+                                target_weights[sym] = weight
                     
-                    portfolio_returns.append(daily_return)
-                    portfolio_positions.append({
-                        'date': date,
-                        'stocks': list(selected_stocks),
-                        'position_size': position_size,
-                        'trades': trades_today
-                    })
+                    # 3. Execute Trades (Reallocate)
+                    trades = [] # (sym, diff_val, price)
                     
-                    previous_stocks = selected_stocks.copy()
-                else:
-                    # No predictions for this date
-                    portfolio_returns.append(0.0)
-                    daily_costs.append(0.0)
-                    portfolio_positions.append({
-                        'date': date,
-                        'stocks': [],
-                        'position_size': 0.0
-                    })
-            
-            # Convert to Series
-            # Ensure we have the same length for returns and costs
-            min_len = min(len(portfolio_returns), len(daily_costs), len(dates))
-            if min_len == 0:
-                print(f"   ⚠️  ERROR: No data generated! portfolio_returns={len(portfolio_returns)}, daily_costs={len(daily_costs)}, dates={len(dates)}")
-                return {
-                    'status': 'error',
-                    'message': 'No portfolio data generated. Check predictions format.'
-                }
-            
-            returns_series = pd.Series(portfolio_returns[:min_len], index=dates[:min_len])
-            returns_series.name = 'portfolio_return'
-            costs_series = pd.Series(daily_costs[:min_len], index=dates[:min_len])
-            
-            # Step 3: Apply Transaction Costs (Transaction Cost Model)
-            # Adjust returns for daily transaction costs
-            cost_adjusted_returns = returns_series - costs_series
-            
-            # Debug information - always print to help diagnose issues
-            print(f"   📊 Returns series length: {len(returns_series)}")
-            print(f"   📊 Costs series length: {len(costs_series)}")
-            if len(returns_series) > 0:
-                print(f"   📊 Returns stats: mean={returns_series.mean():.6f}, std={returns_series.std():.6f}, min={returns_series.min():.6f}, max={returns_series.max():.6f}")
-                print(f"   💰 Costs stats: mean={costs_series.mean():.6f}, total={costs_series.sum():.6f}, min={costs_series.min():.6f}, max={costs_series.max():.6f}")
-                print(f"   📈 Cost-adjusted: mean={cost_adjusted_returns.mean():.6f}, std={cost_adjusted_returns.std():.6f}, min={cost_adjusted_returns.min():.6f}, max={cost_adjusted_returns.max():.6f}")
-            else:
-                print(f"   ⚠️  WARNING: Returns series is empty!")
-            
-            # Step 4: Post-trade Analysis
-            # Calculate performance metrics
-            # Check for any issues before calculating cumulative returns
-            if len(cost_adjusted_returns) == 0:
-                print(f"   ⚠️  Warning: No returns data!")
-                total_return = 0.0
-                cumulative_returns = pd.Series([1.0])
-            else:
-                # Check for extreme values that might cause issues
-                extreme_negative = (cost_adjusted_returns < -0.5).sum()
-                if extreme_negative > 0:
-                    print(f"   ⚠️  Warning: {extreme_negative} days with returns < -50%")
+                    for sym in universe:
+                        price = daily_prices.get(sym, 0.0)
+                        if price <= 0: continue 
+                        
+                        target_val = total_equity * target_weights[sym]
+                        current_val = holdings[sym] * price
+                        diff_val = target_val - current_val
+                        
+                        if abs(diff_val) > (total_equity * 0.001): # Trade if > 0.1% change
+                            trades.append((sym, diff_val, price))
+                            
+                    # Process Sells First (to raise cash)
+                    for sym, diff_val, price in [t for t in trades if t[1] < 0]:
+                        sell_val = abs(diff_val)
+                        cost = sell_val * cost_rate
+                        shares_to_sell = sell_val / price
+                        
+                        if shares_to_sell > holdings[sym]: 
+                            shares_to_sell = holdings[sym]
+                            sell_val = shares_to_sell * price
+                            cost = sell_val * cost_rate
+                        
+                        holdings[sym] -= shares_to_sell
+                        cash += (sell_val - cost)
+                        daily_cost += cost
+                        
+                    # Process Buys
+                    for sym, diff_val, price in [t for t in trades if t[1] > 0]:
+                        buy_val = diff_val
+                        cost = buy_val * cost_rate
+                        cost_to_buy = buy_val + cost
+                        
+                        if cash >= cost_to_buy:
+                            shares_to_buy = buy_val / price
+                            holdings[sym] += shares_to_buy
+                            cash -= cost_to_buy
+                            daily_cost += cost
+                        else:
+                            available = cash
+                            if available > 1.0: # min cash
+                                trade_val = available / (1 + cost_rate)
+                                shares = trade_val / price
+                                holdings[sym] += shares
+                                cash = 0.0
+                                daily_cost += (available - trade_val)
+
+                # Record History
+                final_stock_val = sum(holdings.get(sym, 0.0) * daily_prices.get(sym, 0.0) for sym in universe)
                 
-                # Calculate cumulative returns
-                cumulative_returns = (1 + cost_adjusted_returns).cumprod()
-                total_return = cumulative_returns.iloc[-1] - 1
-                
-                # Check for invalid values
-                if np.isnan(total_return) or np.isinf(total_return) or total_return < -1.0:
-                    print(f"   ⚠️  Warning: Invalid total return: {total_return}")
-                    print(f"   📊 Cost-adjusted returns sample: {cost_adjusted_returns.head(10).tolist()}")
-                    print(f"   📊 Cumulative returns sample: {cumulative_returns.head(10).tolist()}")
-                    # Clamp to reasonable range
-                    total_return = max(-1.0, min(10.0, total_return if not (np.isnan(total_return) or np.isinf(total_return)) else 0.0))
-                    if np.isnan(total_return) or np.isinf(total_return):
-                        total_return = 0.0
+                portfolio_history.append({
+                    'date': date,
+                    'equity': cash + final_stock_val,
+                    'cash': cash,
+                    'cost': daily_cost,
+                    'holdings_count': sum(1 for h in holdings.values() if h > 0.001)
+                })
+
+            # 4. Analysis
+            history_df = pd.DataFrame(portfolio_history).set_index('date')
+            if history_df.empty:
+                 return {'status': 'error', 'message': 'No history generated'}
+                 
+            returns_series = history_df['equity'].pct_change().fillna(0.0)
             
-            # Calculate risk metrics
-            if QLIB_AVAILABLE:
-                try:
-                    from qlib.contrib.evaluate import risk_analysis
-                    risk_metrics = risk_analysis(cost_adjusted_returns)
-                    sharpe_ratio = risk_metrics.get('IR', 0)
-                    volatility = risk_metrics.get('vol', 0)
-                    max_drawdown = risk_metrics.get('MDD', 0)
-                except:
-                    # Fallback calculation
-                    sharpe_ratio = cost_adjusted_returns.mean() / cost_adjusted_returns.std() * np.sqrt(252) if cost_adjusted_returns.std() > 0 else 0
-                    volatility = cost_adjusted_returns.std() * np.sqrt(252)
-                    running_max = cumulative_returns.expanding().max()
-                    drawdown = (cumulative_returns - running_max) / running_max
-                    max_drawdown = drawdown.min()
-            else:
-                sharpe_ratio = cost_adjusted_returns.mean() / cost_adjusted_returns.std() * np.sqrt(252) if cost_adjusted_returns.std() > 0 else 0
-                volatility = cost_adjusted_returns.std() * np.sqrt(252)
-                running_max = cumulative_returns.expanding().max()
-                drawdown = (cumulative_returns - running_max) / running_max
-                max_drawdown = drawdown.min()
+            # Stats
+            total_return = (history_df['equity'].iloc[-1] / total_capital) - 1
             
-            # Compile results
+            # Snapshot
+            print("\n   📊 Portfolio Holdings Snapshot (Sample):")
+            if len(history_df) > 0:
+                sample_indices = np.linspace(0, len(history_df)-1, 5, dtype=int)
+                for i in sample_indices:
+                    d = history_df.index[i]
+                    row = history_df.loc[d]
+                    print(f"      {str(d).split()[0]}: Equity=${row['equity']:,.0f} (Cash=${row['cash']:,.0f}), Positions={int(row['holdings_count'])}")
+
             results = {
                 'status': 'success',
-                'backtest_period': {
-                    'start_time': start_time,
-                    'end_time': end_time,
-                    'total_days': len(returns_series)
-                },
-                'strategy_parameters': {
-                    'look_back_period': look_back_period,
-                    'investment_horizon': investment_horizon,
-                    'topk': topk
-                },
                 'performance_metrics': {
                     'total_return': total_return,
-                    'cumulative_return': total_return,
-                    'sharpe_ratio': sharpe_ratio,
-                    'volatility': volatility,
-                    'max_drawdown': max_drawdown,
-                    'calmar_ratio': abs(total_return / max_drawdown) if max_drawdown != 0 else 0
+                    'sharpe_ratio': (returns_series.mean() / returns_series.std() * np.sqrt(252)) if returns_series.std() > 0 else 0,
+                    'max_drawdown': (history_df['equity'] / history_df['equity'].cummax() - 1).min(),
+                    'volatility': returns_series.std() * np.sqrt(252)
                 },
-                'risk_metrics': {
-                    'max_position_size_used': position_size if 'position_size' in locals() else 0.0,
-                    'total_trades': int(costs_series.sum() / (transaction_costs['open_cost'] + transaction_costs['close_cost'])) if len(costs_series) > 0 else 0,
-                    'total_transaction_costs': float(costs_series.sum()),
-                    'avg_daily_cost': float(costs_series.mean()) if len(costs_series) > 0 else 0.0
-                },
-                'returns_series': cost_adjusted_returns,
-                'positions': portfolio_positions
+                'returns_series': returns_series,
+                'positions': [] 
             }
             
-            # Step 5: Generate Visualizations (decoupled)
+            # Step 5: Visualizations
             if plot_results and VISUALIZER_AVAILABLE:
                 try:
-                    # Validate data before plotting
-                    if len(cost_adjusted_returns) == 0:
-                        print(f"⚠️  Cannot generate plots: no returns data")
-                        results['visualizations'] = {'plots_generated': False, 'error': 'No returns data'}
-                    else:
-                        visualizer = BacktestVisualizer()
-                        
-                        # Generate plots
-                        plots = {}
-                        if output_dir:
-                            os.makedirs(output_dir, exist_ok=True)
-                        
-                        # P&L Curve
-                        pnl_fig = visualizer.plot_pnl_curve(
-                            cost_adjusted_returns,
-                            save_path=f"{output_dir}/pnl_curve.png" if output_dir else None
-                        )
-                        plots['pnl_curve'] = pnl_fig
-                        
-                        # Drawdown
-                        drawdown_fig = visualizer.plot_drawdown(
-                            cost_adjusted_returns,
-                            save_path=f"{output_dir}/drawdown.png" if output_dir else None
-                        )
-                        plots['drawdown'] = drawdown_fig
-                        
-                        # Metrics Table
-                        metrics_fig = visualizer.plot_metrics_table(
-                            results['performance_metrics'],
-                            save_path=f"{output_dir}/metrics_table.png" if output_dir else None
-                        )
-                        plots['metrics_table'] = metrics_fig
-                        
-                        # Returns Distribution
-                        dist_fig = visualizer.plot_returns_distribution(
-                            cost_adjusted_returns,
-                            save_path=f"{output_dir}/returns_distribution.png" if output_dir else None
-                        )
-                        plots['returns_distribution'] = dist_fig
-                        
-                        results['visualizations'] = {
-                            'plots_generated': True,
-                            'plot_count': len(plots),
-                            'output_dir': output_dir
-                        }
-                        
-                        print(f"✅ Generated {len(plots)} visualization plots")
+                    visualizer = BacktestVisualizer()
+                    plots = {}
+                    if output_dir: os.makedirs(output_dir, exist_ok=True)
                     
-                except Exception as viz_error:
-                    print(f"⚠️  Visualization failed: {viz_error}")
-                    import traceback
-                    traceback.print_exc()
-                    results['visualizations'] = {'plots_generated': False, 'error': str(viz_error)}
-            elif plot_results and not VISUALIZER_AVAILABLE:
-                results['visualizations'] = {'plots_generated': False, 'error': 'Visualizer not available'}
-            
-            print(f"✅ Backtest completed")
-            print(f"   Total Return: {total_return:.2%}")
-            print(f"   Sharpe Ratio: {sharpe_ratio:.3f}")
-            print(f"   Max Drawdown: {max_drawdown:.2%}")
-            
-            # Final validation
-            if abs(total_return) > 0.5:  # More than 50% is suspicious
-                print(f"   ⚠️  WARNING: Total return {total_return:.2%} seems extreme!")
-                print(f"   📊 Check: cumulative_returns final value = {cumulative_returns.iloc[-1] if len(cumulative_returns) > 0 else 'N/A'}")
+                    plots['pnl_curve'] = visualizer.plot_pnl_curve(
+                        returns_series, save_path=f"{output_dir}/pnl_curve.png" if output_dir else None
+                    )
+                    plots['drawdown'] = visualizer.plot_drawdown(
+                        returns_series, save_path=f"{output_dir}/drawdown.png" if output_dir else None
+                    )
+                    results['visualizations'] = {'plots_generated': True, 'output_dir': output_dir}
+                    print(f"✅ Generated visualization plots")
+                except Exception as e:
+                    print(f"⚠️ Visualization failed: {e}")
             
             return results
             
         except Exception as e:
-            print(f"❌ Backtest failed: {str(e)}")
             import traceback
             traceback.print_exc()
-            return {
-                'status': 'error',
-                'message': str(e),
-                'error_type': type(e).__name__
-            }
-
+            return {'status': 'error', 'message': str(e)}
 if __name__ == "__main__":
     print("BacktestAgent initialized with Qlib integration")
     agent = BacktestAgent()
