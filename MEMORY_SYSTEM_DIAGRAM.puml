@@ -1,0 +1,100 @@
+@startuml Memory_System_Architecture
+!theme plain
+skinparam backgroundColor white
+skinparam arrowFontSize 11
+skinparam arrowColor #666666
+skinparam noteBkgColor #FFFACD
+skinparam packageBkgColor #E1F5FE
+
+title FinAgent Memory System - Complete Architecture
+
+package "Agent Layer" #FFE6E6 {
+  component "OpenAI\nGPT-4" as GPT
+  component "Alpha Agents" as AlphaAgents
+  component "Portfolio\nAgents" as PortfolioAgents
+  component "Risk Agents" as RiskAgents
+  component "Other Agents" as OtherAgents
+}
+
+package "Protocol Servers" #E3F2FD {
+  component "MCP Server\n(Port 8001)\nJSON-RPC 2.0" as MCPServer
+  component "HTTP Memory\nServer\n(Port 8000)\nFastAPI" as HTTPServer
+  component "A2A Server\n(Port 8002)\nAgent Protocol" as A2AServer
+}
+
+package "Unified Architecture" #F3E5F5 {
+  component "Unified Interface\nManager" as InterfaceManager {
+    rectangle "Tool Definitions" as ToolDefs {
+      note bottom of ToolDefs
+        store_graph_memory()
+        retrieve_graph_memory()
+        retrieve_memory_with_expansion()
+        create_relationship()
+        filter_graph_memories()
+        get_graph_memory_statistics()
+        semantic_search_memories()
+        prune_graph_memories()
+      end note
+    }
+    rectangle "Tool Execution\nEngine" as ToolEngine
+  }
+  
+  component "Unified Database\nManager" as DBManager {
+    rectangle "Core Operations" as CoreOps {
+      note bottom of CoreOps
+        Connection Management
+        Memory Storage
+        Retrieval & Search
+        Relationship Management
+        Filtering & Analytics
+        Batch Operations
+      end note
+    }
+    rectangle "Enhanced\nComponents" as Enhanced {
+      note bottom of Enhanced
+        Intelligent Indexer
+        Stream Processor
+        LLM Research Service
+      end note
+    }
+  }
+}
+
+database "Neo4j Graph\nDatabase\n(bolt:7687)" as Neo4j {
+  note bottom of Neo4j
+    Memory Nodes
+    Agent Nodes
+    Relationship Edges
+    Full-Text Indices
+  end note
+}
+
+' Connections from agents to protocols
+GPT --> MCPServer : Tools
+AlphaAgents --> MCPServer : MCP Protocol
+AlphaAgents --> HTTPServer : REST API
+PortfolioAgents --> MCPServer : MCP Protocol
+PortfolioAgents --> HTTPServer : REST API
+RiskAgents --> A2AServer : A2A Protocol
+OtherAgents --> MCPServer : MCP Protocol
+OtherAgents --> A2AServer : A2A Protocol
+
+' Connections from protocols to interface
+MCPServer --> InterfaceManager : Tool Calls
+HTTPServer --> InterfaceManager : Tool Calls
+A2AServer --> InterfaceManager : Tool Calls
+
+' Connections within interface layer
+InterfaceManager --> ToolDefs : Definitions
+InterfaceManager --> ToolEngine : Execute
+
+' Connections from interface to database manager
+ToolEngine --> DBManager : Operations
+ToolDefs --> DBManager : Handlers
+
+' Connections from database manager to Neo4j
+DBManager --> Neo4j : Bolt Protocol
+CoreOps --> Neo4j
+Enhanced --> Neo4j
+
+@enduml
