@@ -25,10 +25,21 @@ FinAgent Orchestration Documentation
 
 .. toctree::
    :maxdepth: 2
+   :caption: Workflow & Execution
+   
+   intro/workflow
+   intro/execution
+   intro/orchestration
+   intro/tutorials
+
+.. toctree::
+   :maxdepth: 2
    :caption: Agent Pools
    
    intro/data_agent_pool
    intro/alpha_agent_pool
+   intro/risk_agent
+   intro/portfolio_agent
    intro/memory_agent
    
    intro/transaction_cost_agent_pool
