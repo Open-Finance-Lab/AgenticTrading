@@ -13,7 +13,6 @@ This test suite covers all core functionality of BacktestAgent, including:
 - Performance tests
 - Error handling tests
 
-Author: AI Assistant
 Date: 2025-10-17
 Version: v2.0
 """

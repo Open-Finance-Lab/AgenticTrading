@@ -27,9 +27,9 @@ try:
     # Data Processing Components (simplified imports)
     try:
         from qlib.contrib.data.handler import Alpha158, Alpha360
-        from qlib.contrib.data.handler import RobustZScoreNorm, Fillna, CSRankNorm
-        from qlib.contrib.data.handler import MinMaxNorm, ZScoreNorm, Winsorize
-        from qlib.contrib.data.handler import DropnaLabel
+        from qlib.data.dataset.processor import RobustZScoreNorm, Fillna, CSRankNorm
+        from qlib.data.dataset.processor import MinMaxNorm, ZScoreNorm#,Winsorize
+        from qlib.data.dataset.processor import DropnaLabel
         DATA_HANDLERS_AVAILABLE = True
     except ImportError:
         DATA_HANDLERS_AVAILABLE = False
@@ -37,7 +37,7 @@ try:
     
     # Machine Learning Models (simplified imports)
     try:
-        from qlib.contrib.model import LGBModel, GRUModel, TabnetModel
+        from qlib.contrib.model import LGBModel, GRU, TabnetModel
         MODELS_AVAILABLE = True
     except ImportError:
         MODELS_AVAILABLE = False

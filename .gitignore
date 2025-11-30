@@ -227,3 +227,4 @@ FinAgents/agent_pools/alpha_agent_pool/agents/theory_driven/BTC_agent
 FinAgents/agent_pools/alpha_agent_pool/agents/theory_driven/mlruns/
 FinAgents/agent_pools/alpha_agent_pool/agents/20_factors/
 FinAgents/agent_pools/alpha_agent_pool/qlib/backtest_results/
+FinAgents/agent_pools/backtest_agent/qlib_data/

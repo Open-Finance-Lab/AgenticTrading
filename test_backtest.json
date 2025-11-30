@@ -1,0 +1,762 @@
+{
+  "test_summary": {
+    "test_timestamp": "2025-11-29T21:04:28.599775",
+    "total_execution_time": 0.06189,
+    "total_tests": 12,
+    "passed_tests": 9,
+    "failed_tests": 2,
+    "skipped_tests": 0,
+    "partial_tests": 1,
+    "success_rate": 75.0
+  },
+  "agent_info": {
+    "name": "BacktestAgent",
+    "tool_count": 20,
+    "qlib_available": true,
+    "qlib_initialized": true
+  },
+  "test_results": {
+    "agent_initialization": {
+      "status": "PASS",
+      "init_time": 0.00011086463928222656,
+      "tool_count": 20,
+      "agent_name": "BacktestAgent",
+      "qlib_available": true,
+      "qlib_initialized": true
+    },
+    "basic_functionality": {
+      "status": "PASS",
+      "total_tools": 20,
+      "expected_tools": 11,
+      "missing_tools": [],
+      "available_tools": [
+        "initialize_qlib_data",
+        "create_alpha_factor_strategy",
+        "run_comprehensive_backtest",
+        "analyze_factor_performance",
+        "generate_detailed_report",
+        "optimize_strategy_parameters",
+        "calculate_transaction_costs",
+        "run_qlib_backtest",
+        "create_qlib_strategy",
+        "setup_qlib_dataset",
+        "run_long_short_backtest",
+        "create_portfolio_analysis",
+        "initialize_qlib_system",
+        "run_enhanced_backtest",
+        "train_qlib_model",
+        "analyze_factor_ic",
+        "optimize_portfolio_weights",
+        "run_walk_forward_analysis",
+        "calculate_advanced_risk_metrics",
+        "run_factor_attribution_analysis"
+      ]
+    },
+    "qlib_integration": {
+      "status": "PASS",
+      "qlib_available": true,
+      "qlib_initialized": true,
+      "components": {
+        "qlib_core": true,
+        "qlib_version": "0.9.6.99",
+        "backtest_engine": true,
+        "executor": true,
+        "strategy": true
+      },
+      "data_access": true
+    },
+    "strategy_creation": {
+      "status": "PASS",
+      "total_configs": 3,
+      "successful_creations": 3,
+      "created_strategies": [
+        {
+          "name": "momentum_strategy",
+          "strategy_id": "alpha_strategy_20251129_210428",
+          "creation_time": 0.0005939006805419922,
+          "asset": "VTI",
+          "factors_count": 2
+        },
+        {
+          "name": "multi_factor_strategy",
+          "strategy_id": "alpha_strategy_20251129_210428",
+          "creation_time": 0.000225067138671875,
+          "asset": "VTI",
+          "factors_count": 3
+        },
+        {
+          "name": "simple_strategy",
+          "strategy_id": "alpha_strategy_20251129_210428",
+          "creation_time": 0.00020813941955566406,
+          "asset": "VTI",
+          "factors_count": 1
+        }
+      ]
+    },
+    "backtest_execution": {
+      "status": "FAIL",
+      "total_configs": 3,
+      "successful_executions": 0,
+      "backtest_results": []
+    },
+    "factor_analysis": {
+      "status": "PASS",
+      "total_factors": 4,
+      "successful_analyses": 4,
+      "analysis_results": [
+        {
+          "factor_name": "momentum_factor",
+          "description": "Momentum factor",
+          "analysis_time": 3.0279159545898438e-05,
+          "ic_mean": 0.004499726681158655,
+          "ic_std": 0.14935802471441714,
+          "ic_ir": 0.6738540825392747,
+          "simplified": true
+        },
+        {
+          "factor_name": "value_factor",
+          "description": "Value factor",
+          "analysis_time": 1.2636184692382812e-05,
+          "ic_mean": -0.0857506997946757,
+          "ic_std": 0.12520697120277896,
+          "ic_ir": -0.45459872277678137,
+          "simplified": true
+        },
+        {
+          "factor_name": "quality_factor",
+          "description": "Quality factor",
+          "analysis_time": 1.1920928955078125e-05,
+          "ic_mean": -0.08803595858783753,
+          "ic_std": 0.12752031271778266,
+          "ic_ir": 0.18853708295284277,
+          "simplified": true
+        },
+        {
+          "factor_name": "volatility_factor",
+          "description": "Volatility factor",
+          "analysis_time": 1.0013580322265625e-05,
+          "ic_mean": -0.07981511761411404,
+          "ic_std": 0.14735149216538723,
+          "ic_ir": -0.09191183269303571,
+          "simplified": true
+        }
+      ]
+    },
+    "advanced_features": {
+      "status": "PASS",
+      "total_tests": 4,
+      "passed_tests": 1,
+      "failed_tests": 3,
+      "skipped_tests": 0,
+      "test_details": [
+        {
+          "feature": "enhanced_backtest",
+          "status": "FAIL",
+          "result": {
+            "status": "error",
+            "message": "This type of signal is not supported"
+          }
+        },
+        {
+          "feature": "ml_model_training",
+          "status": "FAIL",
+          "result": {
+            "status": "error",
+            "message": "cannot import name 'GRUModel' from 'qlib.contrib.model' (/Users/lijifeng/miniforge3/envs/agent/lib/python3.12/site-packages/qlib/contrib/model/__init__.py)"
+          }
+        },
+        {
+          "feature": "portfolio_optimization",
+          "status": "FAIL",
+          "result": {
+            "status": "error",
+            "message": "No module named 'qlib.contrib.portfolio'"
+          }
+        },
+        {
+          "feature": "walk_forward_analysis",
+          "status": "PASS",
+          "result": {
+            "status": "success",
+            "walk_forward_results": [],
+            "summary": {
+              "error": "No results to summarize"
+            }
+          }
+        }
+      ]
+    },
+    "performance": {
+      "status": "PASS",
+      "metrics": {
+        "strategy_creation_time": 0.0003097057342529297,
+        "backtest_time": 0.004030942916870117,
+        "backtest_success": false,
+        "factor_analysis_time": 2.09808349609375e-05,
+        "factor_analysis_success": true,
+        "concurrent_analysis_time": 4.410743713378906e-05,
+        "concurrent_success": true,
+        "memory_usage_mb": 446.984375,
+        "data_load_time": 0.001837015151977539,
+        "data_load_success": true
+      }
+    },
+    "error_handling": {
+      "status": "FAIL",
+      "total_tests": 3,
+      "passed_tests": 2,
+      "test_details": [
+        {
+          "test": "invalid_strategy_id",
+          "status": "PASS",
+          "error": "Strategy invalid_strategy_id not found"
+        },
+        {
+          "test": "invalid_parameters",
+          "status": "PASS",
+          "error": "Valid alpha factor proposals required"
+        },
+        {
+          "test": "invalid_date_range",
+          "status": "FAIL",
+          "result": {
+            "status": "success",
+            "results": {
+              "strategy_id": "alpha_strategy_20251129_210428",
+              "backtest_period": {
+                "start_date": "2025-01-01T00:00:00",
+                "end_date": "2025-12-31T00:00:00",
+                "total_days": 155,
+                "trading_days": 155
+              },
+              "performance_metrics": {
+                "total_return": 0.13161119384315745,
+                "sharpe_ratio": 0.6936443797095805,
+                "max_drawdown": -0.05,
+                "volatility": 0.3084784283039531
+              },
+              "risk_metrics": {
+                "var_95": -0.025342417345278284,
+                "tracking_error": 0.3084784283039531,
+                "beta": 1.0
+              },
+              "transaction_analysis": {
+                "total_costs": 0.01,
+                "cost_per_trade": 0.001,
+                "turnover": 2.0
+              },
+              "factor_attribution": {
+                "momentum_factor": -0.0038616916080018537,
+                "value_factor": -0.009399389278278374
+              },
+              "detailed_results": {
+                "returns": [
+                  -0.000662429440604504,
+                  -0.02344031990671041,
+                  0.024791084718517892,
+                  0.0036928139190402433,
+                  0.049446415505323825,
+                  -0.006450947373902215,
+                  0.006208775544375067,
+                  -0.0009080022536406335,
+                  0.01352704424046008,
+                  -0.01280931998049869,
+                  0.002335812266607412,
+                  -0.006601537527447545,
+                  0.025422362294071948,
+                  0.013648155098769398,
+                  -0.02142468511569398,
+                  0.00021751723032591383,
+                  0.01183265123738129,
+                  0.011361811302500321,
+                  0.010656931185831692,
+                  -0.015085164865800537,
+                  0.02075580050438138,
+                  0.007466152347160506,
+                  -0.00849425356319053,
+                  -0.010140211843924059,
+                  0.03239191807117769,
+                  0.05329962242706804,
+                  -0.016908611152287412,
+                  0.009207145479273763,
+                  -0.04682086422621801,
+                  -0.03336934526560766,
+                  -0.01699846281386679,
+                  0.015612233461394657,
+                  -0.01660321220005891,
+                  0.010092422752863853,
+                  0.02166697191463604,
+                  -0.04267342124994224,
+                  0.022039612723211404,
+                  0.015387825159662766,
+                  0.0009720344531152924,
+                  0.011764560893894948,
+                  0.009537323956831914,
+                  -0.0224813567561174,
+                  -0.003921578397169008,
+                  0.008720036774868328,
+                  0.0008970305295131422,
+                  0.02073598131795409,
+                  -0.012670070537433796,
+                  -0.003318600666600403,
+                  0.015006715504280664,
+                  -0.01913656931535055,
+                  -0.00011304857293638482,
+                  0.016159381558017143,
+                  0.0062787344480623175,
+                  -0.008773732753093361,
+                  -0.034302258944743876,
+                  -0.018814534664182606,
+                  0.013947110320071347,
+                  0.005548640971854716,
+                  0.029611840231709458,
+                  0.006677097685547947,
+                  0.07634333291910682,
+                  -0.014551471251599793,
+                  -0.022898243396529603,
+                  0.022300976656075396,
+                  -0.02029450019569354,
+                  -0.0043865300952671635,
+                  -0.0074970181476868205,
+                  -0.01768015923208628,
+                  0.0026459618461969862,
+                  -0.003832534031836302,
+                  0.021899046680647162,
+                  -0.025192820418469396,
+                  -0.007782548810112457,
+                  0.005614345609950672,
+                  0.01929762941883467,
+                  -0.010783116469305071,
+                  0.011552211142500986,
+                  0.0030139184432161023,
+                  -0.016632665557327446,
+                  -0.01361459039757094,
+                  0.010389849313805651,
+                  0.019821187503970945,
+                  -0.011935974812866968,
+                  0.002621281756546957,
+                  0.019501450658486272,
+                  8.463467777288042e-06,
+                  -0.02405392555109979,
+                  0.008126249034222427,
+                  0.008646756370200407,
+                  0.000498958290702321,
+                  0.015769208128475588,
+                  0.03176895991928463,
+                  0.010788013224026846,
+                  -0.009918607930455833,
+                  -0.0371923297099634,
+                  -0.009496756326040304,
+                  -0.018877498845331648,
+                  0.0015230851805349982,
+                  0.03432826596525569,
+                  -0.02065521860997119,
+                  -0.015462357599094976,
+                  -0.00971742646973396,
+                  0.03819735828446965,
+                  -0.016409400013850706,
+                  -0.00514939996316429,
+                  -0.0024730839296284272,
+                  -0.026030488766329938,
+                  0.014209367057035146,
+                  0.011233067992115557,
+                  -0.0082253268762052,
+                  -0.025691476841165694,
+                  0.027015643199433982,
+                  0.03348855198657107,
+                  -0.00792562103963627,
+                  0.005593842829265715,
+                  0.02851521795939784,
+                  -0.023889631250535257,
+                  -0.016982456807085433,
+                  -0.02111096255037016,
+                  0.02019843232212465,
+                  0.0021529011476047306,
+                  -0.024430316552635337,
+                  -0.048073925511953844,
+                  0.002442089706815048,
+                  0.007574627898032325,
+                  -0.020851679860967857,
+                  0.005054431792492698,
+                  -0.011318050207409338,
+                  0.0027483954113679977,
+                  -0.022351932551166024,
+                  0.03259444834714165,
+                  0.010807809594061048,
+                  -0.00027155812423948164,
+                  -0.006973362280670582,
+                  0.03426750261176367,
+                  -0.016520630364404258,
+                  0.011154871899968024,
+                  -0.01988789549960759,
+                  0.01940265004506758,
+                  -0.004365439489064884,
+                  0.019121078939367344,
+                  -0.016298733538637446,
+                  -0.003554847513212089,
+                  0.002812680659001802,
+                  -0.002386369813687881,
+                  -0.02244410105620849,
+                  0.019478984562472643,
+                  -0.006783296118817835,
+                  -0.004286268698592389,
+                  0.01598786274773759,
+                  0.009915861998305223,
+                  0.0016059614289075355,
+                  0.006160604805811351,
+                  0.020426377439052814,
+                  -0.01386105991749139
+                ],
+                "positions": [
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1,
+                  0.1
+                ],
+                "trades": [
+                  "mock_trade",
+                  "mock_trade",
+                  "mock_trade",
+                  "mock_trade",
+                  "mock_trade",
+                  "mock_trade",
+                  "mock_trade",
+                  "mock_trade",
+                  "mock_trade",
+                  "mock_trade"
+                ]
+              },
+              "benchmark_comparison": "SPY"
+            }
+          }
+        }
+      ]
+    },
+    "data_validation": {
+      "status": "PASS",
+      "total_tests": 3,
+      "passed_tests": 3,
+      "test_details": [
+        {
+          "test": "qlib_data_path",
+          "status": "PASS",
+          "path": "/Users/lijifeng/Documents/AI_agent/FinAgent-Orchestration/FinAgents/agent_pools/backtest_agent/qlib_data",
+          "exists": true
+        },
+        {
+          "test": "asset_scanning",
+          "status": "PASS",
+          "asset_count": 38,
+          "assets": [
+            "VTI",
+            "XOM",
+            "LLY",
+            "CVX",
+            "PEP"
+          ]
+        },
+        {
+          "test": "data_loading",
+          "status": "PASS",
+          "asset": "VTI",
+          "data_shape": [
+            251,
+            8
+          ],
+          "data_types": [
+            "float64",
+            "float64",
+            "float64",
+            "float64",
+            "int64",
+            "float64",
+            "float64",
+            "float64"
+          ]
+        }
+      ]
+    },
+    "advanced_qlib_features": {
+      "status": "PASS",
+      "total_tests": 5,
+      "passed_tests": 4,
+      "test_details": [
+        {
+          "test": "qlib_system_init",
+          "status": "PASS",
+          "result": {
+            "status": "success",
+            "message": "Qlib already initialized",
+            "provider_uri": "/Users/lijifeng/Documents/AI_agent/FinAgent-Orchestration/FinAgents/agent_pools/backtest_agent/datasets/qlib_data",
+            "region": "US"
+          }
+        },
+        {
+          "test": "qlib_dataset_setup",
+          "status": "PASS",
+          "result": {
+            "status": "success",
+            "dataset_config": {
+              "class": "DatasetH",
+              "module_path": "qlib.data.dataset",
+              "kwargs": {
+                "handler": {
+                  "class": "Alpha158",
+                  "module_path": "qlib.contrib.data.handler",
+                  "kwargs": {
+                    "start_time": "2020-01-01",
+                    "end_time": "2023-12-31",
+                    "fit_start_time": "2020-01-01",
+                    "fit_end_time": "2023-12-31",
+                    "instruments": "csi500",
+                    "infer_processors": [
+                      {
+                        "class": "RobustZScoreNorm",
+                        "kwargs": {}
+                      },
+                      {
+                        "class": "Fillna",
+                        "kwargs": {}
+                      }
+                    ],
+                    "learn_processors": [
+                      {
+                        "class": "DropnaLabel",
+                        "kwargs": {}
+                      },
+                      {
+                        "class": "CSRankNorm",
+                        "kwargs": {
+                          "fields_group": "feature"
+                        }
+                      }
+                    ]
+                  }
+                },
+                "segments": {
+                  "train": [
+                    "2020-01-01",
+                    "2022-12-31"
+                  ],
+                  "valid": [
+                    "2023-01-01",
+                    "2023-06-30"
+                  ],
+                  "test": [
+                    "2023-07-01",
+                    "2023-12-31"
+                  ]
+                }
+              }
+            },
+            "instruments": "csi500",
+            "time_range": "2020-01-01 to 2023-12-31",
+            "fields_count": 7,
+            "segments": {
+              "train": [
+                "2020-01-01",
+                "2022-12-31"
+              ],
+              "valid": [
+                "2023-01-01",
+                "2023-06-30"
+              ],
+              "test": [
+                "2023-07-01",
+                "2023-12-31"
+              ]
+            }
+          }
+        },
+        {
+          "test": "qlib_strategy_creation",
+          "status": "PASS",
+          "result": {
+            "status": "success",
+            "strategy_id": "qlib_topk_20251129_210428",
+            "strategy_type": "topk",
+            "config": {
+              "class": "TopkDropoutStrategy",
+              "module_path": "qlib.contrib.strategy",
+              "kwargs": {
+                "topk": 30,
+                "n_drop": 3,
+                "method_sell": "bottom",
+                "method_buy": "top",
+                "hold_thresh": 1
+              }
+            },
+            "parameters": {
+              "topk": 30,
+              "n_drop": 3,
+              "method_sell": "bottom",
+              "method_buy": "top",
+              "hold_thresh": 1
+            }
+          }
+        },
+        {
+          "test": "long_short_backtest",
+          "status": "PASS",
+          "result": {
+            "status": "success",
+            "backtest_type": "long_short_mock",
+            "parameters": {
+              "topk": 20,
+              "period": "2023-01-01 to 2023-12-31",
+              "simulation": "mock_data"
+            },
+            "returns": {
+              "long": {
+                

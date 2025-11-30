@@ -1,7 +1,7 @@
 {
   "test_summary": {
-    "test_timestamp": "2025-10-17T05:53:27.752114",
-    "total_execution_time": 0.512128,
+    "test_timestamp": "2025-11-29T21:26:25.778263",
+    "total_execution_time": 0.12036,
     "total_tests": 12,
     "passed_tests": 11,
     "failed_tests": 1,
@@ -18,7 +18,7 @@
   "test_results": {
     "agent_initialization": {
       "status": "PASS",
-      "init_time": 0.001984834671020508,
+      "init_time": 0.00012063980102539062,
       "tool_count": 20,
       "agent_name": "BacktestAgent",
       "qlib_available": true,
@@ -72,23 +72,23 @@
       "created_strategies": [
         {
           "name": "momentum_strategy",
-          "strategy_id": "alpha_strategy_20251017_055327",
-          "creation_time": 0.001995563507080078,
-          "asset": "TMO",
+          "strategy_id": "alpha_strategy_20251129_212625",
+          "creation_time": 0.00078582763671875,
+          "asset": "TSLA",
           "factors_count": 2
         },
         {
           "name": "multi_factor_strategy",
-          "strategy_id": "alpha_strategy_20251017_055327",
-          "creation_time": 0.0009965896606445312,
-          "asset": "TMO",
+          "strategy_id": "alpha_strategy_20251129_212625",
+          "creation_time": 0.0002639293670654297,
+          "asset": "TSLA",
           "factors_count": 3
         },
         {
           "name": "simple_strategy",
-          "strategy_id": "alpha_strategy_20251017_055327",
-          "creation_time": 0.0009992122650146484,
-          "asset": "TMO",
+          "strategy_id": "alpha_strategy_20251129_212625",
+          "creation_time": 0.00021195411682128906,
+          "asset": "TSLA",
           "factors_count": 1
         }
       ]
@@ -100,20 +100,20 @@
       "backtest_results": [
         {
           "name": "medium_period",
-          "execution_time": 0.04479503631591797,
-          "total_return": 0.4436923812105418,
-          "sharpe_ratio": 2.4871640560508887,
+          "execution_time": 0.012999296188354492,
+          "total_return": 0.10086628576070103,
+          "sharpe_ratio": 0.5424830187161017,
           "max_drawdown": -0.05,
-          "volatility": 0.3058163810289,
+          "volatility": 0.3187447841996349,
           "qlib_native": false
         },
         {
           "name": "long_period",
-          "execution_time": 0.03390955924987793,
-          "total_return": 0.2951447749802431,
-          "sharpe_ratio": 0.8974905261596687,
+          "execution_time": 0.009650945663452148,
+          "total_return": 0.3558305858903513,
+          "sharpe_ratio": 1.107678452186157,
           "max_drawdown": -0.05,
-          "volatility": 0.33148643301350805,
+          "volatility": 0.3238098835177076,
           "qlib_native": false
         }
       ]
@@ -125,38 +125,38 @@
       "analysis_results": [
         {
           "factor_name": "momentum_factor",
-          "description": "动量因子",
-          "analysis_time": 0.0009975433349609375,
-          "ic_mean": -0.06714391213957122,
-          "ic_std": 0.08880900019649439,
-          "ic_ir": -0.32021978492882464,
+          "description": "Momentum factor",
+          "analysis_time": 1.811981201171875e-05,
+          "ic_mean": 0.06755845736396911,
+          "ic_std": 0.061018151860324533,
+          "ic_ir": 0.4236494470818981,
           "simplified": true
         },
         {
           "factor_name": "value_factor",
-          "description": "价值因子",
-          "analysis_time": 0.0,
-          "ic_mean": 0.00421009808938104,
-          "ic_std": 0.12784035999950571,
-          "ic_ir": -0.03773385569358534,
+          "description": "Value factor",
+          "analysis_time": 8.106231689453125e-06,
+          "ic_mean": -0.03677345109137209,
+          "ic_std": 0.07895191005067523,
+          "ic_ir": 0.14721219834168298,
           "simplified": true
         },
         {
           "factor_name": "quality_factor",
-          "description": "质量因子",
-          "analysis_time": 0.0,
-          "ic_mean": -0.015471407116748076,
-          "ic_std": 0.1479786441060854,
-          "ic_ir": 0.40670354632647054,
+          "description": "Quality factor",
+          "analysis_time": 6.9141387939453125e-06,
+          "ic_mean": 0.05200317331404985,
+          "ic_std": 0.13282278152937618,
+          "ic_ir": -0.5848711724335969,
           "simplified": true
         },
         {
           "factor_name": "volatility_factor",
-          "description": "波动率因子",
-          "analysis_time": 0.0,
-          "ic_mean": 0.03309734226914879,
-          "ic_std": 0.12673791993276196,
-          "ic_ir": -0.8897571173684737,
+          "description": "Volatility factor",
+          "analysis_time": 7.152557373046875e-06,
+          "ic_mean": 0.006275179194818792,
+          "ic_std": 0.11352318666415723,
+          "ic_ir": 0.06907320344513446,
           "simplified": true
         }
       ]
@@ -181,7 +181,7 @@
           "status": "FAIL",
           "result": {
             "status": "error",
-            "message": "cannot import name 'GRUModel' from 'qlib.contrib.model' (C:\\Users\\suzhe_wilfpq2\\AppData\\Roaming\\Python\\Python311\\site-packages\\qlib\\contrib\\model\\__init__.py)"
+            "message": "cannot import name 'GRUModel' from 'qlib.contrib.model' (/Users/lijifeng/miniforge3/envs/agent/lib/python3.12/site-packages/qlib/contrib/model/__init__.py)"
           }
         },
         {
@@ -201,10 +201,10 @@
               {
                 "period": "2020-01-01 to 2020-09-09",
                 "metrics": {
-                  "total_return": 0.45284874099803163,
-                  "cumulative_return": 0.4923832698079533,
-                  "volatility": 0.32351438336836175,
-                  "sharpe_ratio": 1.3942465875222627,
+                  "total_return": 0.6300619793377836,
+                  "cumulative_return": 0.7800337593092426,
+                  "volatility": 0.3251980391912699,
+                  "sharpe_ratio": 1.9298136524555538,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -212,10 +212,10 @@
               {
                 "period": "2020-01-22 to 2020-09-30",
                 "metrics": {
-                  "total_return": -0.025693484417527834,
-                  "cumulative_return": -0.06894840043134753,
-                  "volatility": 0.3024267512910129,
-                  "sharpe_ratio": -0.08462190938434606,
+                  "total_return": -0.34112058900892794,
+                  "cumulative_return": -0.322048356850834,
+                  "volatility": 0.30732792099353673,
+                  "sharpe_ratio": -1.105569208248795,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -223,10 +223,10 @@
               {
                 "period": "2020-02-12 to 2020-10-21",
                 "metrics": {
-                  "total_return": 0.9204802292560093,
-                  "cumulative_return": 1.3891886139449272,
-                  "volatility": 0.3109518260238563,
-                  "sharpe_ratio": 2.9485016351373785,
+                  "total_return": -0.49623196915062023,
+                  "cumulative_return": -0.42136042249879435,
+                  "volatility": 0.31720492414699847,
+                  "sharpe_ratio": -1.5582058799918028,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -234,10 +234,10 @@
               {
                 "period": "2020-03-04 to 2020-11-11",
                 "metrics": {
-                  "total_return": 0.33632586676787646,
-                  "cumulative_return": 0.33723225335217766,
-                  "volatility": 0.3017855499557208,
-                  "sharpe_ratio": 1.1100482298273775,
+                  "total_return": 0.0481834639940974,
+                  "cumulative_return": 0.003022323380988734,
+                  "volatility": 0.30022896726453485,
+                  "sharpe_ratio": 0.1598547134111989,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -245,10 +245,10 @@
               {
                 "period": "2020-03-25 to 2020-12-02",
                 "metrics": {
-                  "total_return": 0.5118281926519028,
-                  "cumulative_return": 0.5898326046108402,
-                  "volatility": 0.30867205097291495,
-                  "sharpe_ratio": 1.6516077652979484,
+                  "total_return": -0.37763967669538073,
+                  "cumulative_return": -0.3532841990637339,
+                  "volatility": 0.3402171654880282,
+                  "sharpe_ratio": -1.1056086168149468,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -256,10 +256,10 @@
               {
                 "period": "2020-04-15 to 2020-12-23",
                 "metrics": {
-                  "total_return": 0.17263715963560383,
-                  "cumulative_return": 0.12596485950452263,
-                  "volatility": 0.328433199590661,
-                  "sharpe_ratio": 0.5235609540544396,
+                  "total_return": 0.3700998473135917,
+                  "cumulative_return": 0.3644609647414139,
+                  "volatility": 0.34389566366979,
+                  "sharpe_ratio": 1.0719443162890814,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -267,10 +267,10 @@
               {
                 "period": "2020-05-06 to 2021-01-13",
                 "metrics": {
-                  "total_return": 0.11520074922341692,
-                  "cumulative_return": 0.06922540955337664,
-                  "volatility": 0.3107515637827068,
-                  "sharpe_ratio": 0.36925127229260185,
+                  "total_return": 0.0846360553628244,
+                  "cumulative_return": 0.040575605398669445,
+                  "volatility": 0.3000083992057649,
+                  "sharpe_ratio": 0.28099721782092796,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -278,10 +278,10 @@
               {
                 "period": "2020-05-27 to 2021-02-03",
                 "metrics": {
-                  "total_return": 0.3001612980669289,
-                  "cumulative_return": 0.2858232523648703,
-                  "volatility": 0.3121949216797184,
-                  "sharpe_ratio": 0.9576545581381795,
+                  "total_return": -0.18313812164975296,
+                  "cumulative_return": -0.20706908549587733,
+                  "volatility": 0.31171556056671856,
+                  "sharpe_ratio": -0.5851945768271402,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -289,10 +289,10 @@
               {
                 "period": "2020-06-17 to 2021-02-24",
                 "metrics": {
-                  "total_return": -0.11131834206762015,
-                  "cumulative_return": -0.14293505175221233,
-                  "volatility": 0.29289577091935726,
-                  "sharpe_ratio": -0.3785590630847333,
+                  "total_return": 0.03970831466617214,
+                  "cumulative_return": -0.010078725993235338,
+                  "volatility": 0.3154464028817922,
+                  "sharpe_ratio": 0.1253822026325426,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -300,10 +300,10 @@
               {
                 "period": "2020-07-08 to 2021-03-17",
                 "metrics": {
-                  "total_return": 0.32412688877075996,
-                  "cumulative_return": 0.3235975836392042,
-                  "volatility": 0.29524121711520257,
-                  "sharpe_ratio": 1.0934982519634975,
+                  "total_return": 0.11441970190908951,
+                  "cumulative_return": 0.0766778923671505,
+                  "volatility": 0.2850084464746544,
+                  "sharpe_ratio": 0.3998739389396399,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -311,10 +311,10 @@
               {
                 "period": "2020-07-29 to 2021-04-07",
                 "metrics": {
-                  "total_return": 0.596041706371737,
-                  "cumulative_return": 0.7308130322444593,
-                  "volatility": 0.30611932567379707,
-                  "sharpe_ratio": 1.9393934342183847,
+                  "total_return": 0.36614337550317433,
+                  "cumulative_return": 0.37144530400913967,
+                  "volatility": 0.3167563957048076,
+                  "sharpe_ratio": 1.1513458715613236,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -322,10 +322,10 @@
               {
                 "period": "2020-08-19 to 2021-04-28",
                 "metrics": {
-                  "total_return": 0.15427889433448422,
-                  "cumulative_return": 0.1150513158964519,
-                  "volatility": 0.3012377119016172,
-                  "sharpe_ratio": 0.5101256923082386,
+                  "total_return": -0.2537384675197119,
+                  "cumulative_return": -0.26247106882783877,
+                  "volatility": 0.3177110603097795,
+                  "sharpe_ratio": -0.7954886695771132,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -333,10 +333,10 @@
               {
                 "period": "2020-09-09 to 2021-05-19",
                 "metrics": {
-                  "total_return": 0.5560303100703144,
-                  "cumulative_return": 0.6456692725407525,
-                  "volatility": 0.33900761846113725,
-                  "sharpe_ratio": 1.6336876567057346,
+                  "total_return": -0.2524508031325926,
+                  "cumulative_return": -0.2621378765950403,
+                  "volatility": 0.3204398699572479,
+                  "sharpe_ratio": -0.7847118834018597,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -344,10 +344,10 @@
               {
                 "period": "2020-09-30 to 2021-06-09",
                 "metrics": {
-                  "total_return": 0.32381017068106716,
-                  "cumulative_return": 0.31064899143402913,
-                  "volatility": 0.3267161581848918,
-                  "sharpe_ratio": 0.9871880545344519,
+                  "total_return": -0.13829549103345146,
+                  "cumulative_return": -0.1727656282729534,
+                  "volatility": 0.3204122882839055,
+                  "sharpe_ratio": -0.429911316064114,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -355,10 +355,10 @@
               {
                 "period": "2020-10-21 to 2021-06-30",
                 "metrics": {
-                  "total_return": -0.5289815922109102,
-                  "cumulative_return": -0.44021696138983546,
-                  "volatility": 0.31802736023549744,
-                  "sharpe_ratio": -1.6567466254724161,
+                  "total_return": 0.581591969677984,
+                  "cumulative_return": 0.6859322552351503,
+                  "volatility": 0.3425833982488575,
+                  "sharpe_ratio": 1.6909552247722506,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -366,10 +366,10 @@
               {
                 "period": "2020-11-11 to 2021-07-21",
                 "metrics": {
-                  "total_return": 0.31857612019283316,
-                  "cumulative_return": 0.3114117645570649,
-                  "volatility": 0.3084660565895315,
-                  "sharpe_ratio": 1.0286931714633338,
+                  "total_return": 0.2360376230844018,
+                  "cumulative_return": 0.21401603758701082,
+                  "volatility": 0.2900679063960581,
+                  "sharpe_ratio": 0.8105159614984645,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -377,10 +377,10 @@
               {
                 "period": "2020-12-02 to 2021-08-11",
                 "metrics": {
-                  "total_return": 0.8207385860495312,
-                  "cumulative_return": 1.1531546072649141,
-                  "volatility": 0.325189371313188,
-                  "sharpe_ratio": 2.513903073512174,
+                  "total_return": -0.20267617039541438,
+                  "cumulative_return": -0.23031282691613986,
+                  "volatility": 0.3435227746200794,
+                  "sharpe_ratio": -0.5876614120740277,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -388,10 +388,10 @@
               {
                 "period": "2020-12-23 to 2021-09-01",
                 "metrics": {
-                  "total_return": -0.12717882534779698,
-                  "cumulative_return": -0.16544208779984437,
-                  "volatility": 0.32761892101752643,
-                  "sharpe_ratio": -0.38665697893827927,
+                  "total_return": 0.8572828575503182,
+                  "cumulative_return": 1.2396965470287609,
+                  "volatility": 0.3157651758614326,
+                  "sharpe_ratio": 2.7042069646475015,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -399,10 +399,10 @@
               {
                 "period": "2021-01-13 to 2021-09-22",
                 "metrics": {
-                  "total_return": 0.6226576576664467,
-                  "cumulative_return": 0.7758583988602767,
-                  "volatility": 0.30990284969206544,
-                  "sharpe_ratio": 2.001261236615191,
+                  "total_return": 0.7638399234062367,
+                  "cumulative_return": 1.0297125069463156,
+                  "volatility": 0.3319616905101579,
+                  "sharpe_ratio": 2.2918933570466185,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -410,10 +410,10 @@
               {
                 "period": "2021-02-03 to 2021-10-13",
                 "metrics": {
-                  "total_return": 0.6756700025873418,
-                  "cumulative_return": 0.8686886541079604,
-                  "volatility": 0.3154515586306785,
-                  "sharpe_ratio": 2.1334475983806316,
+                  "total_return": 0.1263771373358959,
+                  "cumulative_return": 0.08209776607405694,
+                  "volatility": 0.3085942540018821,
+                  "sharpe_ratio": 0.40790656769100586,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -421,10 +421,10 @@
               {
                 "period": "2021-02-24 to 2021-11-03",
                 "metrics": {
-                  "total_return": -0.2680584422143179,
-                  "cumulative_return": -0.2646316949622436,
-                  "volatility": 0.27920643363312947,
-                  "sharpe_ratio": -0.9562778307275832,
+                  "total_return": -0.3642900601783258,
+                  "cumulative_return": -0.33987530141131905,
+                  "volatility": 0.31814849193019473,
+                  "sharpe_ratio": -1.1405057315096603,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -432,10 +432,10 @@
               {
                 "period": "2021-03-17 to 2021-11-24",
                 "metrics": {
-                  "total_return": 0.19383434455419707,
-                  "cumulative_return": 0.15996694316379978,
-                  "volatility": 0.3013299623613374,
-                  "sharpe_ratio": 0.640720223727093,
+                  "total_return": -0.07428013257883928,
+                  "cumulative_return": -0.1176124462410969,
+                  "volatility": 0.3182301541932729,
+                  "sharpe_ratio": -0.2324937918106052,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -443,10 +443,10 @@
               {
                 "period": "2021-04-07 to 2021-12-15",
                 "metrics": {
-                  "total_return": 0.14498472249053582,
-                  "cumulative_return": 0.10185789207985385,
-                  "volatility": 0.3101873082023512,
-                  "sharpe_ratio": 0.4655627632968699,
+                  "total_return": 0.05412004267657666,
+                  "cumulative_return": 0.002019190111952174,
+                  "volatility": 0.3224915676584092,
+                  "sharpe_ratio": 0.1671551596087466,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -454,10 +454,10 @@
               {
                 "period": "2021-04-28 to 2022-01-05",
                 "metrics": {
-                  "total_return": 0.5419234914183426,
-                  "cumulative_return": 0.6357693671034359,
-                  "volatility": 0.31463856842456145,
-                  "sharpe_ratio": 1.7155605049833695,
+                  "total_return": 0.8946539465933678,
+                  "cumulative_return": 1.3147122670277454,
+                  "volatility": 0.3290673401421063,
+                  "sharpe_ratio": 2.70801035618258,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -465,10 +465,10 @@
               {
                 "period": "2021-05-19 to 2022-01-26",
                 "metrics": {
-                  "total_return": 0.3757268850709707,
-                  "cumulative_return": 0.38499835370715174,
-                  "volatility": 0.315748963047442,
-                  "sharpe_ratio": 1.1852510771745062,
+                  "total_return": 0.1650637218096452,
+                  "cumulative_return": 0.12136125346558346,
+                  "volatility": 0.31727438428781063,
+                  "sharpe_ratio": 0.5181990862602961,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -476,10 +476,10 @@
               {
                 "period": "2021-06-09 to 2022-02-16",
                 "metrics": {
-                  "total_return": 0.6989289396999949,
-                  "cumulative_return": 0.9152352155234749,
-                  "volatility": 0.31120385607160517,
-                  "sharpe_ratio": 2.237010760434672,
+                  "total_return": 0.36405345675882816,
+                  "cumulative_return": 0.3724006703640024,
+                  "volatility": 0.3077264532848017,
+                  "sharpe_ratio": 1.1783663913801554,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -487,10 +487,10 @@
               {
                 "period": "2021-06-30 to 2022-03-09",
                 "metrics": {
-                  "total_return": 0.08848912837737011,
-                  "cumulative_return": 0.031587475351798844,
-                  "volatility": 0.3383492214572193,
-                  "sharpe_ratio": 0.2604982171883417,
+                  "total_return": 0.6418876554268576,
+                  "cumulative_return": 0.8051592520664441,
+                  "volatility": 0.31834817773749696,
+                  "sharpe_ratio": 2.0083373952799373,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -498,10 +498,10 @@
               {
                 "period": "2021-07-21 to 2022-03-30",
                 "metrics": {
-                  "total_return": 0.7216308917801593,
-                  "cumulative_return": 0.9499014020057102,
-                  "volatility": 0.32581127880691924,
-                  "sharpe_ratio": 2.206119439441436,
+                  "total_return": 0.1256111810648057,
+                  "cumulative_return": 0.07990416904530928,
+                  "volatility": 0.3120853952008169,
+                  "sharpe_ratio": 0.4008989081421749,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -509,10 +509,10 @@
               {
                 "period": "2021-08-11 to 2022-04-20",
                 "metrics": {
-                  "total_return": 0.44577470875742775,
-                  "cumulative_return": 0.4838826396102134,
-                  "volatility": 0.3193919055528306,
-                  "sharpe_ratio": 1.3901816097008164,
+                  "total_return": 0.7290391154647445,
+                  "cumulative_return": 0.9653616436666506,
+                  "volatility": 0.32399228213837666,
+                  "sharpe_ratio": 2.241280357484326,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -520,10 +520,10 @@
               {
                 "period": "2021-09-01 to 2022-05-11",
                 "metrics": {
-                  "total_return": 0.569764747082086,
-                  "cumulative_return": 0.681842070513319,
-                  "volatility": 0.3137755588949692,
-                  "sharpe_ratio": 1.8086581201775627,
+                  "total_return": -0.02868312215176093,
+                  "cumulative_return": -0.07805395399063375,
+                  "volatility": 0.32444378430306386,
+                  "sharpe_ratio": -0.08805762819224974,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -531,10 +531,10 @@
               {
                 "period": "2021-09-22 to 2022-06-01",
                 "metrics": {
-                  "total_return": -0.01992207211110203,
-                  "cumulative_return": -0.07042110268677637,
-                  "volatility": 0.3251006883970526,
-                  "sharpe_ratio": -0.06103748608135481,
+                  "total_return": 0.44646799179405416,
+                  "cumulative_return": 0.4856156464505377,
+                  "volatility": 0.31740059570650686,
+                  "sharpe_ratio": 1.4010789588609405,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -542,10 +542,10 @@
               {
                 "period": "2021-10-13 to 2022-06-22",
                 "metrics": {
-                  "total_return": -0.07991536480380597,
-                  "cumulative_return": -0.11392058046667897,
-                  "volatility": 0.2864957927816612,
-                  "sharpe_ratio": -0.2778382643033756,
+                  "total_return": 0.529490108020002,
+                  "cumulative_return": 0.6145252965102954,
+                  "volatility": 0.31641237878567224,
+                  "sharpe_ratio": 1.66680350423485,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -553,10 +553,10 @@
               {
                 "period": "2021-11-03 to 2022-07-13",
                 "metrics": {
-                  "total_return": 0.24646002441580417,
-                  "cumulative_return": 0.2165727900726926,
-                  "volatility": 0.31661502927221746,
-                  "sharpe_ratio": 0.7753449818410487,
+                  "total_return": 0.7142005520688185,
+                  "cumulative_return": 0.9489773084795614,
+                  "volatility": 0.30377203291924676,
+                  "sharpe_ratio": 2.3418140839010406,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -564,10 +564,10 @@
               {
                 "period": "2021-11-24 to 2022-08-03",
                 "metrics": {
-                  "total_return": 0.5398298313044914,
-                  "cumulative_return": 0.620823201060557,
-                  "volatility": 0.33549445915462284,
-                  "sharpe_ratio": 1.602697457094034,
+                  "total_return": 0.006462737405693364,
+                  "cumulative_return": -0.05136416659142151,
+                  "volatility": 0.3450623625816173,
+                  "sharpe_ratio": 0.018655158276056513,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -575,10 +575,10 @@
               {
                 "period": "2021-12-15 to 2022-08-24",
                 "metrics": {
-                  "total_return": 0.18410217414954205,
-                  "cumulative_return": 0.14560439849943685,
-                  "volatility": 0.31054862967730734,
-                  "sharpe_ratio": 0.5904856117459648,
+                  "total_return": 0.20792895224556368,
+                  "cumulative_return": 0.16722074922127517,
+                  "volatility": 0.32662490400462296,
+                  "sharpe_ratio": 0.6340823866769336,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -586,10 +586,10 @@
               {
                 "period": "2022-01-05 to 2022-09-14",
                 "metrics": {
-                  "total_return": 0.43004540931635715,
-                  "cumulative_return": 0.4523785333406971,
-                  "volatility": 0.3359189639351456,
-                  "sharpe_ratio": 1.2751457079764903,
+                  "total_return": 0.8529059326824507,
+                  "cumulative_return": 1.221998210303366,
+                  "volatility": 0.32690946241466223,
+                  "sharpe_ratio": 2.598685142709259,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -597,10 +597,10 @@
               {
                 "period": "2022-01-26 to 2022-10-05",
                 "metrics": {
-                  "total_return": 0.02030846957737245,
-                  "cumulative_return": -0.028510737155545418,
-                  "volatility": 0.31346972677057927,
-                  "sharpe_ratio": 0.06452999195496913,
+                  "total_return": -0.2255429107126834,
+                  "cumulative_return": -0.2379045404070672,
+                  "volatility": 0.30265552624567316,
+                  "sharpe_ratio": -0.7422677508784098,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -608,10 +608,10 @@
               {
                 "period": "2022-02-16 to 2022-10-26",
                 "metrics": {
-                  "total_return": 0.3455258876240407,
-                  "cumulative_return": 0.35481032270103774,
-                  "volatility": 0.288585235008503,
-                  "sharpe_ratio": 1.1925772038997566,
+                  "total_return": 0.6444956517768744,
+                  "cumulative_return": 0.8111869729253738,
+                  "volatility": 0.3158363707107051,
+                  "sharpe_ratio": 2.032534241350846,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -619,10 +619,10 @@
               {
                 "period": "2022-03-09 to 2022-11-16",
                 "metrics": {
-                  "total_return": -0.17667545553206293,
-                  "cumulative_return": -0.20203480177074162,
-                  "volatility": 0.31279714790833757,
-                  "sharpe_ratio": -0.562591873839613,
+                  "total_return": 0.5863533634217613,
+                  "cumulative_return": 0.7041590059567282,
+                  "volatility": 0.32527027488826965,
+                  "sharpe_ratio": 1.79553991337024,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -630,10 +630,10 @@
               {
                 "period": "2022-03-30 to 2022-12-07",
                 "metrics": {
-                  "total_return": -0.05911469125884422,
-                  "cumulative_return": -0.1035621421262044,
-                  "volatility": 0.3170262819661986,
-                  "sharpe_ratio": -0.1857291956600642,
+                  "total_return": 0.4449455571120362,
+                  "cumulative_return": 0.4764953319929315,
+                  "volatility": 0.33211069340516974,
+                  "sharpe_ratio": 1.3344553121028337,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -641,10 +641,10 @@
               {
                 "period": "2022-04-20 to 2022-12-28",
                 "metrics": {
-                  "total_return": 0.1449193686136293,
-                  "cumulative_return": 0.10120619062748193,
-                  "volatility": 0.31025723802426514,
-                  "sharpe_ratio": 0.4652480171109744,
+                  "total_return": 0.2653573786783754,
+                  "cumulative_return": 0.23896185493725142,
+                  "volatility": 0.3197207655721812,
+                  "sharpe_ratio": 0.8266855448421557,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -652,10 +652,10 @@
               {
                 "period": "2022-05-11 to 2023-01-18",
                 "metrics": {
-                  "total_return": 0.5805231539807056,
-                  "cumulative_return": 0.7075447406522763,
-                  "volatility": 0.3000124220962069,
-                  "sharpe_ratio": 1.9273488478234049,
+                  "total_return": 0.4833958800438434,
+                  "cumulative_return": 0.5357821875179896,
+                  "volatility": 0.32958834824753597,
+                  "sharpe_ratio": 1.4608684650158772,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -663,10 +663,10 @@
               {
                 "period": "2022-06-01 to 2023-02-08",
                 "metrics": {
-                  "total_return": 0.388829043602624,
-                  "cumulative_return": 0.40946342941315916,
-                  "volatility": 0.3014937558391767,
-                  "sharpe_ratio": 1.284577748001803,
+                  "total_return": 0.24999431308963607,
+                  "cumulative_return": 0.21442414177158486,
+                  "volatility": 0.33339655376727617,
+                  "sharpe_ratio": 0.7468769261750338,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -674,10 +674,10 @@
               {
                 "period": "2022-06-22 to 2023-03-01",
                 "metrics": {
-                  "total_return": -0.23580227431414147,
-                  "cumulative_return": -0.2542084738409479,
-                  "volatility": 0.3383147880563671,
-                  "sharpe_ratio": -0.6942358353999849,
+                  "total_return": 0.5089650884500841,
+                  "cumulative_return": 0.5858101433614555,
+                  "volatility": 0.30854980836879886,
+                  "sharpe_ratio": 1.643019554648196,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -685,10 +685,10 @@
               {
                 "period": "2022-07-13 to 2023-03-22",
                 "metrics": {
-                  "total_return": 0.18735534575053842,
-                  "cumulative_return": 0.1445296058394785,
-                  "volatility": 0.3237724756637959,
-                  "sharpe_ratio": 0.5763763902552287,
+                  "total_return": 0.698954206389559,
+                  "cumulative_return": 0.9124831819440657,
+                  "volatility": 0.31554600831342344,
+                  "sharpe_ratio": 2.2063075532575303,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -696,10 +696,10 @@
               {
                 "period": "2022-08-03 to 2023-04-12",
                 "metrics": {
-                  "total_return": 0.24881276423528415,
-                  "cumulative_return": 0.2215738144278494,
-                  "volatility": 0.3116303168646542,
-                  "sharpe_ratio": 0.7952670236571086,
+                  "total_return": 0.28099118750028573,
+                  "cumulative_return": 0.26563694187181186,
+                  "volatility": 0.30113639863770975,
+                  "sharpe_ratio": 0.9294145498905941,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -707,10 +707,10 @@
               {
                 "period": "2022-08-24 to 2023-05-03",
                 "metrics": {
-                  "total_return": 0.22832973966578612,
-                  "cumulative_return": 0.19808056435746946,
-                  "volatility": 0.30871836458358,
-                  "sharpe_ratio": 0.736681962159806,
+                  "total_return": 0.4693106401379974,
+                  "cumulative_return": 0.5123132491085522,
+                  "volatility": 0.3330438582370368,
+                  "sharpe_ratio": 1.4035858815866589,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -718,10 +718,10 @@
               {
                 "period": "2022-09-14 to 2023-05-24",
                 "metrics": {
-                  "total_return": 0.23096256236771745,
-                  "cumulative_return": 0.19983765310839408,
-                  "volatility": 0.3119439125291255,
-                  "sharpe_ratio": 0.7374712492355769,
+                  "total_return": 0.6347085248117861,
+                  "cumulative_return": 0.8012472239208002,
+                  "volatility": 0.3021405752547302,
+                  "sharpe_ratio": 2.0924028324620276,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -729,10 +729,10 @@
               {
                 "period": "2022-10-05 to 2023-06-14",
                 "metrics": {
-                  "total_return": 0.14235478026882703,
-                  "cumulative_return": 0.1001569825141464,
-                  "volatility": 0.3062951016464757,
-                  "sharpe_ratio": 0.46292647969537465,
+                  "total_return": 0.16317633634114104,
+                  "cumulative_return": 0.12481179476790416,
+                  "volatility": 0.30214329375471777,
+                  "sharpe_ratio": 0.5379281087628447,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -740,10 +740,10 @@
               {
                 "period": "2022-10-26 to 2023-07-05",
                 "metrics": {
-                  "total_return": 0.32741341336812957,
-                  "cumulative_return": 0.3237855044687332,
-                  "volatility": 0.30561407602076957,
-                  "sharpe_ratio": 1.0670951202602859,
+                  "total_return": 0.592328486331121,
+                  "cumulative_return": 0.7119448395757211,
+                  "volatility": 0.32902189446418234,
+                  "sharpe_ratio": 1.7931550360147415,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -751,10 +751,10 @@
               {
                 "period": "2022-11-16 to 2023-07-26",
                 "metrics": {
-                  "total_return": -0.10138270432812138,
-                  "cumulative_return": -0.13626729024568485,
-                  "volatility": 0.3001194797388317,
-                  "sharpe_ratio": -0.3364726017268283,
+                  "total_return": -0.26991650646731125,
+                  "cumulative_return": -0.2760493942160144,
+                  "volatility": 0.32531178456861626,
+                  "sharpe_ratio": -0.8264368386220516,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -762,10 +762,10 @@
               {
                 "period": "2022-12-07 to 2023-08-16",
                 "metrics": {
-                  "total_return": -0.48005915394707105,
-                  "cumulative_return": -0.410346001680026,
-                  "volatility": 0.30833463250285603,
-                  "sharpe_ratio": -1.55078812605001,
+                  "total_return": -0.04747066258500368,
+                  "cumulative_return": -0.09148398373598743,
+                  "volatility": 0.3113046051130693,
+                  "sharpe_ratio": -0.1518867075237094,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -773,10 +773,10 @@
               {
                 "period": "2022-12-28 to 2023-09-06",
                 "metrics": {
-                  "total_return": 0.04085512189922681,
-                  "cumulative_return": -0.0021331765729190044,
-                  "volatility": 0.29336249885912136,
-                  "sharpe_ratio": 0.13871452337033327,
+                  "total_return": 0.2804212230324783,
+                  "cumulative_return": 0.2635611639578861,
+                  "volatility": 0.3045372675067249,
+                  "sharpe_ratio": 0.9171712908521112,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -784,10 +784,10 @@
               {
                 "period": "2023-01-18 to 2023-09-27",
                 "metrics": {
-                  "total_return": 0.10568554452419299,
-                  "cumulative_return": 0.06068257665527854,
-                  "volatility": 0.30545871781289013,
-                  "sharpe_ratio": 0.3446220682549921,
+                  "total_return": 0.19641012910117533,
+                  "cumulative_return": 0.15952296811995437,
+                  "volatility": 0.31120614122152584,
+                  "sharpe_ratio": 0.6286309251878295,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -795,10 +795,10 @@
               {
                 "period": "2023-02-08 to 2023-10-18",
                 "metrics": {
-                  "total_return": -0.16518212447710023,
-                  "cumulative_return": -0.20024018042488756,
-                  "volatility": 0.3401592411827331,
-                  "sharpe_ratio": -0.4836829660496526,
+                  "total_return": 0.4429767350696235,
+                  "cumulative_return": 0.47910754458628513,
+                  "volatility": 0.3202385845977837,
+                  "sharpe_ratio": 1.3778034881016996,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -806,10 +806,10 @@
               {
                 "period": "2023-03-01 to 2023-11-08",
                 "metrics": {
-                  "total_return": 0.11065431788160407,
-                  "cumulative_return": 0.0721665485511489,
-                  "volatility": 0.2862000020036712,
-                  "sharpe_ratio": 0.3851046410363353,
+                  "total_return": 0.6427110745334842,
+                  "cumulative_return": 0.811528699069687,
+                  "volatility": 0.30942718249882195,
+                  "sharpe_ratio": 2.068889712226651,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -817,10 +817,10 @@
               {
                 "period": "2023-03-22 to 2023-11-29",
                 "metrics": {
-                  "total_return": 0.16159703085822374,
-                  "cumulative_return": 0.1215949989624403,
-                  "volatility": 0.30630800497437843,
-                  "sharpe_ratio": 0.5254786189135344,
+                  "total_return": 0.11629460484990352,
+                  "cumulative_return": 0.07172654545411916,
+                  "volatility": 0.30620786968121916,
+                  "sharpe_ratio": 0.3782885870984708,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -828,10 +828,10 @@
               {
                 "period": "2023-04-12 to 2023-12-20",
                 "metrics": {
-                  "total_return": -0.17886350386163402,
-                  "cumulative_return": -0.20041216657259198,
-                  "volatility": 0.29882531085471303,
-                  "sharpe_ratio": -0.5961895696889545,
+                  "total_return": 0.023211229499551872,
+                  "cumulative_return": -0.0250079580223439,
+                  "volatility": 0.3115118582267952,
+                  "sharpe_ratio": 0.07421703186850434,
                   "max_drawdown": -0.05,
                   "calmar_ratio": 1.2
                 }
@@ -839,10 +839,10 @@
             ],
             "summary": {
               "total_periods": 58,
-              "average_return": 0.22567045491495533,
-              "average_sharpe": 0.7145154690685572,
+              "average_return": 0.24861714775972274,
+              "average_sharpe": 0.776238479673134,
               "average_max_drawdown": -0.04999999999999999,
-              "consistency_score": 1.3669213534876725
+              "consistency_score": 1.429040884895526
             }
           }
         }
@@ -851,15 +851,15 @@
     "performance": {
       "status": "PASS",
       "metrics": {
-        "strategy_creation_time": 0.0009970664978027344,
-        "backtest_time": 0.03689885139465332,
+        "strategy_creation_time": 0.00032591819763183594,
+        "backtest_time": 0.008800983428955078,
         "backtest_success": true,
-        "factor_analysis_time": 0.0009982585906982422,
+        "factor_analysis_time": 9.775161743164062e-06,
         "factor_analysis_success": true,
-        "concurrent_analysis_time": 0.0009970664978027344,
+        "concurrent_analysis_time": 2.7179718017578125e-05,
         "concurrent_success": true,
-        "memory_usage_mb": 227.8984375,
-        "data_load_time": 0.01296544075012207,
+        "memory_usage_mb": 446.640625,
+        "data_load_time": 0.0035521984100341797,
         "data_load_success": true
       }
     },
@@ -884,7 +884,7 @@
           "result": {
             "status": "success",
             "results": {
-              "strategy_id": "alpha_strategy_20251017_055327",
+              "strategy_id": "alpha_strategy_20251129_212625",
               "backtest_period": {
                 "start_date": "2025-01-01T00:00:00",
                 "end_date": "2025-12-31T00:00:00",
@@ -892,14 +892,14 @@
                 "trading_days": 155
               },
               "performance_metrics": {
-                "total_return": 0.289916992934318,
-                "sharpe_ratio": 1.5598056654052423,
+                "total_return": -0.17231638061875143,
+                "sharpe_ratio": -0.8099873502099535,
                 "max_drawdown": -0.05,
-                "volatility": 0.3021843861699071
+                "volatility": 0.34587340562285745
               },
               "risk_metrics": {
-                "var_95": -0.026405595715161278,
-                "tracking_error": 0.3021843861699071,
+                "var_95": -0.034501953010364135,
+                "tracking_error": 0.34587340562285745,
                 "beta": 1.0
               },
               "transaction_analysis": {
@@ -908,165 +908,166 @@
                 "turnover": 2.0
               },
               "factor_attribution": {
-                "momentum": -0.008281000706745112
+                "momentum_factor": -0.007793532508816616,
+                "value_factor": 0.003350738434269869
               },
               "detailed_results": {
                 "returns": [
-                  0.015043825023932145,
-                  -0.028308305360653332,
-                  -0.01995369810249389,
-                  0.02142409539671719,
-                  -0.012906684833476331,
-                  -0.0016514226417434419,
-                  0.018396160260545275,
-                  -0.0016687787424044974,
-                  0.0036019197118595967,
-                  -0.02174999320556379,
-                  -0.003518182325031839,
-                  -0.011752017709450328,
-                  0.025815375175024267,
-                  0.005606961638695093,
-                  0.01600080172178273,
-                  0.017069842877347266,
-                  0.015668593752517734,
-                  -0.010828655764407016,
-                  0.03880125954607584,
-                  0.00966818754654912,
-                  0.030918055779460624,
-                  -0.035310838384599946,
-                  0.007455526548230804,
-                  -0.006076927035262102,
-                  -0.025590148724236112,
-                  0.003160363214123804,
-                  -0.010174640275065299,
-                  0.009138995573543886,
-                  0.014235842912054375,
-                  -0.02479804715103384,
-                  0.01332659307031386,
-                  -0.008675869958282689,
-                  -0.03665856220204797,
-                  -0.008729368827963952,
-                  -0.05321875900081684,
-                  0.026661126004471836,
-                  -0.018799530029525006,
-                  0.010159992850902674,
-                  -0.013907815718754522,
-                  0.006117673633541444,
-                  -0.018634737639763074,
-                  0.016453798772220918,
-                  -0.013928526531149007,
-                  0.02133266917410473,
-                  0.0025884797926086895,
-                  0.04176017336148802,
-                  -0.021431288436914008,
-                  0.0015544092626124937,
-                  -0.022711270306837932,
-                  0.007391083952618757,
-                  -0.0010415492811607576,
-                  -0.008559738536188438,
-                  -0.0029379596733784897,
-                  0.03584371616631655,
-                  0.000813284151105066,
-                  -0.017681246836380195,
-                  0.03524464919795928,
-                  0.021683594124546287,
-                  -0.005298920107355479,
-                  -0.014461150025219843,
-                  -0.009644228613190142,
-                  0.0025247714585128816,
-                  -0.0011106928906945254,
-                  -0.00904646336970109,
-                  0.02954455792243725,
-                  0.001995147858672128,
-                  -0.015848688529320844,
-                  -0.0034016161773991445,
-                  -0.017211366766770608,
-                  0.032516487655351145,
-                  -0.0011876325466489666,
-                  -0.03340452966679492,
-                  -0.012269587205522396,
-                  -0.009291554730594318,
-                  0.0008252541652917366,
-                  0.008092550836843604,
-                  0.003471906701679734,
-                  0.011980008238445184,
-                  -0.005293164189676667,
-                  0.004914959283107133,
-                  0.002166585936512727,
-                  0.018611402626885355,
-                  -0.008333411550455107,
-                  0.014707461755701427,
-                  -0.013680137115773594,
-                  0.013393083175900367,
-                  0.028579721212413575,
-                  -0.0190796868775499,
-                  0.007199907927518442,
-                  0.0052296097905184975,
-                  -0.005298097052973285,
-                  -0.018002761088158962,
-                  -0.032690566705615744,
-                  -0.02212844590381348,
-                  -0.0036164083872455774,
-                  -0.008364061342620771,
-                  0.019616901415156957,
-                  0.011870354180786146,
-                  0.02077215145164035,
-                  0.012386396423757447,
-                  0.019081527708969388,
-                  -0.008753787823996266,
-                  0.06486788216817223,
-                  0.03596141938404748,
-                  -0.014677452070749518,
-                  0.04345999621104047,
-                  0.026743327622122236,
-                  0.012905351489138392,
-                  0.0034857414593301795,
-                  -0.007776162727508455,
-                  -0.01458783822265567,
-                  -0.019216744479783034,
-                  -0.006200535506353587,
-                  -0.01642285121035542,
-                  -0.007366272735109327,
-                  -0.0006340240423263392,
-                  0.004307993921019517,
-                  0.0012243106328946795,
-                  -0.022760773464866935,
-                  -0.012566747121406971,
-                  -0.00012019179110206533,
-                  0.026364693108957227,
-                  -0.00836380923071237,
-                  0.0028455229305574437,
-                  -0.03514739571862556,
-                  0.0036975553109915146,
-                  -0.0015588742894506761,
-                  0.016384918060360198,
-                  0.02017796466378614,
-                  0.016463730938816885,
-                  -0.029463544932444536,
-                  -0.0001225946637191382,
-                  0.040141266599734465,
-                  0.02355041226662981,
-                  0.014916259679255254,
-                  -0.010407903345427419,
-                  0.01813007589943049,
-                  -0.0052034234075346054,
-                  -0.01590478695453819,
-                  0.019457641608534745,
-                  -0.0052643213883915565,
-                  0.03529225249271538,
-                  -0.007753968716157745,
-                  -0.008219725321536767,
-                  0.025638449186239597,
-                  0.01584752543881642,
-                  0.008452761419472762,
-                  0.04691012459204974,
-                  -0.0016476710149053216,
-                  0.011811573047024147,
-                  0.0019894520978318373,
-                  -0.0030970269988656925,
-                  -0.02330342508655641,
-                  0.0009773342089133804,
-                  0.0019032449198231722
+                  0.0226002060617497,
+                  0.010095318266267667,
+                  0.052809126959781495,
+                  -0.016176749070134416,
+                  -0.02195609037611291,
+                  0.012292902269643307,
+                  -0.01945298195550724,
+                  -0.01804267185246046,
+                  -0.003487267038997391,
+                  0.021962040535607956,
+                  -0.03521644529972841,
+                  -0.021762645118775757,
+                  0.020805824369265792,
+                  0.016060097390122104,
+                  0.008677258552900751,
+                  -0.045711074547945915,
+                  -0.0202193260001919,
+                  -0.012589039552083053,
+                  -0.028287056383464466,
+                  0.0007082841514532018,
+                  -0.006512707821003061,
+                  0.0015491838283990206,
+                  -0.028908222649154724,
+                  0.013029105692125526,
+                  0.019743047980984585,
+                  0.052920269191223245,
+                  0.03675493378908683,
+                  0.005293741864376473,
+                  0.0008918141815555304,
+                  0.03448740703591972,
+                  0.027976263041418724,
+                  0.013249326083420256,
+                  -0.010182185620834923,
+                  -0.007380129419031405,
+                  -0.006395445414019581,
+                  0.026495477730356192,
+                  0.01495728442690127,
+                  -0.011351078500849815,
+                  -0.03511095299990256,
+                  0.02594687139726831,
+                  0.015992980348932696,
+                  -0.01191120120170306,
+                  0.02200898956165952,
+                  -0.001173727252877754,
+                  -0.009696192521739734,
+                  -0.012508166737889789,
+                  -0.020329686031424283,
+                  0.022174159050171716,
+                  -0.00800729121555347,
+                  0.028024241502306174,
+                  0.02474691090314104,
+                  -0.015197669666169037,
+                  0.007040606971063486,
+                  -0.018978260066414412,
+                  -0.0001994925164936468,
+                  -0.0011536211116314249,
+                  -0.016997510459863748,
+                  -0.012263784525750368,
+                  -0.015095728038984523,
+                  -0.011078846022130552,
+                  -0.00030024734961403516,
+                  -0.03476159428171481,
+                  0.034310271818135896,
+                  -0.021213312105539027,
+                  -0.01747225707862731,
+                  -0.006754635612372658,
+                  -0.010669580266448781,
+                  0.011436926590560056,
+                  -0.015139562727118855,
+                  -0.022215128235307365,
+                  -0.02835917638994903,
+                  -0.00766564307711219,
+                  0.03846277708348742,
+                  0.006081356784941233,
+                  0.002359131946371462,
+                  0.044613682468816,
+                  0.005705477191807748,
+                  0.0345500452745732,
+                  -0.03009312958918238,
+                  0.01866522688100919,
+                  0.018858145387877705,
+                  0.0062697027352490425,
+                  -0.017087351406375618,
+                  -0.03229527665322103,
+                  -0.03796571327855125,
+                  -0.012482148323834595,
+                  0.0009613573037508059,
+                  -0.027983292154784907,
+                  -0.01837492337536356,
+                  0.005416915086292174,
+                  0.009313269849174544,
+                  -0.005507858219526699,
+                  -0.016491804342732987,
+                  -0.014169215422292747,
+                  0.02345794922876332,
+                  -0.024737031571194033,
+                  -0.004416268373903186,
+                  -0.038779423759325166,
+                  -0.013365467221606545,
+                  0.011133809305528729,
+                  -0.004851965970869241,
+                  -0.017165578434491575,
+                  -0.0007615667131101573,
+                  -0.03439067817978527,
+                  0.0018452495429826755,
+                  -0.012635702601902494,
+                  0.021657626681525394,
+                  -0.03258385164980362,
+                  0.05617885373026766,
+                  -0.010696299864716902,
+                  0.009559734963600358,
+                  -0.03564151510025889,
+                  0.01538434629002509,
+                  -0.03277999510822567,
+                  0.013383099170011946,
+                  -0.0003402773938444784,
+                  -0.00033687779468881884,
+                  0.010362090631996019,
+                  0.009052590646246092,
+                  -0.00611018896289866,
+                  -0.04891426844026974,
+                  -0.0020244752915465924,
+                  -0.027443230752771833,
+                  -0.02998255995876308,
+                  -0.0016631653133025784,
+                  -0.00663998488655504,
+                  0.00533174048582961,
+                  -0.0187773593823301,
+                  0.036690181286965946,
+                  0.000934604504374626,
+                  0.025534659453486493,
+                  0.03205686806399298,
+                  -0.014025556696904388,
+                  -0.02621804180959119,
+                  0.04024181139621839,
+                  0.011992246458648862,
+                  -0.0016196198087991636,
+                  -0.014995112016547917,
+                  0.020490635958594402,
+                  0.02976901904463222,
+                  -0.004830909508239327,
+                  -0.011292334067051995,
+                  -0.019181311432764043,
+                  0.022486069129837572,
+                  -0.010468905606293872,
+                  0.040437031187979006,
+                  0.0010770356399243438,
+                  0.003259977063127762,
+                  -0.0037617034349956206,
+                  -0.027566290655111732,
+                  0.011875218067406112,
+                  -0.001645127045620504,
+                  -0.027071923127083456,
+                  0.03941056942672619,
+                  -0.014167692702931502
                 ],
                 "positions": [
                   0.1,
@@ -1252,7 +1253,7 @@
         {
           "test": "qlib_data_path",
           "status": "PASS",
-          "path": "E:\\Desktop\\Backtest\\AgenticTradng-main\\qlib_data",
+          "path": "/Users/lijifeng/Documents/AI_agent/FinAgent-Orchestration/FinAgents/agent_pools/backtest_agent/qlib_data",
           "exists": true
         },
         {
@@ -1260,17 +1261,17 @@
           "status": "PASS",
           "asset_count": 38,
           "assets": [
-            "TMO",
-            "MRK",
-            "ABBV",
-            "ACN",
-            "LLY"
+            "TSLA",
+            "GBTC",
+            "PEP",
+            "MA",
+            "QQQ"
           ]
         },
         {
           "test": "data_loading",
           "status": "PASS",
-          "asset": "TMO",
+          "asset": "TSLA",
           "data_shape": [
             753,
             7
@@ -1298,7 +1299,7 @@
           "result": {
             "status": "success",
             "message": "Qlib already initialized",
-            "provider_uri": "E:\\Desktop\\Backtest\\AgenticTradng-main\\datasets\\qlib_data",
+            "provider_uri": "/Users/lijifeng/Documents/AI_agent/FinAgent-Orchestration/FinAgents/agent_pools/backtest_agent/datasets/qlib_data",
             "region": "US"
           }
         },
@@ -1384,7 +1385,7 @@
           "status": "PASS",
           "result": {
             "status": "success",
-            "strategy_id": "qlib_topk_20251017_055328",
+            "strategy_id": "qlib_topk_20251129_212625",
             "strategy_type": "topk",
             "config": {
               "class": "TopkDropoutStrategy",
