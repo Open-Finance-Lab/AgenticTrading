@@ -1,0 +1,260 @@
+{
+  "status": "success",
+  "timestamp": "2025-11-29T23:02:29.778235",
+  "model_performance": {
+    "test_correlation": 0.31083442294817404,
+    "test_mae": 0.015335957899964536,
+    "train_correlation": 0.20648678007768878,
+    "n_features": 17,
+    "n_samples": 115
+  },
+  "alpha_signals": [
+    {
+      "instrument": "MSFT",
+      "date": "2025-08-15 04:00:00",
+      "signal": -1.0,
+      "signal_type": "SHORT",
+      "confidence": 1.0
+    },
+    {
+      "instrument": "AAPL",
+      "date": "2025-08-15 04:00:00",
+      "signal": -1.0,
+      "signal_type": "SHORT",
+      "confidence": 1.0
+    },
+    {
+      "instrument": "AMZN",
+      "date": "2025-08-15 04:00:00",
+      "signal": -1.0,
+      "signal_type": "SHORT",
+      "confidence": 1.0
+    },
+    {
+      "instrument": "GOOGL",
+      "date": "2025-08-15 04:00:00",
+      "signal": 0.0,
+      "signal_type": "NEUTRAL",
+      "confidence": 0.0
+    }
+  ],
+  "top_features": [
+    {
+      "feature": "Bollinger_position",
+      "importance": 0.04634763721561117
+    },
+    {
+      "feature": "MA_20_ratio",
+      "importance": -0.040144598882949925
+    },
+    {
+      "feature": "MA_5_ratio",
+      "importance": -0.006611258610845177
+    },
+    {
+      "feature": "MA_10_ratio",
+      "importance": -0.006166219839072155
+    },
+    {
+      "feature": "MA_50_ratio",
+      "importance": 0.005812050928345576
+    },
+    {
+      "feature": "Bollinger_lower",
+      "importance": -0.004177907542679707
+    },
+    {
+      "feature": "momentum_5d",
+      "importance": 0.0024101837175992237
+    },
+    {
+      "feature": "MACD_signal",
+      "importance": -0.0016313548857134663
+    },
+    {
+      "feature": "Bollinger_upper",
+      "importance": -0.0015112783461443654
+    },
+    {
+      "feature": "momentum_10d",
+      "importance": -0.0013342377034475167
+    }
+  ],
+  "signal_summary": {
+    "total_signals": 575,
+    "long_signals": 190,
+    "short_signals": 71,
+    "neutral_signals": 314,
+    "signal_strength_mean": 0.4539130434782609,
+    "signal_strength_std": 0.49830495898259375
+  },
+  "recommendations": [
+    "Model shows strong predictive power. Consider using signals for trading.",
+    "Strong bearish bias: 3 short signals vs 0 long signals.",
+    "Strongest signal: SHORT on MSFT (confidence: 1.0000)"
+  ],
+  "signal_history": [
+    {
+      "date": "2025-08-04 04:00:00",
+      "long_count": 0,
+      "short_count": 0,
+      "neutral_count": 5,
+      "top_long": [],
+      "top_short": []
+    },
+    {
+      "date": "2025-08-05 04:00:00",
+      "long_count": 2,
+      "short_count": 0,
+      "neutral_count": 3,
+      "top_long": [
+        [
+          "NVDA",
+          1.0
+        ],
+        [
+          "GOOGL",
+          1.0
+        ]
+      ],
+      "top_short": []
+    },
+    {
+      "date": "2025-08-06 04:00:00",
+      "long_count": 2,
+      "short_count": 0,
+      "neutral_count": 3,
+      "top_long": [
+        [
+          "AAPL",
+          1.0
+        ],
+        [
+          "GOOGL",
+          1.0
+        ]
+      ],
+      "top_short": []
+    },
+    {
+      "date": "2025-08-07 04:00:00",
+      "long_count": 4,
+      "short_count": 0,
+      "neutral_count": 1,
+      "top_long": [
+        [
+          "NVDA",
+          1.0
+        ],
+        [
+          "AMZN",
+          1.0
+        ],
+        [
+          "AAPL",
+          1.0
+        ]
+      ],
+      "top_short": []
+    },
+    {
+      "date": "2025-08-08 04:00:00",
+      "long_count": 2,
+      "short_count": 1,
+      "neutral_count": 2,
+      "top_long": [
+        [
+          "GOOGL",
+          1.0
+        ],
+        [
+          "AAPL",
+          1.0
+        ]
+      ],
+      "top_short": [
+        [
+          "MSFT",
+          -1.0
+        ]
+      ]
+    },
+    {
+      "date": "2025-08-11 04:00:00",
+      "long_count": 1,
+      "short_count": 2,
+      "neutral_count": 2,
+      "top_long": [
+        [
+          "AAPL",
+          1.0
+        ]
+      ],
+      "top_short": [
+        [
+          "NVDA",
+          -1.0
+        ],
+        [
+          "MSFT",
+          -1.0
+        ]
+      ]
+    },
+    {
+      "date": "2025-08-12 04:00:00",
+      "long_count": 1,
+      "short_count": 0,
+      "neutral_count": 4,
+      "top_long": [
+        [
+          "AAPL",
+          1.0
+        ]
+      ],
+      "top_short": []
+    },
+    {
+      "date": "2025-08-13 04:00:00",
+      "long_count": 0,
+      "short_count": 1,
+      "neutral_count": 4,
+      "top_long": [],
+      "top_short": [
+        [
+          "MSFT",
+          -1.0
+        ]
+      ]
+    },
+    {
+      "date": "2025-08-14 04:00:00",
+      "long_count": 0,
+      "short_count": 0,
+      "neutral_count": 5,
+      "top_long": [],
+      "top_short": []
+    },
+    {
+      "date": "2025-08-15 04:00:00",
+      "long_count": 0,
+      "short_count": 3,
+      "neutral_count": 1,
+      "top_long": [],
+      "top_short": [
+        [
+          "MSFT",
+          -1.0
+        ],
+        [
+          "AAPL",
+          -1.0
+        ],
+        [
+          "AMZN",
+          -1.0
+        ]
+      ]
+    }
+  ]
+}
