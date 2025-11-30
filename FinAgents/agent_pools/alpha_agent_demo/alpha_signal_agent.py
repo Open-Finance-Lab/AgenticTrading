@@ -31,7 +31,12 @@ try:
 except ImportError:
     # Fallback if agents.py is not found
     print("Warning: agents.py not found. Creating minimal Agent class.")
-    from openai import OpenAI
+    try:
+        from openai import OpenAI
+    except ImportError:
+        OpenAI = None
+        print("Warning: openai module not found. Agent will run in mock mode.")
+
     import json
     import inspect
     
@@ -47,7 +52,10 @@ except ImportError:
             self.instructions = instructions
             self.model = model
             self.tools = tools or []
-            self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            if OpenAI:
+                self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            else:
+                self.client = None
         
         def run(self, user_request, context=None, max_turns=10):
             return f"Agent {self.name} executed with request: {user_request[:100]}"
