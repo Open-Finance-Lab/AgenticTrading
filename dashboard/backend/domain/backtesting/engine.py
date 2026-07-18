@@ -210,11 +210,7 @@ class HourlyBacktester:
         in ``_agent_run_metadata`` instead."""
         return {"data_source": self.data_source}
 
-    def _agent_run_metadata(
-        self,
-        manager: PortfolioManager = None,
-        model_id: str = None,
-    ) -> Dict:
+    def _agent_run_metadata(self) -> Dict:
         """Provenance plus the effective config the agent run actually used.
 
         LLM_MAX_OUTPUT_TOKENS is an env knob that changes a run's spend and
@@ -229,10 +225,7 @@ class HourlyBacktester:
             meta["initial_pipeline"] = self.initial_pipeline
         if self.pipeline is not None:
             meta["final_pipeline"] = self.pipeline
-        if manager is not None:
-            meta.update(manager.llm_diagnostic_summary())
-            if model_id:
-                meta["model_id"] = model_id
+        meta.update(getattr(self, "_llm_run_diagnostics", {}))
         return meta
 
     def _current_equity(self, manager: PortfolioManager) -> float:
@@ -451,6 +444,10 @@ class HourlyBacktester:
             llm_model, manager.input_tokens, manager.output_tokens
         )
 
+        self._llm_run_diagnostics = manager.llm_diagnostic_summary()
+        if llm_model:
+            self._llm_run_diagnostics["model_id"] = llm_model
+
         db.insert_run(
             run_id=run_id,
             session_id=self.session_id,
@@ -469,7 +466,7 @@ class HourlyBacktester:
             input_tokens=manager.input_tokens,
             output_tokens=manager.output_tokens,
             est_cost_usd=est_cost,
-            metadata=self._agent_run_metadata(manager, llm_model),
+            metadata=self._agent_run_metadata(),
         )
 
         db.insert_equity_points(run_id, equity_curve)
