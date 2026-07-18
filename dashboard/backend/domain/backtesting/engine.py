@@ -210,7 +210,11 @@ class HourlyBacktester:
         in ``_agent_run_metadata`` instead."""
         return {"data_source": self.data_source}
 
-    def _agent_run_metadata(self) -> Dict:
+    def _agent_run_metadata(
+        self,
+        manager: PortfolioManager = None,
+        model_id: str = None,
+    ) -> Dict:
         """Provenance plus the effective config the agent run actually used.
 
         LLM_MAX_OUTPUT_TOKENS is an env knob that changes a run's spend and
@@ -225,6 +229,10 @@ class HourlyBacktester:
             meta["initial_pipeline"] = self.initial_pipeline
         if self.pipeline is not None:
             meta["final_pipeline"] = self.pipeline
+        if manager is not None:
+            meta.update(manager.llm_diagnostic_summary())
+            if model_id:
+                meta["model_id"] = model_id
         return meta
 
     def _current_equity(self, manager: PortfolioManager) -> float:
@@ -392,6 +400,8 @@ class HourlyBacktester:
                     model=self.model,
                     strategy_prompt=self.strategy_prompt,
                     pipeline=self.pipeline,
+                    step_index=i,
+                    diagnostic_timestamp=timestamp,
                 )
                 llm_calls_count += 1  # Track that LLM was used
                 if llm_calls_count == 1:  # Set on first call
@@ -402,7 +412,10 @@ class HourlyBacktester:
                 decision = manager.make_trading_decision(state)
             
             # Execute trades (only if real data available)
+            trades_before = len(manager.trades)
             manager.execute_actions(decision["actions"], market_data, timestamp)
+            if manager.llm_diagnostics and len(manager.llm_diagnostics) > i:
+                manager.llm_diagnostics[-1]["trades_executed"] = len(manager.trades) - trades_before
             
             # Update equity (uses forward-filled prices for smooth valuation)
             manager.update_equity(market_data, price_cache, timestamp)
@@ -456,11 +469,17 @@ class HourlyBacktester:
             input_tokens=manager.input_tokens,
             output_tokens=manager.output_tokens,
             est_cost_usd=est_cost,
-            metadata=self._agent_run_metadata(),
+            metadata=self._agent_run_metadata(manager, llm_model),
         )
 
         db.insert_equity_points(run_id, equity_curve)
         db.insert_trades(run_id, manager.trades)
+        insert_diagnostics = getattr(db, "insert_llm_diagnostics", None)
+        if insert_diagnostics:
+            try:
+                insert_diagnostics(run_id, manager.llm_diagnostics)
+            except Exception as exc:
+                print(f"⚠️  Could not persist LLM diagnostics: {exc}")
         
         print(f"\n  ✅ Agent backtest complete")
         print(f"     • Run ID: {run_id}")

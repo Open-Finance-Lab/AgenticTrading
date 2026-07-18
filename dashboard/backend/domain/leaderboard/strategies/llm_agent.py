@@ -49,6 +49,8 @@ class LLMAgentStrategy(BaselineStrategy):
         self.output_tokens = 0
         self._num_trades = 0
         self.used_llm = False
+        self.llm_diagnostics = []
+        self.run_metadata = {}
 
     def required_symbols(self) -> List[str]:
         symbols = self.config.get("symbols")
@@ -125,12 +127,21 @@ class LLMAgentStrategy(BaselineStrategy):
 
             if client is not None:
                 decision = manager.make_trading_decision_with_llm(
-                    state, client, mode=self.mode, model=model_id
+                    state,
+                    client,
+                    mode=self.mode,
+                    model=model_id,
+                    step_index=i,
+                    diagnostic_timestamp=ts,
+                    integration=self.integration,
                 )
             else:
                 decision = manager.make_trading_decision(state)
 
+            trades_before = len(manager.trades)
             manager.execute_actions(decision.get("actions", []), market_data, ts)
+            if manager.llm_diagnostics and len(manager.llm_diagnostics) > i:
+                manager.llm_diagnostics[-1]["trades_executed"] = len(manager.trades) - trades_before
             manager.update_equity(market_data, price_cache, ts)
 
             if (i + 1) % 25 == 0 or (i + 1) == total:
@@ -149,6 +160,8 @@ class LLMAgentStrategy(BaselineStrategy):
         self.input_tokens = manager.input_tokens
         self.output_tokens = manager.output_tokens
         self.model_id = model_id
+        self.llm_diagnostics = manager.llm_diagnostics
+        self.run_metadata = manager.llm_diagnostic_summary()
         return curve
 
     def num_trades(self) -> int:

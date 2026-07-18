@@ -24,6 +24,7 @@ This module is domain-level orchestration: it must NOT import dashboard scripts,
 
 import json
 import os
+import time
 from datetime import datetime, timedelta
 from typing import Dict, List
 
@@ -51,6 +52,7 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     extract_response_text as _extract_response_text,
     extract_token_usage as _extract_token_usage,
     parse_llm_response as _parse_llm_response,
+    response_block_types as _response_block_types,
     request_trading_decision as _request_trading_decision,
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import run_pipeline_decision
@@ -72,7 +74,60 @@ class PortfolioManager:
         self.input_tokens = 0
         self.output_tokens = 0
         # Latest decision-pipeline step outputs (for daily post-trade analysis).
-        self.last_pipeline_step_outputs = []    
+        self.last_pipeline_step_outputs = []
+        self.llm_diagnostics = []  # structured per-step telemetry; no raw prompts
+
+    @staticmethod
+    def _iso_timestamp(value) -> str:
+        return value.isoformat() if hasattr(value, "isoformat") else str(value)
+
+    @staticmethod
+    def _action_summary(action: Dict) -> Dict:
+        """Keep only structured action fields; never persist model reasoning."""
+        summary = {
+            "symbol": action.get("symbol"),
+            "action": str(action.get("action", "hold")).lower(),
+        }
+        for key in ("shares", "position_size", "confidence"):
+            if key in action:
+                value = action.get(key)
+                if isinstance(value, (str, int, float, bool)) or value is None:
+                    summary[key] = value
+                else:
+                    summary[key] = str(value)
+        return summary
+
+    def llm_diagnostic_summary(self) -> Dict:
+        """Return run-level counters derived from step diagnostics."""
+        diagnostics = self.llm_diagnostics
+        latencies = [d.get("latency_ms") for d in diagnostics if d.get("latency_ms") is not None]
+        first = diagnostics[0] if diagnostics else {}
+        return {
+            "decision_steps": len(diagnostics),
+            "llm_decisions": self.llm_decisions,
+            "fallback_steps": sum(bool(d.get("fallback_reason")) for d in diagnostics),
+            # A step can recover after an empty thinking-only response. Count
+            # those recovered incidents via retries, not only the final text
+            # state, otherwise the instability disappears from run metadata.
+            "no_text_steps": sum(
+                int(d.get("retry_count", 0) or 0) > 0
+                or d.get("fallback_reason") == "no_text_after_retries"
+                for d in diagnostics
+            ),
+            "parse_failures": sum(
+                d.get("fallback_reason") == "parse_failed" for d in diagnostics
+            ),
+            "total_retries": sum(int(d.get("retry_count", 0) or 0) for d in diagnostics),
+            "avg_latency_ms": round(sum(latencies) / len(latencies)) if latencies else 0,
+            "model_id": first.get("model_id"),
+            "integration": first.get("integration"),
+            "reasoning_effort": first.get("reasoning_effort"),
+        }
+
+    def _finish_llm_diagnostic(self, diagnostic: Dict, started_at: float) -> None:
+        diagnostic["latency_ms"] = int((time.perf_counter() - started_at) * 1000)
+        self.llm_diagnostics.append(diagnostic)
+
     def get_portfolio_state(self, market_data: Dict[str, pd.Series], price_cache: Dict = None, timestamp = None) -> Dict:
         """Get current portfolio state with market indicators.
 
@@ -113,6 +168,9 @@ class PortfolioManager:
         model: str = None,
         strategy_prompt: str = None,
         pipeline: List[Dict] = None,
+        step_index: int = None,
+        diagnostic_timestamp=None,
+        integration: str = None,
     ) -> Dict:
         """
         Make trading decisions using Claude LLM with technical indicators.
@@ -131,6 +189,27 @@ class PortfolioManager:
         Returns:
             {"actions": [list of trading actions]}
         """
+        started_at = time.perf_counter()
+        decision_timestamp = diagnostic_timestamp or portfolio_state.get("timestamp", datetime.now())
+        diagnostic = {
+            "step_index": int(step_index if step_index is not None else len(self.llm_diagnostics)),
+            "timestamp": self._iso_timestamp(decision_timestamp),
+            "model_id": model,
+            "integration": integration,
+            "reasoning_effort": os.getenv("OPENROUTER_REASONING_EFFORT", "medium"),
+            "response_block_types": [],
+            "text_present": False,
+            "parse_success": False,
+            "fallback_reason": None,
+            "retry_count": 0,
+            "llm_call_count": 0,
+            "actions_proposed": [],
+            "actions_accepted": 0,
+            "trades_executed": 0,
+            "latency_ms": None,
+            "error_type": None,
+        }
+
         if not HAS_ANTHROPIC or not llm_client:
             print("\u26a0️  LLM client not available, using rule-based fallback")
             return self.make_trading_decision(portfolio_state)
@@ -266,6 +345,8 @@ class PortfolioManager:
             except TypeError as e:
                 print(f"   ⚠️  Market snapshot serialization error: {e}")
                 print(f"   Falling back to rule-based logic")
+                diagnostic["fallback_reason"] = "snapshot_serialization_error"
+                diagnostic["error_type"] = type(e).__name__
                 return self.make_trading_decision(portfolio_state)
             
             # DEBUG: Show what's in market_snapshot for buy-and-hold mode
@@ -301,9 +382,13 @@ class PortfolioManager:
                 self.output_tokens += output_delta
                 self.llm_calls += pipeline_calls
                 self.last_pipeline_step_outputs = step_outputs or []
+                diagnostic["llm_call_count"] += pipeline_calls
                 if decision is None:
                     print("   Falling back to rule-based logic")
+                    diagnostic["fallback_reason"] = "pipeline_failed"
                     return self.make_trading_decision(portfolio_state)
+                diagnostic["text_present"] = True
+                diagnostic["parse_success"] = True
             else:
                 prompt = create_prompt(market_snapshot, mode=mode, custom_prompt=strategy_prompt)
 
@@ -337,6 +422,10 @@ class PortfolioManager:
                         response = _request_trading_decision(
                             llm_client, prompt=prompt, model=model
                         )
+                    diagnostic["llm_call_count"] += 1
+                    for block_type in _response_block_types(response):
+                        if block_type not in diagnostic["response_block_types"]:
+                            diagnostic["response_block_types"].append(block_type)
                     try:
                         input_delta, output_delta = _extract_token_usage(response)
                         self.input_tokens += input_delta
@@ -346,11 +435,13 @@ class PortfolioManager:
                         print(f"   ⚠️  Could not read token usage: {usage_err}")
                     try:
                         llm_response = _extract_response_text(response)
+                        diagnostic["text_present"] = True
                         break
                     except AttributeError as extract_err:
                         if "No text content" not in str(extract_err):
                             raise
                         if attempt < no_text_retries:
+                            diagnostic["retry_count"] += 1
                             print(
                                 f"   ⚠️  {extract_err}; "
                                 f"retry {attempt + 1}/{no_text_retries}"
@@ -363,7 +454,9 @@ class PortfolioManager:
                 # ================================================================
                 decision = _parse_llm_response(llm_response)
                 if decision is None:
+                    diagnostic["fallback_reason"] = "parse_failed"
                     return {"actions": []}
+                diagnostic["parse_success"] = True
 
             # ================================================================
             # STEP 4: Convert LLM decisions to actions
@@ -374,7 +467,14 @@ class PortfolioManager:
             if not llm_actions:
                 print(f"   ⚠️  LLM returned no actions. Decision object: {decision}")
                 print(f"   Falling back to rule-based logic")
+                diagnostic["fallback_reason"] = "empty_actions"
                 return self.make_trading_decision(portfolio_state)
+
+            diagnostic["actions_proposed"] = [
+                self._action_summary(action)
+                for action in llm_actions
+                if isinstance(action, dict)
+            ]
 
             # The prompt contract asks for at most one action per DJIA symbol.
             # A response with more than that is degenerate or hostile (e.g. a
@@ -439,6 +539,7 @@ class PortfolioManager:
                             "reason": f"[LLM] {reasoning} (confidence: {confidence:.0%})",
                             "confidence": confidence
                         })
+                        diagnostic["actions_accepted"] += 1
                         print(f"      ✅ BUY {symbol}: {shares} shares @ ${price:.2f} (conf: {confidence:.0%})")
                     else:
                         print(f"      ⚠️  BUY {symbol}: Skip (insufficient cash: need ${shares*price:,.0f}, have ${self.cash:,.0f})")
@@ -452,6 +553,7 @@ class PortfolioManager:
                             "reason": f"[LLM] {reasoning} (confidence: {confidence:.0%})",
                             "confidence": confidence
                         })
+                        diagnostic["actions_accepted"] += 1
                         print(f"      ✅ SELL {symbol}: {self.positions[symbol]} shares @ ${price:.2f} (conf: {confidence:.0%})")
                     else:
                         print(f"      ⚠️  SELL {symbol}: Skip (not in portfolio, only owns: {list(self.positions.keys())})")
@@ -473,7 +575,15 @@ class PortfolioManager:
         except Exception as e:
             print(f"\n❌ LLM decision error: {e}")
             print(f"   Falling back to rule-based logic\n")
+            diagnostic["fallback_reason"] = diagnostic["fallback_reason"] or (
+                "no_text_after_retries"
+                if "No text content" in str(e)
+                else "exception"
+            )
+            diagnostic["error_type"] = type(e).__name__
             return self.make_trading_decision(portfolio_state)
+        finally:
+            self._finish_llm_diagnostic(diagnostic, started_at)
     
     def execute_actions(self, actions: List[Dict], market_data: Dict, timestamp: datetime):
         """Execute trading decisions."""

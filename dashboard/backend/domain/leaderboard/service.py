@@ -230,6 +230,24 @@ def _find_cached_run(strategy_id: str, start_date: str, end_date: str, session_i
     return None
 
 
+def _llm_run_metadata(strategy_impl: Any) -> Optional[Dict[str, Any]]:
+    metadata = getattr(strategy_impl, "run_metadata", None)
+    return dict(metadata) if isinstance(metadata, dict) and metadata else None
+
+
+def _persist_llm_diagnostics(run_id: str, strategy_impl: Any) -> None:
+    diagnostics = getattr(strategy_impl, "llm_diagnostics", None) or []
+    insert = getattr(db, "insert_llm_diagnostics", None)
+    if not diagnostics or insert is None:
+        return
+    try:
+        insert(run_id, diagnostics)
+    except Exception as exc:
+        # Diagnostics must never invalidate an otherwise completed leaderboard
+        # run; keep the metrics and surface the persistence problem in logs.
+        print(f"⚠️  Could not persist LLM diagnostics for {run_id}: {exc}")
+
+
 def _symbols_for_config(config: Dict[str, Any]) -> List[str]:
     symbols: set[str] = set()
     for strategy in config.get("strategies", []):
@@ -398,8 +416,10 @@ def ensure_leaderboard_runs(
             max_drawdown=metrics["max_drawdown"],
             num_trades=strategy_impl.num_trades(),
             llm_model=strategy_id,
+            metadata=_llm_run_metadata(strategy_impl),
         )
         db.insert_equity_points(run_id, curve)
+        _persist_llm_diagnostics(run_id, strategy_impl)
         created += 1
 
     return {
@@ -599,8 +619,10 @@ def deploy_model_run(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         est_cost_usd=est_cost,
+        metadata=_llm_run_metadata(strategy_impl),
     )
     db.insert_equity_points(run_id, curve)
+    _persist_llm_diagnostics(run_id, strategy_impl)
 
     return {
         "entry_id": entry_id,

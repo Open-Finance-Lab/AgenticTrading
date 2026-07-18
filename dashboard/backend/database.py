@@ -168,6 +168,39 @@ class BacktestDatabase:
             ON backtest_decisions(run_id, step_index)
         """)
 
+        # llm_step_diagnostics: structured per-step telemetry for internal LLM
+        # backtests. Keep this separate from backtest_decisions, which records
+        # external-agent submissions and has a different contract.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS llm_step_diagnostics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                step_index INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                model_id TEXT,
+                integration TEXT,
+                reasoning_effort TEXT,
+                response_block_types TEXT,
+                text_present INTEGER DEFAULT 0,
+                parse_success INTEGER DEFAULT 0,
+                fallback_reason TEXT,
+                retry_count INTEGER DEFAULT 0,
+                llm_call_count INTEGER DEFAULT 0,
+                actions_proposed TEXT,
+                actions_accepted INTEGER DEFAULT 0,
+                trades_executed INTEGER DEFAULT 0,
+                latency_ms INTEGER,
+                error_type TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (run_id) REFERENCES agent_runs(run_id),
+                UNIQUE(run_id, step_index)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_diagnostics_run
+            ON llm_step_diagnostics(run_id, step_index)
+        """)
+
         # idempotency_keys: replay-safe decision submissions (v2)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS idempotency_keys (
@@ -302,6 +335,7 @@ class BacktestDatabase:
             """)
 
             self._ensure_decisions_table(cursor)
+            self._ensure_llm_diagnostics_table(cursor)
             self._migrate_trades_schema(cursor)
             conn.commit()
         
@@ -370,6 +404,38 @@ class BacktestDatabase:
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_decisions_run
             ON backtest_decisions(run_id, step_index)
+        """)
+
+    def _ensure_llm_diagnostics_table(self, cursor) -> None:
+        """Create the per-step LLM diagnostics table on legacy databases."""
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS llm_step_diagnostics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL,
+                step_index INTEGER NOT NULL,
+                timestamp TEXT NOT NULL,
+                model_id TEXT,
+                integration TEXT,
+                reasoning_effort TEXT,
+                response_block_types TEXT,
+                text_present INTEGER DEFAULT 0,
+                parse_success INTEGER DEFAULT 0,
+                fallback_reason TEXT,
+                retry_count INTEGER DEFAULT 0,
+                llm_call_count INTEGER DEFAULT 0,
+                actions_proposed TEXT,
+                actions_accepted INTEGER DEFAULT 0,
+                trades_executed INTEGER DEFAULT 0,
+                latency_ms INTEGER,
+                error_type TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (run_id) REFERENCES agent_runs(run_id),
+                UNIQUE(run_id, step_index)
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_llm_diagnostics_run
+            ON llm_step_diagnostics(run_id, step_index)
         """)
 
     def _trades_column_set(self, cursor) -> set:
@@ -688,6 +754,89 @@ class BacktestDatabase:
             ))
         conn.commit()
         conn.close()
+
+    def insert_llm_diagnostics(self, run_id: str, diagnostics: List[Dict[str, Any]]) -> None:
+        """Batch insert structured per-step LLM diagnostics idempotently."""
+        if not diagnostics:
+            return
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        self._ensure_llm_diagnostics_table(cursor)
+        for entry in diagnostics:
+            cursor.execute("""
+                INSERT INTO llm_step_diagnostics (
+                    run_id, step_index, timestamp, model_id, integration,
+                    reasoning_effort, response_block_types, text_present,
+                    parse_success, fallback_reason, retry_count, llm_call_count,
+                    actions_proposed, actions_accepted, trades_executed,
+                    latency_ms, error_type
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(run_id, step_index) DO UPDATE SET
+                    timestamp = excluded.timestamp,
+                    model_id = excluded.model_id,
+                    integration = excluded.integration,
+                    reasoning_effort = excluded.reasoning_effort,
+                    response_block_types = excluded.response_block_types,
+                    text_present = excluded.text_present,
+                    parse_success = excluded.parse_success,
+                    fallback_reason = excluded.fallback_reason,
+                    retry_count = excluded.retry_count,
+                    llm_call_count = excluded.llm_call_count,
+                    actions_proposed = excluded.actions_proposed,
+                    actions_accepted = excluded.actions_accepted,
+                    trades_executed = excluded.trades_executed,
+                    latency_ms = excluded.latency_ms,
+                    error_type = excluded.error_type
+            """, (
+                run_id,
+                int(entry.get("step_index", 0)),
+                str(entry.get("timestamp", "")),
+                entry.get("model_id"),
+                entry.get("integration"),
+                entry.get("reasoning_effort"),
+                json.dumps(entry.get("response_block_types") or []),
+                int(bool(entry.get("text_present"))),
+                int(bool(entry.get("parse_success"))),
+                entry.get("fallback_reason"),
+                int(entry.get("retry_count", 0) or 0),
+                int(entry.get("llm_call_count", 0) or 0),
+                json.dumps(entry.get("actions_proposed") or []),
+                int(entry.get("actions_accepted", 0) or 0),
+                int(entry.get("trades_executed", 0) or 0),
+                entry.get("latency_ms"),
+                entry.get("error_type"),
+            ))
+        conn.commit()
+        conn.close()
+
+    def get_llm_diagnostics(self, run_id: str) -> List[Dict[str, Any]]:
+        """Return structured LLM diagnostics ordered by backtest step."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        self._ensure_llm_diagnostics_table(cursor)
+        cursor.execute("""
+            SELECT step_index, timestamp, model_id, integration,
+                   reasoning_effort, response_block_types, text_present,
+                   parse_success, fallback_reason, retry_count, llm_call_count,
+                   actions_proposed, actions_accepted, trades_executed,
+                   latency_ms, error_type
+            FROM llm_step_diagnostics
+            WHERE run_id = ?
+            ORDER BY step_index ASC
+        """, (run_id,))
+        rows = cursor.fetchall()
+        conn.close()
+
+        result = []
+        for row in rows:
+            item = dict(row)
+            for field in ("response_block_types", "actions_proposed"):
+                try:
+                    item[field] = json.loads(item.get(field) or "[]")
+                except (TypeError, ValueError):
+                    item[field] = []
+            result.append(item)
+        return result
 
     def get_trades(self, run_id: str) -> List[Dict]:
         conn = self._get_connection()

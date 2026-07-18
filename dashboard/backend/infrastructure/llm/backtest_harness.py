@@ -189,6 +189,16 @@ def extract_response_text(response) -> str:
         f"(content types: {[getattr(b, 'type', type(b).__name__) for b in blocks]})"
     )
 
+
+def response_block_types(response) -> list[str]:
+    """Return provider response block types without exposing block contents."""
+    blocks = getattr(response, "content", None) or []
+    return [
+        str(getattr(block, "type", type(block).__name__))
+        for block in blocks
+    ]
+
+
 def extract_token_usage(response):
     """Return ``(input_tokens, output_tokens)`` deltas from a provider response.
 
