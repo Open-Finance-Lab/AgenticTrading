@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ATL Tech-Stack Blueprint — Engineering the Six Planes (2026-07)</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:      #f9f9f7;
+    --surface:   #fcfcfb;
+    --ink:       #0b0b0b;
+    --ink-2:     #52514e;
+    --muted:     #898781;
+    --grid:      #e1e0d9;
+    --border:    rgba(11,11,11,0.10);
+    --c-control: #2a78d6;
+    --c-bus:     #2a78d6;
+    --c-exec:    #008300;
+    --c-trust:   #eb6834;
+    --c-data:    #4a3aa7;
+    --c-src:     #1baf7a;
+    --c-pillar:  #eda100;
+    --good:      #0ca30c;
+    --good-text: #006300;
+    --warn:      #fab219;
+    --serious:   #ec835a;
+    --tint-ok:   rgba(12,163,12,0.12);
+    --tint-fix:  rgba(250,178,25,0.16);
+    --tint-unv:  rgba(236,131,90,0.16);
+    --tint-blue: rgba(42,120,214,0.10);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page:      #0d0d0d;
+      --surface:   #1a1a19;
+      --ink:       #ffffff;
+      --ink-2:     #c3c2b7;
+      --muted:     #898781;
+      --grid:      #2c2c2a;
+      --border:    rgba(255,255,255,0.10);
+      --c-control: #3987e5;
+      --c-bus:     #3987e5;
+      --c-exec:    #008300;
+      --c-trust:   #d95926;
+      --c-data:    #9085e9;
+      --c-src:     #199e70;
+      --c-pillar:  #c98500;
+      --good-text: #0ca30c;
+      --tint-ok:   rgba(12,163,12,0.18);
+      --tint-fix:  rgba(201,133,0,0.22);
+      --tint-unv:  rgba(217,89,38,0.22);
+      --tint-blue: rgba(57,135,229,0.16);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface:   #1a1a19;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --muted:     #898781;
+    --grid:      #2c2c2a;
+    --border:    rgba(255,255,255,0.10);
+    --c-control: #3987e5;
+    --c-bus:     #3987e5;
+    --c-exec:    #008300;
+    --c-trust:   #d95926;
+    --c-data:    #9085e9;
+    --c-src:     #199e70;
+    --c-pillar:  #c98500;
+    --good-text: #0ca30c;
+    --tint-ok:   rgba(12,163,12,0.18);
+    --tint-fix:  rgba(201,133,0,0.22);
+    --tint-unv:  rgba(217,89,38,0.22);
+    --tint-blue: rgba(57,135,229,0.16);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--page); color: var(--ink);
+    line-height: 1.55; font-size: 15px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 20px 80px; }
+  header.doc { padding: 28px 0 8px; }
+  h1 { font-size: 26px; line-height: 1.25; letter-spacing: -0.01em; }
+  .subtitle { color: var(--ink-2); margin-top: 6px; max-width: 76ch; }
+  .meta { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  .src-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .src-chips span {
+    font-size: 12px; color: var(--ink-2); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 20px; padding: 3px 12px;
+  }
+  .statrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 22px 0 6px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .stat .v { font-size: 24px; font-weight: 700; }
+  .stat .l { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+  nav.toc { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; margin: 22px 0; font-size: 13.5px; }
+  nav.toc a { color: var(--ink-2); text-decoration: none; }
+  nav.toc a:hover { color: var(--ink); text-decoration: underline; }
+  nav.toc ol { margin-left: 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 2px 24px; }
+  h2 { font-size: 19px; margin: 44px 0 12px; padding-top: 18px; border-top: 1px solid var(--grid); letter-spacing: -0.01em; }
+  h2 .no { color: var(--muted); font-weight: 600; margin-right: 8px; }
+  h3 { font-size: 15.5px; margin: 22px 0 8px; }
+  p { margin: 10px 0; max-width: 88ch; }
+  p.lede { font-size: 15.5px; }
+  ul.tight, ol.tight { margin: 8px 0 8px 22px; max-width: 86ch; }
+  ul.tight li, ol.tight li { margin: 5px 0; }
+  strong { font-weight: 650; }
+  code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.92em; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+  .callout {
+    background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--c-trust);
+    border-radius: 8px; padding: 14px 18px; margin: 16px 0; max-width: 92ch;
+  }
+  .callout.blue { border-left-color: var(--c-control); }
+  .callout.green { border-left-color: var(--c-exec); }
+  .callout.amber { border-left-color: var(--c-pillar); }
+  .callout h4 { font-size: 14px; margin-bottom: 6px; }
+  /* verdict chips — status colors always ship icon + label, never color alone */
+  .chip { display: inline-block; font-size: 11.5px; font-weight: 650; border-radius: 20px; padding: 1px 10px; white-space: nowrap; }
+  .chip.adopt  { background: var(--tint-ok);  color: var(--good-text); }
+  .chip.cand   { background: var(--tint-blue); color: var(--c-control); }
+  .chip.watch  { background: var(--tint-fix); color: var(--ink-2); }
+  .chip.avoid  { background: var(--tint-unv); color: var(--c-trust); }
+  .chip.build  { background: var(--tint-unv); color: var(--c-trust); border: 1px dashed var(--c-trust); }
+  /* tables */
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; background: var(--surface); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  th { text-align: left; font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-2); background: color-mix(in srgb, var(--surface) 60%, var(--page)); padding: 9px 12px; border-bottom: 1.5px solid var(--grid); }
+  td { padding: 9px 12px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td.plane-cell { font-weight: 650; white-space: nowrap; }
+  .planemark { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 7px; vertical-align: baseline; }
+  .sup { font-size: 10px; color: var(--muted); vertical-align: super; }
+  /* deviation cards */
+  .dev { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; margin: 12px 0; }
+  .dev .g { color: var(--muted); font-size: 13px; }
+  .dev .r { margin-top: 6px; }
+  .dev .keep { margin-top: 6px; font-size: 13px; color: var(--good-text); }
+  /* week plan */
+  .week { border-left: 3px solid var(--c-control); padding: 2px 0 2px 16px; margin: 14px 0; }
+  .week h4 { font-size: 14px; }
+  .week .who { color: var(--muted); font-size: 12px; }
+  .datebox { display: inline-block; font-weight: 700; background: var(--tint-unv); color: var(--c-trust); border-radius: 6px; padding: 0 8px; margin-right: 6px; white-space: nowrap; }
+  footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--grid); color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>ATL Tech-Stack Blueprint — Engineering the Six Planes</h1>
+  <p class="subtitle">The engineering companion to <em>ATL-Platform-Guidance-2026-07</em>. The guidance fixes <strong>what</strong> the 自动化托管平台 is — six planes, five objects, six contracts, buy-not-build everywhere except the Trust/Commit boundary. This document fixes <strong>which technologies</strong>, at <strong>which cost tier</strong>, wired into <strong>which existing repo seam</strong>, in <strong>which order</strong>.</p>
+  <p class="meta">Compiled 2026-07-19 · research basis: 10-area web-research fleet, primary sources, every load-bearing claim dated and labeled verified / vendor-claimed<span class="sup">ᵛ</span> / inferred<span class="sup">ⁱ</span> · owner: engineering (Felix)</p>
+  <div class="src-chips">
+    <span>Anchor: ATL-Platform-Guidance-2026-07.html</span>
+    <span>Repo: Open-Finance-Lab/AgenticTrading @ 2026-07-19</span>
+    <span>Deps: Python 3.13 · FastAPI 0.135 · Pydantic 2.11 · psycopg 3.3 · mcp 1.23</span>
+  </div>
+  <div class="statrow">
+    <div class="stat"><div class="v">$0</div><div class="l">Phase-0 infra cost — every pick runs on existing free tiers</div></div>
+    <div class="stat"><div class="v">~€10–20/mo</div><div class="l">pilot tier: one Hetzner box replaces a PaaS split</div></div>
+    <div class="stat"><div class="v">5</div><div class="l">on-ramp refinements to the adopted guidance (§5)</div></div>
+    <div class="stat"><div class="v">2</div><div class="l">hard dates inside 2 weeks: Jul 28 &amp; Jul 31 (§7)</div></div>
+  </div>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#read">How to read this</a></li>
+    <li><a href="#table">The stack decision table</a></li>
+    <li><a href="#tiers">Three deployment tiers (cost model)</a></li>
+    <li><a href="#areas">Per-area decisions &amp; rejected alternatives</a></li>
+    <li><a href="#dev">Deviations from the adopted guidance</a></li>
+    <li><a href="#plan">Week 0–4 engineering plan, mapped to the repo</a></li>
+    <li><a href="#dates">Time-sensitive actions</a></li>
+    <li><a href="#watch">Consolidated watch list</a></li>
+    <li><a href="#trace">Traceability &amp; confidence</a></li>
+  </ol>
+</nav>
+
+<h2 id="read"><span class="no">1</span>How to read this</h2>
+<p class="lede">One sentence of orientation: <strong>the six-plane architecture survives contact with 2026 reality completely intact — but three of its named vendors are scale-tier destinations, not entry points.</strong> Research across all ten stack areas converged on the same pattern: the plane is right, the contract is right, and there is a cheaper on-ramp that runs on infrastructure ATL already pays $0 for, with a clean migration seam to the guidance's named vendor when the demand gates (≥50 contest submissions, ≥10 sustained teams) actually fire.</p>
+<p>Rules carried over from the guidance and applied here without re-arguing: mid/low-frequency event-driven only, never HFT; "no contract, no platform asset"; formalize the repo's existing seeds rather than inventing parallel contracts; the Trust/Commit boundary is the one fully-custom BUILD; never grow <code>/api/v1</code>. Verdicts use four labels: <span class="chip adopt">✓ adopt</span> (do it in the named phase), <span class="chip cand">◇ candidate</span> (spike/evaluate before committing), <span class="chip watch">◔ watch</span> (re-check on a trigger, don't build), <span class="chip avoid">✕ avoid</span> (rejected with reason), plus <span class="chip build">⚒ build</span> (the custom differentiator).</p>
+
+<h2 id="table"><span class="no">2</span>The stack decision table</h2>
+<p>One row per stack slot. "Now" = Phase 0, current $0 infra. "Pilot" = closed-loop pilot on a small paid box. "Scale" = contest scale after the demand gate. The repo-seam column is the load-bearing one: every pick attaches to code that already exists.</p>
+<div class="tablewrap">
+<table>
+  <tr><th>Slot (plane)</th><th>Now — $0</th><th>Pilot — ~$25–75/mo total</th><th>Scale — funded</th><th>Repo seam it formalizes</th></tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-bus)"></span>Durable workflow</td>
+    <td><strong>DBOS Transact</strong> (Python lib, checkpoints into Neon PG) <span class="chip adopt">✓ adopt</span></td>
+    <td>DBOS, system DB on the pilot box's local Postgres</td>
+    <td><strong>Temporal</strong> (Cloud $100/mo floor<span class="sup">ᵛ</span> or self-host cluster) <span class="chip watch">◔ watch</span></td>
+    <td>The hand-rolled v1+v2 run lifecycle (cap ledger, reaper, <code>owner_instance</code>/<code>heartbeat_at</code>) — DBOS subsumes exactly this machinery</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-bus)"></span>Event bus / queue</td>
+    <td><strong>pgmq + LISTEN/NOTIFY</strong> on Neon (transactional enqueue, no dual-write) <span class="chip adopt">✓ adopt</span></td>
+    <td>same; DBOS cron/timers for schedules</td>
+    <td><strong>NATS JetStream</strong> at the 1-to-N fan-out trigger (licensing resolved, Apache-2.0/CNCF) <span class="chip cand">◇ candidate</span></td>
+    <td>New <code>events</code> queue table beside the existing stores; issue #145's leaderboard-refresh scheduler is the first consumer</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-src)"></span>Event sources</td>
+    <td><strong>SEC EDGAR direct polling</strong> (free, ≤8 req/s) + <strong>Alpaca IEX websocket</strong> (free tier) + FinSearch signals (live) <span class="chip adopt">✓ adopt</span></td>
+    <td>same</td>
+    <td>Alpaca SIP $99/mo<span class="sup">ᵛ</span>; sec-api.io push $49–55/mo only if filing-alert latency becomes a product feature</td>
+    <td><code>infrastructure/market_data/</code> + <code>integrations/news_sentiment.py</code> — EventRadar becomes a poller emitting into the pgmq table</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-control)"></span>Model gateway</td>
+    <td><strong>Defer</strong> — direct SDK calls + existing <code>token_cost</code> metering suffice until community BYOK</td>
+    <td><strong>LiteLLM</strong> self-hosted, version-pinned ≥1.84.0 signed, isolated, never auto-upgraded <span class="chip cand">◇ candidate</span></td>
+    <td>LiteLLM hardened, or <strong>Bifrost</strong> (Go single binary) if ops weight bites; Cloudflare AI Gateway as free cache front</td>
+    <td><code>infrastructure/llm/</code> — the gateway slots behind the validator boundary; virtual keys map to the existing per-agent API-key model</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-exec)"></span>MCP tool runtime</td>
+    <td><strong>Official MCP Python SDK</strong> targeting the 2026-07-28 spec (repo already pins <code>mcp==1.23.0</code>) <span class="chip adopt">✓ adopt</span></td>
+    <td>+ <strong>MCPJungle</strong> single-binary gateway for auth/metering <span class="chip cand">◇ candidate</span></td>
+    <td>IBM ContextForge (RBAC, multi-tenant, OTel) once K8s-class infra exists <span class="chip cand">◇ candidate</span></td>
+    <td>Phase C MCP façade (planned); the agents/versions registry stays the tool-version source of truth — public MCP Registry is still preview, not load-bearing</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-exec)"></span>Community sandbox</td>
+    <td><strong>gVisor (runsc)</strong> spike — drop-in Docker runtime, no KVM needed, <code>--network</code> allowlisted to the MCP endpoint <span class="chip adopt">✓ adopt</span></td>
+    <td>Daytona PAYG (~$0.05/vCPU-hr<span class="sup">ᵛ</span>, $200 free credit, AGPL self-host path) or E2B free tier</td>
+    <td>Firecracker/microsandbox on bare metal (~€40–50/mo) or E2B Pro $150/mo — same OCI image at every tier</td>
+    <td>New worker tier behind the Runner API; the sandbox isolates <em>code</em>, the Trust boundary gates <em>orders</em> — orthogonal, both required</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-trust)"></span>Trust/Commit boundary</td>
+    <td colspan="3"><span class="chip build">⚒ build</span> — the one custom component at every tier. v0 = 7 config-declared checks (§4.9), cribbing NautilusTrader's RiskEngine shape, LEAN's pluggable BuyingPowerModel/BrokerageModel split, vn.py's flow throttling. Audit-log every allow <em>and</em> deny (FINRA 2026 asks for exactly this).</td>
+    <td>Extends <code>infrastructure/llm/validator.py</code> + H6 guard; plugs into the Phase-B <code>execution/paper_backend.py</code> stub</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-data)"></span>Ledgers &amp; run history</td>
+    <td><strong>Neon Postgres</strong> — dedicated project for runs/traces gets its own free allotment (0.5GB + 100 CU-hrs) → resolves issue #140 at $0 <span class="chip adopt">✓ adopt</span></td>
+    <td>Neon Launch (usage-based, ~$10–40/mo realistic)</td>
+    <td>same, plus read replicas as needed</td>
+    <td>#134's store-factory + <code>*_postgres.py</code> twin pattern, applied to <code>agent_runs</code> (with the #135 ALTER-migration lesson)</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-data)"></span>Trace blobs</td>
+    <td><strong>Cloudflare R2</strong> (10GB free, $0 egress at every tier) — PG rows carry a <code>trace_ref</code> pointer, blobs hold full prompts/responses <span class="chip adopt">✓ adopt</span></td>
+    <td>paid R2 — hundreds of GB stays under $5/mo</td>
+    <td>same (B2 + Bandwidth Alliance as the cost fallback)</td>
+    <td>Mirrors the <code>context_ref</code> provenance pattern already in <code>/api/v2</code>; <code>run_manifest</code> grows the pointer column</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-data)"></span>Eval analytics</td>
+    <td><strong>DuckDB / chDB embedded</strong>, reading Parquet off R2 in scheduled batch jobs — zero servers <span class="chip adopt">✓ adopt</span></td>
+    <td>same</td>
+    <td><strong>ClickHouse</strong> self-host 16–32GB VPS, or Cloud Basic ~$66.5/mo<span class="sup">ᵛ</span> — only at real-time-OLAP need <span class="chip watch">◔ watch</span></td>
+    <td>Leaderboard refresh + Evaluator API batch jobs; chDB shares ClickHouse's on-disk format, so the scale migration is a data copy, not a rewrite</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-pillar)"></span>Observability</td>
+    <td><strong>Pydantic Logfire</strong> free tier (10M spans/mo, one-line FastAPI auto-instrument) + <strong>OTel GenAI</strong> span vocabulary <span class="chip adopt">✓ adopt</span></td>
+    <td>self-hosted <strong>Arize Phoenix</strong> (single container) if SaaS lock-in or volume bites <span class="chip cand">◇ candidate</span></td>
+    <td>Langfuse v3 (6-service stack) only if integrated eval/prompt tooling justifies the ops <span class="chip watch">◔ watch</span></td>
+    <td>Kills the "logger.info is invisible in prod" problem in one line; Trace Schema adopts OTel GenAI attribute names (behind own constants — agent spans still Development-stability)</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-pillar)"></span>Trajectory eval</td>
+    <td><strong>Inspect AI</strong> (UK AISI, OSS) as the step-level harness + <strong>DeepEval</strong> assertions in pytest CI <span class="chip adopt">✓ adopt</span></td>
+    <td>same, over the R2 trace archive</td>
+    <td><span class="chip build">⚒ build</span> trading-specific trajectory eval — nobody has one publicly; H6 is already its seed</td>
+    <td>H6 decision-coverage guard generalizes into the Evaluator API; the leaderboard service is the publish surface</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-exec)"></span>Remote gateway / interop</td>
+    <td><strong>A2A v1.0</strong> (Linux Foundation, stable Apr 2026, ACP merged in) as the remote-agent contract; reference template on <strong>Pydantic AI</strong> <span class="chip adopt">✓ adopt</span></td>
+    <td>adapters: AI Hedge Fund (MIT, simplest), TradingAgents (Apache-2.0, LangGraph-state bridge)</td>
+    <td>accept native-A2A community agents with near-zero adapter work</td>
+    <td>Runner API <code>run(agent, event, state, policy) → intent + trace</code> as a thin layer over the v2 <code>ExecutionBackend</code>; Pydantic-validated shapes match the existing typed contract</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-src)"></span>Broker</td>
+    <td><strong>Alpaca</strong> Trading API direct (paper free; official OSS <code>alpaca-mcp-server</code> exists, defaults to paper) <span class="chip adopt">✓ adopt</span></td>
+    <td>same; Tradier sandbox as the de-risk second broker <span class="chip cand">◇ candidate</span></td>
+    <td>SIP data $99/mo; multi-broker only if external users bring own accounts</td>
+    <td><code>infrastructure/brokers/alpaca_paper.py</code>; single-account Trading API is the correct tier per Alpaca's own OAuth-vs-Broker-API guidance</td>
+  </tr>
+  <tr>
+    <td class="plane-cell"><span class="planemark" style="background:var(--c-control)"></span>Hosting</td>
+    <td><strong>Stay Render-free + Neon</strong> — nothing new needs to be always-on yet</td>
+    <td><strong>One Hetzner CX32/CX42</strong> (4–8 vCPU, 8–16GB, ~€10–20/mo) Docker Compose: app + workers + gateway + Phoenix + local PG <span class="chip adopt">✓ adopt</span></td>
+    <td>split tiers; managed services where ops hours &gt; $ savings</td>
+    <td>Render free's 15-min cold-start is structurally wrong for webhook receivers and gateways — that constraint, not capacity, forces the pilot box</td>
+  </tr>
+</table>
+</div>
+
+<h2 id="tiers"><span class="no">3</span>Three deployment tiers (cost model)</h2>
+
+<h3>Tier 0 — now, $0/mo (this is not a compromise tier)</h3>
+<p>Everything in the "Now" column runs on infrastructure ATL already has: Render free (web), Neon free (two projects: content DB as today + a new runs/traces project with its own 0.5GB/100 CU-hr allotment), R2 free (10GB, $0 egress), Logfire free (10M spans/mo), Alpaca paper + IEX websocket, EDGAR polling. DBOS, pgmq, DuckDB, Inspect AI, Pydantic AI, the MCP SDK, and gVisor are libraries or runtimes, not services — they add zero hosted cost. <strong>The entire Week 0–4 plan in §6 executes at this tier.</strong></p>
+<div class="callout amber">
+  <h4>◔ One interaction to verify before committing to DBOS-on-Neon</h4>
+  <p>DBOS's system tables are polled by the app process; on a scale-to-zero Neon free project, continuous polling could keep compute awake and burn through the 100 CU-hr monthly allotment (~0.25 CU always-on ≈ 180 CU-hrs/mo — over budget). The Week 1–2 spike must measure this. Mitigations, in order: tune DBOS poll intervals; put the DBOS system DB in its own Neon project; or accept that the durable-workflow engine is what finally motivates the pilot box's local Postgres. This is a spike question, not a blocker — the decorator code is identical in all three outcomes.</p>
+</div>
+
+<h3>Tier 1 — closed-loop pilot, ~$25–75/mo all-in</h3>
+<p>The trigger is not capacity — it is <strong>warmth</strong>: the moment a workflow engine, an LLM gateway, or a webhook receiver must be always-on, Render free's 15-minute idle spin-down (~1-min cold start) is disqualifying, and a PaaS split (4–5 services × $7/mo Render Starter) crosses the price of one good VPS. The pilot shape: one Hetzner CX32/CX42 (~€10–20/mo<span class="sup">ⁱ</span>, post the 2026-06-15 price adjustment) running Docker Compose — FastAPI app, DBOS workers, pinned LiteLLM, pgmq consumers, Arize Phoenix, local Postgres for high-churn workflow state. Neon keeps the durable content role (Launch tier, usage-based, realistically $10–40/mo). Sandbox runs go to Daytona PAYG or E2B's free tier — <strong>not</strong> self-hosted Firecracker, because Hetzner cloud VPSes have no nested virtualization<span class="sup">ⁱ</span>. Honest ops note: this tier makes the lab own OS patching, Docker updates, disk monitoring, and a <code>pg_dump</code>-plus-offsite-copy backup cron — budget real maintenance hours, not just euros.</p>
+
+<h3>Tier 2 — contest scale, after the demand gate</h3>
+<p>Only after ≥50 external submissions justify it: Temporal (Cloud Essentials $100/mo floor<span class="sup">ᵛ</span> with $1k–6k startup credits, or a self-hosted cluster at ~4–6 eng-hrs/mo ops<span class="sup">ⁱ</span>), NATS JetStream for true 1-to-N fan-out, ClickHouse for real-time OLAP, ContextForge as the multi-tenant MCP gateway, Alpaca SIP data, and hardware-isolated sandboxes at volume (bare-metal Firecracker or E2B Pro). Every Tier-2 component has a named Tier-0/1 seam designed for this handoff — that is the point of the table in §2.</p>
+
+<h2 id="areas"><span class="no">4</span>Per-area decisions &amp; rejected alternatives</h2>
+
+<h3>4.1 Durable workflow — DBOS first, Temporal at scale</h3>
+<p><span class="chip adopt">✓ adopt</span> <strong>DBOS Transact (Python)</strong>: durable workflows as decorators (<code>@DBOS.workflow</code>/<code>@DBOS.step</code>) checkpointing into the Postgres ATL already runs — no new service, no new DB, $0. Its June-2026 release added pluggable datasources and LISTEN/NOTIFY durable streams. The deep reason it fits: ATL already hand-built a mini-workflow-engine (active-run cap ledger, reaper sweep, heartbeat recovery, cross-restart step persistence) — DBOS replaces precisely that machinery with the same database underneath. Discipline for the port: keep the workflow/activity conceptual split Temporal-shaped, concentrate decorators at the run-lifecycle seam rather than scattering them, so the Tier-2 Temporal port stays mechanical.</p>
+<p><span class="chip cand">◇ candidate</span> Hatchet (Postgres-backed, richer queue ergonomics, but wants RabbitMQ in prod); Restate (single Rust binary, Python SDK 1.0 only since 2026-06-23 — one month old, and it doesn't reuse the Neon investment). <span class="chip avoid">✕ avoid</span> Prefect (data-pipeline orchestrator, wrong shape); Cloudflare Workflows (not self-hostable, per-step billing incoming). <span class="chip watch">◔ watch</span> Temporal — the destination, not the entry: Replay 2026 GA'd Task Queue Priority &amp; Fairness (exactly the multi-tenant contest feature), triggers are cross-language workers, contest-scale volume, or fairness needs.</p>
+
+<h3>4.2 Eventing — Postgres is the bus until fan-out is real</h3>
+<p><span class="chip adopt">✓ adopt</span> <strong>pgmq</strong> (SQS-like Postgres extension, active, v1.11.1 Apr 2026) + LISTEN/NOTIFY on Neon: transactional enqueue in the same transaction as domain writes eliminates the dual-write problem a separate broker would introduce, with ~40–80× headroom over ATL's thousands-of-events/day. DBOS cron/timers cover schedules — which is precisely what issue #145 (leaderboard refresh needs an in-service scheduler) has been waiting for. <span class="chip cand">◇ candidate</span> NATS JetStream at the graduation trigger: one event needing true concurrent 1-to-N fan-out across independently-scaling worker tiers (the Synadia/CNCF licensing dispute resolved — core stays Apache-2.0; the trademark transfer's paperwork is still loose<span class="sup">ⁱ</span>, a watch item). <span class="chip avoid">✕ avoid</span> Kafka/Redpanda/Confluent at every described phase (partition-scale answers to a problem the lab doesn't have; Confluent's credits lapse); Upstash Kafka (discontinued 2025-03-11); CloudAMQP free tier (explicitly not production).</p>
+<p>Event sources: EDGAR has <em>no</em> official push feed — a polite poller (≤8 req/s self-limit, proper User-Agent, local cache) is the correct and free answer. Alpaca's free IEX websocket is adequate for never-HFT cadence; SIP is a $99/mo<span class="sup">ᵛ</span> Tier-2 upgrade. FinSearch signals are already live and bearer-gated.</p>
+
+<h3>4.3 Model gateway — defer, then LiteLLM pinned and isolated</h3>
+<p>Phase 0 needs no gateway: agents run on lab keys through direct SDK calls, and <code>token_cost</code> already meters. The gateway becomes real when community BYOK and lab-funded contest keys must coexist with per-agent spend caps — Week 3–4 at the earliest. Then: <span class="chip cand">◇ candidate</span> <strong>LiteLLM self-hosted</strong> — still the most battle-tested with exactly the virtual-key + per-project spend primitives needed, <em>but</em> it suffered a real supply-chain compromise (2026-03-24: PyPI versions 1.82.7/.8 carried a credential harvester + RCE backdoor for ~40 minutes). Adoption is conditional on discipline: pin an exact signed version ≥1.84.0, never auto-upgrade, run it network-isolated. <span class="chip cand">◇ candidate</span> Bifrost (Apache-2.0 Go single binary; hierarchical budgets/virtual keys; vendor speed claims unaudited) as the lighter swap if LiteLLM's Python+Redis+tokenizer footprint drags. Cloudflare AI Gateway as a free cache/analytics front — it is a passthrough, not a control plane (no hard spend caps). <span class="chip avoid">✕ avoid</span> Portkey (acquired by Palo Alto Networks, closed 2026-05-29, folded into an enterprise security suite — wrong roadmap gravity); Envoy AI Gateway / kgateway (K8s-native, no K8s here); OpenRouter for lab-funded spend (5.5% + 5.5% fee stacking) though fine as a community-BYOK convenience.</p>
+
+<h3>4.4 MCP tool runtime — build against the 2026-07-28 spec from day one</h3>
+<p>The MCP ground is moving <em>right now</em>: the <strong>2026-07-28 spec release</strong> (RC locked 2026-05-21) is the largest revision since launch — stateless core (no initialize handshake, no sticky sessions, plain load balancers work), Tasks graduated to an official extension with a poll-based lifecycle, elicitation reworked as Multi-Round-Trip requests, MCP Apps (sandboxed HTML UIs), Roots/Sampling/Logging deprecated with 12-month windows. The official Python SDK's v2 (beta 2026-06-30) renames the server class to <code>MCPServer</code> — a breaking bump from the repo's pinned <code>mcp==1.23.0</code>. <span class="chip adopt">✓ adopt</span> official SDK targeting the new spec for Phase C's façade; anything written pre-spec against 1.x would be born legacy. FastMCP 3.0 (standalone, GA 2026-02-18) as an optional authoring convenience once it demonstrably tracks the new spec. <span class="chip cand">◇ candidate</span> MCPJungle (single-binary gateway+registry) at pilot; ContextForge 1.0 (IBM, GA June 2026 — RBAC, teams, OTel) at scale. <span class="chip avoid">✕ avoid</span> building on the public MCP Registry (still preview, no durability guarantees) — the agents/versions tables remain the tool-version source of truth. <span class="chip watch">◔ watch</span> Triggers/server-initiated events: still "On the Horizon" with a working group — which confirms the guidance's architectural call that <strong>activation lives in the event bus, MCP stays at the tool layer</strong>.</p>
+<p>Validation from an unexpected direction: <strong>Alpaca ships an official open-source MCP server</strong> (order placement incl. brackets/spreads, defaults to paper trading) and IBKR now markets MCP connectivity. Brokers themselves are converging on ATL's tool-runtime bet; ATL's differentiator stays the layer they don't have — metered, versioned, multi-tenant, <em>trust-boundary-gated</em> tools.</p>
+
+<h3>4.5 Community sandbox — gVisor's kernel boundary is $0</h3>
+<p><span class="chip adopt">✓ adopt</span> <strong>Docker + gVisor (runsc)</strong> for the untrusted-code tier: a drop-in OCI runtime (swap <code>runc</code>→<code>runsc</code>), no KVM/nested-virt requirement, running on any cheap VPS — with <code>--network=none</code> plus an egress allowlist to only the MCP tool endpoint. For ATL's threat model (community Python strategy code that may only call allowlisted tools) that is a real security boundary at zero incremental cost. <span class="chip cand">◇ candidate</span> Daytona ($200 free credit, ~$0.05/vCPU-hr<span class="sup">ᵛ</span>, AGPL self-host escape hatch — the cleanest managed migration story) and microsandbox (Apache-2.0 Firecracker/libkrun microVMs, needs real KVM, hosted tier still closed-beta). E2B: free tier for prototyping, Pro at $150/mo is scale-tier money; its published free-tier terms differed across two research passes (one-time $100 credit + 20-concurrent vs. 100 sandbox-hrs/mo) — re-verify before budgeting, and email them about education pricing (none published). <span class="chip watch">◔ watch</span> Modal Sandboxes (~3–3.75× non-preemptible premium<span class="sup">ᵛ</span>, GPU differentiator irrelevant here); Cloudflare Sandboxes (cheap but Workers-native lock-in, already repriced once in 2026). <span class="chip avoid">✕ avoid</span> Fly Machines (free tier gone, no sandbox abstraction). Constraint that shapes Tier 1: Hetzner cloud VPSes lack nested virtualization<span class="sup">ⁱ</span>, so real Firecracker needs bare metal (~€40–50/mo) — hence managed sandbox + self-hosted-everything-else is the pragmatic pilot split. Every option is OCI-compatible: the same agent image runs under runsc, microsandbox, Firecracker, E2B, or Daytona — tier upgrades are infra swaps, not rebuilds. The OpenAI Agents SDK's April-2026 sandbox abstraction (9 pluggable providers) is the design pattern to mirror in the Runner API's sandbox field.</p>
+
+<h3>4.6 Data plane — Neon + R2 + DuckDB; ClickHouse waits</h3>
+<p><span class="chip adopt">✓ adopt</span> the split: <strong>Neon Postgres</strong> for ledgers and trace <em>metadata</em> (a dedicated Neon project for runs/traces gets its own free 0.5GB/100 CU-hr/5GB-egress allotment — Neon allows up to 100 projects — which is the $0 resolution of issue #140); <strong>Cloudflare R2</strong> for raw trace payloads (full prompts/responses, tool logs) as JSONL/Parquet keyed by <code>run_id/step_id</code>, with PG rows carrying a <code>trace_ref</code> pointer — the same shape as v2's existing <code>context_ref</code>; <strong>DuckDB/chDB embedded</strong> for leaderboard/eval batch analytics reading Parquet straight off R2 ($0-egress makes read-back free). Post-Databricks Neon got <em>cheaper</em> (storage $1.75→$0.35/GB-mo, free compute doubled)<span class="sup">ᵛ</span>. Plain Postgres with a timestamp index carries bars/equity curves at ATL's row counts. <span class="chip cand">◇ candidate</span> pg_timeseries if partition pain appears (verify Neon's extension whitelist first — unconfirmed). <span class="chip avoid">✕ avoid</span> TimescaleDB (its useful features are TSL-licensed and it doesn't run on Neon — would force a second self-hosted Postgres); ClickHouse Cloud now (no free tier in 2026, Basic ~$66.5/mo<span class="sup">ᵛ</span>); MotherDuck as a dependency (free tier just shrank, Business 2.5×'d). <span class="chip watch">◔ watch</span> self-hosted ClickHouse at the real-time-OLAP trigger — chDB shares its on-disk format, so the migration is a copy.</p>
+
+<h3>4.7 Observability — one line of Logfire ends the print() era</h3>
+<p><span class="chip adopt">✓ adopt</span> <strong>Pydantic Logfire</strong> (free: 10M spans/mo, 1 seat, 3 projects) — <code>logfire.configure()</code> plus FastAPI auto-instrument gives structured OTel traces immediately, from the team that already owns ATL's Pydantic contract layer. This directly retires the known failure mode where <code>logger.info</code> emits nothing in prod and <code>print()</code> is the convention. Adopt <strong>OTel GenAI semantic conventions</strong> as the Trace Schema's vocabulary, but wrap attribute names behind ATL-owned constants: client-span conventions stabilized in early 2026, while agent-level spans (<code>invoke_agent</code>, <code>execute_tool</code>) are still Development-stability and can rename. <span class="chip cand">◇ candidate</span> Arize Phoenix self-hosted (single container, ELv2, no caps) on the pilot box when Logfire's SaaS-only nature or volume becomes a real constraint. <span class="chip watch">◔ watch</span> Langfuse v3 — MIT core but a six-service self-host stack (PG+ClickHouse+Redis+MinIO+web+worker); scale-tier ops weight. Helicone: gateway-shaped, in maintenance mode post-Mintlify-acquisition. <span class="chip avoid">✕ avoid</span> LangSmith / Braintrust / W&amp;B Weave — usage-metered SaaS whose pricing scales against ATL's exact growth axis (more agents × more steps × more traces).</p>
+
+<h3>4.8 Trajectory evaluation — the pillar where ATL gets to be first</h3>
+<p><span class="chip adopt">✓ adopt</span> <strong>Inspect AI</strong> (UK AISI, OSS): step-level scoring, tool-call correctness, LLM-as-judge rubrics, sandboxed execution, log viewer — purpose-built for trajectory-level eval, free forever, no hosted tier to outgrow. Pair with <strong>DeepEval</strong> pytest-native assertions to gate agent behaviors in the existing CI suite, and RAGAS agentic metrics (goal accuracy, tool-call F1) over the trace archive as cheap bolt-ons. Two findings sharpen the guidance here. First, an erratum: the "final-output-only misses 20–40% of step failures" figure <strong>could not be verified at that number</strong> — the direction is well-supported (e.g. ~60% single-run success collapsing to ~25% consistency over 8 runs), but the 20–40% statistic should stop being quoted. Second, an opportunity: <strong>no public trajectory-eval framework or benchmark exists for trading agents</strong> — the closest work (TradingAgents paper, "New Quant" survey) evaluates final P&amp;L only and flags the methodology gap explicitly. ATL's H6 decision-coverage guard is already a bespoke trajectory-integrity signal; generalizing it through the Evaluator API into published, step-level trading-agent evaluation is a genuine first — and it is <span class="chip build">⚒ build</span>, cheap, and differentiating.</p>
+
+<h3>4.9 Broker &amp; the Trust/Commit boundary — crib three designs, build one</h3>
+<p><span class="chip adopt">✓ adopt</span> Alpaca stays the sole broker: paper trading free at every tier, the $135M agent-first raise (2026-07-16) de-risks the roadmap, the official OSS MCP server (paper-by-default) is both a reference and a candidate integration, and single-account direct Trading API is the correct tier — no OAuth/Broker-API multi-tenant plumbing until external users bring their own brokerage accounts. <span class="chip cand">◇ candidate</span> Tradier (free sandbox, clean prod/sandbox token split) as the second-broker de-risk. <span class="chip watch">◔ watch</span> IBKR (official MCP story is newer/thinner; onboarding friction) and Schwab. <span class="chip avoid">✕ avoid</span> Robinhood (no third-party equities API; "Agentic Trading" is a closed first-party product — though its ring-fenced sub-account + kill-switch + order-preview design is worth studying as convergent evolution toward ATL's own boundary).</p>
+<p>The boundary itself is <span class="chip build">⚒ build</span> — design cribbed from three OSS references, code from none: <strong>NautilusTrader's RiskEngine</strong> for the shape (a small, explicit, config-declared check set — and its June-2026 panic-on-denial bugfix is the cautionary tale: <em>test the deny path as hard as the allow path</em>); <strong>LEAN's</strong> pluggable BuyingPowerModel + BrokerageModel split for making checks swappable per worker tier while every tier routes through one gate; <strong>vn.py's</strong> risk_manager for order-flow/cancel-count throttling against loop-happy LLM agents. The v0 checklist, in order: (1) buying-power sufficiency, (2) max notional per order + per instrument, (3) submit/modify rate limits, (4) fat-finger price-band check vs last price, (5) PDT day-trade gating, (6) tradability/market-hours/lot-size validation, (7) structured audit log of every outcome, allow <em>and</em> deny. FINRA's 2026 report (the first with a dedicated GenAI section) asks member firms for exactly this — guardrails, limited system access, action logging, out-of-bounds blocking — so the audit trail is the compliance surface, not polish. No FIX-side "agent order intent" standard exists to wait for (checked; the nearest activity is FIDO's agentic-authentication WG, an identity standard, not order semantics).</p>
+
+<h3>4.10 Agent frameworks &amp; interop — A2A won; the template is Pydantic AI</h3>
+<p><span class="chip adopt">✓ adopt</span> <strong>A2A v1.0</strong> (stable 2026-04, Apache-2.0, Linux-Foundation-governed, 150+ orgs, IBM's ACP merged into it Aug 2025) as the remote-gateway worker tier's wire contract — the interop war is over and hedging is unnecessary; AGNTCY/OASF is complementary discovery infra to watch, not a rival. Note the guidance's Agent Card object now has an external counterpart: A2A specifies <em>signed Agent Cards</em> — align ATL's card schema so contest cards can be exported as A2A cards later. <span class="chip adopt">✓ adopt</span> <strong>Pydantic AI</strong> (MIT, FastAPI-native, model-agnostic, native MCP) as the reference agent template: its type-validated tool/output shape is the closest native match to <code>run(agent, event, state, policy) → action intent + trace</code>, and it keeps the template vendor-neutral. <span class="chip avoid">✕ avoid</span> building ATL's own harness on the OpenAI Agents SDK / Claude Agent SDK / Google ADK — all excellent, all vendor-anchored; use them as design references (OpenAI's harness/sandbox split, Claude's subagent+hooks model). Adapter priorities for Weeks 2–3: <strong>AI Hedge Fund</strong> (virattt — 62.3k stars, MIT, flat call shape, easiest) then <strong>TradingAgents</strong> (Tauric — 93.7k stars, Apache-2.0, LangGraph-native: build the adapter as a LangGraph checkpoint/state bridge, don't rewrite it and don't adopt LangGraph as ATL's runtime). <span class="chip watch">◔ watch</span> QuantDinger — only vendor sources found; independently verify stars/adoption/license before spending adapter effort. Its MCP-native Agent Gateway makes it more informative as a design comp for ATL's own tool tier than as an adapter target. CrewAI/smolagents: no trading-community traction; support on demand only.</p>
+
+<h2 id="dev"><span class="no">5</span>Deviations from the adopted guidance</h2>
+<p>Five places where this blueprint refines the 2026-07-19 guidance. In every case the plane, the contract, and the buy-not-build principle are preserved — what changes is entry sequencing, driven by verified 2026 pricing and maturity facts. Flagged here explicitly so the guidance doc and central DB can carry the update.</p>
+
+<div class="dev">
+  <div class="g">Guidance: "adopt Temporal (saves ~12–18 months)."</div>
+  <div class="r"><strong>Refined: adopt <em>durable execution</em> now, enter via DBOS, keep Temporal as the committed scale destination.</strong> The 12–18-month build-avoidance argument stands — and DBOS satisfies it at $0 on existing Postgres, while a real Temporal deployment means either a $100/mo cloud floor or a multi-service self-hosted cluster with ~4–6 eng-hrs/mo of ops the lab cannot absorb pre-contest. Temporal's Replay-2026 fairness/priority features are precisely the <em>contest-scale</em> trigger.</div>
+  <div class="keep">Preserved: buy-not-build; the Temporal-shaped workflow/activity split; the guidance's replacement-seam analysis of the hand-rolled run lifecycle.</div>
+</div>
+
+<div class="dev">
+  <div class="g">Guidance: "integrate E2B/Firecracker-class sandboxes."</div>
+  <div class="r"><strong>Refined: enter via gVisor (kernel boundary, $0, no KVM requirement), prototype managed UX on Daytona's free credit, graduate to Firecracker-class microVMs (bare metal or E2B Pro) when adversarial volume is real.</strong> New constraint discovered: Hetzner cloud VPSes — the pilot tier's economics winner — have no nested virtualization, so DIY Firecracker requires bare metal. All options are OCI-compatible; upgrades are infra swaps.</div>
+  <div class="keep">Preserved: hard isolation as the injection defense (never prompts); trust-tiered worker split; OpenAI-SDK sandbox-abstraction compatibility.</div>
+</div>
+
+<div class="dev">
+  <div class="g">Guidance: "ClickHouse eval" in the data plane.</div>
+  <div class="r"><strong>Refined: DuckDB/chDB embedded over R2 Parquet now; ClickHouse at the real-time-OLAP trigger.</strong> ClickHouse Cloud has no free tier in 2026 (trial only, Basic ~$66.5/mo) and a credible self-host needs a 16GB+ box. ATL's actual query pattern (batch leaderboard refresh) is DuckDB-shaped; chDB shares ClickHouse's on-disk format, making the eventual migration a data copy.</div>
+  <div class="keep">Preserved: traces on object storage; an OLAP engine for eval analytics; the eventual ClickHouse endpoint.</div>
+</div>
+
+<div class="dev">
+  <div class="g">Guidance data plane names Kafka (+ Redis) for the bus.</div>
+  <div class="r"><strong>Refined: pgmq + LISTEN/NOTIFY on Neon until true 1-to-N fan-out exists, then NATS JetStream — Kafka-class systems at no described phase.</strong> Transactional enqueue beside domain writes beats a broker at this scale (no dual-write), and the NATS licensing risk that argued for Kafka resolved in CNCF's favor.</div>
+  <div class="keep">Preserved: an event bus as the activation spine; sparse event-driven activation as differentiator ingredient.</div>
+</div>
+
+<div class="dev">
+  <div class="g">Guidance: "final-output-only evaluation misses 20–40% of step failures."</div>
+  <div class="r"><strong>Erratum: the direction is well-supported; the 20–40% figure is unverifiable and should stop being quoted.</strong> Substitute the verified adjacent evidence (single-run ~60% success vs ~25% eight-run consistency) or say "a large share" — and note the flip side: trajectory-level eval for <em>trading</em> agents has no public prior art, making it an ATL first (§4.8).</div>
+  <div class="keep">Preserved: trajectory-level evaluation as a pillar requirement — strengthened, in fact, by the prior-art gap.</div>
+</div>
+
+<h2 id="plan"><span class="no">6</span>Week 0–4 engineering plan, mapped to the repo</h2>
+<p>The guidance's Week 0–4 ladder, translated into repo-level work items. Everything below executes at Tier 0 ($0). Existing open tasks slot in rather than compete: the SDK v1→v2 migration (gate for <code>agentictrading</code> 0.2.0) proceeds in parallel as the access-layer track; Phase B's <code>paper_backend.py</code> stub is where the Trust boundary lands; issue #145's scheduler need is the first DBOS consumer.</p>
+
+<div class="week">
+  <h4>Week 0–1 — contracts v0 + the two $0 unlocks</h4>
+  <ul class="tight">
+    <li><strong>Freeze the six contracts as code</strong>: Pydantic models + exported JSON Schemas in a new <code>dashboard/backend/contracts/</code> (or <code>docs/superpowers/specs/</code> first if spec-review is wanted). Sources: <code>run_manifest</code> → Trace Schema (adopt OTel GenAI attribute names behind ATL constants; add <code>trace_ref</code>); <code>external_agents</code> registry + v2 scopes → Agent Manifest; v2 lifecycle → Runner API (<code>run(agent, event, state, policy) → intent + trace</code>); leaderboard service → Evaluator API; MCP tool defs (2026-07-28 spec shapes) → Tool Manifest; Agent Card aligned to A2A's signed-card schema. This discharges queue task <code>atl-platform-contracts-01</code>.</li>
+    <li><strong>Wire Logfire</strong> (one line + FastAPI auto-instrument) — observability unlock, ends the print() era.</li>
+    <li><strong>Resolve #140</strong>: dedicated Neon runs/traces project; port <code>agent_runs</code> via the #134 store-factory + <code>*_postgres.py</code> twin pattern, with #135's ALTER-migration lesson applied from day one. Leaderboard history stops evaporating per deploy — the "Trace as platform asset" prerequisite.</li>
+    <li><strong>Plan the <code>mcp</code> 1.23 → SDK-v2 bump</strong> for right after 2026-07-28 (see §7).</li>
+  </ul>
+</div>
+
+<div class="week">
+  <h4>Week 1–2 — one closed loop on durable rails</h4>
+  <ul class="tight">
+    <li><strong>DBOS spike</strong>: wrap exactly one workflow — the external-run session or the #145 leaderboard refresh — measuring the Neon CU-burn question from §3. Keep decorators at the lifecycle seam.</li>
+    <li><strong>pgmq event table + EDGAR poller</strong> (or reuse FinSearch's feed for news events): the EventRadar v0.</li>
+    <li><strong>Hero-milestone slice</strong>: 8-K event → FinSearch retrieval → decision → Trust-boundary v0 checks (1, 2, 4, 6, 7 of the checklist) → Alpaca paper order → trace row + R2 blob → leaderboard entry. Thin at every stage; end-to-end beats deep.</li>
+  </ul>
+</div>
+
+<div class="week">
+  <h4>Week 2–3 — Runner API + first adapters</h4>
+  <ul class="tight">
+    <li><strong>Runner API v0</strong> as a thin layer over the v2 <code>ExecutionBackend</code>; reference agent template on Pydantic AI.</li>
+    <li><strong>Adapters</strong>: AI Hedge Fund (flat call, MIT) first, TradingAgents (LangGraph checkpoint bridge) second. QuantDinger: verification pass before any code.</li>
+    <li>Sandbox spike: run the reference template's image under gVisor with the MCP-only egress allowlist.</li>
+  </ul>
+</div>
+
+<div class="week">
+  <h4>Week 3–4 — community surface</h4>
+  <ul class="tight">
+    <li><strong>Agent Cards</strong> (registry + leaderboard join, A2A-exportable), contest onboarding docs, Inspect-AI-based trajectory scores on the leaderboard beside P&amp;L.</li>
+    <li><strong>LiteLLM stand-up only if BYOK contest keys are real by now</strong> — pinned, isolated, per §4.3.</li>
+  </ul>
+</div>
+
+<h2 id="dates"><span class="no">7</span>Time-sensitive actions</h2>
+<ul class="tight">
+  <li><span class="datebox">Jul 28</span><strong>MCP spec final + Python SDK v2 stable target.</strong> Hold any new MCP server code until the final spec lands; then schedule the <code>mcp==1.23.0</code> → v2 bump (breaking: <code>MCPServer</code> rename, stateless core, Tasks-as-extension). Anything built against 1.x this week would be born legacy.</li>
+  <li><span class="datebox">Jul 31</span><strong>DigitalOcean GitHub-Student-Pack credits expire</strong> (announced 2026-06-12). Verify no lab infra or teammate workflow rides on DO pack credits before that date.</li>
+  <li><span class="datebox">rolling</span><strong>Apply to Modal Academics</strong> — up to $25K compute credits, open to faculty/PhD students/course instructors; the professor qualifies. Zero-cost optionality even though Modal isn't in the adopted stack.</li>
+  <li><span class="datebox">rolling</span><strong>Email E2B about education pricing</strong> (none published) and re-verify their free-tier terms, which differed between research passes.</li>
+  <li><span class="datebox">policy</span><strong>LiteLLM pinning policy</strong> — decide now, before any adoption: exact signed versions ≥1.84.0 only, no auto-upgrade, network-isolated deploy (2026-03-24 supply-chain incident).</li>
+</ul>
+
+<h2 id="watch"><span class="no">8</span>Consolidated watch list</h2>
+<div class="tablewrap">
+<table>
+  <tr><th>Trigger to re-check</th><th>What changes if it fires</th></tr>
+  <tr><td>DBOS-on-Neon CU-burn spike result (Week 1–2)</td><td>Whether the DBOS system DB lives on Neon, a second Neon project, or waits for the pilot box's local PG</td></tr>
+  <tr><td>Neon extension whitelist adds pg_timeseries; post-Databricks pricing wave 2</td><td>Bars/equity-curve tooling stays in Neon vs needs the pilot box; budget assumptions</td></tr>
+  <tr><td>MCP Triggers/Events WG ships a spec; Registry GA</td><td>Event activation could move partially into MCP; discovery listing (never load-bearing)</td></tr>
+  <tr><td>FastMCP 3.x adopts the 2026-07-28 stateless/Tasks model</td><td>Whether the authoring-convenience layer is safe for production tools</td></tr>
+  <tr><td>Temporal Serverless Workers mature; DBOS/Hatchet hit major maturity milestones</td><td>The Tier-2 workflow migration path and its timing</td></tr>
+  <tr><td>Synadia's NATS trademark transfer actually completes</td><td>Confidence in NATS as the fan-out graduation target</td></tr>
+  <tr><td>microsandbox hosted GA; Cloudflare Sandboxes reprices again; AWS nested-virt expands beyond C8i/M8i/R8i</td><td>Cheapest true-microVM path for the sandbox tier</td></tr>
+  <tr><td>Palo Alto's handling of Portkey's OSS gateway; Mintlify's investment in Helicone</td><td>Whether either re-enters the gateway shortlist</td></tr>
+  <tr><td>OTel GenAI agent-span conventions reach stable</td><td>Unpin the ATL-owned attribute constants from Development-stability names</td></tr>
+  <tr><td>Alpaca free-tier websocket limits or Algo-Trader-Plus pricing move post-raise</td><td>Event-source budget; the 200 req/min ceiling binds before data quality does</td></tr>
+  <tr><td>FINRA/SEC follow-on AI rulemaking in late 2026; any FIX/ISO-20022 agent-order-intent standard</td><td>Trust-boundary audit-log and kill-switch specifics; whether an external intent schema replaces ATL's own</td></tr>
+  <tr><td>A2A trust-chain governance spec (RFC-complete target Q3 2026)</td><td>What the remote-gateway tier must verify about incoming agents</td></tr>
+  <tr><td>Oracle Always-Free shrinks again; Hetzner pricing/nested-virt changes</td><td>Backup free-compute options; pilot-box sizing and the DIY-Firecracker calculus</td></tr>
+  <tr><td>Any new OSS trading-agent repo overtakes TradingAgents/AI-Hedge-Fund; QuantDinger independent verification</td><td>Adapter priority list for Weeks 2–3</td></tr>
+</table>
+</div>
+
+<h2 id="trace"><span class="no">9</span>Traceability &amp; confidence</h2>
+<p>Anchors: the adopted guidance (<em>ATL-Platform-Guidance-2026-07.html</em> + central-DB <code>atl-platform-target-architecture</code>) supplies the planes, objects, contracts, gates, and never-do list — reused verbatim, deviations declared in §5 only. Repo facts (seams, issue numbers, dependency pins, the #134/#135 persistence lessons) verified against the working tree and project records on 2026-07-19. All vendor/pricing/spec claims come from a 10-area research fleet run 2026-07-19 using primary sources (pricing pages, changelogs, official blogs, GitHub); every load-bearing claim carries a date and a confidence label in the underlying research log — <span class="sup">ᵛ</span> marks vendor-claimed numbers and <span class="sup">ⁱ</span> marks inferred/secondary-source claims surfaced in this document. Prices and free-tier terms in this space have changed multiple times <em>within 2026</em> (Neon, Render, Fly, Cloudflare, MotherDuck, OpenRouter, Hetzner, Oracle all repriced); treat every number as a snapshot and re-verify at commitment time. Full research log with per-claim sources: session workflow output <code>we1txjbhm</code> (10 areas, 140+ dated claims).</p>
+
+<footer>
+  ATL Tech-Stack Blueprint · compiled 2026-07-19 · companion to ATL-Platform-Guidance-2026-07 · SecureFinAI Lab / Open-Finance-Lab · internal engineering document — not user-facing product documentation
+</footer>
+
+</div>
+</body>
+</html>

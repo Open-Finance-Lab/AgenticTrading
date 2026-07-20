@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ATL 智能体接线计划 — Agent Fleet Wiring Plan (2026-07)</title>
+<style>
+  :root {
+    color-scheme: light;
+    --page:      #f9f9f7;
+    --surface:   #fcfcfb;
+    --ink:       #0b0b0b;
+    --ink-2:     #52514e;
+    --muted:     #898781;
+    --grid:      #e1e0d9;
+    --border:    rgba(11,11,11,0.10);
+    --c-control: #2a78d6;
+    --c-bus:     #2a78d6;
+    --c-exec:    #008300;
+    --c-trust:   #eb6834;
+    --c-data:    #4a3aa7;
+    --c-src:     #1baf7a;
+    --c-pillar:  #eda100;
+    --good:      #0ca30c;
+    --good-text: #006300;
+    --warn:      #fab219;
+    --serious:   #ec835a;
+    --tint-ok:   rgba(12,163,12,0.12);
+    --tint-fix:  rgba(250,178,25,0.16);
+    --tint-unv:  rgba(236,131,90,0.16);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --page:      #0d0d0d;
+      --surface:   #1a1a19;
+      --ink:       #ffffff;
+      --ink-2:     #c3c2b7;
+      --muted:     #898781;
+      --grid:      #2c2c2a;
+      --border:    rgba(255,255,255,0.10);
+      --c-control: #3987e5;
+      --c-bus:     #3987e5;
+      --c-exec:    #008300;
+      --c-trust:   #d95926;
+      --c-data:    #9085e9;
+      --c-src:     #199e70;
+      --c-pillar:  #c98500;
+      --good-text: #0ca30c;
+      --tint-ok:   rgba(12,163,12,0.18);
+      --tint-fix:  rgba(201,133,0,0.22);
+      --tint-unv:  rgba(217,89,38,0.22);
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:      #0d0d0d;
+    --surface:   #1a1a19;
+    --ink:       #ffffff;
+    --ink-2:     #c3c2b7;
+    --muted:     #898781;
+    --grid:      #2c2c2a;
+    --border:    rgba(255,255,255,0.10);
+    --c-control: #3987e5;
+    --c-bus:     #3987e5;
+    --c-exec:    #008300;
+    --c-trust:   #d95926;
+    --c-data:    #9085e9;
+    --c-src:     #199e70;
+    --c-pillar:  #c98500;
+    --good-text: #0ca30c;
+    --tint-ok:   rgba(12,163,12,0.18);
+    --tint-fix:  rgba(201,133,0,0.22);
+    --tint-unv:  rgba(217,89,38,0.22);
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--page); color: var(--ink);
+    line-height: 1.55; font-size: 15px;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; padding: 32px 20px 80px; }
+  header.doc { padding: 28px 0 8px; }
+  h1 { font-size: 26px; line-height: 1.25; letter-spacing: -0.01em; }
+  .subtitle { color: var(--ink-2); margin-top: 6px; max-width: 78ch; }
+  .meta { color: var(--muted); font-size: 12.5px; margin-top: 10px; }
+  .src-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .src-chips span {
+    font-size: 12px; color: var(--ink-2); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 20px; padding: 3px 12px;
+  }
+  .statrow { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin: 22px 0 6px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .stat .v { font-size: 24px; font-weight: 700; }
+  .stat .l { font-size: 12px; color: var(--ink-2); margin-top: 2px; }
+  nav.toc { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; margin: 22px 0; font-size: 13.5px; }
+  nav.toc a { color: var(--ink-2); text-decoration: none; }
+  nav.toc a:hover { color: var(--ink); text-decoration: underline; }
+  nav.toc ol { margin-left: 18px; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 2px 24px; }
+  h2 { font-size: 19px; margin: 44px 0 12px; padding-top: 18px; border-top: 1px solid var(--grid); letter-spacing: -0.01em; }
+  h2 .no { color: var(--muted); font-weight: 600; margin-right: 8px; }
+  h3 { font-size: 15.5px; margin: 22px 0 8px; }
+  p { margin: 10px 0; max-width: 88ch; }
+  p.lede { font-size: 15.5px; }
+  ul.tight, ol.tight { margin: 8px 0 8px 22px; max-width: 86ch; }
+  ul.tight li, ol.tight li { margin: 5px 0; }
+  strong { font-weight: 650; }
+  code { font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace; font-size: 0.92em; background: var(--surface); border: 1px solid var(--grid); border-radius: 4px; padding: 0 4px; }
+  .quote {
+    border-left: 3px solid var(--c-control); background: var(--surface);
+    padding: 12px 18px; border-radius: 0 8px 8px 0; margin: 14px 0; max-width: 86ch;
+  }
+  .quote .zh { font-weight: 600; }
+  .quote .en { color: var(--ink-2); font-size: 13.5px; margin-top: 4px; }
+  .callout {
+    background: var(--surface); border: 1px solid var(--border); border-left: 4px solid var(--c-trust);
+    border-radius: 8px; padding: 14px 18px; margin: 16px 0; max-width: 92ch;
+  }
+  .callout.blue { border-left-color: var(--c-control); }
+  .callout.green { border-left-color: var(--c-exec); }
+  .callout.amber { border-left-color: var(--c-pillar); }
+  .callout h4 { font-size: 14px; margin-bottom: 6px; }
+  .tablewrap { overflow-x: auto; margin: 14px 0; border: 1px solid var(--border); border-radius: 8px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; background: var(--surface); }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+  th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-2); background: var(--page); white-space: nowrap; }
+  tr:last-child td { border-bottom: none; }
+  td.nw, th.nw { white-space: nowrap; }
+  .num { font-variant-numeric: tabular-nums; }
+  .chip { display: inline-block; border-radius: 20px; font-size: 11px; font-weight: 650; padding: 1px 9px; vertical-align: 1px; white-space: nowrap; }
+  .chip.ok   { background: var(--tint-ok);  color: var(--good-text); }
+  .chip.fix  { background: var(--tint-fix); color: var(--c-pillar); }
+  .chip.unv  { background: var(--tint-unv); color: var(--c-trust); }
+  .chip.blue { background: rgba(42,120,214,0.14); color: var(--c-control); }
+  .chip.gray { background: var(--page); color: var(--muted); border: 1px solid var(--grid); }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 10px; margin: 14px 0; }
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 15px; font-size: 13px; }
+  .card b.t { display: block; font-size: 13.5px; margin-bottom: 3px; }
+  .card .fields { color: var(--ink-2); font-size: 12.5px; }
+  .card .seed { margin-top: 7px; font-size: 12.5px; border-top: 1px dashed var(--grid); padding-top: 6px; }
+  .seed .y { color: var(--good-text); font-weight: 600; }
+  .seed .n { color: var(--muted); font-weight: 600; }
+  /* wiring diagram */
+  .arch { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin: 18px 0; }
+  .arch-tagline { text-align: center; color: var(--ink-2); font-size: 13px; margin-bottom: 14px; }
+  .plane { border: 1.5px solid var(--grid); border-radius: 8px; margin: 10px 0; overflow: hidden; }
+  .plane > .bar { padding: 7px 14px; font-weight: 650; font-size: 13.5px; color: #fff; display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 4px; }
+  .plane > .bar .tag { font-size: 11px; font-weight: 600; opacity: 0.92; }
+  .plane .cells { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; }
+  .cell { border: 1px solid var(--grid); border-radius: 6px; padding: 7px 11px; font-size: 12.5px; background: var(--page); min-width: 130px; flex: 1 1 140px; }
+  .cell b { display: block; font-size: 12.5px; }
+  .cell span { color: var(--ink-2); font-size: 11.5px; }
+  .p-control > .bar { background: var(--c-control); }
+  .p-bus > .bar { background: var(--c-bus); }
+  .p-bus { border-style: dashed; }
+  .p-exec > .bar { background: var(--c-exec); }
+  .p-trust > .bar { background: var(--c-trust); }
+  .p-data > .bar { background: var(--c-data); }
+  .p-src > .bar { background: var(--c-src); }
+  .loop { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 12px; font-size: 12.5px; color: var(--ink-2); }
+  .loop .step { background: var(--page); border: 1px solid var(--grid); border-radius: 20px; padding: 3px 12px; }
+  .loop .arr { color: var(--muted); }
+  sup.i { color: var(--muted); font-weight: 600; }
+  footer { margin-top: 56px; padding-top: 16px; border-top: 1px solid var(--grid); color: var(--muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="doc">
+  <h1>ATL 智能体接线计划 · Agent Fleet Wiring Plan</h1>
+  <p class="subtitle">The execution bridge from the adopted platform guidance and tech-stack blueprint to running code: every step required to wire an in-house fleet of LLM trading agents into continuous backtesting and paper trading on ATL, and to open the same rails to community agents — 先闭环，再扩展，再展示.</p>
+  <p class="meta">2026-07-20 · third document in the series · repo state verified against <code>Open-Finance-Lab/AgenticTrading</code> main (<code>54969cb</code>, post-#147) · $0 infrastructure through Week 4</p>
+  <div class="src-chips">
+    <span>Anchor: ATL-Platform-Guidance-2026-07.html (adopted 2026-07-19)</span>
+    <span>Anchor: ATL-Tech-Stack-Blueprint-2026-07.html (adopted 2026-07-19)</span>
+    <span>14-agent repo + web verification sweep, 2026-07-20</span>
+  </div>
+  <div class="statrow">
+    <div class="stat"><div class="v num">0</div><div class="l">order-submission code paths in the repo today — paper trading is a build, not a wire-up</div></div>
+    <div class="stat"><div class="v num">1 → 2</div><div class="l">one decision (#140 runs-to-Neon) unblocks both durable history and scheduling (#145)</div></div>
+    <div class="stat"><div class="v num">3<sup class="i">ⁱ</sup></div><div class="l">Alpaca paper accounts per login (hard cap) — forces the virtual-portfolio topology</div></div>
+    <div class="stat"><div class="v num">7</div><div class="l">in-house LLM agents already H6-cleared and ready to fleet on the backtest rail</div></div>
+    <div class="stat"><div class="v num">30 = 30</div><div class="l">DJIA universe exactly fits Alpaca's free 30-channel websocket cap<sup class="i">ⁱ</sup></div></div>
+    <div class="stat"><div class="v num">≥50</div><div class="l">external agent submissions — the demand gate all of this feeds (3–9 mo)</div></div>
+  </div>
+</header>
+
+<nav class="toc">
+  <ol>
+    <li><a href="#position">What this is &amp; where it sits</a></li>
+    <li><a href="#state">现状盘点 — where the repo actually is</a></li>
+    <li><a href="#constraints">The three constraints that shape the design</a></li>
+    <li><a href="#decisions">Six load-bearing decisions (D1–D6)</a></li>
+    <li><a href="#wiring">Target wiring — one diagram</a></li>
+    <li><a href="#tracks">The plan — four tracks, every step</a></li>
+    <li><a href="#master">Master step index (Week 0–4)</a></li>
+    <li><a href="#risks">Risks &amp; standing rules</a></li>
+    <li><a href="#notnow">What we deliberately do NOT do now</a></li>
+    <li><a href="#followups">Stale docs &amp; follow-ups</a></li>
+    <li><a href="#trace">Traceability note</a></li>
+  </ol>
+</nav>
+
+<!-- ============================================================ -->
+<h2 id="position"><span class="no">1</span>What this is &amp; where it sits 定位</h2>
+
+<p class="lede">The guidance fixed the destination (six-plane 自动化托管平台, five objects, six contracts, roadmap gates). The blueprint fixed the materials ($0 on-ramps: DBOS, pgmq, Neon, R2, DuckDB, gVisor, Inspect AI). This document fixes the <strong>work order</strong>: the concrete, sequenced steps that take today's repo to (a) an in-house fleet of LLM agents continuously backtesting and paper-trading on ATL, and (b) a community on-ramp where outside builders test their own agents and strategies — the funnel that feeds the ≥50-submission demand gate.</p>
+
+<div class="quote">
+  <div class="zh">先闭环，再扩展，再展示。</div>
+  <div class="en">Close one real loop before widening; widen before displaying. The fleet closes the loop and stress-tests the rails; the community widens it; the leaderboard and Agent Cards display it. Every step below lands as a platform asset under one of the six contracts — no contract, no platform asset.</div>
+</div>
+
+<p>Two structural insights drive the sequencing:</p>
+<ul class="tight">
+  <li><strong>The backtest fleet is nearly free; the paper fleet is a real build.</strong> External agents can already register, get an API key, and drive a full backtest step-by-step through <code>/api/v2</code> (scopes, rate limits, idempotency, run caps, reaper, restart recovery — all shipped). Paper trading, by contrast, has <em>zero</em> execution code: the entire <code>/paper/*</code> surface is a read-only display proxy over one shared Alpaca account, and <code>execution/paper_backend.py</code> is a stub whose own spec says it "requires a focused design pass." So the fleet starts trading <em>this week</em> on the backtest rail while Phase B is designed properly.</li>
+  <li><strong>Persistence-first is the forced move.</strong> Run history lives in ephemeral SQLite (issue #140): every deploy erases every run, decision log, and leaderboard entry. That same ephemerality is why nothing can be scheduled (issue #145: an off-instance cron writes to its own dead copy of the DB). Moving runs to the dedicated Neon project (blueprint §5) makes prod state reachable from anywhere — at which point a $0 GitHub Actions cron discharges #145 and the fleet has a heartbeat.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="state"><span class="no">2</span>现状盘点 — where the repo actually is <span class="chip gray">verified 2026-07-20</span></h2>
+
+<p>Everything below was re-verified against source this morning by a 14-agent sweep (three claims additionally hand-checked at file/line level). This is the honest inventory the plan builds on.</p>
+
+<div class="tablewrap"><table>
+  <tr><th>Capability</th><th class="nw">Status</th><th>Evidence</th></tr>
+  <tr><td><strong>External agent drives a backtest via <code>/api/v2</code></strong> — register (120/hr per-IP), API key, 5 scopes, 120/min token bucket, canonical <code>run_id</code>, DB-backed idempotency, 30s decision deadline with auto-hold, shared v1+v2 active-run cap (5/agent), reaper + heartbeat + restart tombstones</td><td><span class="chip ok">works</span></td><td><code>api/v2/*</code>, <code>execution/backtest_backend.py</code>, <code>domain/runs/service.py</code></td></tr>
+  <tr><td><strong>In-house LLM leaderboard entries</strong> — 7 models, H6-gated (≥95% genuine LLM decision coverage), exact per-run token cost recorded</td><td><span class="chip ok">works, manual</span></td><td>one human CLI run per model: <code>deploy_leaderboard_model.py</code>; CommonStack ×6, OpenRouter ×1 (Nemotron, H6-passed per PR #150)</td></tr>
+  <tr><td><strong>Daily leaderboard</strong> — shipped in PR #132; LLM entries require <code>refresh_daily_leaderboard.py --models</code> which nothing runs</td><td><span class="chip fix">shipped, unscheduled</span></td><td>issue #145; zero scheduler hits repo-wide (no APScheduler/cron/BackgroundTasks)</td></tr>
+  <tr><td><strong>Paper trading execution</strong> — no order-submission call anywhere (<code>AlpacaPaperTradingClient</code> is 100% read-only GETs); <code>PaperBackend</code> raises <code>NotImplementedError</code>; v2 <code>mode</code> is regex-locked to <code>^backtest$</code></td><td><span class="chip unv">does not exist</span></td><td><code>infrastructure/brokers/alpaca_paper.py</code>, <code>execution/paper_backend.py</code>, <code>api/v2/runs.py</code></td></tr>
+  <tr><td><strong>Paper trading UI</strong> — one shared Alpaca account displayed to all visitors; <code>/paper/*</code> exempt from session middleware (no auth); cache keys unnamespaced (<code>paper:positions</code> etc.)</td><td><span class="chip fix">display-only</span></td><td><code>api/routers/paper_trading.py</code>, <code>middleware.py</code>, <code>cache.py</code></td></tr>
+  <tr><td><strong><code>POST /paper/start-session</code></strong> — dead (never called) <em>and</em> broken: omits required <code>session_id</code> arg → <code>TypeError</code>, silently swallowed by bare <code>except</code></td><td><span class="chip unv">dead + broken</span></td><td>hand-verified: <code>paper_trading.py:273</code> vs <code>database.py:379</code></td></tr>
+  <tr><td><strong>Run persistence</strong> — <code>agent_runs</code>, <code>protocol_runs/steps</code>, equity, trades, decisions, manifests, idempotency: SQLite-only, reset to seed on every deploy. Agents/keys/strategies/users are Postgres-durable (PRs #134/#146/#147)</td><td><span class="chip fix">split (#140 open)</span></td><td><code>database.py</code>; no Postgres factory exists for any run table</td></tr>
+  <tr><td><strong>Scheduling / background work</strong> — one 60s reaper daemon thread (extensible via <code>register_reaper_sweep()</code>); Discord bot runs as a separate paid Render worker (~$7/mo) — the team's existing precedent for "needs a real background process"; DBOS has zero footprint (spike not started)</td><td><span class="chip fix">reaper only</span></td><td><code>domain/runs/service.py</code>, <code>render-discord-bot.yaml</code>; repo-wide grep</td></tr>
+  <tr><td><strong>Community funnel</strong> — signup → register agent → key → SDK backtest works; but published SDK 0.2.0 is v1-only (despite the v2-migration gate), its PyPI metadata links to <code>Allan-Feng/AgenticTrading</code> instead of <code>Open-Finance-Lab</code>, all quickstarts teach v1, RTD site last rebuilt 2026-05-11, Discord <code>/agent</code> excludes SDK-registered agents</td><td><span class="chip fix">works, leaky</span></td><td>hand-verified: <code>packaging/agentictrading/pyproject.toml:46</code>, <code>__init__.py:70</code>; docs sweep</td></tr>
+  <tr><td><strong>Reusable but unwired pure logic</strong> — <code>domain/trading/execution.py::execute_actions</code> (simulated fills), <code>portfolio.py</code> (valuation/equity curves), <code>PaperTradingSession</code> (bookkeeping): extracted from the backtest engine, tested, currently dead on the paper path</td><td><span class="chip ok">ready to reuse</span></td><td><code>domain/trading/*</code></td></tr>
+</table></div>
+
+<div class="callout blue">
+  <h4>Why this inventory matters</h4>
+  <p>The gap is asymmetric. Backtesting has a complete, hardened agent-facing rail with unified lifecycle infrastructure that is <strong>backend-agnostic</strong> (the reaper, heartbeats, caps, and tombstone recovery drive any <code>ExecutionBackend</code> generically). Paper trading has pure domain logic waiting to be composed but no broker write path, no cadence driver, no per-agent isolation, and no integrity guard. The plan therefore ships the fleet on backtests immediately (Track A) and treats paper as a designed build (Track B) — not the other way around.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="constraints"><span class="no">3</span>The three constraints that shape the design 约束</h2>
+
+<h3>3.1 Alpaca: 3 paper accounts per login — the fleet cannot be "one real account per agent"</h3>
+<ul class="tight">
+  <li>Standard (non-Broker-API) users: <strong>max 3 simultaneous paper accounts</strong> per login<sup class="i">ⁱ</sup> (Alpaca staff, community forum, 2026-03); reset is now delete-then-recreate with fresh keys; multi-paper expansion is roadmap-only, no date. Beyond 3, the only sanctioned path is Broker API — a business-tier product, per Alpaca's own OAuth-vs-Broker-API guidance the wrong tier for ATL now (blueprint §1).</li>
+  <li>Trading API: <strong>200 requests/min per account</strong>, ~10/s burst<sup class="i">ⁱ</sup>. Market data free tier: IEX feed, 200 req/min<sup class="i">ⁱ</sup>; websocket 1 connection, 30 trade/quote channels (minute bars uncapped)<sup class="i">ⁱ</sup> — the DJIA-30 universe fits exactly. SIP + 10k req/min is the $99/mo Algo Trader Plus tier — a scale trigger, not a Week-0 need.</li>
+  <li>No ToS prohibition on bot trading found; Alpaca's whole positioning is agent-first (the 2026-07-16 <strong>$135M raise explicitly for "agent-first brokerage infrastructure"</strong> ✓; monthly active API users ~4× in 6 months<sup class="i">ᵛ</sup>). Their official OSS MCP server (65 tools, paper-by-default) ships <em>no</em> execution guardrails — validation that ATL's trust-gated layer is the differentiator, not a commodity.</li>
+  <li>Design analog: QuantConnect scopes paper trading <strong>per-project</strong> ($100k simulated capital per deployment), sidestepping any account-count ceiling — the shape ATL should imitate.</li>
+</ul>
+
+<h3>3.2 Render free tier: web-only, ephemeral, sleeps</h3>
+<ul class="tight">
+  <li>Live prod is free-tier: one <code>type: web</code> service, no persistent disk, no cron/worker, cold-starts after idle (<code>render.yaml</code>'s standard plan + disk are aspirational). Any in-process interval loop dies when the dyno sleeps; any off-instance scheduler writes to its own ephemeral DB copy, never prod's.</li>
+  <li>Consequence: <strong>durable-Postgres-first, then schedule from outside.</strong> Once runs live in Neon, a GitHub Actions cron (already-proven CI secrets + deploy-hook pattern, PR #95) reaches prod state at $0. In-service scheduling arrives later via the DBOS spike (blueprint Week 1–2), whose Neon CU-burn measurement decides where the workflow engine's system DB lives.</li>
+</ul>
+
+<h3>3.3 MCP 2026-07-28: the largest spec revision since launch, 8 days out</h3>
+<ul class="tight">
+  <li>Stateless core, Tasks-as-extension, SDK v2 renames to <code>MCPServer</code> — breaking against the repo's pinned <code>mcp==1.23.0</code>. Standing rule from the blueprint, carried verbatim: <strong>hold all new MCP server code until the final spec lands</strong>; anything built this week is born legacy. Phase C (the MCP façade over v2) stays mechanical-when-ready — every v2 endpoint is already MCP-shaped.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="decisions"><span class="no">4</span>Six load-bearing decisions <span class="chip blue">D1–D6</span></h2>
+
+<p>The 14-agent sweep surfaced five genuine contradictions or gaps that block a coherent plan. Each becomes an explicit decision below — four are engineering calls this document makes and defends; two (D1 sign-off, D6 incentives) need human sign-off beyond it.</p>
+
+<div class="grid2">
+  <div class="card"><b class="t">D1 · Run history moves to the dedicated Neon runs project <span class="chip fix">needs user + lab sign-off</span></b>
+    <div class="fields">Issue #140 lists three options (Postgres / paid disk / accept split). The blueprint already selected and detailed option 1 at $0 (own Neon project = own free allotment; R2 <code>trace_ref</code> blobs; #134 twin pattern with the #135 ALTER lesson) — but the issue itself is still formally open. This plan treats D1 as its first step <em>because everything else stands on it</em>: durable runs, schedulable refreshes, community run history, Trace-as-asset.</div>
+    <div class="seed"><span class="y">Unlocks:</span> #140 <em>and</em> #145 · Scope note: port <code>agent_runs</code> + equity + trades + decisions + manifests + idempotency <em>and</em> <code>protocol_runs/steps</code> (the v1+v2 ledger) — the hottest tables; WAL-sidecar and lazy-ALTER traps apply.</div></div>
+
+  <div class="card"><b class="t">D2 · Virtual portfolios for the fleet; ≤3 real Alpaca paper accounts for hero agents <span class="chip ok">this doc's call</span></b>
+    <div class="fields">A fleet of N agents + an open community cannot map 1:1 onto real Alpaca paper accounts (cap = 3<sup class="i">ⁱ</sup>). So: every fleet/community agent gets an <strong>ATL virtual paper portfolio</strong> — per-agent cash/positions/fills ledger in the runs DB, fills simulated at live IEX quotes by the already-extracted pure <code>execute_actions()</code>, one shared market-data feed for everyone (QuantConnect's per-project model, ATL-flavored). The ≤3 real accounts are reserved for showcase "hero" agents — including the guidance's 8-K hero-milestone loop — where Alpaca's own fill simulation adds realism and credibility.</div>
+    <div class="seed"><span class="y">Bonus:</span> the virtual ledger's commit point is exactly where Trust-boundary v0 belongs — one gate, both paths (virtual fill or real paper order). Broker API calls stay near-zero regardless of fleet size.</div></div>
+
+  <div class="card"><b class="t">D3 · The in-house fleet dogfoods <code>/api/v2</code> — same rail as the community <span class="chip ok">this doc's call</span></b>
+    <div class="fields">Today's 7 entries run through the internal <code>llm_agent</code> strategy path; external agents use v2. Growing two parallel rails violates 统一行动原则. Going forward the fleet registers as first-class v2 agents (Agent Identity + Manifest + API key), driving runs through the same protocol the community uses — every fleet run produces a Trace, exercises the contracts, and finds community-facing bugs before the community does. The internal replay path remains for baselines and for the H6-gated daily-board refresh until leaderboard sourcing is generalized (Track B step 9).</div>
+    <div class="seed"><span class="y">Honest note:</span> leaderboard identity today joins on <code>llm_model</code> ↔ config strategy id, write-once per window — v2-sourced entries need the Evaluator-API generalization; don't hack it early.</div></div>
+
+  <div class="card"><b class="t">D4 · Scheduling: GitHub Actions cron now, DBOS after the spike <span class="chip ok">this doc's call</span></b>
+    <div class="fields">Phase 1 (post-D1): a scheduled GH Actions workflow runs the daily refresh + fleet backtests against Neon — $0, no new infra, discharges #145. Phase 2: the blueprint's DBOS spike (Week 1–2, wrapping exactly this refresh workflow as its first consumer) measures Neon CU-burn and, if green, becomes the durable in-service driver — mandatory for paper trading's wall-clock cadence, which a 6-hourly GH cron cannot provide. The Discord-bot worker (~$7/mo) is the proven fallback if an always-on process is needed before DBOS concludes.</div>
+    <div class="seed"><span class="y">Sequencing:</span> GH cron is an interim <em>addition</em> to the blueprint, not a replacement — DBOS remains the committed direction.</div></div>
+
+  <div class="card"><b class="t">D5 · H6 extends to the paper path before any paper result is published <span class="chip ok">this doc's call</span></b>
+    <div class="fields">The H6 integrity guard exists only on the backtest/leaderboard path; <code>domain/trading</code> has zero LLM instrumentation. Verified: the guard reads <code>used_llm</code>/<code>llm_decisions</code>/<code>decision_steps</code> by duck-typing — a paper decision loop that carries the same counters passes through <em>unchanged</em>. Paper runs additionally need windowed coverage (an open-ended session shouldn't be permanently tainted by one bad patch). No paper equity curve reaches the leaderboard without clearing the same ≥95% bar.</div>
+    <div class="seed"><span class="y">Why it matters:</span> "the model actually drove it" is the platform's credibility asset — the Evaluator-API/trajectory-eval first the blueprint names (H6 is the seed).</div></div>
+
+  <div class="card"><b class="t">D6 · Community incentives: flagged open, not decided here <span class="chip fix">lab decision</span></b>
+    <div class="fields">The guidance leaves cold-start mechanics (Numerai-style staking vs Alpha-Streams-style revenue share vs none) explicitly open. Track C builds everything that doesn't depend on it: frictionless onboarding, Agent Cards, contest wiring into the FinRL Contest community (85 teams in 2025, verified), a visible submissions counter against the ≥50 demand gate. The incentive choice goes to the lab with the contest proposal (3–9 mo window) — it does not block Weeks 0–4.</div>
+    <div class="seed"><span class="n">Also open:</span> SDK versioning erratum — 0.2.0 shipped v1-only despite the stated v2 gate; the v2 release becomes 0.3.0 (record it, don't relitigate it).</div></div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="wiring"><span class="no">5</span>Target wiring — one diagram 接线图</h2>
+
+<div class="arch">
+  <div class="arch-tagline">the fleet and the community ride the same rail: 事件/时刻 → v2 协议 → 执行后端 → 信任边界 → 账本与轨迹 → 评测与展示</div>
+
+  <div class="plane p-bus">
+    <div class="bar">DRIVER 驱动 <span class="tag">GH Actions cron (Week 1) → DBOS workflows (post-spike) · reaper stays for lifecycle</span></div>
+    <div class="cells">
+      <div class="cell"><b>Daily refresh</b><span>leaderboard baselines + H6-gated LLM entries (discharges #145)</span></div>
+      <div class="cell"><b>Fleet backtests</b><span>N in-house agents × daily window via v2</span></div>
+      <div class="cell"><b>Paper cadence</b><span>hourly bar-close decision cycles (Track B; needs in-service driver)</span></div>
+    </div>
+  </div>
+
+  <div class="plane p-control">
+    <div class="bar">AGENT RAIL — <code>/api/v2</code> <span class="tag">fleet + community, one contract (D3)</span></div>
+    <div class="cells">
+      <div class="cell"><b>Agent Identity</b><span>register → key → scopes → rate limits (exists)</span></div>
+      <div class="cell"><b>Runner API</b><span>context → decision → result, idempotent (exists)</span></div>
+      <div class="cell"><b>mode: paper</b><span>unlock <code>^backtest$</code> regex (Track B)</span></div>
+    </div>
+  </div>
+
+  <div class="plane p-exec">
+    <div class="bar">EXECUTION BACKENDS <span class="tag">shared lifecycle: caps · reaper · heartbeats · tombstones (backend-agnostic, exists)</span></div>
+    <div class="cells">
+      <div class="cell"><b>BacktestBackend ✓</b><span>lockstep, shipped</span></div>
+      <div class="cell"><b>PaperBackend ⚒</b><span>realtime loop: live bars → context → decision window → commit (Track B build)</span></div>
+    </div>
+  </div>
+
+  <div class="plane p-trust">
+    <div class="bar">TRUST / COMMIT BOUNDARY v0 ⚒ <span class="tag">the one BUILD item — only door to any fill, virtual or real</span></div>
+    <div class="cells">
+      <div class="cell"><b>Action Intent</b><span>JSON-only, validator.py (exists)</span></div>
+      <div class="cell"><b>Deterministic checks</b><span>7 config-declared rules (Nautilus/LEAN/vn.py-cribbed)</span></div>
+      <div class="cell"><b>Budget / permissions</b><span>per-agent caps</span></div>
+      <div class="cell"><b>Execute</b><span>virtual fill (fleet/community) · Alpaca paper order (≤3 hero agents)</span></div>
+      <div class="cell"><b>Receipt + reconcile</b><span>audit-log every allow AND deny</span></div>
+    </div>
+  </div>
+
+  <div class="plane p-data">
+    <div class="bar">LEDGERS &amp; TRACES <span class="tag">Neon runs project (D1) + R2 trace_ref blobs — durable, $0</span></div>
+    <div class="cells">
+      <div class="cell"><b>Runs / steps / decisions</b><span>survive every deploy</span></div>
+      <div class="cell"><b>Virtual portfolios</b><span>per-agent cash/positions/fills (D2)</span></div>
+      <div class="cell"><b>Traces</b><span>observation · reasoning · intent · risk check · receipt</span></div>
+    </div>
+  </div>
+
+  <div class="plane p-src">
+    <div class="bar">EVALUATE &amp; DISPLAY <span class="tag">Evaluator API + H6 · leaderboard · Agent Cards</span></div>
+    <div class="cells">
+      <div class="cell"><b>H6 gate</b><span>≥95% genuine LLM coverage, backtest + paper (D5)</span></div>
+      <div class="cell"><b>Leaderboards</b><span>contest · daily · paper section</span></div>
+      <div class="cell"><b>Agent Cards</b><span>community-facing, A2A-exportable (Track C)</span></div>
+    </div>
+  </div>
+
+  <div class="loop">
+    <span class="step">register agent</span><span class="arr">→</span>
+    <span class="step">event / tick</span><span class="arr">→</span>
+    <span class="step">context</span><span class="arr">→</span>
+    <span class="step">LLM decision</span><span class="arr">→</span>
+    <span class="step">trust gate</span><span class="arr">→</span>
+    <span class="step">fill (virtual | paper)</span><span class="arr">→</span>
+    <span class="step">trace + ledger</span><span class="arr">→</span>
+    <span class="step">evaluate (H6)</span><span class="arr">→</span>
+    <span class="step">leaderboard / card</span>
+  </div>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="tracks"><span class="no">6</span>The plan — four tracks, every step 分轨计划</h2>
+
+<h3>Track P0 · Platform rails 平台底座 <span class="chip gray">Week 0–1</span></h3>
+<ol class="tight">
+  <li><strong>P0.1 — Sign off D1</strong> (user + lab, on issue #140): runs move to the dedicated Neon project. One message, three options already framed in the issue; the blueprint's $0 resolution is the recommendation. Everything below assumes yes.</li>
+  <li><strong>P0.2 — Runs-to-Postgres migration.</strong> Apply the #134 store-factory + <code>*_postgres.py</code> twin pattern to the run tables: <code>agent_runs</code>, <code>equity_timeseries</code>, <code>trades</code>, <code>backtest_decisions</code>, <code>run_manifest</code>, <code>idempotency_keys</code>, and <code>protocol_runs/steps</code>. New env var (e.g. <code>RUNS_DATABASE_URL</code>) with startup backend logging exactly like #134's; lazy-ALTER migration path from day one (#135 lesson); never touch the seed DB in place (WAL-sidecar trap); <code>conftest.py</code> strips the env so tests stay on SQLite. Incremental equity appends (paper needs append semantics, not write-once curves) enter the schema here. <em>This is the largest single work item in the plan — treat it as its own spec.</em></li>
+  <li><strong>P0.3 — Contracts v0</strong> (discharges queue task <code>atl-platform-contracts-01</code>): six Pydantic models + exported JSON Schemas in <code>dashboard/backend/contracts/</code>, formalizing existing seeds — <code>external_agents</code>→Agent Manifest, v2 lifecycle→Runner API, <code>run_manifest</code>(+<code>trace_ref</code>)→Trace Schema, leaderboard service→Evaluator API, Agent Card aligned to A2A's signed-card shape, Tool Manifest deferred to post-Jul-28 MCP shapes. Mechanical formalization, not design.</li>
+  <li><strong>P0.4 — Wire Logfire</strong> (one-line FastAPI auto-instrument, free 10M spans/mo): ends the "logging is invisible in prod" era before the fleet starts generating load worth observing.</li>
+  <li><strong>P0.5 — Phase B design spec</strong> (the "focused design pass" the v2 spec explicitly demands): PaperBackend realtime loop, order-capable Alpaca adapter, D2 virtual-portfolio ledger schema, cadence + decision-window semantics, non-terminal restart re-attachment (the tombstone pattern covers finished runs, not resuming live ones — Alpaca/ledger is the source of truth on restart), D5 windowed H6 counters, Trust-boundary v0 check list and ordering. Written and reviewed <em>this week</em> so Track B starts Week 2 with no design debt.</li>
+  <li><strong>P0.6 — Funnel quick-fix PR batch</strong> (small, independent, immediate): fix SDK repo links (<code>Allan-Feng</code> → <code>Open-Finance-Lab</code>); fix-or-delete the broken <code>POST /paper/start-session</code>; triage frontend/SDK robustness issues #151/#152/#153/#154 into the normal flow.</li>
+</ol>
+
+<h3>Track A · Backtest fleet 回测舰队 <span class="chip gray">Week 1–2 · the loop closes here</span></h3>
+<ol class="tight">
+  <li><strong>A.1 — Schedule the daily refresh</strong> (discharges #145): GH Actions cron runs <code>refresh_daily_leaderboard.py --models</code> against Neon with CI-stored keys (secrets precedent exists since the PR #95 deploy hook). Daily-board LLM entries appear in prod for the first time, and survive deploys. H6 stays the publication gate.</li>
+  <li><strong>A.2 — Register the fleet as v2 agents</strong> (D3): each in-house model gets an Agent Identity + Manifest + key. A thin fleet-driver script (same cron) walks each agent through a daily-window v2 backtest via the protocol — dogfooding the exact community path, producing Traces, and continuously exercising caps/rate-limits/idempotency under real load.</li>
+  <li><strong>A.3 — Cost telemetry rollup:</strong> per-run <code>est_cost_usd</code> already lands in the runs DB (now durable) — add a trivial DuckDB/SQL weekly rollup so fleet spend is a number, not a feeling, before scaling N.</li>
+  <li><strong>A.4 — DBOS spike</strong> (blueprint Week 1–2, unchanged): wrap exactly one workflow — this refresh — in DBOS Transact; measure the Neon CU-burn question (~0.25 CU always-on ≈ 180 CU-hr/mo vs the 100 free); outcome decides the Phase-2 driver home (tune polling / separate Neon project / pilot box local PG). Decorator code is identical in all three outcomes.</li>
+</ol>
+
+<h3>Track B · Paper fleet 纸面交易舰队 <span class="chip gray">Week 2–4 · the real build</span></h3>
+<ol class="tight">
+  <li><strong>B.1 — Adopt the Phase B spec</strong> (from P0.5) after review.</li>
+  <li><strong>B.2 — Order-capable Alpaca adapter:</strong> add <code>POST /v2/orders</code> submission, fill-status polling (paper fills aren't instant), and rejection/error mapping beside the existing read-only client. Alpaca's own MCP server is the reference for call shapes — read it, don't adopt it (no guardrails; MCP code is frozen till Jul 28 anyway).</li>
+  <li><strong>B.3 — Virtual portfolio ledger</strong> (D2): per-agent cash/positions/fills persisted in the runs DB; fills simulated at live IEX quotes via the pure, already-tested <code>execute_actions()</code>; one shared market-data fetch per cycle serves every agent (30-symbol universe = one bars call — rate limits become a non-issue); cache keys namespaced per agent/run.</li>
+  <li><strong>B.4 — PaperBackend implements <code>ExecutionBackend</code>:</strong> realtime loop with hourly bar-close cadence — a decision window opens per cycle, late/absent decisions HOLD (mirroring backtest semantics, per-cycle rather than blocking). Plugs into the existing reaper/heartbeat/cap machinery unchanged; adds its own non-terminal restart re-attachment (rebuild from ledger + Alpaca truth, not from a tombstone).</li>
+  <li><strong>B.5 — Trust/Commit boundary v0</strong> (the guidance's one BUILD item, landing exactly where the blueprint said it would): structured Action Intent (validator.py, unchanged as the hard JSON-only wall) → 7 config-declared deterministic checks (cribbing NautilusTrader RiskEngine / LEAN buying-power + brokerage models / vn.py throttling) → per-agent budget/permissions → execute (virtual fill or real paper order) → receipt + reconciliation. <strong>Audit-log every allow and every deny.</strong> One gate, both execution paths.</li>
+  <li><strong>B.6 — H6 for paper</strong> (D5): the paper decision loop carries <code>used_llm</code>/<code>llm_decisions</code>/<code>decision_steps</code> (duck-type compatible with the existing guard, verified), windowed for open-ended sessions. No paper curve is published below the bar.</li>
+  <li><strong>B.7 — Unlock <code>mode: "paper"</code> in v2:</strong> drop the <code>^backtest$</code> regex, add paper-appropriate run caps and scope checks. The community can now request paper runs on the same contract as backtests.</li>
+  <li><strong>B.8 — Hero agents on real Alpaca paper</strong> (≤3 accounts): the showcase tier, including the guidance's hero-milestone slice — 8-K event (EDGAR poll → pgmq table, EventRadar v0) → FinSearch retrieval → decision → Trust checks → real Alpaca paper order → trace row + R2 blob → leaderboard. Thin at every stage; end-to-end beats deep.</li>
+  <li><strong>B.9 — Paper leaderboard surface:</strong> new session naming (e.g. <code>leaderboard-paper</code>) + incremental equity appends + live H6 coverage; generalize entry sourcing enough that v2-driven runs can publish (the Evaluator-API seam). The frontend Paper Trading tab becomes per-agent (virtual portfolios + hero accounts) instead of one shared account view — and <code>/paper/*</code> gets auth/ownership <em>before</em> any community-facing write path exists.</li>
+</ol>
+
+<h3>Track C · Community on-ramp 社区入口 <span class="chip gray">Week 3–4 · feeds the ≥50 demand gate</span></h3>
+<ol class="tight">
+  <li><strong>C.1 — SDK 0.3.0 on v2:</strong> migrate <code>agentictrading</code> to the v2 contract (the one open build task from the platform adoption), correct repo links (P0.6), publish. v1 stays frozen-but-working for existing integrations.</li>
+  <li><strong>C.2 — Docs that match reality:</strong> a v2-first quickstart (signup → register → key → first backtest → see yourself on the board in &lt;15 minutes), v1 explicitly marked "compatibility surface", paper-mode docs when B.7 lands, onboarding walkthrough for non-SDK users. Fix the RTD rebuild pipeline (site last built 2026-05-11 — new docs literally cannot render). All user-facing doc edits are Felix-coordinated (§10 lists every stale item found).</li>
+  <li><strong>C.3 — Agent Cards MVP:</strong> registry + leaderboard join, A2A-exportable shape (contracts from P0.3); every community agent gets a public face — purpose, limits, performance, risks, provenance.</li>
+  <li><strong>C.4 — Contest onboarding:</strong> wire the seasonal-lab framing to the FinRL Contest community (85 teams in 2025, verified — the cold-start engine); a visible submissions counter against the ≥50 demand gate; contest outputs land as platform assets, not slide decks. Incentive mechanics (D6) go to the lab as a proposal alongside this.</li>
+  <li><strong>C.5 — Discord parity:</strong> external/SDK-registered agents become selectable in <code>/agent</code>; fix the deep-link ownership bug (#151) and API timeouts (#152). Discord is the community's lowest-friction front door — it should see the same agent population as the web.</li>
+  <li><strong>C.6 — Security boundary, stated and kept:</strong> community code <strong>never executes on ATL infrastructure</strong> in this phase — agents run on their owners' machines and speak the API/SDK. Server-side hosted community agents wait for the sandbox tier (gVisor spike → Daytona/E2B), per the blueprint's execution-plane sequencing. Prompt-injection defense is sandbox-hard, never prompt-soft.</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2 id="master"><span class="no">7</span>Master step index 总步骤表 <span class="chip gray">Week 0–4 · all $0</span></h2>
+
+<div class="tablewrap"><table>
+  <tr><th class="nw">Week</th><th class="nw">Step</th><th>Deliverable</th><th>Discharges / gates</th></tr>
+  <tr><td class="nw num">0</td><td class="nw">P0.1</td><td>D1 sign-off on issue #140 (user + lab)</td><td>gates everything</td></tr>
+  <tr><td class="nw num">0–1</td><td class="nw">P0.2</td><td>Runs/traces → Neon runs project (twin pattern; append-capable equity; R2 <code>trace_ref</code> column)</td><td>#140 · unlocks #145 · Trace-as-asset</td></tr>
+  <tr><td class="nw num">0–1</td><td class="nw">P0.3</td><td>Six contracts v0 as Pydantic + JSON Schema</td><td><code>atl-platform-contracts-01</code> · guidance Week 0–1 gate</td></tr>
+  <tr><td class="nw num">0–1</td><td class="nw">P0.4</td><td>Logfire wired (1 line + auto-instrument)</td><td>observability unlock</td></tr>
+  <tr><td class="nw num">0–1</td><td class="nw">P0.5</td><td>Phase B design spec written + reviewed</td><td>the spec's own "focused design pass" requirement</td></tr>
+  <tr><td class="nw num">0–1</td><td class="nw">P0.6</td><td>Funnel quick-fix PR batch (SDK links, dead paper endpoint, #151–#154 triage)</td><td>community-funnel hygiene</td></tr>
+  <tr><td class="nw num">1</td><td class="nw">A.1</td><td>GH Actions cron: daily leaderboard refresh against Neon</td><td>#145 · first durable daily LLM entries in prod</td></tr>
+  <tr><td class="nw num">1–2</td><td class="nw">A.2</td><td>Fleet registered as v2 agents + daily fleet-driver runs</td><td>D3 · guidance Week 1–2 "close the loop" gate (backtest leg)</td></tr>
+  <tr><td class="nw num">1–2</td><td class="nw">A.3</td><td>Fleet cost rollup (DuckDB over runs DB)</td><td>spend visibility before scaling N</td></tr>
+  <tr><td class="nw num">1–2</td><td class="nw">A.4</td><td>DBOS spike wrapping the refresh workflow; CU-burn measured</td><td>blueprint Week 1–2 · decides Phase-2 driver home</td></tr>
+  <tr><td class="nw num">2</td><td class="nw">B.1–B.3</td><td>Order-capable Alpaca adapter · virtual portfolio ledger · namespaced caches</td><td>D2 · paper execution exists for the first time</td></tr>
+  <tr><td class="nw num">2–3</td><td class="nw">B.4–B.6</td><td>PaperBackend (realtime loop) · Trust boundary v0 · H6-for-paper counters</td><td>the BUILD item lands · D5</td></tr>
+  <tr><td class="nw num">3</td><td class="nw">B.7–B.8</td><td>v2 <code>mode: paper</code> unlocked · ≤3 hero agents live incl. 8-K hero slice</td><td>guidance hero milestone (thin) · EventRadar v0</td></tr>
+  <tr><td class="nw num">3–4</td><td class="nw">B.9</td><td>Paper leaderboard section + per-agent UI + <code>/paper/*</code> auth</td><td>display without integrity debt</td></tr>
+  <tr><td class="nw num">3–4</td><td class="nw">C.1–C.2</td><td>SDK 0.3.0 on v2 · v2-first docs + RTD rebuild fixed</td><td>the one open build task · funnel unblocked</td></tr>
+  <tr><td class="nw num">3–4</td><td class="nw">C.3–C.5</td><td>Agent Cards MVP · contest onboarding + submissions counter · Discord parity</td><td>guidance Week 3–4 community-minimum gate</td></tr>
+  <tr><td class="nw num">4+</td><td class="nw">C.6</td><td>Sandbox tier spike (gVisor) — only when hosting community code server-side</td><td>execution-plane sequencing, unchanged</td></tr>
+</table></div>
+
+<!-- ============================================================ -->
+<h2 id="risks"><span class="no">8</span>Risks &amp; standing rules 风险与守则</h2>
+
+<div class="tablewrap"><table>
+  <tr><th>Risk</th><th>Exposure</th><th>Mitigation baked into the plan</th></tr>
+  <tr><td><strong>#140 sign-off stalls</strong></td><td>every durable-state step blocks</td><td>P0.1 is a single decision with the analysis already done; the fallback options are named in the issue itself</td></tr>
+  <tr><td><strong>Fleet LLM spend creeps</strong></td><td>daily runs × N models × 2 boards</td><td>exact per-run cost already recorded; A.3 rollup makes it visible weekly; fleet size N is a config knob, start small (2–3 dogfood agents + existing 7 entries)</td></tr>
+  <tr><td><strong>Neon CU-burn from DBOS polling</strong></td><td>could exhaust 100 CU-hr/mo free tier</td><td>the spike measures before committing (A.4); three pre-authorized outcomes, decorator code identical in all</td></tr>
+  <tr><td><strong>Alpaca limits as fleet grows</strong><sup class="i">ⁱ</sup></td><td>200 req/min/account; data 200 req/min; ws 30 channels</td><td>D2 topology makes broker calls O(hero agents), not O(fleet); one shared bars fetch per cycle serves all agents; numbers are secondary-sourced — re-verify against primary docs at commitment time (blueprint's own cost caveat)</td></tr>
+  <tr><td><strong>MCP spec lands mid-plan (Jul 28)</strong></td><td>Phase C / Tool Manifest churn</td><td>MCP code frozen until final spec; Tool Manifest deliberately deferred in P0.3; bump <code>mcp==1.23.0</code> only after</td></tr>
+  <tr><td><strong>Paper integrity gap</strong></td><td>a rule-based fallback curve published under an LLM's name</td><td>D5: H6-equivalent windowed counters are a Track B exit criterion, not a follow-up</td></tr>
+  <tr><td><strong>Community write-paths without auth</strong></td><td><code>/paper/*</code> is unauthenticated today</td><td>B.9 gates any community-visible paper surface on auth/ownership; C.6 keeps community code off ATL infra until the sandbox tier</td></tr>
+  <tr><td><strong>Render free-tier sleep</strong></td><td>in-process loops silently die</td><td>nothing schedule-critical lives in the web dyno: cron is off-instance (A.1), durable driver is DBOS-post-spike (A.4)</td></tr>
+</table></div>
+
+<p><strong>Standing rules carried forward, verbatim force:</strong> never grow <code>/api/v1</code>; the validator's JSON-only wall never loosens (no tool_calls from agent responses, including via any future MCP façade); no "beats the market" or 千万级 claims in external narrative; EU AI Act high-risk date is <strong>2027-12-02</strong> (not 2026-08-02); the "20–40% step failures" figure stays retired; treat every price/free-tier number in this document as a snapshot to re-verify at commitment time.</p>
+
+<!-- ============================================================ -->
+<h2 id="notnow"><span class="no">9</span>What we deliberately do NOT do now 暂不做</h2>
+<ul class="tight">
+  <li><strong>Temporal, NATS, ClickHouse, E2B/Firecracker, LiteLLM gateway</strong> — all remain scale-tier destinations behind their blueprint triggers (fan-out need, real-time OLAP, adversarial volume, BYOK coexistence). Entry stays DBOS / pgmq / DuckDB / gVisor.</li>
+  <li><strong>Broker API / multi-broker / real capital</strong> — single-account Alpaca paper is the correct tier until external users bring their own brokerage accounts (9–18 mo gate).</li>
+  <li><strong>New MCP server code before Jul 28</strong> — born legacy otherwise.</li>
+  <li><strong>Hosting community code server-side</strong> — API/SDK-only until the sandbox tier exists (C.6).</li>
+  <li><strong>Leaderboard shortcuts</strong> — no publishing paper curves before H6-for-paper (D5), no hacking v2 runs into the board before the Evaluator-API seam (B.9).</li>
+  <li><strong>Cell-ization, multi-tenancy machinery, revenue features</strong> — pre-PMF over-engineering per the guidance's never-do list; the demand gate decides.</li>
+</ul>
+
+<!-- ============================================================ -->
+<h2 id="followups"><span class="no">10</span>Stale user-facing docs &amp; follow-ups 待办</h2>
+
+<p>Found during this sweep (user-facing docs are updated in coordinated passes, not piecemeal — this is the queue for that pass, extending the seven sections already flagged on 2026-07-19):</p>
+<ul class="tight">
+  <li><code>packaging/agentictrading/pyproject.toml:46-47</code> + README — Source/Issues links point at <code>Allan-Feng/AgenticTrading</code>, not <code>Open-Finance-Lab</code> (verified; fix rides in P0.6 since it's package metadata, not prose docs).</li>
+  <li><code>docs/source/lab/operating_modes.rst</code> — still says "Leaderboard <em>(in development)</em>"; it shipped 2026-07-18 (PR #132).</li>
+  <li><code>docs/api/python-sdk-quickstart.md</code> + <code>docs/source/lab/external_agents.rst</code> — teach v1 exclusively, never signal that v2 is canonical; no migration guidance.</li>
+  <li><code>packaging/agentictrading/README.md</code> — documents two v1 client generations as parallel first-class quickstarts with no steer; docs link points at the orchestration RTD.</li>
+  <li>README roadmap — presents Agent Cards / managed runtime / open ecosystem as future work with no mention that <code>/api/v2</code> exists today (and Phase B is stubbed); free-tier ephemeral-storage reality (#140) undocumented for operators.</li>
+  <li><code>docs/integrations/vnpy-simulation.md</code> — recommends an 11-trading-day window while <code>/backtest/run</code> defaults to ~90 days (issue #128 context).</li>
+  <li><strong>RTD pipeline</strong> — hosted site last rebuilt 2026-05-11; CI neither validates nor triggers docs builds; sections added since have never rendered. Fixing the rebuild is a prerequisite for every other docs fix mattering.</li>
+</ul>
+
+<p>Time-boxed follow-ups inherited from the blueprint, unchanged: <strong>Jul 28</strong> MCP spec (then bump <code>mcp</code>) · <strong>Jul 31</strong> DigitalOcean student-pack credit expiry check · Modal Academics application (up to $25K) · E2B education-pricing email + free-tier re-verification · LiteLLM pinning policy (≥1.84.0 signed, no auto-upgrade) decided before any gateway stand-up.</p>
+
+<!-- ============================================================ -->
+<h2 id="trace"><span class="no">11</span>Traceability note 溯源</h2>
+
+<div class="tablewrap"><table>
+  <tr><th>Section</th><th>Anchors to</th></tr>
+  <tr><td>§1 positioning, sequencing principle, demand gate</td><td>Guidance §1–§2, §7 (roadmap, gates, 统一行动原则)</td></tr>
+  <tr><td>§2 repo inventory</td><td>2026-07-20 verification sweep: 10 gatherer + 3 follow-up agents over the repo, GitHub issues/PRs (#140, #145, #132, #134, #150–#155), specs (<code>2026-06-23-agent-api-foundation-*</code>, <code>2026-07-13-finsearch-leaderboard-agent-design</code>); three claims hand-verified at file/line (broken paper endpoint, SDK links/version, DJIA-30 count)</td></tr>
+  <tr><td>§3.1 Alpaca constraints</td><td>Web verification 2026-07-20 (Alpaca docs, community-forum staff replies, $135M raise announcement, official MCP server repo); <sup class="i">ⁱ</sup>-marked numbers are secondary-sourced per the family convention</td></tr>
+  <tr><td>§3.2–3.3, §6 P0.2–P0.4, A.4, tier picks, §9, §10 follow-ups</td><td>Blueprint §2 (stack decision table, incl. the ledgers/run-history row resolving #140), §4 (per-area decisions &amp; rejected alternatives), §6 (Week 0–4 engineering plan), §7 (time-sensitive actions)</td></tr>
+  <tr><td>§5 diagram, B.5 Trust boundary v0, hero slice</td><td>Guidance §3 plane 5 + §4.1 (the BUILD item), §7 hero milestone; blueprint Trust-boundary row (Nautilus/LEAN/vn.py cribs, allow-AND-deny audit rule)</td></tr>
+  <tr><td>§4 D5, B.6, §8 integrity row</td><td>H6 guard mechanics verified in repo (<code>domain/leaderboard/service.py</code>, duck-typed attribute reads); blueprint §4.8 (trajectory evaluation — generalizing H6 through the Evaluator API as ATL's first)</td></tr>
+</table></div>
+
+<p><strong>New in this document</strong> (not restated from the anchors): the D2 virtual-portfolio topology, forced by the newly verified 3-account cap<sup class="i">ⁱ</sup> and modeled on QuantConnect's per-project scoping; the D3 fleet-dogfoods-v2 decision (the alignment rule applied to our own fleet); the D4 GitHub-Actions-before-DBOS interim (an addition in front of the blueprint's DBOS sequencing, not a replacement); the B.9 leaderboard-sourcing schema analysis; and the verified inventory of funnel breakages (§2, §10). <strong>Deliberate deviations from the anchors: none.</strong> Where the guidance and the live issue tracker disagreed (#140 "adopted" vs formally open), this plan surfaces the discrepancy and makes sign-off its literal first step rather than assuming it. The SDK 0.2.0/v2-gate contradiction is recorded as an erratum (v2 ships as 0.3.0) rather than relitigated.</p>
+
+<footer>
+  ATL 智能体接线计划 · Agent Fleet Wiring Plan · 2026-07-20 · third in the series after ATL-Platform-Guidance-2026-07 and ATL-Tech-Stack-Blueprint-2026-07 · all infrastructure $0 through Week 4 · superscript ⁱ = secondary-sourced, re-verify at commitment time · ᵛ = vendor-reported
+</footer>
+
+</div>
+</body>
+</html>
