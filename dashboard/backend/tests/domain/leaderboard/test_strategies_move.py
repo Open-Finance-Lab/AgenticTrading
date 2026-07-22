@@ -7,6 +7,7 @@ behavior.
 
 import json
 
+import pandas as pd
 import pytest
 
 from dashboard.backend.paths import CONFIG_DIR
@@ -147,3 +148,103 @@ def test_only_nemotron_leaderboard_entry_disables_reasoning():
         for strategy in strategies
         if strategy["id"] != "nemotron_3_nano_30b"
     )
+
+
+@pytest.mark.parametrize("temperature", [0, 0.5, 2])
+def test_llm_agent_accepts_valid_temperature(temperature):
+    strategy = LLMAgentStrategy({"temperature": temperature})
+    assert strategy.temperature == temperature
+
+
+def test_llm_agent_without_temperature_keeps_provider_default():
+    strategy = LLMAgentStrategy({})
+    assert strategy.temperature is None
+
+
+@pytest.mark.parametrize(
+    "temperature",
+    ["0", True, False, -0.1, 2.1, float("nan"), float("inf"), -float("inf")],
+)
+def test_llm_agent_rejects_invalid_temperature(temperature):
+    with pytest.raises(ValueError, match="temperature"):
+        LLMAgentStrategy({"temperature": temperature})
+
+
+def test_only_nemotron_leaderboard_entry_pins_temperature():
+    config = json.loads((CONFIG_DIR / "leaderboard.json").read_text(encoding="utf-8"))
+    strategies = config["strategies"]
+    nemotron = next(s for s in strategies if s["id"] == "nemotron_3_nano_30b")
+
+    assert nemotron["temperature"] == 0
+    assert all(
+        "temperature" not in strategy
+        for strategy in strategies
+        if strategy["id"] != "nemotron_3_nano_30b"
+    )
+
+
+@pytest.mark.parametrize(
+    ("config_temperature", "expected"),
+    [(0, 0), (None, None)],
+)
+def test_llm_agent_passes_temperature_to_portfolio_manager(
+    monkeypatch,
+    config_temperature,
+    expected,
+):
+    captured = []
+    timestamp = pd.Timestamp("2026-04-15 14:00:00+00:00")
+    bars = pd.DataFrame(
+        {
+            "open": [100.0],
+            "high": [101.0],
+            "low": [99.0],
+            "close": [100.0],
+            "volume": [1000],
+            "rsi": [50.0],
+            "macd": [0.0],
+            "macd_signal": [0.0],
+            "sma20": [100.0],
+            "sma50": [100.0],
+            "bb_upper": [110.0],
+            "bb_lower": [90.0],
+        },
+        index=[timestamp],
+    )
+
+    def _fake_decision(self, state, client, **kwargs):
+        captured.append(kwargs)
+        return {"actions": []}
+
+    monkeypatch.setattr(
+        llm_agent_module.TechnicalIndicators,
+        "calculate_indicators",
+        staticmethod(lambda frame: frame),
+    )
+    monkeypatch.setattr(
+        llm_agent_module.LLMAgentStrategy,
+        "_make_client",
+        lambda self: object(),
+    )
+    monkeypatch.setattr(
+        llm_agent_module.PortfolioManager,
+        "make_trading_decision_with_llm",
+        _fake_decision,
+    )
+
+    strategy_config = {
+        "symbols": ["AAPL"],
+        "model_id": "test-model",
+    }
+    if config_temperature is not None:
+        strategy_config["temperature"] = config_temperature
+    strategy = LLMAgentStrategy(strategy_config)
+    strategy.run(
+        {"AAPL": bars},
+        "2026-04-15",
+        "2026-04-15",
+        10000,
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["temperature"] == expected

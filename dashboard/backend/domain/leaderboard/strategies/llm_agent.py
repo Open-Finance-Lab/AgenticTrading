@@ -13,6 +13,7 @@ web request. It records token usage / cost so cost can be shown per run.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -42,6 +43,18 @@ class LLMAgentStrategy(BaselineStrategy):
         # Omitted → env auto-detect (CommonStack key prefers CommonStack).
         self.integration = self.config.get("integration")
         self.reasoning_effort = self.config.get("reasoning_effort")
+        temperature = self.config.get("temperature")
+        if temperature is not None and (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature)
+            or not 0 <= temperature <= 2
+        ):
+            raise ValueError(
+                "temperature must be a finite number between 0 and 2; "
+                f"got {temperature!r}"
+            )
+        self.temperature = temperature
         # Populated during run() for reporting / cost tracking.
         self.llm_calls = 0
         self.llm_decisions = 0  # steps the model actually drove (H6 guard numerator)
@@ -129,7 +142,11 @@ class LLMAgentStrategy(BaselineStrategy):
 
             if client is not None:
                 decision = manager.make_trading_decision_with_llm(
-                    state, client, mode=self.mode, model=model_id
+                    state,
+                    client,
+                    mode=self.mode,
+                    model=model_id,
+                    temperature=self.temperature,
                 )
             else:
                 decision = manager.make_trading_decision(state)
