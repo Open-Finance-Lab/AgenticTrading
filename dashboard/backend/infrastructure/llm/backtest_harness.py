@@ -148,23 +148,31 @@ def _parse_max_output_tokens(raw: Optional[str]) -> int:
 DEFAULT_MAX_OUTPUT_TOKENS = _parse_max_output_tokens(os.getenv("LLM_MAX_OUTPUT_TOKENS"))
 
 
-def request_trading_decision(client, *, prompt: str, model: Optional[str] = None, max_tokens: Optional[int] = None):
+def request_trading_decision(
+    client,
+    *,
+    prompt: str,
+    model: Optional[str] = None,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+):
     """Submit the prompt to the Anthropic client and return the raw response.
 
     Mirrors the original ``llm_client.messages.create(...)`` call exactly: same
     model resolution (``model or LLM_MODEL_NAME``), ``max_tokens=2000``, system
     prompt, and single user message. Exceptions are intentionally NOT caught here
     so the legacy wrapper's outer handler can fall back to rule-based logic,
-    exactly as before.
+    exactly as before. Temperature is omitted unless explicitly configured.
     """
-    return client.messages.create(
-        model=model or LLM_MODEL_NAME,
-        max_tokens=max_tokens or DEFAULT_MAX_OUTPUT_TOKENS,  # Reduced from 3000 (saves tokens)
-        system=SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": prompt}
-        ]
-    )
+    request_kwargs = {
+        "model": model or LLM_MODEL_NAME,
+        "max_tokens": max_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
+        "system": SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if temperature is not None:
+        request_kwargs["temperature"] = temperature
+    return client.messages.create(**request_kwargs)
 
 
 def extract_response_text(response) -> str:
