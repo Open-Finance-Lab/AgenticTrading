@@ -28,6 +28,7 @@ from dashboard.backend.domain.leaderboard.baselines import (
 )
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
 from dashboard.backend.domain.leaderboard.strategies import get_strategy
+from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
 from dashboard.backend.paths import CONFIG_DIR, DATA_DIR
 
 LEADERBOARD_MODE = "leaderboard"
@@ -492,6 +493,38 @@ def _reject_if_llm_fallback(
         )
 
 
+def _llm_run_metadata(
+    entry_id: str,
+    entry: Dict[str, Any],
+    strategy_impl: Any,
+    *,
+    model_id: Optional[str],
+    initial_capital: float,
+    start_date: str,
+    end_date: str,
+) -> Optional[Dict[str, Any]]:
+    """Snapshot effective config for a manually deployed LLM run."""
+    if entry.get("strategy") != "llm_agent":
+        return None
+    return {
+        "entry_id": entry_id,
+        "model_id": model_id,
+        "integration": getattr(
+            strategy_impl, "integration", entry.get("integration")
+        ),
+        "temperature": getattr(
+            strategy_impl, "temperature", entry.get("temperature")
+        ),
+        "reasoning_effort": getattr(
+            strategy_impl, "reasoning_effort", entry.get("reasoning_effort")
+        ),
+        "llm_max_output_tokens": llm_harness.DEFAULT_MAX_OUTPUT_TOKENS,
+        "initial_capital": initial_capital,
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+
+
 def deploy_model_run(
     entry_id: str,
     *,
@@ -599,6 +632,15 @@ def deploy_model_run(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         est_cost_usd=est_cost,
+        metadata=_llm_run_metadata(
+            entry_id,
+            entry,
+            strategy_impl,
+            model_id=model_id,
+            initial_capital=initial_capital,
+            start_date=start_date,
+            end_date=end_date,
+        ),
     )
     db.insert_equity_points(run_id, curve)
 

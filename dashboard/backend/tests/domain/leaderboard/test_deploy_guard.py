@@ -10,6 +10,7 @@ import pytest
 
 from dashboard.backend.database import BacktestDatabase
 from dashboard.backend.domain.leaderboard import service as canon_service
+from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
 
 
 _CONFIG = {
@@ -191,11 +192,103 @@ def test_publishes_real_llm_run(guard_env, monkeypatch):
     assert guard_env.get_run(result["run_id"]) is not None
 
 
+def test_deploy_records_effective_llm_run_metadata(guard_env, monkeypatch):
+    config = {
+        "session_id": "lb-metadata-test",
+        "start_date": "2026-04-15",
+        "end_date": "2026-05-15",
+        "initial_capital": 10000,
+        "strategies": [
+            {
+                "id": "nemotron_3_nano_30b",
+                "name": "Nemotron",
+                "model": "Nemotron 3 Nano 30B",
+                "strategy": "llm_agent",
+                "integration": "openrouter",
+                "model_id": "configured-model-id",
+                "temperature": 0,
+                "reasoning_effort": "none",
+            },
+        ],
+    }
+    monkeypatch.setattr(canon_service, "load_leaderboard_config", lambda: config)
+    monkeypatch.setattr(llm_harness, "DEFAULT_MAX_OUTPUT_TOKENS", 1234)
+    _use(
+        monkeypatch,
+        FakeLLMStrategy(
+            used_llm=True,
+            llm_calls=5,
+            model_id="resolved-model-id",
+        ),
+    )
+
+    result = canon_service.deploy_model_run(
+        "nemotron_3_nano_30b",
+        force_refresh=True,
+        start_date="2026-04-16",
+        end_date="2026-04-30",
+    )
+
+    assert guard_env.get_run(result["run_id"])["metadata"] == {
+        "entry_id": "nemotron_3_nano_30b",
+        "model_id": "resolved-model-id",
+        "integration": "openrouter",
+        "temperature": 0,
+        "reasoning_effort": "none",
+        "llm_max_output_tokens": 1234,
+        "initial_capital": 10000.0,
+        "start_date": "2026-04-16",
+        "end_date": "2026-04-30",
+    }
+
+
+def test_deploy_records_null_for_provider_default_parameters(guard_env, monkeypatch):
+    _use(monkeypatch, FakeLLMStrategy(used_llm=True, llm_calls=5))
+    result = canon_service.deploy_model_run("claude_haiku_4_5", force_refresh=True)
+
+    metadata = guard_env.get_run(result["run_id"])["metadata"]
+    assert metadata["temperature"] is None
+    assert metadata["reasoning_effort"] is None
+
+
+def test_cached_historical_run_is_not_backfilled_or_recomputed(
+    guard_env,
+    monkeypatch,
+):
+    run_id = canon_service._run_id(
+        "claude_haiku_4_5",
+        "2026-04-15",
+        "2026-05-15",
+    )
+    guard_env.insert_run(
+        run_id=run_id,
+        session_id="lb-guard-test",
+        agent_name="Haiku",
+        mode="leaderboard",
+        start_date="2026-04-15",
+        end_date="2026-05-15",
+        initial_equity=100000,
+        llm_model="claude_haiku_4_5",
+    )
+    monkeypatch.setattr(
+        canon_service,
+        "get_strategy",
+        lambda entry: pytest.fail("cached run must not recompute"),
+    )
+
+    result = canon_service.deploy_model_run("claude_haiku_4_5")
+
+    assert result["cached"] is True
+    assert guard_env.get_run(run_id)["metadata"] is None
+
+
 def test_baseline_without_used_llm_publishes(guard_env, monkeypatch):
     # A rule-based baseline legitimately makes 0 LLM calls and must NOT be blocked.
     _use(monkeypatch, FakeBaseline())
     result = canon_service.deploy_model_run("djia_index", force_refresh=True)
-    assert guard_env.get_run(result["run_id"]) is not None
+    run = guard_env.get_run(result["run_id"])
+    assert run is not None
+    assert run["metadata"] is None
 
 
 def test_ensure_leaderboard_runs_also_guards_llm_fallback(tmp_path, monkeypatch):
