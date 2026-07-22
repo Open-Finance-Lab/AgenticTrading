@@ -52,6 +52,7 @@ class BacktestDatabase:
         enable_wal(self.db_path)
         self._init_schema()
         self._migrate_schema()  # Handle existing DBs
+        self._ensure_equity_timeseries_uniqueness()
 
     def _get_connection(self):
         """Get database connection."""
@@ -320,6 +321,61 @@ class BacktestDatabase:
             conn.close()
         except Exception as e:
             print(f"⚠️ Trades migration retry warning: {e}")
+
+    @staticmethod
+    def _has_equity_timeseries_unique_index(cursor) -> bool:
+        """Return whether all equity points are protected by the natural key."""
+        cursor.execute("PRAGMA index_list(equity_timeseries)")
+        for index in cursor.fetchall():
+            is_unique = bool(index[2])
+            is_partial = bool(index[4]) if len(index) > 4 else False
+            if not is_unique or is_partial:
+                continue
+
+            index_name = str(index[1]).replace('"', '""')
+            cursor.execute(f'PRAGMA index_info("{index_name}")')
+            columns = [row[2] for row in cursor.fetchall()]
+            if columns == ["run_id", "timestamp"]:
+                return True
+        return False
+
+    def _ensure_equity_timeseries_uniqueness(self) -> None:
+        """Upgrade legacy equity tables so reruns replace existing points."""
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            if self._has_equity_timeseries_unique_index(cursor):
+                return
+
+            try:
+                with conn:
+                    cursor.execute(
+                        """
+                        DELETE FROM equity_timeseries
+                        WHERE id NOT IN (
+                            SELECT MAX(id)
+                            FROM equity_timeseries
+                            GROUP BY run_id, timestamp
+                        )
+                        """
+                    )
+                    cursor.execute(
+                        """
+                        CREATE UNIQUE INDEX IF NOT EXISTS
+                            uq_equity_timeseries_run_timestamp
+                        ON equity_timeseries(run_id, timestamp)
+                        """
+                    )
+                    if not self._has_equity_timeseries_unique_index(cursor):
+                        raise RuntimeError(
+                            "equity_timeseries unique constraint migration failed"
+                        )
+            except sqlite3.Error as exc:
+                raise RuntimeError(
+                    "equity_timeseries unique constraint migration failed"
+                ) from exc
+        finally:
+            conn.close()
 
     def _migrate_trades_schema(self, cursor) -> None:
         """Upgrade legacy trades table (shares/action/total_value) to new columns."""
