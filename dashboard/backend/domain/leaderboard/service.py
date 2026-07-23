@@ -399,6 +399,18 @@ def ensure_leaderboard_runs(
             max_drawdown=metrics["max_drawdown"],
             num_trades=strategy_impl.num_trades(),
             llm_model=strategy_id,
+            metadata=_llm_run_metadata(
+                strategy_id,
+                strategy,
+                strategy_impl,
+                model_id=(
+                    getattr(strategy_impl, "model_id", None)
+                    or strategy.get("model_id")
+                ),
+                initial_capital=initial_capital,
+                start_date=start_date,
+                end_date=end_date,
+            ),
         )
         db.insert_equity_points(run_id, curve)
         created += 1
@@ -503,7 +515,7 @@ def _llm_run_metadata(
     start_date: str,
     end_date: str,
 ) -> Optional[Dict[str, Any]]:
-    """Snapshot effective config for a manually deployed LLM run."""
+    """Snapshot effective config for a published LLM run (``None`` otherwise)."""
     if entry.get("strategy") != "llm_agent":
         return None
     return {

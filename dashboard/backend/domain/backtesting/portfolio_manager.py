@@ -25,7 +25,7 @@ This module is domain-level orchestration: it must NOT import dashboard scripts,
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -113,7 +113,7 @@ class PortfolioManager:
         model: str = None,
         strategy_prompt: str = None,
         pipeline: List[Dict] = None,
-        temperature: float = None,
+        temperature: Optional[float] = None,
     ) -> Dict:
         """
         Make trading decisions using Claude LLM with technical indicators.

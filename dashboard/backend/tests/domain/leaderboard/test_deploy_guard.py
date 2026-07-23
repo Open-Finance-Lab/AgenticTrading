@@ -282,6 +282,61 @@ def test_cached_historical_run_is_not_backfilled_or_recomputed(
     assert guard_env.get_run(run_id)["metadata"] is None
 
 
+def test_ensure_leaderboard_runs_records_llm_metadata(tmp_path, monkeypatch):
+    """Provenance must not depend on *which* path published the run. The
+    auto-compute path already guards against a misconfigured LLM entry landing
+    here, so it has to record that entry's config too."""
+    cfg = {
+        "session_id": "lb-auto-meta",
+        "start_date": "2026-04-15",
+        "end_date": "2026-05-15",
+        "initial_capital": 10000,
+        "strategies": [
+            {"id": "auto_llm", "name": "Auto", "model": "Auto",
+             "strategy": "llm_agent", "integration": "openrouter",
+             "temperature": 0, "reasoning_effort": "none",
+             "auto_compute": True},
+            {"id": "djia_index", "name": "DJIA", "model": "DJIA",
+             "strategy": "market_index"},
+        ],
+    }
+    test_db = BacktestDatabase(db_path=tmp_path / "lb.db")
+    monkeypatch.setattr(canon_service, "db", test_db)
+    monkeypatch.setattr(canon_service, "load_leaderboard_config", lambda: dict(cfg))
+    monkeypatch.setattr(llm_harness, "DEFAULT_MAX_OUTPUT_TOKENS", 1234)
+    monkeypatch.setattr(canon_service, "fetch_hourly_bars", lambda syms, s, e: {"AAPL": object()})
+    monkeypatch.setattr(canon_service, "calc_metrics", lambda curve, cap: {
+        "initial_equity": cap, "final_equity": cap, "total_return": 0.0,
+        "sharpe_ratio": 0.0, "max_drawdown": 0.0,
+    })
+    monkeypatch.setattr(
+        canon_service,
+        "get_strategy",
+        lambda entry: FakeBaseline() if entry["id"] == "djia_index"
+        else FakeLLMStrategy(used_llm=True, llm_calls=5, model_id="resolved-model-id"),
+    )
+
+    canon_service.ensure_leaderboard_runs(force_refresh=True)
+
+    llm_run = test_db.get_run(canon_service._run_id("auto_llm", "2026-04-15", "2026-05-15"))
+    assert llm_run["metadata"] == {
+        "entry_id": "auto_llm",
+        "model_id": "resolved-model-id",
+        "integration": "openrouter",
+        "temperature": 0,
+        "reasoning_effort": "none",
+        "llm_max_output_tokens": 1234,
+        "initial_capital": 10000.0,
+        "start_date": "2026-04-15",
+        "end_date": "2026-05-15",
+    }
+    # A rule-based baseline on the same path stays metadata-free.
+    baseline_run = test_db.get_run(
+        canon_service._run_id("djia_index", "2026-04-15", "2026-05-15")
+    )
+    assert baseline_run["metadata"] is None
+
+
 def test_baseline_without_used_llm_publishes(guard_env, monkeypatch):
     # A rule-based baseline legitimately makes 0 LLM calls and must NOT be blocked.
     _use(monkeypatch, FakeBaseline())

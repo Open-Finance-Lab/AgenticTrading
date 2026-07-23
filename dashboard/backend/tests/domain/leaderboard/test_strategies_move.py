@@ -150,7 +150,7 @@ def test_only_nemotron_leaderboard_entry_disables_reasoning():
     )
 
 
-@pytest.mark.parametrize("temperature", [0, 0.5, 2])
+@pytest.mark.parametrize("temperature", [0, 0.5, 1])
 def test_llm_agent_accepts_valid_temperature(temperature):
     strategy = LLMAgentStrategy({"temperature": temperature})
     assert strategy.temperature == temperature
@@ -163,11 +163,29 @@ def test_llm_agent_without_temperature_keeps_provider_default():
 
 @pytest.mark.parametrize(
     "temperature",
-    ["0", True, False, -0.1, 2.1, float("nan"), float("inf"), -float("inf")],
+    ["0", True, False, -0.1, 1.1, 2, float("nan"), float("inf"), -float("inf")],
 )
 def test_llm_agent_rejects_invalid_temperature(temperature):
+    """Every gateway here speaks the Anthropic Messages shape, which caps
+    ``temperature`` at 1.0 — accepting the OpenAI 0–2 range would only turn a
+    typo into a 400 at request time, i.e. a silent rule-based fallback."""
     with pytest.raises(ValueError, match="temperature"):
         LLMAgentStrategy({"temperature": temperature})
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "max"])
+def test_llm_agent_rejects_temperature_with_reasoning_enabled(effort):
+    """Anthropic rejects ``temperature`` alongside extended thinking, and the
+    OpenRouter wrapper injects ``thinking`` whenever the effort enables it.
+    Catch the conflict in config, not as a per-request 400."""
+    with pytest.raises(ValueError, match="reasoning_effort"):
+        LLMAgentStrategy({"temperature": 0, "reasoning_effort": effort})
+
+
+@pytest.mark.parametrize("effort", ["none", "off", "disabled", "auto", "default"])
+def test_llm_agent_allows_temperature_when_reasoning_off_or_passthrough(effort):
+    strategy = LLMAgentStrategy({"temperature": 0, "reasoning_effort": effort})
+    assert strategy.temperature == 0
 
 
 def test_only_nemotron_leaderboard_entry_pins_temperature():

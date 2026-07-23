@@ -127,11 +127,20 @@ pytest dashboard/backend/tests/domain/leaderboard/test_strategies_move.py -q
 
 ```text
 字段缺失或 null -> None
-int/float 且有限、0 <= value <= 2 -> float 或原数值
+int/float 且有限、0 <= value <= 1 -> float 或原数值
 其他情况 -> ValueError
 ```
 
 Python 的 `bool` 是 `int` 子类，必须在数字判断前单独拒绝。不得静默改成默认值，否则错误实验仍会被发布。
+
+**（评审修订）上界取 1 而不是 2。** 这里所有 gateway（commonstack / openrouter / anthropic）最终都走
+Anthropic Messages 形状的 `client.messages.create`，其 `temperature` 上限是 1.0。放行 OpenAI 的 0–2 区间
+只会把配置笔误推迟成每步一次的 400，进而静默回退到 rule-based，最后由 H6 guard 拦下——一个很难查的失败模式。
+
+**（评审修订）与 reasoning 的互斥检查。** Anthropic 不允许 `temperature` 与 extended thinking 同时出现，而
+OpenRouter 包装层会在 effort 启用推理时注入 `thinking`。因此配置里显式写了非关闭、非透传（`auto`/`default`）
+的 `reasoning_effort` 时，同时固定 `temperature` 直接报错。`reasoning_effort` 缺省时取决于环境变量，
+配置期无法判定，按“未知”放行。
 
 ### Step 4：连接策略与决策层
 
