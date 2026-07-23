@@ -278,6 +278,7 @@ def test_get_leaderboard_equity_curve_is_hourly_with_open_tick(isolated_service)
         [
             {"timestamp": "2026-04-15T15:00:00", "equity": 100200, "cash": 0, "positions_value": 100200},
         ],
+        replace=False,  # extend the seeded curve; a rerun would replace it
     )
     result = canon_service.get_leaderboard()
     curve = result["entries"][0]["equity_curve"]

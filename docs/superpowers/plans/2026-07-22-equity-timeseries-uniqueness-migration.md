@@ -16,10 +16,15 @@
 - 不修改 Nemotron 配置、提示词、解析、交易、指标和排行榜 API。
 - 去重固定保留同组 `MAX(id)`，即最后写入的记录。
 - 删除重复数据和创建唯一索引必须在同一事务中完成。
-- 迁移失败必须阻止数据库继续初始化，不能只打印 warning。
+- 数据问题（残留重复、索引名被占用）导致迁移失败时必须阻止数据库继续初始化，不能只打印 warning。
+- **（评审修订）** 数据库被其他进程锁住属于瞬时故障，不算数据问题：重试一次后降级为 warning 并推迟到下次启动。
+  `database.py` 末尾是模块级单例 `db = BacktestDatabase()`，在这里硬失败等于让 `import` 失败、整个应用无法启动。
 - 自动测试使用临时数据库，不连接网络，不产生 OpenRouter 费用。
 - 真实验证只操作本地实验数据库的临时副本。
-- 不提交 `dashboard/storage/data/backtest.db` 或任何 API Key。
+- 不提交任何 API Key。
+- **（评审修订）** `dashboard/storage/data/backtest.db` 需要一并迁移后提交：只做运行时迁移会让每次本地
+  `uvicorn` 都静默改写这个被 Git 跟踪的二进制文件。提交前用 `.dump` 逐行 diff 证明改动范围
+  （实测：仅删除 483 行 `equity_timeseries` INSERT + 新增 1 个唯一索引）。
 - 代码和测试作为一个独立提交，便于审阅和回滚。
 
 ---

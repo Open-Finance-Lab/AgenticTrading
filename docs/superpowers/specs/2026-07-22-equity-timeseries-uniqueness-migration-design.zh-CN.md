@@ -86,8 +86,19 @@ BacktestDatabase 打开数据库
 
 - 两步成功后才提交；
 - 任意一步失败时整体回滚，不留下“已删除但未加保护”的半迁移状态；
-- 唯一性迁移失败时向调用方抛出异常，停止 `BacktestDatabase` 初始化；
+- 唯一性迁移因**数据问题**失败时向调用方抛出异常，停止 `BacktestDatabase` 初始化；
 - 不沿用现有普通迁移只打印 warning 后继续运行的行为，因为继续运行会让排行榜展示已知错误的数据。
+
+**（评审修订）失败分类。** 上述硬失败只针对数据问题（`sqlite3.IntegrityError`、索引名被非唯一索引占用
+导致创建后校验不通过）。`sqlite3.OperationalError`（`database is locked`）是另一类：
+
+- 它是瞬时的——回测 CLI、Discord bot 或另一个 uvicorn 进程正持有写锁；
+- `database.py` 末尾是模块级 `db = BacktestDatabase()`，在这里抛异常等于 `import dashboard.backend.database` 失败，应用完全无法启动；
+- 相邻的既有迁移在同样条件下本来就是打印 warning 后继续。
+
+因此对 `OperationalError` 用新连接重试一次（每次连接有独立的 busy timeout），仍失败则打印
+`⚠️ equity_timeseries uniqueness migration deferred: ...` 并推迟到下次启动。所有 `equity_timeseries`
+写入方本来就用 `INSERT OR REPLACE`，推迟一次不会比迁移存在之前更糟。
 
 数据库文件本身不存在 `equity_timeseries` 表时，正常初始化会先创建该表及其唯一约束，因此不会进入清理分支。已经迁移成功的数据库再次启动时检测到等价唯一约束并跳过，保证迁移幂等。
 

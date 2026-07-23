@@ -117,3 +117,117 @@ def test_failed_uniqueness_migration_rolls_back_and_stops_startup(tmp_path):
         BacktestDatabase(path)
 
     assert len(_raw_points(path)) == 2
+
+
+def test_transient_lock_is_retried_then_deferred(tmp_path, monkeypatch, capsys):
+    """A busy database must not take the app down.
+
+    ``database.py`` ends with a module-level ``db = BacktestDatabase()``, so a
+    hard failure here aborts *import* of the module. Lock contention is
+    transient (a backtest CLI or the Discord bot holding the write lock), and
+    the migrations above it degrade on exactly the same condition.
+    """
+    path = tmp_path / "locked-equity.db"
+    _create_legacy_database(path)
+    attempts = []
+
+    def _locked(self, conn, cursor):
+        attempts.append(1)
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        BacktestDatabase, "_apply_equity_timeseries_uniqueness", _locked
+    )
+
+    BacktestDatabase(path)  # must not raise
+
+    assert len(attempts) == 2, "a locked write should be retried once"
+    assert "equity_timeseries uniqueness migration deferred" in capsys.readouterr().out
+    # Deferred, not half-applied: the duplicates are still there for next boot.
+    assert len(_raw_points(path)) == 2
+
+
+def test_data_error_still_fails_startup(tmp_path, monkeypatch):
+    """Only *transient* errors degrade — a genuine data problem still aborts."""
+    path = tmp_path / "integrity-equity.db"
+    _create_legacy_database(path)
+
+    def _integrity(self, conn, cursor):
+        raise sqlite3.IntegrityError("UNIQUE constraint failed")
+
+    monkeypatch.setattr(
+        BacktestDatabase, "_apply_equity_timeseries_uniqueness", _integrity
+    )
+
+    with pytest.raises(RuntimeError, match="equity_timeseries.*unique"):
+        BacktestDatabase(path)
+
+
+def _point(timestamp, equity):
+    return {
+        "timestamp": timestamp,
+        "equity": equity,
+        "cash": equity / 2,
+        "positions_value": equity / 2,
+        "daily_return": 0.0,
+    }
+
+
+def test_rerun_replaces_curve_and_drops_stale_points(tmp_path):
+    """The unique key collapses *repeated* timestamps; it cannot remove points
+    the new curve no longer produces. A rerun must replace, not merge."""
+    db = BacktestDatabase(tmp_path / "rerun.db")
+    db.insert_equity_points(
+        RUN_ID,
+        [
+            _point("2026-04-15T14:00:00", 100.0),
+            _point("2026-04-15T15:00:00", 101.0),
+            _point("2026-04-15T16:00:00", 102.0),
+        ],
+    )
+
+    db.insert_equity_points(
+        RUN_ID,
+        [
+            _point("2026-04-15T14:00:00", 200.0),
+            _point("2026-04-15T15:00:00", 201.0),
+        ],
+    )
+
+    curve = db.get_equity_curve(RUN_ID)
+    assert [p["timestamp"] for p in curve] == [
+        "2026-04-15T14:00:00",
+        "2026-04-15T15:00:00",
+    ]
+    assert [p["equity"] for p in curve] == [200.0, 201.0]
+
+
+def test_rerun_leaves_other_runs_untouched(tmp_path):
+    db = BacktestDatabase(tmp_path / "rerun-scope.db")
+    db.insert_equity_points("other-run", [_point("2026-04-15T14:00:00", 500.0)])
+    db.insert_equity_points(RUN_ID, [_point("2026-04-15T14:00:00", 100.0)])
+
+    db.insert_equity_points(RUN_ID, [_point("2026-04-15T15:00:00", 300.0)])
+
+    assert len(db.get_equity_curve("other-run")) == 1
+    assert [p["equity"] for p in db.get_equity_curve(RUN_ID)] == [300.0]
+
+
+def test_empty_curve_is_a_noop_not_a_wipe(tmp_path):
+    db = BacktestDatabase(tmp_path / "empty-curve.db")
+    db.insert_equity_points(RUN_ID, [_point("2026-04-15T14:00:00", 100.0)])
+
+    db.insert_equity_points(RUN_ID, [])
+
+    assert len(db.get_equity_curve(RUN_ID)) == 1
+
+
+def test_replace_false_appends_to_an_existing_curve(tmp_path):
+    db = BacktestDatabase(tmp_path / "append.db")
+    db.insert_equity_points(RUN_ID, [_point("2026-04-15T14:00:00", 100.0)])
+
+    db.insert_equity_points(
+        RUN_ID, [_point("2026-04-15T15:00:00", 101.0)], replace=False
+    )
+
+    assert [p["equity"] for p in db.get_equity_curve(RUN_ID)] == [100.0, 101.0]
