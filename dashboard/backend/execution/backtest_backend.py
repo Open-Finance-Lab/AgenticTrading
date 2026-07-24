@@ -84,6 +84,23 @@ class BacktestBackend(ExecutionBackend):
         self.session.load_market_data()
 
     def start_background_load(self) -> None:
+        # Fast path (runs under the shared create lock — peek only, never
+        # get_dataset): a resident dataset skips the loader thread entirely.
+        dataset = ext.market_data_store.peek(
+            DJIA_30, self.session.start_date, self.session.end_date)
+        if dataset is not None:
+            self.session.adopt_dataset(dataset)
+            # Mirror the background loader's post-load row transition, with the
+            # same don't-resurrect-a-terminal-run guard.
+            with self.session._step_lock:
+                status_now = self.session.status
+            if status_now not in TERMINAL_STATUSES:
+                try:
+                    run_repo.run_store.update_run(self.run_id, status="running")
+                except Exception:
+                    pass  # best-effort; both statuses count as active anyway
+            return
+
         def _load() -> None:
             try:
                 self.session.load_market_data()

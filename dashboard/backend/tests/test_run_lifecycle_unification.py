@@ -546,6 +546,10 @@ def test_v2_row_transitions_to_running_after_load(monkeypatch):
         def __init__(self):
             self._step_lock = threading.Lock()
             self.status = "loading"
+            # start_background_load's peek fast path reads these; the store is
+            # reset per test, so peek cold-misses and _load runs as intended.
+            self.start_date = "2026-04-15"
+            self.end_date = "2026-04-16"
 
         def load_market_data(self):
             self.status = "waiting_decision"

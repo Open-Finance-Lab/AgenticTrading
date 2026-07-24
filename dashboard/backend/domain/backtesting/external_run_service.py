@@ -780,20 +780,29 @@ def start_backtest(
     with _lock:
         _sessions[backtest_id] = session
 
-    def _load_in_background() -> None:
-        # load_market_data() constructs AlpacaDataLoader; missing credentials
-        # now raise MarketDataUnavailableError (a plain Exception, B0 deep
-        # fix). The SystemExit catch stays as defense-in-depth: on this daemon
-        # thread the default threading.excepthook silently swallows
-        # SystemExit, so a regression back to sys.exit() would strand the run
-        # in "loading" forever. (Mirrors the _finalize() catch above.)
-        try:
-            session.load_market_data()
-        except (Exception, SystemExit) as exc:
-            session.status = "failed"
-            session.error = str(exc)
+    # Fast path: creation runs under the caller's _create_lock, where blocking
+    # is forbidden — peek() is non-blocking. A resident dataset means no loader
+    # thread at all: attach it and open step 0 synchronously. Miss or
+    # build-in-flight falls through to the loader thread exactly as before
+    # (get_dataset inside the thread blocks/dedupes there).
+    dataset = market_data_store.peek(DJIA_30, start_date, end_date)
+    if dataset is not None:
+        session.adopt_dataset(dataset)
+    else:
+        def _load_in_background() -> None:
+            # load_market_data() constructs AlpacaDataLoader; missing credentials
+            # now raise MarketDataUnavailableError (a plain Exception, B0 deep
+            # fix). The SystemExit catch stays as defense-in-depth: on this daemon
+            # thread the default threading.excepthook silently swallows
+            # SystemExit, so a regression back to sys.exit() would strand the run
+            # in "loading" forever. (Mirrors the _finalize() catch above.)
+            try:
+                session.load_market_data()
+            except (Exception, SystemExit) as exc:
+                session.status = "failed"
+                session.error = str(exc)
 
-    threading.Thread(target=_load_in_background, daemon=True).start()
+        threading.Thread(target=_load_in_background, daemon=True).start()
 
     return {
         "backtest_id": backtest_id,

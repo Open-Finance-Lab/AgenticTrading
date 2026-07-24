@@ -90,6 +90,10 @@ def test_background_load_does_not_revive_a_cancelled_row(monkeypatch):
             self._step_lock = threading.Lock()
             self.status = "loading"
             self.error = None
+            # start_background_load's peek fast path reads these; the store is
+            # reset per test, so peek cold-misses and _load runs as intended.
+            self.start_date = "2026-04-15"
+            self.end_date = "2026-04-16"
 
         def load_market_data(self):
             # A cancel() landed mid-load; load_market_data's terminal guard

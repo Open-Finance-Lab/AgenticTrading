@@ -70,3 +70,42 @@ def test_adopt_dataset_respects_terminal_status():
     s.adopt_dataset(ds)
     assert s.status == "closed"  # never resurrected
     assert s.total_steps > 0     # data attached is fine; status is not touched
+
+
+def test_v1_start_backtest_fast_path_skips_loader_thread():
+    # Warm the cache through a normal session load.
+    _session(0).load_market_data()
+    assert _CountingLoader.calls == 1
+
+    res = ebs.start_backtest(
+        session_id="sess_fast", agent_name="fast", model_name="m",
+        start_date="2026-04-15", end_date="2026-04-16",
+    )
+    assert res["status"] == "loading"  # wire literal is frozen (Decision 5)
+    session = ebs.get_session(res["backtest_id"])
+    # Resident hit: step 0 opened synchronously — no loader thread, no fetch.
+    assert session.status == "waiting_decision"
+    assert _CountingLoader.calls == 1
+
+
+def test_v2_start_background_load_fast_path(monkeypatch):
+    import dashboard.backend.execution.backtest_backend as bb_mod
+
+    _session(0).load_market_data()  # warm
+    assert _CountingLoader.calls == 1
+
+    row_updates = []
+
+    class _FakeRunStore:
+        def update_run(self, run_id, **kw):
+            row_updates.append((run_id, kw))
+
+    monkeypatch.setattr(bb_mod.run_repo, "run_store", _FakeRunStore())
+    backend = bb_mod.BacktestBackend(
+        run_id="run_fast", session_id="sess_v2", agent_name="a", model_name="m",
+        start_date="2026-04-15", end_date="2026-04-16",
+    )
+    backend.start_background_load()
+    assert backend.session.status == "waiting_decision"  # no thread needed
+    assert _CountingLoader.calls == 1
+    assert ("run_fast", {"status": "running"}) in row_updates
