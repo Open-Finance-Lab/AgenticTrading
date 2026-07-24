@@ -194,6 +194,43 @@ def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
     assert spy.last_args[2] == agent_session
 
 
+def test_backtest_run_forwards_selected_assets(client, monkeypatch):
+    """UI Asset Universe must reach the background worker (not stay mocked/DJIA-only)."""
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    mag7 = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META"]
+    resp = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "assets": mag7,
+        },
+        headers=_sess(),
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["assets"] == mag7
+    assert spy.calls == 1
+    assert spy.last_args[-1] == mag7
+
+
+def test_backtest_run_rejects_bad_assets(monkeypatch):
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "assets": ["NOT A TICKER!!!"],
+        },
+        headers=_sess(),
+    )
+    assert resp.status_code == 422
+    assert spy.calls == 0
+
+
 def test_backtest_run_rejects_external_agent_id(client):
     owner = str(uuid.uuid4())
     created = client.post(

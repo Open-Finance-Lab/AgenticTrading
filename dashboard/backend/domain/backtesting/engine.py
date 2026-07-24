@@ -68,6 +68,7 @@ class HourlyBacktester:
         progress_file: str = None,
         data_source: str = ALPACA,
         initial_capital: float = None,
+        symbols: Optional[List[str]] = None,
     ):
         # Validate and swap dates if they're in the wrong order
         from datetime import datetime as dt_parser
@@ -100,6 +101,19 @@ class HourlyBacktester:
         self.progress_file = (progress_file or "").strip() or None
         self.data_source = data_source
         self.data_loader = create_market_data_provider(data_source)
+        # Selected asset universe for this run (defaults to full DJIA_30).
+        if symbols:
+            cleaned = []
+            seen = set()
+            for raw in symbols:
+                sym = str(raw or "").strip().upper()
+                if not sym or sym in seen:
+                    continue
+                seen.add(sym)
+                cleaned.append(sym)
+            self.symbols = cleaned or list(DJIA_30)
+        else:
+            self.symbols = list(DJIA_30)
         self.all_data = {}
         self.use_llm = use_llm and HAS_ANTHROPIC and data_source != VNPY_SIMULATION
         self.llm_client = None
@@ -180,7 +194,11 @@ class HourlyBacktester:
     
     def load_data(self):
         """Fetch hourly data from the selected normalized provider."""
-        self.all_data = self.data_loader.fetch_bars(DJIA_30, self.start_date, self.end_date)
+        print(f"   Universe: {len(self.symbols)} symbols ({', '.join(self.symbols[:8])}"
+              f"{'…' if len(self.symbols) > 8 else ''})")
+        self.all_data = self.data_loader.fetch_bars(
+            self.symbols, self.start_date, self.end_date
+        )
         if not self.all_data:
             # Raise, don't sys.exit(1): this runs inside server threads
             # (external runs, algo service) where SystemExit evades
@@ -208,7 +226,10 @@ class HourlyBacktester:
         Provenance is the only thing the baselines share with the agent: they
         make no model calls and run no pipeline, so anything LLM-shaped belongs
         in ``_agent_run_metadata`` instead."""
-        return {"data_source": self.data_source}
+        return {
+            "data_source": self.data_source,
+            "symbols": list(self.symbols),
+        }
 
     def _agent_run_metadata(self) -> Dict:
         """Provenance plus the effective config the agent run actually used.
@@ -284,7 +305,10 @@ class HourlyBacktester:
         llm_calls_count = 0
         llm_model = "rule-based"  # Default
         
-        manager = PortfolioManager(initial_capital=self.initial_capital)
+        manager = PortfolioManager(
+            initial_capital=self.initial_capital,
+            allowed_symbols=self.symbols,
+        )
         _decision_steps, post_trade_steps = split_pipeline(self.pipeline)
         if post_trade_steps:
             print(
@@ -371,7 +395,7 @@ class HourlyBacktester:
 
             # Get market data for this hour (real data when available)
             market_data = {}
-            for symbol in DJIA_30:
+            for symbol in self.symbols:
                 if symbol not in self.all_data:
                     continue
                 df = self.all_data[symbol]
@@ -479,14 +503,20 @@ class HourlyBacktester:
     def run_buyhold_baseline(self) -> Tuple[str, List[Dict]]:
         """Buy and hold baseline using shared baseline generator."""
         print("📊 Running Buy & Hold baseline...\n")
+
+        # Full DJIA runs keep the historical 10-stock B&H sleeve; other universes
+        # buy-and-hold the selected assets so the baseline matches the agent book.
+        if set(self.symbols) == set(DJIA_30):
+            bh_symbols = [s for s in TOP_10 if s in self.all_data]
+        else:
+            bh_symbols = [s for s in self.symbols if s in self.all_data]
         
-        # Use shared baseline generator (10-stock buy-and-hold)
         equity_history, _ = generate_baselines(
             bars_by_symbol=self.all_data,
             start_date=self.start_date,
             end_date=self.end_date,
             initial_capital=self.initial_capital,
-            symbols_list=TOP_10
+            symbols_list=bh_symbols,
         )
         
         if not equity_history:
@@ -527,13 +557,24 @@ class HourlyBacktester:
         """DJIA index baseline using shared baseline generator."""
         print("📊 Running DJIA Index baseline...\n")
         
-        # Use shared baseline generator (full DJIA 30 stocks - don't filter)
-        # DJIA is a market index and should track all 30 stocks regardless of agent mode
+        # True DJIA equal-weight needs all 30 names. When the agent universe is a
+        # subset (Mag7 / custom), fetch DJIA bars separately so the chart baseline
+        # stays a real Dow proxy rather than the selected sleeve.
+        if set(self.symbols) == set(DJIA_30) and set(self.all_data.keys()) >= set(DJIA_30):
+            bars = self.all_data
+        else:
+            print("   Fetching full DJIA bars for index baseline…")
+            bars = self.data_loader.fetch_bars(DJIA_30, self.start_date, self.end_date)
+            if not bars:
+                print("   ⚠️  No DJIA bars available; skipping index baseline")
+                return None, []
+
         _, equity_history = generate_baselines(
-            bars_by_symbol=self.all_data,
+            bars_by_symbol=bars,
             start_date=self.start_date,
             end_date=self.end_date,
-            initial_capital=self.initial_capital
+            initial_capital=self.initial_capital,
+            symbols_list=list(DJIA_30),
         )
         
         if not equity_history:

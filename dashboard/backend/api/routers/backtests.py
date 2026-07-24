@@ -48,7 +48,11 @@ from dashboard.backend.infrastructure.market_data.provider import (
 )
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.agents.service import agent_service
-from dashboard.backend.domain.backtesting.constants import resolve_initial_capital
+from dashboard.backend.domain.backtesting.constants import (
+    MAX_BACKTEST_INITIAL_CAPITAL,
+    resolve_initial_capital,
+)
+from dashboard.backend.infrastructure.llm.validator import DJIA_30
 from dashboard.backend.equity_plot import (
     build_backtest_chart_data,
     curve_timestamps_and_values,
@@ -219,6 +223,8 @@ def run_backtest_background(
     agent_id: Optional[str] = None,
     data_source: str = ALPACA,
     live_run_id: Optional[str] = None,
+    initial_capital: Optional[float] = None,
+    assets: Optional[List[str]] = None,
 ):
     """Run backtest in background thread."""
     global backtest_status, backtest_session_id
@@ -301,13 +307,12 @@ def run_backtest_background(
 
         cmd += ["--run-id", live_run_id, "--progress-file", progress_file]
 
-        from dashboard.backend.domain.backtesting.constants import resolve_initial_capital as _resolve_cap
-        cash_allocation = None
-        if agent_id:
-            agent = agent_service.get_agent(agent_id)
-            if agent:
-                cash_allocation = agent.get("cash_allocation")
-        cmd += ["--initial-capital", str(_resolve_cap(cash_allocation))]
+        # Simulation capital is independent of the agent's portfolio sleeve.
+        cmd += ["--initial-capital", str(resolve_initial_capital(initial_capital))]
+
+        if assets:
+            cmd += ["--assets", ",".join(assets)]
+            print(f"   Assets: {', '.join(assets)}", flush=True)
 
         print(f"📋 Running: {' '.join(cmd)}", flush=True)
         
@@ -414,6 +419,10 @@ class BacktestRunRequest(BaseModel):
     agent_id: Optional[str] = None
     pipeline: Optional[List[Dict[str, Any]]] = None
     data_source: Optional[Literal["alpaca", "vnpy_simulation"]] = None
+    # Simulation starting cash for this run only — independent of portfolio sleeves.
+    initial_capital: Optional[float] = None
+    # Tradeable universe for this run. Accepts a list or a comma-separated string.
+    assets: Optional[Any] = None
 
 
 # /backtest/run spends real operator LLM credits per trading hour of the run, on
@@ -424,6 +433,8 @@ MAX_STRATEGY_PROMPT_CHARS = 4000
 MAX_BACKTEST_DAYS = 31
 MAX_PIPELINE_STEPS = 20
 MAX_PIPELINE_JSON_CHARS = 32000
+MAX_BACKTEST_ASSETS = 30
+_ASSET_TICKER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9.]{0,9}$")
 
 # A model id is a provider/model slug: letters, digits, and . _ / - only, bounded
 # length. This rejects a garbage/injection string reaching the backtest subprocess
@@ -445,6 +456,48 @@ def _parse_ymd(value: str, field: str) -> datetime:
         return datetime.strptime(value, "%Y-%m-%d")
     except (ValueError, TypeError):
         raise HTTPException(status_code=422, detail=f"{field} must be a date in YYYY-MM-DD format.")
+
+
+def _normalize_backtest_assets(raw: Any) -> Optional[List[str]]:
+    """Parse / validate a caller-supplied asset universe.
+
+    Returns ``None`` when the caller omitted assets (engine defaults to DJIA_30).
+    Rejects empty lists, oversized universes, and malformed tickers.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        items = [part.strip() for part in raw.split(",")]
+    elif isinstance(raw, (list, tuple)):
+        items = [str(part).strip() for part in raw]
+    else:
+        raise HTTPException(
+            status_code=422,
+            detail="assets must be a list of tickers or a comma-separated string.",
+        )
+    cleaned: List[str] = []
+    seen = set()
+    for item in items:
+        if not item:
+            continue
+        ticker = item.upper()
+        if not _ASSET_TICKER_RE.fullmatch(ticker):
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid asset ticker '{item}'.",
+            )
+        if ticker in seen:
+            continue
+        seen.add(ticker)
+        cleaned.append(ticker)
+    if not cleaned:
+        raise HTTPException(status_code=422, detail="assets must include at least one ticker.")
+    if len(cleaned) > MAX_BACKTEST_ASSETS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"assets too large (max {MAX_BACKTEST_ASSETS} tickers).",
+        )
+    return cleaned
 
 
 def _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipeline=None) -> None:
@@ -541,6 +594,7 @@ async def run_backtest_endpoint(
     strategy_prompt: Optional[str] = None,
     model: Optional[str] = None,
     data_source: str = ALPACA,
+    assets: Optional[str] = None,
     body: Optional[BacktestRunRequest] = None,
 ):
     """
@@ -555,6 +609,8 @@ async def run_backtest_endpoint(
     # Body (when provided) overrides query params.
     agent_id: Optional[str] = None
     pipeline: Optional[List[Dict[str, Any]]] = None
+    initial_capital: Optional[float] = None
+    raw_assets: Any = assets
     if body is not None:
         start_date = body.start_date or start_date
         end_date = body.end_date or end_date
@@ -564,6 +620,25 @@ async def run_backtest_endpoint(
         agent_id = body.agent_id
         if body.pipeline is not None:
             pipeline = body.pipeline
+        if body.initial_capital is not None:
+            initial_capital = body.initial_capital
+        if body.assets is not None:
+            raw_assets = body.assets
+
+    selected_assets = _normalize_backtest_assets(raw_assets)
+
+    if initial_capital is not None:
+        try:
+            initial_capital = float(initial_capital)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=422, detail="initial_capital must be a number.")
+        if initial_capital <= 0:
+            raise HTTPException(status_code=422, detail="initial_capital must be greater than 0.")
+        if initial_capital > float(MAX_BACKTEST_INITIAL_CAPITAL):
+            raise HTTPException(
+                status_code=422,
+                detail=f"initial_capital cannot exceed {MAX_BACKTEST_INITIAL_CAPITAL:g}.",
+            )
 
     pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
 
@@ -601,6 +676,10 @@ async def run_backtest_endpoint(
         print(f"   Sub-agent pipeline: {len(pipeline)} step(s)", flush=True)
     if model:
         print(f"   Model override: {model}", flush=True)
+    if selected_assets:
+        print(f"   Assets ({len(selected_assets)}): {', '.join(selected_assets)}", flush=True)
+    else:
+        print(f"   Assets: default DJIA ({len(DJIA_30)})", flush=True)
     
     if backtest_status["running"]:
         print(f"⚠️ Backtest already running, rejecting request", flush=True)
@@ -643,6 +722,8 @@ async def run_backtest_endpoint(
             agent_id,
             data_source,
             live_run_id,
+            initial_capital,
+            selected_assets,
         ),
         daemon=True
     )
@@ -656,6 +737,7 @@ async def run_backtest_endpoint(
         "data_source": data_source,
         "live_run_id": live_run_id,
         "run_id": live_run_id,
+        "assets": selected_assets or list(DJIA_30),
     }
 
 @router.get("/backtest/status")

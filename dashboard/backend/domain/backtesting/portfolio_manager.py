@@ -59,7 +59,11 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import run_pipeline_de
 class PortfolioManager:
     """Manages portfolio with hourly trading decisions based on indicators."""
     
-    def __init__(self, initial_capital: float = INITIAL_CAPITAL):
+    def __init__(
+        self,
+        initial_capital: float = INITIAL_CAPITAL,
+        allowed_symbols: Optional[List[str]] = None,
+    ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.positions = {}  # {symbol: num_shares}
@@ -72,7 +76,11 @@ class PortfolioManager:
         self.input_tokens = 0
         self.output_tokens = 0
         # Latest decision-pipeline step outputs (for daily post-trade analysis).
-        self.last_pipeline_step_outputs = []    
+        self.last_pipeline_step_outputs = []
+        # Tradeable universe for this run (defaults to DJIA_30).
+        symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
+        self.allowed_symbols = [str(s).strip().upper() for s in symbols if s]
+        self._allowed_set = set(self.allowed_symbols)    
     def get_portfolio_state(self, market_data: Dict[str, pd.Series], price_cache: Dict = None, timestamp = None) -> Dict:
         """Get current portfolio state with market indicators.
 
@@ -189,10 +197,9 @@ class PortfolioManager:
             # Add market signals to snapshot
             signals = portfolio_state["market_signals"]
             
-            # For buy-and-hold mode, use ALL 30 DJIA stocks (match baseline)
+            # For buy-and-hold mode, offer the full selected universe
             if mode == "buy_and_hold":
-                # Use all DJIA 30 stocks (same as baseline)
-                symbols_to_include = [s for s in DJIA_30 if s in signals]
+                symbols_to_include = [s for s in self.allowed_symbols if s in signals]
             else:
                 # For safe_trading, rank by trend/momentum (NOT RSI extremity).
                 # Ranking by |RSI-50| seeds a mean-reversion bias (fade winners,
@@ -307,7 +314,12 @@ class PortfolioManager:
                     print("   Falling back to rule-based logic")
                     return self.make_trading_decision(portfolio_state)
             else:
-                prompt = create_prompt(market_snapshot, mode=mode, custom_prompt=strategy_prompt)
+                prompt = create_prompt(
+                    market_snapshot,
+                    mode=mode,
+                    custom_prompt=strategy_prompt,
+                    allowed_symbols=self.allowed_symbols,
+                )
 
                 # ================================================================
                 # STEP 2: Call Claude with technical indicator analysis
@@ -384,19 +396,20 @@ class PortfolioManager:
                 print(f"   Falling back to rule-based logic")
                 return self.make_trading_decision(portfolio_state)
 
-            # The prompt contract asks for at most one action per DJIA symbol.
+            # The prompt contract asks for at most one action per universe symbol.
             # A response with more than that is degenerate or hostile (e.g. a
             # free-form strategy_prompt goading the model into spamming
             # actions) — bound the work instead of iterating it all.
-            if len(llm_actions) > len(DJIA_30):
+            max_actions = max(len(self.allowed_symbols), 1)
+            if len(llm_actions) > max_actions:
                 print(
                     f"   ⚠️  LLM returned {len(llm_actions)} actions; "
-                    f"processing only the first {len(DJIA_30)}"
+                    f"processing only the first {max_actions}"
                 )
-                llm_actions = llm_actions[: len(DJIA_30)]
+                llm_actions = llm_actions[:max_actions]
 
             for llm_action in llm_actions:
-                symbol = llm_action.get("symbol")
+                symbol = str(llm_action.get("symbol") or "").strip().upper()
                 action_type = llm_action.get("action", "hold").lower()
                 confidence = llm_action.get("confidence", 0.5)
                 reasoning = llm_action.get("reasoning", "")
@@ -409,8 +422,8 @@ class PortfolioManager:
                     print(f"      ⏸️  Skipping (confidence {confidence:.0%} too low)")
                     continue
                 
-                if symbol not in DJIA_30:
-                    print(f"   ❌ {symbol}: Invalid symbol, skipping")
+                if symbol not in self._allowed_set:
+                    print(f"   ❌ {symbol}: Outside selected universe, skipping")
                     continue
                 
                 signal = signals.get(symbol, {})

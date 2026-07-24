@@ -22,6 +22,7 @@ from dashboard.backend.domain.agents.service import (
     InvalidVersionFieldError,
     NoExternalRunsError,
     agent_service,
+    sample_equity_sparkline,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -139,6 +140,45 @@ def test_agent_with_stats_counts_only_external_runs(svc):
     assert enriched["run_count"] == 1
     assert enriched["latest_run"] is not None
     assert len(enriched["runs"]) == 1
+
+
+def test_sample_equity_sparkline_keeps_ends_when_downsampling():
+    curve = [{"equity": float(i)} for i in range(100)]
+    spark = sample_equity_sparkline(curve, max_points=10)
+    assert len(spark) == 10
+    assert spark[0] == 0.0
+    assert spark[-1] == 99.0
+
+
+def test_list_agents_with_stats_attaches_equity_sparkline(svc):
+    agent = svc.create_agent(
+        name="A", model_name="m", owner_user_id=None, owner_browser_session="b1"
+    )
+    session = agent["session_id"]
+    _insert_ext_run(svc.db, run_id="ext_1", session_id=session)
+    svc.db.insert_equity_points(
+        "ext_1",
+        [
+            {
+                "timestamp": f"2026-04-15T{10 + i:02d}:00:00",
+                "equity": 100000 + i * 250,
+                "cash": 50000,
+                "positions_value": 50000 + i * 250,
+                "daily_return": 0.0,
+            }
+            for i in range(8)
+        ],
+    )
+    listed = svc.list_agents_with_stats(
+        owner_user_id=None,
+        owner_browser_session="b1",
+        trading_session_id=None,
+    )
+    assert len(listed) == 1
+    spark = listed[0]["equity_sparkline"]
+    assert spark[0] == 100000.0
+    assert spark[-1] == 100000 + 7 * 250
+    assert listed[0]["latest_run"]["equity_sparkline"] == spark
 
 
 def test_list_external_runs(svc):

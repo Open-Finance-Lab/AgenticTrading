@@ -425,9 +425,7 @@ def test_reject_nonfinite_quantity(client):
 
 
 def test_reject_nondefault_initial_cash(client):
-    """H2: create_run rejects a non-default config.initial_cash rather than
-    silently ignoring it (the engine's starting capital is fixed).
-    """
+    """create_run rejects config.initial_cash above MAX_BACKTEST_INITIAL_CAPITAL."""
     agent_id, key, _ = _new_agent(client)
     version_id = _new_version(client, agent_id, key)
 
@@ -447,6 +445,44 @@ def test_reject_nondefault_initial_cash(client):
     )
     assert resp.status_code == 400, resp.text
     assert resp.json()["detail"]["error"]["code"] == "invalid_config"
+
+
+def test_create_run_accepts_independent_initial_cash(client):
+    """Simulation capital is independent of the agent's cash_allocation sleeve."""
+    agent_id, key, session_headers = _new_agent(client)
+    # Give the agent a sleeve that differs from the backtest capital we request.
+    patched = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"cash_allocation": 1500},
+        headers={**session_headers, "X-API-Key": key},
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["agent"]["cash_allocation"] == 1500
+
+    version_id = _new_version(client, agent_id, key)
+    resp = client.post(
+        "/api/v1/runs",
+        json={
+            "agent_version_id": version_id,
+            "environment": {"type": "backtest", "environment_id": "us-equity-hourly-v1"},
+            "config": {
+                "start_date": "2026-04-15",
+                "end_date": "2026-04-16",
+                "symbols": ["AAPL", "MSFT"],
+                "initial_cash": 5000,
+            },
+        },
+        headers={"X-API-Key": key},
+    )
+    assert resp.status_code == 200, resp.text
+    # Sleeve must be unchanged after starting a backtest with different capital.
+    listed = client.get(
+        "/api/v1/agents",
+        headers={**session_headers, "X-API-Key": key},
+    )
+    assert listed.status_code == 200
+    agent = next(a for a in listed.json()["agents"] if a["agent_id"] == agent_id)
+    assert agent["cash_allocation"] == 1500
 
 
 def test_position_cap_accounts_for_intra_decision_accumulation(client):
