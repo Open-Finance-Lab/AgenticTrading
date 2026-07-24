@@ -7211,6 +7211,12 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     gap: 6px;
 }
 
+.allocation-legend-item--loading .allocation-legend-label {
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-style: italic;
+}
+
 .section-card.pf-allocation-card .allocation-legend-row {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto auto;

@@ -201,6 +201,97 @@ function parseAgentCashAllocationInput(raw) {
   return Math.round(value);
 }
 
+/**
+ * Native number spinners sometimes step by 1 on the first click even when
+ * step="100" (leaving values like 1101). Intercept arrows and snap ±1 glitches
+ * so capital inputs always move in $100 increments.
+ */
+const CASH_STEP_INPUT_IDS = [
+  'externalAgentCashAllocation',
+  'builtinAgentCashAllocation',
+  'agentEditorCashAllocation',
+  'backtestInitialCapital',
+];
+
+function cashStepMeta(input) {
+  const step = Math.max(1, Number(input.step) || 100);
+  const min = Number(input.min);
+  const max = Number(input.max);
+  return {
+    step,
+    min: Number.isFinite(min) ? min : 0,
+    max: Number.isFinite(max) ? max : Number.POSITIVE_INFINITY,
+  };
+}
+
+function snapCashStepValue(input, raw) {
+  const { step, min, max } = cashStepMeta(input);
+  let value = Number(raw);
+  if (!Number.isFinite(value)) value = min;
+  value = Math.round(value / step) * step;
+  return Math.min(max, Math.max(min, value));
+}
+
+function nudgeCashStepInput(input, direction) {
+  const { step, min, max } = cashStepMeta(input);
+  const current = snapCashStepValue(input, input.value === '' ? min : input.value);
+  const next = Math.min(max, Math.max(min, current + direction * step));
+  input.value = String(next);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
+function bindCashStepInput(input) {
+  if (!input || input.dataset.cashStepBound === '1') return;
+  input.dataset.cashStepBound = '1';
+  if (!input.step || input.step === 'any') input.step = '100';
+
+  let lastValue = snapCashStepValue(input, input.value === '' ? 0 : input.value);
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      nudgeCashStepInput(input, 1);
+      lastValue = Number(input.value);
+    } else if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      nudgeCashStepInput(input, -1);
+      lastValue = Number(input.value);
+    }
+  });
+
+  input.addEventListener('input', () => {
+    const value = Number(input.value);
+    if (!Number.isFinite(value)) return;
+    const diff = value - lastValue;
+    // Spinner glitch: first click often lands on ±1 instead of ±step.
+    if (Math.abs(diff) === 1) {
+      const step = Number(input.step) || 100;
+      const corrected = snapCashStepValue(
+        input,
+        lastValue + (diff > 0 ? step : -step),
+      );
+      input.value = String(corrected);
+      lastValue = corrected;
+      return;
+    }
+    lastValue = value;
+  });
+
+  input.addEventListener('change', () => {
+    if (input.value === '') return;
+    const snapped = snapCashStepValue(input, input.value);
+    if (String(snapped) !== input.value) input.value = String(snapped);
+    lastValue = snapped;
+  });
+}
+
+function bindCashStepInputs() {
+  CASH_STEP_INPUT_IDS.forEach((id) => {
+    bindCashStepInput(document.getElementById(id));
+  });
+}
+
 function applyAgentCashAllocationOverride(agent) {
   if (!agent?.agent_id) return agent;
   if (agent.cash_allocation != null) return agent;
@@ -2412,6 +2503,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Initialize session FIRST (before any API calls)
     initSession();
     initAuthUI();
+    bindCashStepInputs();
     await restoreActiveAgentSession();
     // Portfolio overview must not wait on the agents waterfall. Paint any
     // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
