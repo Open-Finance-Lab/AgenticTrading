@@ -21,7 +21,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-import pytz
 
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.domain.agents.repository import agent_store
@@ -42,9 +41,9 @@ from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioMana
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
 
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+from dashboard.backend.domain.backtesting import market_data_store
 
 DECISION_TIMEOUT_SECONDS = int(os.getenv("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", "30"))
-ET_TZ = pytz.timezone("US/Eastern")
 
 _sessions: Dict[str, "ExternalBacktestSession"] = {}
 _lock = threading.Lock()
@@ -177,71 +176,35 @@ class ExternalBacktestSession:
     # ------------------------------------------------------------------
 
     def load_market_data(self) -> None:
-        loader = AlpacaDataLoader()
-        self.all_data = loader.fetch_bars(DJIA_30, self.start_date, self.end_date)
-        if not self.all_data:
-            raise RuntimeError("No market data returned from Alpaca")
+        # loader_factory resolves the module-global name at call time, so every
+        # existing monkeypatch of ebs.AlpacaDataLoader still controls the fetch.
+        dataset = market_data_store.get_dataset(
+            DJIA_30, self.start_date, self.end_date,
+            loader_factory=AlpacaDataLoader,
+        )
+        self.adopt_dataset(dataset)
 
-        for symbol, df in self.all_data.items():
-            self.all_data[symbol] = TechnicalIndicators.calculate_indicators(df)
+    def adopt_dataset(self, dataset: "market_data_store.MarketDataset") -> None:
+        """Attach a built shared dataset and open step 0.
 
-        self.timestamps = self._build_trading_timestamps()
-        self.total_steps = len(self.timestamps)
-        self.price_cache = self._build_price_cache()
+        SHARED + READ-ONLY: all_data/timestamps/price_cache belong to the
+        store and other sessions — never mutate them (see the store docstring).
 
-        if self.total_steps == 0:
-            raise RuntimeError("No trading hours in the selected date range")
+        Publish the loaded state under the step lock, and only if a concurrent
+        cancel() hasn't already moved the run to a terminal state (cancel()
+        writes "closed" under this same lock; an unlocked write here used to
+        resurrect a cancelled run back to waiting_decision).
+        """
+        self.all_data = dataset.all_data
+        self.timestamps = dataset.timestamps
+        self.price_cache = dataset.price_cache
+        self.total_steps = dataset.total_steps
 
-        # Publish the loaded state under the step lock, and only if a concurrent
-        # cancel() hasn't already moved the run to a terminal state. cancel()
-        # writes "closed" under this same lock; this write used to be unlocked
-        # and would resurrect a cancelled run back to waiting_decision (freeing
-        # its cap slot while it kept running). _open_current_step takes no lock.
         with self._step_lock:
             if self.status in TERMINAL_STATUSES:
                 return
             self.status = "waiting_decision"
             self._open_current_step()
-
-    def _build_trading_timestamps(self) -> List[Any]:
-        all_timestamps: set = set()
-        for df in self.all_data.values():
-            all_timestamps.update(df.index)
-        ordered = sorted(all_timestamps)
-
-        min_required = int(len(self.all_data) * 0.8)
-        filtered = []
-        for ts in ordered:
-            real_count = sum(1 for df in self.all_data.values() if ts in df.index)
-            if real_count >= min_required:
-                filtered.append(ts)
-        ordered = filtered if filtered else ordered
-
-        market_hours = []
-        for ts in ordered:
-            ts_et = ts.astimezone(ET_TZ)
-            hour, minute = ts_et.hour, ts_et.minute
-            is_market = (
-                (hour > 9 and hour < 16)
-                or (hour == 9 and minute >= 30)
-                or (hour == 16 and minute == 0)
-            )
-            if is_market:
-                market_hours.append(ts)
-        return market_hours
-
-    def _build_price_cache(self) -> Dict[str, Dict[Any, float]]:
-        cache: Dict[str, Dict[Any, float]] = {}
-        for symbol, df in self.all_data.items():
-            cache[symbol] = {}
-            last_price = None
-            for timestamp in self.timestamps:
-                if timestamp in df.index:
-                    last_price = df.loc[timestamp, "close"]
-                    cache[symbol][timestamp] = float(last_price)
-                elif last_price is not None:
-                    cache[symbol][timestamp] = float(last_price)
-        return cache
 
     def _market_data_at(self, timestamp) -> Dict[str, pd.Series]:
         market_data = {}
@@ -817,20 +780,29 @@ def start_backtest(
     with _lock:
         _sessions[backtest_id] = session
 
-    def _load_in_background() -> None:
-        # load_market_data() constructs AlpacaDataLoader; missing credentials
-        # now raise MarketDataUnavailableError (a plain Exception, B0 deep
-        # fix). The SystemExit catch stays as defense-in-depth: on this daemon
-        # thread the default threading.excepthook silently swallows
-        # SystemExit, so a regression back to sys.exit() would strand the run
-        # in "loading" forever. (Mirrors the _finalize() catch above.)
-        try:
-            session.load_market_data()
-        except (Exception, SystemExit) as exc:
-            session.status = "failed"
-            session.error = str(exc)
+    # Fast path: creation runs under the caller's _create_lock, where blocking
+    # is forbidden — peek() is non-blocking. A resident dataset means no loader
+    # thread at all: attach it and open step 0 synchronously. Miss or
+    # build-in-flight falls through to the loader thread exactly as before
+    # (get_dataset inside the thread blocks/dedupes there).
+    dataset = market_data_store.peek(DJIA_30, start_date, end_date)
+    if dataset is not None:
+        session.adopt_dataset(dataset)
+    else:
+        def _load_in_background() -> None:
+            # load_market_data() constructs AlpacaDataLoader; missing credentials
+            # now raise MarketDataUnavailableError (a plain Exception, B0 deep
+            # fix). The SystemExit catch stays as defense-in-depth: on this daemon
+            # thread the default threading.excepthook silently swallows
+            # SystemExit, so a regression back to sys.exit() would strand the run
+            # in "loading" forever. (Mirrors the _finalize() catch above.)
+            try:
+                session.load_market_data()
+            except (Exception, SystemExit) as exc:
+                session.status = "failed"
+                session.error = str(exc)
 
-    threading.Thread(target=_load_in_background, daemon=True).start()
+        threading.Thread(target=_load_in_background, daemon=True).start()
 
     return {
         "backtest_id": backtest_id,
