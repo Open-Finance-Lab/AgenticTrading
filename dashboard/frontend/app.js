@@ -563,15 +563,45 @@ function resolveBacktestCardMetrics(agent) {
   if (ending == null && retFrac != null) ending = startEquity * (1 + retFrac);
   if (ending == null) ending = startEquity;
   const pnl = ending - startEquity;
+  const returnPct = retFrac != null
+    ? retFrac
+    : (startEquity ? pnl / startEquity : 0);
   return {
     ending,
     pnl,
+    returnPct,
     positive: pnl >= 0,
     period: formatShortDateRange(run?.start_date, run?.end_date),
     universe: run?.universe || run?.index || 'DJIA',
     createdAt: run?.created_at || null,
     runId: run?.run_id || null,
   };
+}
+
+function formatSignedReturnPct(frac) {
+  const n = Number(frac);
+  if (!Number.isFinite(n)) return '—';
+  const pct = n * 100;
+  const body = `${Math.abs(pct).toFixed(1)}%`;
+  if (pct > 0) return `+${body}`;
+  if (pct < 0) return `−${body}`;
+  return body;
+}
+
+/** Shared top block: portfolio sleeve always leads (draft + backtested cards). */
+function renderAgentAllocatedCapitalHero(agent) {
+  const capital =
+    agent.cash_allocation != null
+      ? formatAgentCashAllocation(agent.cash_allocation)
+      : '$1,000';
+  return `
+    <div class="agent-card-hero agent-card-hero--draft">
+      <div class="agent-card-hero-text">
+        <span class="agent-card-metric-label">Allocated Capital</span>
+        <p class="agent-card-metric-value">${escapeHtml(capital)}</p>
+        <p class="agent-card-capital-note">From My Portfolio</p>
+      </div>
+    </div>`;
 }
 
 function renderAgentCardBody(agent, statusKey) {
@@ -634,51 +664,35 @@ function renderAgentCardBody(agent, statusKey) {
 
   if (statusKey === 'backtested') {
     const m = resolveBacktestCardMetrics(agent);
-    const runCount = agentRunCount(agent);
-    const runLabel = runCount > 0 ? `Completed backtest #${runCount}` : 'Completed a backtest';
+    const endingLabel = formatAgentMoney(m.ending, { cents: false });
+    const metaParts = [`Ending Value ${endingLabel}`];
+    if (m.period && m.period !== '—') metaParts.push(m.period);
     return `
-      <div class="agent-card-hero">
-        <div class="agent-card-hero-text">
-          <div class="agent-card-metric-head">
-            <span class="agent-card-mode-chip agent-card-mode-chip--backtest">BACKTEST</span>
-            <span class="agent-card-metric-label">Ending Value</span>
-          </div>
-          <p class="agent-card-metric-value">${escapeHtml(formatAgentMoney(m.ending))}</p>
-          <p class="agent-card-change ${m.positive ? 'is-pos' : 'is-neg'}">${escapeHtml(formatSignedMoney(m.pnl))} during latest run</p>
-        </div>
-        ${renderAgentSparkline(agent, m.positive, m)}
-      </div>
-      <p class="agent-card-period">${escapeHtml(m.period)}</p>
+      ${renderAgentAllocatedCapitalHero(agent)}
       <div class="agent-card-divider"></div>
-      ${renderAgentRunsLink(agent)}
-      <div class="agent-card-divider"></div>
-      <div class="agent-card-activity">
-        <span class="agent-card-activity-icon agent-card-activity-icon--done" aria-hidden="true">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="m8.5 12.5 2.5 2.5 4.5-5"/></svg>
-        </span>
-        <div class="agent-card-activity-text">
-          <span>${escapeHtml(runLabel)}</span>
+      <div class="agent-card-latest">
+        <div class="agent-card-latest-head">
+          <span class="agent-card-metric-label">Latest Backtest</span>
+          <span class="agent-card-mode-chip agent-card-mode-chip--simulation">Simulation</span>
         </div>
+        <div class="agent-card-latest-row">
+          <p class="agent-card-latest-return ${m.positive ? 'is-pos' : 'is-neg'}">${escapeHtml(formatSignedReturnPct(m.returnPct))}</p>
+          ${renderAgentSparkline(agent, m.positive, m)}
+        </div>
+        <p class="agent-card-latest-meta">${escapeHtml(metaParts.join(' · '))}</p>
+        <p class="agent-card-latest-note">Separate from allocated capital.</p>
+        ${renderAgentRunsLink(agent)}
       </div>`;
   }
 
-  const capital =
-    agent.cash_allocation != null
-      ? formatAgentCashAllocation(agent.cash_allocation)
-      : '$1,000';
   return `
-    <div class="agent-card-hero agent-card-hero--draft">
-      <div class="agent-card-hero-text">
-        <span class="agent-card-metric-label">Allocated Capital</span>
-        <p class="agent-card-metric-value">${escapeHtml(capital)}</p>
-      </div>
-    </div>
+    ${renderAgentAllocatedCapitalHero(agent)}
     <div class="agent-card-empty">
       <span class="agent-card-empty-icon" aria-hidden="true">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 16l4-4 3 3 5-6 4 4"/><path d="M4 20h16"/></svg>
       </span>
-      <strong>No backtest runs yet</strong>
-      <span>Run a backtest to evaluate this agent.</span>
+      <strong>No backtests yet</strong>
+      <span>Test this agent on historical market data.</span>
     </div>`;
 }
 
