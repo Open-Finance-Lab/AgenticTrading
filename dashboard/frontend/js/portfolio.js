@@ -16,6 +16,9 @@ const PORTFOLIO_MOCK = {
 /** @type {null | { equity: number, cash_available: number, allocated: number }} */
 let livePortfolio = null;
 let portfolioRenderSeq = 0;
+/** In-flight GET /portfolio — shared so boot prefetch + loadAgents don't double-fetch. */
+let portfolioFetchPromise = null;
+const PORTFOLIO_CACHE_KEY = 'portfolio-live-cache';
 
 const PF_WALLET_ICON =
     '<path d="M19 7V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-2"/><path d="M16 12h5v4h-5a2 2 0 0 1 0-4Z"/>';
@@ -328,8 +331,48 @@ function updateAgentAllocationFromAgents(agents) {
     renderAllocationChart('agent', buildAgentAllocationData(agents, getTotalPortfolioValue()));
 }
 
+function readCachedPortfolio() {
+    try {
+        const raw = sessionStorage.getItem(PORTFOLIO_CACHE_KEY);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw);
+        if (!parsed || typeof parsed !== 'object') return null;
+        return {
+            equity: Number(parsed.equity) || 0,
+            cash_available: Number(parsed.cash_available) || 0,
+            allocated: Number(parsed.allocated) || 0,
+        };
+    } catch (_) {
+        return null;
+    }
+}
+
+function writeCachedPortfolio(portfolio) {
+    try {
+        sessionStorage.setItem(
+            PORTFOLIO_CACHE_KEY,
+            JSON.stringify({
+                equity: Number(portfolio.equity) || 0,
+                cash_available: Number(portfolio.cash_available) || 0,
+                allocated: Number(portfolio.allocated) || 0,
+            }),
+        );
+    } catch (_) {
+        /* sessionStorage unavailable — ignore */
+    }
+}
+
+function clearCachedPortfolio() {
+    try {
+        sessionStorage.removeItem(PORTFOLIO_CACHE_KEY);
+    } catch (_) {
+        /* ignore */
+    }
+}
+
 function renderPortfolioFromMock(agents) {
     livePortfolio = null;
+    clearCachedPortfolio();
     setPortfolioSampleBadgeVisible(true);
     renderPortfolioOverview(PORTFOLIO_MOCK.summary);
     renderAllocationChart('agent', buildAgentAllocationData(agents, getTotalPortfolioValue()));
@@ -341,18 +384,31 @@ function renderPortfolioFromLive(portfolio, agents) {
         cash_available: Number(portfolio.cash_available) || 0,
         allocated: Number(portfolio.allocated) || 0,
     };
+    writeCachedPortfolio(livePortfolio);
     setPortfolioSampleBadgeVisible(false);
     renderPortfolioOverview(summaryFromLivePortfolio(livePortfolio));
     updateAgentAllocationFromAgents(agents);
 }
 
+function fetchLivePortfolio() {
+    if (portfolioFetchPromise) return portfolioFetchPromise;
+    portfolioFetchPromise = (async () => {
+        try {
+            const data = await API.get(`${API_BASE}/api/v1/portfolio`);
+            return data && data.portfolio ? data.portfolio : null;
+        } finally {
+            portfolioFetchPromise = null;
+        }
+    })();
+    return portfolioFetchPromise;
+}
+
 // ---------------------------------------------------------------------------
-// Public entry point — called when the My Agents tab becomes visible.
+// Public entry points — My Agents tab + boot prefetch.
 // ---------------------------------------------------------------------------
 
 // Renders are async and callers do not await them, so two can be in flight at
-// once (switching to My Agents starts one, and the loadAgents() that follows
-// starts another with a fresher agent list). Responses are not guaranteed to
+// once (boot prefetch, then loadAgents). Responses are not guaranteed to
 // arrive in request order, so without this sequence guard a slower earlier
 // request can repaint the panel with stale agents after the newer one landed.
 async function renderPortfolio(agents) {
@@ -363,40 +419,64 @@ async function renderPortfolio(agents) {
         renderPortfolioFromMock(list);
         return;
     }
+    // Instant paint from memory / sessionStorage before the network round-trip.
+    const cached = livePortfolio || readCachedPortfolio();
+    if (cached) {
+        renderPortfolioFromLive(cached, list);
+    }
     try {
-        const data = await API.get(`${API_BASE}/api/v1/portfolio`);
+        const portfolio = await fetchLivePortfolio();
         if (seq !== portfolioRenderSeq) return;
-        const portfolio = data && data.portfolio;
         if (!portfolio) {
-            renderPortfolioFromMock(list);
+            if (!livePortfolio) renderPortfolioFromMock(list);
             return;
         }
         renderPortfolioFromLive(portfolio, list);
     } catch (error) {
         if (seq !== portfolioRenderSeq) return;
         console.warn('Portfolio API unavailable; showing sample data:', error?.message || error);
-        renderPortfolioFromMock(list);
+        // Keep last-known figures if we already painted them; only fall back to
+        // SAMPLE DATA when the panel would otherwise stay blank.
+        if (!livePortfolio) renderPortfolioFromMock(list);
     }
 }
 
 /**
- * Repaint the panel from whatever is already cached — no network.
+ * Repaint the panel from memory or sessionStorage — no network.
  *
- * Lets the My Agents tab paint instantly on a revisit while the authoritative
- * refresh rides along with loadAgents(), instead of both firing their own
- * GET /api/v1/portfolio on every tab switch.
+ * Lets hard refresh and My Agents tab revisit paint instantly while the
+ * authoritative refresh rides along with prefetchPortfolio / loadAgents.
  */
 function repaintPortfolioFromCache(agents) {
     const list = agents || [];
     if (livePortfolio) {
         renderPortfolioFromLive(livePortfolio, list);
-    } else if (!isPortfolioSignedIn()) {
-        renderPortfolioFromMock(list);
+        return;
     }
-    // Signed in but nothing cached yet: leave it be — the render that
-    // loadAgents() kicks off is about to paint the real figures.
+    if (!isPortfolioSignedIn()) {
+        renderPortfolioFromMock(list);
+        return;
+    }
+    const cached = readCachedPortfolio();
+    if (cached) {
+        renderPortfolioFromLive(cached, list);
+    }
+    // Signed in but nothing cached yet: leave it be — prefetch / loadAgents
+    // is about to paint the real figures.
+}
+
+/** Boot helper: paint from cache immediately (no network). */
+function paintPortfolioBoot(agents) {
+    repaintPortfolioFromCache(agents);
+}
+
+/** Boot helper: cache paint + start GET /portfolio without waiting on agents. */
+async function prefetchPortfolio(agents) {
+    return renderPortfolio(agents || []);
 }
 
 window.renderPortfolio = renderPortfolio;
 window.repaintPortfolioFromCache = repaintPortfolioFromCache;
+window.paintPortfolioBoot = paintPortfolioBoot;
+window.prefetchPortfolio = prefetchPortfolio;
 window.updateAgentAllocationFromAgents = updateAgentAllocationFromAgents;
