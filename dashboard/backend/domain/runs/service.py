@@ -30,6 +30,7 @@ import dashboard.backend.domain.backtesting.external_run_service as ebs
 from dashboard.backend.database import db
 from dashboard.backend.domain.backtesting.constants import (
     INITIAL_CAPITAL,
+    MAX_BACKTEST_INITIAL_CAPITAL,
     resolve_initial_capital,
 )
 from dashboard.backend.execution.base import TERMINAL_STATUSES
@@ -386,26 +387,33 @@ def create_run(
                 details={"invalid_symbols": invalid},
             )
 
-    # Starting capital follows the agent's cash_allocation (default
-    # INITIAL_CAPITAL, max MAX_AGENT_CASH_ALLOCATION). A non-matching override
-    # is rejected so agents/SDKs know it was not honored.
-    resolved_capital = resolve_initial_capital(agent.get("cash_allocation"))
+    # Simulation capital is independent of the agent's portfolio sleeve
+    # (cash_allocation). Callers may set config.initial_cash up to
+    # MAX_BACKTEST_INITIAL_CAPITAL; omitted → INITIAL_CAPITAL.
     initial_cash = config.get("initial_cash")
-    if initial_cash is not None:
+    if initial_cash is None:
+        resolved_capital = float(INITIAL_CAPITAL)
+    else:
         try:
             requested = float(initial_cash)
         except (TypeError, ValueError):
             raise ProtocolError(
                 "invalid_config", "config.initial_cash must be a number", 400
             )
-        if requested != float(resolved_capital):
+        if requested <= 0:
             raise ProtocolError(
                 "invalid_config",
-                f"config.initial_cash must match this agent's cash allocation "
-                f"({resolved_capital:g}); custom values are not supported",
+                "config.initial_cash must be greater than 0",
                 400,
-                details={"initial_cash": resolved_capital},
             )
+        if requested > float(MAX_BACKTEST_INITIAL_CAPITAL) + 1e-9:
+            raise ProtocolError(
+                "invalid_config",
+                f"config.initial_cash cannot exceed {MAX_BACKTEST_INITIAL_CAPITAL:g}",
+                400,
+                details={"max_initial_cash": MAX_BACKTEST_INITIAL_CAPITAL},
+            )
+        resolved_capital = resolve_initial_capital(requested)
 
     mode = config.get("mode", "safe_trading")
     if mode not in ("safe_trading", "buy_and_hold"):

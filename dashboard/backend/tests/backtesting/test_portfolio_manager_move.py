@@ -290,7 +290,7 @@ def test_safe_trading_threads_custom_strategy_prompt(monkeypatch):
     from dashboard.backend.domain.backtesting import portfolio_manager as pm_mod
     captured = {}
 
-    def fake_create_prompt(snapshot, mode=None, custom_prompt=None):
+    def fake_create_prompt(snapshot, mode=None, custom_prompt=None, allowed_symbols=None):
         captured["custom_prompt"] = custom_prompt
         captured["mode"] = mode
         raise _StopAfterCapture()

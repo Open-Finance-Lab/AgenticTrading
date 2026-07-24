@@ -58,6 +58,7 @@ def test_engine_load_data_empty_raises_not_exits():
     backtester.start_date = "2026-01-01"
     backtester.end_date = "2026-01-02"
     backtester.data_source = "alpaca"
+    backtester.symbols = ["AAPL"]
     with pytest.raises(MarketDataUnavailableError):
         backtester.load_data()
 

@@ -177,6 +177,11 @@ def main():
         help="Market-data provider (default: alpaca)",
     )
     parser.add_argument("--initial-capital", type=float, default=None, help="Starting capital for this backtest (defaults to INITIAL_CAPITAL)")
+    parser.add_argument(
+        "--assets",
+        default=None,
+        help="Comma-separated tickers for the tradeable universe (default: full DJIA_30)",
+    )
     
     args = parser.parse_args()
     
@@ -219,11 +224,22 @@ def main():
         print("🗑️ Clearing all existing data...\n")
         db.clear_all()
     
+    symbols = None
+    if args.assets:
+        symbols = [s.strip().upper() for s in args.assets.split(",") if s.strip()]
+        if not symbols:
+            symbols = None
+
     print(f"\n🚀 Hourly Agent Backtest Framework")
     print(f"{'='*70}")
     print(f"Period: {args.start} → {args.end}")
     print(f"Session: {session_id[:8]}...")
-    print(f"Stocks: {len(DJIA_30)} (DJIA)")
+    universe_label = (
+        f"{len(symbols)} selected" if symbols else f"{len(DJIA_30)} (DJIA)"
+    )
+    print(f"Stocks: {universe_label}")
+    if symbols:
+        print(f"Universe: {', '.join(symbols)}")
     print(f"Data source: {args.data_source}")
     print(f"Trading: Hourly (Agent decisions based on indicators)")
     capital = float(args.initial_capital) if args.initial_capital is not None else float(INITIAL_CAPITAL)
@@ -253,6 +269,7 @@ def main():
         progress_file=args.progress_file,
         data_source=args.data_source,
         initial_capital=capital,
+        symbols=symbols,
     )
     
     if backtester.use_llm:
@@ -272,8 +289,8 @@ def main():
     print(f"\n📊 DEBUG - Loaded Symbols:")
     print(f"   Total symbols loaded: {len(backtester.all_data)}")
     print(f"   Symbols: {', '.join(sorted(backtester.all_data.keys())[:10])}{'...' if len(backtester.all_data) > 10 else ''}")
-    print(f"   Agent will buy: 10 target stocks (AAPL, MSFT, JPM, V, JNJ, UNH, WMT, HD, MA, PG)")
-    print(f"   Baselines will buy: ALL {len(backtester.all_data)} symbols equally")
+    print(f"   Agent universe: {', '.join(backtester.symbols)}")
+    print(f"   Loaded bars for: {len(backtester.all_data)} symbols")
     
     # Step 3: Run backtests
     print("\n3️⃣ Running backtests...\n")

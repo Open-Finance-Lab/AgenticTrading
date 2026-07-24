@@ -30,6 +30,36 @@ from dashboard.backend.database import db
 # agent run listings.
 BASELINE_AGENT_NAMES = {"DJIA", "buy-and-hold"}
 
+# Card sparkline budget — enough to show path shape without shipping full curves.
+_SPARKLINE_MAX_POINTS = 36
+
+
+def sample_equity_sparkline(
+    curve: Optional[List[Dict[str, Any]]],
+    *,
+    max_points: int = _SPARKLINE_MAX_POINTS,
+) -> List[float]:
+    """Downsample an equity timeseries to a short list of equity floats.
+
+    Always includes the first and last points when downsampling so the card
+    sparkline ends on the same value as Ending Value / final equity.
+    """
+    equities: List[float] = []
+    for point in curve or []:
+        try:
+            equities.append(float(point["equity"]))
+        except (TypeError, ValueError, KeyError):
+            continue
+    if not equities:
+        return []
+    if len(equities) <= max_points:
+        return equities
+    last = len(equities) - 1
+    return [
+        equities[round(i * last / (max_points - 1))]
+        for i in range(max_points)
+    ]
+
 
 class AgentServiceError(Exception):
     """Base class for agent-service domain errors."""
@@ -127,6 +157,39 @@ class AgentService:
         )
         return result
 
+    def attach_equity_sparklines(
+        self, agents: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Attach ``equity_sparkline`` from each agent's latest run curve.
+
+        Batches curve loads so agent-card listings stay O(unique latest runs)
+        instead of one query per agent.
+        """
+        run_ids: List[str] = []
+        seen = set()
+        for agent in agents:
+            latest = agent.get("latest_run") or {}
+            run_id = latest.get("run_id")
+            if not run_id or run_id in seen:
+                continue
+            seen.add(run_id)
+            run_ids.append(run_id)
+        if not run_ids:
+            return agents
+        curves = self.db.get_equity_curves(run_ids)
+        for agent in agents:
+            latest = agent.get("latest_run")
+            if not latest:
+                continue
+            spark = sample_equity_sparkline(curves.get(latest.get("run_id")) or [])
+            if not spark:
+                continue
+            agent["equity_sparkline"] = spark
+            latest = dict(latest)
+            latest["equity_sparkline"] = spark
+            agent["latest_run"] = latest
+        return agents
+
     def list_external_runs(self, session_id: str) -> List[Dict[str, Any]]:
         ext_runs = self._external_runs(session_id)
         ext_runs.sort(key=lambda r: r.get("created_at") or "", reverse=True)
@@ -196,7 +259,7 @@ class AgentService:
         )
         if not agent:
             raise AgentNotFoundError()
-        return self.agent_with_stats(agent)
+        return self.attach_equity_sparklines([self.agent_with_stats(agent)])[0]
 
     def create_agent(
         self,
@@ -234,10 +297,11 @@ class AgentService:
         """
         agents = self.agents.list_builtin_agents()
         runs_by_session = self.db.get_runs_by_sessions([a["session_id"] for a in agents])
-        return [
+        enriched = [
             self.agent_with_stats(a, session_runs=runs_by_session.get(a["session_id"], []))
             for a in agents
         ]
+        return self.attach_equity_sparklines(enriched)
 
     def list_agents_with_stats(
         self,
@@ -257,11 +321,18 @@ class AgentService:
             owner_browser_session=owner_browser_session,
             trading_session_id=trading_session_id,
         )
-        runs_by_session = self.db.get_runs_by_sessions([a["session_id"] for a in agents])
-        return [
-            self.agent_with_stats(a, session_runs=runs_by_session.get(a["session_id"], []))
+        # Same batching as list_builtin_agents_with_stats — one runs query for
+        # the whole list instead of get_runs_by_session per agent (N+1).
+        runs_by_session = self.db.get_runs_by_sessions(
+            [a["session_id"] for a in agents]
+        )
+        enriched = [
+            self.agent_with_stats(
+                a, session_runs=runs_by_session.get(a["session_id"], [])
+            )
             for a in agents
         ]
+        return self.attach_equity_sparklines(enriched)
 
     def claim_account_agents(
         self,
@@ -271,7 +342,8 @@ class AgentService:
     ) -> Tuple[int, List[Dict[str, Any]]]:
         claimed = self.agents.claim_browser_agents_to_user(browser_session, user_id)
         agents = self.agents.list_agents(owner_user_id=user_id)
-        return claimed, [self.agent_with_stats(a) for a in agents]
+        enriched = [self.agent_with_stats(a) for a in agents]
+        return claimed, self.attach_equity_sparklines(enriched)
 
     def import_session(
         self,

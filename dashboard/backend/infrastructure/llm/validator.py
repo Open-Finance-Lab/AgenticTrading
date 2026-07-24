@@ -13,6 +13,7 @@ Usage:
 
 import json
 import logging
+import re
 from typing import Dict, Any, List, Optional, Tuple
 from enum import Enum
 from decimal import Decimal
@@ -33,6 +34,11 @@ DJIA_30 = [
 
 # Top 10 DJIA stocks (for 10-stock buy-and-hold mode)
 TOP_10_STOCKS = ["AAPL", "MSFT", "JPM", "V", "JNJ", "WMT", "PG", "AXP", "HD", "DIS"]
+
+# Ticker shape only — universe membership is enforced by callers that know the
+# selected asset universe (default: DJIA_30). Mag7 / custom lists include names
+# outside the Dow (e.g. TSLA, META).
+_TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 
 
 class TradingAction(str, Enum):
@@ -69,10 +75,13 @@ class LLMTradingDecision(BaseModel):
     @field_validator('symbol')
     @classmethod
     def validate_symbol(cls, v):
-        """Ensure symbol is in DJIA 30"""
-        if v not in DJIA_30:
-            raise ValueError(f"Invalid symbol: {v}. Must be one of {DJIA_30}")
-        return v
+        """Normalize ticker and enforce shape (universe checked later)."""
+        if not isinstance(v, str):
+            raise ValueError(f"Symbol must be a string, got {type(v)}")
+        symbol = v.strip().upper()
+        if not _TICKER_RE.fullmatch(symbol):
+            raise ValueError(f"Invalid symbol format: {v}")
+        return symbol
     
     @field_validator('confidence')
     @classmethod
@@ -145,7 +154,8 @@ class PortfolioConstraints(BaseModel):
 def validate_llm_response(
     raw_response: str,
     portfolio_state: Dict[str, Any],
-    current_prices: Dict[str, float]
+    current_prices: Dict[str, float],
+    allowed_symbols: Optional[List[str]] = None,
 ) -> Optional[LLMTradingDecision]:
     """
     Validate LLM response and check portfolio constraints.
@@ -154,6 +164,7 @@ def validate_llm_response(
         raw_response: Raw string from LLM
         portfolio_state: Current portfolio state
         current_prices: Current market prices {symbol: price}
+        allowed_symbols: Tradeable universe (defaults to DJIA_30)
     
     Returns:
         LLMTradingDecision if valid, None if invalid (reason logged)
@@ -194,6 +205,18 @@ def validate_llm_response(
         logger.warning(
             f"❌ Schema validation failed: {e}",
             extra={"errors": e.errors(), "json_data": json_data}
+        )
+        return None
+
+    allow = {
+        str(s).strip().upper()
+        for s in (allowed_symbols if allowed_symbols is not None else DJIA_30)
+        if s
+    }
+    if decision.symbol not in allow:
+        logger.warning(
+            f"❌ Symbol {decision.symbol} not in allowed universe",
+            extra={"symbol": decision.symbol, "allowed": sorted(allow)},
         )
         return None
     
@@ -669,15 +692,27 @@ Return ONLY valid JSON.
 """
 
 
-def create_safe_prompt(market_snapshot: Dict[str, Any]) -> str:
+def _format_valid_symbols(allowed_symbols: Optional[List[str]] = None) -> str:
+    symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
+    return ", ".join(str(s).strip().upper() for s in symbols if s)
+
+
+def create_safe_prompt(
+    market_snapshot: Dict[str, Any],
+    allowed_symbols: Optional[List[str]] = None,
+) -> str:
     """Create a safe prompt for LLM trading decision."""
     return SAFE_TRADING_PROMPT.format(
         market_snapshot=json.dumps(market_snapshot, indent=2),
-        valid_symbols=", ".join(DJIA_30)
+        valid_symbols=_format_valid_symbols(allowed_symbols),
     )
 
 
-def create_custom_prompt(market_snapshot: Dict[str, Any], strategy_prompt: str) -> str:
+def create_custom_prompt(
+    market_snapshot: Dict[str, Any],
+    strategy_prompt: str,
+    allowed_symbols: Optional[List[str]] = None,
+) -> str:
     """Concatenate a user's free-form strategy with the fixed execution contract.
 
     The free-form ``strategy_prompt`` is included verbatim and REPLACES the
@@ -690,7 +725,7 @@ def create_custom_prompt(market_snapshot: Dict[str, Any], strategy_prompt: str) 
     strategy = (strategy_prompt or "").strip()
     contract = CUSTOM_STRATEGY_OUTPUT_CONTRACT.format(
         market_snapshot=json.dumps(market_snapshot, indent=2),
-        valid_symbols=", ".join(DJIA_30),
+        valid_symbols=_format_valid_symbols(allowed_symbols),
     )
     return f"=== USER STRATEGY ===\n{strategy}\n{contract}"
 
@@ -699,6 +734,7 @@ def create_prompt(
     market_snapshot: Dict[str, Any],
     mode: str = "safe_trading",
     custom_prompt: str | None = None,
+    allowed_symbols: Optional[List[str]] = None,
 ) -> str:
     """
     Create a prompt for LLM trading decision based on mode.
@@ -709,16 +745,18 @@ def create_prompt(
         custom_prompt: optional free-form strategy that REPLACES the built-in
             strategy body for this run (the market snapshot + JSON output
             contract are still enforced). When set, ``mode`` is ignored.
+        allowed_symbols: Tradeable universe listed in VALID SYMBOLS (default DJIA_30).
     
     Returns:
         Formatted prompt string
     """
     if custom_prompt and custom_prompt.strip():
-        return create_custom_prompt(market_snapshot, custom_prompt)
+        return create_custom_prompt(
+            market_snapshot, custom_prompt, allowed_symbols=allowed_symbols
+        )
     if mode == "buy_and_hold":
         return BUY_AND_HOLD_PROMPT.format(
             market_snapshot=json.dumps(market_snapshot, indent=2),
-            valid_symbols=", ".join(DJIA_30)
+            valid_symbols=_format_valid_symbols(allowed_symbols),
         )
-    else:
-        return create_safe_prompt(market_snapshot)
+    return create_safe_prompt(market_snapshot, allowed_symbols=allowed_symbols)
