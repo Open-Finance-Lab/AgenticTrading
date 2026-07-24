@@ -331,6 +331,25 @@ function updateAgentAllocationFromAgents(agents) {
     renderAllocationChart('agent', buildAgentAllocationData(agents, getTotalPortfolioValue()));
 }
 
+/** Placeholder pie while agents are still loading — avoids a false "all Unallocated" flash. */
+function renderAllocationLoading() {
+    const legendEl = document.getElementById('agentAllocationLegend');
+    if (legendEl) {
+        legendEl.innerHTML =
+            '<li class="allocation-legend-item allocation-legend-item--loading">' +
+            '<span class="allocation-legend-label">Loading agents…</span></li>';
+    }
+    renderAllocationChart('agent', {
+        total: getTotalPortfolioValue(),
+        slices: [{
+            label: 'Loading',
+            value: Math.max(getTotalPortfolioValue(), 1),
+            pct: 100,
+            color: AVAILABLE_SLICE_COLOR,
+        }],
+    });
+}
+
 function readCachedPortfolio() {
     try {
         const raw = sessionStorage.getItem(PORTFOLIO_CACHE_KEY);
@@ -370,15 +389,21 @@ function clearCachedPortfolio() {
     }
 }
 
-function renderPortfolioFromMock(agents) {
+function renderPortfolioFromMock(agents, options) {
+    options = options || {};
     livePortfolio = null;
     clearCachedPortfolio();
     setPortfolioSampleBadgeVisible(true);
     renderPortfolioOverview(PORTFOLIO_MOCK.summary);
+    if (options.deferAllocation) {
+        renderAllocationLoading();
+        return;
+    }
     renderAllocationChart('agent', buildAgentAllocationData(agents, getTotalPortfolioValue()));
 }
 
-function renderPortfolioFromLive(portfolio, agents) {
+function renderPortfolioFromLive(portfolio, agents, options) {
+    options = options || {};
     livePortfolio = {
         equity: Number(portfolio.equity) || 0,
         cash_available: Number(portfolio.cash_available) || 0,
@@ -387,6 +412,10 @@ function renderPortfolioFromLive(portfolio, agents) {
     writeCachedPortfolio(livePortfolio);
     setPortfolioSampleBadgeVisible(false);
     renderPortfolioOverview(summaryFromLivePortfolio(livePortfolio));
+    if (options.deferAllocation) {
+        renderAllocationLoading();
+        return;
+    }
     updateAgentAllocationFromAgents(agents);
 }
 
@@ -411,33 +440,37 @@ function fetchLivePortfolio() {
 // once (boot prefetch, then loadAgents). Responses are not guaranteed to
 // arrive in request order, so without this sequence guard a slower earlier
 // request can repaint the panel with stale agents after the newer one landed.
-async function renderPortfolio(agents) {
+async function renderPortfolio(agents, options) {
+    options = options || {};
     const list = agents || [];
+    const deferAllocation = !!options.deferAllocation;
     const seq = ++portfolioRenderSeq;
     if (!isPortfolioSignedIn() || typeof API === 'undefined' || typeof API_BASE === 'undefined') {
         if (seq !== portfolioRenderSeq) return;
-        renderPortfolioFromMock(list);
+        renderPortfolioFromMock(list, { deferAllocation: deferAllocation });
         return;
     }
     // Instant paint from memory / sessionStorage before the network round-trip.
     const cached = livePortfolio || readCachedPortfolio();
     if (cached) {
-        renderPortfolioFromLive(cached, list);
+        renderPortfolioFromLive(cached, list, { deferAllocation: deferAllocation });
+    } else if (deferAllocation) {
+        renderAllocationLoading();
     }
     try {
         const portfolio = await fetchLivePortfolio();
         if (seq !== portfolioRenderSeq) return;
         if (!portfolio) {
-            if (!livePortfolio) renderPortfolioFromMock(list);
+            if (!livePortfolio) renderPortfolioFromMock(list, { deferAllocation: deferAllocation });
             return;
         }
-        renderPortfolioFromLive(portfolio, list);
+        renderPortfolioFromLive(portfolio, list, { deferAllocation: deferAllocation });
     } catch (error) {
         if (seq !== portfolioRenderSeq) return;
         console.warn('Portfolio API unavailable; showing sample data:', error?.message || error);
         // Keep last-known figures if we already painted them; only fall back to
         // SAMPLE DATA when the panel would otherwise stay blank.
-        if (!livePortfolio) renderPortfolioFromMock(list);
+        if (!livePortfolio) renderPortfolioFromMock(list, { deferAllocation: deferAllocation });
     }
 }
 
@@ -447,32 +480,38 @@ async function renderPortfolio(agents) {
  * Lets hard refresh and My Agents tab revisit paint instantly while the
  * authoritative refresh rides along with prefetchPortfolio / loadAgents.
  */
-function repaintPortfolioFromCache(agents) {
+function repaintPortfolioFromCache(agents, options) {
+    options = options || {};
     const list = agents || [];
+    const deferAllocation = !!options.deferAllocation;
     if (livePortfolio) {
-        renderPortfolioFromLive(livePortfolio, list);
+        renderPortfolioFromLive(livePortfolio, list, { deferAllocation: deferAllocation });
         return;
     }
     if (!isPortfolioSignedIn()) {
-        renderPortfolioFromMock(list);
+        renderPortfolioFromMock(list, { deferAllocation: deferAllocation });
         return;
     }
     const cached = readCachedPortfolio();
     if (cached) {
-        renderPortfolioFromLive(cached, list);
+        renderPortfolioFromLive(cached, list, { deferAllocation: deferAllocation });
+        return;
+    }
+    if (deferAllocation) {
+        renderAllocationLoading();
     }
     // Signed in but nothing cached yet: leave it be — prefetch / loadAgents
     // is about to paint the real figures.
 }
 
-/** Boot helper: paint from cache immediately (no network). */
+/** Boot helper: overview from cache; defer pie until loadAgents has the list. */
 function paintPortfolioBoot(agents) {
-    repaintPortfolioFromCache(agents);
+    repaintPortfolioFromCache(agents, { deferAllocation: true });
 }
 
-/** Boot helper: cache paint + start GET /portfolio without waiting on agents. */
+/** Boot helper: fetch portfolio totals without painting a false empty-agent pie. */
 async function prefetchPortfolio(agents) {
-    return renderPortfolio(agents || []);
+    return renderPortfolio(agents || [], { deferAllocation: true });
 }
 
 window.renderPortfolio = renderPortfolio;
