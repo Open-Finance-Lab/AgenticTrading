@@ -1168,107 +1168,244 @@ async function updateHomePortfolioModule() {
     renderHomePortfolioChart(equity, dayPnl, homePortRange);
 }
 
-function renderHomeAgentStatusCard(agent) {
-    const status = (typeof resolveAgentStatusBadge === 'function')
-        ? resolveAgentStatusBadge(agent)
-        : { key: 'draft', label: 'DRAFT', className: 'draft' };
+function homeListUserAgents() {
+    if (typeof allAgents === 'undefined' || !Array.isArray(allAgents)) return [];
+    return allAgents.filter(
+        (a) => a?.agent_id && !(typeof isDemoAgent === 'function' && isDemoAgent(a.agent_id)),
+    );
+}
+
+function homeAgentIsPaperTrading(agent) {
+    if (typeof resolveAgentStatusBadge === 'function') {
+        return resolveAgentStatusBadge(agent).key === 'paper';
+    }
+    const deployment = String(agent?.deployment_status || '').toLowerCase();
+    return agent?.is_live === true || deployment === 'live' || deployment === 'paper';
+}
+
+function homeParseActivityTime(raw) {
+    if (!raw) return NaN;
+    const t = new Date(String(raw).replace(' ', 'T')).getTime();
+    return Number.isFinite(t) ? t : NaN;
+}
+
+function homeActivityRelTime(iso) {
+    const t = homeParseActivityTime(iso);
+    if (!Number.isFinite(t)) return '';
+    const mins = Math.round((Date.now() - t) / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins} min ago`;
+    const hours = Math.round(mins / 60);
+    if (hours < 24) return `${hours} hr ago`;
+    const startToday = new Date();
+    startToday.setHours(0, 0, 0, 0);
+    const startYesterday = new Date(startToday);
+    startYesterday.setDate(startYesterday.getDate() - 1);
+    if (t >= startYesterday.getTime() && t < startToday.getTime()) return 'Yesterday';
+    if (typeof formatRelativeTime === 'function') return formatRelativeTime(iso);
+    return `${Math.round(hours / 24)}d ago`;
+}
+
+function homeFormatReturnBadge(run) {
+    const retRaw = Number(run?.total_return);
+    let frac = null;
+    if (Number.isFinite(retRaw)) {
+        frac = Math.abs(retRaw) <= 1 ? retRaw : retRaw / 100;
+    } else {
+        const initial = Number(run?.initial_equity);
+        const final = Number(run?.final_equity);
+        if (Number.isFinite(initial) && initial > 0 && Number.isFinite(final)) {
+            frac = (final - initial) / initial;
+        }
+    }
+    if (frac == null || !Number.isFinite(frac)) return null;
+    const pct = frac * 100;
+    const sign = pct > 0 ? '+' : '';
+    return {
+        text: `${sign}${pct.toFixed(1)}%`,
+        tone: pct >= 0 ? 'pos' : 'neg',
+    };
+}
+
+/** Build up to 3 recent real activities from agent records (no demo filler). */
+function collectHomeAgentActivities(agents) {
+    const events = [];
+    for (const agent of agents) {
+        const agentId = agent.agent_id;
+        const agentName = agent.name || 'Untitled agent';
+
+        if (agent.created_at) {
+            events.push({
+                at: agent.created_at,
+                agentId,
+                agentName,
+                kind: 'created',
+                description: 'was created',
+                badge: null,
+                tone: 'neutral',
+                target: 'configure',
+                runId: null,
+            });
+        }
+
+        const runs = Array.isArray(agent.runs) && agent.runs.length
+            ? agent.runs
+            : (agent.latest_run && (agent.latest_run.run_id || agent.latest_run.created_at)
+                ? [agent.latest_run]
+                : []);
+        const seenRuns = new Set();
+        for (const run of runs) {
+            const runId = run?.run_id || null;
+            const dedupe = runId || `${agentId}:${run?.created_at || ''}`;
+            if (seenRuns.has(dedupe)) continue;
+            seenRuns.add(dedupe);
+            if (!run?.created_at && !runId) continue;
+            const badge = homeFormatReturnBadge(run);
+            events.push({
+                at: run.created_at || agent.created_at,
+                agentId,
+                agentName,
+                kind: 'backtest',
+                description: 'completed a backtest',
+                badge: badge?.text || null,
+                tone: badge?.tone || 'neutral',
+                target: 'backtest',
+                runId,
+            });
+        }
+
+        if (homeAgentIsPaperTrading(agent)) {
+            const paperAt = agent.paper_updated_at || agent.last_used_at || agent.created_at;
+            if (paperAt) {
+                events.push({
+                    at: paperAt,
+                    agentId,
+                    agentName,
+                    kind: 'paper',
+                    description: 'started paper trading',
+                    badge: null,
+                    tone: 'cyan',
+                    target: 'paper',
+                    runId: null,
+                });
+            }
+        }
+    }
+
+    return events
+        .filter((e) => Number.isFinite(homeParseActivityTime(e.at)))
+        .sort((a, b) => homeParseActivityTime(b.at) - homeParseActivityTime(a.at))
+        .slice(0, 3);
+}
+
+function renderHomeAgentOverview(agents) {
     const esc = (typeof escapeHtml === 'function') ? escapeHtml : (v) => String(v ?? '');
-    const modelLabel = (typeof formatAgentModelLabel === 'function')
-        ? formatAgentModelLabel(agent.model_name)
-        : (agent.model_name || 'local-model');
-    const type = (typeof agentTypeLabel === 'function')
-        ? agentTypeLabel(agent)
-        : (agent.agent_type === 'builtin' ? 'Built-in' : 'External');
-    const icon = (typeof agentRobotIcon === 'function')
-        ? agentRobotIcon()
-        : '';
-    const body = (typeof renderAgentCardBody === 'function')
-        ? renderAgentCardBody(agent, status.key)
-        : '';
-    const actions = (typeof renderAgentCardActions === 'function')
-        ? renderAgentCardActions(agent, status.key)
-        : '';
+    const total = agents.length;
+    const paper = agents.filter(homeAgentIsPaperTrading).length;
+    const notTrading = Math.max(0, total - paper);
+    const activities = collectHomeAgentActivities(agents);
+
+    const activityHtml = activities.length
+        ? `<ul class="hm-agent-activity-list" role="list">
+            ${activities.map((ev) => {
+                const badge = ev.badge
+                    ? `<span class="hm-agent-activity-badge is-${esc(ev.tone)}">${esc(ev.badge)}</span>`
+                    : '';
+                return `<li>
+                  <button type="button" class="hm-agent-activity-row"
+                    data-agent-id="${esc(ev.agentId)}"
+                    data-target="${esc(ev.target)}"
+                    data-run-id="${esc(ev.runId || '')}"
+                    data-kind="${esc(ev.kind)}">
+                    <span class="hm-agent-activity-dot is-${esc(ev.tone || ev.kind)}" aria-hidden="true"></span>
+                    <span class="hm-agent-activity-main">
+                      <span class="hm-agent-activity-name">${esc(ev.agentName)}</span>
+                      <span class="hm-agent-activity-desc">${esc(ev.description)}</span>
+                      ${badge}
+                    </span>
+                    <time class="hm-agent-activity-time tabular-nums" datetime="${esc(ev.at)}">${esc(homeActivityRelTime(ev.at))}</time>
+                  </button>
+                </li>`;
+            }).join('')}
+          </ul>`
+        : `<p class="hm-agent-activity-empty">No recent agent activity.</p>`;
 
     return `
-      <div class="agent-card agent-card--status agent-card--home agent-card--${status.key}">
-        <div class="agent-card-top">
-          <div class="agent-card-identity">
-            ${icon}
-            <div class="agent-card-identity-text">
-              <h3 class="agent-name">${esc(agent.name || 'Untitled agent')}</h3>
-              <p class="agent-card-submeta">${esc(modelLabel)} · ${esc(type)}</p>
-            </div>
+      <div class="hm-agent-overview" aria-label="Agent team overview">
+        <div class="hm-agent-stats" role="group" aria-label="Agent status overview">
+          <div class="hm-agent-stat">
+            <span class="hm-agent-stat-value tabular-nums">${esc(String(total))}</span>
+            <span class="hm-agent-stat-label">Total Agents</span>
           </div>
-          <span class="status-badge ${status.className}"><span class="status-badge-dot" aria-hidden="true"></span>${status.label}</span>
+          <div class="hm-agent-stat hm-agent-stat--paper">
+            <span class="hm-agent-stat-value tabular-nums">${esc(String(paper))}</span>
+            <span class="hm-agent-stat-label">Paper Trading</span>
+          </div>
+          <div class="hm-agent-stat hm-agent-stat--idle">
+            <span class="hm-agent-stat-value tabular-nums">${esc(String(notTrading))}</span>
+            <span class="hm-agent-stat-label">Not Trading</span>
+          </div>
         </div>
-        ${body}
-        ${actions}
+        <div class="hm-agent-activity">
+          <p class="hm-agent-activity-label">Agent Activity</p>
+          ${activityHtml}
+        </div>
       </div>`;
+}
+
+async function openHomeAgentActivity(event) {
+    const row = event.currentTarget;
+    const agentId = row?.dataset?.agentId;
+    if (!agentId) return;
+    const agents = homeListUserAgents();
+    const agent = agents.find((a) => a.agent_id === agentId);
+    if (!agent) return;
+
+    const target = row.dataset.target || 'configure';
+    const runId = row.dataset.runId || null;
+
+    if (target === 'backtest' && typeof openAgentInBacktest === 'function') {
+        await openAgentInBacktest(agent, runId || undefined);
+        return;
+    }
+    if (target === 'paper' && typeof openAgentInPaper === 'function') {
+        await openAgentInPaper(agent);
+        return;
+    }
+    if (typeof navigateToPage === 'function') {
+        navigateToPage('playground', { playgroundTab: 'agents' });
+    }
+    if (typeof showPlaygroundPanel === 'function') {
+        showPlaygroundPanel('agents');
+    }
+    if (window.AgentEditor?.open) {
+        window.AgentEditor.open(agent);
+    }
 }
 
 function updateHomeAgentModule() {
     const empty = document.getElementById('homeAgentEmpty');
     const filled = document.getElementById('homeAgentFilled');
-    const viewBtn = document.getElementById('homeModuleViewAgentsBtn');
+    const agents = homeListUserAgents();
 
-    const agents = (typeof allAgents !== 'undefined' && Array.isArray(allAgents))
-        ? allAgents.filter((a) => a?.agent_id && !(typeof isDemoAgent === 'function' && isDemoAgent(a.agent_id)))
-        : [];
-    const activeId = localStorage.getItem('active-agent-id');
-    const agent = agents.find((a) => a.agent_id === activeId) || agents[0] || null;
-
-    if (!agent) {
+    if (!agents.length) {
         if (empty) empty.hidden = false;
         if (filled) {
             filled.hidden = true;
             filled.innerHTML = '';
         }
-        if (viewBtn) viewBtn.hidden = true;
         return;
     }
 
     if (empty) empty.hidden = true;
-    if (viewBtn) viewBtn.hidden = false;
     if (!filled) return;
     filled.hidden = false;
-    filled.innerHTML = renderHomeAgentStatusCard(agent);
+    filled.innerHTML = renderHomeAgentOverview(agents);
 
-    filled.querySelectorAll('.agent-view-runs-btn').forEach((btn) => {
-        btn.addEventListener('click', async (event) => {
+    filled.querySelectorAll('.hm-agent-activity-row').forEach((btn) => {
+        btn.addEventListener('click', (event) => {
             event.preventDefault();
-            event.stopPropagation();
-            if (typeof openAgentInBacktest !== 'function') {
-                if (typeof navigateToPage === 'function') {
-                    navigateToPage('playground', { playgroundTab: 'backtest' });
-                }
-                return;
-            }
-            const runId = typeof resolveLatestAgentRunId === 'function'
-                ? resolveLatestAgentRunId(agent)
-                : (typeof resolveBacktestCardMetrics === 'function'
-                    ? resolveBacktestCardMetrics(agent).runId
-                    : null);
-            await openAgentInBacktest(agent, runId);
-        });
-    });
-
-    filled.querySelectorAll('.agent-run-backtest-btn').forEach((btn) => {
-        btn.addEventListener('click', async (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            if (typeof openAgentInBacktest === 'function') {
-                await openAgentInBacktest(agent);
-            }
-        });
-    });
-
-    filled.querySelectorAll('.agent-open-btn').forEach((btn) => {
-        btn.addEventListener('click', async (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            if (typeof openAgentInPaper === 'function') {
-                await openAgentInPaper(agent);
-            }
+            openHomeAgentActivity(event);
         });
     });
 }

@@ -224,10 +224,10 @@
     if (cashInput && cashInput.value !== '') {
       const value = Number(cashInput.value);
       if (!Number.isFinite(value) || value < 0) {
-        throw new Error('Initial cash must be zero or greater.');
+        throw new Error('Allocated capital must be zero or greater.');
       }
       if (value > 3000) {
-        throw new Error('Initial cash cannot exceed $3,000.');
+        throw new Error('Allocated capital cannot exceed $3,000.');
       }
       cash_allocation = Math.round(value);
     } else {
@@ -670,7 +670,7 @@
     }
 
     if (!sorted.length) {
-      container.innerHTML = '<p class="agent-editor-run-empty">No backtest runs yet. Run a backtest from Playground to see history here.</p>';
+      container.innerHTML = '<p class="agent-editor-run-empty">No backtest runs yet. Run a backtest from this agent to see history here.</p>';
       return;
     }
 
@@ -947,6 +947,12 @@
     document.getElementById('agentEditorResetBtn')?.addEventListener('click', resetPipeline);
     document.getElementById('agentEditorModeSimple')?.addEventListener('click', () => setEditorMode('simple'));
     document.getElementById('agentEditorModeAdvanced')?.addEventListener('click', () => setEditorMode('advanced'));
+    document.getElementById('agentEditorRunBacktestBtn')?.addEventListener('click', () => {
+      if (!currentAgent) return;
+      if (typeof window.openRunBacktestModal === 'function') {
+        window.openRunBacktestModal(currentAgent);
+      }
+    });
 
     document.getElementById('agentEditorAddSelect')?.addEventListener('change', (e) => {
       const customName = document.getElementById('agentEditorCustomName');

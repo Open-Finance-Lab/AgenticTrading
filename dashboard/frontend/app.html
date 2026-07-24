@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=59">
+    <link rel="stylesheet" href="styles.css?v=63">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
     (function () {
@@ -146,7 +146,7 @@
                 <svg class="header-discord-btn__arrow" aria-hidden="true"><use href="#icon-chevron-right"/></svg>
             </a>
         </div>
-        <a class="header-brand" href="/?stay=1" aria-label="Agentic Trading Lab home">
+        <a class="header-brand" href="/" aria-label="Agentic Trading Lab home">
             <div class="logo-container">
                 <img src="images/atltransparent.png" alt="" class="logo-icon">
             </div>
@@ -176,6 +176,7 @@
                             <span id="accountMenuEmail" class="account-menu-email"></span>
                         </div>
                         <button id="accountMenuAccountBtn" class="account-menu-item" type="button">Account</button>
+                        <a id="accountMenuLandingLink" class="account-menu-item" href="/?stay=1">Visit Landing Page</a>
                         <button id="accountMenuLogoutBtn" class="account-menu-item account-menu-item--danger" type="button">Log out</button>
                     </div>
                 </div>
@@ -211,6 +212,127 @@
         </div>
     </div>
 
+    <div id="runBacktestModal" class="auth-modal run-backtest-modal" hidden>
+        <div class="auth-modal-backdrop" id="runBacktestModalBackdrop"></div>
+        <div class="auth-modal-panel run-backtest-modal-panel" role="dialog" aria-labelledby="runBacktestModalTitle">
+            <button id="runBacktestModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
+            <h2 id="runBacktestModalTitle" class="auth-modal-title">Run Backtest</h2>
+            <p class="auth-modal-subtitle">Simulation settings for this agent. Does not change allocated capital.</p>
+
+            <div class="run-backtest-modal-body">
+                <div class="control-group">
+                    <label>Agent</label>
+                    <p id="runBacktestAgentName" class="run-backtest-readonly">—</p>
+                </div>
+
+                <div class="control-group" id="runBacktestPromptGroup" hidden>
+                    <label>Prompt</label>
+                    <pre id="runBacktestPromptPreview" class="run-backtest-prompt-preview"></pre>
+                </div>
+
+                <div class="control-group">
+                    <label>Period</label>
+                    <div class="date-range-inputs">
+                        <div class="date-input-wrapper">
+                            <input type="date" id="startDate" value="2026-04-15" class="date-input">
+                        </div>
+                        <span class="date-separator">→</span>
+                        <div class="date-input-wrapper">
+                            <input type="date" id="endDate" value="2026-04-23" class="date-input">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label>Asset Universe</label>
+                    <p class="control-helper">Choose the universe of assets your agent is allowed to trade.</p>
+                    <div class="universe-tabs">
+                        <button class="universe-tab active" data-tab="builtin" type="button">Built-in</button>
+                        <button class="universe-tab" data-tab="custom" type="button">Custom</button>
+                    </div>
+                    <div id="builtinTab" class="universe-content active">
+                        <div class="preset-cards">
+                            <div class="preset-card selected" id="djiaCard">
+                                <div class="preset-name">DJIA 30</div>
+                                <div class="preset-desc">30 blue-chip companies</div>
+                                <button class="preset-btn" type="button">Selected</button>
+                            </div>
+                            <div class="preset-card" id="mag7Card">
+                                <div class="preset-name">Magnificent 7</div>
+                                <div class="preset-desc">7 major tech companies</div>
+                                <button class="preset-btn" type="button">Select</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div id="customTab" class="universe-content">
+                        <div class="custom-universe">
+                            <div class="custom-header">Build custom universe</div>
+                            <div class="search-input-group">
+                                <input type="text" class="search-asset-input" id="assetSearchInput" placeholder="Search company or ticker">
+                                <button class="add-asset-btn" type="button">+</button>
+                            </div>
+                            <div class="selected-chips" id="selectedChips">
+                                <div class="chip" data-ticker="AAPL">AAPL <span class="chip-remove">×</span></div>
+                                <div class="chip" data-ticker="MSFT">MSFT <span class="chip-remove">×</span></div>
+                                <div class="chip" data-ticker="GOOGL">GOOGL <span class="chip-remove">×</span></div>
+                                <div class="chip" data-ticker="AMZN">AMZN <span class="chip-remove">×</span></div>
+                                <div class="chip" data-ticker="NVDA">NVDA <span class="chip-remove">×</span></div>
+                                <div class="chip" data-ticker="TSLA">TSLA <span class="chip-remove">×</span></div>
+                            </div>
+                            <div class="chips-helper">Add companies to create your custom universe.</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-group">
+                    <label for="backtestInitialCapital">Initial Capital</label>
+                    <p class="control-helper">Simulation starting cash for this backtest only (max $10,000). Independent of portfolio allocation and paper trading.</p>
+                    <input
+                        class="control-select"
+                        id="backtestInitialCapital"
+                        type="number"
+                        min="1"
+                        max="10000"
+                        step="100"
+                        value="1000"
+                        aria-label="Backtest initial capital"
+                    >
+                    <p id="runBacktestCapitalHint" class="control-helper">Does not change Allocated Capital.</p>
+                </div>
+
+                <div class="control-group">
+                    <label for="modelSelect">Model</label>
+                    <p class="control-helper">Defaults to this agent’s model. Changing it here is temporary and is not saved to the agent.</p>
+                    <select class="control-select" id="modelSelect">
+                        <option value="claude-haiku-4.5">Claude Haiku 4.5</option>
+                        <option value="claude-sonnet-4.6">Claude Sonnet 4.6</option>
+                        <option value="claude-opus-4.7">Claude Opus 4.7</option>
+                        <option value="gpt-5.2">GPT-5.2</option>
+                        <option value="gpt-5-mini">GPT-5 mini</option>
+                        <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
+                        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
+                        <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
+                    </select>
+                </div>
+
+                <!-- Hidden: keep market-data hooks working; default Alpaca -->
+                <select id="marketDataSourceSelect" hidden aria-hidden="true">
+                    <option value="alpaca" selected>Alpaca market data</option>
+                </select>
+                <p id="vnpySimulationNotice" class="market-data-notice" hidden>
+                    vn.py simulated bars · deterministic · no LLM calls
+                </p>
+                <select id="backtestAgentSelect" hidden aria-hidden="true">
+                    <option value="">Loading agents…</option>
+                </select>
+            </div>
+
+            <p id="runBacktestModalError" class="auth-error" hidden></p>
+            <button id="runBacktestModalSubmit" class="auth-submit" type="button">▶ Run Backtest</button>
+        </div>
+    </div>
+
     <!-- Live Ticker — auto-scrolls right to left -->
     <div class="ticker-bar">
         <div class="ticker-marquee" id="tickerMarquee">
@@ -239,7 +361,7 @@
                             </h1>
                             <div class="home-landing-ctas">
                                 <button id="homeGetStartedBtn" class="home-btn home-btn-primary home-landing-cta" type="button">Get Started</button>
-                                <a class="home-btn home-btn-secondary home-landing-cta" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join Discord Community</a>
+                                <a class="home-btn home-btn-secondary home-landing-cta" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join Discord</a>
                             </div>
                         </div>
                         <div class="home-landing-playground" aria-label="Agent playground preview">
@@ -392,14 +514,15 @@
                         <article class="home-module home-module--agent" id="homeModuleAgent">
                             <header class="home-module-head">
                                 <h3 class="home-module-title">My Agents</h3>
+                                <button class="hm-head-outline-btn" id="homeModuleViewAgentsBtn" type="button">Manage Agents</button>
                             </header>
                             <div class="home-module-body" id="homeAgentBody">
                                 <div class="hm-agent-empty" id="homeAgentEmpty">
-                                    <button class="hm-agent-empty-cta" id="homeModuleCreateAgentEmpty" type="button">Create your agent</button>
+                                    <p class="hm-agent-empty-copy">Create your first agent to start testing trading ideas.</p>
+                                    <button class="hm-agent-empty-cta" id="homeModuleCreateAgentEmpty" type="button">Create Agent</button>
                                 </div>
                                 <div class="hm-agent-filled" id="homeAgentFilled" hidden></div>
                             </div>
-                            <button class="hm-footer-btn" id="homeModuleViewAgentsBtn" type="button" hidden>Manage agents</button>
                         </article>
 
                         <article class="home-module home-module--ranking" id="homeModuleRanking">
@@ -473,7 +596,7 @@
                                 <li><span class="hm-act-dot"></span><span>QuantNova completed a backtest</span><time class="tabular-nums">18m ago</time></li>
                                 <li><span class="hm-act-dot"></span><span>Momentum Scout moved to #3</span><time class="tabular-nums">31m ago</time></li>
                             </ul>
-                            <button class="hm-footer-btn" id="homeModuleCommunityBtn" type="button">Join the Discord community</button>
+                            <button class="hm-footer-btn" id="homeModuleCommunityBtn" type="button">Join Discord</button>
                         </article>
                         </div>
                     </div>
@@ -600,7 +723,7 @@
                     <input id="externalAgentModel" type="text" maxlength="100" placeholder="gpt-4 / rule-based" autocomplete="off">
                 </label>
                 <label class="auth-field">
-                    <span>Initial cash (max $3,000)</span>
+                    <span>Allocated capital (max $3,000)</span>
                     <input id="externalAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="externalAgentCashHint">
                 </label>
                 <p id="externalAgentCashHint" class="credential-hint">Starting capital budget for this agent's backtests and trading sessions.</p>
@@ -637,7 +760,7 @@
                     <input id="builtinAgentDescription" type="text" maxlength="280" placeholder="What is this agent's edge?" autocomplete="off">
                 </label>
                 <label class="auth-field">
-                    <span>Initial cash (max $3,000)</span>
+                    <span>Allocated capital (max $3,000)</span>
                     <input id="builtinAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="builtinAgentCashHint">
                 </label>
                 <p id="builtinAgentCashHint" class="credential-hint">Starting capital budget for this agent's backtests and trading sessions.</p>
@@ -763,8 +886,8 @@
                 </label>
                 <textarea id="agentEditorDescription" class="agent-editor-description" rows="2" maxlength="280" placeholder="Optional description for this agent…" aria-label="Agent description"></textarea>
                 <label class="agent-editor-cash-field" for="agentEditorCashAllocation">
-                    <span class="agent-editor-cash-label">Initial cash (max $3,000)</span>
-                    <input id="agentEditorCashAllocation" class="agent-editor-cash-input" type="number" min="0" max="3000" step="100" placeholder="0" aria-label="Initial cash">
+                    <span class="agent-editor-cash-label">Allocated capital (paper, max $3,000)</span>
+                    <input id="agentEditorCashAllocation" class="agent-editor-cash-input" type="number" min="0" max="3000" step="100" placeholder="0" aria-label="Allocated capital for paper trading">
                 </label>
             </div>
             <div class="agent-editor-header-actions">
@@ -774,6 +897,7 @@
                 </div>
                 <span id="agentEditorDirtyBadge" class="agent-editor-dirty-badge" hidden>Unsaved changes</span>
                 <button id="agentEditorResetBtn" class="home-btn home-btn-secondary agent-editor-reset-btn" type="button">Reset pipeline</button>
+                <button id="agentEditorRunBacktestBtn" class="home-btn home-btn-secondary" type="button">Run Backtest</button>
                 <button id="agentEditorSaveBtn" class="home-btn home-btn-primary" type="button">Save</button>
             </div>
         </header>
@@ -827,109 +951,45 @@
 
     <!-- Main Content: 3-Column Layout (Playground / Backtest) -->
     <div class="main-container playground-panel playground-backtest-panel" style="display: none;">
-        <!-- Left Panel: Setup -->
+        <!-- Left Panel: selected / running run config (read-only) -->
         <aside class="left-panel">
-            <!-- Backtest Setup Section -->
             <section class="control-section">
-                <h3 class="control-title">Backtest Setup</h3>
-                
-                <div class="control-group">
-                    <label>Period</label>
-                    <div class="date-range-inputs">
-                        <div class="date-input-wrapper">
-                            <input type="date" id="startDate" value="2026-04-15" class="date-input">
-                        </div>
-                        <span class="date-separator">→</span>
-                        <div class="date-input-wrapper">
-                            <input type="date" id="endDate" value="2026-04-23" class="date-input">
-                        </div>
+                <h3 class="control-title">Run config</h3>
+                <p id="backtestConfigEmpty" class="control-helper">No backtests yet. Run one from My Agents.</p>
+                <dl id="backtestConfigList" class="backtest-config-list" hidden>
+                    <div class="backtest-config-row">
+                        <dt>Agent</dt>
+                        <dd id="backtestConfigAgent">—</dd>
                     </div>
-                </div>
-
-                <div class="control-group">
-                    <label>Asset Universe</label>
-                    <p class="control-helper">Choose the universe of assets your agent is allowed to trade.</p>
-                    
-                    <!-- Tabs: Built-in / Custom -->
-                    <div class="universe-tabs">
-                        <button class="universe-tab active" data-tab="builtin">Built-in</button>
-                        <button class="universe-tab" data-tab="custom">Custom</button>
+                    <div class="backtest-config-row">
+                        <dt>Model</dt>
+                        <dd id="backtestConfigModel">—</dd>
                     </div>
-                    
-                    <!-- Built-in Tab -->
-                    <div id="builtinTab" class="universe-content active">
-                        <div class="preset-cards">
-                            <div class="preset-card selected" id="djiaCard">
-                                <div class="preset-name">DJIA</div>
-                                <div class="preset-desc">30 blue-chip companies</div>
-                                <button class="preset-btn">Selected</button>
-                            </div>
-                            <div class="preset-card" id="mag7Card">
-                                <div class="preset-name">Magnificent 7</div>
-                                <div class="preset-desc">7 major tech companies</div>
-                                <button class="preset-btn">Select</button>
-                            </div>
-                        </div>
-                        
-
+                    <div class="backtest-config-row" id="backtestConfigPromptRow" hidden>
+                        <dt>Prompt</dt>
+                        <dd id="backtestConfigPrompt" class="backtest-config-prompt">—</dd>
                     </div>
-                    
-                    <!-- Custom Tab -->
-                    <div id="customTab" class="universe-content">
-                        <div class="custom-universe">
-                            <div class="custom-header">Build custom universe</div>
-                            
-                            <div class="search-input-group">
-                                <input type="text" class="search-asset-input" id="assetSearchInput" placeholder="Search company or ticker">
-                                <button class="add-asset-btn">+</button>
-                            </div>
-                            
-                            <div class="selected-chips" id="selectedChips">
-                                <div class="chip" data-ticker="AAPL">AAPL <span class="chip-remove">×</span></div>
-                                <div class="chip" data-ticker="MSFT">MSFT <span class="chip-remove">×</span></div>
-                                <div class="chip" data-ticker="GOOGL">GOOGL <span class="chip-remove">×</span></div>
-                                <div class="chip" data-ticker="AMZN">AMZN <span class="chip-remove">×</span></div>
-                                <div class="chip" data-ticker="NVDA">NVDA <span class="chip-remove">×</span></div>
-                                <div class="chip" data-ticker="TSLA">TSLA <span class="chip-remove">×</span></div>
-                            </div>
-                            
-                            <div class="chips-helper">Add companies to create your custom universe.</div>
-                        </div>
+                    <div class="backtest-config-row">
+                        <dt>Started</dt>
+                        <dd id="backtestConfigStarted">—</dd>
                     </div>
-                </div>
-
-                <div class="control-group">
-                    <label for="backtestAgentSelect">Agent</label>
-                    <p class="control-helper">Choose which agent's pipeline and session this backtest should use.</p>
-                    <select class="control-select" id="backtestAgentSelect" aria-label="Select agent for backtest">
-                        <option value="">Loading agents…</option>
-                    </select>
-                </div>
-
-                <div class="control-group">
-                    <label for="marketDataSourceSelect">Market Data</label>
-                    <select class="control-select" id="marketDataSourceSelect" aria-label="Select market data source">
-                        <option value="alpaca">Alpaca market data</option>
-                    </select>
-                    <p id="vnpySimulationNotice" class="market-data-notice" hidden>
-                        vn.py simulated bars · deterministic · no LLM calls
-                    </p>
-                </div>
-
-                <div class="control-group universe-spacing">
-                    <label for="modelSelect">Model</label>
-                    <select class="control-select" id="modelSelect">
-                        <option value="claude-haiku-4.5">Claude Haiku 4.5</option>
-                        <option value="claude-sonnet-4.6">Claude Sonnet 4.6</option>
-                        <option value="claude-opus-4.7">Claude Opus 4.7</option>
-                        <option value="gpt-5.2">GPT-5.2</option>
-                        <option value="gpt-5-mini">GPT-5 mini</option>
-                        <option value="deepseek-v4-flash">DeepSeek V4 Flash</option>
-                        <option value="deepseek-v4-pro">DeepSeek V4 Pro</option>
-                        <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
-                        <option value="gemini-2.5-pro">Gemini 2.5 Pro</option>
-                    </select>
-                </div>
+                    <div class="backtest-config-row">
+                        <dt>Initial capital</dt>
+                        <dd id="backtestConfigCapital">—</dd>
+                    </div>
+                    <div class="backtest-config-row">
+                        <dt>Asset universe</dt>
+                        <dd id="backtestConfigUniverse">—</dd>
+                    </div>
+                    <div class="backtest-config-row">
+                        <dt>Time window</dt>
+                        <dd id="backtestConfigWindow">—</dd>
+                    </div>
+                    <div class="backtest-config-row">
+                        <dt>Status</dt>
+                        <dd id="backtestConfigStatus">—</dd>
+                    </div>
+                </dl>
 
                 <div id="backtestRunProgress" class="backtest-run-progress section-card compact" hidden>
                     <div class="backtest-run-progress-head">
@@ -943,91 +1003,6 @@
                     <p class="backtest-run-progress-hint">Multi-step agent pipelines can take several minutes (timeout: 10 min).</p>
                 </div>
             </section>
-
-            <!-- Advanced Settings Section (Collapsible) -->
-            <section class="control-section">
-                <button class="collapsible-header" id="advancedToggle">
-                    <span class="toggle-icon">▶</span>
-                    <h3 class="control-title" style="display: inline; margin: 0;">Advanced Settings</h3>
-                </button>
-                
-                <div class="collapsible-content" id="advancedContent" style="display: none;">
-                    <div class="control-group">
-                        <label>Agent Type</label>
-                        <select class="control-select">
-                            <option>Momentum Agent</option>
-                            <option>Mean Reversion</option>
-                            <option>Custom</option>
-                        </select>
-                    </div>
-
-                    <div class="control-group">
-                        <label>Initial Capital</label>
-                        <div style="padding: 8px 0; color: #e5e7eb; font-weight: 500;">$1,000</div>
-                    </div>
-
-                    <div class="control-group">
-                        <label>Risk Aversion</label>
-                        <div class="slider-container">
-                            <input type="range" min="0" max="100" value="60" class="slider">
-                            <div class="slider-labels">
-                                <span>Conservative</span>
-                                <span class="slider-value">0.60</span>
-                                <span>Aggressive</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="control-group">
-                        <label>Trades/Day</label>
-                        <div class="slider-container">
-                            <input type="range" min="0" max="10" value="3.2" step="0.1" class="slider">
-                            <div class="slider-labels">
-                                <span>0</span>
-                                <span class="slider-value">3.2</span>
-                                <span>10</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="control-group">
-                        <label>Slippage (%)</label>
-                        <div class="slider-container">
-                            <input type="range" min="0" max="1" value="0.1" step="0.01" class="slider">
-                            <div class="slider-labels">
-                                <span>0%</span>
-                                <span class="slider-value">0.10%</span>
-                                <span>1%</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="control-group">
-                        <label>Transaction Cost (%)</label>
-                        <div class="slider-container">
-                            <input type="range" min="0" max="1" value="0.1" step="0.01" class="slider">
-                            <div class="slider-labels">
-                                <span>0%</span>
-                                <span class="slider-value">0.10%</span>
-                                <span>1%</span>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="control-group">
-                        <label>Max Position per Asset (%)</label>
-                        <div class="slider-container">
-                            <input type="range" min="0" max="100" value="50" class="slider">
-                            <div class="slider-labels">
-                                <span>0%</span>
-                                <span class="slider-value">50%</span>
-                                <span>100%</span>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </section>
-
         </aside>
 
         <!-- Center Panel: Charts & Decision Log -->
@@ -1043,7 +1018,6 @@
                         <select id="backtestRunSelect" class="filter-select backtest-run-select" aria-label="Select backtest run" hidden>
                             <option value="">Latest run</option>
                         </select>
-                        <button class="run-backtest-btn">▶ Run Backtest</button>
                         <button class="time-btn active">1D</button>
                         <button class="time-btn">1W</button>
                         <button class="time-btn">1M</button>
@@ -1544,11 +1518,11 @@
     <script src="market-events/marketEventRelativeTime.js"></script>
     <script src="market-events/MarketEventCard.js"></script>
     <script src="market-events/MarketEventFeed.js"></script>
-    <script src="js/portfolio.js?v=11"></script>
-    <script src="js/agent-editor.js?v=9"></script>
-    <script src="app.js?v=31"></script>
+    <script src="js/portfolio.js?v=12"></script>
+    <script src="js/agent-editor.js?v=11"></script>
+    <script src="app.js?v=41"></script>
     <script src="js/leaderboard.js?v=16"></script>
-    <script src="home-page.js?v=34"></script>
+    <script src="home-page.js?v=36"></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads
