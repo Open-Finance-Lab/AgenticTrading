@@ -151,9 +151,7 @@ let homeMockIndex = 0;
 let homeToastTimer = null;
 let homeActivePulseTab = 'traded';
 let homeFeedHovered = false;
-let homeMetricValues = { agents: 0, decisions: 147, trades: 37, backtests: 126 };
-/** When true, Community "Active agents" is driven by the user's held agents — mock pulses must not overwrite it. */
-let homeAgentsMetricIsLive = false;
+let homeMetricValues = { agents: 28, decisions: 147, trades: 37, backtests: 126 };
 let homeEvents = [];
 let homeLatestEvent = null;
 
@@ -347,7 +345,6 @@ function prependActivity(item) {
 }
 
 function flashMetric(key, delta) {
-    if (key === 'agents' && homeAgentsMetricIsLive) return;
     if (homeMetricValues[key] === undefined) return;
     homeMetricValues[key] = Math.max(0, homeMetricValues[key] + delta);
     const map = {
@@ -1178,16 +1175,6 @@ function homeListUserAgents() {
     );
 }
 
-/** Community card: count of the user's agents that currently hold allocated capital. */
-function updateHomeCommunityAgentCount() {
-    const agents = homeListUserAgents();
-    const held = agents.filter((agent) => Number(agent.cash_allocation) > 0).length;
-    homeAgentsMetricIsLive = true;
-    homeMetricValues.agents = held;
-    const el = document.getElementById('homeMetricAgents');
-    if (el) el.textContent = String(held);
-}
-
 function homeAgentIsPaperTrading(agent) {
     if (typeof resolveAgentStatusBadge === 'function') {
         return resolveAgentStatusBadge(agent).key === 'paper';
@@ -1713,7 +1700,6 @@ function refreshHomeModules() {
         console.warn('Home portfolio refresh failed:', error?.message || error);
     });
     updateHomeAgentModule();
-    updateHomeCommunityAgentCount();
     loadHomeLeaderboardModule();
     loadHomeMarketNewsModule();
 }
