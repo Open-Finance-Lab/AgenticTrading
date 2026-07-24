@@ -35,7 +35,8 @@ if host not in ("127.0.0.1", "localhost", "::1") and not args.allow_remote:
 
 BASE = args.base
 M = args.agents
-AGENTS = json.load(open(os.path.join(args.artifacts, "agents.json")))
+with open(os.path.join(args.artifacts, "agents.json")) as _f:
+    AGENTS = json.load(_f)
 PID_FILE = os.path.join(args.artifacts, "server.pid")
 
 samples = []          # (kind, ms, http_status)
@@ -138,8 +139,10 @@ def drive(agent):
 
 def server_stats():
     try:
-        pid = int(open(PID_FILE).read())
-        st = open(f"/proc/{pid}/status").read()
+        with open(PID_FILE) as f:
+            pid = int(f.read())
+        with open(f"/proc/{pid}/status") as f:
+            st = f.read()
         rss = next(l for l in st.splitlines() if l.startswith("VmRSS")).split()[1]
         thr = next(l for l in st.splitlines() if l.startswith("Threads")).split()[1]
         return int(rss) // 1024, int(thr)

@@ -31,8 +31,7 @@ from dashboard.backend.infrastructure.llm.validator import (
     actions_to_executable,
     parse_actions_payload,
 )
-from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL, resolve_initial_capital
-from dashboard.backend.domain.backtesting.features import TechnicalIndicators
+from dashboard.backend.domain.backtesting.constants import resolve_initial_capital
 from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
     calculate_sharpe,
@@ -40,7 +39,23 @@ from dashboard.backend.domain.backtesting.metrics import (
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
 
-from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
+from dashboard.backend.domain.backtesting import (
+    baseline_worker,
+    constants as _constants,
+    features as _features,
+    market_data_store,
+)
+
+# Canonical re-exports. external_run_service is the single wiring point that names
+# these concrete symbols; guard tests (test_canonical_consumers,
+# test_external_run_service_move) assert `svc.TechnicalIndicators` is that class and
+# `svc.INITIAL_CAPITAL` is the canonical constant. Bound by assignment rather than a
+# bare `from ... import X` so each re-export is explicit and static analysis sees it
+# as used — no py/unused-import false positive. Do not remove (deleting either
+# reddens those tests). resolve_initial_capital stays a direct import: it's called
+# in the body, so it's a genuine use, not a re-export.
+TechnicalIndicators = _features.TechnicalIndicators
+INITIAL_CAPITAL = _constants.INITIAL_CAPITAL
 
 DECISION_TIMEOUT_SECONDS = int(os.getenv("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", "60"))
 

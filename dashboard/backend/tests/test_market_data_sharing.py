@@ -1,7 +1,5 @@
 """Two same-config sessions share one dataset object; the loader runs once."""
 
-import threading
-
 import numpy as np
 import pandas as pd
 import pytest
