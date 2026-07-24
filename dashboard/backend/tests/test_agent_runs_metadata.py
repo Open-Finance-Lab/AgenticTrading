@@ -124,16 +124,21 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
     backtester.prompt_adaptations = []
     backtester.initial_pipeline = None
     backtester.pipeline = None
+    backtester.symbols = ["AAPL", "MSFT"]
     monkeypatch.setattr(engine_mod.llm_harness, "DEFAULT_MAX_OUTPUT_TOKENS", 777)
     backtester.data_source = "alpaca"
 
     backtester.use_llm = True
     assert backtester._agent_run_metadata() == {
         "data_source": "alpaca",
+        "symbols": ["AAPL", "MSFT"],
         "llm_max_output_tokens": 777,
     }
     backtester.use_llm = False
-    assert backtester._agent_run_metadata() == {"data_source": "alpaca"}
+    assert backtester._agent_run_metadata() == {
+        "data_source": "alpaca",
+        "symbols": ["AAPL", "MSFT"],
+    }
 
 
 def test_baseline_metadata_is_provenance_only(monkeypatch):
@@ -149,6 +154,7 @@ def test_baseline_metadata_is_provenance_only(monkeypatch):
 
     backtester = HourlyBacktester.__new__(HourlyBacktester)  # skip creds init
     backtester.data_source = "vnpy_simulation"
+    backtester.symbols = ["AAPL"]
     monkeypatch.setattr(engine_mod.llm_harness, "DEFAULT_MAX_OUTPUT_TOKENS", 777)
     # State as it stands once the agent run has finished, which is when the
     # baselines actually build their metadata.
@@ -157,7 +163,10 @@ def test_baseline_metadata_is_provenance_only(monkeypatch):
     backtester.initial_pipeline = [{"step": "a"}]
     backtester.pipeline = [{"step": "b"}]
 
-    assert backtester._run_metadata() == {"data_source": "vnpy_simulation"}
+    assert backtester._run_metadata() == {
+        "data_source": "vnpy_simulation",
+        "symbols": ["AAPL"],
+    }
 
 
 def test_engine_agent_run_wires_the_metadata():
