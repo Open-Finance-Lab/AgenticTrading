@@ -310,6 +310,12 @@ class AgentService:
         owner_browser_session: Optional[str],
         trading_session_id: Optional[str],
     ) -> List[Dict[str, Any]]:
+        """List owned agents enriched with run stats (batched, no N+1).
+
+        Same prefetch pattern as ``list_builtin_agents_with_stats``: one
+        ``get_runs_by_sessions`` query for the whole listing, then per-agent
+        enrichment from the prefetched map.
+        """
         agents = self.agents.list_agents(
             owner_user_id=owner_user_id,
             owner_browser_session=owner_browser_session,

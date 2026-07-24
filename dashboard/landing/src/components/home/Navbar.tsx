@@ -1,5 +1,6 @@
 import { Link } from "wouter";
 import atlLogo from "@assets/atltransparent.png";
+import { useSignedIn } from "@/lib/session";
 
 const NAV_LINKS = [
   { href: "#talk", label: "Talk" },
@@ -9,6 +10,9 @@ const NAV_LINKS = [
 
 /** Same 3-column chrome as dashboard `.header` so the brand sits on the viewport center. */
 export function Navbar() {
+  const signedIn = useSignedIn();
+  const primaryCtaLabel = signedIn ? "Open Dashboard" : "Get Started";
+
   return (
     <nav className="landing-header border-b border-border bg-background/80 backdrop-blur-md">
       <div className="hidden md:flex items-center gap-3 text-[15px] font-semibold text-muted-foreground min-w-0">
@@ -29,7 +33,7 @@ export function Navbar() {
           href="/app?view=home"
           className="inline-flex items-center justify-center rounded-md text-[15px] font-semibold h-10 px-5 bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
         >
-          Get Started
+          {primaryCtaLabel}
         </a>
       </div>
     </nav>
