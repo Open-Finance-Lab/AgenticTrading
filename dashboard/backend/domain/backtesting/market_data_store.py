@@ -117,6 +117,16 @@ def get_dataset(symbols, start_date, end_date,
                 raise
             with _cache_lock:
                 entry.dataset = dataset
+                # Mark the just-built entry most-recently-used BEFORE evicting.
+                # Every other access path (waiter, peek, non-leader) refreshes
+                # recency; a leader's entry otherwise keeps its stale
+                # insertion-time position, so after a slow build it can be the
+                # LRU victim and get evicted here — before event.set() below.
+                # That both drops the hottest dataset and lets a same-key
+                # request racing into the pre-signal window become a second
+                # leader (redundant build == single-flight violation). Refreshing
+                # keeps the fresh entry at the back, safe for any cap >= 1.
+                _cache.move_to_end(key)
                 _evict_lru_locked()
             entry.event.set()
             return dataset

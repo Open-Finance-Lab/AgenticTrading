@@ -182,3 +182,42 @@ def test_empty_fetch_raises_runtime_error():
 
     with pytest.raises(RuntimeError, match="No market data"):
         mds.get_dataset(SYMS, "2026-04-15", "2026-04-16", loader_factory=_Empty)
+
+
+def test_completed_leader_is_not_self_evicted_under_cap(monkeypatch):
+    """A slow-built dataset must survive its own completion. It is the hottest
+    entry (its requester is about to use it), so evicting it here would drop the
+    hot dataset AND let a same-key request racing into the pre-signal window
+    become a second leader (redundant build == single-flight violation).
+    Regression: the leader path must refresh LRU recency before eviction, like
+    every other access path already does."""
+    monkeypatch.setattr(mds, "MARKET_DATA_CACHE_MAX_ENTRIES", 1)
+
+    started, release = threading.Event(), threading.Event()
+
+    class _SlowLoader:
+        def fetch_bars(self, symbols, start, end):
+            started.set()
+            release.wait(5)
+            return _synth_bars(symbols, start, end)
+
+    slow = ("2026-04-13", "2026-04-14")
+    fast = ("2026-04-15", "2026-04-16")
+
+    t = threading.Thread(
+        target=lambda: mds.get_dataset(SYMS, *slow, loader_factory=_SlowLoader))
+    t.start()
+    assert started.wait(5)  # slow build is in flight (entry not yet 'done')
+
+    # This completes while the slow build is still running, so when the slow
+    # build finishes both entries are 'done' and cap=1 forces one eviction.
+    mds.get_dataset(SYMS, *fast, loader_factory=_CountingLoader)
+
+    release.set()
+    t.join(10)
+
+    # The just-completed (most-recently-used) slow entry is retained; the older
+    # fast entry is the eviction victim. The pre-fix behavior evicted the slow
+    # entry it had just built.
+    assert mds.peek(SYMS, *slow) is not None
+    assert mds.peek(SYMS, *fast) is None
