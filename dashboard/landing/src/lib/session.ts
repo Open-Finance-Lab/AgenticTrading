@@ -1,0 +1,26 @@
+import { useEffect, useState } from "react";
+
+const AUTH_TOKEN_KEY = "auth-token";
+
+/** True when the dashboard session token is present in localStorage. */
+export function hasAuthToken(): boolean {
+  try {
+    return Boolean(localStorage.getItem(AUTH_TOKEN_KEY));
+  } catch {
+    return false;
+  }
+}
+
+/** Reactive signed-in flag for marketing CTAs (Get Started vs Open Dashboard). */
+export function useSignedIn(): boolean {
+  const [signedIn, setSignedIn] = useState(hasAuthToken);
+
+  useEffect(() => {
+    const sync = () => setSignedIn(hasAuthToken());
+    sync();
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
+  }, []);
+
+  return signedIn;
+}
