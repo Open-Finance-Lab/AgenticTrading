@@ -209,7 +209,8 @@ def test_finalize_marks_completed_before_baselines(monkeypatch, tmp_path):
         def run_djia_baseline(self):
             return (None, None)
 
-    monkeypatch.setattr(svc, "HourlyBacktester", _BlockingBacktester)
+    from dashboard.backend.domain.backtesting import baseline_worker as bw
+    monkeypatch.setattr(bw, "HourlyBacktester", _BlockingBacktester)
 
     session = svc.ExternalBacktestSession(
         backtest_id="bt_fin", session_id="s", agent_name="a", model_name="m",

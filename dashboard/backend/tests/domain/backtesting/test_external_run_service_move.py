@@ -52,8 +52,12 @@ def test_service_wires_canonical_symbols():
     from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
     from dashboard.backend.domain.agents.repository import agent_store
     from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
+    from dashboard.backend.domain.backtesting import baseline_worker as bw
 
-    assert svc.HourlyBacktester is HourlyBacktester
+    # T2: HourlyBacktester is consumed by the baseline_worker now, not the
+    # service; the service no longer imports it.
+    assert bw.HourlyBacktester is HourlyBacktester
+    assert not hasattr(svc, "HourlyBacktester")
     assert svc.PortfolioManager is PortfolioManager
     assert svc.TechnicalIndicators is TechnicalIndicators
     assert svc.AlpacaDataLoader is AlpacaDataLoader

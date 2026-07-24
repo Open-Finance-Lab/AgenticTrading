@@ -84,11 +84,16 @@ def test_external_backtest_service_uses_canonical_symbols():
     assert ebs.PortfolioManager is PortfolioManager
     assert ebs.AlpacaDataLoader is AlpacaDataLoader
     assert ebs.TechnicalIndicators is TechnicalIndicators
-    # Phase 2C5: HourlyBacktester is now the canonical engine class.
-    assert ebs.HourlyBacktester is HourlyBacktester
-    assert ebs.HourlyBacktester.__module__ == (
+    # T2: HourlyBacktester consumption moved from the service to the deduping
+    # baseline_worker; the worker binds the canonical engine class, and the
+    # service no longer references it at all.
+    from dashboard.backend.domain.backtesting import baseline_worker as bw
+
+    assert bw.HourlyBacktester is HourlyBacktester
+    assert bw.HourlyBacktester.__module__ == (
         "dashboard.backend.domain.backtesting.engine"
     )
+    assert not hasattr(ebs, "HourlyBacktester")
     assert not hasattr(ebs, "bha")
 
 

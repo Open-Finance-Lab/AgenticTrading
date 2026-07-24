@@ -148,10 +148,16 @@ def test_no_backend_source_imports_scripts():
 
 
 def test_external_backtest_service_uses_canonical_engine():
+    # T2 moved baseline generation off the finalize request into the deduping
+    # baseline_worker, so the worker (not the service) is now the backend's
+    # HourlyBacktester consumer. It must still bind the canonical engine class,
+    # never the legacy flat script.
     import dashboard.backend.domain.backtesting.external_run_service as ebs
+    from dashboard.backend.domain.backtesting import baseline_worker as bw
 
-    assert ebs.HourlyBacktester is HourlyBacktester
-    assert ebs.HourlyBacktester.__module__ == ENGINE_MODULE
+    assert bw.HourlyBacktester is HourlyBacktester
+    assert bw.HourlyBacktester.__module__ == ENGINE_MODULE
+    assert not hasattr(ebs, "HourlyBacktester")  # moved out of the service (T2)
 
 
 # ---------------------------------------------------------------------------

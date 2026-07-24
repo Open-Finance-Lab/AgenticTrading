@@ -323,6 +323,11 @@ GET /api/v1/runs/{run_id}/result
 `result` is available only once the run is `completed`; otherwise it returns
 `409 run_not_completed`.
 
+Baseline comparison runs (`baseline_run_ids`, the baseline ids inside
+`compare_url`) are generated asynchronously after completion and normally land
+within seconds; poll `GET /api/v1/runs/{run_id}` to pick them up. The decision
+response that completes the run is a snapshot from before they exist.
+
 ---
 
 ## 11. Error format
