@@ -53,8 +53,27 @@ os.environ.pop("USERS_DATABASE_URL", None)
 # imported.
 os.environ.pop("CONTENT_DATABASE_URL", None)
 
+# T1+ scale knobs are read once at import (like MAX_ACTIVE_RUNS_PER_AGENT); a
+# stray shell value would silently skew the whole run. Same rationale as the
+# DB-URL strips above. Later tiers append their vars here.
+os.environ.pop("MARKET_DATA_CACHE_MAX_ENTRIES", None)
+
 
 @atexit.register
 def _cleanup_test_db_dir() -> None:
     """Remove the temporary database directory when the test process exits."""
     shutil.rmtree(_TEST_DB_DIR, ignore_errors=True)
+
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _reset_shared_scale_state():
+    """The market-data store is a module-level cache shared across the test
+    process; without a per-test reset, one test's synthetic bars would be
+    served to every later test with the same (symbols, dates) key."""
+    from dashboard.backend.domain.backtesting import market_data_store
+    market_data_store._reset_for_tests()
+    yield
+    market_data_store._reset_for_tests()

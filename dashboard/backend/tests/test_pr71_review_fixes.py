@@ -53,17 +53,17 @@ def test_load_market_data_does_not_resurrect_a_cancelled_run(monkeypatch):
         model_name="m", start_date="2026-04-15", end_date="2026-04-16",
     )
 
-    class _Loader:
-        def fetch_bars(self, symbols, start, end):
-            return {"AAA": object()}
+    # load_market_data now delegates to the shared store; stub get_dataset so
+    # the terminal-status guard in adopt_dataset is exercised without a fetch.
+    class _FakeDataset:
+        all_data = {"AAA": object()}
+        timestamps = ["ts0"]
+        price_cache = {"AAA": {"ts0": 1.0}}
+        total_steps = 1
 
-    monkeypatch.setattr(svc, "AlpacaDataLoader", _Loader)
     monkeypatch.setattr(
-        svc.TechnicalIndicators, "calculate_indicators",
-        staticmethod(lambda df: df),
+        svc.market_data_store, "get_dataset", lambda *a, **k: _FakeDataset(),
     )
-    monkeypatch.setattr(session, "_build_trading_timestamps", lambda: ["ts0"])
-    monkeypatch.setattr(session, "_build_price_cache", lambda: {})
 
     # The agent cancelled while the fetch was running.
     session.status = "closed"
