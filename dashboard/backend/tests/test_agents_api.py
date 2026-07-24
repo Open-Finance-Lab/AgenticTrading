@@ -383,6 +383,43 @@ def test_builtin_listing_batches_run_stats_queries(client, monkeypatch):
     assert calls["batch"] == 1, "listing must fetch all stats in one query"
 
 
+def test_owner_listing_batches_run_stats_queries(client, monkeypatch):
+    """Owned /agents listing must batch run-stats the same way as /agents/builtin."""
+    browser_session = str(uuid.uuid4())
+    headers = {"X-Session-Id": browser_session, "X-Browser-Id": browser_session}
+    for i in range(3):
+        resp = client.post(
+            "/api/v1/agents",
+            json={"name": f"owned-{i}", "agent_type": "external"},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+
+    import dashboard.backend.api.routers.agents as agents_api
+
+    svc_db = agents_api.agent_service.db
+    calls = {"per_session": 0, "batch": 0}
+    orig_single = svc_db.get_runs_by_session
+    orig_batch = svc_db.get_runs_by_sessions
+
+    def counting_single(session_id):
+        calls["per_session"] += 1
+        return orig_single(session_id)
+
+    def counting_batch(session_ids):
+        calls["batch"] += 1
+        return orig_batch(session_ids)
+
+    monkeypatch.setattr(svc_db, "get_runs_by_session", counting_single)
+    monkeypatch.setattr(svc_db, "get_runs_by_sessions", counting_batch)
+
+    listing = client.get("/api/v1/agents", headers=headers)
+    assert listing.status_code == 200
+    assert len(listing.json()["agents"]) == 3
+    assert calls["per_session"] == 0, "owner listing still queries per agent (N+1)"
+    assert calls["batch"] == 1, "owner listing must fetch all stats in one query"
+
+
 def test_cash_allocation_cap_is_three_thousand(client):
     """Per-agent sleeve max is $3,000."""
     from dashboard.backend.domain.backtesting.constants import (
