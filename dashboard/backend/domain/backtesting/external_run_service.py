@@ -32,7 +32,6 @@ from dashboard.backend.infrastructure.llm.validator import (
     parse_actions_payload,
 )
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL, resolve_initial_capital
-from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
     calculate_sharpe,
@@ -40,7 +39,19 @@ from dashboard.backend.domain.backtesting.metrics import (
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
 
-from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
+from dashboard.backend.domain.backtesting import (
+    baseline_worker,
+    features as _features,
+    market_data_store,
+)
+
+# Canonical re-export. external_run_service is the single wiring point that names
+# the concrete TechnicalIndicators; guard tests (test_canonical_consumers,
+# test_external_run_service_move) assert `svc.TechnicalIndicators` is that class.
+# Bound by assignment rather than a bare `from ... import TechnicalIndicators` so
+# the re-export is explicit and static analysis sees it as used — no
+# py/unused-import false positive. Do not remove (deleting it reddens those tests).
+TechnicalIndicators = _features.TechnicalIndicators
 
 DECISION_TIMEOUT_SECONDS = int(os.getenv("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", "60"))
 

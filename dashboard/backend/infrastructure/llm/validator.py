@@ -22,6 +22,21 @@ from pydantic import BaseModel, field_validator, ValidationError, ConfigDict
 
 logger = logging.getLogger(__name__)
 
+# Any C0 control char (incl. CR/LF) or DEL — the log-injection surface.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _safe_log_value(value: Any, limit: int = 500) -> str:
+    """Neutralize untrusted (LLM/attacker-controlled) text before it reaches a log
+    record. Strips CR/LF — the sanitizer CodeQL py/log-injection recognizes — plus
+    other control chars, so a crafted response cannot forge or split log lines, and
+    bounds length. Sanitizes only what is *logged*; never the value trading
+    validation runs against, so the LLM safety boundary is unchanged.
+    """
+    text = str(value)[:limit].replace("\r", " ").replace("\n", " ")
+    return _CONTROL_CHARS.sub(" ", text)
+
+
 # DJIA 30 constituents. Source: S&P Dow Jones Indices, effective 2026-06-29
 # (GOOGL replaced VZ). Canonical for ATL — the backtest script and the v2 API
 # contract import this (guarded by tests/test_djia30_universe.py). Reconcile
@@ -180,7 +195,7 @@ def validate_llm_response(
        "function_calls" in raw_response or "invoke" in raw_response:
         logger.error(
             "🚨 SECURITY: LLM attempted tool calling! Rejecting response entirely.",
-            extra={"raw_response_preview": raw_response[:200]}
+            extra={"raw_response_preview": _safe_log_value(raw_response, 200)}
         )
         return None
     
@@ -191,8 +206,9 @@ def validate_llm_response(
         json_data = json.loads(raw_response)
     except json.JSONDecodeError as e:
         logger.warning(
-            f"❌ Invalid JSON from LLM: {e}",
-            extra={"raw_response_preview": raw_response[:200]}
+            "❌ Invalid JSON from LLM: %s",
+            _safe_log_value(e, 200),
+            extra={"raw_response_preview": _safe_log_value(raw_response, 200)}
         )
         return None
     
@@ -203,8 +219,12 @@ def validate_llm_response(
         decision = LLMTradingDecision(**json_data)
     except ValidationError as e:
         logger.warning(
-            f"❌ Schema validation failed: {e}",
-            extra={"errors": e.errors(), "json_data": json_data}
+            "❌ Schema validation failed: %s",
+            _safe_log_value(e, 500),
+            extra={
+                "errors": _safe_log_value(e.errors(), 500),
+                "json_data": _safe_log_value(json_data, 500),
+            }
         )
         return None
 

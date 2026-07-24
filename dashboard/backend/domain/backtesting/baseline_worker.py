@@ -158,6 +158,6 @@ def _reset_for_tests(maxsize: Optional[int] = None) -> None:
                     old_q.get_nowait()
                     old_q.task_done()
                 except queue.Empty:
-                    pass
+                    pass  # queue drained concurrently; nothing to evict before enqueuing _STOP
                 old_q.put_nowait(_STOP)
         _worker_thread = None
