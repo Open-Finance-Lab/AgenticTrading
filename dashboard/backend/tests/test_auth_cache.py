@@ -78,6 +78,38 @@ def test_misses_are_not_cached(store):
     assert len(store.resolves) == 2
 
 
+def test_inflight_resolve_not_recached_after_racing_invalidation(store, monkeypatch):
+    """A rotate/delete landing WHILE a cache-miss resolve is mid-DB-read must not
+    let that resolve write its stale pre-rotation snapshot into the cache — else
+    the revoked key would authenticate from cache until the TTL."""
+    monkeypatch.setattr(auth_cache, "_now", lambda: 1000.0)
+    real_resolve = store.resolve_api_key
+
+    def resolve_then_invalidate(api_key, touch=True):
+        agent = real_resolve(api_key, touch=touch)
+        auth_cache.invalidate_agent("agent-A")  # rotate/delete lands mid-flight
+        return agent
+
+    monkeypatch.setattr(store, "resolve_api_key", resolve_then_invalidate)
+    assert auth_cache.resolve_api_key("key-A")["agent_id"] == "agent-A"  # in-flight ok
+    assert len(store.resolves) == 1
+    # Not resurrected: the next resolve must re-read the DB, not hit a poisoned cache.
+    monkeypatch.setattr(store, "resolve_api_key", real_resolve)
+    auth_cache.resolve_api_key("key-A")
+    assert len(store.resolves) == 2
+
+
+def test_mutating_returned_scopes_does_not_corrupt_cache(store, monkeypatch):
+    """The cached agent's scopes list must be independent of what callers get,
+    so an in-place edit by one caller can't leak into every other holder."""
+    monkeypatch.setattr(auth_cache, "_now", lambda: 1000.0)
+    first = auth_cache.resolve_api_key("key-A")
+    first["scopes"].append("runs:write")   # a caller mutates its own view
+    second = auth_cache.resolve_api_key("key-A")  # served from cache
+    assert second["scopes"] == ["runs:read"]      # cache untouched
+    assert len(store.resolves) == 1               # confirm it was a cache hit
+
+
 def test_rotate_endpoint_invalidates_old_key():
     """End-to-end: after key rotation the OLD key must fail immediately, not
     after the TTL — exactly the behavior the cache would break without

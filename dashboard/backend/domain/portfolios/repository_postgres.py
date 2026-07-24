@@ -32,9 +32,8 @@ class PostgresPortfolioStore:
 
     def _init_schema(self) -> None:
         # Runs once per process, from __init__ -- not per query. Re-running it
-        # on every read would double this store's Postgres connections (there
-        # is no pool: _get_connection opens a fresh TCP+TLS session to Neon)
-        # and issue DDL on the request path.
+        # on every read would issue DDL on the request path and thrash the
+        # shared pool with schema churn.
         #
         # ADDING A COLUMN LATER (#175 allocate/reclaim)? It must go in an
         # `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` below, *not* only in the
