@@ -7,10 +7,20 @@ auth. Revocation/rotation propagates within <=TTL for entries nobody
 invalidates; the delete/rotate paths call invalidate_agent() for immediate
 effect (required: rotate_api_key blind-UPDATEs by agent id, so the OLD hash —
 the cache key — is never in scope there; hence the reverse index).
+
+Scope: the cache is process-local (plain module globals under a threading
+lock), so invalidate_agent()'s "immediate effect" is per-process. A
+multi-worker deployment (uvicorn --workers N) would keep a revoked key valid
+on every OTHER worker for up to the TTL; the shipping deploy is single-worker
+(see db_pool.py's max_size note), so before enabling workers keep the TTL low
+or move invalidation cross-process. Growth is bounded by the live-agent count,
+not by request volume: misses are never cached and rotate/delete evict, so a
+valid key holds at most one entry across the three maps.
 """
 
 from __future__ import annotations
 
+import copy
 import os
 import random
 import threading
@@ -47,11 +57,16 @@ _invalidation_epoch = 0
 
 def _copy_agent(agent: Dict[str, Any]) -> Dict[str, Any]:
     """Independent copy so neither the caller nor the cache can mutate the
-    other's view. Only ``scopes`` is a mutable nested value; the rest scalars."""
+    other's view. ``scopes`` (list of str) and ``pipeline`` (JSON-decoded list
+    of step dicts, so arbitrarily nested) are the mutable nested fields; every
+    other field from _public_agent() is a scalar and rides along by value."""
     out = dict(agent)
     scopes = out.get("scopes")
     if isinstance(scopes, list):
         out["scopes"] = list(scopes)
+    pipeline = out.get("pipeline")
+    if pipeline is not None:
+        out["pipeline"] = copy.deepcopy(pipeline)
     return out
 
 

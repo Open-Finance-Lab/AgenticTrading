@@ -110,6 +110,20 @@ def test_mutating_returned_scopes_does_not_corrupt_cache(store, monkeypatch):
     assert len(store.resolves) == 1               # confirm it was a cache hit
 
 
+def test_mutating_returned_pipeline_does_not_corrupt_cache(store, monkeypatch):
+    """pipeline (a JSON-decoded list of step dicts) is the second mutable nested
+    field on a real agent record; like scopes, the cache's copy must be
+    independent of the caller's, down to the nested step dicts."""
+    monkeypatch.setattr(auth_cache, "_now", lambda: 1000.0)
+    store.agents["key-A"]["pipeline"] = [{"role": "researcher"}]
+    first = auth_cache.resolve_api_key("key-A")     # miss: fills cache
+    first["pipeline"].append({"role": "trader"})    # a caller mutates its view
+    first["pipeline"][0]["role"] = "hijacked"       # ...including a nested step
+    second = auth_cache.resolve_api_key("key-A")    # served from cache
+    assert second["pipeline"] == [{"role": "researcher"}]  # cache untouched
+    assert len(store.resolves) == 1                        # confirm cache hit
+
+
 def test_rotate_endpoint_invalidates_old_key():
     """End-to-end: after key rotation the OLD key must fail immediately, not
     after the TTL — exactly the behavior the cache would break without
