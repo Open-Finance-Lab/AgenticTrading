@@ -121,20 +121,24 @@ def test_a_slow_earlier_render_cannot_repaint_over_a_newer_one():
     script = "\n".join(
         [
             "let portfolioRenderSeq = 0;",
+            "let livePortfolio = null;",
             "const painted = [];",
+            "const API = {};",
             "const API_BASE = '';",
             "const isPortfolioSignedIn = () => true;",
             "const renderPortfolioFromMock = () => painted.push('mock');",
             "const renderPortfolioFromLive = (p) => painted.push(p.tag);",
-            # First call hangs for 50ms, second returns immediately.
+            "const readCachedPortfolio = () => null;",
+            # Independent fetches (bypass coalescing) so out-of-order completion
+            # can be observed; coalescing is covered separately.
             "let call = 0;",
-            "const API = { get: () => {",
+            "const fetchLivePortfolio = () => {",
             "  call += 1;",
             "  const tag = call === 1 ? 'stale' : 'fresh';",
             "  const delay = call === 1 ? 50 : 0;",
             "  return new Promise((r) => setTimeout(",
-            "    () => r({ portfolio: { tag } }), delay));",
-            "} };",
+            "    () => r({ tag }), delay));",
+            "};",
             _extract_function(src, "renderPortfolio"),
             "(async () => {",
             "  const first = renderPortfolio([]);",
@@ -147,3 +151,114 @@ def test_a_slow_earlier_render_cannot_repaint_over_a_newer_one():
     painted = _run_node(script)
 
     assert painted == ["fresh"], painted
+
+
+def test_concurrent_renders_coalesce_to_one_portfolio_get():
+    """Boot prefetch + loadAgents must share a single in-flight GET."""
+    src = _PORTFOLIO_JS.read_text(encoding="utf-8")
+    script = "\n".join(
+        [
+            "let portfolioRenderSeq = 0;",
+            "let livePortfolio = null;",
+            "let portfolioFetchPromise = null;",
+            "const painted = [];",
+            "const API_BASE = '';",
+            "const isPortfolioSignedIn = () => true;",
+            "const renderPortfolioFromMock = () => painted.push('mock');",
+            "const renderPortfolioFromLive = (p) => painted.push('live');",
+            "const readCachedPortfolio = () => null;",
+            "let gets = 0;",
+            "const API = { get: () => {",
+            "  gets += 1;",
+            "  return Promise.resolve({ portfolio: { equity: 1, cash_available: 1, allocated: 0 } });",
+            "} };",
+            _extract_function(src, "fetchLivePortfolio"),
+            _extract_function(src, "renderPortfolio"),
+            "(async () => {",
+            "  await Promise.all([renderPortfolio([]), renderPortfolio([])]);",
+            "  console.log(JSON.stringify({ gets, painted }));",
+            "})();",
+        ]
+    )
+    result = _run_node(script)
+    assert result["gets"] == 1, result
+    assert result["painted"] == ["live"], result
+
+
+def test_session_cache_paints_before_network_returns():
+    """A hard-refresh cache hit must paint overview figures before GET resolves."""
+    src = _PORTFOLIO_JS.read_text(encoding="utf-8")
+    script = "\n".join(
+        [
+            "let portfolioRenderSeq = 0;",
+            "let livePortfolio = null;",
+            "let portfolioFetchPromise = null;",
+            "const painted = [];",
+            "const API_BASE = '';",
+            "const PORTFOLIO_CACHE_KEY = 'portfolio-live-cache';",
+            "const sessionStorage = { _d: {}, getItem(k){ return this._d[k] ?? null; },",
+            "  setItem(k,v){ this._d[k] = String(v); }, removeItem(k){ delete this._d[k]; } };",
+            "sessionStorage.setItem(PORTFOLIO_CACHE_KEY, JSON.stringify({",
+            "  equity: 10000, cash_available: 7000, allocated: 3000 }));",
+            "const isPortfolioSignedIn = () => true;",
+            "const renderPortfolioFromMock = () => painted.push('mock');",
+            "const renderPortfolioFromLive = (p, agents) => {",
+            "  painted.push({",
+            "    equity: Number(p.equity),",
+            "    cash_available: Number(p.cash_available),",
+            "    allocated: Number(p.allocated),",
+            "    agents: (agents || []).length,",
+            "  });",
+            "};",
+            _extract_function(src, "readCachedPortfolio"),
+            _extract_function(src, "writeCachedPortfolio"),
+            _extract_function(src, "clearCachedPortfolio"),
+            "let resolveNet;",
+            "const API = { get: () => new Promise((r) => { resolveNet = r; }) };",
+            _extract_function(src, "fetchLivePortfolio"),
+            _extract_function(src, "renderPortfolio"),
+            "(async () => {",
+            "  const pending = renderPortfolio([{ name: 'A' }]);",
+            "  // Cache paint happens synchronously before the awaited GET.",
+            "  const afterCache = painted.slice();",
+            "  resolveNet({ portfolio: { equity: 10000, cash_available: 7000, allocated: 3000 } });",
+            "  await pending;",
+            "  console.log(JSON.stringify({ afterCache, final: painted }));",
+            "})();",
+        ]
+    )
+    result = _run_node(script)
+
+    assert result["afterCache"] == [
+        {"equity": 10000, "cash_available": 7000, "allocated": 3000, "agents": 1}
+    ], result
+    assert result["final"][-1]["equity"] == 10000
+    assert "mock" not in result["final"]
+
+
+def test_repaint_from_session_cache_needs_no_network():
+    src = _PORTFOLIO_JS.read_text(encoding="utf-8")
+    script = "\n".join(
+        [
+            "let livePortfolio = null;",
+            "const painted = [];",
+            "const PORTFOLIO_CACHE_KEY = 'portfolio-live-cache';",
+            "const sessionStorage = { _d: {}, getItem(k){ return this._d[k] ?? null; },",
+            "  setItem(k,v){ this._d[k] = String(v); }, removeItem(k){ delete this._d[k]; } };",
+            "sessionStorage.setItem(PORTFOLIO_CACHE_KEY, JSON.stringify({",
+            "  equity: 10000, cash_available: 7000, allocated: 3000 }));",
+            "const isPortfolioSignedIn = () => true;",
+            "const renderPortfolioFromMock = () => painted.push('mock');",
+            "const renderPortfolioFromLive = (p) => painted.push(Number(p.equity));",
+            "const updateAgentAllocationFromAgents = () => {};",
+            _extract_function(src, "readCachedPortfolio"),
+            _extract_function(src, "writeCachedPortfolio"),
+            _extract_function(src, "clearCachedPortfolio"),
+            # renderPortfolioFromLive is stubbed above; repaint calls it.
+            _extract_function(src, "repaintPortfolioFromCache"),
+            "repaintPortfolioFromCache([]);",
+            "console.log(JSON.stringify(painted));",
+        ]
+    )
+    painted = _run_node(script)
+    assert painted == [10000], painted
