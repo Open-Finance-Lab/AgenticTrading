@@ -329,7 +329,7 @@ class HourlyBacktester:
                     "universe": profile.universe,
                     "timeframe": profile.timeframe,
                     "timezone": profile.timezone,
-                    "decision_source": profile.decision_source,
+                    "decision_source": RULE_BASED_DECISION_SOURCE,
                     "benchmark": profile.benchmark,
                 }
             )

@@ -103,6 +103,32 @@ def test_ifind_mode_locks_us_universe_and_restores_previous_us_model(js):
     assert re.search(r"selectPreset\([^)]*previousUniverse", js)
 
 
+def test_ifind_mode_applies_one_month_dates_without_changing_capital(html, js):
+    assert re.search(
+        r"IFIND_ASHARE_START_DATE\s*=\s*['\"]2026-04-01['\"]",
+        js,
+    )
+    assert re.search(
+        r"IFIND_ASHARE_END_DATE\s*=\s*['\"]2026-05-01['\"]",
+        js,
+    )
+    assert "previousStartDate" in js
+    assert "previousEndDate" in js
+    assert re.search(r"startDateInput\.value\s*=\s*IFIND_ASHARE_START_DATE", js)
+    assert re.search(r"endDateInput\.value\s*=\s*IFIND_ASHARE_END_DATE", js)
+    assert re.search(r"startDateInput\.value\s*=\s*previousStartDate", js)
+    assert re.search(r"endDateInput\.value\s*=\s*previousEndDate", js)
+
+    capital_input = re.search(
+        r'<input\b(?=[^>]*id="backtestInitialCapital")[^>]*>',
+        html,
+        re.S,
+    )
+    assert capital_input
+    assert _attr(capital_input.group(0), "value", "1000")
+    assert "IFIND_ASHARE_INITIAL_CAPITAL" not in js
+
+
 def test_ifind_profiles_declare_llm_capability_and_sync_model_control(js):
     demo = re.search(
         r"a_share_demo_6\s*:\s*\{(?P<body>.*?)\n\s*\},\n\s*csi300_sample_20",
@@ -124,6 +150,13 @@ def test_ifind_profiles_declare_llm_capability_and_sync_model_control(js):
         js,
         re.S,
     )
+    assert "Uses this agent's model by default" in js
+    assert not re.search(
+        r"if\s*\(\s*resetDecisionSource\s*\|\|\s*!allowsLLM\s*\)\s*\{"
+        r"\s*modelSelect\.value\s*=\s*RULE_BASED_DECISION_SOURCE",
+        js,
+        re.S,
+    )
 
 
 def test_ifind_request_uses_selected_profile_and_explicit_decision_source(js):
@@ -136,12 +169,11 @@ def test_ifind_request_uses_selected_profile_and_explicit_decision_source(js):
     assert re.search(r"const\s+pipeline\s*=\s*isRuleBasedDecision\s*\?\s*null", js)
 
 
-def test_ifind_universe_change_resets_decision_source(js):
+def test_ifind_universe_change_preserves_decision_source(js):
     assert re.search(
         r"getElementById\(['\"]ifindAshareUniverseSelect['\"]\)"
         r"\?\.addEventListener\(\s*['\"]change['\"]\s*,"
-        r"\s*\(\)\s*=>\s*renderIFindAshareUniverse\(\s*\{"
-        r"\s*resetDecisionSource\s*:\s*true\s*\}\s*\)",
+        r"\s*\(\)\s*=>\s*renderIFindAshareUniverse\(\s*\)",
         js,
         re.S,
     )
@@ -215,9 +247,25 @@ def test_ifind_chart_does_not_render_us_index_series(js):
 
 def test_ifind_errors_are_mapped_to_short_actionable_messages(js):
     assert re.search(r"function\s+formatBacktestError\s*\(", js)
-    for marker in ("403", "503", "429", "50 bars", "authentication", "response format"):
+    for marker in (
+        "403",
+        "503",
+        "429",
+        "50 bars",
+        "minimum=50",
+        "valid bars",
+        "authentication",
+        "response format",
+    ):
         assert marker in js
     assert re.search(r"formatBacktestError\(\s*error", js)
+
+
+def test_completed_zero_trade_run_has_actionable_empty_state(js):
+    assert (
+        "No trades were executed. The selected strategy produced no executable orders."
+        in js
+    )
 
 
 def test_frontend_never_collects_or_stores_ifind_credentials(html, js):

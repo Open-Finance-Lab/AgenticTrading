@@ -174,7 +174,7 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
         "universe": universe,
         "timeframe": "60m",
         "timezone": "Asia/Shanghai",
-        "decision_source": "rule_based",
+        "decision_source": "llm",
         "benchmark": "equal_weight_buyhold",
         "assets": list(symbols),
     }
@@ -189,7 +189,7 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
         "60m",
         None,
         list(symbols),
-        "rule_based",
+        "llm",
     )
 
     captured = {}
@@ -206,7 +206,7 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
     assert command[command.index("--data-source") + 1] == IFIND_ASHARE
     assert command[command.index("--universe") + 1] == universe
     assert command[command.index("--timeframe") + 1] == "60m"
-    assert command[command.index("--decision-source") + 1] == "rule_based"
+    assert command[command.index("--decision-source") + 1] == "llm"
     assert "--use-llm" not in command
     assert "--no-llm" not in command
     assert secret not in " ".join(command)

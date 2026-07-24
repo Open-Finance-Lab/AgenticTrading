@@ -113,7 +113,7 @@ _MARKET_PROFILES = {
         timeframe="60m",
         symbols=A_SHARE_DEMO_6_SYMBOLS,
         benchmark="equal_weight_buyhold",
-        default_decision_source=RULE_BASED_DECISION_SOURCE,
+        default_decision_source=LLM_DECISION_SOURCE,
         allowed_decision_sources=(
             RULE_BASED_DECISION_SOURCE,
             LLM_DECISION_SOURCE,
@@ -128,7 +128,7 @@ _MARKET_PROFILES = {
         timeframe="60m",
         symbols=CSI300_SAMPLE_20_2026H2_SYMBOLS,
         benchmark="equal_weight_buyhold",
-        default_decision_source=RULE_BASED_DECISION_SOURCE,
+        default_decision_source=LLM_DECISION_SOURCE,
         allowed_decision_sources=(
             RULE_BASED_DECISION_SOURCE,
             LLM_DECISION_SOURCE,

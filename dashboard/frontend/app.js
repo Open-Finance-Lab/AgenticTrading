@@ -1684,6 +1684,8 @@ async function loadMarketDataFeatures() {
 function syncMarketDataSourceUI(options = {}) {
   const select = document.getElementById('marketDataSourceSelect');
   const modelSelect = document.getElementById('modelSelect');
+  const startDateInput = document.getElementById('startDate');
+  const endDateInput = document.getElementById('endDate');
   const modelSelectHint = document.getElementById('modelSelectHint');
   const notice = document.getElementById('vnpySimulationNotice');
   const ifindNotice = document.getElementById('ifindAshareNotice');
@@ -1702,7 +1704,11 @@ function syncMarketDataSourceUI(options = {}) {
       previousUniverse: selectedUniverse,
       previousModel: modelSelect?.value || '',
       previousTab: activeTab?.dataset.tab || 'builtin',
+      previousStartDate: startDateInput?.value || '',
+      previousEndDate: endDateInput?.value || '',
     };
+    if (startDateInput) startDateInput.value = IFIND_ASHARE_START_DATE;
+    if (endDateInput) endDateInput.value = IFIND_ASHARE_END_DATE;
   }
 
   if (ifindUniverse) ifindUniverse.hidden = !isIFind;
@@ -1721,7 +1727,13 @@ function syncMarketDataSourceUI(options = {}) {
       customTab.style.display = 'none';
     }
   } else if (window.IFIND_PREVIOUS_UI_STATE) {
-    const { previousUniverse, previousModel, previousTab } = window.IFIND_PREVIOUS_UI_STATE;
+    const {
+      previousUniverse,
+      previousModel,
+      previousTab,
+      previousStartDate,
+      previousEndDate,
+    } = window.IFIND_PREVIOUS_UI_STATE;
     const tab = document.querySelector(`.universe-tab[data-tab="${previousTab}"]`);
     if (tab) handleUniverseTabSwitch(tab);
     selectPreset(previousUniverse);
@@ -1729,6 +1741,8 @@ function syncMarketDataSourceUI(options = {}) {
       modelSelect.querySelector('option[value="rule_based"]')?.remove();
       if (previousModel) modelSelect.value = previousModel;
     }
+    if (startDateInput) startDateInput.value = previousStartDate;
+    if (endDateInput) endDateInput.value = previousEndDate;
     window.IFIND_PREVIOUS_UI_STATE = null;
   }
 
@@ -2570,6 +2584,7 @@ let backtestPollTimer = null;
 let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
 let tradingLogFilter = 'all';
+let tradingLogEmptyMessage = 'No trades yet.';
 let currentMode = "home";
 let currentPage = "home";
 let playgroundTab = "agents";
@@ -2697,7 +2712,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             renderTradingLog(tradingLogCache, {
                 emptyMessage: tradingLogCache.length
                     ? 'No trades match this filter.'
-                    : 'Run a backtest to see trades here.',
+                    : tradingLogEmptyMessage,
             });
         });
     }
@@ -2715,7 +2730,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
     document.getElementById('ifindAshareUniverseSelect')?.addEventListener(
         'change',
-        () => renderIFindAshareUniverse({ resetDecisionSource: true }),
+        () => renderIFindAshareUniverse(),
     );
 
     // Setup universe tabs
@@ -3285,6 +3300,8 @@ const ASSET_UNIVERSES = {
 
 const IFIND_ASHARE_SOURCE = 'ifind_ashare';
 const IFIND_ASHARE_TIMEFRAME = '60m';
+const IFIND_ASHARE_START_DATE = '2026-04-01';
+const IFIND_ASHARE_END_DATE = '2026-05-01';
 const IFIND_ASHARE_DEFAULT_UNIVERSE = 'a_share_demo_6';
 const RULE_BASED_DECISION_SOURCE = 'rule_based';
 const LLM_DECISION_SOURCE = 'llm';
@@ -3346,6 +3363,7 @@ function syncIFindModelControl({ resetDecisionSource = false } = {}) {
     const modelSelectHint = document.getElementById('modelSelectHint');
     if (!modelSelect) return;
 
+    const previousValue = modelSelect.value;
     let ruleOption = modelSelect.querySelector(
         `option[value="${RULE_BASED_DECISION_SOURCE}"]`,
     );
@@ -3358,14 +3376,23 @@ function syncIFindModelControl({ resetDecisionSource = false } = {}) {
 
     const profile = getIFindUniverseProfile();
     const allowsLLM = profile.allowedDecisionSources.includes(LLM_DECISION_SOURCE);
-    if (resetDecisionSource || !allowsLLM) {
+    if (!allowsLLM) {
         modelSelect.value = RULE_BASED_DECISION_SOURCE;
+    } else if (resetDecisionSource) {
+        const preferredModel = runBacktestModalAgent?.model_name || previousValue;
+        const llmOptions = Array.from(modelSelect.options).filter(
+            (option) => option.value !== RULE_BASED_DECISION_SOURCE,
+        );
+        const selectedOption = llmOptions.find(
+            (option) => option.value === preferredModel,
+        ) || llmOptions[0];
+        if (selectedOption) modelSelect.value = selectedOption.value;
     }
     modelSelect.disabled = !allowsLLM;
     modelSelect.setAttribute('aria-disabled', String(!allowsLLM));
     if (modelSelectHint) {
         modelSelectHint.textContent = allowsLLM
-            ? 'Rule-based by default. Choose a model to run strict LLM decisions.'
+            ? "Uses this agent's model by default. Choose Rule-based for deterministic decisions without LLM calls."
             : 'This universe supports rule-based decisions only.';
     }
 }
@@ -3672,8 +3699,14 @@ function formatBacktestError(error, dataSource = null) {
     if (status === 403) return 'iFinD A-share access is disabled (403). Ask the server operator to enable it.';
     if (status === 503) return 'iFinD A-share access is not configured (503). Ask the server operator to finish API setup.';
     if (status === 429 || lower.includes('429')) return 'iFinD is rate limited (429). Wait briefly, then run again.';
-    if (lower.includes('50 bars') || lower.includes('fewer than 50') || lower.includes('at least 50')) {
-        return 'iFinD returned fewer than 50 bars. Use a wider date range or check data permissions.';
+    if (
+        lower.includes('50 bars')
+        || lower.includes('fewer than 50')
+        || lower.includes('at least 50')
+        || lower.includes('minimum=50')
+        || lower.includes('valid bars')
+    ) {
+        return 'iFinD returned fewer than 50 valid bars. Use a wider date range (about one month) or check data permissions.';
     }
     if (lower.includes('authentication') || lower.includes('credential') || lower.includes('permission') || lower.includes('token')) {
         return 'iFinD authentication or data permission failed. Ask the server operator to check the account.';
@@ -4108,6 +4141,7 @@ function renderTradingLog(trades, { emptyMessage = 'No trades yet.' } = {}) {
     if (!tbody) return;
 
     tradingLogCache = Array.isArray(trades) ? trades.map(normalizeTradeRecord) : [];
+    tradingLogEmptyMessage = emptyMessage;
     let filtered = tradingLogCache;
     if (tradingLogFilter === 'buy') {
         filtered = tradingLogCache.filter((trade) => trade.side === 'BUY');
@@ -4155,10 +4189,12 @@ async function loadTradingLogForRun(runId) {
     }
     try {
         const data = await API.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/trades?t=${Date.now()}`);
-        renderTradingLog(data.trades || [], { emptyMessage: 'No trades recorded for this run.' });
+        renderTradingLog(data.trades || [], {
+            emptyMessage: 'No trades were executed. The selected strategy produced no executable orders.',
+        });
     } catch (error) {
         console.warn('Could not load trades:', error.message);
-        clearTradingLog('No trades recorded for this run.');
+        clearTradingLog('Trade log unavailable for this run.');
     }
 }
 

@@ -323,7 +323,7 @@ def test_enabled_ifind_profile_is_passed_to_background_runner(monkeypatch):
         "universe": A_SHARE_DEMO_6,
         "timeframe": "60m",
         "timezone": "Asia/Shanghai",
-        "decision_source": "rule_based",
+        "decision_source": "llm",
         "benchmark": "equal_weight_buyhold",
         "assets": list(A_SHARE_DEMO_6_SYMBOLS),
     }
@@ -337,7 +337,7 @@ def test_enabled_ifind_profile_is_passed_to_background_runner(monkeypatch):
         "60m",
         None,
         list(A_SHARE_DEMO_6_SYMBOLS),
-        "rule_based",
+        "llm",
     )
 
 
@@ -474,7 +474,7 @@ def test_enabled_ifind_csi300_sample20_is_passed_to_background_runner(
     body = response.json()
     assert body["universe"] == CSI300_SAMPLE_20_2026H2
     assert body["assets"] == list(CSI300_SAMPLE_20_2026H2_SYMBOLS)
-    assert body["decision_source"] == "rule_based"
+    assert body["decision_source"] == "llm"
     assert len(spy.calls) == 1
     args = spy.calls[0][0]
     assert args[7:] == (
@@ -484,7 +484,7 @@ def test_enabled_ifind_csi300_sample20_is_passed_to_background_runner(
         "60m",
         None,
         list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
-        "rule_based",
+        "llm",
     )
 
 
@@ -493,7 +493,7 @@ def test_enabled_ifind_csi300_sample20_is_passed_to_background_runner(
     [
         ("alpaca", "llm"),
         (VNPY_SIMULATION, "rule_based"),
-        (IFIND_ASHARE, "rule_based"),
+        (IFIND_ASHARE, "llm"),
     ],
 )
 def test_background_command_uses_profile_decision_source(

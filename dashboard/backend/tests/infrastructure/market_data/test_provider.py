@@ -172,7 +172,7 @@ def test_ifind_profile_describes_the_fixed_a_share_market():
         "000858.SZ",
         "300750.SZ",
     )
-    assert profile.decision_source == "rule_based"
+    assert profile.decision_source == "llm"
     assert profile.benchmark == "equal_weight_buyhold"
-    assert profile.llm_enabled is False
+    assert profile.llm_enabled is True
     assert profile.index_baseline_enabled is False

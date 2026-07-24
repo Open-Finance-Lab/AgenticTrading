@@ -87,7 +87,7 @@ def make_cn_bars(symbols=A_SHARE_DEMO_6_SYMBOLS, count=60):
     return bars
 
 
-def test_ifind_engine_uses_profile_symbols_and_forces_rule_mode(monkeypatch):
+def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
     provider = RecordingProvider(make_cn_bars())
     monkeypatch.setattr(engine_module, "create_market_data_provider", lambda _source, universe=None: provider)
     monkeypatch.setattr(engine_module, "HAS_ANTHROPIC", True)
@@ -103,8 +103,9 @@ def test_ifind_engine_uses_profile_symbols_and_forces_rule_mode(monkeypatch):
         START,
         END,
         session_id="ifind-engine-test",
-        use_llm=True,
+        use_llm=False,
         data_source=IFIND_ASHARE,
+        decision_source=RULE_BASED_DECISION_SOURCE,
     )
 
     assert backtester.use_llm is False
@@ -283,13 +284,15 @@ def test_ifind_explicit_llm_requires_a_client(monkeypatch):
         )
 
 
-def test_ifind_default_decision_source_remains_rule_based(monkeypatch):
+def test_ifind_default_decision_source_matches_alpaca_llm_default(monkeypatch):
     provider = RecordingProvider(make_cn_bars())
     monkeypatch.setattr(
         engine_module,
         "create_market_data_provider",
         lambda _source, universe=None: provider,
     )
+    monkeypatch.setattr(engine_module, "HAS_ANTHROPIC", True)
+    monkeypatch.setattr(engine_module, "make_llm_client", lambda: object())
 
     backtester = HourlyBacktester(
         START,
@@ -298,8 +301,8 @@ def test_ifind_default_decision_source_remains_rule_based(monkeypatch):
         use_llm=True,
     )
 
-    assert backtester.decision_source == RULE_BASED_DECISION_SOURCE
-    assert backtester.use_llm is False
+    assert backtester.decision_source == LLM_DECISION_SOURCE
+    assert backtester.use_llm is True
     assert backtester.strict_llm is False
 
 

@@ -89,27 +89,27 @@ def test_csi300_sample_20_is_exact_and_versioned():
     assert len(set(CSI300_SAMPLE_20_2026H2_SYMBOLS)) == 20
 
 
-def test_a_share_demo_6_defaults_to_rules_but_allows_llm():
+def test_a_share_demo_6_defaults_to_llm_but_allows_rules():
     profile = get_market_profile(IFIND_ASHARE, A_SHARE_DEMO_6)
 
-    assert profile.default_decision_source == RULE_BASED_DECISION_SOURCE
+    assert profile.default_decision_source == LLM_DECISION_SOURCE
     assert profile.allowed_decision_sources == (
         RULE_BASED_DECISION_SOURCE,
         LLM_DECISION_SOURCE,
     )
-    assert profile.decision_source == RULE_BASED_DECISION_SOURCE
-    assert profile.llm_enabled is False
+    assert profile.decision_source == LLM_DECISION_SOURCE
+    assert profile.llm_enabled is True
 
 
-def test_csi300_sample_20_defaults_to_rules_but_allows_llm():
+def test_csi300_sample_20_defaults_to_llm_but_allows_rules():
     profile = get_market_profile(IFIND_ASHARE, CSI300_SAMPLE_20_2026H2)
 
-    assert profile.default_decision_source == RULE_BASED_DECISION_SOURCE
+    assert profile.default_decision_source == LLM_DECISION_SOURCE
     assert profile.allowed_decision_sources == (
         RULE_BASED_DECISION_SOURCE,
         LLM_DECISION_SOURCE,
     )
-    assert profile.llm_enabled is False
+    assert profile.llm_enabled is True
 
 
 def test_us_profiles_preserve_their_default_decision_behavior():
@@ -130,10 +130,10 @@ def test_us_profiles_preserve_their_default_decision_behavior():
 @pytest.mark.parametrize(
     ("universe", "requested", "expected"),
     [
-        (A_SHARE_DEMO_6, None, RULE_BASED_DECISION_SOURCE),
+        (A_SHARE_DEMO_6, None, LLM_DECISION_SOURCE),
         (A_SHARE_DEMO_6, RULE_BASED_DECISION_SOURCE, RULE_BASED_DECISION_SOURCE),
         (A_SHARE_DEMO_6, LLM_DECISION_SOURCE, LLM_DECISION_SOURCE),
-        (CSI300_SAMPLE_20_2026H2, None, RULE_BASED_DECISION_SOURCE),
+        (CSI300_SAMPLE_20_2026H2, None, LLM_DECISION_SOURCE),
         (CSI300_SAMPLE_20_2026H2, LLM_DECISION_SOURCE, LLM_DECISION_SOURCE),
     ],
 )
