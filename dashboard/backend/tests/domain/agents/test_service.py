@@ -25,8 +25,6 @@ from dashboard.backend.domain.agents.service import (
     sample_equity_sparkline,
 )
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-
 
 @pytest.fixture
 def svc(tmp_path):

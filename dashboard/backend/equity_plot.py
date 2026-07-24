@@ -17,7 +17,7 @@ import pytz
 from matplotlib.figure import Figure
 from matplotlib.ticker import FixedFormatter, FixedLocator, FuncFormatter, NullFormatter
 
-from dashboard.backend.chart_style import PLAYGROUND_THEME, series_color, series_kind
+from dashboard.backend.chart_style import PLAYGROUND_THEME, series_color
 from dashboard.backend.domain.leaderboard.strategies._yahoo import fetch_index_hourly
 
 _ET = pytz.timezone("US/Eastern")

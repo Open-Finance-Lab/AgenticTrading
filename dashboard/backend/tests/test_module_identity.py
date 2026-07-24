@@ -9,7 +9,7 @@ a module would mean two copies of its import-time singleton state.
 
 import sys
 
-import dashboard.backend.app  # noqa: F401  -- import for its full module graph
+import dashboard.backend.app as _app  # Load full module graph for canonical identity checks
 
 CRITICAL_MODULES = [
     "database",

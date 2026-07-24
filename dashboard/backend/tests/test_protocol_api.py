@@ -4,10 +4,8 @@ Uses synthetic in-memory market data so no Alpaca/Yahoo network access is
 required. The whole protocol stack is exercised through the public HTTP API.
 """
 
-import sys
 import time
 import uuid
-from pathlib import Path
 
 import pandas as pd
 import pytest

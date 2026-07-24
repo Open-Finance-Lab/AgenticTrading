@@ -15,7 +15,6 @@ from dashboard.backend.infrastructure.brokers import alpaca_paper
 from dashboard.backend.infrastructure.brokers.alpaca_paper import (
     AlpacaPaperTradingClient,
     Position,
-    Trade,
 )
 
 _BACKEND = Path(__file__).resolve().parents[3]

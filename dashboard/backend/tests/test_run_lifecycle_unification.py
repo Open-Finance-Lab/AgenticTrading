@@ -16,7 +16,6 @@ exactly like v1 runs do:
 """
 
 import sqlite3
-import time
 import uuid
 
 import pytest
@@ -599,7 +598,7 @@ def test_runstore_survives_partially_migrated_schema(tmp_path):
     conn.commit()
     conn.close()
 
-    store = RunStore(path)  # must add only heartbeat_at, without crashing
+    RunStore(path)  # must add only heartbeat_at, without crashing
     conn = sqlite3.connect(str(path))
     cols = {row[1] for row in conn.execute("PRAGMA table_info(protocol_runs)")}
     conn.close()

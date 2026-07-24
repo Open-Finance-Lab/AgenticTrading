@@ -3,10 +3,8 @@ Simple in-memory cache with TTL (time-to-live) for paper trading data.
 Reduces redundant API calls to Alpaca.
 """
 
-import json
 import time
 from typing import Optional, Dict, Any, Callable, Set
-from datetime import datetime, timedelta
 from threading import Lock
 
 

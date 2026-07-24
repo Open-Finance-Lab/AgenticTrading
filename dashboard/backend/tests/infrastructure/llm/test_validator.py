@@ -12,7 +12,6 @@ from dashboard.backend.infrastructure.llm import validator as validator_mod
 from dashboard.backend.infrastructure.llm.validator import (
     DJIA_30,
     TOP_10_STOCKS,
-    LLMTradingDecision,
     TradingAction,
     actions_to_executable,
     parse_actions_payload,

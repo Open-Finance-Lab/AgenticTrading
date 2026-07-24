@@ -30,7 +30,6 @@ because a local hook failed.
 
 from __future__ import annotations
 
-import time
 from typing import Any, Dict, List, Optional, Union
 
 try:  # Protocol is available on 3.8+; guard for older typing backends.

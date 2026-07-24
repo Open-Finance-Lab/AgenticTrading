@@ -15,10 +15,8 @@ import json
 import requests
 import os
 import uuid
-from pathlib import Path
 from typing import Dict, List, Optional
 from datetime import datetime, timedelta
-import sys
 
 from dashboard.backend.paths import CREDENTIALS_DIR
 

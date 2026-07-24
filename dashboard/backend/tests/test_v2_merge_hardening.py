@@ -12,11 +12,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import dashboard.backend.api.v2.runs as runs_mod
-import dashboard.backend.execution.backtest_backend as bb_mod
 from dashboard.backend.api.v2.errors import ApiError
 from dashboard.backend.api.v2.rate_limit import TokenBucketLimiter
 from dashboard.backend.app import app
-from dashboard.backend.execution.backtest_backend import BacktestBackend
+from dashboard.backend.execution.backtest_backend import BacktestBackend, ext
 from dashboard.backend.tests._v2_fakes import FakeBackend
 
 client = TestClient(app)
@@ -39,7 +38,7 @@ def test_background_load_systemexit_marks_run_failed(monkeypatch):
         def __init__(self):
             raise SystemExit(1)
 
-    monkeypatch.setattr(bb_mod.ext, "AlpacaDataLoader", _Boom)
+    monkeypatch.setattr(ext, "AlpacaDataLoader", _Boom)
     backend = BacktestBackend(
         run_id="run_se_guard", session_id="sess_se", agent_name="a",
         model_name="m", start_date="2026-04-15", end_date="2026-04-16",

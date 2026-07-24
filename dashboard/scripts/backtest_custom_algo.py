@@ -40,11 +40,6 @@ from backtest_hourly_agent import (  # noqa: E402
     HAS_ANTHROPIC,
 )
 
-try:
-    from anthropic import Anthropic
-except ImportError:
-    Anthropic = None  # type: ignore
-
 
 class CustomAlgoPortfolioManager(PortfolioManager):
     """Portfolio manager with user strategy blocks + enforced stop-loss rules."""
@@ -342,8 +337,6 @@ class CustomAlgoBacktester(HourlyBacktester):
         )
         db.insert_equity_points(run_id, equity_curve)
 
-        wins = sum(1 for t in manager.trades if t.get("side") == "SELL" and t.get("cost", 0) < t.get("proceeds", 0))
-        losses = max(1, sum(1 for t in manager.trades if t.get("side") == "SELL") - wins)
         wl = len([t for t in manager.trades if t.get("side") == "BUY"]) / max(1, len([t for t in manager.trades if t.get("side") == "SELL"]))
 
         result = {

@@ -5528,7 +5528,6 @@ function displayAccountMetrics(account) {
     const dayPnLEl = document.getElementById('dayPnL');
     if (dayPnLEl) {
         const dayPnL = parseFloat(account.day_pnl) || 0;
-        const dayPnLPercent = parseFloat(account.equity) ? (dayPnL / parseFloat(account.equity)) * 100 : 0;
         dayPnLEl.textContent = (dayPnL >= 0 ? '+' : '') + formatCurrency(dayPnL);
         dayPnLEl.className = 'paper-value ' + (dayPnL >= 0 ? 'positive' : 'negative');
     }
@@ -5743,9 +5742,6 @@ function displayTrades(trades) {
             const idParts = trade.id.split('::');
             if (idParts[0].length >= 14) {
                 const ts = idParts[0];
-                const year = parseInt(ts.substring(0, 4));
-                const month = parseInt(ts.substring(4, 6));
-                const day = parseInt(ts.substring(6, 8));
                 const hour = parseInt(ts.substring(8, 10));
                 const minute = parseInt(ts.substring(10, 12));
                 timeStr = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;

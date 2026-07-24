@@ -3,7 +3,6 @@ Auth API tests using a temporary SQLite database.
 """
 
 import base64
-import sys
 import tempfile
 from pathlib import Path
 
@@ -23,9 +22,9 @@ def temp_user_store():
 
 @pytest.fixture
 def client(temp_user_store, monkeypatch):
-    import dashboard.backend.users as users_module
+    from dashboard.backend import users
 
-    monkeypatch.setattr(users_module, "user_store", temp_user_store)
+    monkeypatch.setattr(users, "user_store", temp_user_store)
     return TestClient(app)
 
 
