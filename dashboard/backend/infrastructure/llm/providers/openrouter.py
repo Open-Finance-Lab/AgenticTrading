@@ -77,6 +77,20 @@ def reasoning_is_disabled(override: Optional[str] = None) -> bool:
     return effort in _OFF_VALUES
 
 
+def reasoning_is_explicitly_enabled(override: Optional[str]) -> bool:
+    """True when a *config-supplied* effort turns extended thinking on.
+
+    Deliberately environment-independent: only an explicit, non-passthrough
+    effort counts. ``None`` means "let the env / provider decide", which is not
+    something config validation can resolve, so it reads as "unknown", not
+    "enabled".
+    """
+    if override is None or not str(override).strip():
+        return False
+    effort = str(override).strip().lower()
+    return effort not in _OFF_VALUES and effort not in _PASSTHROUGH_VALUES
+
+
 def reasoning_extra_body(override: Optional[str] = None) -> Optional[dict[str, Any]]:
     """OpenRouter ``reasoning`` payload to merge into ``extra_body``, or ``None``.
 

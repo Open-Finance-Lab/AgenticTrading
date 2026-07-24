@@ -10,6 +10,9 @@ external service is ever called.
 import json
 from datetime import datetime
 
+from dashboard.backend.domain.backtesting import (
+    portfolio_manager as portfolio_manager_module,
+)
 import dashboard.backend.infrastructure.llm.backtest_harness as harness
 from dashboard.backend.infrastructure.llm.backtest_harness import (
     SYSTEM_PROMPT,
@@ -116,6 +119,18 @@ def test_request_model_override():
     client = _FakeClient(_FakeResponse("{}"))
     request_trading_decision(client, prompt="P", model="custom-model")
     assert client.captured["model"] == "custom-model"
+
+
+def test_request_includes_explicit_zero_temperature():
+    client = _FakeClient(_FakeResponse("{}"))
+    request_trading_decision(client, prompt="P", temperature=0)
+    assert client.captured["temperature"] == 0
+
+
+def test_request_omits_temperature_when_unset():
+    client = _FakeClient(_FakeResponse("{}"))
+    request_trading_decision(client, prompt="P")
+    assert "temperature" not in client.captured
 
 
 def test_system_prompt_required_fragments():
@@ -274,6 +289,71 @@ def test_api_exception_falls_back_to_rule_based():
     pm = bha.PortfolioManager(100000)
     out = pm.make_trading_decision_with_llm(_portfolio_state(), _BoomClient())
     assert out == pm.make_trading_decision(_portfolio_state())
+
+
+def test_portfolio_forwards_zero_temperature_to_request(monkeypatch):
+    captured = []
+    response_text = json.dumps({"actions": [
+        {"symbol": "AAPL", "action": "buy", "confidence": 0.9,
+         "reasoning": "strong", "position_size": 1},
+    ]})
+
+    def _fake_request(client, **kwargs):
+        captured.append(kwargs)
+        return _FakeResponse(response_text, usage=_FakeUsage(10, 5))
+
+    monkeypatch.setattr(
+        portfolio_manager_module,
+        "_request_trading_decision",
+        _fake_request,
+    )
+
+    pm = bha.PortfolioManager(100000)
+    pm.make_trading_decision_with_llm(
+        _portfolio_state(), object(), temperature=0
+    )
+
+    assert len(captured) == 1
+    assert captured[0]["temperature"] == 0
+
+
+def test_portfolio_forwards_temperature_to_no_text_retry(monkeypatch):
+    captured = []
+    extract_attempts = 0
+    response_text = json.dumps({"actions": [
+        {"symbol": "AAPL", "action": "buy", "confidence": 0.9,
+         "reasoning": "strong", "position_size": 1},
+    ]})
+
+    def _fake_request(client, **kwargs):
+        captured.append(kwargs)
+        return _FakeResponse(response_text, usage=_FakeUsage(10, 5))
+
+    def _fake_extract(response):
+        nonlocal extract_attempts
+        extract_attempts += 1
+        if extract_attempts == 1:
+            raise AttributeError("No text content block in response")
+        return response_text
+
+    monkeypatch.setattr(
+        portfolio_manager_module,
+        "_request_trading_decision",
+        _fake_request,
+    )
+    monkeypatch.setattr(
+        portfolio_manager_module,
+        "_extract_response_text",
+        _fake_extract,
+    )
+
+    pm = bha.PortfolioManager(100000)
+    pm.make_trading_decision_with_llm(
+        _portfolio_state(), object(), temperature=0
+    )
+
+    assert len(captured) == 2
+    assert [call["temperature"] for call in captured] == [0, 0]
 
 
 def test_no_json_response_returns_empty_actions():

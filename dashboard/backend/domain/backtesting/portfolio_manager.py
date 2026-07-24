@@ -25,7 +25,7 @@ This module is domain-level orchestration: it must NOT import dashboard scripts,
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -113,6 +113,7 @@ class PortfolioManager:
         model: str = None,
         strategy_prompt: str = None,
         pipeline: List[Dict] = None,
+        temperature: Optional[float] = None,
     ) -> Dict:
         """
         Make trading decisions using Claude LLM with technical indicators.
@@ -127,6 +128,7 @@ class PortfolioManager:
             portfolio_state: Current portfolio state with market signals
             llm_client: Anthropic client instance
             mode: "safe_trading" (risk management) or "buy_and_hold" (debug mode)
+            temperature: Optional model sampling temperature
         
         Returns:
             {"actions": [list of trading actions]}
@@ -326,7 +328,10 @@ class PortfolioManager:
                         os.environ["OPENROUTER_REASONING_EFFORT"] = "none"
                         try:
                             response = _request_trading_decision(
-                                llm_client, prompt=prompt, model=model
+                                llm_client,
+                                prompt=prompt,
+                                model=model,
+                                temperature=temperature,
                             )
                         finally:
                             if prev_effort is None:
@@ -335,7 +340,10 @@ class PortfolioManager:
                                 os.environ["OPENROUTER_REASONING_EFFORT"] = prev_effort
                     else:
                         response = _request_trading_decision(
-                            llm_client, prompt=prompt, model=model
+                            llm_client,
+                            prompt=prompt,
+                            model=model,
+                            temperature=temperature,
                         )
                     try:
                         input_delta, output_delta = _extract_token_usage(response)

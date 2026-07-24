@@ -52,6 +52,7 @@ class BacktestDatabase:
         enable_wal(self.db_path)
         self._init_schema()
         self._migrate_schema()  # Handle existing DBs
+        self._ensure_equity_timeseries_uniqueness()
 
     def _get_connection(self):
         """Get database connection."""
@@ -321,6 +322,91 @@ class BacktestDatabase:
         except Exception as e:
             print(f"⚠️ Trades migration retry warning: {e}")
 
+    @staticmethod
+    def _has_equity_timeseries_unique_index(cursor) -> bool:
+        """Return whether all equity points are protected by the natural key."""
+        cursor.execute("PRAGMA index_list(equity_timeseries)")
+        for index in cursor.fetchall():
+            is_unique = bool(index[2])
+            is_partial = bool(index[4]) if len(index) > 4 else False
+            if not is_unique or is_partial:
+                continue
+
+            index_name = str(index[1]).replace('"', '""')
+            cursor.execute(f'PRAGMA index_info("{index_name}")')
+            columns = [row[2] for row in cursor.fetchall()]
+            if columns == ["run_id", "timestamp"]:
+                return True
+        return False
+
+    # A locked database is retried once with a fresh connection (each attempt
+    # gets its own busy timeout) before the migration is deferred.
+    _UNIQUENESS_MIGRATION_ATTEMPTS = 2
+
+    def _ensure_equity_timeseries_uniqueness(self) -> None:
+        """Upgrade legacy equity tables so reruns replace existing points.
+
+        Fails hard on a *data* problem (leftover duplicates, an index name
+        already taken) — that needs a human. Lock contention is different: it
+        is transient, and this module ends with a module-level singleton, so
+        raising here aborts ``import dashboard.backend.database`` and the app
+        never boots. The migrations above degrade on the same condition, and
+        every equity writer already uses INSERT OR REPLACE, so deferring to the
+        next startup is no worse than the state before this migration existed.
+        """
+        last_error: Optional[sqlite3.Error] = None
+        for attempt in range(1, self._UNIQUENESS_MIGRATION_ATTEMPTS + 1):
+            conn = self._get_connection()
+            try:
+                cursor = conn.cursor()
+                if self._has_equity_timeseries_unique_index(cursor):
+                    return
+                self._apply_equity_timeseries_uniqueness(conn, cursor)
+                return
+            except sqlite3.OperationalError as exc:
+                last_error = exc
+                if attempt < self._UNIQUENESS_MIGRATION_ATTEMPTS:
+                    print(f"⚠️ equity_timeseries uniqueness migration retry: {exc}")
+            except sqlite3.Error as exc:
+                raise RuntimeError(
+                    "equity_timeseries unique constraint migration failed"
+                ) from exc
+            finally:
+                conn.close()
+
+        print(f"⚠️ equity_timeseries uniqueness migration deferred: {last_error}")
+
+    def _apply_equity_timeseries_uniqueness(self, conn, cursor) -> None:
+        """Dedup to the newest point per (run_id, timestamp), then protect it.
+
+        One transaction, so a failure never leaves rows deleted without the
+        constraint that justified deleting them. The index is re-read after
+        creation because ``IF NOT EXISTS`` silently succeeds when a *non-unique*
+        index already owns the name.
+        """
+        with conn:
+            cursor.execute(
+                """
+                DELETE FROM equity_timeseries
+                WHERE id NOT IN (
+                    SELECT MAX(id)
+                    FROM equity_timeseries
+                    GROUP BY run_id, timestamp
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS
+                    uq_equity_timeseries_run_timestamp
+                ON equity_timeseries(run_id, timestamp)
+                """
+            )
+            if not self._has_equity_timeseries_unique_index(cursor):
+                raise RuntimeError(
+                    "equity_timeseries unique constraint migration failed"
+                )
+
     def _migrate_trades_schema(self, cursor) -> None:
         """Upgrade legacy trades table (shares/action/total_value) to new columns."""
         cursor.execute("PRAGMA table_info(trades)")
@@ -453,31 +539,50 @@ class BacktestDatabase:
         conn.commit()
         conn.close()
     
-    def insert_equity_points(self, run_id: str, 
-                           points: List[Dict[str, Any]]) -> None:
-        """Batch insert equity points. 
-        
+    def insert_equity_points(self, run_id: str,
+                           points: List[Dict[str, Any]],
+                           replace: bool = True) -> None:
+        """Replace this run's equity curve with ``points``, atomically.
+
         Each point should have: timestamp, equity, cash, positions_value, [daily_return]
+
+        Every production caller hands over a *whole* curve, and a rerun can
+        legitimately produce a different set of timestamps (fewer bars, a
+        partial run, a changed symbol list). The (run_id, timestamp) unique key
+        only collapses timestamps that repeat, so without the delete the
+        leftovers of the previous curve stay spliced into the new one — which
+        is exactly the force-refresh case. Pass ``replace=False`` to append to
+        an existing curve instead. An empty ``points`` list is a no-op rather
+        than a wipe: a failed rerun must not erase the curve on the board.
         """
+        if not points:
+            return
+
         conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        for point in points:
-            cursor.execute("""
-                INSERT OR REPLACE INTO equity_timeseries 
-                (run_id, timestamp, equity, cash, positions_value, daily_return)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                run_id,
-                point['timestamp'],
-                point['equity'],
-                point['cash'],
-                point['positions_value'],
-                point.get('daily_return')
-            ))
-        
-        conn.commit()
-        conn.close()
+        try:
+            with conn:
+                cursor = conn.cursor()
+                if replace:
+                    cursor.execute(
+                        "DELETE FROM equity_timeseries WHERE run_id = ?", (run_id,)
+                    )
+                cursor.executemany("""
+                    INSERT OR REPLACE INTO equity_timeseries
+                    (run_id, timestamp, equity, cash, positions_value, daily_return)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, [
+                    (
+                        run_id,
+                        point['timestamp'],
+                        point['equity'],
+                        point['cash'],
+                        point['positions_value'],
+                        point.get('daily_return'),
+                    )
+                    for point in points
+                ])
+        finally:
+            conn.close()
     
     @staticmethod
     def _parse_run_row(run: Dict) -> Dict:

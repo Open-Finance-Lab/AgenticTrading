@@ -13,6 +13,7 @@ web request. It records token usage / cost so cost can be shown per run.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List
 
 import pandas as pd
@@ -26,6 +27,9 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     make_llm_client,
 )
 from dashboard.backend.infrastructure.llm.providers import KNOWN_INTEGRATIONS
+from dashboard.backend.infrastructure.llm.providers.openrouter import (
+    reasoning_is_explicitly_enabled,
+)
 
 from .base import BaselineStrategy
 from ._common import build_price_cache, market_timestamps, subset_bars, timestamps_in_contest
@@ -42,6 +46,35 @@ class LLMAgentStrategy(BaselineStrategy):
         # Omitted → env auto-detect (CommonStack key prefers CommonStack).
         self.integration = self.config.get("integration")
         self.reasoning_effort = self.config.get("reasoning_effort")
+        temperature = self.config.get("temperature")
+        # 0–1, not the OpenAI 0–2 range: every gateway here is reached through
+        # an Anthropic Messages client, which caps temperature at 1.0. A value
+        # above it would only surface as a per-request 400 — i.e. a silent
+        # rule-based fallback that the H6 guard then blocks from publishing.
+        if temperature is not None and (
+            isinstance(temperature, bool)
+            or not isinstance(temperature, (int, float))
+            or not math.isfinite(temperature)
+            or not 0 <= temperature <= 1
+        ):
+            raise ValueError(
+                "temperature must be a finite number between 0 and 1; "
+                f"got {temperature!r}"
+            )
+        # Anthropic rejects temperature alongside extended thinking, and the
+        # OpenRouter wrapper injects a `thinking` block whenever the configured
+        # effort enables it. Catch the conflict here rather than one 400 per
+        # decision step.
+        if temperature is not None and reasoning_is_explicitly_enabled(
+            self.reasoning_effort
+        ):
+            raise ValueError(
+                f"temperature ({temperature!r}) cannot be combined with "
+                f"reasoning_effort={self.reasoning_effort!r}: extended thinking "
+                "and temperature are mutually exclusive on the Anthropic "
+                "Messages API. Disable reasoning or drop temperature."
+            )
+        self.temperature = temperature
         # Populated during run() for reporting / cost tracking.
         self.llm_calls = 0
         self.llm_decisions = 0  # steps the model actually drove (H6 guard numerator)
@@ -129,7 +162,11 @@ class LLMAgentStrategy(BaselineStrategy):
 
             if client is not None:
                 decision = manager.make_trading_decision_with_llm(
-                    state, client, mode=self.mode, model=model_id
+                    state,
+                    client,
+                    mode=self.mode,
+                    model=model_id,
+                    temperature=self.temperature,
                 )
             else:
                 decision = manager.make_trading_decision(state)

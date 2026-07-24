@@ -139,6 +139,7 @@
       "integration": "openrouter",
       "model_id": "nvidia/nemotron-3-nano-30b-a3b",
       "reasoning_effort": "none",
+      "temperature": 0,
       "mode": "safe_trading",
       "symbols": [],
       "auto_compute": false
