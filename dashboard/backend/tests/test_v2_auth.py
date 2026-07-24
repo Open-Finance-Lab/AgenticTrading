@@ -59,9 +59,10 @@ def test_require_scope_rejects_bad_scope(tmp_path, monkeypatch):
                  ("runs:read", created["agent_id"]))
     conn.commit()
     conn.close()
+    # resolve_agent now routes through the auth_cache, whose store lookup is
+    # late-bound to repository.agent_store (patched above) — no auth_scopes-local
+    # patch is needed (or possible).
     monkeypatch.setattr(agent_store_mod, "agent_store", store)
-    from dashboard.backend.api.v2 import auth_scopes
-    monkeypatch.setattr(auth_scopes, "agent_store", store)
 
     dep = require_scope("decisions:write")
     with pytest.raises(ApiError) as exc:

@@ -339,7 +339,7 @@ class AgentStore:
         conn.close()
         return _public_agent(row) if row else None
 
-    def resolve_api_key(self, api_key: str) -> Optional[Dict[str, Any]]:
+    def resolve_api_key(self, api_key: str, touch: bool = True) -> Optional[Dict[str, Any]]:
         if not api_key or not api_key.strip():
             return None
         key_hash = _hash_api_key(api_key.strip())
@@ -350,7 +350,7 @@ class AgentStore:
             (key_hash,),
         )
         row = cursor.fetchone()
-        if row:
+        if row and touch:
             cursor.execute(
                 "UPDATE external_agents SET last_used_at = ? WHERE agent_id = ?",
                 (_utcnow_iso(), row["agent_id"]),

@@ -60,6 +60,7 @@ os.environ.pop("MARKET_DATA_CACHE_MAX_ENTRIES", None)
 os.environ.pop("BASELINE_QUEUE_MAX", None)
 os.environ.pop("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", None)
 os.environ.pop("MAX_ACTIVE_RUNS_GLOBAL", None)
+os.environ.pop("AGENT_AUTH_CACHE_TTL_SECONDS", None)
 
 
 @atexit.register
@@ -77,8 +78,10 @@ def _reset_shared_scale_state():
     process; without a per-test reset, one test's synthetic bars would be
     served to every later test with the same (symbols, dates) key."""
     from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
+    from dashboard.backend.domain.agents import auth_cache
     market_data_store._reset_for_tests()
     baseline_worker._reset_for_tests()
+    auth_cache._reset_for_tests()
     yield
     # Best-effort drain so a job enqueued in this test doesn't leak into the
     # next. Note pytest tears fixtures down LIFO, so a test's own monkeypatches
@@ -89,3 +92,4 @@ def _reset_shared_scale_state():
     baseline_worker.wait_idle(timeout=5)
     baseline_worker._reset_for_tests()
     market_data_store._reset_for_tests()
+    auth_cache._reset_for_tests()

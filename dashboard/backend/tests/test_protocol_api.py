@@ -60,7 +60,6 @@ def client(tmp_path, monkeypatch):
     import dashboard.backend.api.routers.agents as agents_api
     import dashboard.backend.api.routers.agent_versions as versions_api
     import dashboard.backend.api.routers.runs as runs_api
-    import dashboard.backend.api.protocol_auth as protocol_auth
 
     test_db = db_module.BacktestDatabase(db_path=db_path)
     test_agents = agent_store_module.AgentStore(db_path=db_path)
@@ -73,11 +72,12 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(run_service, "db", test_db)
     monkeypatch.setattr(agents_api.agent_service, "db", test_db)
 
-    # Agent store
+    # Agent store. protocol_auth now resolves through the auth_cache, whose
+    # store lookup is late-bound to agent_store_module.agent_store (patched
+    # above), so no protocol_auth-local patch is needed (or possible).
     monkeypatch.setattr(agent_store_module, "agent_store", test_agents)
     monkeypatch.setattr(ebs, "agent_store", test_agents)
     monkeypatch.setattr(agents_api.agent_service, "agents", test_agents)
-    monkeypatch.setattr(protocol_auth, "agent_store", test_agents)
 
     # Version store
     monkeypatch.setattr(version_module, "agent_version_store", test_versions)
