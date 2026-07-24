@@ -17,9 +17,6 @@ from __future__ import annotations
 import secrets
 from typing import Any, Optional
 
-import psycopg
-from psycopg.rows import dict_row
-
 from dashboard.backend.db_url import require_postgres_url
 from dashboard.backend.domain.strategies.repository import (
     _CODE_LENGTH,
@@ -35,8 +32,11 @@ class PostgresStrategyStore:
         self.database_url = require_postgres_url(database_url)
         self._init_schema()
 
-    def _get_connection(self) -> psycopg.Connection:
-        return psycopg.connect(self.database_url, row_factory=dict_row)
+    def _get_connection(self):
+        # Pooled checkout: same context-manager transaction semantics as
+        # psycopg.connect (commit on clean exit), returned to the pool on close.
+        from dashboard.backend.db_pool import get_pool
+        return get_pool(self.database_url).connection()
 
     def _init_schema(self) -> None:
         # Adding a column later requires an `ALTER TABLE ... ADD COLUMN IF NOT

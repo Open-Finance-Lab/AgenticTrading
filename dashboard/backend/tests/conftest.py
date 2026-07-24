@@ -73,15 +73,21 @@ import pytest  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
-def _reset_shared_scale_state():
+def _reset_shared_scale_state(monkeypatch):
     """The market-data store is a module-level cache shared across the test
     process; without a per-test reset, one test's synthetic bars would be
-    served to every later test with the same (symbols, dates) key."""
+    served to every later test with the same (symbols, dates) key. The auth
+    cache and pg pools are the same kind of process-global state; reset all
+    three, and cap the pool-connect wait so the fail-loud "unreachable URL"
+    tests raise in ~1s instead of blocking the whole prod-default timeout."""
     from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
     from dashboard.backend.domain.agents import auth_cache
+    from dashboard.backend import db_pool
+    monkeypatch.setattr(db_pool, "POOL_TIMEOUT_SECONDS", 1.0)
     market_data_store._reset_for_tests()
     baseline_worker._reset_for_tests()
     auth_cache._reset_for_tests()
+    db_pool._reset_for_tests()
     yield
     # Best-effort drain so a job enqueued in this test doesn't leak into the
     # next. Note pytest tears fixtures down LIFO, so a test's own monkeypatches
@@ -93,3 +99,4 @@ def _reset_shared_scale_state():
     baseline_worker._reset_for_tests()
     market_data_store._reset_for_tests()
     auth_cache._reset_for_tests()
+    db_pool._reset_for_tests()

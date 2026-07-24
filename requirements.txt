@@ -49,7 +49,7 @@ python-dateutil==2.9.0.post0
 python-dotenv==1.2.2
 python-multipart==0.0.31
 pytz==2025.2
-psycopg[binary]==3.3.4
+psycopg[binary,pool]==3.3.4
 PyYAML==6.0.1
 referencing==0.36.2
 requests==2.33.1
