@@ -193,10 +193,10 @@ function parseAgentCashAllocationInput(raw) {
   }
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) {
-    throw new Error(`Initial cash must be between $0 and $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
+    throw new Error(`Allocated capital must be between $0 and $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
   }
   if (value > MAX_AGENT_CASH_ALLOCATION) {
-    throw new Error(`Initial cash cannot exceed $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
+    throw new Error(`Allocated capital cannot exceed $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
   }
   return Math.round(value);
 }
@@ -393,21 +393,43 @@ function hashStringSeed(str) {
   return Math.abs(h) || 1;
 }
 
-function renderAgentSparkline(seed, positive = true) {
+/** Render card sparkline from real equity samples (or a 2-point start→end fallback). */
+function renderAgentSparklineFromValues(values, positive = true, seed = 'spark') {
+  const nums = (Array.isArray(values) ? values : [])
+    .map(Number)
+    .filter((v) => Number.isFinite(v));
   const color = positive ? '#4ade80' : '#ff6b6b';
   const fillId = `agSpark-${hashStringSeed(seed)}`;
-  const n = 8;
-  const pts = [];
-  let v = 0.35 + (hashStringSeed(seed) % 30) / 100;
-  for (let i = 0; i < n; i += 1) {
-    const wobble = ((hashStringSeed(`${seed}:${i}`) % 17) - 8) / 40;
-    v = Math.max(0.08, Math.min(0.92, v + wobble + (positive ? 0.04 : -0.03)));
-    pts.push([ (i / (n - 1)) * 80, 36 - v * 32 ]);
+  const w = 80;
+  const h = 36;
+  const top = 4;
+  const bottom = 4;
+  const plotH = h - top - bottom;
+
+  if (nums.length < 2) {
+    return `
+    <svg class="agent-card-sparkline agent-card-sparkline--empty" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true">
+      <path d="M4,${(h / 2).toFixed(1)} H${w - 4}" fill="none" stroke="rgba(148,163,184,0.35)" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="3 3"/>
+    </svg>`;
   }
+
+  const min = Math.min(...nums);
+  const max = Math.max(...nums);
+  // Keep tiny PnL readable without inventing fake volatility.
+  const span = max - min;
+  const pad = span > 0 ? span * 0.18 : Math.max(Math.abs(max) * 0.004, 1);
+  const lo = min - pad;
+  const hi = max + pad;
+  const range = hi - lo || 1;
+  const pts = nums.map((v, i) => {
+    const x = (i / (nums.length - 1)) * w;
+    const y = top + (1 - (v - lo) / range) * plotH;
+    return [x, y];
+  });
   const line = pts.map((p, i) => `${i === 0 ? 'M' : 'L'}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join(' ');
-  const area = `${line} L80,36 L0,36 Z`;
+  const area = `${line} L${w},${h} L0,${h} Z`;
   return `
-    <svg class="agent-card-sparkline" viewBox="0 0 80 36" width="80" height="36" aria-hidden="true">
+    <svg class="agent-card-sparkline" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" aria-hidden="true">
       <defs>
         <linearGradient id="${fillId}" x1="0" y1="0" x2="0" y2="1">
           <stop offset="0%" stop-color="${color}" stop-opacity="0.35"/>
@@ -417,6 +439,25 @@ function renderAgentSparkline(seed, positive = true) {
       <path d="${area}" fill="url(#${fillId})"/>
       <path d="${line}" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>`;
+}
+
+function resolveAgentSparklineValues(agent, metrics = {}) {
+  const fromAgent = agent?.equity_sparkline;
+  if (Array.isArray(fromAgent) && fromAgent.length >= 2) return fromAgent;
+  const fromRun = agent?.latest_run?.equity_sparkline;
+  if (Array.isArray(fromRun) && fromRun.length >= 2) return fromRun;
+  const ending = Number(metrics.ending);
+  const pnl = Number(metrics.pnl);
+  if (Number.isFinite(ending) && Number.isFinite(pnl)) {
+    return [ending - pnl, ending];
+  }
+  return null;
+}
+
+function renderAgentSparkline(agent, positive = true, metrics = {}) {
+  const values = resolveAgentSparklineValues(agent, metrics);
+  const seed = agent?.agent_id || agent?.name || 'spark';
+  return renderAgentSparklineFromValues(values, positive, seed);
 }
 
 function agentTypeLabel(agent) {
@@ -565,7 +606,7 @@ function renderAgentCardBody(agent, statusKey) {
           <p class="agent-card-metric-value">${escapeHtml(formatAgentMoney(m.equity))}</p>
           ${changeHtml}
         </div>
-        ${renderAgentSparkline(agent.agent_id || agent.name, positive)}
+        ${renderAgentSparkline(agent, positive, { ending: m.equity, pnl: m.dayPnl ?? 0 })}
       </div>
       <div class="agent-card-divider"></div>
       <div class="agent-card-stats">
@@ -605,7 +646,7 @@ function renderAgentCardBody(agent, statusKey) {
           <p class="agent-card-metric-value">${escapeHtml(formatAgentMoney(m.ending))}</p>
           <p class="agent-card-change ${m.positive ? 'is-pos' : 'is-neg'}">${escapeHtml(formatSignedMoney(m.pnl))} during latest run</p>
         </div>
-        ${renderAgentSparkline(agent.agent_id || agent.name, m.positive)}
+        ${renderAgentSparkline(agent, m.positive, m)}
       </div>
       <p class="agent-card-period">${escapeHtml(m.period)}</p>
       <div class="agent-card-divider"></div>
@@ -646,8 +687,6 @@ function renderAgentCardActions(agent, statusKey) {
   let primary = '';
   if (statusKey === 'paper') {
     primary = `<button class="agent-card-cta agent-open-btn" type="button" data-agent-id="${id}">Open Agent</button>`;
-  } else if (statusKey === 'backtested') {
-    primary = `<button class="agent-card-cta agent-card-cta--outline agent-view-runs-btn" type="button" data-agent-id="${id}">View All Runs</button>`;
   } else {
     primary = `<button class="agent-card-cta agent-run-backtest-btn" type="button" data-agent-id="${id}">Run Backtest</button>`;
   }
@@ -894,7 +933,8 @@ function renderAgentCards(grid, agents) {
   grid.querySelectorAll('.agent-run-backtest-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const agent = agents.find((a) => a.agent_id === btn.dataset.agentId);
-      await openAgentInBacktest(agent);
+      if (!agent) return;
+      openRunBacktestModal(agent);
     });
   });
 
@@ -1969,6 +2009,18 @@ function closeAccountMenu() {
   toggleAccountMenu(false);
 }
 
+function syncHeaderBrand(signedIn) {
+  const brand = document.querySelector('.header-brand');
+  if (!brand) return;
+  if (signedIn) {
+    brand.setAttribute('href', '/app?view=home');
+    brand.setAttribute('aria-label', 'Agentic Trading Lab dashboard');
+  } else {
+    brand.setAttribute('href', '/');
+    brand.setAttribute('aria-label', 'Agentic Trading Lab home');
+  }
+}
+
 function updateAuthUI() {
   const user = getStoredAuthUser();
   const label = document.getElementById('authUserLabel');
@@ -1993,6 +2045,8 @@ function updateAuthUI() {
     menuWrap.hidden = true;
     closeAccountMenu();
   }
+
+  syncHeaderBrand(Boolean(user));
 
   updateAccountPage();
 
@@ -2216,9 +2270,17 @@ function initAuthUI() {
     closeAccountMenu();
     navigateToPage('account');
   });
+  document.getElementById('accountMenuLandingLink')?.addEventListener('click', () => {
+    closeAccountMenu();
+  });
   document.getElementById('accountMenuLogoutBtn')?.addEventListener('click', () => {
     closeAccountMenu();
     logoutUser();
+  });
+  document.querySelector('.header-brand')?.addEventListener('click', (event) => {
+    if (!getStoredAuthUser()) return;
+    event.preventDefault();
+    navigateToPage('home');
   });
   document.addEventListener('click', (event) => {
     const wrap = document.getElementById('accountMenuWrap');
@@ -2329,6 +2391,10 @@ window.DEFAULT_RUNS = {};
 
 let chartInstance = null;
 let liveBacktestChartActive = false;
+/** When set, Backtest view is pinned to this in-flight run (blocks history chart paint). */
+let liveBacktestRunId = null;
+/** Active status-poll timer id (so dropdown can re-attach to a running job). */
+let backtestPollTimer = null;
 let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
 let tradingLogFilter = 'all';
@@ -2347,14 +2413,34 @@ document.addEventListener('DOMContentLoaded', async () => {
     initSession();
     initAuthUI();
     await restoreActiveAgentSession();
-    // Load agents before home modules render so the dashboard My Agents card
-    // is not empty on first paint (previously only loaded on My Agents tab).
-    try {
-        await loadAgents();
-    } catch (error) {
-        console.warn('Initial loadAgents failed:', error.message);
+    // Portfolio overview must not wait on the agents waterfall. Paint any
+    // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
+    // then show the page while loadAgents continues in the background.
+    if (typeof window.paintPortfolioBoot === 'function') {
+        try {
+            window.paintPortfolioBoot(
+                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
+            );
+        } catch (error) {
+            console.warn('Portfolio boot paint failed:', error?.message || error);
+        }
     }
+    if (typeof window.prefetchPortfolio === 'function') {
+        Promise.resolve(
+            window.prefetchPortfolio(
+                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
+            ),
+        ).catch((error) => {
+            console.warn('Portfolio prefetch failed:', error?.message || error);
+        });
+    }
+    const agentsReady = loadAgents().catch((error) => {
+        console.warn('Initial loadAgents failed:', error.message);
+    });
     applyInitialNavigation();
+    // Home modules / agent cards catch up once the list lands; do not block
+    // first navigation on that wait.
+    await agentsReady;
     window.addEventListener('agent-editor-saved', async (event) => {
         const agent = event.detail?.agent;
         if (agent?.agent_id) {
@@ -2399,13 +2485,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     setupTickerResizeHandler();
     setupTickerScrollControls();
 
-    // Setup slider value displays
-    document.querySelectorAll('.slider').forEach(slider => {
-        slider.addEventListener('input', (e) => {
-            updateSliderValue(e.target);
-        });
-    });
-
     // Setup time period buttons
     document.querySelectorAll('.time-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
@@ -2413,20 +2492,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
-    // Setup quick scenario buttons
-    document.querySelectorAll('.scenario-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            handleScenario(e.currentTarget);
-        });
+    // Setup run backtest modal
+    document.getElementById('runBacktestModalClose')?.addEventListener('click', closeRunBacktestModal);
+    document.getElementById('runBacktestModalBackdrop')?.addEventListener('click', closeRunBacktestModal);
+    document.getElementById('runBacktestModalSubmit')?.addEventListener('click', () => {
+        runBacktest();
     });
-
-    // Setup run backtest button
-    const runBtn = document.querySelector('.run-backtest-btn');
-    if (runBtn) {
-        runBtn.addEventListener('click', () => {
-            runBacktest();
-        });
-    }
+    document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return;
+        const modal = document.getElementById('runBacktestModal');
+        if (modal && !modal.hidden) closeRunBacktestModal();
+    });
 
     const backtestRunSelect = document.getElementById('backtestRunSelect');
     if (backtestRunSelect) {
@@ -2465,24 +2541,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         marketDataSourceSelect.addEventListener('change', syncMarketDataSourceUI);
     }
 
-    // Setup collapsible advanced settings
-    const advancedToggle = document.getElementById('advancedToggle');
-    const advancedContent = document.getElementById('advancedContent');
-    if (advancedToggle && advancedContent) {
-        advancedToggle.addEventListener('click', () => {
-            advancedToggle.classList.toggle('active');
-            advancedContent.style.display = advancedContent.style.display === 'none' ? 'block' : 'none';
-        });
-    }
-
     // Setup universe tabs
     document.querySelectorAll('.universe-tab').forEach(tab => {
         tab.addEventListener('click', (e) => handleUniverseTabSwitch(e.target));
     });
     
     // Setup preset cards
-    document.getElementById('djiaCard').addEventListener('click', () => selectPreset('djia'));
-    document.getElementById('mag7Card').addEventListener('click', () => selectPreset('mag7'));
+    document.getElementById('djiaCard')?.addEventListener('click', () => selectPreset('djia'));
+    document.getElementById('mag7Card')?.addEventListener('click', () => selectPreset('mag7'));
     
     // Setup custom universe builder
     setupAssetSearch();
@@ -2565,6 +2631,10 @@ window.isUsEquityMarketOpen = isUsEquityMarketOpen;
  */
 async function loadPerformanceMetrics() {
     try {
+        if (liveBacktestChartActive) {
+            displayNoMetrics();
+            return;
+        }
         // Mirror the chart: show metrics for the selected run. window.SELECTED_RUN
         // is set by loadData; resolve from session runs when called standalone.
         let metrics = window.SELECTED_RUN || null;
@@ -3007,57 +3077,12 @@ function showTickerStatus(message) {
 }
 
 /**
- * Update slider value display
- */
-function updateSliderValue(slider) {
-    const container = slider.closest('.slider-container');
-    const valueSpan = container.querySelector('.slider-value');
-    if (valueSpan) {
-        const value = slider.value;
-        const max = slider.max;
-        
-        if (max === '100') {
-            valueSpan.textContent = (value / 100).toFixed(2);
-        } else {
-            valueSpan.textContent = parseFloat(value).toFixed(2);
-        }
-    }
-}
-
-/**
  * Update time period selection
  */
 function updateTimePeriod(btn) {
     document.querySelectorAll('.time-btn').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     console.log('Time period changed:', btn.textContent);
-}
-
-/**
- * Handle quick scenario buttons
- */
-function handleScenario(btn) {
-    const scenario = btn.querySelector('span:last-child').textContent;
-    console.log('Scenario selected:', scenario);
-    
-    const sliders = document.querySelectorAll('.slider');
-    
-    switch(scenario) {
-        case 'Low Cost':
-            sliders[3].value = 0.01;
-            sliders[4].value = 0.01;
-            break;
-        case 'High Momentum':
-            sliders[1].value = 80;
-            sliders[2].value = 6;
-            break;
-        case 'Conservative':
-            sliders[1].value = 20;
-            sliders[2].value = 1.5;
-            break;
-    }
-    
-    sliders.forEach(updateSliderValue);
 }
 
 
@@ -3068,7 +3093,7 @@ function handleScenario(btn) {
 // Asset universe definitions
 const ASSET_UNIVERSES = {
     djia: {
-        name: 'DJIA',
+        name: 'DJIA 30',
         // Canonical Dow-30 — must mirror backend validator.DJIA_30
         // (pinned by dashboard/backend/tests/test_djia30_universe.py).
         assets: ['AAPL', 'AMGN', 'AMZN', 'AXP', 'BA', 'CAT', 'CRM', 'CSCO', 'CVX', 'DIS',
@@ -3201,17 +3226,21 @@ function selectPreset(preset) {
 
     selectedUniverse = preset;
 
-    document.getElementById('djiaCard').classList.remove('selected');
-    document.getElementById('mag7Card').classList.remove('selected');
+    const djiaCard = document.getElementById('djiaCard');
+    const mag7Card = document.getElementById('mag7Card');
+    if (!djiaCard || !mag7Card) return;
+
+    djiaCard.classList.remove('selected');
+    mag7Card.classList.remove('selected');
 
     if (preset === 'djia') {
-        document.getElementById('djiaCard').classList.add('selected');
-        document.getElementById('djiaCard').querySelector('.preset-btn').textContent = 'Selected';
-        document.getElementById('mag7Card').querySelector('.preset-btn').textContent = 'Select';
+        djiaCard.classList.add('selected');
+        djiaCard.querySelector('.preset-btn').textContent = 'Selected';
+        mag7Card.querySelector('.preset-btn').textContent = 'Select';
     } else if (preset === 'mag7') {
-        document.getElementById('mag7Card').classList.add('selected');
-        document.getElementById('mag7Card').querySelector('.preset-btn').textContent = 'Selected';
-        document.getElementById('djiaCard').querySelector('.preset-btn').textContent = 'Select';
+        mag7Card.classList.add('selected');
+        mag7Card.querySelector('.preset-btn').textContent = 'Selected';
+        djiaCard.querySelector('.preset-btn').textContent = 'Select';
     }
 
     const universeData = ASSET_UNIVERSES[preset];
@@ -3331,7 +3360,7 @@ function setupAssetSearch() {
  */
 function getSelectedAssets() {
     const builtinTab = document.getElementById('builtinTab');
-    const isBuiltin = builtinTab.classList.contains('active');
+    const isBuiltin = builtinTab?.classList.contains('active');
     
     if (!isBuiltin) {
         // Get chips from custom universe
@@ -3402,19 +3431,23 @@ function showBacktestRunProgress(show, { isError = false } = {}) {
     panel.classList.toggle('is-error', !!isError);
 }
 
-function updateBacktestRunProgress({ elapsedSeconds = 0, message = '', maxSeconds = BACKTEST_POLL_MAX_SECONDS, stepPct = null }) {
+function updateBacktestRunProgress({ elapsedSeconds, message = '', maxSeconds = BACKTEST_POLL_MAX_SECONDS, stepPct = null } = {}) {
     const elapsedEl = document.getElementById('backtestRunElapsed');
     const messageEl = document.getElementById('backtestRunProgressMessage');
     const barEl = document.getElementById('backtestRunProgressBar');
-    const elapsed = Math.max(0, Number(elapsedSeconds) || 0);
 
-    if (elapsedEl) elapsedEl.textContent = formatBacktestElapsed(elapsed);
+    if (elapsedEl && elapsedSeconds !== undefined && elapsedSeconds !== null) {
+        const elapsed = Math.max(0, Number(elapsedSeconds) || 0);
+        elapsedEl.textContent = formatBacktestElapsed(elapsed);
+    }
     if (messageEl && message) messageEl.textContent = message;
     if (barEl) {
         const pct = Number.isFinite(stepPct)
             ? Math.min(99, Math.round(stepPct))
-            : Math.min(95, Math.round((elapsed / maxSeconds) * 100));
-        barEl.style.width = `${pct}%`;
+            : (elapsedSeconds !== undefined && elapsedSeconds !== null
+                ? Math.min(95, Math.round((Math.max(0, Number(elapsedSeconds) || 0) / maxSeconds) * 100))
+                : null);
+        if (pct != null) barEl.style.width = `${pct}%`;
     }
 }
 
@@ -3508,10 +3541,13 @@ function initLiveBacktestChart() {
 
     if (chartInstance) {
         chartInstance.destroy();
+        chartInstance = null;
     }
 
     liveBacktestChartMeta = { timestamps: [] };
     liveBacktestChartActive = true;
+    backtestChartData = null;
+    window.SELECTED_RUN = null;
     const ctx = perfCtx.getContext('2d');
     chartInstance = new Chart(ctx, {
         type: 'line',
@@ -3531,6 +3567,181 @@ function initLiveBacktestChart() {
         },
         options: getPerformanceChartOptions(liveBacktestChartMeta),
     });
+}
+
+/** Clear history chart/metrics/log and pin the view to a soon-to-start live run. */
+function prepareLiveBacktestView(launchConfig = null) {
+    liveBacktestChartActive = true;
+    liveBacktestRunId = null;
+    localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
+    const runSelect = document.getElementById('backtestRunSelect');
+    if (runSelect) runSelect.value = '';
+    displayNoMetrics();
+    clearTradingLog('Backtest running… trades will appear here.');
+    initLiveBacktestChart();
+    renderBacktestRunConfig(null, { running: true, launchConfig });
+    showBacktestRunProgress(true);
+}
+
+/** Switch the Backtest surface onto an in-flight run (chart + log + config). */
+function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
+    if (!runId) return;
+    const alreadyLive =
+        liveBacktestChartActive &&
+        liveBacktestRunId === runId &&
+        chartInstance &&
+        chartInstance.data?.datasets?.[0]?.label === 'Agent (live)';
+
+    liveBacktestRunId = runId;
+    liveBacktestChartActive = true;
+    localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
+    const runSelect = document.getElementById('backtestRunSelect');
+    if (runSelect) {
+        // Ensure the Running option exists / is selected even if not in DB yet.
+        if (![...runSelect.options].some((opt) => opt.value === runId)) {
+            const cfg = launchConfig || getBacktestLaunchConfig(runId);
+            const label = `Running… · ${cfg?.agentName || 'Agent'}`;
+            const opt = document.createElement('option');
+            opt.value = runId;
+            opt.textContent = label;
+            runSelect.insertBefore(opt, runSelect.firstChild);
+        }
+        runSelect.value = runId;
+        runSelect.hidden = false;
+    }
+    displayNoMetrics();
+    if (!alreadyLive) {
+        initLiveBacktestChart();
+    }
+    renderBacktestRunConfig(
+        { run_id: runId },
+        { running: true, launchConfig: launchConfig || getBacktestLaunchConfig(runId) },
+    );
+    showBacktestRunProgress(true);
+    if (progress) {
+        updateLiveBacktestChart(progress);
+        updateLiveTradingLog(progress);
+        const step = Number(progress.step);
+        const total = Number(progress.total_steps);
+        const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
+            ? (100 * step / total)
+            : null;
+        updateBacktestRunProgress({
+            message: stepPct != null
+                ? `Backtest running… step ${step}/${total} (${Math.round(stepPct)}%)`
+                : 'Backtest is running…',
+            stepPct,
+        });
+    } else if (!alreadyLive) {
+        clearTradingLog('Backtest running… trades will appear here.');
+    }
+    ensureBacktestPolling();
+}
+
+function stopBacktestPolling() {
+    if (backtestPollTimer) {
+        clearInterval(backtestPollTimer);
+        backtestPollTimer = null;
+    }
+}
+
+function isViewingLiveBacktest(liveId = liveBacktestRunId) {
+    if (!liveId) return false;
+    return localStorage.getItem(SELECTED_BACKTEST_RUN_KEY) === liveId;
+}
+
+function ensureBacktestPolling() {
+    if (backtestPollTimer) return;
+    const maxAttempts = BACKTEST_POLL_MAX_SECONDS;
+    let attempts = 0;
+
+    backtestPollTimer = setInterval(async () => {
+        attempts += 1;
+        try {
+            const status = await API.get(`${API_BASE}/backtest/status`);
+            const liveId = status.live_run_id || liveBacktestRunId;
+            const serverElapsed = Number(status.elapsed_seconds);
+            const displayElapsed = Number.isFinite(serverElapsed) && serverElapsed > 0
+                ? serverElapsed
+                : attempts;
+            const viewingLive = isViewingLiveBacktest(liveId);
+
+            if (status.running) {
+                if (liveId) liveBacktestRunId = liveId;
+                const step = Number(status.progress?.step);
+                const total = Number(status.progress?.total_steps);
+                const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
+                    ? (100 * step / total)
+                    : null;
+
+                if (viewingLive) {
+                    liveBacktestChartActive = true;
+                    if (status.progress) {
+                        updateLiveBacktestChart(status.progress);
+                        updateLiveTradingLog(status.progress);
+                    }
+                    updateBacktestRunProgress({
+                        elapsedSeconds: displayElapsed,
+                        message: status.message || 'Backtest is running…',
+                        stepPct,
+                    });
+                    showBacktestRunProgress(true);
+                    renderBacktestRunConfig(
+                        { run_id: liveId },
+                        { running: true, launchConfig: getBacktestLaunchConfig(liveId) },
+                    );
+                }
+            } else {
+                stopBacktestPolling();
+                liveBacktestChartActive = false;
+                const finishedId = liveBacktestRunId;
+                liveBacktestRunId = null;
+
+                if (status.error) {
+                    if (viewingLive) {
+                        showBacktestRunProgress(true, { isError: true });
+                        updateBacktestRunProgress({
+                            elapsedSeconds: displayElapsed,
+                            message: status.error,
+                        });
+                    }
+                    return;
+                }
+
+                if (status.success && viewingLive) {
+                    updateBacktestRunProgress({
+                        elapsedSeconds: displayElapsed,
+                        message: `Completed in ${formatBacktestElapsed(displayElapsed)}.`,
+                    });
+                    if (finishedId) {
+                        localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, finishedId);
+                    } else {
+                        localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
+                    }
+                    await loadData();
+                    await loadPerformanceMetrics();
+                    setTimeout(() => showBacktestRunProgress(false), 2500);
+                } else if (!viewingLive) {
+                    showBacktestRunProgress(false);
+                }
+            }
+
+            if (attempts >= maxAttempts) {
+                stopBacktestPolling();
+                if (isViewingLiveBacktest(liveBacktestRunId)) {
+                    showBacktestRunProgress(true, { isError: true });
+                    updateBacktestRunProgress({
+                        elapsedSeconds: maxAttempts,
+                        message: 'Timed out after 10 minutes. The backtest may still be running in the background.',
+                    });
+                }
+                liveBacktestChartActive = false;
+                liveBacktestRunId = null;
+            }
+        } catch (error) {
+            console.error('Error polling backtest status:', error);
+        }
+    }, 1000);
 }
 
 function updateLiveBacktestChart(progress) {
@@ -3638,6 +3849,197 @@ async function loadTradingLogForRun(runId) {
     }
 }
 
+const BACKTEST_LAUNCH_CONFIG_KEY = 'backtest-launch-configs';
+/** @type {null | object} */
+let runBacktestModalAgent = null;
+
+function readBacktestLaunchConfigMap() {
+    try {
+        const raw = localStorage.getItem(BACKTEST_LAUNCH_CONFIG_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (_error) {
+        return {};
+    }
+}
+
+function stashBacktestLaunchConfig(runId, config) {
+    if (!runId || !config) return;
+    const map = readBacktestLaunchConfigMap();
+    map[runId] = { ...config, savedAt: new Date().toISOString() };
+    const keys = Object.keys(map).sort(
+        (a, b) => String(map[a].savedAt || '').localeCompare(String(map[b].savedAt || '')),
+    );
+    while (keys.length > 40) {
+        delete map[keys.shift()];
+    }
+    try {
+        localStorage.setItem(BACKTEST_LAUNCH_CONFIG_KEY, JSON.stringify(map));
+    } catch (_error) {
+        /* ignore quota */
+    }
+}
+
+function getBacktestLaunchConfig(runId) {
+    if (!runId) return null;
+    return readBacktestLaunchConfigMap()[runId] || null;
+}
+
+function formatPromptFromPipeline(pipeline) {
+    if (!Array.isArray(pipeline) || !pipeline.length) return null;
+    if (pipeline.length === 1) {
+        const prompt = String(pipeline[0]?.prompt || '').trim();
+        return prompt || null;
+    }
+    return pipeline
+        .map((step, index) => {
+            const label = step.label || step.presetKey || `Step ${index + 1}`;
+            const prompt = String(step.prompt || '').trim();
+            return prompt ? `• ${label}: ${prompt}` : `• ${label}`;
+        })
+        .join('\n');
+}
+
+function describeUniverseFromAssets(assets) {
+    if (!Array.isArray(assets) || !assets.length) return null;
+    const sorted = [...assets].map(String).sort().join(',');
+    for (const uni of Object.values(ASSET_UNIVERSES)) {
+        if ([...uni.assets].map(String).sort().join(',') === sorted) {
+            return uni.name;
+        }
+    }
+    if (assets.length <= 8) return assets.join(', ');
+    return `${assets.slice(0, 6).join(', ')} +${assets.length - 6} more`;
+}
+
+function setBacktestConfigText(id, value) {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+}
+
+function renderBacktestRunConfig(run, { running = false, launchConfig = null } = {}) {
+    const empty = document.getElementById('backtestConfigEmpty');
+    const list = document.getElementById('backtestConfigList');
+    const cfg = launchConfig || (run?.run_id ? getBacktestLaunchConfig(run.run_id) : null);
+
+    if (!run && !cfg) {
+        if (empty) empty.hidden = false;
+        if (list) list.hidden = true;
+        if (!running) showBacktestRunProgress(false);
+        return;
+    }
+
+    if (empty) empty.hidden = true;
+    if (list) list.hidden = false;
+
+    const agentName = cfg?.agentName || run?.agent_name || '—';
+    const model = cfg?.model || run?.llm_model || '—';
+    const capital = cfg?.initialCapital ?? run?.initial_equity;
+    const start = cfg?.startDate || run?.start_date;
+    const end = cfg?.endDate || run?.end_date;
+    const universe = cfg?.universeLabel || describeUniverseFromAssets(cfg?.assets) || '—';
+    const started = run?.created_at
+        ? new Date(String(run.created_at).replace(' ', 'T')).toLocaleString()
+        : (cfg?.startedAt
+            ? new Date(cfg.startedAt).toLocaleString()
+            : (running ? 'Just now' : '—'));
+    const prompt = cfg?.prompt || null;
+
+    setBacktestConfigText('backtestConfigAgent', agentName);
+    setBacktestConfigText('backtestConfigModel', model || '—');
+    setBacktestConfigText('backtestConfigStarted', started);
+    setBacktestConfigText(
+        'backtestConfigCapital',
+        Number.isFinite(Number(capital)) ? `$${Number(capital).toLocaleString()}` : '—',
+    );
+    setBacktestConfigText('backtestConfigUniverse', universe);
+    setBacktestConfigText(
+        'backtestConfigWindow',
+        start && end ? `${start} → ${end}` : '—',
+    );
+    setBacktestConfigText('backtestConfigStatus', running ? 'Running' : 'Completed');
+
+    const promptRow = document.getElementById('backtestConfigPromptRow');
+    const promptEl = document.getElementById('backtestConfigPrompt');
+    if (prompt) {
+        if (promptRow) promptRow.hidden = false;
+        if (promptEl) promptEl.textContent = prompt;
+    } else if (promptRow) {
+        promptRow.hidden = true;
+    }
+}
+
+function closeRunBacktestModal() {
+    const modal = document.getElementById('runBacktestModal');
+    if (modal) modal.hidden = true;
+    runBacktestModalAgent = null;
+    const err = document.getElementById('runBacktestModalError');
+    if (err) {
+        err.hidden = true;
+        err.textContent = '';
+    }
+}
+
+function openRunBacktestModal(agent) {
+    if (!agent?.agent_id) {
+        alert('Please create or select an agent first.');
+        return;
+    }
+    if (isDemoAgent(agent.agent_id)) {
+        alert('Demo agents cannot run backtests. Create your own agent first.');
+        return;
+    }
+
+    runBacktestModalAgent = agent;
+    populateBacktestAgentSelect();
+    const select = document.getElementById('backtestAgentSelect');
+    if (select) select.value = agent.agent_id;
+
+    const nameEl = document.getElementById('runBacktestAgentName');
+    if (nameEl) nameEl.textContent = agent.name || agent.agent_id;
+
+    const sleeve = Number(agent.cash_allocation);
+    const hint = document.getElementById('runBacktestCapitalHint');
+    if (hint) {
+        hint.textContent = Number.isFinite(sleeve)
+            ? `Does not change Allocated Capital ($${sleeve.toLocaleString()}).`
+            : 'Does not change Allocated Capital.';
+    }
+
+    syncModelSelectFromAgent(agent);
+    selectPreset('djia');
+    const builtinTabBtn = document.querySelector('#runBacktestModal .universe-tab[data-tab="builtin"]');
+    if (builtinTabBtn) handleUniverseTabSwitch(builtinTabBtn);
+
+    const pipeline = loadAgentPipelineForBacktest(agent);
+    const prompt = formatPromptFromPipeline(pipeline);
+    const promptGroup = document.getElementById('runBacktestPromptGroup');
+    const promptPreview = document.getElementById('runBacktestPromptPreview');
+    if (prompt) {
+        if (promptGroup) promptGroup.hidden = false;
+        if (promptPreview) promptPreview.textContent = prompt;
+    } else if (promptGroup) {
+        promptGroup.hidden = true;
+    }
+
+    const err = document.getElementById('runBacktestModalError');
+    if (err) {
+        err.hidden = true;
+        err.textContent = '';
+    }
+    const submit = document.getElementById('runBacktestModalSubmit');
+    if (submit) {
+        submit.disabled = false;
+        submit.textContent = '▶ Run Backtest';
+    }
+
+    const modal = document.getElementById('runBacktestModal');
+    if (modal) modal.hidden = false;
+}
+
+window.openRunBacktestModal = openRunBacktestModal;
+window.closeRunBacktestModal = closeRunBacktestModal;
+
 async function runBacktest() {
     // Get dates from form
     const startDateInput = document.getElementById('startDate');
@@ -3652,7 +4054,14 @@ async function runBacktest() {
     const endDate = endDateInput.value;
     
     if (!startDate || !endDate) {
-        console.warn('⚠️ Please select both start and end dates');
+        const msg = 'Please select both start and end dates.';
+        const err = document.getElementById('runBacktestModalError');
+        if (err && !document.getElementById('runBacktestModal')?.hidden) {
+            err.textContent = msg;
+            err.hidden = false;
+        } else {
+            console.warn(msg);
+        }
         return;
     }
 
@@ -3661,22 +4070,44 @@ async function runBacktest() {
     const marketDataSourceSelect = document.getElementById('marketDataSourceSelect');
     const dataSource = marketDataSourceSelect?.value || 'alpaca';
     const isSimulation = dataSource === 'vnpy_simulation';
-    const activeAgent = getSelectedBacktestAgent();
+    const activeAgent = runBacktestModalAgent || getSelectedBacktestAgent();
     if (!activeAgent) {
         alert('Please create or select an agent first.');
         return;
     }
 
     await activateAgent(activeAgent);
-    syncModelSelectFromAgent(activeAgent);
     const pipeline = loadAgentPipelineForBacktest(activeAgent);
     const model = isSimulation
         ? null
-        : activeAgent?.model_name || (modelSelect ? modelSelect.value : 'claude-haiku-4.5');
+        : (modelSelect?.value || activeAgent?.model_name || 'claude-haiku-4.5');
+
+    const capitalInput = document.getElementById('backtestInitialCapital');
+    let initialCapital = 1000;
+    if (capitalInput && capitalInput.value !== '') {
+        const parsed = Number(capitalInput.value);
+        if (!Number.isFinite(parsed) || parsed <= 0) {
+            alert('Initial capital must be greater than 0.');
+            return;
+        }
+        if (parsed > 10000) {
+            alert('Initial capital cannot exceed $10,000.');
+            return;
+        }
+        initialCapital = Math.round(parsed);
+        capitalInput.value = String(initialCapital);
+    }
+
+    const promptSummary = formatPromptFromPipeline(pipeline);
+    const universeLabel =
+        document.getElementById('builtinTab')?.classList.contains('active')
+            ? (ASSET_UNIVERSES[selectedUniverse]?.name || selectedUniverse)
+            : describeUniverseFromAssets(assets);
     
     console.log(`Running backtest: ${startDate} to ${endDate}`);
     console.log(`Assets: ${assets.join(', ')}`);
     console.log(`Market data: ${dataSource}`);
+    console.log(`Initial capital (simulation): $${initialCapital}`);
     console.log(`Model: ${model || 'disabled for simulation'}`);
     if (activeAgent?.agent_id) {
         console.log(`Agent: ${activeAgent.name} (${activeAgent.agent_id})`);
@@ -3685,12 +4116,32 @@ async function runBacktest() {
         console.log(`Sub-agent pipeline: ${pipeline.length} step(s)`);
     }
     
-    const btn = document.querySelector('.run-backtest-btn');
-    btn.textContent = '⏳ Running...';
-    btn.disabled = true;
-    showBacktestRunProgress(true);
-    initLiveBacktestChart();
-    clearTradingLog('Backtest running… trades will appear here.');
+    const btn = document.getElementById('runBacktestModalSubmit');
+    if (btn) {
+        btn.textContent = '⏳ Running...';
+        btn.disabled = true;
+    }
+
+    const launchConfigBase = {
+        agentId: activeAgent.agent_id,
+        agentName: activeAgent.name,
+        model: model || null,
+        prompt: promptSummary,
+        initialCapital,
+        startDate,
+        endDate,
+        assets: [...assets],
+        universeLabel,
+        dataSource,
+        startedAt: new Date().toISOString(),
+    };
+
+    // Pin live view BEFORE navigateToPage → showPlaygroundPanel → loadData(),
+    // otherwise the async history load paints the previous run over the chart.
+    closeRunBacktestModal();
+    prepareLiveBacktestView(launchConfigBase);
+    navigateToPage('playground', { playgroundTab: 'backtest' });
+    currentMode = 'backtest';
     updateBacktestRunProgress({
         elapsedSeconds: 0,
         message: pipeline?.length
@@ -3710,6 +4161,9 @@ async function runBacktest() {
             start_date: startDate,
             end_date: endDate,
             data_source: dataSource,
+            initial_capital: initialCapital,
+            // Body is authoritative; query `assets` kept for older callers/logs.
+            assets: [...assets],
         };
         if (model) {
             params.set('model', model);
@@ -3725,38 +4179,36 @@ async function runBacktest() {
         
         if (!data.success) {
             console.error('❌ Backtest failed:', data.error || 'Unknown error');
+            liveBacktestChartActive = false;
+            liveBacktestRunId = null;
             showBacktestRunProgress(true, { isError: true });
             updateBacktestRunProgress({
                 elapsedSeconds: 0,
                 message: data.error || 'Failed to start backtest.',
             });
-            btn.textContent = '❌ Error - Try Again';
-            btn.disabled = false;
-            setTimeout(() => {
-                btn.textContent = '▶ Run Backtest';
-                showBacktestRunProgress(false);
-            }, 5000);
+            setTimeout(() => showBacktestRunProgress(false), 5000);
             return;
+        }
+
+        const liveRunId = data.live_run_id || data.run_id;
+        if (liveRunId) {
+            stashBacktestLaunchConfig(liveRunId, launchConfigBase);
+            attachToLiveBacktest(liveRunId, null, launchConfigBase);
         }
         
         console.log('✅ Backtest started:', data.message);
-        
-        // Poll for status (now session-aware)
-        await pollBacktestStatus(btn);
+        await pollBacktestStatus(null);
         
     } catch (error) {
         console.error('❌ Error starting backtest:', error.message);
+        liveBacktestChartActive = false;
+        liveBacktestRunId = null;
         showBacktestRunProgress(true, { isError: true });
         updateBacktestRunProgress({
             elapsedSeconds: 0,
             message: error.message || 'Failed to start backtest.',
         });
-        btn.textContent = '❌ Error - Try Again';
-        btn.disabled = false;
-        setTimeout(() => {
-            btn.textContent = '▶ Run Backtest';
-            showBacktestRunProgress(false);
-        }, 5000);
+        setTimeout(() => showBacktestRunProgress(false), 5000);
     }
 }
 
@@ -3764,108 +4216,24 @@ async function runBacktest() {
  * Poll backtest status until complete
  */
 async function pollBacktestStatus(btn) {
+    ensureBacktestPolling();
+    // Legacy callers awaited this; keep a lightweight wait until the poller stops
+    // or the run leaves "running" (max ~10 min).
     const maxAttempts = BACKTEST_POLL_MAX_SECONDS;
-    let attempts = 0;
-    let isComplete = false;
-    
-    return new Promise((resolve) => {
-        const interval = setInterval(async () => {
-            if (isComplete) return; // Prevent re-entry
-            
-            attempts++;
-            const elapsedSeconds = attempts;
-            
-            try {
-                const status = await API.get(`${API_BASE}/backtest/status`);
-                const serverElapsed = Number(status.elapsed_seconds);
-                const displayElapsed = Number.isFinite(serverElapsed) && serverElapsed > 0
-                    ? serverElapsed
-                    : elapsedSeconds;
-
-                if (status.running) {
-                    if (status.progress) {
-                        updateLiveBacktestChart(status.progress);
-                        updateLiveTradingLog(status.progress);
-                    }
-                    const step = Number(status.progress?.step);
-                    const total = Number(status.progress?.total_steps);
-                    const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
-                        ? (100 * step / total)
-                        : null;
-                    updateBacktestRunProgress({
-                        elapsedSeconds: displayElapsed,
-                        message: status.message || 'Backtest is running…',
-                        stepPct,
-                    });
-                    if (btn) {
-                        btn.textContent = `⏳ Running… ${formatBacktestElapsed(displayElapsed)}`;
-                    }
-                }
-                
-                if (!status.running) {
-                    isComplete = true;
-                    clearInterval(interval);
-                    liveBacktestChartActive = false;
-                    
-                    if (status.error) {
-                        console.error('❌ Backtest error:', status.error);
-                        showBacktestRunProgress(true, { isError: true });
-                        updateBacktestRunProgress({
-                            elapsedSeconds: displayElapsed,
-                            message: status.error,
-                        });
-                    } else if (status.success) {
-                        console.log('✅ Backtest completed:', status.message);
-                        console.log(`   Found ${status.runs_count} runs`);
-                        updateBacktestRunProgress({
-                            elapsedSeconds: displayElapsed,
-                            message: `Completed in ${formatBacktestElapsed(displayElapsed)}.`,
-                        });
-                        
-                        console.log('→ Reloading backtest data...');
-                        localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
-                        const runSelect = document.getElementById('backtestRunSelect');
-                        if (runSelect) runSelect.value = '';
-                        window.SELECTED_RUN = null;
-                        await loadData();
-                        
-                        console.log('→ Refreshing performance metrics...');
-                        await loadPerformanceMetrics();
-                        
-                        console.log('✅ Dashboard updated with latest backtest results');
-                        setTimeout(() => showBacktestRunProgress(false), 2500);
-                    } else {
-                        showBacktestRunProgress(false);
-                    }
-                    
-                    if (btn) {
-                        btn.textContent = '▶ Run Backtest';
-                        btn.disabled = false;
-                    }
-                    resolve();
-                    return;
-                }
-                
-                if (attempts >= maxAttempts) {
-                    isComplete = true;
-                    clearInterval(interval);
-                    console.warn('⚠️ Backtest timeout - still running after 10 minutes');
-                    showBacktestRunProgress(true, { isError: true });
-                    updateBacktestRunProgress({
-                        elapsedSeconds: maxAttempts,
-                        message: 'Timed out after 10 minutes. The backtest may still be running in the background.',
-                    });
-                    if (btn) {
-                        btn.textContent = '▶ Run Backtest';
-                        btn.disabled = false;
-                    }
-                    resolve();
-                }
-            } catch (error) {
-                console.error('Error polling backtest status:', error);
+    for (let i = 0; i < maxAttempts; i += 1) {
+        if (!backtestPollTimer) {
+            if (btn) {
+                btn.disabled = false;
+                btn.textContent = '▶ Run Backtest';
             }
-        }, 1000);
-    });
+            return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    if (btn) {
+        btn.disabled = false;
+        btn.textContent = '▶ Run Backtest';
+    }
 }
 
 /**
@@ -4513,13 +4881,23 @@ function resolveSelectedExternalRun(externalRuns) {
     return latestRun([...externalRuns]);
 }
 
-function populateBacktestRunSelector(externalRuns) {
+function populateBacktestRunSelector(externalRuns, { runningId = null } = {}) {
     const select = document.getElementById('backtestRunSelect');
     if (!select) return;
 
     const sorted = [...externalRuns].sort(
         (a, b) => (b.created_at || '').localeCompare(a.created_at || ''),
     );
+
+    if (runningId && !sorted.some((run) => run.run_id === runningId)) {
+        const cfg = getBacktestLaunchConfig(runningId);
+        sorted.unshift({
+            run_id: runningId,
+            agent_name: cfg?.agentName || 'Agent',
+            created_at: cfg?.startedAt || '',
+            _running: true,
+        });
+    }
 
     if (!sorted.length) {
         select.innerHTML = '';
@@ -4530,16 +4908,21 @@ function populateBacktestRunSelector(externalRuns) {
     select.hidden = false;
     const previous = select.value || localStorage.getItem(SELECTED_BACKTEST_RUN_KEY);
     select.innerHTML = sorted
-        .map(
-            (run) =>
-                `<option value="${escapeHtml(run.run_id)}">${escapeHtml(formatBacktestRunLabel(run))}</option>`,
-        )
+        .map((run) => {
+            const isRunning = run._running || run.run_id === runningId;
+            const label = isRunning
+                ? `Running… · ${formatBacktestRunPrimary(run)}`
+                : formatBacktestRunLabel(run);
+            return `<option value="${escapeHtml(run.run_id)}">${escapeHtml(label)}</option>`;
+        })
         .join('');
 
     const selectedId =
-        previous && sorted.some((r) => r.run_id === previous)
-            ? previous
-            : sorted[0].run_id;
+        (runningId && sorted.some((r) => r.run_id === runningId) && (!previous || previous === runningId))
+            ? runningId
+            : (previous && sorted.some((r) => r.run_id === previous)
+                ? previous
+                : sorted[0].run_id);
     select.value = selectedId;
     localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, selectedId);
 }
@@ -4654,11 +5037,42 @@ async function loadData() {
                 console.warn('Session runs unavailable:', e.message);
             }
 
-            // Selectable runs are the agent's own runs; baselines are plotted
-            // for comparison but never listed/selected. Built-in and external
-            // agents share this path: the selected run_id drives everything.
+            let runningId = liveBacktestRunId || null;
+            let statusProgress = null;
+            try {
+                const status = await API.get(`${API_BASE}/backtest/status`);
+                if (status?.running && status.live_run_id) {
+                    runningId = status.live_run_id;
+                    liveBacktestRunId = runningId;
+                    statusProgress = status.progress || null;
+                    ensureBacktestPolling();
+                } else if (!status?.running) {
+                    liveBacktestRunId = null;
+                }
+            } catch (_statusError) {
+                /* status optional while browsing history */
+            }
+
             const selectableRuns = sessionRuns.filter(r => !isBaselineRun(r));
-            populateBacktestRunSelector(selectableRuns);
+            populateBacktestRunSelector(selectableRuns, { runningId });
+
+            const selectedId = localStorage.getItem(SELECTED_BACKTEST_RUN_KEY);
+
+            // Dropdown (or deep-link) onto the in-flight run — always attach live
+            // surface even if the run is not in DB yet (synthetic selector option).
+            if (runningId && selectedId === runningId) {
+                attachToLiveBacktest(
+                    runningId,
+                    statusProgress,
+                    getBacktestLaunchConfig(runningId),
+                );
+                return;
+            }
+
+            // Viewing a finished run while another job may still be running.
+            liveBacktestChartActive = false;
+            showBacktestRunProgress(false);
+
             const selectedRun = resolveSelectedRun(sessionRuns);
 
             window.SELECTED_RUN = selectedRun;
@@ -4671,14 +5085,34 @@ async function loadData() {
                 comparisonData = null;
                 backtestChartData = null;
                 displayNoMetrics();
-                clearTradingLog('Run a backtest to see trades here.');
+                clearTradingLog(
+                    runningId
+                        ? 'Select the Running run to watch live progress.'
+                        : 'No backtests yet. Run one from My Agents.',
+                );
+                if (runningId) {
+                    renderBacktestRunConfig(
+                        { run_id: runningId },
+                        { running: true, launchConfig: getBacktestLaunchConfig(runningId) },
+                    );
+                } else {
+                    renderBacktestRunConfig(null);
+                }
                 return;
             }
 
             localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, selectedRun.run_id);
+            renderBacktestRunConfig(selectedRun, {
+                running: false,
+                launchConfig: getBacktestLaunchConfig(selectedRun.run_id),
+            });
 
             const chartUrl = `${API_BASE}/api/backtest/${encodeURIComponent(selectedRun.run_id)}/chart-data?t=${Date.now()}`;
             backtestChartData = await API.get(chartUrl);
+            // Another click may have switched to the live run while we awaited.
+            if (liveBacktestChartActive || isViewingLiveBacktest(runningId)) {
+                return;
+            }
             console.log('Loaded backtest chart data:', backtestChartData);
 
             initializeCharts();
@@ -4696,6 +5130,10 @@ async function loadData() {
  * Agent vs DJIA index + Nasdaq-100 (same baselines as Discord plot.png).
  */
 function initializeCharts() {
+    if (liveBacktestChartActive) {
+        console.log('Skipping historical chart paint — live backtest view is active');
+        return;
+    }
     if (!backtestChartData || !backtestChartData.series || !backtestChartData.series.length) {
         console.warn('No backtest chart data available');
         return;
