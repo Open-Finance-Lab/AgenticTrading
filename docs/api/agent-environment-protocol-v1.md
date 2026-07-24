@@ -290,7 +290,7 @@ always empty — do not wait for them to populate.
   sequence check.
 
 The decision timeout is controlled by
-`EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS` (default 30s).
+`EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS` (default 60s).
 
 ---
 

@@ -42,7 +42,7 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataL
 
 from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
 
-DECISION_TIMEOUT_SECONDS = int(os.getenv("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", "30"))
+DECISION_TIMEOUT_SECONDS = int(os.getenv("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", "60"))
 
 _sessions: Dict[str, "ExternalBacktestSession"] = {}
 _lock = threading.Lock()

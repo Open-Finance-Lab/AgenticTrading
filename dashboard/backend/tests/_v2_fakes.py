@@ -37,8 +37,8 @@ class FakeBackend(ExecutionBackend):
             "loop": self.loop, "status": "waiting_decision",
             "step_index": self.step_index, "total_steps": self.total_steps,
             "timestamp": "2026-04-15T13:30:00+00:00",
-            "decision_deadline_at": "2026-04-15T13:30:30+00:00",
-            "decision_timeout_seconds": 30, "universe": list(UNIVERSE),
+            "decision_deadline_at": "2026-04-15T13:31:00+00:00",
+            "decision_timeout_seconds": 60, "universe": list(UNIVERSE),
             "portfolio": {"cash": 100000.0, "positions_value": 0.0,
                           "total_equity": 100000.0, "num_positions": 0},
             "current_holdings": {}, "recent_trades": [], "top_signals": {},
@@ -87,7 +87,7 @@ class FakeBackend(ExecutionBackend):
             "trades": [], "decisions": [], "metrics": self._metrics(),
             "manifest": {"agent_name": "fake", "model_name": "m", "mode": "backtest",
                          "universe": "djia_30", "start_date": "2026-04-15",
-                         "end_date": "2026-04-16", "decision_timeout_seconds": 30,
+                         "end_date": "2026-04-16", "decision_timeout_seconds": 60,
                          "schema_version": SCHEMA_VERSION, "news_sentiment_source": None},
         }
 

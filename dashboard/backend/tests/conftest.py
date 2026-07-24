@@ -58,6 +58,7 @@ os.environ.pop("CONTENT_DATABASE_URL", None)
 # DB-URL strips above. Later tiers append their vars here.
 os.environ.pop("MARKET_DATA_CACHE_MAX_ENTRIES", None)
 os.environ.pop("BASELINE_QUEUE_MAX", None)
+os.environ.pop("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", None)
 
 
 @atexit.register
