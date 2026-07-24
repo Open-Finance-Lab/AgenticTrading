@@ -6,7 +6,7 @@ from typing import List, Optional
 
 from fastapi import Header
 
-from dashboard.backend.domain.agents.repository import agent_store
+from dashboard.backend.domain.agents import auth_cache
 from dashboard.backend.api.v2.errors import ApiError
 
 SCOPES: List[str] = [
@@ -21,7 +21,7 @@ def parse_scopes(csv: str) -> List[str]:
 
 def resolve_agent(x_api_key: Optional[str]) -> dict:
     """Resolve an X-API-Key to an agent record, or raise unauthorized."""
-    agent = agent_store.resolve_api_key((x_api_key or "").strip())
+    agent = auth_cache.resolve_api_key((x_api_key or "").strip())
     if not agent:
         raise ApiError("unauthorized", "Invalid or missing API key", status=401)
     return agent

@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.agents.repository import agent_store
+from dashboard.backend.domain.agents import auth_cache
 from dashboard.backend.api.v2.errors import ApiError
 from dashboard.backend.api.v2.auth_scopes import resolve_agent, require_scope
 
@@ -74,4 +75,5 @@ def rotate_key(agent_id: str, agent: dict = Depends(require_scope("agents:regist
     new_key = agent_store.rotate_api_key(agent_id)
     if not new_key:
         raise ApiError("agent_not_found", "Agent not found", status=404)
+    auth_cache.invalidate_agent(agent_id)
     return {"agent_id": agent_id, "api_key": new_key}

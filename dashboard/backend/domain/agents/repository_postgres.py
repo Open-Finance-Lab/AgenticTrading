@@ -15,9 +15,6 @@ import json
 import uuid
 from typing import Any, Dict, List, Optional
 
-import psycopg
-from psycopg.rows import dict_row
-
 from dashboard.backend.db_url import require_postgres_url
 from dashboard.backend.domain.agents.repository import (
     DEFAULT_SCOPES,
@@ -36,8 +33,11 @@ class PostgresAgentStore:
         self.database_url = require_postgres_url(database_url)
         self._init_schema()
 
-    def _get_connection(self) -> psycopg.Connection:
-        return psycopg.connect(self.database_url, row_factory=dict_row)
+    def _get_connection(self):
+        # Pooled checkout: same context-manager transaction semantics as
+        # psycopg.connect (commit on clean exit), returned to the pool on close.
+        from dashboard.backend.db_pool import get_pool
+        return get_pool(self.database_url).connection()
 
     def _init_schema(self) -> None:
         # ADDING A COLUMN LATER? It must go in an `ALTER TABLE ... ADD COLUMN IF
@@ -306,7 +306,7 @@ class PostgresAgentStore:
                 row = cur.fetchone()
         return _public_agent(row) if row else None
 
-    def resolve_api_key(self, api_key: str) -> Optional[Dict[str, Any]]:
+    def resolve_api_key(self, api_key: str, touch: bool = True) -> Optional[Dict[str, Any]]:
         if not api_key or not api_key.strip():
             return None
         key_hash = _hash_api_key(api_key.strip())
@@ -317,7 +317,7 @@ class PostgresAgentStore:
                     (key_hash,),
                 )
                 row = cur.fetchone()
-                if row:
+                if row and touch:
                     cur.execute(
                         "UPDATE external_agents SET last_used_at = %s WHERE agent_id = %s",
                         (_utcnow_iso(), row["agent_id"]),

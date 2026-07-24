@@ -17,6 +17,7 @@ preserved exactly; only the call site moved.
 from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.domain.agents.repository import agent_store, _UNSET
+from dashboard.backend.domain.agents import auth_cache
 from dashboard.backend.domain.agents.version_repository import (
     VALID_EXECUTION_MODES,
     VALID_VERIFICATION_LEVELS,
@@ -379,10 +380,14 @@ class AgentService:
         return self.agents.resolve_api_key(api_key)
 
     def delete_agent(self, agent_id: str) -> bool:
-        return self.agents.delete_agent(agent_id)
+        result = self.agents.delete_agent(agent_id)
+        auth_cache.invalidate_agent(agent_id)
+        return result
 
     def rotate_api_key(self, agent_id: str) -> Optional[str]:
-        return self.agents.rotate_api_key(agent_id)
+        new_key = self.agents.rotate_api_key(agent_id)
+        auth_cache.invalidate_agent(agent_id)
+        return new_key
 
     def activate_agent(
         self,

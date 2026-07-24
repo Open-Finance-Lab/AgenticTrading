@@ -10,12 +10,12 @@ from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, Request
 
-from dashboard.backend.domain.agents.repository import agent_store
+from dashboard.backend.domain.agents import auth_cache
 
 
 def resolve_agent_by_key(x_api_key: Optional[str]) -> Dict[str, Any]:
     """Resolve an Agent API key to the agent, or raise 401."""
-    agent = agent_store.resolve_api_key(x_api_key or "")
+    agent = auth_cache.resolve_api_key(x_api_key or "")
     if not agent:
         raise HTTPException(status_code=401, detail="Invalid or missing API key (X-API-Key)")
     return agent
