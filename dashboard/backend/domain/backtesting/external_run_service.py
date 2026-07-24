@@ -37,6 +37,12 @@ from dashboard.backend.domain.backtesting.metrics import (
     calculate_sharpe,
 )
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
+# Canonical re-export: unused in this module's body, but external_run_service is
+# the wiring point that names the single TechnicalIndicators implementation. Guard
+# tests (test_canonical_consumers, test_external_run_service_move) assert its
+# presence, so this import is deliberate — CodeQL py/unused-import #1110 is a
+# false positive and is dismissed. Do not delete.
+from dashboard.backend.domain.backtesting.features import TechnicalIndicators  # noqa: F401
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
 
 from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
