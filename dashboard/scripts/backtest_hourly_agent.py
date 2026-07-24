@@ -216,6 +216,7 @@ def main():
         market_profile = get_market_profile(args.data_source, args.universe)
     except ValueError as exc:
         parser.error(str(exc))
+        return
     if args.timeframe is not None and args.timeframe != market_profile.timeframe:
         parser.error(
             f"--data-source {args.data_source} requires "
@@ -243,6 +244,7 @@ def main():
         )
     except ValueError as exc:
         parser.error(str(exc))
+        return
     
     session_id = args.session_id
 

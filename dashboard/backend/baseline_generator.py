@@ -17,7 +17,7 @@ import json
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta, time
+from datetime import datetime, time
 
 from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL

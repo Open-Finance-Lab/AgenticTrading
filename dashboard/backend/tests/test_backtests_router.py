@@ -321,7 +321,7 @@ def test_ifind_llm_accepts_every_frontend_model(monkeypatch, model):
     monkeypatch.setattr(
         bt,
         "ensure_llm_client_available",
-        lambda: object(),
+        object,
         raising=False,
     )
 
@@ -351,7 +351,7 @@ def test_explicit_llm_requires_model_before_scheduling(monkeypatch):
     monkeypatch.setattr(
         bt,
         "ensure_llm_client_available",
-        lambda: object(),
+        object,
         raising=False,
     )
 

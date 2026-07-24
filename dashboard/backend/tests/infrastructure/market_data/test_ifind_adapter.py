@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import date, datetime, time, timedelta
+from datetime import datetime, time, timedelta
 from math import inf, nan
 from zoneinfo import ZoneInfo
 
