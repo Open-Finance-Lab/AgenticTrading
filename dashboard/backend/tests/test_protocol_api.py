@@ -91,8 +91,9 @@ def client(tmp_path, monkeypatch):
 
     # Synthetic data + fast, network-free finalize
     monkeypatch.setattr(ebs, "AlpacaDataLoader", _FakeLoader)
-    monkeypatch.setattr(ebs.HourlyBacktester, "run_buyhold_baseline", lambda self: (None, None))
-    monkeypatch.setattr(ebs.HourlyBacktester, "run_djia_baseline", lambda self: (None, None))
+    from dashboard.backend.domain.backtesting import baseline_worker as bw
+    monkeypatch.setattr(bw.HourlyBacktester, "run_buyhold_baseline", lambda self: (None, None))
+    monkeypatch.setattr(bw.HourlyBacktester, "run_djia_baseline", lambda self: (None, None))
     monkeypatch.setattr(ebs, "DECISION_TIMEOUT_SECONDS", 300)
 
     # Isolate the in-memory run/session registries between tests.

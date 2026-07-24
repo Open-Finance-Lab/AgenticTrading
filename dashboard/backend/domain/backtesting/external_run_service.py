@@ -40,8 +40,7 @@ from dashboard.backend.domain.backtesting.metrics import (
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
 
-from dashboard.backend.domain.backtesting.engine import HourlyBacktester
-from dashboard.backend.domain.backtesting import market_data_store
+from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
 
 DECISION_TIMEOUT_SECONDS = int(os.getenv("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", "30"))
 
@@ -359,14 +358,15 @@ class ExternalBacktestSession:
                 return {"status": "failed", "error": self.error}
 
             if self.status == "completed":
+                baseline_ids = self.baseline_run_ids  # one snapshot for both fields
                 return {
                     "status": "completed",
                     "backtest_id": self.backtest_id,
                     "run_id": self.run_id,
-                    "baseline_run_ids": self.baseline_run_ids,
+                    "baseline_run_ids": baseline_ids,
                     "total_steps": self.total_steps,
                     "metrics": self._final_metrics(),
-                    "compare_url": self._compare_url(),
+                    "compare_url": self._compare_url(baseline_ids),
                     "session_id": self.session_id,
                 }
 
@@ -557,44 +557,29 @@ class ExternalBacktestSession:
         db.insert_trades(self.run_id, self.manager.trades)
         db.insert_decisions(self.run_id, self.decision_log)
 
-        # The run is fully persisted now — publish "completed" BEFORE the slow,
-        # best-effort baseline generation below. is_active()/cancel() read
-        # self.status without _step_lock; if the flip waited until after the
-        # baselines (two full backtests, seconds-to-minutes, all under the step
-        # lock) a cancel would block for that whole window and the cap would
-        # keep counting a finished run. baseline_run_ids fills in just below,
-        # still before _finalize returns, so the locked callers see the
-        # complete envelope.
+        # The run is fully persisted now — publish "completed" here, in-request.
+        # is_active()/cancel() read self.status without _step_lock, so the flip
+        # must land before this method returns (T1 already moved the slow work —
+        # the market-data build — out of finalize; T2 below moves baselines out
+        # too). baseline_run_ids stays {} in the envelope this finalize returns;
+        # the worker fills it in asynchronously and later polls self-heal (see
+        # _publish_baselines).
         self.status = "completed"
 
-        try:
-            backtester = HourlyBacktester(
-                self.start_date,
-                self.end_date,
-                self.session_id,
-                use_llm=False,
-                mode=self.mode,
-            )
-            backtester.all_data = self.all_data
-            buyhold_id, _ = backtester.run_buyhold_baseline()
-            djia_id, _ = backtester.run_djia_baseline()
-            if buyhold_id:
-                self.baseline_run_ids["buy_and_hold"] = buyhold_id
-            if djia_id:
-                self.baseline_run_ids["djia"] = djia_id
-            db.update_run_baselines(
-                self.run_id,
-                djia_run_id=djia_id,
-                buyhold_run_id=buyhold_id,
-            )
-        # Baseline generation is strictly best-effort and must never break — or
-        # hang — run finalization. A credential-less environment now raises
-        # MarketDataUnavailableError (a plain Exception, B0 deep fix), but the
-        # SystemExit catch stays as defense-in-depth: any regression back to a
-        # BaseException here would propagate into the ASGI worker and wedge
-        # the request future forever (the original B0 hang).
-        except (Exception, SystemExit) as exc:
-            print(f"⚠️ Baseline generation failed (run saved): {exc}")
+        # Background half (T2): baselines depend only on the run config, so
+        # they move to the deduping worker. The job pins all_data (the shared
+        # T1 bundle) so cache eviction can't force a rebuild, and publishes
+        # back via _publish_baselines. Queue-full/failure degrade exactly like
+        # the old best-effort inline path: run saved, baselines absent.
+        baseline_worker.submit(baseline_worker.BaselineJob(
+            run_id=self.run_id,
+            session_id=self.session_id,
+            start_date=self.start_date,
+            end_date=self.end_date,
+            mode=self.mode,
+            all_data=self.all_data,
+            publish=self._publish_baselines,
+        ))
 
         try:
             agent_store.register_or_get_agent(
@@ -606,8 +591,23 @@ class ExternalBacktestSession:
             print(f"⚠️ Agent auto-register failed (run saved): {exc}")
         # status is already "completed" (set before the baseline block above).
 
-    def _compare_url(self) -> Optional[str]:
-        return build_compare_url(self.run_id, self.baseline_run_ids)
+    def _publish_baselines(self, ids: Dict[str, str]) -> None:
+        """Worker-thread callback: swap in a NEW dict in one statement.
+
+        get_status()/get_current_step() alias baseline_run_ids out from under
+        _step_lock and serialize it after releasing the lock — an in-place
+        write from the worker could tear a poll response mid-iteration. A
+        single reference assignment is GIL-atomic: readers see the old (empty)
+        dict or the new (complete) one, never a hybrid.
+        """
+        self.baseline_run_ids = dict(ids)
+
+    def _compare_url(self, baseline_run_ids: Optional[Dict[str, str]] = None) -> Optional[str]:
+        # Callers that ALSO surface baseline_run_ids in the same response pass a
+        # snapshot so the two fields can't straddle the worker's one-time async
+        # publish (T2: _publish_baselines rebinds the dict). Default reads live.
+        ids = self.baseline_run_ids if baseline_run_ids is None else baseline_run_ids
+        return build_compare_url(self.run_id, ids)
 
     def _final_metrics(self) -> Dict[str, Any]:
         if not self.run_id:
@@ -629,9 +629,10 @@ class ExternalBacktestSession:
             if self.status == "waiting_decision":
                 base["decision_deadline_at"] = _iso(self._deadline_at())
             if self.status == "completed":
+                baseline_ids = self.baseline_run_ids  # one snapshot for both fields
                 base["metrics"] = self._final_metrics()
-                base["baseline_run_ids"] = self.baseline_run_ids
-                base["compare_url"] = self._compare_url()
+                base["baseline_run_ids"] = baseline_ids
+                base["compare_url"] = self._compare_url(baseline_ids)
             if self.error:
                 base["error"] = self.error
             return base

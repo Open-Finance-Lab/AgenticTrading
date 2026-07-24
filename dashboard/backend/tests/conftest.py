@@ -57,6 +57,7 @@ os.environ.pop("CONTENT_DATABASE_URL", None)
 # stray shell value would silently skew the whole run. Same rationale as the
 # DB-URL strips above. Later tiers append their vars here.
 os.environ.pop("MARKET_DATA_CACHE_MAX_ENTRIES", None)
+os.environ.pop("BASELINE_QUEUE_MAX", None)
 
 
 @atexit.register
@@ -73,7 +74,16 @@ def _reset_shared_scale_state():
     """The market-data store is a module-level cache shared across the test
     process; without a per-test reset, one test's synthetic bars would be
     served to every later test with the same (symbols, dates) key."""
-    from dashboard.backend.domain.backtesting import market_data_store
+    from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
     market_data_store._reset_for_tests()
+    baseline_worker._reset_for_tests()
     yield
+    # Best-effort drain so a job enqueued in this test doesn't leak into the
+    # next. Note pytest tears fixtures down LIFO, so a test's own monkeypatches
+    # may already be reverted here — in practice patched baseline fakes return
+    # instantly, so the queue is empty long before teardown. Any T2 test that
+    # gates or slows the worker must call baseline_worker.wait_idle() itself
+    # before returning (every test in this plan does).
+    baseline_worker.wait_idle(timeout=5)
+    baseline_worker._reset_for_tests()
     market_data_store._reset_for_tests()
