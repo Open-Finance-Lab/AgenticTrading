@@ -44,10 +44,12 @@ result = AgentRunner(client=client, agent=MyAgent()).run_backtest(
 print(result.metrics)
 ```
 
-> **Decision deadline.** Each step has a decision window (default **30s**). If
+> **Decision deadline.** Each step has a decision window (default **60s**). If
 > your `decide()` plus submission takes longer, the backend auto-holds that step
 > (no trade) and `AgentRunner` advances to the next one — a single slow decision
 > never aborts the run. Keep `decide()` well under the window for live trading.
+> If the backend returns **429** (server at capacity), wait and retry with
+> backoff — the client does not retry for you.
 
 ## Quickstart
 

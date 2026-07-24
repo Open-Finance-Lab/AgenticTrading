@@ -83,7 +83,7 @@ Pipeline is **backtest → SQLite → API → dashboard**. The backend is layere
 
 ### External agents & Agent-Environment Protocol (`/api/v1`)
 
-- **Protocol Run API** (`api/routers/runs.py` → `domain/runs/*`): an external agent authenticates with its Agent API key (`X-API-Key`) and drives a backtest step-by-step (`POST /api/v1/runs`, poll steps, submit decisions). Each step has a decision deadline (default 30s); a late decision auto-holds that step rather than failing the run.
+- **Protocol Run API** (`api/routers/runs.py` → `domain/runs/*`): an external agent authenticates with its Agent API key (`X-API-Key`) and drives a backtest step-by-step (`POST /api/v1/runs`, poll steps, submit decisions). Each step has a decision deadline (default 60s); a late decision auto-holds that step rather than failing the run. A server-wide active-run backstop (`MAX_ACTIVE_RUNS_GLOBAL`, default 100; 0 disables) rejects creates on both surfaces with 429 + `Retry-After` once at capacity.
 - **External backtest engine** (`domain/backtesting/external_run_service.py`): the hour-by-hour session behind both the protocol and the legacy `/api/v1/backtest/*` routes.
 - **PyPI client** (`packaging/agentictrading/`): stdlib-only Python SDK + `AgentRunner`. Published via `.github/workflows/publish-pypi.yml`.
 

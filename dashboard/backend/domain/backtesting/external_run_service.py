@@ -42,7 +42,7 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataL
 
 from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
 
-DECISION_TIMEOUT_SECONDS = int(os.getenv("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", "30"))
+DECISION_TIMEOUT_SECONDS = int(os.getenv("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", "60"))
 
 _sessions: Dict[str, "ExternalBacktestSession"] = {}
 _lock = threading.Lock()
@@ -107,6 +107,8 @@ def build_final_metrics(run: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         "input_tokens": run.get("input_tokens"),
         "output_tokens": run.get("output_tokens"),
         "est_cost_usd": run.get("est_cost_usd"),
+        "timeout_holds": (run.get("metadata") or {}).get("timeout_holds")
+        if isinstance(run.get("metadata"), dict) else None,
     }
 
 
@@ -167,6 +169,9 @@ class ExternalBacktestSession:
         self.llm_calls = 0
         self.est_input_tokens = 0
         self.est_output_tokens = 0
+        # Integrity counter: steps auto-held because their decision deadline
+        # passed (see _advance_step). Surfaced at every result surface.
+        self.timeout_holds = 0
 
         self._step_lock = threading.Lock()
 
@@ -365,6 +370,7 @@ class ExternalBacktestSession:
                     "run_id": self.run_id,
                     "baseline_run_ids": baseline_ids,
                     "total_steps": self.total_steps,
+                    "timeout_holds": self.timeout_holds,
                     "metrics": self._final_metrics(),
                     "compare_url": self._compare_url(baseline_ids),
                     "session_id": self.session_id,
@@ -482,6 +488,12 @@ class ExternalBacktestSession:
         decision_source: str,
         raw_actions: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
+        if decision_source == "timeout_hold":
+            # Integrity counter: steps the server auto-held past the deadline.
+            # A latency-corrupted run stays green but is now VISIBLE at every
+            # surface where its results appear (status, result metrics,
+            # agent_runs.metadata).
+            self.timeout_holds += 1
         timestamp = self.timestamps[self.step_index]
         market_data = self._market_data_at(timestamp)
 
@@ -552,6 +564,10 @@ class ExternalBacktestSession:
             input_tokens=self.est_input_tokens,
             output_tokens=self.est_output_tokens,
             est_cost_usd=est_cost,
+            metadata={
+                "decision_timeout_seconds": DECISION_TIMEOUT_SECONDS,
+                "timeout_holds": self.timeout_holds,
+            },
         )
         db.insert_equity_points(self.run_id, equity_curve)
         db.insert_trades(self.run_id, self.manager.trades)
@@ -625,6 +641,7 @@ class ExternalBacktestSession:
                 "agent_name": self.agent_name,
                 "model_name": self.model_name,
                 "run_id": self.run_id,
+                "timeout_holds": self.timeout_holds,
             }
             if self.status == "waiting_decision":
                 base["decision_deadline_at"] = _iso(self._deadline_at())
@@ -901,5 +918,7 @@ def get_run_result(run_id: str, session_id: str) -> Optional[Dict[str, Any]]:
             "input_tokens": run.get("input_tokens"),
             "output_tokens": run.get("output_tokens"),
             "est_cost_usd": run.get("est_cost_usd"),
+            "timeout_holds": (run.get("metadata") or {}).get("timeout_holds")
+            if isinstance(run.get("metadata"), dict) else None,
         },
     }

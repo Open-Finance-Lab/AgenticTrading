@@ -39,7 +39,8 @@ class CreateRunBody(BaseModel):
 
 
 def _handle_protocol_error(exc: ProtocolError):
-    raise HTTPException(status_code=exc.status_code, detail=exc.to_body())
+    raise HTTPException(status_code=exc.status_code, detail=exc.to_body(),
+                        headers=exc.headers or None)
 
 
 def _require_run_owner(run_id: str, agent: Dict[str, Any]) -> Dict[str, Any]:

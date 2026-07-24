@@ -51,6 +51,11 @@ _registry_lock = threading.Lock()
 
 # Cap concurrent (non-terminal) runs per agent to bound resource use / abuse.
 MAX_ACTIVE_RUNS_PER_AGENT = int(os.getenv("MAX_ACTIVE_RUNS_PER_AGENT", "5"))
+# Global backstop across ALL agents (Decision 3 of the 2026-07-24 scale spec):
+# beyond this, creates 429 with Retry-After instead of degrading everyone.
+# Default 100 = the highest load ever exercised by the loadtest harness; raise
+# it only after a measured smoke run at the higher value. 0 disables.
+MAX_ACTIVE_RUNS_GLOBAL = int(os.getenv("MAX_ACTIVE_RUNS_GLOBAL", "100"))
 # How often the background reaper drains abandoned runs and evicts terminal ones.
 REAPER_INTERVAL_SECONDS = float(os.getenv("RUN_REAPER_INTERVAL_SECONDS", "60"))
 # Startup recovery marks ALL non-terminal rows failed; only correct when a single
@@ -436,6 +441,19 @@ def create_run(
                     f"(limit {MAX_ACTIVE_RUNS_PER_AGENT}); wait for one to finish",
                     429,
                     details={"active_runs": active, "limit": MAX_ACTIVE_RUNS_PER_AGENT},
+                )
+
+        if MAX_ACTIVE_RUNS_GLOBAL > 0:
+            total = run_store.count_active_runs_total()
+            if total >= MAX_ACTIVE_RUNS_GLOBAL:
+                raise ProtocolError(
+                    "too_many_active_runs_global",
+                    f"The server is at its active-run capacity "
+                    f"({total} of {MAX_ACTIVE_RUNS_GLOBAL}); retry shortly",
+                    429,
+                    details={"active_runs_total": total,
+                             "limit": MAX_ACTIVE_RUNS_GLOBAL},
+                    headers={"Retry-After": "30"},
                 )
 
         start_res = ebs.start_backtest(

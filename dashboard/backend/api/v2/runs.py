@@ -30,6 +30,7 @@ from dashboard.backend.database import db
 # correctness of the cap beats create throughput. Long work (market-data
 # load) stays off the lock (background thread).
 from dashboard.backend.domain.runs.service import (
+    MAX_ACTIVE_RUNS_GLOBAL,
     MAX_ACTIVE_RUNS_PER_AGENT,
     _create_lock as _shared_create_lock,
 )
@@ -354,6 +355,20 @@ def create_run(body: CreateRunBody, response: Response,
                 status=429, retryable=True,
                 details={"active_runs": active, "limit": MAX_ACTIVE_RUNS_PER_AGENT},
             )
+        if MAX_ACTIVE_RUNS_GLOBAL > 0:
+            total = run_repo.run_store.count_active_runs_total()
+            if total >= MAX_ACTIVE_RUNS_GLOBAL:
+                raise ApiError(
+                    "too_many_active_runs_global",
+                    f"The server is at its active-run capacity "
+                    f"({total} of {MAX_ACTIVE_RUNS_GLOBAL}); retry shortly",
+                    status=429, retryable=True,
+                    details={"active_runs_total": total,
+                             "limit": MAX_ACTIVE_RUNS_GLOBAL},
+                    # Explicit: ApiError's auto Retry-After injection only
+                    # fires for code "rate_limited".
+                    headers={"Retry-After": "30"},
+                )
         run_id = _mint_run_id()
         backend = BacktestBackend(
             run_id=run_id, session_id=agent["session_id"], agent_name=body.agent_name,

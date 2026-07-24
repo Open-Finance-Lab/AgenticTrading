@@ -59,7 +59,7 @@ _FAILED_STATES = {"failed", "cancelled", "canceled"}
 
 # Conflict codes that mean "the step was auto-held server-side; the run is still
 # live" — e.g. the agent took longer than the environment's decision window
-# (default 30s). These must NOT abort the run.
+# (default 60s). These must NOT abort the run.
 #
 # NOTE: a genuinely-late decision surfaces as ``decision_deadline_exceeded``: the
 # backend consults the engine decision log and, when the step was auto-held with
@@ -114,7 +114,7 @@ class AgentRunner:
 
         Note
         ----
-        The environment enforces a per-step decision deadline (default 30s). If
+        The environment enforces a per-step decision deadline (default 60s). If
         ``agent.decide`` plus submission takes longer, the backend auto-holds
         that step and the runner advances to the next one instead of failing —
         so a single slow decision never aborts the whole run.

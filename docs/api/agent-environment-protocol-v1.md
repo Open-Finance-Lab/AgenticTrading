@@ -290,7 +290,7 @@ always empty — do not wait for them to populate.
   sequence check.
 
 The decision timeout is controlled by
-`EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS` (default 30s).
+`EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS` (default 60s).
 
 ---
 
@@ -350,6 +350,7 @@ All protocol errors use a consistent envelope (delivered as the HTTP `detail`):
 | 409  | `decision_deadline_exceeded` | decision arrived after the deadline (step auto-held) |
 | 409  | `run_not_completed` | results requested before completion |
 | 429  | `too_many_active_runs` | per-agent concurrent-run cap exceeded |
+| 429  | `too_many_active_runs_global` | server-wide active-run capacity reached — retry after the `Retry-After` header (seconds) |
 | 500  | `run_failed` | the run's backtest failed |
 
 Every 4xx from these routes uses the envelope above (delivered as the HTTP
