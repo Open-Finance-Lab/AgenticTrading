@@ -17,7 +17,7 @@ import json
 import os
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 
 from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
@@ -25,9 +25,9 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
 )
 
-# NOTE: domain.leaderboard.strategies._common is imported lazily inside the
-# methods that need it — the strategies package imports this module back
-# (buy_hold et al.), so a top-level import here is a circular import.
+# The baseline calculations operate on already-normalized bars and keep their
+# market-session filtering local so A-share timestamps are not interpreted as
+# US/Eastern dates.
 
 # Try to import numpy
 try:
@@ -43,6 +43,44 @@ except ImportError:
     import subprocess
     subprocess.check_call(["pip", "install", "pandas"])
     import pandas as pd
+
+
+def _market_hours_only(timestamps, market_timezone: str):
+    """Keep regular sessions in the timezone belonging to the market profile."""
+    import pytz
+
+    market_tz = pytz.timezone(market_timezone)
+    kept = []
+    for timestamp in timestamps:
+        local = timestamp.astimezone(market_tz)
+        local_time = local.time()
+        if market_timezone == "Asia/Shanghai":
+            in_session = (
+                time(9, 30) <= local_time <= time(11, 30)
+                or time(13, 0) <= local_time <= time(15, 0)
+            )
+        else:
+            in_session = (
+                (local.hour > 9 and local.hour < 16)
+                or (local.hour == 9 and local.minute >= 30)
+                or (local.hour == 16 and local.minute == 0)
+            )
+        if in_session:
+            kept.append(timestamp)
+    return kept
+
+
+def _timestamps_in_window(timestamps, start_date: str, end_date: str, market_timezone: str):
+    import pytz
+
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    market_tz = pytz.timezone(market_timezone)
+    return [
+        timestamp
+        for timestamp in timestamps
+        if start <= timestamp.astimezone(market_tz).date() <= end
+    ]
 
 
 class BaselineGenerator:
@@ -153,7 +191,8 @@ class BaselineGenerator:
         start_date: str,
         end_date: str,
         initial_capital: float = INITIAL_CAPITAL,
-        symbols_to_buy: Optional[List[str]] = None
+        symbols_to_buy: Optional[List[str]] = None,
+        market_timezone: str = "US/Eastern",
     ) -> List[Dict]:
         """
         Generate Buy & Hold baseline curve.
@@ -191,29 +230,10 @@ class BaselineGenerator:
         if not all_timestamps:
             return []
         
-        # Filter: only keep regular market hours (9:30 AM - 4:00 PM ET)
-        import pytz
-        et_tz = pytz.timezone('US/Eastern')
-        market_hours_only = []
-        
-        for ts in all_timestamps:
-            ts_et = ts.astimezone(et_tz)
-            hour = ts_et.hour
-            minute = ts_et.minute
-            
-            # Market hours: 9:30 AM through 4:00 PM ET
-            is_market_hours = (hour > 9 and hour < 16) or \
-                             (hour == 9 and minute >= 30) or \
-                             (hour == 16 and minute == 0)
-            
-            if is_market_hours:
-                market_hours_only.append(ts)
-        
-        all_timestamps = market_hours_only
-        from dashboard.backend.domain.leaderboard.strategies._common import (
-            timestamps_in_contest,
+        all_timestamps = _market_hours_only(all_timestamps, market_timezone)
+        all_timestamps = _timestamps_in_window(
+            all_timestamps, start_date, end_date, market_timezone
         )
-        all_timestamps = timestamps_in_contest(all_timestamps, start_date, end_date)
 
         if not all_timestamps:
             return []
@@ -289,7 +309,8 @@ class BaselineGenerator:
         start_date: str,
         end_date: str,
         initial_capital: float = INITIAL_CAPITAL,
-        symbols_to_track: Optional[List[str]] = None
+        symbols_to_track: Optional[List[str]] = None,
+        market_timezone: str = "US/Eastern",
     ) -> List[Dict]:
         """
         Generate Index baseline curve (equal-weight index).
@@ -324,29 +345,10 @@ class BaselineGenerator:
         if not all_timestamps:
             return []
         
-        # Filter: only keep regular market hours (9:30 AM - 4:00 PM ET)
-        import pytz
-        et_tz = pytz.timezone('US/Eastern')
-        market_hours_only = []
-        
-        for ts in all_timestamps:
-            ts_et = ts.astimezone(et_tz)
-            hour = ts_et.hour
-            minute = ts_et.minute
-            
-            # Market hours: 9:30 AM through 4:00 PM ET
-            is_market_hours = (hour > 9 and hour < 16) or \
-                             (hour == 9 and minute >= 30) or \
-                             (hour == 16 and minute == 0)
-            
-            if is_market_hours:
-                market_hours_only.append(ts)
-        
-        all_timestamps = market_hours_only
-        from dashboard.backend.domain.leaderboard.strategies._common import (
-            timestamps_in_contest,
+        all_timestamps = _market_hours_only(all_timestamps, market_timezone)
+        all_timestamps = _timestamps_in_window(
+            all_timestamps, start_date, end_date, market_timezone
         )
-        all_timestamps = timestamps_in_contest(all_timestamps, start_date, end_date)
 
         if not all_timestamps:
             return []
@@ -422,7 +424,8 @@ def generate_baselines(
     start_date: str,
     end_date: str,
     initial_capital: float = INITIAL_CAPITAL,
-    symbols_list: Optional[List[str]] = None
+    symbols_list: Optional[List[str]] = None,
+    market_timezone: str = "US/Eastern",
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Generate both baselines (Buy & Hold, Index).
@@ -440,11 +443,21 @@ def generate_baselines(
     generator = BaselineGenerator()
     
     buyhold_curve = generator.generate_buyhold_baseline(
-        bars_by_symbol, start_date, end_date, initial_capital, symbols_list
+        bars_by_symbol,
+        start_date,
+        end_date,
+        initial_capital,
+        symbols_list,
+        market_timezone,
     )
     
     index_curve = generator.generate_index_baseline(
-        bars_by_symbol, start_date, end_date, initial_capital, symbols_list
+        bars_by_symbol,
+        start_date,
+        end_date,
+        initial_capital,
+        symbols_list,
+        market_timezone,
     )
     
     return buyhold_curve, index_curve

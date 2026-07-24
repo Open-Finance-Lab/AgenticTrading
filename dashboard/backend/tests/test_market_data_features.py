@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 import uuid
 from types import SimpleNamespace
 
@@ -12,10 +13,18 @@ from fastapi.testclient import TestClient
 from dashboard.backend.app import app
 import dashboard.backend.api.routers.backtests as backtests
 from dashboard.backend.infrastructure.market_data.provider import (
+    IFIND_ASHARE,
     MarketDataDependencyError,
     VNPY_SIMULATION,
     validate_market_data_source,
 )
+from dashboard.backend.infrastructure.market_data.profiles import (
+    A_SHARE_DEMO_6,
+    A_SHARE_DEMO_6_SYMBOLS,
+    CSI300_SAMPLE_20_2026H2,
+    CSI300_SAMPLE_20_2026H2_SYMBOLS,
+)
+from dashboard.backend.infrastructure.llm import providers as llm_providers
 
 REAL_RUN_BACKTEST_BACKGROUND = backtests.run_backtest_background
 
@@ -52,20 +61,43 @@ def reset_backtest_state(monkeypatch):
 
 def test_features_endpoint_reports_disabled_by_default(monkeypatch):
     monkeypatch.delenv("ENABLE_VNPY_SIMULATION", raising=False)
+    monkeypatch.delenv("ENABLE_IFIND_ASHARE", raising=False)
 
     response = TestClient(app).get("/config/features")
 
     assert response.status_code == 200
-    assert response.json() == {"vnpy_simulation_enabled": False}
+    assert response.json() == {
+        "vnpy_simulation_enabled": False,
+        "ifind_ashare_enabled": False,
+    }
 
 
 def test_features_endpoint_reports_enabled(monkeypatch):
     monkeypatch.setenv("ENABLE_VNPY_SIMULATION", "true")
+    monkeypatch.delenv("ENABLE_IFIND_ASHARE", raising=False)
 
     response = TestClient(app).get("/config/features")
 
     assert response.status_code == 200
-    assert response.json() == {"vnpy_simulation_enabled": True}
+    assert response.json() == {
+        "vnpy_simulation_enabled": True,
+        "ifind_ashare_enabled": False,
+    }
+
+
+def test_features_endpoint_reports_ifind_gate_without_token_status(monkeypatch):
+    monkeypatch.delenv("ENABLE_VNPY_SIMULATION", raising=False)
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.delenv("IFIND_ACCESS_TOKEN", raising=False)
+
+    response = TestClient(app).get("/config/features")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "vnpy_simulation_enabled": False,
+        "ifind_ashare_enabled": True,
+    }
+    assert "token" not in response.text.lower()
 
 
 def test_unknown_source_returns_422_before_scheduling(monkeypatch):
@@ -132,6 +164,96 @@ def test_missing_vnpy_returns_503_before_scheduling(monkeypatch):
     assert spy.calls == []
 
 
+def test_disabled_ifind_returns_403_before_scheduling(monkeypatch):
+    monkeypatch.delenv("ENABLE_IFIND_ASHARE", raising=False)
+    spy = Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-23",
+            "data_source": IFIND_ASHARE,
+            "universe": A_SHARE_DEMO_6,
+            "timeframe": "60m",
+        },
+        headers=session_headers(),
+    )
+
+    assert response.status_code == 403
+    assert spy.calls == []
+
+
+def test_missing_ifind_token_returns_503_before_scheduling(monkeypatch):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.delenv("IFIND_ACCESS_TOKEN", raising=False)
+    spy = Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-23",
+            "data_source": IFIND_ASHARE,
+            "universe": A_SHARE_DEMO_6,
+            "timeframe": "60m",
+        },
+        headers=session_headers(),
+    )
+
+    assert response.status_code == 503
+    assert "IFIND_ACCESS_TOKEN" in response.text
+    assert spy.calls == []
+
+
+def test_ifind_rejects_wrong_universe_before_checking_credentials(monkeypatch):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.delenv("IFIND_ACCESS_TOKEN", raising=False)
+    spy = Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-23",
+            "data_source": IFIND_ASHARE,
+            "universe": "custom_a_share_pool",
+            "timeframe": "60m",
+        },
+        headers=session_headers(),
+    )
+
+    assert response.status_code == 422
+    assert A_SHARE_DEMO_6 in response.text
+    assert spy.calls == []
+
+
+def test_ifind_rejects_unsupported_timeframe_before_scheduling(monkeypatch):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    spy = Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-23",
+            "data_source": IFIND_ASHARE,
+            "universe": A_SHARE_DEMO_6,
+            "timeframe": "1d",
+        },
+        headers=session_headers(),
+    )
+
+    assert response.status_code == 422
+    assert "60m" in response.text
+    assert spy.calls == []
+
+
 def test_enabled_simulation_is_passed_to_background_runner(monkeypatch):
     monkeypatch.setenv("ENABLE_VNPY_SIMULATION", "true")
     spy = Spy()
@@ -161,22 +283,221 @@ def test_enabled_simulation_is_passed_to_background_runner(monkeypatch):
     assert body["data_source"] == VNPY_SIMULATION
     assert len(spy.calls) == 1
     # Positional args: start, end, session, prompt, model, pipeline, agent_id,
-    # data_source, live_run_id (live_run_id is minted by /backtest/run).
+    # data_source, live_run_id, universe, timeframe, initial_capital, assets,
+    # decision_source.
     args = spy.calls[0][0]
     assert args[7] == VNPY_SIMULATION
     assert args[8] == body["live_run_id"]
     assert str(args[8]).startswith("agent_")
 
 
+def test_enabled_ifind_profile_is_passed_to_background_runner(monkeypatch):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    spy = Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    response = TestClient(app).post(
+        "/backtest/run?assets=AAPL,MSFT",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-23",
+            "data_source": IFIND_ASHARE,
+            "universe": A_SHARE_DEMO_6,
+            "timeframe": "60m",
+        },
+        headers=session_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "success": True,
+        "message": "Backtest started in background. Check /backtest/status for progress.",
+        "status_url": "/backtest/status",
+        "session_id": body["session_id"],
+        "data_source": IFIND_ASHARE,
+        "live_run_id": body["live_run_id"],
+        "run_id": body["live_run_id"],
+        "market": "CN",
+        "universe": A_SHARE_DEMO_6,
+        "timeframe": "60m",
+        "timezone": "Asia/Shanghai",
+        "decision_source": "rule_based",
+        "benchmark": "equal_weight_buyhold",
+        "assets": list(A_SHARE_DEMO_6_SYMBOLS),
+    }
+    assert len(spy.calls) == 1
+    args, kwargs = spy.calls[0]
+    assert kwargs == {}
+    assert args[7:] == (
+        IFIND_ASHARE,
+        body["live_run_id"],
+        A_SHARE_DEMO_6,
+        "60m",
+        None,
+        list(A_SHARE_DEMO_6_SYMBOLS),
+        "rule_based",
+    )
+
+
+@pytest.mark.parametrize("universe", [A_SHARE_DEMO_6, CSI300_SAMPLE_20_2026H2])
+def test_ifind_explicit_llm_is_preflighted_and_scheduled(monkeypatch, universe):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    preflight_calls = []
+    monkeypatch.setattr(
+        backtests,
+        "ensure_llm_client_available",
+        lambda: preflight_calls.append(True) or object(),
+        raising=False,
+    )
+    spy = Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-23",
+            "data_source": IFIND_ASHARE,
+            "universe": universe,
+            "timeframe": "60m",
+            "decision_source": "llm",
+            "model": "gpt-5.2",
+            "strategy_prompt": "A-share momentum",
+        },
+        headers=session_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["decision_source"] == "llm"
+    assert preflight_calls == [True]
+    args = spy.calls[0][0]
+    assert args[3] == "A-share momentum"
+    assert args[4] == "gpt-5.2"
+    assert args[-1] == "llm"
+
+
+def test_ifind_body_decision_source_overrides_query(monkeypatch):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    preflight_calls = []
+    monkeypatch.setattr(
+        backtests,
+        "ensure_llm_client_available",
+        lambda: preflight_calls.append(True),
+        raising=False,
+    )
+    spy = Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    response = TestClient(app).post(
+        "/backtest/run?decision_source=llm&model=gpt-5.2",
+        json={
+            "data_source": IFIND_ASHARE,
+            "universe": A_SHARE_DEMO_6,
+            "timeframe": "60m",
+            "decision_source": "rule_based",
+        },
+        headers=session_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["decision_source"] == "rule_based"
+    assert preflight_calls == []
+    args = spy.calls[0][0]
+    assert args[3:6] == (None, None, None)
+    assert args[-1] == "rule_based"
+
+
+def test_ifind_explicit_llm_configuration_error_is_sanitized(monkeypatch):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    secret = "provider-secret-that-must-not-leak"
+    monkeypatch.setenv("COMMONSTACK_API_KEY", secret)
+    spy = Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    def fail_preflight():
+        raise llm_providers.LLMProviderConfigurationError(
+            "LLM provider client is unavailable"
+        )
+
+    monkeypatch.setattr(
+        backtests,
+        "ensure_llm_client_available",
+        fail_preflight,
+        raising=False,
+    )
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "data_source": IFIND_ASHARE,
+            "universe": A_SHARE_DEMO_6,
+            "timeframe": "60m",
+            "decision_source": "llm",
+            "model": "gpt-5.2",
+        },
+        headers=session_headers(),
+    )
+
+    assert response.status_code == 503
+    assert "client is unavailable" in response.text
+    assert secret not in response.text
+    assert spy.calls == []
+
+
+def test_enabled_ifind_csi300_sample20_is_passed_to_background_runner(
+    monkeypatch,
+):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    spy = Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-06-23",
+            "end_date": "2026-07-23",
+            "data_source": IFIND_ASHARE,
+            "universe": CSI300_SAMPLE_20_2026H2,
+            "timeframe": "60m",
+            "assets": ["AAPL"],
+        },
+        headers=session_headers(),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["universe"] == CSI300_SAMPLE_20_2026H2
+    assert body["assets"] == list(CSI300_SAMPLE_20_2026H2_SYMBOLS)
+    assert body["decision_source"] == "rule_based"
+    assert len(spy.calls) == 1
+    args = spy.calls[0][0]
+    assert args[7:] == (
+        IFIND_ASHARE,
+        body["live_run_id"],
+        CSI300_SAMPLE_20_2026H2,
+        "60m",
+        None,
+        list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
+        "rule_based",
+    )
+
+
 @pytest.mark.parametrize(
-    ("data_source", "expected_flag", "unexpected_flag"),
+    ("data_source", "expected_source"),
     [
-        ("alpaca", "--use-llm", "--no-llm"),
-        (VNPY_SIMULATION, "--no-llm", "--use-llm"),
+        ("alpaca", "llm"),
+        (VNPY_SIMULATION, "rule_based"),
+        (IFIND_ASHARE, "rule_based"),
     ],
 )
-def test_background_command_uses_correct_llm_flag(
-    monkeypatch, data_source, expected_flag, unexpected_flag
+def test_background_command_uses_profile_decision_source(
+    monkeypatch, data_source, expected_source
 ):
     captured = {}
 
@@ -196,5 +517,88 @@ def test_background_command_uses_correct_llm_flag(
 
     command = captured["command"]
     assert command[command.index("--data-source") + 1] == data_source
-    assert expected_flag in command
-    assert unexpected_flag not in command
+    assert command[command.index("--decision-source") + 1] == expected_source
+    assert "--use-llm" not in command
+    assert "--no-llm" not in command
+    assert "--assets" not in command
+    if data_source == IFIND_ASHARE:
+        assert command[command.index("--universe") + 1] == A_SHARE_DEMO_6
+        assert command[command.index("--timeframe") + 1] == "60m"
+
+
+def test_background_command_propagates_explicit_ifind_llm(monkeypatch):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(backtests.db, "get_runs_by_mode", lambda mode: [])
+
+    REAL_RUN_BACKTEST_BACKGROUND(
+        "2026-04-01",
+        "2026-04-23",
+        "session-id",
+        strategy_prompt="A-share momentum",
+        model="gpt-5.2",
+        data_source=IFIND_ASHARE,
+        universe=A_SHARE_DEMO_6,
+        timeframe="60m",
+        decision_source="llm",
+    )
+
+    command = captured["command"]
+    assert command[command.index("--decision-source") + 1] == "llm"
+    assert command[command.index("--model") + 1] == "gpt-5.2"
+    assert "--strategy-prompt-file" in command
+    assert "--use-llm" not in command
+    assert "--no-llm" not in command
+
+
+def test_background_error_is_sanitized_and_clears_running_state(monkeypatch):
+    secret = "test-ifind-token-that-must-not-leak"
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", secret)
+
+    def fail_run(command, **kwargs):
+        raise RuntimeError(f"upstream failed with access_token={secret}")
+
+    monkeypatch.setattr(subprocess, "run", fail_run)
+
+    REAL_RUN_BACKTEST_BACKGROUND(
+        "2026-04-01",
+        "2026-04-23",
+        "session-id",
+        data_source=IFIND_ASHARE,
+        universe=A_SHARE_DEMO_6,
+        timeframe="60m",
+    )
+
+    assert backtests.backtest_status["running"] is False
+    assert backtests.backtest_status["error"]
+    assert secret not in backtests.backtest_status["error"]
+    assert "[REDACTED]" in backtests.backtest_status["error"]
+
+
+def test_cli_rejects_universe_that_does_not_match_ifind_profile(monkeypatch, capsys):
+    from dashboard.scripts import backtest_hourly_agent
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "backtest_hourly_agent.py",
+            "--data-source",
+            IFIND_ASHARE,
+            "--universe",
+            "custom_a_share_pool",
+            "--timeframe",
+            "60m",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        backtest_hourly_agent.main()
+
+    assert exc_info.value.code == 2
+    assert A_SHARE_DEMO_6 in capsys.readouterr().err

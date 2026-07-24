@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hourly DJIA Backtest with Agent Decision Making
+Profile-driven Hourly Backtest with Agent Decision Making
 
-The agent manages a $100k portfolio across DJIA stocks.
+The agent manages a portfolio across the selected market profile.
 Each hour, the agent analyzes market data and technical indicators and decides:
 - What positions to buy
 - What positions to sell  
@@ -82,7 +82,17 @@ from dashboard.backend.domain.backtesting.metrics import (
 )
 from dashboard.backend.infrastructure.llm.decision_parsing import fix_json_formatting
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
-from dashboard.backend.infrastructure.market_data.provider import ALPACA, VNPY_SIMULATION
+from dashboard.backend.infrastructure.market_data.provider import (
+    ALPACA,
+    IFIND_ASHARE,
+    VNPY_SIMULATION,
+)
+from dashboard.backend.infrastructure.market_data.profiles import (
+    LLM_DECISION_SOURCE,
+    RULE_BASED_DECISION_SOURCE,
+    get_market_profile,
+    resolve_decision_source,
+)
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 
 # DJIA_30 is imported from validator (the single source of truth, guarded by
@@ -162,8 +172,16 @@ def main():
     parser.add_argument("--end", default=DEFAULT_END, help="End date (YYYY-MM-DD)")
     parser.add_argument("--session-id", default="legacy-demo-session", help="Session ID for isolation")
     parser.add_argument("--clear", action="store_true", help="Clear all data first")
-    parser.add_argument("--use-llm", action="store_true", default=True, help="Use LLM for trading decisions (default: True)")
-    parser.add_argument("--no-llm", dest="use_llm", action="store_false", help="Disable LLM, use rule-based logic")
+    llm_group = parser.add_mutually_exclusive_group()
+    llm_group.add_argument("--use-llm", dest="use_llm", action="store_true", help="Use the profile's default decision source (legacy compatibility)")
+    llm_group.add_argument("--no-llm", dest="use_llm", action="store_false", help="Disable LLM, use rule-based logic")
+    parser.set_defaults(use_llm=None)
+    parser.add_argument(
+        "--decision-source",
+        choices=[RULE_BASED_DECISION_SOURCE, LLM_DECISION_SOURCE],
+        default=None,
+        help="Explicit decision source; takes precedence over the profile default",
+    )
     parser.add_argument("--mode", default="safe_trading", choices=["safe_trading", "buy_and_hold"], help="Agent mode: 'safe_trading' (risk management) or 'buy_and_hold' (debug)")
     parser.add_argument("--strategy-prompt-file", default=None, help="Path to a UTF-8 file with a free-form strategy prompt that REPLACES the built-in agent prompt for this run")
     parser.add_argument("--pipeline-file", default=None, help="Path to a UTF-8 JSON file with the sub-agent pipeline steps for this run")
@@ -173,8 +191,18 @@ def main():
     parser.add_argument(
         "--data-source",
         default=ALPACA,
-        choices=[ALPACA, VNPY_SIMULATION],
+        choices=[ALPACA, VNPY_SIMULATION, IFIND_ASHARE],
         help="Market-data provider (default: alpaca)",
+    )
+    parser.add_argument(
+        "--universe",
+        default=None,
+        help="Fixed universe key bound to the selected market-data provider",
+    )
+    parser.add_argument(
+        "--timeframe",
+        default=None,
+        help="Fixed bar timeframe bound to the selected market-data provider",
     )
     parser.add_argument("--initial-capital", type=float, default=None, help="Starting capital for this backtest (defaults to INITIAL_CAPITAL)")
     parser.add_argument(
@@ -184,6 +212,37 @@ def main():
     )
     
     args = parser.parse_args()
+    try:
+        market_profile = get_market_profile(args.data_source, args.universe)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.timeframe is not None and args.timeframe != market_profile.timeframe:
+        parser.error(
+            f"--data-source {args.data_source} requires "
+            f"--timeframe {market_profile.timeframe}"
+        )
+    if args.decision_source is not None and args.use_llm is not None:
+        flag_source = (
+            LLM_DECISION_SOURCE if args.use_llm else RULE_BASED_DECISION_SOURCE
+        )
+        if flag_source != args.decision_source:
+            parser.error(
+                f"--decision-source {args.decision_source} conflicts with "
+                f"{'--use-llm' if args.use_llm else '--no-llm'}"
+            )
+    legacy_use_llm = True if args.use_llm is None else args.use_llm
+    requested_decision_source = (
+        args.decision_source
+        if args.decision_source is not None
+        else (None if legacy_use_llm else RULE_BASED_DECISION_SOURCE)
+    )
+    try:
+        decision_source = resolve_decision_source(
+            market_profile,
+            requested_decision_source,
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
     
     session_id = args.session_id
 
@@ -234,13 +293,16 @@ def main():
     print(f"{'='*70}")
     print(f"Period: {args.start} → {args.end}")
     print(f"Session: {session_id[:8]}...")
-    universe_label = (
-        f"{len(symbols)} selected" if symbols else f"{len(DJIA_30)} (DJIA)"
+    effective_symbols = (
+        list(market_profile.symbols)
+        if args.data_source == IFIND_ASHARE
+        else (symbols or list(DJIA_30))
     )
+    universe_label = f"{len(effective_symbols)} ({market_profile.universe})"
     print(f"Stocks: {universe_label}")
-    if symbols:
-        print(f"Universe: {', '.join(symbols)}")
+    print(f"Universe: {', '.join(effective_symbols)}")
     print(f"Data source: {args.data_source}")
+    print(f"Decision source: {decision_source}")
     print(f"Trading: Hourly (Agent decisions based on indicators)")
     capital = float(args.initial_capital) if args.initial_capital is not None else float(INITIAL_CAPITAL)
     print(f"Capital: ${capital:,.0f}")
@@ -260,7 +322,7 @@ def main():
         args.start,
         args.end,
         session_id,
-        use_llm=args.use_llm,
+        use_llm=decision_source == LLM_DECISION_SOURCE,
         mode=args.mode,
         strategy_prompt=strategy_prompt,
         model=args.model,
@@ -270,6 +332,8 @@ def main():
         data_source=args.data_source,
         initial_capital=capital,
         symbols=symbols,
+        universe=market_profile.universe,
+        decision_source=decision_source,
     )
     
     if backtester.use_llm:
@@ -290,6 +354,7 @@ def main():
     print(f"   Total symbols loaded: {len(backtester.all_data)}")
     print(f"   Symbols: {', '.join(sorted(backtester.all_data.keys())[:10])}{'...' if len(backtester.all_data) > 10 else ''}")
     print(f"   Agent universe: {', '.join(backtester.symbols)}")
+    print(f"   Baselines will use: {market_profile.benchmark}")
     print(f"   Loaded bars for: {len(backtester.all_data)} symbols")
     
     # Step 3: Run backtests
@@ -311,7 +376,16 @@ def main():
         bh_final = bh_eq[-1]
         print(f"   Final equity: ${bh_final['equity']:,.0f}")
     
-    djia_id, djia_eq = backtester.run_djia_baseline()
+    if market_profile.index_baseline_enabled:
+        djia_id, djia_eq = backtester.run_djia_baseline()
+    else:
+        djia_id, djia_eq = None, []
+
+    db.update_run_baselines(
+        agent_id,
+        djia_run_id=djia_id,
+        buyhold_run_id=bh_id,
+    )
     
     # Summary
     print(f"{'='*70}")
@@ -320,7 +394,8 @@ def main():
     print(f"\nRun IDs:")
     print(f"  • Agent: {agent_id}")
     print(f"  • Buy & Hold: {bh_id}")
-    print(f"  • DJIA Index: {djia_id}")
+    if djia_id:
+        print(f"  • DJIA Index: {djia_id}")
     print(f"\n📊 Dashboard: python3 dashboard/backend/app.py → http://localhost:8000")
 
 

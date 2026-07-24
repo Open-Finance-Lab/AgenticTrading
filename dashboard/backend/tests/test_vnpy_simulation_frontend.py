@@ -99,6 +99,10 @@ def test_vnpy_option_is_feature_gated_and_updates_model_state(js):
     assert re.search(r"features\.vnpy_simulation_enabled\s*===\s*true", js)
     assert re.search(r"option\.value\s*=\s*['\"]vnpy_simulation['\"]", js)
     assert re.search(r"modelSelect\.disabled\s*=\s*isSimulation", js)
+    assert re.search(
+        r"decisionSource\s*=\s*isSimulation\s*\?\s*RULE_BASED_DECISION_SOURCE",
+        js,
+    )
 
 
 def test_backtest_request_and_result_labels_include_data_source(js):

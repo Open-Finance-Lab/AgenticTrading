@@ -115,6 +115,31 @@ def test_request_uses_default_model_and_params():
     assert cap["messages"] == [{"role": "user", "content": "HELLO"}]
 
 
+def test_request_uses_market_aware_a_share_system_prompt():
+    client = _FakeClient(_FakeResponse('{"actions": []}'))
+    market_context = {
+        "market": "CN",
+        "timezone": "Asia/Shanghai",
+        "timeframe": "60m",
+        "symbols": ["600519.SH", "601318.SH"],
+        "paper_backtest": True,
+    }
+
+    request_trading_decision(
+        client,
+        prompt="HELLO",
+        market_context=market_context,
+    )
+
+    system_prompt = client.captured["system"]
+    assert "Chinese A-share" in system_prompt
+    assert "Asia/Shanghai" in system_prompt
+    assert "60m" in system_prompt
+    assert "historical paper backtest" in system_prompt
+    assert "DJIA" not in system_prompt
+    assert "600519.SH" not in system_prompt
+
+
 def test_request_model_override():
     client = _FakeClient(_FakeResponse("{}"))
     request_trading_decision(client, prompt="P", model="custom-model")

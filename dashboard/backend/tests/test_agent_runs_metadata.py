@@ -68,6 +68,24 @@ def test_data_source_provenance_roundtrips_for_api_projection(tmp_path):
     )
 
 
+def test_ifind_profile_provenance_roundtrips_without_credentials(tmp_path):
+    db = _make_db(tmp_path)
+    metadata = {
+        "data_source": "ifind_ashare",
+        "market": "CN",
+        "universe": "a_share_demo_6",
+        "timeframe": "60m",
+        "timezone": "Asia/Shanghai",
+        "decision_source": "rule_based",
+        "benchmark": "equal_weight_buyhold",
+    }
+    _insert_minimal(db, "run_ifind_source", metadata=metadata)
+
+    stored = db.get_run("run_ifind_source")["metadata"]
+    assert stored == metadata
+    assert "token" not in str(stored).lower()
+
+
 def test_migration_adds_metadata_column(tmp_path):
     """A DB created before the column must gain it on open (both
     _init_schema's CREATE IF NOT EXISTS and _migrate_schema must know it)."""

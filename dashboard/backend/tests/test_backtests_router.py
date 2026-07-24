@@ -131,6 +131,44 @@ def test_run_metadata_response_defaults_legacy_runs_to_alpaca():
     assert bt._run_metadata_response(_run_record()).data_source == "alpaca"
 
 
+def test_run_metadata_response_exposes_complete_ifind_profile():
+    response = bt._run_metadata_response(
+        _run_record(
+            {
+                "data_source": "ifind_ashare",
+                "market": "CN",
+                "universe": "a_share_demo_6",
+                "timeframe": "60m",
+                "timezone": "Asia/Shanghai",
+                "decision_source": "rule_based",
+                "benchmark": "equal_weight_buyhold",
+                "symbols": ["600519.SH", "601318.SH"],
+            }
+        )
+    )
+
+    assert response.data_source == "ifind_ashare"
+    assert response.market == "CN"
+    assert response.universe == "a_share_demo_6"
+    assert response.timeframe == "60m"
+    assert response.timezone == "Asia/Shanghai"
+    assert response.decision_source == "rule_based"
+    assert response.benchmark == "equal_weight_buyhold"
+    assert response.symbols == ["600519.SH", "601318.SH"]
+
+
+def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
+    response = bt._run_metadata_response(_run_record())
+
+    assert response.market is None
+    assert response.universe is None
+    assert response.timeframe is None
+    assert response.timezone is None
+    assert response.decision_source is None
+    assert response.benchmark is None
+    assert response.symbols is None
+
+
 @pytest.fixture(autouse=True)
 def _reset_backtest_guards(monkeypatch):
     bt._backtest_rate_limiter.reset()
@@ -212,7 +250,8 @@ def test_backtest_run_forwards_selected_assets(client, monkeypatch):
     assert resp.status_code == 200, resp.text
     assert resp.json()["assets"] == mag7
     assert spy.calls == 1
-    assert spy.last_args[-1] == mag7
+    assert spy.last_args[-2] == mag7
+    assert spy.last_args[-1] == "llm"
 
 
 def test_backtest_run_rejects_bad_assets(monkeypatch):
@@ -269,6 +308,67 @@ def test_backtest_run_accepts_frontend_model_options(model):
         headers=_sess(),
     )
     assert resp.status_code == 200, (model, resp.text)
+
+
+@pytest.mark.parametrize("model", [
+    "claude-haiku-4.5", "claude-sonnet-4.6", "claude-opus-4.7",
+    "gpt-5.2", "gpt-5-mini", "deepseek-v4-flash", "deepseek-v4-pro",
+    "gemini-3.5-flash", "gemini-2.5-pro",
+])
+def test_ifind_llm_accepts_every_frontend_model(monkeypatch, model):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    monkeypatch.setattr(
+        bt,
+        "ensure_llm_client_available",
+        lambda: object(),
+        raising=False,
+    )
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "data_source": "ifind_ashare",
+            "universe": "a_share_demo_6",
+            "timeframe": "60m",
+            "decision_source": "llm",
+            "model": model,
+        },
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, (model, resp.text)
+    assert resp.json()["decision_source"] == "llm"
+
+
+def test_explicit_llm_requires_model_before_scheduling(monkeypatch):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(
+        bt,
+        "ensure_llm_client_available",
+        lambda: object(),
+        raising=False,
+    )
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "data_source": "ifind_ashare",
+            "universe": "a_share_demo_6",
+            "timeframe": "60m",
+            "decision_source": "llm",
+        },
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 422
+    assert "model" in resp.text.lower()
+    assert spy.calls == 0
 
 
 @pytest.mark.parametrize("model", [

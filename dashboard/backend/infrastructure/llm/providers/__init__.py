@@ -38,6 +38,10 @@ PROVIDERS = {
 KNOWN_INTEGRATIONS = tuple(PROVIDERS.keys())
 
 
+class LLMProviderConfigurationError(RuntimeError):
+    """Raised when an explicitly requested provider client is unavailable."""
+
+
 def resolve_integration(integration: Optional[str] = None) -> str:
     """Normalize an integration id, or auto-detect from env when omitted.
 
@@ -86,13 +90,30 @@ def default_model_name(integration: Optional[str] = None) -> str:
     return PROVIDERS[resolved].default_model_name()
 
 
+def ensure_llm_client_available(integration: Optional[str] = None) -> Any:
+    """Construct a client without making a network request, or fail safely."""
+    if not HAS_ANTHROPIC or _Anthropic is None:
+        raise LLMProviderConfigurationError(
+            "LLM provider client is unavailable because the Anthropic SDK is missing"
+        )
+    resolved = resolve_integration(integration)
+    client = make_llm_client(resolved)
+    if client is None:
+        raise LLMProviderConfigurationError(
+            f"LLM provider client is unavailable for integration {resolved!r}"
+        )
+    return client
+
+
 __all__ = [
     "HAS_ANTHROPIC",
     "KNOWN_INTEGRATIONS",
+    "LLMProviderConfigurationError",
     "PROVIDERS",
     "anthropic_native",
     "commonstack",
     "default_model_name",
+    "ensure_llm_client_available",
     "make_llm_client",
     "openrouter",
     "resolve_integration",

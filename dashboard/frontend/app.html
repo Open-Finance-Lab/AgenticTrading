@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=63">
+    <link rel="stylesheet" href="styles.css?v=64">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
     (function () {
@@ -244,9 +244,37 @@
                 </div>
 
                 <div class="control-group">
+                    <label for="marketDataSourceSelect">Market Data</label>
+                    <select class="control-select" id="marketDataSourceSelect" aria-label="Select market data source">
+                        <option value="alpaca" selected>Alpaca market data</option>
+                    </select>
+                    <p id="vnpySimulationNotice" class="market-data-notice" hidden>
+                        vn.py simulated bars · deterministic · no LLM calls
+                    </p>
+                    <p id="ifindAshareNotice" class="market-data-notice is-ifind" hidden>
+                        Historical iFinD A-share data for paper backtesting; not real-time and no real orders.
+                    </p>
+                </div>
+
+                <div class="control-group">
                     <label>Asset Universe</label>
                     <p class="control-helper">Choose the universe of assets your agent is allowed to trade.</p>
-                    <div class="universe-tabs">
+                    <div id="ifindAshareUniverse" class="ifind-universe-panel" hidden>
+                        <select
+                            id="ifindAshareUniverseSelect"
+                            class="control-select ifind-universe-select"
+                            aria-label="Select registered A-share universe"
+                        >
+                            <option value="a_share_demo_6">A-Share Demo 6</option>
+                            <option value="csi300_sample_20_2026h2">CSI 300 Sample 20 (2026 H2)</option>
+                        </select>
+                        <div class="ifind-universe-head">
+                            <span id="ifindAshareUniverseTitle" class="ifind-universe-title">A-Share Demo 6 · 6 stocks</span>
+                            <span class="ifind-timeframe">60m</span>
+                        </div>
+                        <div id="ifindAshareSymbolGrid" class="ifind-symbol-grid" aria-label="Registered A-share universe"></div>
+                    </div>
+                    <div class="universe-tabs" id="universeTabs">
                         <button class="universe-tab active" data-tab="builtin" type="button">Built-in</button>
                         <button class="universe-tab" data-tab="custom" type="button">Custom</button>
                     </div>
@@ -293,7 +321,7 @@
                         type="number"
                         min="1"
                         max="10000"
-                        step="100"
+                        step="1"
                         value="1000"
                         aria-label="Backtest initial capital"
                     >
@@ -302,7 +330,7 @@
 
                 <div class="control-group">
                     <label for="modelSelect">Model</label>
-                    <p class="control-helper">Defaults to this agent’s model. Changing it here is temporary and is not saved to the agent.</p>
+                    <p id="modelSelectHint" class="control-helper">Defaults to this agent’s model. Changing it here is temporary and is not saved to the agent.</p>
                     <select class="control-select" id="modelSelect">
                         <option value="claude-haiku-4.5">Claude Haiku 4.5</option>
                         <option value="claude-sonnet-4.6">Claude Sonnet 4.6</option>
@@ -316,13 +344,6 @@
                     </select>
                 </div>
 
-                <!-- Hidden: keep market-data hooks working; default Alpaca -->
-                <select id="marketDataSourceSelect" hidden aria-hidden="true">
-                    <option value="alpaca" selected>Alpaca market data</option>
-                </select>
-                <p id="vnpySimulationNotice" class="market-data-notice" hidden>
-                    vn.py simulated bars · deterministic · no LLM calls
-                </p>
                 <select id="backtestAgentSelect" hidden aria-hidden="true">
                     <option value="">Loading agents…</option>
                 </select>
@@ -978,8 +999,24 @@
                         <dd id="backtestConfigCapital">—</dd>
                     </div>
                     <div class="backtest-config-row">
-                        <dt>Asset universe</dt>
+                        <dt>Market data</dt>
+                        <dd id="backtestConfigMarketData">—</dd>
+                    </div>
+                    <div class="backtest-config-row">
+                        <dt>Universe</dt>
                         <dd id="backtestConfigUniverse">—</dd>
+                    </div>
+                    <div class="backtest-config-row">
+                        <dt>Symbols</dt>
+                        <dd id="backtestConfigSymbols">—</dd>
+                    </div>
+                    <div class="backtest-config-row">
+                        <dt>Timeframe</dt>
+                        <dd id="backtestConfigTimeframe">—</dd>
+                    </div>
+                    <div class="backtest-config-row">
+                        <dt>Decision source</dt>
+                        <dd id="backtestConfigDecisionSource">—</dd>
                     </div>
                     <div class="backtest-config-row">
                         <dt>Time window</dt>

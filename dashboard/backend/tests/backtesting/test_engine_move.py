@@ -62,7 +62,7 @@ class _FakeDB:
         self.trades.append((run_id, list(trades)))
 
 
-def _fake_provider_factory(data_source="alpaca"):
+def _fake_provider_factory(data_source="alpaca", universe=None):
     return _FakeLoader()
 
 
