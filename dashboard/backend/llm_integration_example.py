@@ -13,6 +13,7 @@ DO NOT expose websearch, browser, or HTTP tools to the LLM.
 
 import json
 import logging
+import os
 from typing import Dict, Optional, Any
 
 # NOTE: This requires anthropic library
