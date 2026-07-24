@@ -358,14 +358,15 @@ class ExternalBacktestSession:
                 return {"status": "failed", "error": self.error}
 
             if self.status == "completed":
+                baseline_ids = self.baseline_run_ids  # one snapshot for both fields
                 return {
                     "status": "completed",
                     "backtest_id": self.backtest_id,
                     "run_id": self.run_id,
-                    "baseline_run_ids": self.baseline_run_ids,
+                    "baseline_run_ids": baseline_ids,
                     "total_steps": self.total_steps,
                     "metrics": self._final_metrics(),
-                    "compare_url": self._compare_url(),
+                    "compare_url": self._compare_url(baseline_ids),
                     "session_id": self.session_id,
                 }
 
@@ -601,8 +602,12 @@ class ExternalBacktestSession:
         """
         self.baseline_run_ids = dict(ids)
 
-    def _compare_url(self) -> Optional[str]:
-        return build_compare_url(self.run_id, self.baseline_run_ids)
+    def _compare_url(self, baseline_run_ids: Optional[Dict[str, str]] = None) -> Optional[str]:
+        # Callers that ALSO surface baseline_run_ids in the same response pass a
+        # snapshot so the two fields can't straddle the worker's one-time async
+        # publish (T2: _publish_baselines rebinds the dict). Default reads live.
+        ids = self.baseline_run_ids if baseline_run_ids is None else baseline_run_ids
+        return build_compare_url(self.run_id, ids)
 
     def _final_metrics(self) -> Dict[str, Any]:
         if not self.run_id:
@@ -624,9 +629,10 @@ class ExternalBacktestSession:
             if self.status == "waiting_decision":
                 base["decision_deadline_at"] = _iso(self._deadline_at())
             if self.status == "completed":
+                baseline_ids = self.baseline_run_ids  # one snapshot for both fields
                 base["metrics"] = self._final_metrics()
-                base["baseline_run_ids"] = self.baseline_run_ids
-                base["compare_url"] = self._compare_url()
+                base["baseline_run_ids"] = baseline_ids
+                base["compare_url"] = self._compare_url(baseline_ids)
             if self.error:
                 base["error"] = self.error
             return base
