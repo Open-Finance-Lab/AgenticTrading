@@ -27,6 +27,7 @@ ERROR_CODES = [
     "validation_failed", "step_already_closed", "run_not_found", "agent_not_found",
     "unauthorized", "forbidden_scope", "rate_limited", "universe_violation",
     "insufficient_cash", "invalid_symbol", "invalid_status", "too_many_active_runs",
+    "too_many_active_runs_global",
 ]
 
 

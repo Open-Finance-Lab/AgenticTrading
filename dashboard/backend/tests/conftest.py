@@ -59,6 +59,7 @@ os.environ.pop("CONTENT_DATABASE_URL", None)
 os.environ.pop("MARKET_DATA_CACHE_MAX_ENTRIES", None)
 os.environ.pop("BASELINE_QUEUE_MAX", None)
 os.environ.pop("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", None)
+os.environ.pop("MAX_ACTIVE_RUNS_GLOBAL", None)
 
 
 @atexit.register

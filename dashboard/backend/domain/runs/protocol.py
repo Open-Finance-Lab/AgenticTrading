@@ -27,12 +27,16 @@ VALID_ORDER_TYPES = {"market"}
 class ProtocolError(Exception):
     """Raised for protocol-level failures; mapped to an HTTP error envelope."""
 
-    def __init__(self, code: str, message: str, status_code: int = 400, details: Any = None):
+    def __init__(self, code: str, message: str, status_code: int = 400,
+                 details: Any = None, headers: Optional[Dict[str, str]] = None):
         super().__init__(message)
         self.code = code
         self.message = message
         self.status_code = status_code
         self.details = details
+        # Response headers (e.g. Retry-After on 429) — forwarded to the
+        # HTTPException by the router's _handle_protocol_error.
+        self.headers = headers or {}
 
     def to_body(self) -> Dict[str, Any]:
         return error_body(self.code, self.message, self.details)

@@ -282,6 +282,25 @@ class RunStore:
         conn.close()
         return int(count)
 
+    def count_active_runs_total(self) -> int:
+        """Active runs across ALL agents — the global backstop cap's count.
+
+        Deliberately reconciliation-free: both surfaces flip their row to a
+        terminal status synchronously inside the finalizing request, so a raw
+        COUNT tracks reality; the residual (terminal run, no subsequent poll)
+        is bounded by the reaper interval and errs toward a spurious 429 —
+        the safe direction, and Retry-After tells the client when to retry."""
+        placeholders = ",".join("?" for _ in self._ACTIVE_STATUSES)
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT COUNT(*) FROM protocol_runs WHERE status IN ({placeholders})",
+            self._ACTIVE_STATUSES,
+        )
+        (count,) = cursor.fetchone()
+        conn.close()
+        return int(count)
+
     def fail_unfinished_runs(self) -> int:
         """Mark runs left non-terminal by a crash/restart as failed.
 
