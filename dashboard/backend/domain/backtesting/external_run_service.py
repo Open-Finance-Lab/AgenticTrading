@@ -32,7 +32,6 @@ from dashboard.backend.infrastructure.llm.validator import (
     parse_actions_payload,
 )
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL, resolve_initial_capital
-from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
     calculate_sharpe,

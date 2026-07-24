@@ -55,5 +55,5 @@ def _reset_for_tests() -> None:
             try:
                 pool.close()
             except Exception:
-                pass
+                pass  # best-effort teardown: a pool that won't close must not break test reset
         _pools.clear()
