@@ -1,8 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { MessageSquare, Bot, Hash } from "lucide-react";
 import { DiscordMock } from "./DiscordMock";
-
-const DISCORD_URL = "https://discord.gg/9HnQ6XDG98";
+import { SIGNUP_HREF } from "@/lib/cta";
 
 export function Talk() {
   return (
@@ -32,8 +31,8 @@ export function Talk() {
                 <span><span className="text-foreground font-medium">3.</span> Get your backtest result</span>
               </li>
             </ol>
-            <Button size="lg" className="bg-[#5865F2] hover:bg-[#4752C4] text-white border-transparent" asChild>
-              <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer">Join Discord</a>
+            <Button size="lg" className="bg-primary text-primary-foreground hover:bg-primary/90" asChild>
+              <a href={SIGNUP_HREF}>Start Free</a>
             </Button>
           </div>
 
