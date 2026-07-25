@@ -238,7 +238,7 @@ export function DiscordMock() {
                     </span>
                     {msg.author === "agent" ? (
                       <span className="discord-bot-badge" title="Agent">
-                        APP
+                        App
                       </span>
                     ) : null}
                     <span className="discord-timestamp">{msg.time}</span>

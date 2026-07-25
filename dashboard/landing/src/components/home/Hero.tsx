@@ -105,8 +105,13 @@ export function Hero() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, delay: ctaDelay }}
           >
-            <Button size="lg" className="w-full sm:w-auto bg-primary text-primary-foreground glow-primary hover:bg-primary/90 text-base h-12 px-8" asChild>
-              <a href={PRIMARY_LANDING_CTA.href}>{PRIMARY_LANDING_CTA.label}</a>
+            <Button
+              size="lg"
+              type="button"
+              data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+              className="w-full sm:w-auto bg-primary text-primary-foreground glow-primary hover:bg-primary/90 text-base h-12 px-8"
+            >
+              {PRIMARY_LANDING_CTA.label}
             </Button>
           </motion.div>
         </div>
