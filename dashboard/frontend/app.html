@@ -350,125 +350,6 @@
     <div id="homeView" class="page-view home-view">
         <div class="home-page home-page--pager">
             <div class="home-pager-track" id="homePagerTrack" data-page="0">
-                <section class="home-pager-screen" id="homeScreenLanding" aria-label="Welcome">
-                    <div class="home-landing-hero">
-                    <div class="home-landing-hero-grid-bg" aria-hidden="true"></div>
-                    <div class="home-landing-hero-inner">
-                        <div class="home-landing-hero-copy">
-                            <h1 class="home-landing-headline">
-                                <span class="home-headline-line home-headline-line--1">Talk to Agents</span>
-                                <span class="home-headline-line home-headline-line--2 home-headline-accent">Test Trading Ideas</span>
-                            </h1>
-                            <div class="home-landing-ctas">
-                                <button id="homeGetStartedBtn" class="home-btn home-btn-primary home-landing-cta" type="button">Get Started</button>
-                                <a class="home-btn home-btn-secondary home-landing-cta" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join Discord</a>
-                            </div>
-                        </div>
-                        <div class="home-landing-playground" aria-label="Agent playground preview">
-                            <div class="home-playground-window">
-                                <div class="home-playground-titlebar">
-                                    <span class="home-playground-dot home-playground-dot--red" aria-hidden="true"></span>
-                                    <span class="home-playground-dot home-playground-dot--yellow" aria-hidden="true"></span>
-                                    <span class="home-playground-dot home-playground-dot--green" aria-hidden="true"></span>
-                                    <span class="home-playground-title">
-                                        <svg class="ui-icon ui-icon--inline" aria-hidden="true"><use href="#icon-terminal"/></svg>
-                                        agent-playground.exe
-                                    </span>
-                                </div>
-                                <div id="homePlaygroundChat" class="home-playground-chat" data-step="0">
-                                    <div class="home-chat-row home-chat-row--user home-chat-step" data-step="0">
-                                        <div class="home-chat-avatar home-chat-avatar--user" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-user"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--user">
-                                            I want to follow Warren Buffett. If Berkshire makes a move, copy the move and tell me how it goes.
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="1" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <div class="home-chat-agent-line">
-                                                <svg class="ui-icon ui-icon--inline home-chat-icon-accent"><use href="#icon-search"/></svg>
-                                                <span>Fetching Berkshire Hathaway 13F filings...</span>
-                                            </div>
-                                            <ul class="home-chat-checklist">
-                                                <li><svg class="ui-icon ui-icon--inline home-chat-check"><use href="#icon-check-circle"/></svg><span>Q1 2025 → +$OXY +$SIRI −$PARA</span></li>
-                                                <li><svg class="ui-icon ui-icon--inline home-chat-check"><use href="#icon-check-circle"/></svg><span>Q4 2024 → +$OXY +$VZ −$HP</span></li>
-                                                <li><svg class="ui-icon ui-icon--inline home-chat-check"><use href="#icon-check-circle"/></svg><span>Copy-trade rules set · 6 tickers tracked</span></li>
-                                            </ul>
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="2" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <div class="home-chat-agent-line">
-                                                <svg class="ui-icon ui-icon--inline home-chat-icon-accent"><use href="#icon-chart"/></svg>
-                                                <span>Running backtest · 24 months, $10k start...</span>
-                                            </div>
-                                            <div class="home-chat-agent-line home-chat-agent-line--muted">
-                                                <svg class="ui-icon ui-icon--inline"><use href="#icon-check-circle"/></svg>
-                                                <span>22 trades · avg hold 63 days</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="3" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <div class="home-chat-agent-line home-chat-agent-line--positive">
-                                                <svg class="ui-icon ui-icon--inline"><use href="#icon-chart"/></svg>
-                                                <strong>Backtest Complete</strong>
-                                            </div>
-                                            <svg class="home-chat-equity" viewBox="0 0 240 50" preserveAspectRatio="none" aria-hidden="true">
-                                                <defs>
-                                                    <linearGradient id="homeHeroEquityFill" x1="0" y1="0" x2="0" y2="1">
-                                                        <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.35"/>
-                                                        <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
-                                                    </linearGradient>
-                                                </defs>
-                                                <polygon points="0,50 0,42 20,40 40,38 60,34 80,36 100,30 120,28 140,22 160,24 180,16 200,12 220,14 240,8 240,50" fill="url(#homeHeroEquityFill)"/>
-                                                <polyline points="0,42 20,40 40,38 60,34 80,36 100,30 120,28 140,22 160,24 180,16 200,12 220,14 240,8" fill="none" stroke="#22d3ee" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-                                            </svg>
-                                            <div class="home-chat-metrics">
-                                                <div>Return <span class="positive">+41.2%</span></div>
-                                                <div>Sharpe <span>1.31</span></div>
-                                                <div>Win Rate <span>68%</span></div>
-                                                <div>Max DD <span class="negative">-9.4%</span></div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="4" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <p class="home-chat-prompt-text">
-                                                Looks solid. Want me to run this in
-                                                <span class="home-headline-accent">paper trading</span>
-                                                and alert you when Berkshire's next 13F drops?
-                                            </p>
-                                            <div class="home-chat-actions">
-                                                <span class="home-chat-action home-chat-action--primary">Yes, start now</span>
-                                                <span class="home-chat-action">Not yet</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <button id="homeScrollHint" class="home-scroll-hint" type="button" aria-label="Scroll to dashboard">
-                        <span class="home-scroll-hint-label">Scroll</span>
-                        <svg class="home-scroll-hint-icon" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
-                    </button>
-                    </div>
-                </section>
 
                 <section class="home-pager-screen" id="homeScreenDashboard" aria-label="Dashboard">
                 <div class="home-dashboard-screen-inner">
@@ -1067,7 +948,7 @@
             </div>
         </section>
 
-        <!-- Right Panel: Metrics & Performance Drivers -->
+        <!-- Right Panel: Metrics -->
         <aside class="right-panel">
             <!-- Trading Performance Summary -->
             <div class="section-card compact">
@@ -1090,28 +971,8 @@
                     <span class="metric-value" data-metric="sharpe" title="Annualized for hourly data (sqrt(252*6.5))">--</span>
                 </div>
                 
-                <button class="view-more-btn">View More Metrics →</button>
             </div>
 
-            <!-- Performance Drivers -->
-            <div class="section-card compact">
-                <h3 class="section-title">Performance Drivers</h3>
-                
-                <div class="driver-item positive">
-                    <span class="driver-icon">▲</span>
-                    <span class="driver-text">Lower slippage improved execution quality.</span>
-                </div>
-                <div class="driver-item positive">
-                    <span class="driver-icon">▲</span>
-                    <span class="driver-text">Higher transaction cost reduced returns.</span>
-                </div>
-                <div class="driver-item positive">
-                    <span class="driver-icon">▲</span>
-                    <span class="driver-text">Balanced risk level helped stability.</span>
-                </div>
-                
-                <button class="view-details-btn">View Details →</button>
-            </div>
 
 
         </aside>
