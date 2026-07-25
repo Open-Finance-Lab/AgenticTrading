@@ -92,6 +92,55 @@ def test_builds_official_hourly_request_with_exclusive_end():
     assert "Fill" not in kwargs["json"]["functionpara"]
 
 
+@pytest.mark.parametrize("currency", ["RMB", "MHB"])
+def test_builds_official_daily_close_request_with_exclusive_end(currency):
+    session = FakeSession([FakeResponse()])
+
+    result = make_client(session).fetch_daily_closes(
+        ["600519.SH", "601318.SH"],
+        START,
+        END,
+        currency=currency,
+    )
+
+    assert result == {"errorcode": 0, "tables": []}
+    assert len(session.calls) == 1
+    url, kwargs = session.calls[0]
+    assert url == "https://ifind.test/api/v1/cmd_history_quotation"
+    assert kwargs["headers"] == {
+        "Content-Type": "application/json",
+        "access_token": TOKEN,
+        "ifindlang": "cn",
+    }
+    assert kwargs["json"] == {
+        "codes": "600519.SH,601318.SH",
+        "indicators": "close",
+        "startdate": "2026-04-01",
+        "enddate": "2026-04-22",
+        "functionpara": {
+            "Interval": "D",
+            "CPS": "1",
+            "Currency": currency,
+            "Fill": "Blank",
+        },
+    }
+
+
+def test_rejects_unknown_daily_close_currency_before_http_call():
+    from dashboard.backend.infrastructure.market_data.ifind_client import (
+        IFindRequestError,
+    )
+
+    session = FakeSession([FakeResponse()])
+
+    with pytest.raises(IFindRequestError, match="currency"):
+        make_client(session).fetch_daily_closes(
+            ["600519.SH"], START, END, currency="USD"
+        )
+
+    assert session.calls == []
+
+
 def test_uses_environment_defaults_without_exposing_token(monkeypatch):
     from dashboard.backend.infrastructure.market_data.ifind_client import (
         IFindHttpClient,

@@ -4169,6 +4169,9 @@ function normalizeTradeRecord(trade) {
         quantity,
         price,
         value,
+        nativePrice: trade?.native_price == null ? null : Number(trade.native_price),
+        nativeValue: trade?.native_value == null ? null : Number(trade.native_value),
+        fxRate: trade?.fx_rate == null ? null : Number(trade.fx_rate),
     };
 }
 
@@ -4214,13 +4217,22 @@ function renderTradingLog(trades, { emptyMessage = 'No trades yet.' } = {}) {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
         });
+        const hasNativeAudit = Number.isFinite(trade.nativePrice)
+            && Number.isFinite(trade.nativeValue)
+            && Number.isFinite(trade.fxRate);
+        const priceAudit = hasNativeAudit
+            ? `<div class="trading-log-native">¥${trade.nativePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>`
+            : '';
+        const valueAudit = hasNativeAudit
+            ? `<div class="trading-log-native">¥${trade.nativeValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · FX ${trade.fxRate.toFixed(4)}</div>`
+            : '';
         return `<tr>
             <td>${formatTradeTimestamp(trade.timestamp)}</td>
             <td><span class="${actionClass}">${actionLabel}</span></td>
             <td>${trade.symbol}</td>
             <td>${trade.quantity} shares</td>
-            <td>$${trade.price.toFixed(2)}</td>
-            <td>$${totalValue}</td>
+            <td>$${trade.price.toFixed(2)}${priceAudit}</td>
+            <td>$${totalValue}${valueAudit}</td>
         </tr>`;
     }).join('');
 }
@@ -4349,6 +4361,10 @@ function renderBacktestRunConfig(
     const agentName = cfg?.agentName || run?.agent_name || '—';
     const model = cfg?.model || run?.llm_model || '—';
     const capital = cfg?.initialCapital ?? run?.initial_equity;
+    const nativeInitialCapital = metadata.native_initial_capital
+        ?? run?.native_initial_capital;
+    const startFxRate = metadata.fx_start_rate ?? run?.fx_start_rate;
+    const rawFxSource = metadata.fx_source ?? run?.fx_source;
     const start = cfg?.startDate || run?.start_date;
     const end = cfg?.endDate || run?.end_date;
     const universe = cfg?.universeLabel
@@ -4387,6 +4403,28 @@ function renderBacktestRunConfig(
         Number.isFinite(Number(capital)) ? `$${Number(capital).toLocaleString()}` : '—',
     );
     setBacktestConfigText('backtestConfigMarketData', marketData);
+    const showFx = dataSource === IFIND_ASHARE_SOURCE
+        && Number.isFinite(Number(nativeInitialCapital))
+        && Number.isFinite(Number(startFxRate));
+    const nativeCapitalRow = document.getElementById('backtestConfigNativeCapitalRow');
+    const fxSourceRow = document.getElementById('backtestConfigFxSourceRow');
+    const fxRateRow = document.getElementById('backtestConfigFxRateRow');
+    if (nativeCapitalRow) nativeCapitalRow.hidden = !showFx;
+    if (fxSourceRow) fxSourceRow.hidden = !showFx;
+    if (fxRateRow) fxRateRow.hidden = !showFx;
+    if (showFx) {
+        setBacktestConfigText(
+            'backtestConfigNativeCapital',
+            `¥${Number(nativeInitialCapital).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        );
+        setBacktestConfigText(
+            'backtestConfigFxSource',
+            rawFxSource === 'ifind_history_currency_conversion'
+                ? 'iFinD Historical Conversion Rate'
+                : (rawFxSource || 'iFinD Historical Conversion Rate'),
+        );
+        setBacktestConfigText('backtestConfigFxRate', Number(startFxRate).toFixed(4));
+    }
     setBacktestConfigText('backtestConfigUniverse', universe);
     setBacktestConfigText(
         'backtestConfigSymbols',

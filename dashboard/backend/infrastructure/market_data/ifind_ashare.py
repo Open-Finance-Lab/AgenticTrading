@@ -10,6 +10,7 @@ import pandas as pd
 
 from .ifind_adapter import response_to_frames
 from .ifind_client import IFindHttpClient
+from .ifind_fx import IFindHistoricalFxProvider
 from .profiles import IFIND_ASHARE, MarketProfile, get_market_profile
 
 
@@ -36,12 +37,18 @@ class IFindAshareProvider:
         profile: MarketProfile | None = None,
         client: IFindHttpClient | None = None,
         adapter: Adapter = response_to_frames,
+        fx_provider: IFindHistoricalFxProvider | None = None,
     ) -> None:
         self.profile = profile or get_market_profile(IFIND_ASHARE)
         if self.profile.data_source != IFIND_ASHARE:
             raise ValueError("iFinD provider requires an iFinD market profile")
         self._client = client if client is not None else IFindHttpClient()
         self._adapter = adapter
+        self._fx_provider = (
+            fx_provider
+            if fx_provider is not None
+            else IFindHistoricalFxProvider(client=self._client)
+        )
 
     def fetch_bars(
         self,
@@ -67,6 +74,24 @@ class IFindAshareProvider:
             start=start_date,
             end=end_date,
             min_bars=_MINIMUM_BARS,
+        )
+
+    def fetch_usd_cny(
+        self,
+        symbols: Sequence[str],
+        start: DateInput,
+        end: DateInput,
+    ) -> dict[date, float]:
+        """Return validated iFinD historical CNY-per-USD rates."""
+        canonical_symbols = self._validate_universe(symbols)
+        start_date = self._as_market_date(start)
+        end_date = self._as_market_date(end)
+        if end_date <= start_date:
+            raise IFindDateInputError("iFinD end date must be after start date")
+        return self._fx_provider.fetch_usd_cny(
+            canonical_symbols,
+            start_date,
+            end_date,
         )
 
     def _validate_universe(self, symbols: Sequence[str]) -> tuple[str, ...]:

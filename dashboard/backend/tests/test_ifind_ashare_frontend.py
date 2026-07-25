@@ -259,6 +259,22 @@ def test_run_config_shows_ifind_source_universe_count_timeframe_and_decision(htm
     assert "timeframe" in js
 
 
+def test_ifind_results_show_historical_fx_and_native_trade_audit(html, js, css):
+    for element_id in (
+        "backtestConfigNativeCapital",
+        "backtestConfigFxSource",
+        "backtestConfigFxRate",
+    ):
+        assert _attr(html, "id", element_id)
+        assert element_id in js
+    assert "iFinD Historical Conversion Rate" in js
+    assert "native_price" in js
+    assert "native_value" in js
+    assert "fx_rate" in js
+    assert "¥" in js
+    assert ".trading-log-native" in css
+
+
 def test_running_and_historical_results_show_ifind_provenance(js, css):
     assert js.count("iFinD China A-Shares · 60m") >= 2
     assert re.search(r"renderBacktestDataSourceBadge\(\s*\{[^}]*data_source:\s*dataSource", js, re.S)

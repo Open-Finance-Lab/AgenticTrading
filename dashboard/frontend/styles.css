@@ -1818,6 +1818,14 @@ a.header-brand:hover .title-section h1 {
     font-size: 0.9rem;
 }
 
+.trading-log-native {
+    margin-top: 2px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.3;
+    white-space: nowrap;
+}
+
 .action-hold {
     color: var(--text-secondary);
     font-weight: 700;

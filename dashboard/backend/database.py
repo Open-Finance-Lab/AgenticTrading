@@ -115,6 +115,10 @@ class BacktestDatabase:
                 cash REAL NOT NULL,
                 positions_value REAL NOT NULL,
                 daily_return REAL,
+                native_equity REAL,
+                native_cash REAL,
+                native_positions_value REAL,
+                fx_rate REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (run_id) REFERENCES agent_runs(run_id),
                 UNIQUE(run_id, timestamp)
@@ -138,6 +142,9 @@ class BacktestDatabase:
                 price REAL NOT NULL,
                 value REAL NOT NULL,
                 reason TEXT,
+                native_price REAL,
+                native_value REAL,
+                fx_rate REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
             )
@@ -304,6 +311,7 @@ class BacktestDatabase:
 
             self._ensure_decisions_table(cursor)
             self._migrate_trades_schema(cursor)
+            self._migrate_currency_audit_schema(cursor)
             conn.commit()
         
         except Exception as e:
@@ -317,6 +325,7 @@ class BacktestDatabase:
             conn = self._get_connection()
             cursor = conn.cursor()
             self._migrate_trades_schema(cursor)
+            self._migrate_currency_audit_schema(cursor)
             conn.commit()
             conn.close()
         except Exception as e:
@@ -438,6 +447,27 @@ class BacktestDatabase:
 
         print("✅ trades table migrated (quantity, side, value, reason)")
 
+    @staticmethod
+    def _migrate_currency_audit_schema(cursor) -> None:
+        """Add nullable native-currency fields without rewriting USD history."""
+        additions = {
+            "equity_timeseries": (
+                "native_equity",
+                "native_cash",
+                "native_positions_value",
+                "fx_rate",
+            ),
+            "trades": ("native_price", "native_value", "fx_rate"),
+        }
+        for table, fields in additions.items():
+            cursor.execute(f"PRAGMA table_info({table})")
+            columns = {row[1] for row in cursor.fetchall()}
+            if not columns:
+                continue
+            for field in fields:
+                if field not in columns:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {field} REAL")
+
     def _ensure_decisions_table(self, cursor) -> None:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS backtest_decisions (
@@ -525,16 +555,24 @@ class BacktestDatabase:
     def insert_equity_point(self, run_id: str, timestamp: str, 
                           equity: float, cash: float, 
                           positions_value: float,
-                          daily_return: Optional[float] = None) -> None:
+                          daily_return: Optional[float] = None,
+                          native_equity: Optional[float] = None,
+                          native_cash: Optional[float] = None,
+                          native_positions_value: Optional[float] = None,
+                          fx_rate: Optional[float] = None) -> None:
         """Insert a single equity data point."""
         conn = self._get_connection()
         cursor = conn.cursor()
         
         cursor.execute("""
             INSERT OR REPLACE INTO equity_timeseries 
-            (run_id, timestamp, equity, cash, positions_value, daily_return)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (run_id, timestamp, equity, cash, positions_value, daily_return))
+            (run_id, timestamp, equity, cash, positions_value, daily_return,
+             native_equity, native_cash, native_positions_value, fx_rate)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            run_id, timestamp, equity, cash, positions_value, daily_return,
+            native_equity, native_cash, native_positions_value, fx_rate,
+        ))
         
         conn.commit()
         conn.close()
@@ -568,8 +606,9 @@ class BacktestDatabase:
                     )
                 cursor.executemany("""
                     INSERT OR REPLACE INTO equity_timeseries
-                    (run_id, timestamp, equity, cash, positions_value, daily_return)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    (run_id, timestamp, equity, cash, positions_value, daily_return,
+                     native_equity, native_cash, native_positions_value, fx_rate)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, [
                     (
                         run_id,
@@ -578,6 +617,10 @@ class BacktestDatabase:
                         point['cash'],
                         point['positions_value'],
                         point.get('daily_return'),
+                        point.get('native_equity'),
+                        point.get('native_cash'),
+                        point.get('native_positions_value'),
+                        point.get('fx_rate'),
                     )
                     for point in points
                 ])
@@ -683,7 +726,8 @@ class BacktestDatabase:
         cursor = conn.cursor()
         
         cursor.execute("""
-            SELECT timestamp, equity, cash, positions_value, daily_return 
+            SELECT timestamp, equity, cash, positions_value, daily_return,
+                   native_equity, native_cash, native_positions_value, fx_rate
             FROM equity_timeseries 
             WHERE run_id = ?
             ORDER BY timestamp ASC
@@ -692,7 +736,20 @@ class BacktestDatabase:
         rows = cursor.fetchall()
         conn.close()
         
-        return [dict(row) for row in rows]
+        result = []
+        audit_fields = {
+            "native_equity",
+            "native_cash",
+            "native_positions_value",
+            "fx_rate",
+        }
+        for row in rows:
+            item = dict(row)
+            for field in audit_fields:
+                if item.get(field) is None:
+                    item.pop(field, None)
+            result.append(item)
+        return result
     
     def get_equity_curves(self, run_ids: List[str]) -> Dict[str, List[Dict]]:
         """Get equity curves for multiple runs."""
@@ -741,6 +798,10 @@ class BacktestDatabase:
                 if "reason" in columns:
                     col_names.append("reason")
                     col_values.append(trade.get("reason"))
+                for field in ("native_price", "native_value", "fx_rate"):
+                    if field in columns:
+                        col_names.append(field)
+                        col_values.append(trade.get(field))
                 # Legacy columns may still be NOT NULL after migration
                 if "action" in columns:
                     col_names.extend(["action", "shares", "total_value"])
@@ -799,11 +860,19 @@ class BacktestDatabase:
         cursor = conn.cursor()
         columns = self._trades_column_set(cursor)
         if "quantity" in columns:
-            cursor.execute("""
-                SELECT timestamp, symbol, quantity, side, price, value, reason
-                FROM trades WHERE run_id = ?
-                ORDER BY timestamp ASC, id ASC
-            """, (run_id,))
+            selected = [
+                "timestamp", "symbol", "quantity", "side", "price", "value", "reason"
+            ]
+            selected.extend(
+                field
+                for field in ("native_price", "native_value", "fx_rate")
+                if field in columns
+            )
+            cursor.execute(
+                f"SELECT {', '.join(selected)} FROM trades WHERE run_id = ? "
+                "ORDER BY timestamp ASC, id ASC",
+                (run_id,),
+            )
         else:
             cursor.execute("""
                 SELECT timestamp, symbol, shares AS quantity, action AS side,
@@ -813,7 +882,14 @@ class BacktestDatabase:
             """, (run_id,))
         rows = cursor.fetchall()
         conn.close()
-        return [dict(row) for row in rows]
+        result = []
+        for row in rows:
+            item = dict(row)
+            for field in ("native_price", "native_value", "fx_rate"):
+                if item.get(field) is None:
+                    item.pop(field, None)
+            result.append(item)
+        return result
 
     def get_decisions(self, run_id: str) -> List[Dict]:
         conn = self._get_connection()

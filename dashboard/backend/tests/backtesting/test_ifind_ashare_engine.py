@@ -37,10 +37,18 @@ class RecordingProvider:
     def __init__(self, bars):
         self.bars = bars
         self.calls = []
+        self.fx_calls = []
 
     def fetch_bars(self, symbols, start, end):
         self.calls.append((symbols, start, end))
         return {symbol: self.bars[symbol] for symbol in symbols}
+
+    def fetch_usd_cny(self, symbols, start, end):
+        self.fx_calls.append((symbols, start, end))
+        return {
+            datetime(2026, 3, 31).date(): 7.0,
+            datetime(2026, 4, 15).date(): 7.1,
+        }
 
 
 class RecordingDB:
@@ -114,6 +122,8 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
 
     backtester.load_data()
     assert provider.calls == [(A_SHARE_DEMO_6_SYMBOLS, START, END)]
+    assert provider.fx_calls == [(A_SHARE_DEMO_6_SYMBOLS, START, END)]
+    assert backtester.native_initial_capital == pytest.approx(7_000)
     backtester.calculate_indicators()
 
     agent_id, agent_curve = backtester.run_agent_backtest()
@@ -136,7 +146,25 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
         "symbols": list(A_SHARE_DEMO_6_SYMBOLS),
+        "native_currency": "CNY",
+        "reporting_currency": "USD",
+        "fx_pair": "USD/CNY",
+        "fx_source": "ifind_history_currency_conversion",
+        "fx_policy": "daily_implied_median_forward_fill",
+        "fx_symbols": list(A_SHARE_DEMO_6_SYMBOLS),
+        "fx_max_relative_deviation": 0.0025,
+        "fx_start_rate": 7.0,
+        "fx_end_rate": 7.1,
+        "fx_market_start_date": "2026-04-01",
+        "fx_market_end_date": "2026-04-21",
+        "fx_observation_start_date": "2026-03-31",
+        "fx_observation_end_date": "2026-04-15",
+        "native_initial_capital": 7_000.0,
     }
+    first_equity = recording_db.equity_points[0][1][0]
+    assert first_equity["equity"] == pytest.approx(1_000)
+    assert first_equity["native_equity"] == pytest.approx(7_000)
+    assert first_equity["fx_rate"] == pytest.approx(7.0)
     assert {run["metadata"]["data_source"] for run in recording_db.runs} == {
         IFIND_ASHARE
     }
@@ -167,8 +195,10 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
     assert factory_calls == [(IFIND_ASHARE, CSI300_SAMPLE_20_2026H2)]
     assert backtester.symbols == CSI300_SAMPLE_20_2026H2_SYMBOLS
     assert provider.calls == [(CSI300_SAMPLE_20_2026H2_SYMBOLS, START, END)]
+    assert provider.fx_calls == [(CSI300_SAMPLE_20_2026H2_SYMBOLS, START, END)]
     assert backtester.use_llm is False
-    assert backtester._run_metadata() == {
+    metadata = backtester._run_metadata()
+    assert metadata == {
         "data_source": IFIND_ASHARE,
         "market": "CN",
         "universe": CSI300_SAMPLE_20_2026H2,
@@ -177,6 +207,20 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
         "symbols": list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
+        "native_currency": "CNY",
+        "reporting_currency": "USD",
+        "fx_pair": "USD/CNY",
+        "fx_source": "ifind_history_currency_conversion",
+        "fx_policy": "daily_implied_median_forward_fill",
+        "fx_symbols": list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
+        "fx_max_relative_deviation": 0.0025,
+        "fx_start_rate": 7.0,
+        "fx_end_rate": 7.1,
+        "fx_market_start_date": "2026-04-01",
+        "fx_market_end_date": "2026-04-21",
+        "fx_observation_start_date": "2026-03-31",
+        "fx_observation_end_date": "2026-04-15",
+        "native_initial_capital": 7_000.0,
     }
 
 
@@ -256,6 +300,10 @@ def test_ifind_registered_universe_runs_explicit_llm_with_strict_market_context(
             "timeframe": "60m",
             "symbols": list(symbols),
             "paper_backtest": True,
+            "native_currency": "CNY",
+            "reporting_currency": "USD",
+            "fx_pair": "USD/CNY",
+            "fx_source": "iFinD Historical Conversion Rate",
         }
         for call in decision_calls
     )
@@ -393,7 +441,8 @@ def test_ifind_buyhold_passes_fixed_symbols_and_timezone_to_baselines(monkeypatc
     provider = RecordingProvider(make_cn_bars())
     monkeypatch.setattr(engine_module, "create_market_data_provider", lambda _source, universe=None: provider)
     backtester = HourlyBacktester(START, END, use_llm=False, data_source=IFIND_ASHARE)
-    backtester.all_data = make_cn_bars()
+    backtester.load_data()
+    monkeypatch.setattr(engine_module, "db", RecordingDB())
     captured = {}
 
     def fake_generate_baselines(**kwargs):
@@ -418,6 +467,7 @@ def test_ifind_buyhold_passes_fixed_symbols_and_timezone_to_baselines(monkeypatc
     assert curve
     assert captured["symbols_list"] == list(A_SHARE_DEMO_6_SYMBOLS)
     assert captured["market_timezone"] == "Asia/Shanghai"
+    assert captured["currency_context"] is backtester.currency_context
 
 
 def test_ifind_djia_baseline_is_a_noop(monkeypatch):

@@ -48,6 +48,16 @@ class SpyAdapter:
         return self.result
 
 
+class SpyFxProvider:
+    def __init__(self, result=None):
+        self.result = {date(2026, 3, 31): 7.0} if result is None else result
+        self.calls = []
+
+    def fetch_usd_cny(self, symbols, start, end):
+        self.calls.append((symbols, start, end))
+        return self.result
+
+
 def valid_bar_times(count=52):
     values = []
     current = START
@@ -116,6 +126,26 @@ def test_fetches_fixed_universe_once_and_passes_payload_to_adapter():
             },
         )
     ]
+
+
+def test_fetches_historical_fx_for_the_same_registered_universe():
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        IFindAshareProvider,
+    )
+
+    client = SpyClient()
+    fx_provider = SpyFxProvider()
+    provider = IFindAshareProvider(client=client, fx_provider=fx_provider)
+
+    result = provider.fetch_usd_cny(
+        list(reversed(A_SHARE_DEMO_6_SYMBOLS)),
+        "2026-04-01",
+        "2026-05-01",
+    )
+
+    assert result == {date(2026, 3, 31): 7.0}
+    assert fx_provider.calls == [(A_SHARE_DEMO_6_SYMBOLS, START, END)]
+    assert client.calls == []
 
 
 def test_fetches_selected_csi300_sample20_in_registered_order():

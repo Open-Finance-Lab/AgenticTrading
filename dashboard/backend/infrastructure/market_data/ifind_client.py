@@ -1,4 +1,4 @@
-"""Secret-safe HTTP client for iFinD historical hourly bars."""
+"""Secret-safe HTTP client for iFinD historical market data."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://quantapi.51ifind.com"
 HIGH_FREQUENCY_ENDPOINT = "/api/v1/high_frequency"
+HISTORY_QUOTATION_ENDPOINT = "/api/v1/cmd_history_quotation"
 DEFAULT_TIMEOUT = (3.0, 20.0)
 _RETRY_DELAYS = (0.5, 1.0)
 
@@ -57,7 +58,7 @@ class IFindBusinessError(IFindClientError):
 
 
 class IFindHttpClient:
-    """Fetch official iFinD 60-minute bars without interpreting table data."""
+    """Fetch official iFinD responses without interpreting table data."""
 
     def __init__(
         self,
@@ -95,8 +96,51 @@ class IFindHttpClient:
     ) -> Mapping[str, object]:
         """Return the decoded official response for a half-open date window."""
         normalized_symbols = self._validate_request(symbols, start, end)
-        payload = self._build_payload(normalized_symbols, start, end)
-        url = f"{self._base_url}{HIGH_FREQUENCY_ENDPOINT}"
+        payload = self._build_hourly_payload(normalized_symbols, start, end)
+        return self._request_json(
+            HIGH_FREQUENCY_ENDPOINT,
+            normalized_symbols,
+            start,
+            end,
+            payload,
+        )
+
+    def fetch_daily_closes(
+        self,
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+        *,
+        currency: str,
+    ) -> Mapping[str, object]:
+        """Fetch unadjusted daily closes in RMB or iFinD's USD currency code."""
+        normalized_symbols = self._validate_request(symbols, start, end)
+        normalized_currency = str(currency or "").strip().upper()
+        if normalized_currency not in {"RMB", "MHB"}:
+            raise IFindRequestError("currency must be RMB or MHB")
+        payload = self._build_daily_close_payload(
+            normalized_symbols,
+            start,
+            end,
+            normalized_currency,
+        )
+        return self._request_json(
+            HISTORY_QUOTATION_ENDPOINT,
+            normalized_symbols,
+            start,
+            end,
+            payload,
+        )
+
+    def _request_json(
+        self,
+        endpoint: str,
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+        payload: Mapping[str, object],
+    ) -> Mapping[str, object]:
+        url = f"{self._base_url}{endpoint}"
         headers = {
             "Content-Type": "application/json",
             "access_token": self._token,
@@ -116,7 +160,8 @@ class IFindHttpClient:
                     self._sleep(_RETRY_DELAYS[attempt])
                     continue
                 message = self._failure_message(
-                    normalized_symbols,
+                    endpoint,
+                    symbols,
                     start,
                     end,
                     status_code=None,
@@ -126,7 +171,8 @@ class IFindHttpClient:
                 raise IFindTransportError(message) from None
             except requests.RequestException:
                 message = self._failure_message(
-                    normalized_symbols,
+                    endpoint,
+                    symbols,
                     start,
                     end,
                     status_code=None,
@@ -142,7 +188,8 @@ class IFindHttpClient:
                     self._sleep(_RETRY_DELAYS[attempt])
                     continue
                 message = self._failure_message(
-                    normalized_symbols,
+                    endpoint,
+                    symbols,
                     start,
                     end,
                     status_code=status_code,
@@ -155,7 +202,8 @@ class IFindHttpClient:
                 decoded = response.json()
             except ValueError:
                 message = self._failure_message(
-                    normalized_symbols,
+                    endpoint,
+                    symbols,
                     start,
                     end,
                     status_code=status_code,
@@ -166,7 +214,8 @@ class IFindHttpClient:
 
             if not isinstance(decoded, Mapping):
                 message = self._failure_message(
-                    normalized_symbols,
+                    endpoint,
+                    symbols,
                     start,
                     end,
                     status_code=status_code,
@@ -189,7 +238,8 @@ class IFindHttpClient:
                     str(errorcode) if errorcode is not None else "unavailable"
                 )
                 message = self._failure_message(
-                    normalized_symbols,
+                    endpoint,
+                    symbols,
                     start,
                     end,
                     status_code=status_code,
@@ -224,7 +274,7 @@ class IFindHttpClient:
         return normalized_symbols
 
     @staticmethod
-    def _build_payload(
+    def _build_hourly_payload(
         symbols: Sequence[str],
         start: date,
         end: date,
@@ -245,7 +295,29 @@ class IFindHttpClient:
         }
 
     @staticmethod
+    def _build_daily_close_payload(
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+        currency: str,
+    ) -> dict[str, object]:
+        effective_last_day = end - timedelta(days=1)
+        return {
+            "codes": ",".join(symbols),
+            "indicators": "close",
+            "startdate": start.isoformat(),
+            "enddate": effective_last_day.isoformat(),
+            "functionpara": {
+                "Interval": "D",
+                "CPS": "1",
+                "Currency": currency,
+                "Fill": "Blank",
+            },
+        }
+
+    @staticmethod
     def _failure_message(
+        endpoint: str,
         symbols: Sequence[str],
         start: date,
         end: date,
@@ -256,7 +328,7 @@ class IFindHttpClient:
         status = "none" if status_code is None else str(status_code)
         return (
             "iFinD request failed "
-            f"endpoint={HIGH_FREQUENCY_ENDPOINT} "
+            f"endpoint={endpoint} "
             f"symbols={len(symbols)} "
             f"start={start.isoformat()} "
             f"end={end.isoformat()} "

@@ -63,6 +63,8 @@ class MarketProfile:
     default_decision_source: str
     allowed_decision_sources: tuple[str, ...]
     index_baseline_enabled: bool
+    native_currency: str
+    reporting_currency: str
 
     @property
     def decision_source(self) -> str:
@@ -92,6 +94,8 @@ _MARKET_PROFILES = {
             LLM_DECISION_SOURCE,
         ),
         index_baseline_enabled=True,
+        native_currency="USD",
+        reporting_currency="USD",
     ),
     (VNPY_SIMULATION, "djia_30"): MarketProfile(
         data_source=VNPY_SIMULATION,
@@ -104,6 +108,8 @@ _MARKET_PROFILES = {
         default_decision_source=RULE_BASED_DECISION_SOURCE,
         allowed_decision_sources=(RULE_BASED_DECISION_SOURCE,),
         index_baseline_enabled=True,
+        native_currency="USD",
+        reporting_currency="USD",
     ),
     (IFIND_ASHARE, A_SHARE_DEMO_6): MarketProfile(
         data_source=IFIND_ASHARE,
@@ -119,6 +125,8 @@ _MARKET_PROFILES = {
             LLM_DECISION_SOURCE,
         ),
         index_baseline_enabled=False,
+        native_currency="CNY",
+        reporting_currency="USD",
     ),
     (IFIND_ASHARE, CSI300_SAMPLE_20_2026H2): MarketProfile(
         data_source=IFIND_ASHARE,
@@ -134,6 +142,8 @@ _MARKET_PROFILES = {
             LLM_DECISION_SOURCE,
         ),
         index_baseline_enabled=False,
+        native_currency="CNY",
+        reporting_currency="USD",
     ),
 }
 

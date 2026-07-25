@@ -143,6 +143,14 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
                 "decision_source": "rule_based",
                 "benchmark": "equal_weight_buyhold",
                 "symbols": ["600519.SH", "601318.SH"],
+                "native_currency": "CNY",
+                "reporting_currency": "USD",
+                "native_initial_capital": 7_000,
+                "fx_pair": "USD/CNY",
+                "fx_source": "ifind_history_currency_conversion",
+                "fx_policy": "daily_implied_median_forward_fill",
+                "fx_start_rate": 7.0,
+                "fx_end_rate": 7.1,
             }
         )
     )
@@ -155,6 +163,13 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
     assert response.decision_source == "rule_based"
     assert response.benchmark == "equal_weight_buyhold"
     assert response.symbols == ["600519.SH", "601318.SH"]
+    assert response.native_currency == "CNY"
+    assert response.reporting_currency == "USD"
+    assert response.native_initial_capital == 7_000
+    assert response.fx_pair == "USD/CNY"
+    assert response.fx_source == "ifind_history_currency_conversion"
+    assert response.fx_start_rate == 7.0
+    assert response.fx_end_rate == 7.1
 
 
 def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
@@ -167,6 +182,12 @@ def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
     assert response.decision_source is None
     assert response.benchmark is None
     assert response.symbols is None
+    assert response.native_currency is None
+    assert response.reporting_currency is None
+    assert response.native_initial_capital is None
+    assert response.fx_pair is None
+    assert response.fx_source is None
+    assert response.fx_start_rate is None
 
 
 @pytest.fixture(autouse=True)

@@ -21,6 +21,7 @@ from datetime import datetime, time
 
 from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
+from dashboard.backend.domain.backtesting.currency import CurrencyContext
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
 )
@@ -81,6 +82,38 @@ def _timestamps_in_window(timestamps, start_date: str, end_date: str, market_tim
         for timestamp in timestamps
         if start <= timestamp.astimezone(market_tz).date() <= end
     ]
+
+
+def _equity_point(
+    timestamp,
+    equity: float,
+    cash: float,
+    positions_value: float,
+    currency_context: CurrencyContext | None,
+) -> Dict:
+    record = {
+        "timestamp": timestamp,
+        "equity": equity,
+        "cash": cash,
+        "positions_value": positions_value,
+        "daily_return": 0,
+    }
+    if currency_context is not None:
+        record = currency_context.reporting_equity_record(record)
+    record["timestamp"] = (
+        timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
+    )
+    for field in (
+        "equity",
+        "cash",
+        "positions_value",
+        "native_equity",
+        "native_cash",
+        "native_positions_value",
+    ):
+        if field in record:
+            record[field] = round(float(record[field]), 2)
+    return record
 
 
 class BaselineGenerator:
@@ -193,6 +226,7 @@ class BaselineGenerator:
         initial_capital: float = INITIAL_CAPITAL,
         symbols_to_buy: Optional[List[str]] = None,
         market_timezone: str = "US/Eastern",
+        currency_context: CurrencyContext | None = None,
     ) -> List[Dict]:
         """
         Generate Buy & Hold baseline curve.
@@ -241,19 +275,33 @@ class BaselineGenerator:
         first_ts = all_timestamps[0]
 
         # Buy equal amounts of available stocks
+        native_initial_capital = (
+            currency_context.to_native(initial_capital, first_ts)
+            if currency_context is not None
+            else initial_capital
+        )
+        native_symbol = (
+            "¥"
+            if currency_context is not None
+            and currency_context.native_currency == "CNY"
+            else "$"
+        )
         positions = {}
-        cash = initial_capital
+        cash = native_initial_capital
         num_symbols = len(bars_subset)
         
         print(f"\n   📋 Baseline buying {num_symbols} stocks equally:")
-        print(f"      Allocation per stock: ${initial_capital / num_symbols:,.0f}")
+        print(
+            f"      Allocation per stock: {native_symbol}"
+            f"{native_initial_capital / num_symbols:,.0f}"
+        )
         
         for symbol, df in bars_subset.items():
             if first_ts not in df.index:
                 continue
             
             price = df.loc[first_ts, "close"]
-            allocation = initial_capital / num_symbols
+            allocation = native_initial_capital / num_symbols
             shares = int(allocation / price)
             
             if shares > 0:
@@ -261,8 +309,8 @@ class BaselineGenerator:
                 cash -= shares * price
         
         print(f"      Stocks bought: {len(positions)} ({', '.join(sorted(positions.keys())[:10])}{'...' if len(positions) > 10 else ''})")
-        print(f"      Total invested: ${initial_capital - cash:,.0f}")
-        print(f"      Cash remaining: ${cash:,.0f}")
+        print(f"      Total invested: {native_symbol}{native_initial_capital - cash:,.0f}")
+        print(f"      Cash remaining: {native_symbol}{cash:,.0f}")
         
         # Build forward-filled price cache for smooth equity curve
         price_cache = {}
@@ -293,13 +341,15 @@ class BaselineGenerator:
             
             total_equity = cash + positions_value
             
-            equity_curve.append({
-                "timestamp": timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
-                "equity": round(total_equity, 2),
-                "cash": round(cash, 2),
-                "positions_value": round(positions_value, 2),
-                "daily_return": 0
-            })
+            equity_curve.append(
+                _equity_point(
+                    timestamp,
+                    total_equity,
+                    cash,
+                    positions_value,
+                    currency_context,
+                )
+            )
         
         return equity_curve
     
@@ -311,6 +361,7 @@ class BaselineGenerator:
         initial_capital: float = INITIAL_CAPITAL,
         symbols_to_track: Optional[List[str]] = None,
         market_timezone: str = "US/Eastern",
+        currency_context: CurrencyContext | None = None,
     ) -> List[Dict]:
         """
         Generate Index baseline curve (equal-weight index).
@@ -354,6 +405,17 @@ class BaselineGenerator:
             return []
 
         first_ts = all_timestamps[0]
+        native_initial_capital = (
+            currency_context.to_native(initial_capital, first_ts)
+            if currency_context is not None
+            else initial_capital
+        )
+        native_symbol = (
+            "¥"
+            if currency_context is not None
+            and currency_context.native_currency == "CNY"
+            else "$"
+        )
 
         # Get initial prices
         initial_prices = {}
@@ -385,7 +447,7 @@ class BaselineGenerator:
         
         print(f"\n   📋 Index baseline tracking {num_symbols} stocks equally (equal-weight):")
         print(f"      Stocks tracked: {', '.join(sorted(initial_prices.keys())[:10])}{'...' if len(initial_prices) > 10 else ''}")
-        print(f"      Initial capital: ${initial_capital:,.0f}")
+        print(f"      Initial capital: {native_symbol}{native_initial_capital:,.0f}")
         print(f"      Portfolio: 100% invested in {num_symbols}-stock equal-weight index")
         print()
         
@@ -402,19 +464,21 @@ class BaselineGenerator:
             
             if valid_count > 0:
                 avg_return = index_return / valid_count
-                total_equity = initial_capital * (1 + avg_return)
+                total_equity = native_initial_capital * (1 + avg_return)
                 positions_value = total_equity  # All in positions, no cash
             else:
-                total_equity = initial_capital
+                total_equity = native_initial_capital
                 positions_value = 0
             
-            equity_curve.append({
-                "timestamp": timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
-                "equity": round(total_equity, 2),
-                "cash": 0,
-                "positions_value": round(positions_value, 2),
-                "daily_return": 0
-            })
+            equity_curve.append(
+                _equity_point(
+                    timestamp,
+                    total_equity,
+                    0,
+                    positions_value,
+                    currency_context,
+                )
+            )
         
         return equity_curve
 
@@ -426,6 +490,7 @@ def generate_baselines(
     initial_capital: float = INITIAL_CAPITAL,
     symbols_list: Optional[List[str]] = None,
     market_timezone: str = "US/Eastern",
+    currency_context: CurrencyContext | None = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Generate both baselines (Buy & Hold, Index).
@@ -449,6 +514,7 @@ def generate_baselines(
         initial_capital,
         symbols_list,
         market_timezone,
+        currency_context,
     )
     
     index_curve = generator.generate_index_baseline(
@@ -458,6 +524,7 @@ def generate_baselines(
         initial_capital,
         symbols_list,
         market_timezone,
+        currency_context,
     )
     
     return buyhold_curve, index_curve

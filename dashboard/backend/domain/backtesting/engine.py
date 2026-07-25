@@ -24,6 +24,10 @@ import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.baseline_generator import generate_baselines
 from dashboard.backend.infrastructure.llm.validator import DJIA_30, TOP_10_STOCKS as TOP_10
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
+from dashboard.backend.domain.backtesting.currency import (
+    CurrencyContext,
+    CurrencyContextError,
+)
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.metrics import (
     calculate_sharpe,
@@ -31,6 +35,11 @@ from dashboard.backend.domain.backtesting.metrics import (
 )
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.infrastructure.market_data.alpaca_bars import MarketDataUnavailableError
+from dashboard.backend.infrastructure.market_data.ifind_client import IFindClientError
+from dashboard.backend.infrastructure.market_data.ifind_fx import (
+    IFindFxError,
+    MAX_RELATIVE_DEVIATION,
+)
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
     create_market_data_provider,
@@ -110,6 +119,13 @@ class HourlyBacktester:
         self.progress_file = (progress_file or "").strip() or None
         self.data_source = data_source
         self.profile = get_market_profile(data_source, universe)
+        self.currency_context: CurrencyContext | None = None
+        self.native_initial_capital = self.initial_capital
+        if self.profile.native_currency == self.profile.reporting_currency:
+            self.currency_context = CurrencyContext.identity(
+                self.profile.native_currency,
+                self.profile.timezone,
+            )
         requested_decision_source = (
             decision_source
             if decision_source is not None
@@ -177,7 +193,9 @@ class HourlyBacktester:
     
     def _serialize_trades(self, trades: List[Dict]) -> List[Dict]:
         serialized = []
-        for trade in trades:
+        currency_context = self._require_currency_context()
+        for native_trade in trades:
+            trade = currency_context.reporting_trade(native_trade)
             ts = trade.get("timestamp")
             if hasattr(ts, "isoformat"):
                 ts = ts.isoformat()
@@ -190,17 +208,19 @@ class HourlyBacktester:
                 or trade.get("value")
                 or quantity * price
             )
-            serialized.append(
-                {
-                    "timestamp": ts,
-                    "symbol": trade.get("symbol"),
-                    "side": side,
-                    "quantity": quantity,
-                    "price": price,
-                    "value": value,
-                    "reason": trade.get("reason", ""),
-                }
-            )
+            record = {
+                "timestamp": ts,
+                "symbol": trade.get("symbol"),
+                "side": side,
+                "quantity": quantity,
+                "price": price,
+                "value": value,
+                "reason": trade.get("reason", ""),
+            }
+            for field in ("native_price", "native_value", "fx_rate"):
+                if field in trade:
+                    record[field] = float(trade[field])
+            serialized.append(record)
         return serialized
 
     def _publish_live_progress(self, step: int, total_steps: int, manager) -> None:
@@ -221,6 +241,16 @@ class HourlyBacktester:
                     "equity": float(entry.get("equity", 0) or 0),
                     "cash": float(entry.get("cash", 0) or 0),
                     "positions_value": float(entry.get("positions_value", 0) or 0),
+                    **{
+                        field: float(entry[field])
+                        for field in (
+                            "native_equity",
+                            "native_cash",
+                            "native_positions_value",
+                            "fx_rate",
+                        )
+                        if field in entry
+                    },
                 }
             )
         payload = {
@@ -258,6 +288,44 @@ class HourlyBacktester:
             )
         if self.data_source == IFIND_ASHARE:
             self._ifind_common_start = self._validate_ifind_loaded_data()
+            self._initialize_ifind_currency_context()
+
+    def _initialize_ifind_currency_context(self) -> None:
+        """Load the iFinD historical conversion series for this A-share run."""
+        try:
+            rates = self.data_loader.fetch_usd_cny(
+                self.symbols,
+                self.start_date,
+                self.end_date,
+            )
+            context = CurrencyContext(
+                native_currency=self.profile.native_currency,
+                reporting_currency=self.profile.reporting_currency,
+                timezone=self.profile.timezone,
+                rates=rates,
+                fx_source="ifind_history_currency_conversion",
+                fx_policy="daily_implied_median_forward_fill",
+            )
+            context.rate_at(self._ifind_common_start)
+        except (IFindClientError, IFindFxError, CurrencyContextError, AttributeError) as exc:
+            raise MarketDataUnavailableError(
+                "iFinD historical conversion rate is unavailable; check the "
+                "historical quotation currency permission, token, and date range"
+            ) from exc
+
+        self.currency_context = context
+        self.native_initial_capital = context.to_native(
+            self.initial_capital,
+            self._ifind_common_start,
+        )
+
+    def _require_currency_context(self) -> CurrencyContext:
+        context = getattr(self, "currency_context", None)
+        if context is None:
+            raise MarketDataUnavailableError(
+                "Currency context is not initialized; load market data before running"
+            )
+        return context
 
     def _validate_ifind_loaded_data(self):
         """Require an exact, sufficiently deep A-share batch with a common bar."""
@@ -317,9 +385,12 @@ class HourlyBacktester:
         Provenance is the only thing the baselines share with the agent: they
         make no model calls and run no pipeline, so anything LLM-shaped belongs
         in ``_agent_run_metadata`` instead."""
+        profile = self._effective_profile()
         metadata = {
             "data_source": self.data_source,
             "symbols": list(self.symbols),
+            "native_currency": profile.native_currency,
+            "reporting_currency": profile.reporting_currency,
         }
         if self.data_source == IFIND_ASHARE:
             profile = self._effective_profile()
@@ -331,6 +402,30 @@ class HourlyBacktester:
                     "timezone": profile.timezone,
                     "decision_source": RULE_BASED_DECISION_SOURCE,
                     "benchmark": profile.benchmark,
+                }
+            )
+            context = self._require_currency_context()
+            timestamps = [
+                timestamp
+                for frame in self.all_data.values()
+                for timestamp in frame.index
+            ]
+            first_timestamp = min(timestamps)
+            last_timestamp = max(timestamps)
+            metadata.update(
+                {
+                    "fx_pair": context.fx_pair,
+                    "fx_source": context.fx_source,
+                    "fx_policy": context.fx_policy,
+                    "fx_symbols": list(self.symbols),
+                    "fx_max_relative_deviation": MAX_RELATIVE_DEVIATION,
+                    "fx_start_rate": context.rate_at(first_timestamp),
+                    "fx_end_rate": context.rate_at(last_timestamp),
+                    "fx_market_start_date": context.market_date(first_timestamp).isoformat(),
+                    "fx_market_end_date": context.market_date(last_timestamp).isoformat(),
+                    "fx_observation_start_date": min(context.rates).isoformat(),
+                    "fx_observation_end_date": max(context.rates).isoformat(),
+                    "native_initial_capital": self.native_initial_capital,
                 }
             )
         return metadata
@@ -357,17 +452,28 @@ class HourlyBacktester:
 
     def _llm_market_context(self) -> Dict:
         """Return the fixed market facts supplied to every LLM decision."""
-        return {
+        context = self._require_currency_context()
+        result = {
             "market": self.profile.market,
             "timezone": self.profile.timezone,
             "timeframe": self.profile.timeframe,
             "symbols": list(self.symbols),
             "paper_backtest": True,
+            "native_currency": self.profile.native_currency,
+            "reporting_currency": self.profile.reporting_currency,
         }
+        if context.requires_conversion:
+            result["fx_pair"] = context.fx_pair
+            result["fx_source"] = "iFinD Historical Conversion Rate"
+        return result
 
-    def _current_equity(self, manager: PortfolioManager) -> float:
+    def _current_equity(self, manager: PortfolioManager, timestamp=None) -> float:
         if manager.equity_history:
-            return float(manager.equity_history[-1].get("equity") or manager.cash)
+            equity = manager.equity_history[-1].get("equity")
+            if equity is not None:
+                return float(equity)
+        if timestamp is not None:
+            return self._require_currency_context().to_reporting(manager.cash, timestamp)
         return float(manager.cash)
 
     def _market_hours_only(self, timestamps):
@@ -448,7 +554,7 @@ class HourlyBacktester:
         llm_model = "rule-based"  # Default
         
         manager = PortfolioManager(
-            initial_capital=self.initial_capital,
+            initial_capital=self.native_initial_capital,
             allowed_symbols=self.symbols,
         )
         _decision_steps, post_trade_steps = split_pipeline(self.pipeline)
@@ -513,7 +619,7 @@ class HourlyBacktester:
             if day_episode["trading_day"] != day_key:
                 day_episode = {
                     "trading_day": day_key,
-                    "day_start_equity": self._current_equity(manager),
+                    "day_start_equity": self._current_equity(manager, timestamp),
                     "trade_start_index": len(manager.trades),
                     "latest_step_outputs": [],
                 }
@@ -557,6 +663,11 @@ class HourlyBacktester:
             
             # Update equity (uses forward-filled prices for smooth valuation)
             manager.update_equity(market_data, price_cache, timestamp)
+            manager.equity_history[-1] = (
+                self._require_currency_context().reporting_equity_record(
+                    manager.equity_history[-1]
+                )
+            )
             self._publish_live_progress(i + 1, total_steps, manager)
 
             if post_trade_steps and is_last_bar_of_trading_day(all_timestamps, i):
@@ -611,7 +722,7 @@ class HourlyBacktester:
         )
 
         db.insert_equity_points(run_id, equity_curve)
-        db.insert_trades(run_id, manager.trades)
+        db.insert_trades(run_id, self._serialize_trades(manager.trades))
         
         print(f"\n  ✅ Agent backtest complete")
         print(f"     • Run ID: {run_id}")
@@ -655,6 +766,7 @@ class HourlyBacktester:
             initial_capital=self.initial_capital,
             symbols_list=bh_symbols,
             market_timezone=self._effective_profile().timezone,
+            currency_context=self._require_currency_context(),
         )
         
         if not equity_history:
@@ -717,6 +829,7 @@ class HourlyBacktester:
             initial_capital=self.initial_capital,
             market_timezone=self._effective_profile().timezone,
             symbols_list=list(DJIA_30),
+            currency_context=self._require_currency_context(),
         )
         
         if not equity_history:

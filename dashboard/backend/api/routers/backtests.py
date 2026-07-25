@@ -193,6 +193,10 @@ class EquityPoint(BaseModel):
     cash: float
     positions_value: float
     daily_return: Optional[float] = None
+    native_equity: Optional[float] = None
+    native_cash: Optional[float] = None
+    native_positions_value: Optional[float] = None
+    fx_rate: Optional[float] = None
 
 
 class RunMetadata(BaseModel):
@@ -219,6 +223,14 @@ class RunMetadata(BaseModel):
     decision_source: Optional[str] = None
     benchmark: Optional[str] = None
     symbols: Optional[List[str]] = None
+    native_currency: Optional[str] = None
+    reporting_currency: Optional[str] = None
+    native_initial_capital: Optional[float] = None
+    fx_pair: Optional[str] = None
+    fx_source: Optional[str] = None
+    fx_policy: Optional[str] = None
+    fx_start_rate: Optional[float] = None
+    fx_end_rate: Optional[float] = None
 
 
 class EquityCurve(BaseModel):
@@ -263,6 +275,14 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "decision_source",
             "benchmark",
             "symbols",
+            "native_currency",
+            "reporting_currency",
+            "native_initial_capital",
+            "fx_pair",
+            "fx_source",
+            "fx_policy",
+            "fx_start_rate",
+            "fx_end_rate",
         ):
             if field in metadata:
                 payload[field] = metadata[field]

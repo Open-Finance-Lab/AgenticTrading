@@ -150,12 +150,16 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
     assert backtester._agent_run_metadata() == {
         "data_source": "alpaca",
         "symbols": ["AAPL", "MSFT"],
+        "native_currency": "USD",
+        "reporting_currency": "USD",
         "llm_max_output_tokens": 777,
     }
     backtester.use_llm = False
     assert backtester._agent_run_metadata() == {
         "data_source": "alpaca",
         "symbols": ["AAPL", "MSFT"],
+        "native_currency": "USD",
+        "reporting_currency": "USD",
     }
 
 
@@ -184,6 +188,8 @@ def test_baseline_metadata_is_provenance_only(monkeypatch):
     assert backtester._run_metadata() == {
         "data_source": "vnpy_simulation",
         "symbols": ["AAPL"],
+        "native_currency": "USD",
+        "reporting_currency": "USD",
     }
 
 

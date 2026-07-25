@@ -77,10 +77,26 @@ class _FakeIFindClient:
     def __init__(self, payload: dict) -> None:
         self.payload = payload
         self.calls = []
+        self.fx_calls = []
 
     def fetch_hourly_bars(self, symbols, start, end):
         self.calls.append((tuple(symbols), start, end))
         return self.payload
+
+    def fetch_daily_closes(self, symbols, start, end, *, currency):
+        self.fx_calls.append((tuple(symbols), start, end, currency))
+        tables = []
+        for offset, symbol in enumerate(symbols):
+            usd_close = 10.0 + offset
+            close = usd_close * 7.0 if currency == "RMB" else usd_close
+            tables.append(
+                {
+                    "thscode": symbol,
+                    "time": ["2026-03-31"],
+                    "table": {"close": [close]},
+                }
+            )
+        return {"errorcode": 0, "errmsg": "", "tables": tables}
 
 
 class _CapturingThread:
@@ -322,6 +338,7 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
 
     assert backtests_router.backtest_status["error"] is None
     assert fake_ifind.calls == [(symbols, START, END)]
+    assert [call[3] for call in fake_ifind.fx_calls] == ["RMB", "MHB"]
     assert len(fake_llm.messages.calls) == 60
     assert all(call["model"] == "gpt-5.2" for call in fake_llm.messages.calls)
     assert all("Chinese A-share" in call["system"] for call in fake_llm.messages.calls)
@@ -336,6 +353,10 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     assert agent_run["metadata"]["decision_source"] == "llm"
     assert agent_run["metadata"]["symbols"] == list(symbols)
     assert agent_run["metadata"]["timezone"] == "Asia/Shanghai"
+    assert agent_run["metadata"]["native_currency"] == "CNY"
+    assert agent_run["metadata"]["reporting_currency"] == "USD"
+    assert agent_run["metadata"]["fx_start_rate"] == pytest.approx(7.0)
+    assert agent_run["metadata"]["native_initial_capital"] == pytest.approx(7_000)
     assert agent_run["llm_model"] == "gpt-5.2"
     assert agent_run["llm_calls"] == 60
     assert agent_run["input_tokens"] == 60 * 12
@@ -346,6 +367,7 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     assert test_db.get_equity_curve(agent_run["run_id"])
     assert test_db.get_equity_curve(buyhold_run["run_id"])
     assert test_db.get_trades(agent_run["run_id"]) == []
+    assert test_db.get_equity_curve(agent_run["run_id"])[0]["native_equity"] == pytest.approx(7_000)
 
     chart_response = TestClient(app).get(
         f"/api/backtest/{agent_run['run_id']}/chart-data",
@@ -446,6 +468,7 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
     backtest_hourly_agent.main()
 
     assert fake_client.calls == [(symbols, START, END)]
+    assert [call[3] for call in fake_client.fx_calls] == ["RMB", "MHB"]
     frames = observed["frames"]
     assert tuple(frames) == symbols
     assert all(len(frame) == 60 for frame in frames.values())
@@ -469,6 +492,20 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
         "decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
         "symbols": list(symbols),
+        "native_currency": "CNY",
+        "reporting_currency": "USD",
+        "fx_pair": "USD/CNY",
+        "fx_source": "ifind_history_currency_conversion",
+        "fx_policy": "daily_implied_median_forward_fill",
+        "fx_symbols": list(symbols),
+        "fx_max_relative_deviation": 0.0025,
+        "fx_start_rate": 7.0,
+        "fx_end_rate": 7.0,
+        "fx_market_start_date": "2026-04-01",
+        "fx_market_end_date": "2026-04-21",
+        "fx_observation_start_date": "2026-03-31",
+        "fx_observation_end_date": "2026-03-31",
+        "native_initial_capital": 7_000.0,
     }
     assert agent_run["metadata"] == expected_metadata
     assert buyhold_run["metadata"] == expected_metadata
