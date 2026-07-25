@@ -1,4 +1,5 @@
 import { Route, Switch, Router as WouterRouter } from 'wouter';
+import { Analytics } from '@vercel/analytics/react';
 import LandingPage from '@/pages/landing-page';
 
 // Simplified fallback for NotFound just in case
@@ -26,6 +27,7 @@ function App() {
   return (
     <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, '')}>
       <Router />
+      <Analytics />
     </WouterRouter>
   );
 }

@@ -70,5 +70,8 @@
     "vite": "^6.0.0",
     "wouter": "^3.3.5",
     "zod": "^3.24.0"
+  },
+  "dependencies": {
+    "@vercel/analytics": "^2.0.1"
   }
 }
