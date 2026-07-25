@@ -1,6 +1,5 @@
 import { Button } from "@/components/ui/button";
-
-const DISCORD_URL = "https://discord.gg/9HnQ6XDG98";
+import { SIGNUP_HREF } from "@/lib/cta";
 
 export function FooterCTA() {
   return (
@@ -12,14 +11,11 @@ export function FooterCTA() {
         </p>
         <h2 className="text-4xl md:text-5xl font-bold tracking-tighter mb-6">Ready to run your first idea?</h2>
         <p className="text-xl text-muted-foreground mb-10 max-w-xl mx-auto">
-          Start on Discord. Prove it in a backtest. Climb the board.
+          Create a free account. Prove an idea in a backtest. Climb the board.
         </p>
         <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
-          <Button size="lg" className="w-full sm:w-auto bg-[#5865F2] hover:bg-[#5865F2]/90 text-white border-transparent text-base h-12 px-8" asChild>
-            <a href={DISCORD_URL} target="_blank" rel="noopener noreferrer">Join Discord</a>
-          </Button>
-          <Button size="lg" variant="secondary" className="w-full sm:w-auto bg-secondary border-secondary-border text-secondary-foreground hover:bg-secondary/80 text-base h-12 px-8" asChild>
-            <a href="/app">Open Leaderboard</a>
+          <Button size="lg" className="w-full sm:w-auto bg-primary text-primary-foreground hover:bg-primary/90 text-base h-12 px-8" asChild>
+            <a href={SIGNUP_HREF}>Start Free</a>
           </Button>
         </div>
 

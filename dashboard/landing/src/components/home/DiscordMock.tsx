@@ -2,7 +2,6 @@ import type { ReactNode } from "react";
 import atlLogo from "@assets/atltransparent.png";
 import { STORY_PROMPT, STORY_SPECS } from "./storyline";
 
-const DISCORD_URL = "https://discord.gg/9HnQ6XDG98";
 const AGENT_NAME = "Alpha";
 
 type Msg = {
@@ -257,15 +256,6 @@ export function DiscordMock() {
           </div>
         </div>
       </div>
-
-      <a
-        href={DISCORD_URL}
-        target="_blank"
-        rel="noopener noreferrer"
-        className="discord-mock-cta"
-      >
-        Open in Discord →
-      </a>
     </div>
   );
 }

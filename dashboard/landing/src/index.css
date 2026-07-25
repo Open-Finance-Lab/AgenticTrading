@@ -798,22 +798,6 @@ html {
   color: var(--discord-muted);
 }
 
-.discord-mock-cta {
-  align-self: flex-end;
-  font-size: 12px;
-  font-weight: 600;
-  color: #fff;
-  background: var(--discord-blurple, #5865f2);
-  padding: 8px 14px;
-  border-radius: 8px;
-  text-decoration: none;
-  box-shadow: 0 4px 12px rgba(88, 101, 242, 0.28);
-}
-
-.discord-mock-cta:hover {
-  background: #4752c4;
-}
-
 @media (max-width: 639px) {
   .discord-mock-wrap {
     max-width: none;
