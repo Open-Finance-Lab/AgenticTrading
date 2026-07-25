@@ -594,6 +594,51 @@ function navigateToLeaderboard() {
 
 
 
+function initLandingPlaygroundChat() {
+    const root = document.getElementById('homePlaygroundChat');
+    if (!root || root.dataset.simStarted === '1') return;
+    root.dataset.simStarted = '1';
+
+    const steps = Array.from(root.querySelectorAll('.home-chat-step'));
+    let step = 0;
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    function revealThrough(n) {
+        steps.forEach((el) => {
+            const s = Number(el.dataset.step || 0);
+            if (s <= n) el.hidden = false;
+        });
+        root.dataset.step = String(n);
+        // Keep latest agent bubble in view as steps advance.
+        const latest = steps.find((el) => Number(el.dataset.step || 0) === n);
+        if (latest && typeof latest.scrollIntoView === 'function') {
+            latest.scrollIntoView({ block: 'nearest', behavior: reduceMotion ? 'auto' : 'smooth' });
+        }
+    }
+
+    if (reduceMotion) {
+        revealThrough(4);
+        return;
+    }
+
+    revealThrough(0);
+    const timer = setInterval(() => {
+        step += 1;
+        revealThrough(step);
+        if (step >= 4) clearInterval(timer);
+    }, 2200);
+}
+
+function initHomeGetStarted() {
+    document.getElementById('homeGetStartedBtn')?.addEventListener('click', () => {
+        if (typeof navigateToPage === 'function') {
+            navigateToPage('playground', { playgroundTab: 'agents' });
+            return;
+        }
+        document.getElementById('homeLiveSection')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+}
+
 function measureAppChromeHeight() {
     const header = document.querySelector('.header');
     const ticker = document.querySelector('.ticker-bar');
@@ -1778,6 +1823,8 @@ function initHomePage() {
         initMarketPulseTabs();
     }
     initActivityFeedHover();
+    initLandingPlaygroundChat();
+    initHomeGetStarted();
     initHomeSnapScroll();
     initHomeModules();
 
