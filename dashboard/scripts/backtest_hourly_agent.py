@@ -19,15 +19,7 @@ Usage:
 import sys
 import json
 import argparse
-import os
-import re
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
-import uuid
-import numpy as np
-import pandas as pd
-import requests
 
 # Bootstrap for non-package execution contexts: when this module is run directly
 # as a file (``python dashboard/scripts/backtest_hourly_agent.py``) or imported
@@ -45,9 +37,7 @@ if not __package__:
 
 from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.database import db
-import dashboard.backend.infrastructure.llm.token_cost as token_cost
-from dashboard.backend.baseline_generator import generate_baselines
-from dashboard.backend.infrastructure.llm.validator import create_safe_prompt, create_prompt, validate_llm_response, LLMTradingDecision, DJIA_30
+from dashboard.backend.infrastructure.llm.validator import DJIA_30
 
 # Optional: LLM integration. Phase 2C2 moved the Anthropic SDK import, the
 # default model name, and the LLM request/parse workflow into the canonical

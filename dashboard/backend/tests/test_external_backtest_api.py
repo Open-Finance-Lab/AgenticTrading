@@ -1,11 +1,11 @@
 """Tests for external agent backtest API."""
 
-import sys
-import uuid
-from pathlib import Path
-
 import pytest
 from fastapi.testclient import TestClient
+
+import dashboard.backend.app as app_module
+import dashboard.backend.database as db_module
+import dashboard.backend.domain.backtesting.external_run_service as svc
 
 from dashboard.backend.app import app
 from dashboard.backend.database import BacktestDatabase
@@ -18,10 +18,6 @@ from dashboard.backend.domain.backtesting.external_run_service import (
 
 @pytest.fixture
 def client(temp_db, monkeypatch):
-    import dashboard.backend.app as app_module
-    import dashboard.backend.database as db_module
-    import dashboard.backend.domain.backtesting.external_run_service as svc
-
     monkeypatch.setattr(app_module, "db", temp_db)
     monkeypatch.setattr(db_module, "db", temp_db)
     monkeypatch.setattr(svc, "db", temp_db)

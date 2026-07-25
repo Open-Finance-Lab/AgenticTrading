@@ -25,17 +25,19 @@ pg_only = pytest.mark.skipif(
 # --- dispatch tests ----------------------------------------------------------
 
 def test_build_strategy_store_defaults_to_sqlite(monkeypatch, capsys):
-    import dashboard.backend.domain.strategies.repository as strategies_module
+    from dashboard.backend.domain.strategies.repository import (
+        StrategyStore,
+        _build_strategy_store,
+    )
 
     monkeypatch.delenv("CONTENT_DATABASE_URL", raising=False)
-    store = strategies_module._build_strategy_store()
-    assert isinstance(store, strategies_module.StrategyStore)
+    store = _build_strategy_store()
+    assert isinstance(store, StrategyStore)
     assert "strategy_store backend: sqlite (ephemeral on Render)" in capsys.readouterr().out
 
 
 def test_build_strategy_store_picks_postgres_when_url_set(monkeypatch, capsys):
-    import dashboard.backend.domain.strategies.repository as strategies_module
-    import dashboard.backend.domain.strategies.repository_postgres as strategies_pg_module
+    from dashboard.backend.domain.strategies.repository import _build_strategy_store
 
     created = {}
 
@@ -44,11 +46,12 @@ def test_build_strategy_store_picks_postgres_when_url_set(monkeypatch, capsys):
             created["database_url"] = database_url
 
     monkeypatch.setattr(
-        strategies_pg_module, "PostgresStrategyStore", FakePostgresStrategyStore
+        "dashboard.backend.domain.strategies.repository_postgres.PostgresStrategyStore",
+        FakePostgresStrategyStore,
     )
     monkeypatch.setenv("CONTENT_DATABASE_URL", "postgresql://fake/db")
 
-    store = strategies_module._build_strategy_store()
+    store = _build_strategy_store()
 
     assert isinstance(store, FakePostgresStrategyStore)
     assert created["database_url"] == "postgresql://fake/db"
@@ -57,14 +60,17 @@ def test_build_strategy_store_picks_postgres_when_url_set(monkeypatch, capsys):
 
 def test_build_strategy_store_ignores_users_database_url(monkeypatch, capsys):
     """See the agent-store twin of this test (test_agent_store_postgres.py)."""
-    import dashboard.backend.domain.strategies.repository as strategies_module
+    from dashboard.backend.domain.strategies.repository import (
+        StrategyStore,
+        _build_strategy_store,
+    )
 
     monkeypatch.delenv("CONTENT_DATABASE_URL", raising=False)
     monkeypatch.setenv("USERS_DATABASE_URL", "postgresql://fake/users")
 
-    store = strategies_module._build_strategy_store()
+    store = _build_strategy_store()
 
-    assert isinstance(store, strategies_module.StrategyStore)
+    assert isinstance(store, StrategyStore)
     assert (
         "strategy_store backend: sqlite (ephemeral on Render)"
         in capsys.readouterr().out
@@ -135,13 +141,13 @@ def test_create_get_set_last_run_postgres(pg_strategy_store):
 
 @pg_only
 def test_create_retries_past_a_code_collision_postgres(pg_strategy_store, monkeypatch):
-    import dashboard.backend.domain.strategies.repository_postgres as strategies_pg_module
+    from dashboard.backend.domain.strategies.repository_postgres import secrets
 
     first = pg_strategy_store.create(prompt="first strategy")
 
     codes = iter([first["code"], "fresh456"])
     monkeypatch.setattr(
-        strategies_pg_module.secrets, "token_hex", lambda nbytes: next(codes)
+        secrets, "token_hex", lambda nbytes: next(codes)
     )
 
     second = pg_strategy_store.create(prompt="second strategy")
@@ -153,8 +159,8 @@ def test_create_retries_past_a_code_collision_postgres(pg_strategy_store, monkey
 def test_create_widens_code_space_after_20_collisions_postgres(
     pg_strategy_store, monkeypatch
 ):
-    import dashboard.backend.domain.strategies.repository_postgres as strategies_pg_module
     from dashboard.backend.domain.strategies.repository import _CODE_LENGTH
+    from dashboard.backend.domain.strategies.repository_postgres import secrets
 
     first = pg_strategy_store.create(prompt="first strategy")
 
@@ -167,7 +173,7 @@ def test_create_widens_code_space_after_20_collisions_postgres(
             return first["code"]
         return "w" * 16
 
-    monkeypatch.setattr(strategies_pg_module.secrets, "token_hex", fake_token_hex)
+    monkeypatch.setattr(secrets, "token_hex", fake_token_hex)
 
     second = pg_strategy_store.create(prompt="second strategy")
     assert second["code"] == "w" * 16
@@ -183,12 +189,12 @@ def test_create_widens_code_space_after_20_collisions_postgres(
 def test_create_raises_when_even_widened_code_collides_postgres(
     pg_strategy_store, monkeypatch
 ):
-    import dashboard.backend.domain.strategies.repository_postgres as strategies_pg_module
+    from dashboard.backend.domain.strategies.repository_postgres import secrets
 
     first = pg_strategy_store.create(prompt="first strategy")
 
     monkeypatch.setattr(
-        strategies_pg_module.secrets, "token_hex", lambda nbytes: first["code"]
+        secrets, "token_hex", lambda nbytes: first["code"]
     )
 
     with pytest.raises(RuntimeError):

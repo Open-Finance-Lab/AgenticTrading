@@ -10,8 +10,8 @@ Simulates trading performance of different strategies:
 
 import json
 from pathlib import Path
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple
+from datetime import datetime
+from typing import List, Dict
 from dataclasses import dataclass, asdict
 import numpy as np
 from enum import Enum

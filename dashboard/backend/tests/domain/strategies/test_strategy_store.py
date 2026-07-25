@@ -11,9 +11,8 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
-import dashboard.backend.domain.strategies.repository as strategies_module
 from dashboard.backend.app import app
-from dashboard.backend.domain.strategies.repository import StrategyStore
+from dashboard.backend.domain.strategies.repository import StrategyStore, secrets
 
 
 def _store(tmp_path):
@@ -101,12 +100,12 @@ def test_create_retries_past_a_code_collision(tmp_path, monkeypatch):
     first = store.create(prompt="first strategy")
 
     codes = iter([first["code"], "fresh456"])
-    # NB: strategies_module.secrets IS the stdlib secrets module, so this
+    # NB: secrets IS the stdlib secrets module, so this
     # patches token_hex process-wide rather than just this module's view of
     # it. Harmless -- monkeypatch restores it and nothing else in this test
     # calls token_hex -- but don't read it as module-scoped.
     monkeypatch.setattr(
-        strategies_module.secrets, "token_hex", lambda nbytes: next(codes)
+        secrets, "token_hex", lambda nbytes: next(codes)
     )
 
     second = store.create(prompt="second strategy")
@@ -127,7 +126,7 @@ def test_create_widens_code_space_after_20_collisions(tmp_path, monkeypatch):
             return first["code"]  # every narrow attempt collides
         return "w" * 16  # the widened attempt succeeds
 
-    monkeypatch.setattr(strategies_module.secrets, "token_hex", fake_token_hex)
+    monkeypatch.setattr(secrets, "token_hex", fake_token_hex)
 
     second = store.create(prompt="second strategy")
     assert second["code"] == "w" * 16
@@ -141,7 +140,7 @@ def test_create_raises_when_even_widened_code_collides(tmp_path, monkeypatch):
     first = store.create(prompt="first strategy")
 
     monkeypatch.setattr(
-        strategies_module.secrets, "token_hex", lambda nbytes: first["code"]
+        secrets, "token_hex", lambda nbytes: first["code"]
     )
 
     with pytest.raises(RuntimeError):

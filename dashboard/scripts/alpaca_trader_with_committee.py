@@ -12,9 +12,8 @@ The committee discusses the proposed trade and votes on execution.
 
 import json
 import subprocess
-import sys
 from pathlib import Path
-from datetime import datetime, time
+from datetime import datetime
 
 # Direct-execution bootstrap: make the repo root importable so canonical
 # `dashboard.backend.*` imports resolve (no-op when run as part of the package).
@@ -65,7 +64,7 @@ class AlpacaBotWithCommittee:
                 timeout=10
             )
             return result.stdout
-        except:
+        except Exception:
             return None
     
     def parse_account(self, output):
@@ -81,19 +80,19 @@ class AlpacaBotWithCommittee:
                 try:
                     value = line.split("$")[1].replace(",", "").strip()
                     account["buying_power"] = float(value)
-                except:
+                except Exception:
                     pass
             elif "Cash:" in line and "Portfolio" not in line:
                 try:
                     value = line.split("$")[1].replace(",", "").strip()
                     account["cash"] = float(value)
-                except:
+                except Exception:
                     pass
             elif "Portfolio Value:" in line:
                 try:
                     value = line.split("$")[1].replace(",", "").strip()
                     account["portfolio_value"] = float(value)
-                except:
+                except Exception:
                     pass
         
         return account if account else None
@@ -115,7 +114,7 @@ class AlpacaBotWithCommittee:
                     quote["mid"] = (bid + ask) / 2
                     quote["spread"] = ask - bid
                     return quote
-                except:
+                except Exception:
                     pass
         
         return None
@@ -215,7 +214,7 @@ def log_action(action, details):
     if LOG_FILE.exists():
         try:
             logs = json.loads(LOG_FILE.read_text())
-        except:
+        except Exception:
             logs = []
     
     logs.append({

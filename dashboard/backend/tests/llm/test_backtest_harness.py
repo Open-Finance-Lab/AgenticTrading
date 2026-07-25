@@ -14,13 +14,6 @@ from dashboard.backend.domain.backtesting import (
     portfolio_manager as portfolio_manager_module,
 )
 import dashboard.backend.infrastructure.llm.backtest_harness as harness
-from dashboard.backend.infrastructure.llm.backtest_harness import (
-    SYSTEM_PROMPT,
-    extract_response_text,
-    extract_token_usage,
-    parse_llm_response,
-    request_trading_decision,
-)
 from dashboard.scripts import backtest_hourly_agent as bha
 
 
@@ -107,37 +100,37 @@ def test_legacy_method_still_defined():
 
 def test_request_uses_default_model_and_params():
     client = _FakeClient(_FakeResponse('{"actions": []}'))
-    request_trading_decision(client, prompt="HELLO")
+    harness.request_trading_decision(client, prompt="HELLO")
     cap = client.captured
     assert cap["model"] == harness.LLM_MODEL_NAME
     assert cap["max_tokens"] == 2000
-    assert cap["system"] == SYSTEM_PROMPT
+    assert cap["system"] == harness.SYSTEM_PROMPT
     assert cap["messages"] == [{"role": "user", "content": "HELLO"}]
 
 
 def test_request_model_override():
     client = _FakeClient(_FakeResponse("{}"))
-    request_trading_decision(client, prompt="P", model="custom-model")
+    harness.request_trading_decision(client, prompt="P", model="custom-model")
     assert client.captured["model"] == "custom-model"
 
 
 def test_request_includes_explicit_zero_temperature():
     client = _FakeClient(_FakeResponse("{}"))
-    request_trading_decision(client, prompt="P", temperature=0)
+    harness.request_trading_decision(client, prompt="P", temperature=0)
     assert client.captured["temperature"] == 0
 
 
 def test_request_omits_temperature_when_unset():
     client = _FakeClient(_FakeResponse("{}"))
-    request_trading_decision(client, prompt="P")
+    harness.request_trading_decision(client, prompt="P")
     assert "temperature" not in client.captured
 
 
 def test_system_prompt_required_fragments():
     # Assert stable required fragments of the current (unchanged) prompt.
-    assert "expert quantitative trading advisor" in SYSTEM_PROMPT
-    assert '"actions" array' in SYSTEM_PROMPT
-    assert "ONLY valid JSON" in SYSTEM_PROMPT
+    assert "expert quantitative trading advisor" in harness.SYSTEM_PROMPT
+    assert '"actions" array' in harness.SYSTEM_PROMPT
+    assert "ONLY valid JSON" in harness.SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------
@@ -146,7 +139,7 @@ def test_system_prompt_required_fragments():
 
 def test_extract_response_text():
     resp = _FakeResponse("hello world")
-    assert extract_response_text(resp) == "hello world"
+    assert harness.extract_response_text(resp) == "hello world"
 
 
 def test_extract_response_text_skips_thinking_block():
@@ -162,7 +155,7 @@ def test_extract_response_text_skips_thinking_block():
     class _Resp:
         content = [_Thinking(), _Text()]
 
-    assert extract_response_text(_Resp()) == '{"actions": []}'
+    assert harness.extract_response_text(_Resp()) == '{"actions": []}'
 
 
 def test_extract_response_text_joins_multiple_text_blocks():
@@ -174,7 +167,7 @@ def test_extract_response_text_joins_multiple_text_blocks():
     class _Resp:
         content = [_Text('{"actions":'), _Text(" []}")]
 
-    assert extract_response_text(_Resp()) == '{"actions":\n []}'
+    assert harness.extract_response_text(_Resp()) == '{"actions":\n []}'
 
 
 def test_extract_response_text_raises_when_only_thinking():
@@ -185,7 +178,7 @@ def test_extract_response_text_raises_when_only_thinking():
         content = [_Thinking()]
 
     try:
-        extract_response_text(_Resp())
+        harness.extract_response_text(_Resp())
         assert False, "expected AttributeError"
     except AttributeError as exc:
         assert "No text content block" in str(exc)
@@ -193,17 +186,17 @@ def test_extract_response_text_raises_when_only_thinking():
 
 def test_extract_token_usage_present():
     resp = _FakeResponse("{}", usage=_FakeUsage(123, 45))
-    assert extract_token_usage(resp) == (123, 45)
+    assert harness.extract_token_usage(resp) == (123, 45)
 
 
 def test_extract_token_usage_missing():
     resp = _FakeResponse("{}", usage=None)
-    assert extract_token_usage(resp) == (0, 0)
+    assert harness.extract_token_usage(resp) == (0, 0)
 
 
 def test_extract_token_usage_none_fields_coerced_zero():
     resp = _FakeResponse("{}", usage=_FakeUsage(None, None))
-    assert extract_token_usage(resp) == (0, 0)
+    assert harness.extract_token_usage(resp) == (0, 0)
 
 
 # ---------------------------------------------------------------------------
@@ -211,46 +204,46 @@ def test_extract_token_usage_none_fields_coerced_zero():
 # ---------------------------------------------------------------------------
 
 def test_parse_valid_json_object():
-    out = parse_llm_response('{"actions": [{"symbol": "AAPL", "action": "buy"}]}')
+    out = harness.parse_llm_response('{"actions": [{"symbol": "AAPL", "action": "buy"}]}')
     assert out == {"actions": [{"symbol": "AAPL", "action": "buy"}]}
 
 
 def test_parse_fenced_json():
-    out = parse_llm_response('```json\n{"actions": []}\n```')
+    out = harness.parse_llm_response('```json\n{"actions": []}\n```')
     assert out == {"actions": []}
 
 
 def test_parse_plain_fence():
-    out = parse_llm_response('```\n{"actions": [1]}\n```')
+    out = harness.parse_llm_response('```\n{"actions": [1]}\n```')
     assert out == {"actions": [1]}
 
 
 def test_parse_surrounding_text():
-    out = parse_llm_response('Here is my answer: {"actions": []} thanks')
+    out = harness.parse_llm_response('Here is my answer: {"actions": []} thanks')
     assert out == {"actions": []}
 
 
 def test_parse_no_json_returns_none():
-    assert parse_llm_response("no json here") is None
+    assert harness.parse_llm_response("no json here") is None
 
 
 def test_parse_empty_string_returns_none():
-    assert parse_llm_response("") is None
+    assert harness.parse_llm_response("") is None
 
 
 def test_parse_trailing_comma_fixed():
     # fix_json_formatting repairs trailing commas
-    out = parse_llm_response('{"actions": [1, 2,]}')
+    out = harness.parse_llm_response('{"actions": [1, 2,]}')
     assert out == {"actions": [1, 2]}
 
 
 def test_parse_unrecoverable_returns_none():
-    assert parse_llm_response("{ this : is : not json ]") is None
+    assert harness.parse_llm_response("{ this : is : not json ]") is None
 
 
 def test_parse_non_dict_json_returns_none():
     # "[1,2]" has no braces -> no JSON found -> None
-    assert parse_llm_response("[1, 2, 3]") is None
+    assert harness.parse_llm_response("[1, 2, 3]") is None
 
 
 # ---------------------------------------------------------------------------

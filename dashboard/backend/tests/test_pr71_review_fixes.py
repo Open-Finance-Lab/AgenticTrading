@@ -16,7 +16,6 @@ Each test pins a defect surfaced by the review and is red before its fix:
 import threading
 import uuid
 
-import pytest
 from fastapi.testclient import TestClient
 
 import dashboard.backend.api.v2.runs as runs_mod

@@ -14,7 +14,6 @@ import re
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -219,6 +218,9 @@ class AlpacaMarketData:
                         "changePercent": round(change_percent, 2) if change_percent is not None else None,
                         "timestamp": datetime.now().isoformat()
                     }
+                else:
+                    print(f"❌ {symbol}: No 'quote' key in Alpaca response")
+                    return None
             else:
                 print(f"❌ {symbol}: Error fetching quote: {response.status_code} - {response.text[:200]}")
                 return None
@@ -272,7 +274,6 @@ class AlpacaMarketData:
                             return prev_close if prev_close > 0 else None
                         except (ValueError, TypeError) as e:
                             print(f"⚠️ {symbol}: Could not parse IEX bar data: {e}")
-                            pass
                     elif len(bars_sorted) == 1:
                         try:
                             bar_timestamp = bars_sorted[0].get("t", "unknown")
@@ -281,7 +282,6 @@ class AlpacaMarketData:
                             return prev_close if prev_close > 0 else None
                         except (ValueError, TypeError) as e:
                             print(f"⚠️ {symbol}: Could not parse IEX bar data: {e}")
-                            pass
             
             # ===== ATTEMPT 2: Try SIP with delayed end time (15+ mins ago) =====
             # Only query SIP data up to 15 minutes ago to avoid "recent SIP data" restriction
@@ -310,7 +310,6 @@ class AlpacaMarketData:
                             return prev_close if prev_close > 0 else None
                         except (ValueError, TypeError) as e:
                             print(f"⚠️ {symbol}: Could not parse SIP bar data: {e}")
-                            pass
                     elif len(bars_sorted) == 1:
                         try:
                             bar_timestamp = bars_sorted[0].get("t", "unknown")
@@ -319,7 +318,6 @@ class AlpacaMarketData:
                             return prev_close if prev_close > 0 else None
                         except (ValueError, TypeError) as e:
                             print(f"⚠️ {symbol}: Could not parse SIP bar data: {e}")
-                            pass
             
             # ===== BOTH FAILED: Return None =====
             print(f"⚠️ {symbol}: Could not fetch previous_close (IEX and SIP both unavailable)")

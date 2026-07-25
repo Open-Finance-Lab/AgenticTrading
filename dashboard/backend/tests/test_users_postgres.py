@@ -57,9 +57,9 @@ def test_build_user_store_picks_postgres_when_url_set(monkeypatch):
 @pytest.fixture
 def temp_postgres_store():
     require_local_postgres_url(TEST_POSTGRES_URL)
-    from dashboard.backend.users_postgres import PostgresUserStore
+    import dashboard.backend.users_postgres as users_postgres_module
 
-    store = PostgresUserStore(TEST_POSTGRES_URL)
+    store = users_postgres_module.PostgresUserStore(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM auth_sessions")
@@ -243,9 +243,9 @@ def test_change_password_and_avatar_postgres(pg_client, temp_postgres_store):
 
     # Prove the write landed in Postgres and sessions were pruned there.
     user = temp_postgres_store.get_user_by_email("nina@example.com")
-    from dashboard.backend.users import verify_password
+    import dashboard.backend.users as users_module
 
-    assert verify_password("new-sturdy-pw-2", user["password_hash"])
+    assert users_module.verify_password("new-sturdy-pw-2", user["password_hash"])
     assert pg_client.get(
         "/api/auth/me", headers={"Authorization": f"Bearer {token_a}"}
     ).status_code == 200

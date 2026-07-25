@@ -18,7 +18,6 @@ import threading
 import time
 import uuid
 from functools import lru_cache
-from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 

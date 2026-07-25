@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-import dashboard.backend.baseline_generator as baseline_module
+from dashboard.backend import baseline_generator as baseline_module
 from dashboard.backend.baseline_generator import BaselineGenerator
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,

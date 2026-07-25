@@ -15,9 +15,7 @@ Same logic, different contexts.
 
 import json
 import os
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
-from datetime import datetime, timedelta
 
 from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
@@ -28,14 +26,6 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
 # NOTE: domain.leaderboard.strategies._common is imported lazily inside the
 # methods that need it — the strategies package imports this module back
 # (buy_hold et al.), so a top-level import here is a circular import.
-
-# Try to import numpy
-try:
-    import numpy as np
-except ImportError:
-    import subprocess
-    subprocess.check_call(["pip", "install", "numpy"])
-    import numpy as np
 
 try:
     import pandas as pd

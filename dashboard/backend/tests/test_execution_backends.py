@@ -21,7 +21,6 @@ def test_paper_backend_is_designed_for_stub():
 import pandas as pd
 
 import dashboard.backend.execution.backtest_backend as bb_mod
-from dashboard.backend.execution.backtest_backend import BacktestBackend, load_news_sentiment
 from dashboard.backend.api.v2.models import ContextEnvelope, SubmitAck
 
 
@@ -31,7 +30,7 @@ def test_news_sentiment_fail_closed_when_plan1_absent(monkeypatch):
     import sys
     monkeypatch.setitem(sys.modules,
                         "dashboard.backend.integrations.news_sentiment", None)
-    sentiment, overview = load_news_sentiment(["AAPL"], "2026-04-15T10:30:00+00:00")
+    sentiment, overview = bb_mod.load_news_sentiment(["AAPL"], "2026-04-15T10:30:00+00:00")
     assert sentiment == {}
     assert overview is None
 
@@ -60,7 +59,7 @@ def test_backtest_backend_emits_typed_context(monkeypatch):
     monkeypatch.setattr(bb_mod.ext, "AlpacaDataLoader", lambda: _Loader())
     monkeypatch.setattr(bb_mod, "DJIA_30", symbols, raising=False)
 
-    backend = BacktestBackend(
+    backend = bb_mod.BacktestBackend(
         run_id="run_test_1", session_id="sess_1", agent_name="a",
         model_name="m", start_date="2026-04-15", end_date="2026-04-16",
     )
@@ -98,7 +97,7 @@ def test_news_sentiment_fail_closed_when_loader_raises(monkeypatch):
     # Plan 1 adapter exists but throws at call time → still fail-closed.
     _install_fake_adapter(monkeypatch, RuntimeError("news service down"))
 
-    sentiment, overview = load_news_sentiment(["AAPL"], "2026-04-15T10:30:00+00:00")
+    sentiment, overview = bb_mod.load_news_sentiment(["AAPL"], "2026-04-15T10:30:00+00:00")
     assert sentiment == {} and overview is None
 
 
@@ -115,7 +114,7 @@ def test_news_sentiment_loader_failure_is_logged(monkeypatch, caplog):
     _install_fake_adapter(monkeypatch, KeyError("sentiment_score"))
 
     with caplog.at_level("ERROR"):
-        sentiment, overview = load_news_sentiment(["AAPL"], "2026-04-15T10:30:00+00:00")
+        sentiment, overview = bb_mod.load_news_sentiment(["AAPL"], "2026-04-15T10:30:00+00:00")
 
     assert sentiment == {} and overview is None
     assert any("sentiment_score" in r.getMessage() for r in caplog.records)
@@ -129,7 +128,7 @@ def test_news_sentiment_import_failure_is_logged(monkeypatch, caplog):
                         "dashboard.backend.integrations.news_sentiment", None)
 
     with caplog.at_level("ERROR"):
-        sentiment, overview = load_news_sentiment(["AAPL"], "2026-04-15T10:30:00+00:00")
+        sentiment, overview = bb_mod.load_news_sentiment(["AAPL"], "2026-04-15T10:30:00+00:00")
 
     assert sentiment == {} and overview is None
     assert any("news_sentiment" in r.getMessage() for r in caplog.records)
@@ -138,7 +137,7 @@ def test_news_sentiment_import_failure_is_logged(monkeypatch, caplog):
 def test_apply_decisions_executes_pre_validated_actions():
     # Per-action validation now happens at the v2 boundary (validate_actions);
     # the backend receives only valid actions and reports execution results.
-    backend = BacktestBackend.__new__(BacktestBackend)
+    backend = bb_mod.BacktestBackend.__new__(bb_mod.BacktestBackend)
     backend.run_id = "run_exec"
 
     class _StubSession:
@@ -172,7 +171,7 @@ def test_cancel_makes_context_report_closed(monkeypatch):
     monkeypatch.setattr(bb_mod.ext, "AlpacaDataLoader", lambda: _Loader())
     monkeypatch.setattr(bb_mod, "DJIA_30", symbols, raising=False)
 
-    backend = BacktestBackend(
+    backend = bb_mod.BacktestBackend(
         run_id="run_closed_1", session_id="sess_c", agent_name="a",
         model_name="m", start_date="2026-04-15", end_date="2026-04-16",
     )
