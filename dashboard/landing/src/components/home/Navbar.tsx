@@ -1,6 +1,7 @@
 import { Link } from "wouter";
 import atlLogo from "@assets/atltransparent.png";
 import { useSignedIn } from "@/lib/session";
+import { primaryLandingCta } from "@/lib/cta";
 
 const NAV_LINKS = [
   { href: "#talk", label: "Talk" },
@@ -11,7 +12,7 @@ const NAV_LINKS = [
 /** Same 3-column chrome as dashboard `.header` so the brand sits on the viewport center. */
 export function Navbar() {
   const signedIn = useSignedIn();
-  const primaryCtaLabel = signedIn ? "Open Dashboard" : "Get Started";
+  const primaryCta = primaryLandingCta(signedIn);
 
   return (
     <nav className="landing-header border-b border-border bg-background/80 backdrop-blur-md">
@@ -30,10 +31,10 @@ export function Navbar() {
       </Link>
       <div className="flex items-center justify-end min-w-0">
         <a
-          href="/app?view=home"
+          href={primaryCta.href}
           className="inline-flex items-center justify-center rounded-md text-[15px] font-semibold h-10 px-5 bg-primary text-primary-foreground hover:bg-primary/90 transition-colors"
         >
-          {primaryCtaLabel}
+          {primaryCta.label}
         </a>
       </div>
     </nav>

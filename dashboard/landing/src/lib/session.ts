@@ -11,7 +11,7 @@ export function hasAuthToken(): boolean {
   }
 }
 
-/** Reactive signed-in flag for marketing CTAs (Get Started vs Open Dashboard). */
+/** Reactive signed-in flag for marketing CTAs (Start Free vs Open Dashboard). */
 export function useSignedIn(): boolean {
   const [signedIn, setSignedIn] = useState(hasAuthToken);
 

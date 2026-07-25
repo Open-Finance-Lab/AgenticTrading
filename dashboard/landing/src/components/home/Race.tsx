@@ -11,6 +11,7 @@ import {
   Legend,
 } from "recharts";
 import { STORY_AGENT_NAME, STORY_PROMPT, STORY_SPECS } from "./storyline";
+import { SIGNUP_HREF } from "@/lib/cta";
 
 /** Sample live-board curves — relative time axis reads “live race”, not a fixed contest month. */
 const SAMPLE_CURVES = [
@@ -67,7 +68,7 @@ export function Race() {
               <li>· Same rules for every entry on the board</li>
             </ul>
             <Button size="lg" className="bg-primary text-primary-foreground hover:bg-primary/90" asChild>
-              <a href="/app">View live leaderboard</a>
+              <a href={SIGNUP_HREF}>Start Free</a>
             </Button>
           </div>
 
