@@ -151,6 +151,12 @@ function renderPortfolioOverview(summary) {
 const AGENT_SLICE_COLORS = ['#22d3ee', '#a855f7', '#34d399', '#fbbf24', '#f87171', '#c084fc', '#38bdf8', '#2dd4bf'];
 const AVAILABLE_SLICE_COLOR = '#64748b';
 const pfChartInstances = {};
+/** Compact scroll height; expand raises the cap. All agents stay in the list either way. */
+const ALLOCATION_LEGEND_COLLAPSED_LIMIT = 6;
+const ALLOCATION_LEGEND_SCROLL_MAX_PX = 220;
+const ALLOCATION_LEGEND_EXPANDED_MAX_PX = 420;
+let allocationLegendExpanded = false;
+let allocationLegendBound = false;
 
 function buildAgentAllocationData(agents, totalPortfolioValue) {
     const total = Number(totalPortfolioValue) || 0;
@@ -310,20 +316,67 @@ function renderAllocationChart(key, data, settleRetries = 60) {
     }
 
     if (legendEl) {
-        legendEl.innerHTML = data.slices
-            .map((s) => {
-                const displayValue = s.assignedCapital != null ? s.assignedCapital : s.value;
-                return `
+        renderAllocationLegend(legendEl, data.slices);
+    }
+}
+
+function allocationLegendRowHtml(slice) {
+    const displayValue = slice.assignedCapital != null ? slice.assignedCapital : slice.value;
+    return `
             <li class="allocation-legend-row">
                 <span class="allocation-legend-name">
-                    <span class="allocation-legend-dot" style="background:${s.color}"></span>
-                    ${escapeHtml(s.label)}
+                    <span class="allocation-legend-dot" style="background:${slice.color}"></span>
+                    ${escapeHtml(slice.label)}
                 </span>
-                <span class="allocation-legend-pct">${s.pct}%</span>
+                <span class="allocation-legend-pct">${slice.pct}%</span>
                 <span class="allocation-legend-value">${pfMoney(displayValue)}</span>
             </li>`;
-            })
-            .join('');
+}
+
+function sortAllocationLegendSlices(slices) {
+    const unallocated = slices.filter((s) => s.label === 'Unallocated' || s.label === 'Loading');
+    const agents = slices.filter((s) => s.label !== 'Unallocated' && s.label !== 'Loading');
+    agents.sort((a, b) => {
+        const av = a.assignedCapital != null ? a.assignedCapital : a.value;
+        const bv = b.assignedCapital != null ? b.assignedCapital : b.value;
+        return bv - av;
+    });
+    return [...agents, ...unallocated];
+}
+
+function renderAllocationLegend(legendEl, slices) {
+    const sorted = sortAllocationLegendSlices(slices || []);
+    const agentCount = sorted.filter((s) => s.label !== 'Unallocated' && s.label !== 'Loading').length;
+    const needsExpand = agentCount > ALLOCATION_LEGEND_COLLAPSED_LIMIT;
+    const expanded = allocationLegendExpanded && needsExpand;
+    if (!needsExpand) allocationLegendExpanded = false;
+
+    const rowsHtml = sorted.map(allocationLegendRowHtml).join('');
+    const maxHeight = expanded ? ALLOCATION_LEGEND_EXPANDED_MAX_PX : ALLOCATION_LEGEND_SCROLL_MAX_PX;
+    const toggleHtml = needsExpand
+        ? `<div class="allocation-legend-toggle-row">
+            <button type="button" class="allocation-legend-toggle" data-allocation-legend-toggle aria-expanded="${expanded ? 'true' : 'false'}">
+                ${expanded ? '收起' : `展开全部 (${agentCount})`}
+            </button>
+           </div>`
+        : '';
+
+    legendEl.innerHTML =
+        `<div class="allocation-legend-scroll${expanded ? ' allocation-legend-scroll--expanded' : ''}" style="max-height:${maxHeight}px">` +
+        `<ul class="allocation-legend-list">${rowsHtml}</ul></div>${toggleHtml}`;
+
+    if (!allocationLegendBound) {
+        allocationLegendBound = true;
+        legendEl.closest('.allocation-detail')?.addEventListener('click', (event) => {
+            const btn = event.target.closest('[data-allocation-legend-toggle]');
+            if (!btn) return;
+            allocationLegendExpanded = btn.getAttribute('aria-expanded') !== 'true';
+            const canvas = document.getElementById('agentAllocationChart');
+            const sliceData = canvas?._pfSliceData;
+            if (sliceData?.slices) {
+                renderAllocationLegend(legendEl, sliceData.slices);
+            }
+        });
     }
 }
 
@@ -336,8 +389,9 @@ function renderAllocationLoading() {
     const legendEl = document.getElementById('agentAllocationLegend');
     if (legendEl) {
         legendEl.innerHTML =
+            '<ul class="allocation-legend-list">' +
             '<li class="allocation-legend-item allocation-legend-item--loading">' +
-            '<span class="allocation-legend-label">Loading agents…</span></li>';
+            '<span class="allocation-legend-label">Loading agents…</span></li></ul>';
     }
     renderAllocationChart('agent', {
         total: getTotalPortfolioValue(),
