@@ -151,11 +151,39 @@ def test_ifind_profiles_declare_llm_capability_and_sync_model_control(js):
         re.S,
     )
     assert "Uses this agent's model by default" in js
+    assert re.search(r"function\s+normalizeBacktestModelId\s*\(", js)
+    assert re.search(r"function\s+findBacktestModelOption\s*\(", js)
+    assert re.search(
+        r"findBacktestModelOption\(\s*modelSelect\s*,\s*preferredModel\s*\)",
+        js,
+    )
     assert not re.search(
         r"if\s*\(\s*resetDecisionSource\s*\|\|\s*!allowsLLM\s*\)\s*\{"
         r"\s*modelSelect\.value\s*=\s*RULE_BASED_DECISION_SOURCE",
         js,
         re.S,
+    )
+
+
+def test_agent_model_sync_accepts_provider_paths_and_version_separators(js):
+    assert re.search(r"raw\.includes\(['\"]/['\"]\)", js)
+    assert re.search(r"raw\.split\(['\"]/['\"]\)\.pop\(\)", js)
+    assert ".replace(/_(?:" not in js
+    assert ".replace(/_/g, '-')" in js
+    assert ".replace(/-(\\d+)-(\\d+)(?=-|$)/g, '-$1.$2')" in js
+    assert re.search(
+        r"findBacktestModelOption\(\s*modelSelect\s*,\s*agent\.model_name\s*\)",
+        js,
+    )
+    assert re.search(r"function\s+resolveBacktestModelRequest\s*\(", js)
+    assert re.search(
+        r"agentOption\?\.value\s*===\s*selectedModel[^}]*return\s+agent\.model_name",
+        js,
+        re.S,
+    )
+    assert re.search(
+        r"resolveBacktestModelRequest\(\s*modelSelect\s*,\s*activeAgent\s*\)",
+        js,
     )
 
 
@@ -259,6 +287,22 @@ def test_ifind_errors_are_mapped_to_short_actionable_messages(js):
     ):
         assert marker in js
     assert re.search(r"formatBacktestError\(\s*error", js)
+    assert "The selected LLM provider is not configured" in js
+    assert js.index("llm provider client is unavailable") < js.index("status === 503")
+
+
+def test_backtest_launch_failure_remains_visible_instead_of_loading_history(js):
+    assert "let liveBacktestLaunchPending = false" in js
+    assert "let liveBacktestLaunchError = false" in js
+    assert re.search(r"function\s+showBacktestLaunchFailure\s*\(", js)
+    assert "statusLabel: 'Failed'" in js
+    assert "Backtest did not start." in js
+    assert "isError ? 'Backtest did not start' : 'Backtest in progress'" in js
+    assert re.search(
+        r"!runningId\s*&&\s*\(liveBacktestLaunchPending\s*\|\|\s*liveBacktestLaunchError\)",
+        js,
+    )
+    assert "setTimeout(() => showBacktestRunProgress(false), 5000)" not in js
 
 
 def test_completed_zero_trade_run_has_actionable_empty_state(js):

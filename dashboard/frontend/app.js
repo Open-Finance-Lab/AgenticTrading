@@ -1223,14 +1223,37 @@ function populateBacktestAgentSelect() {
   select.value = selectedId;
 }
 
+function normalizeBacktestModelId(modelName) {
+  const raw = String(modelName || '').trim().toLowerCase();
+  const providerless = raw.includes('/') ? raw.split('/').pop() : raw;
+  return providerless
+    .replace(/_/g, '-')
+    .replace(/-(\d+)-(\d+)(?=-|$)/g, '-$1.$2');
+}
+
+function findBacktestModelOption(modelSelect, modelName) {
+  const normalized = normalizeBacktestModelId(modelName);
+  if (!normalized) return null;
+  return Array.from(modelSelect?.options || []).find(
+    (option) => normalizeBacktestModelId(option.value) === normalized,
+  ) || null;
+}
+
+function resolveBacktestModelRequest(modelSelect, agent) {
+  const selectedModel = modelSelect?.value || '';
+  const agentOption = findBacktestModelOption(modelSelect, agent?.model_name);
+  if (agentOption?.value === selectedModel && agent?.model_name) {
+    return agent.model_name;
+  }
+  return selectedModel || agent?.model_name || 'claude-haiku-4.5';
+}
+
 function syncModelSelectFromAgent(agent) {
   const modelSelect = document.getElementById('modelSelect');
   if (!modelSelect || !agent?.model_name) return;
-  const hasOption = Array.from(modelSelect.options).some(
-    (option) => option.value === agent.model_name,
-  );
-  if (hasOption) {
-    modelSelect.value = agent.model_name;
+  const option = findBacktestModelOption(modelSelect, agent.model_name);
+  if (option) {
+    modelSelect.value = option.value;
   }
 }
 
@@ -2579,6 +2602,8 @@ let chartInstance = null;
 let liveBacktestChartActive = false;
 /** When set, Backtest view is pinned to this in-flight run (blocks history chart paint). */
 let liveBacktestRunId = null;
+let liveBacktestLaunchPending = false;
+let liveBacktestLaunchError = false;
 /** Active status-poll timer id (so dropdown can re-attach to a running job). */
 let backtestPollTimer = null;
 let liveBacktestChartMeta = { timestamps: [] };
@@ -2695,6 +2720,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const backtestRunSelect = document.getElementById('backtestRunSelect');
     if (backtestRunSelect) {
         backtestRunSelect.addEventListener('change', async () => {
+            liveBacktestLaunchPending = false;
+            liveBacktestLaunchError = false;
             const runId = backtestRunSelect.value;
             if (runId) {
                 localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
@@ -3383,9 +3410,8 @@ function syncIFindModelControl({ resetDecisionSource = false } = {}) {
         const llmOptions = Array.from(modelSelect.options).filter(
             (option) => option.value !== RULE_BASED_DECISION_SOURCE,
         );
-        const selectedOption = llmOptions.find(
-            (option) => option.value === preferredModel,
-        ) || llmOptions[0];
+        const selectedOption = findBacktestModelOption(modelSelect, preferredModel)
+            || llmOptions[0];
         if (selectedOption) modelSelect.value = selectedOption.value;
     }
     modelSelect.disabled = !allowsLLM;
@@ -3697,6 +3723,9 @@ function formatBacktestError(error, dataSource = null) {
     const status = Number(error?.status || 0);
     const lower = raw.toLowerCase();
     if (status === 403) return 'iFinD A-share access is disabled (403). Ask the server operator to enable it.';
+    if (lower.includes('llm provider client is unavailable') || lower.includes('llm client is unavailable')) {
+        return 'The selected LLM provider is not configured. Configure the provider or choose Rule-based.';
+    }
     if (status === 503) return 'iFinD A-share access is not configured (503). Ask the server operator to finish API setup.';
     if (status === 429 || lower.includes('429')) return 'iFinD is rate limited (429). Wait briefly, then run again.';
     if (
@@ -3773,6 +3802,14 @@ function showBacktestRunProgress(show, { isError = false } = {}) {
     if (!panel) return;
     panel.hidden = !show;
     panel.classList.toggle('is-error', !!isError);
+    const title = panel.querySelector('.backtest-run-progress-title');
+    const elapsed = panel.querySelector('.backtest-run-elapsed');
+    const track = panel.querySelector('.backtest-run-progress-track');
+    const hint = panel.querySelector('.backtest-run-progress-hint');
+    if (title) title.textContent = isError ? 'Backtest did not start' : 'Backtest in progress';
+    if (elapsed) elapsed.hidden = !!isError;
+    if (track) track.hidden = !!isError;
+    if (hint) hint.hidden = !!isError;
 }
 
 function updateBacktestRunProgress({ elapsedSeconds, message = '', maxSeconds = BACKTEST_POLL_MAX_SECONDS, stepPct = null } = {}) {
@@ -3917,6 +3954,8 @@ function initLiveBacktestChart() {
 function prepareLiveBacktestView(launchConfig = null) {
     liveBacktestChartActive = true;
     liveBacktestRunId = null;
+    liveBacktestLaunchPending = true;
+    liveBacktestLaunchError = false;
     localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
     const runSelect = document.getElementById('backtestRunSelect');
     if (runSelect) runSelect.value = '';
@@ -3930,6 +3969,8 @@ function prepareLiveBacktestView(launchConfig = null) {
 /** Switch the Backtest surface onto an in-flight run (chart + log + config). */
 function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
     if (!runId) return;
+    liveBacktestLaunchPending = false;
+    liveBacktestLaunchError = false;
     const alreadyLive =
         liveBacktestChartActive &&
         liveBacktestRunId === runId &&
@@ -3980,6 +4021,18 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
         clearTradingLog('Backtest running… trades will appear here.');
     }
     ensureBacktestPolling();
+}
+
+function showBacktestLaunchFailure(message, launchConfig) {
+    liveBacktestChartActive = false;
+    liveBacktestRunId = null;
+    liveBacktestLaunchPending = false;
+    liveBacktestLaunchError = true;
+    renderBacktestRunConfig(null, { launchConfig, statusLabel: 'Failed' });
+    displayNoMetrics();
+    clearTradingLog('Backtest did not start.');
+    showBacktestRunProgress(true, { isError: true });
+    updateBacktestRunProgress({ elapsedSeconds: 0, message });
 }
 
 function stopBacktestPolling() {
@@ -4266,7 +4319,10 @@ function setBacktestConfigText(id, value) {
     if (el) el.textContent = value;
 }
 
-function renderBacktestRunConfig(run, { running = false, launchConfig = null } = {}) {
+function renderBacktestRunConfig(
+    run,
+    { running = false, launchConfig = null, statusLabel = null } = {},
+) {
     const empty = document.getElementById('backtestConfigEmpty');
     const list = document.getElementById('backtestConfigList');
     const cfg = launchConfig || (run?.run_id ? getBacktestLaunchConfig(run.run_id) : null);
@@ -4345,7 +4401,10 @@ function renderBacktestRunConfig(run, { running = false, launchConfig = null } =
         'backtestConfigWindow',
         start && end ? `${start} → ${end}` : '—',
     );
-    setBacktestConfigText('backtestConfigStatus', running ? 'Running' : 'Completed');
+    setBacktestConfigText(
+        'backtestConfigStatus',
+        statusLabel || (running ? 'Running' : 'Completed'),
+    );
 
     const promptRow = document.getElementById('backtestConfigPromptRow');
     const promptEl = document.getElementById('backtestConfigPrompt');
@@ -4488,7 +4547,7 @@ async function runBacktest() {
     const pipeline = isRuleBasedDecision ? null : loadAgentPipelineForBacktest(activeAgent);
     const model = isRuleBasedDecision
         ? null
-        : (modelSelect?.value || activeAgent?.model_name || 'claude-haiku-4.5');
+        : resolveBacktestModelRequest(modelSelect, activeAgent);
 
     const capitalInput = document.getElementById('backtestInitialCapital');
     let initialCapital = 1000;
@@ -4610,14 +4669,7 @@ async function runBacktest() {
         if (!data.success) {
             const message = formatBacktestError(data.error || data.message, dataSource);
             console.error('❌ Backtest failed:', message);
-            liveBacktestChartActive = false;
-            liveBacktestRunId = null;
-            showBacktestRunProgress(true, { isError: true });
-            updateBacktestRunProgress({
-                elapsedSeconds: 0,
-                message,
-            });
-            setTimeout(() => showBacktestRunProgress(false), 5000);
+            showBacktestLaunchFailure(message, launchConfigBase);
             return;
         }
 
@@ -4633,14 +4685,7 @@ async function runBacktest() {
     } catch (error) {
         const message = formatBacktestError(error, dataSource);
         console.error('❌ Error starting backtest:', message);
-        liveBacktestChartActive = false;
-        liveBacktestRunId = null;
-        showBacktestRunProgress(true, { isError: true });
-        updateBacktestRunProgress({
-            elapsedSeconds: 0,
-            message,
-        });
-        setTimeout(() => showBacktestRunProgress(false), 5000);
+        showBacktestLaunchFailure(message, launchConfigBase);
     }
 }
 
@@ -5491,6 +5536,10 @@ async function loadData() {
                 }
             } catch (_statusError) {
                 /* status optional while browsing history */
+            }
+
+            if (!runningId && (liveBacktestLaunchPending || liveBacktestLaunchError)) {
+                return;
             }
 
             const selectableRuns = sessionRuns.filter(r => !isBaselineRun(r));
