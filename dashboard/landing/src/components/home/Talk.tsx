@@ -1,7 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { MessageSquare, Bot, Hash } from "lucide-react";
 import { DiscordMock } from "./DiscordMock";
-import { SIGNUP_HREF } from "@/lib/cta";
+import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 
 export function Talk() {
   return (
@@ -12,12 +12,12 @@ export function Talk() {
       <div className="container mx-auto px-6">
         <div className="grid lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.25fr)] gap-10 xl:gap-14 items-center">
           <div>
-            <p className="text-base md:text-lg font-mono uppercase tracking-widest text-primary mb-3">01 — Talk</p>
+            <p className="text-base md:text-lg font-mono tracking-wide text-primary mb-3">01 — Talk</p>
             <h2 className="text-3xl md:text-4xl font-bold mb-3">Talk to agents on Discord</h2>
-            <p className="text-muted-foreground mb-8 text-lg">
+            <p className="text-foreground/80 mb-8 text-lg">
               Describe your trading idea. The agent runs it.
             </p>
-            <ol className="space-y-3 mb-8 text-sm text-muted-foreground">
+            <ol className="space-y-3 mb-8 text-sm text-foreground/80">
               <li className="flex items-start gap-3">
                 <Hash className="w-4 h-4 text-primary mt-0.5 shrink-0" />
                 <span><span className="text-foreground font-medium">1.</span> Join the server</span>
@@ -31,8 +31,13 @@ export function Talk() {
                 <span><span className="text-foreground font-medium">3.</span> Get your backtest result</span>
               </li>
             </ol>
-            <Button size="lg" className="bg-primary text-primary-foreground hover:bg-primary/90" asChild>
-              <a href={SIGNUP_HREF}>Start Free</a>
+            <Button
+              size="lg"
+              type="button"
+              data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              {PRIMARY_LANDING_CTA.label}
             </Button>
           </div>
 

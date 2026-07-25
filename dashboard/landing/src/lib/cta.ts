@@ -1,7 +1,7 @@
-/** Landing CTAs always funnel to the app signup modal. */
-export const SIGNUP_HREF = "/app?auth=signup";
+/** Opens the shipped landing signup modal (see dashboard/frontend/index.html). */
+export const LANDING_AUTH_MODE = "signup" as const;
 
 export const PRIMARY_LANDING_CTA = {
-  href: SIGNUP_HREF,
   label: "Start Free",
+  authMode: LANDING_AUTH_MODE,
 } as const;

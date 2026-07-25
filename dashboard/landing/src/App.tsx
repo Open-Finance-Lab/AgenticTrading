@@ -8,7 +8,7 @@ function NotFound() {
     <div className="flex h-screen w-full items-center justify-center bg-background text-foreground">
       <div className="text-center font-mono">
         <h1 className="text-4xl font-bold text-primary mb-4">404</h1>
-        <p className="text-muted-foreground">ROUTE_NOT_FOUND</p>
+        <p className="text-muted-foreground">Page not found</p>
       </div>
     </div>
   );

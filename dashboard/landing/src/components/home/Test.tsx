@@ -139,7 +139,7 @@ export function Test() {
     <section id="test" className="py-24 relative scroll-mt-40">
       <div className="container mx-auto px-6">
         <div className="mb-10 max-w-3xl">
-          <p className="text-base md:text-lg font-mono uppercase tracking-widest text-primary mb-3">02 — Test</p>
+          <p className="text-base md:text-lg font-mono tracking-wide text-primary mb-3">02 — Test</p>
           <h2 className="text-3xl md:text-4xl font-bold mb-3">Test your trading idea</h2>
         </div>
 
@@ -147,31 +147,28 @@ export function Test() {
           {/* 1. Trading Performance */}
           <figcaption className="flex flex-wrap items-start justify-between gap-3 px-6 md:px-8 pt-6 md:pt-8 pb-5 border-b border-border">
             <div className="min-w-0">
-              <p className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-1">
-                Trading Performance
-              </p>
               <h3 className="text-lg md:text-xl font-bold text-foreground">
-                {STORY_AGENT_NAME} vs baselines — equity curve
+                Trading Performance
               </h3>
             </div>
             <span className="text-xs font-mono text-muted-foreground bg-muted px-2.5 py-1 rounded shrink-0">
-              ILLUSTRATIVE
+              Illustrative
             </span>
           </figcaption>
 
           <div className="p-6 md:p-8 space-y-8">
             {/* 2. Experiment settings — 6 modules */}
             <div>
-              <h4 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-4">
+              <h4 className="text-sm font-mono tracking-wide text-foreground/70 mb-4">
                 Experiment settings
               </h4>
               <dl className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
                 {SETTINGS.map((s) => (
                   <div key={s.label} className="rounded-lg border border-border bg-background/80 px-4 py-3">
-                    <dt className="text-[11px] font-mono uppercase tracking-wider text-muted-foreground mb-1">
+                    <dt className="text-xs font-mono tracking-wide text-foreground/60 mb-1">
                       {s.label}
                     </dt>
-                    <dd className="text-sm font-medium text-foreground leading-snug">{s.value}</dd>
+                    <dd className="text-base font-medium text-foreground leading-snug">{s.value}</dd>
                   </div>
                 ))}
               </dl>
@@ -184,8 +181,8 @@ export function Test() {
                   <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
                   <XAxis
                     dataKey="t"
-                    stroke="hsl(var(--muted-foreground))"
-                    fontSize={11}
+                    stroke="hsl(var(--foreground))"
+                    fontSize={13}
                     tickLine={false}
                     axisLine={false}
                     interval={0}
@@ -197,8 +194,8 @@ export function Test() {
                     }}
                   />
                   <YAxis
-                    stroke="hsl(var(--muted-foreground))"
-                    fontSize={11}
+                    stroke="hsl(var(--foreground))"
+                    fontSize={13}
                     tickLine={false}
                     axisLine={false}
                     domain={[9600, 11600]}
@@ -217,13 +214,13 @@ export function Test() {
                       backgroundColor: "hsl(var(--card))",
                       borderColor: "hsl(var(--border))",
                       borderRadius: "8px",
-                      fontSize: "12px",
+                      fontSize: "13px",
                     }}
                     formatter={(v: number, name: string) => [money(v), name]}
                     labelFormatter={(label) => String(label)}
                   />
                   <Legend
-                    wrapperStyle={{ fontSize: "12px", paddingTop: "8px" }}
+                    wrapperStyle={{ fontSize: "13px", paddingTop: "8px" }}
                     iconType="plainline"
                   />
                   <Line
@@ -271,7 +268,7 @@ export function Test() {
 
             {/* 4. Metrics */}
             <div>
-              <h4 className="text-xs font-mono uppercase tracking-widest text-muted-foreground mb-4">
+              <h4 className="text-sm font-mono tracking-wide text-foreground/70 mb-4">
                 Metrics
               </h4>
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
@@ -286,15 +283,15 @@ export function Test() {
 
         <div className="mb-10">
           <div className="flex items-baseline justify-between gap-3 mb-4">
-            <h3 className="text-sm font-mono uppercase tracking-widest text-muted-foreground">
+            <h3 className="text-base font-mono tracking-wide text-foreground/80">
               Decision log · selected steps
             </h3>
-            <span className="text-xs text-muted-foreground font-mono">
+            <span className="text-sm text-foreground/60 font-mono">
               {STORY_SPECS.trades} trades total
             </span>
           </div>
           <div className="border border-card-border rounded-xl overflow-hidden bg-card">
-            <div className="hidden md:grid grid-cols-12 gap-2 px-4 py-2.5 text-[11px] font-mono uppercase tracking-wider text-muted-foreground border-b border-border bg-muted/30">
+            <div className="hidden md:grid grid-cols-12 gap-2 px-4 py-2.5 text-xs font-mono tracking-wide text-foreground/60 border-b border-border bg-muted/30">
               <div className="col-span-2">Step / time</div>
               <div className="col-span-2">Action</div>
               <div className="col-span-2">Size</div>
@@ -305,7 +302,7 @@ export function Test() {
                 key={`${d.step}-${d.symbol}`}
                 className="grid md:grid-cols-12 gap-2 px-4 py-3.5 border-b border-border last:border-b-0 items-start"
               >
-                <div className="md:col-span-2 font-mono text-xs text-muted-foreground">
+                <div className="md:col-span-2 font-mono text-sm text-foreground/70">
                   <div className="text-foreground font-semibold">#{d.step}</div>
                   <div>{d.time}</div>
                 </div>
@@ -337,15 +334,15 @@ export function Test() {
                             : "text-muted-foreground"
                       }
                     >
-                      {d.action}
+                      {d.action.charAt(0) + d.action.slice(1).toLowerCase()}
                     </span>{" "}
                     {d.symbol}
                   </div>
                 </div>
-                <div className="md:col-span-2 font-mono text-xs text-muted-foreground">
+                <div className="md:col-span-2 font-mono text-sm text-foreground/70">
                   {d.shares} sh @ {d.price}
                 </div>
-                <div className="md:col-span-6 text-sm text-muted-foreground leading-snug">{d.detail}</div>
+                <div className="md:col-span-6 text-sm text-foreground/80 leading-relaxed">{d.detail}</div>
               </div>
             ))}
           </div>
@@ -366,8 +363,8 @@ function Metric({ label, value, tone }: { label: string; value: string; tone?: "
     tone === "positive" ? "text-positive" : tone === "destructive" ? "text-destructive" : "text-foreground";
   return (
     <div className="p-3.5 border border-border rounded-lg bg-background">
-      <div className="text-xs text-muted-foreground mb-1">{label}</div>
-      <div className={`text-xl font-bold font-mono tabular-nums ${valueClass}`}>{value}</div>
+      <div className="text-sm text-foreground/70 mb-1">{label}</div>
+      <div className={`text-2xl font-bold font-mono tabular-nums ${valueClass}`}>{value}</div>
     </div>
   );
 }
