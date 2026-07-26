@@ -11,8 +11,12 @@ import pytest
 from agentictrading.integrations.tradingagents import (
     ARTIFACT_SCHEMA_VERSION,
     ArtifactValidationError,
+    TradingAgentsDecisionGenerator,
     TradingAgentsDecisionArtifact,
     TradingAgentsDecisionRecord,
+    TradingAgentsDependencyError,
+    TradingAgentsGenerationError,
+    TradingAgentsVersionError,
     build_safe_manifest,
     load_decision_artifact,
     map_rating,
@@ -245,3 +249,206 @@ def test_artifact_module_does_not_import_tradingagents():
         name == "tradingagents" or name.startswith("tradingagents.")
         for name in sys.modules
     )
+
+
+# ---------------------------------------------------------------------------
+# Local TradingAgents generation (all dependencies are injected in tests)
+# ---------------------------------------------------------------------------
+
+
+class _FakeGraph:
+    def __init__(self, responses):
+        self.responses = {
+            date: list(values) for date, values in responses.items()
+        }
+        self.calls = []
+
+    def propagate(self, symbol, analysis_date):
+        self.calls.append((symbol, analysis_date))
+        value = self.responses[analysis_date].pop(0)
+        if isinstance(value, BaseException):
+            raise value
+        return {"final_trade_decision": value}, "ignored-upstream-default"
+
+
+def _generator(graph, *, parser=None, version="0.3.1"):
+    return TradingAgentsDecisionGenerator(
+        graph_factory=lambda **kwargs: graph,
+        rating_parser=parser or (lambda raw, default="": raw.split(":", 1)[-1].strip()),
+        version_resolver=lambda: version,
+        clock=lambda: "2026-07-26T12:00:00Z",
+    )
+
+
+def test_generator_builds_graph_once_and_calls_each_date_in_order():
+    graph = _FakeGraph(
+        {
+            "2026-04-03": ["Rating: Buy"],
+            "2026-04-10": ["Rating: Hold"],
+        }
+    )
+    factory_calls = []
+
+    def factory(**kwargs):
+        factory_calls.append(kwargs)
+        return graph
+
+    generator = TradingAgentsDecisionGenerator(
+        graph_factory=factory,
+        rating_parser=lambda raw, default="": raw.split(":", 1)[-1].strip(),
+        version_resolver=lambda: "0.3.1",
+        clock=lambda: "2026-07-26T12:00:00Z",
+    )
+    artifact = generator.generate(
+        symbol="aapl",
+        analysis_dates=("2026-04-03", "2026-04-10"),
+        config={"llm_provider": "openai", "deep_think_llm": "gpt-test"},
+        selected_analysts=("market", "news"),
+    )
+
+    assert len(factory_calls) == 1
+    assert factory_calls[0]["selected_analysts"] == ("market", "news")
+    assert factory_calls[0]["config"]["llm_provider"] == "openai"
+    assert graph.calls == [
+        ("AAPL", "2026-04-03"),
+        ("AAPL", "2026-04-10"),
+    ]
+    assert [record.rating for record in artifact.decisions] == ["Buy", "Hold"]
+    assert [record.atl_action for record in artifact.decisions] == ["BUY", "HOLD"]
+    assert all(record.status == "valid" for record in artifact.decisions)
+    assert artifact.manifest["tradingagents_version"] == "0.3.1"
+    assert artifact.manifest["symbol"] == "AAPL"
+
+
+def test_generator_passes_empty_default_to_upstream_rating_parser():
+    graph = _FakeGraph({"2026-04-03": ["**Rating**: Hold"]})
+    calls = []
+
+    def parser(raw, default="not-empty"):
+        calls.append((raw, default))
+        return "Hold"
+
+    artifact = _generator(graph, parser=parser).generate(
+        symbol="AAPL",
+        analysis_dates=("2026-04-03",),
+        config={},
+        selected_analysts=("market",),
+    )
+
+    assert calls == [("**Rating**: Hold", "")]
+    assert artifact.decisions[0].rating == "Hold"
+    assert artifact.decisions[0].status == "valid"
+
+
+def test_generator_retries_once_then_succeeds():
+    graph = _FakeGraph(
+        {"2026-04-03": [RuntimeError("temporary provider error"), "Rating: Sell"]}
+    )
+    artifact = _generator(graph).generate(
+        symbol="AAPL",
+        analysis_dates=("2026-04-03",),
+        config={},
+        selected_analysts=("market",),
+    )
+
+    record = artifact.decisions[0]
+    assert record.status == "valid"
+    assert record.attempts == 2
+    assert record.rating == "Sell"
+    assert graph.calls == [("AAPL", "2026-04-03")] * 2
+
+
+def test_generator_records_partial_failure_as_error_hold():
+    graph = _FakeGraph(
+        {
+            "2026-04-03": ["Rating: Buy"],
+            "2026-04-10": [
+                RuntimeError("OPENAI_API_KEY=sk-secret failed"),
+                RuntimeError("Bearer token-secret still failed"),
+            ],
+        }
+    )
+    artifact = _generator(graph).generate(
+        symbol="AAPL",
+        analysis_dates=("2026-04-03", "2026-04-10"),
+        config={"api_key": "sk-manifest-secret", "llm_provider": "openai"},
+        selected_analysts=("market",),
+    )
+
+    failed = artifact.decisions[1]
+    assert failed.status == "error"
+    assert failed.atl_action == "HOLD"
+    assert failed.attempts == 2
+    assert failed.error_type == "RuntimeError"
+    assert "token-secret" not in failed.error_message
+    assert "sk-manifest-secret" not in json.dumps(artifact.manifest)
+
+
+def test_generator_retries_unparseable_output_instead_of_defaulting_to_hold():
+    graph = _FakeGraph(
+        {"2026-04-03": ["No rating in this response", "Still no rating"]}
+    )
+    generator = _generator(graph, parser=lambda raw, default="": default)
+
+    with pytest.raises(TradingAgentsGenerationError, match="all analysis dates"):
+        generator.generate(
+            symbol="AAPL",
+            analysis_dates=("2026-04-03",),
+            config={},
+            selected_analysts=("market",),
+        )
+
+    assert graph.calls == [("AAPL", "2026-04-03")] * 2
+
+
+def test_generator_refuses_to_return_artifact_when_every_date_fails():
+    graph = _FakeGraph(
+        {
+            "2026-04-03": [RuntimeError("down"), RuntimeError("still down")],
+            "2026-04-10": [RuntimeError("down"), RuntimeError("still down")],
+        }
+    )
+    with pytest.raises(TradingAgentsGenerationError, match="all analysis dates"):
+        _generator(graph).generate(
+            symbol="AAPL",
+            analysis_dates=("2026-04-03", "2026-04-10"),
+            config={},
+            selected_analysts=("market",),
+        )
+
+
+@pytest.mark.parametrize("version", ["0.2.9", "0.4.0", "1.0.0", "unknown"])
+def test_generator_rejects_unverified_tradingagents_versions(version):
+    graph = _FakeGraph({"2026-04-03": ["Rating: Buy"]})
+    with pytest.raises(TradingAgentsVersionError, match="0.3"):
+        _generator(graph, version=version).generate(
+            symbol="AAPL",
+            analysis_dates=("2026-04-03",),
+            config={},
+            selected_analysts=("market",),
+        )
+    assert graph.calls == []
+
+
+def test_default_generator_loads_dependency_only_when_generate_is_called(monkeypatch):
+    generator = TradingAgentsDecisionGenerator()
+    assert not any(
+        name == "tradingagents" or name.startswith("tradingagents.")
+        for name in sys.modules
+    )
+
+    real_import = __import__
+
+    def blocked_import(name, *args, **kwargs):
+        if name == "tradingagents" or name.startswith("tradingagents."):
+            raise ModuleNotFoundError("blocked for test")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.__import__", blocked_import)
+    with pytest.raises(TradingAgentsDependencyError, match="git clone"):
+        generator.generate(
+            symbol="AAPL",
+            analysis_dates=("2026-04-03",),
+            config={},
+            selected_analysts=("market",),
+        )
