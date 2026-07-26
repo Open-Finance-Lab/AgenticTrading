@@ -68,6 +68,7 @@ class UpdateAgentBody(BaseModel):
         ge=0,
         le=MAX_AGENT_CASH_ALLOCATION,
     )
+    live_trading_enabled: Optional[bool] = None
 
     @field_validator("name", "model_name")
     @classmethod
@@ -319,12 +320,14 @@ async def update_agent(
     fields_set = body.model_fields_set
     pipeline_provided = "pipeline" in fields_set
     cash_allocation_provided = "cash_allocation" in fields_set
+    live_trading_provided = "live_trading_enabled" in fields_set
     if (
         body.name is None
         and body.model_name is None
         and body.description is None
         and not pipeline_provided
         and not cash_allocation_provided
+        and not live_trading_provided
     ):
         raise HTTPException(status_code=400, detail="No fields to update")
 
@@ -338,6 +341,7 @@ async def update_agent(
         pipeline_arg = _UNSET
 
     cash_allocation_arg = body.cash_allocation if cash_allocation_provided else _UNSET
+    live_trading_arg = body.live_trading_enabled if live_trading_provided else _UNSET
 
     # When a signed-in owner changes cash_allocation, the portfolio ledger has
     # to follow (#175). Validate it *first* -- writing nothing -- so a rejected
@@ -369,6 +373,7 @@ async def update_agent(
             description=body.description,
             pipeline=pipeline_arg,
             cash_allocation=cash_allocation_arg,
+            live_trading_enabled=live_trading_arg,
         )
     except AgentNotFoundError:
         raise HTTPException(status_code=404, detail="Agent not found")

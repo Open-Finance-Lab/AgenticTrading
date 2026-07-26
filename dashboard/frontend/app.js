@@ -2472,6 +2472,45 @@ async function openDiscordWithAccount(event) {
   }
 }
 
+/** Handle /app?robinhood=linked|error after OAuth callback. */
+async function handleRobinhoodOAuthReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const robinhood = (params.get('robinhood') || '').toLowerCase();
+  if (!robinhood) return;
+
+  const agentId = params.get('agent_id');
+  const reason = params.get('reason');
+  params.delete('robinhood');
+  params.delete('agent_id');
+  params.delete('reason');
+  const clean = params.toString();
+  const next = `${window.location.pathname}${clean ? `?${clean}` : ''}${window.location.hash}`;
+  window.history.replaceState(getNavigationState(), '', next);
+
+  if (robinhood === 'linked') {
+    if (agentId && window.AgentEditor?.open) {
+      try {
+        const headers = { 'x-session-id': SESSION_ID };
+        const token = localStorage.getItem(AUTH_TOKEN_KEY);
+        if (token) headers.Authorization = `Bearer ${token}`;
+        const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, { headers });
+        if (response.ok) {
+          const data = await response.json();
+          if (data.agent) window.AgentEditor.open(data.agent);
+        }
+      } catch (error) {
+        console.warn('Could not reopen agent editor after Robinhood link:', error);
+      }
+    }
+    alert('Robinhood connected. Enable live trading, save, then Run Live.');
+    return;
+  }
+
+  if (robinhood === 'error') {
+    alert(`Robinhood connection failed (${reason || 'oauth_failed'}). Use localhost and a desktop browser.`);
+  }
+}
+
 /** Handle /app?discord=linked|error after OAuth callback. */
 async function handleDiscordOAuthReturn() {
   const params = new URLSearchParams(window.location.search);
@@ -2670,6 +2709,7 @@ function initAuthUI() {
   updateAuthUI();
   openAuthFromUrl();
   handleDiscordOAuthReturn();
+  handleRobinhoodOAuthReturn();
   wireDiscordAccountButtons();
   initChangePasswordForm();
   initAvatarControls();

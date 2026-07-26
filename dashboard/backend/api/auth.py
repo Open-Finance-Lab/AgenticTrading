@@ -9,6 +9,8 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from dashboard.backend.api import discord_oauth
+from dashboard.backend.api import robinhood_oauth
+from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.users import public_user, user_store, verify_password
 from dashboard.backend.password_policy import validate_new_password
 
@@ -228,6 +230,86 @@ async def set_avatar(payload: AvatarRequest, current_user: dict = Depends(get_cu
 @router.delete("/avatar")
 async def delete_avatar(current_user: dict = Depends(get_current_user)):
     return {"user": _store_avatar(current_user["id"], None)}
+
+
+class RobinhoodStartBody(BaseModel):
+    agent_id: Optional[str] = Field(default=None, max_length=64)
+
+
+@router.post("/robinhood/start")
+async def robinhood_oauth_start(
+    body: RobinhoodStartBody | None = None,
+    current_user: dict = Depends(get_current_user),
+):
+    """Begin Robinhood Agentic OAuth for the logged-in user."""
+    if not robinhood_oauth.oauth_configured():
+        raise HTTPException(status_code=503, detail="Robinhood OAuth is not configured")
+    user_id = int(current_user["id"])
+    existing = broker_store.get_public(user_id)
+    if existing:
+        return {
+            "already_linked": True,
+            "authorize_url": None,
+            "agent_id": (body.agent_id if body else None),
+            "user": public_user(current_user),
+        }
+
+    client_id = robinhood_oauth.register_client()
+    code_verifier, code_challenge = robinhood_oauth.generate_pkce_pair()
+    agent_id = body.agent_id if body else None
+    state = robinhood_oauth.mint_oauth_state(
+        user_id,
+        agent_id=agent_id,
+        code_verifier=code_verifier,
+        client_id=client_id,
+    )
+    return {
+        "already_linked": False,
+        "authorize_url": robinhood_oauth.build_authorize_url(
+            state=state,
+            client_id=client_id,
+            code_challenge=code_challenge,
+        ),
+        "agent_id": agent_id,
+        "user": public_user(current_user),
+    }
+
+
+@router.get("/robinhood/callback")
+async def robinhood_oauth_callback(code: Optional[str] = None, state: Optional[str] = None):
+    """OAuth redirect: exchange code, persist Robinhood tokens, return to /app."""
+    if not code or not state:
+        return _app_redirect({"robinhood": "error", "reason": "missing_params"})
+    try:
+        payload = robinhood_oauth.parse_oauth_state(state)
+    except ValueError as exc:
+        reason = str(exc) if str(exc) in {"invalid_state", "state_expired"} else "invalid_state"
+        return _app_redirect({"robinhood": "error", "reason": reason})
+
+    user_id = int(payload["uid"])
+    agent_id = payload.get("aid")
+    try:
+        token_data = await asyncio.to_thread(
+            robinhood_oauth.exchange_code_for_tokens,
+            code=code,
+            client_id=str(payload["cid"]),
+            code_verifier=str(payload["cv"]),
+        )
+        await asyncio.to_thread(
+            broker_store.upsert_tokens,
+            user_id,
+            access_token=str(token_data["access_token"]),
+            refresh_token=token_data.get("refresh_token"),
+            client_id=str(payload["cid"]),
+            token_expires_at=robinhood_oauth.token_expires_at_iso(token_data.get("expires_in")),
+        )
+    except Exception:
+        return _app_redirect({"robinhood": "error", "reason": "oauth_failed"})
+
+    query: dict[str, str] = {"robinhood": "linked"}
+    if agent_id:
+        query["agent_id"] = str(agent_id)
+    return _app_redirect(query)
 
 
 @router.post("/discord/start")

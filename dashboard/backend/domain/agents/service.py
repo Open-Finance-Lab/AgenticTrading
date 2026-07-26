@@ -253,6 +253,7 @@ class AgentService:
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
         cash_allocation: Any = _UNSET,
+        live_trading_enabled: Any = _UNSET,
     ) -> Dict[str, Any]:
         agent = self.agents.update_agent(
             agent_id,
@@ -261,6 +262,7 @@ class AgentService:
             description=description,
             pipeline=pipeline,
             cash_allocation=cash_allocation,
+            live_trading_enabled=live_trading_enabled,
         )
         if not agent:
             raise AgentNotFoundError()

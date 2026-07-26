@@ -914,6 +914,24 @@
                     <span class="agent-editor-cash-label">Allocated capital (paper, max $3,000)</span>
                     <input id="agentEditorCashAllocation" class="agent-editor-cash-input" type="number" min="0" max="3000" step="100" placeholder="0" aria-label="Allocated capital for paper trading">
                 </label>
+                <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
+                    <div class="agent-editor-broker-head">
+                        <h3 class="agent-editor-intro-title">Robinhood live trading</h3>
+                        <span id="agentEditorRobinhoodStatus" class="agent-editor-broker-status">Checking…</span>
+                    </div>
+                    <p class="agent-editor-intro-text">Connect your Robinhood Agentic account to run this agent with real money. Orders only execute when live trading is enabled and the server execute switch is on.</p>
+                    <div id="agentEditorRobinhoodMeta" class="agent-editor-broker-meta" hidden></div>
+                    <label class="agent-editor-live-toggle">
+                        <input id="agentEditorLiveTradingEnabled" type="checkbox">
+                        <span>Enable live trading for this agent</span>
+                    </label>
+                    <div class="agent-editor-broker-actions">
+                        <button id="agentEditorConnectRobinhoodBtn" class="home-btn home-btn-secondary" type="button">Connect Robinhood</button>
+                        <button id="agentEditorDisconnectRobinhoodBtn" class="home-btn home-btn-secondary" type="button" hidden>Disconnect</button>
+                        <button id="agentEditorRunLiveBtn" class="home-btn home-btn-primary" type="button">Run Live</button>
+                    </div>
+                    <p id="agentEditorLiveRunResult" class="agent-editor-live-result" hidden></p>
+                </div>
             </div>
             <div class="agent-editor-header-actions">
                 <div class="agent-editor-mode-toggle" role="group" aria-label="Editor mode">
@@ -1524,7 +1542,7 @@
     <script src="market-events/MarketEventCard.js"></script>
     <script src="market-events/MarketEventFeed.js"></script>
     <script src="js/portfolio.js?v=15"></script>
-    <script src="js/agent-editor.js?v=11"></script>
+    <script src="js/agent-editor.js?v=12"></script>
     <script src="app.js?v=44"></script>
     <script src="js/leaderboard.js?v=16"></script>
     <script src="home-page.js?v=36"></script>
