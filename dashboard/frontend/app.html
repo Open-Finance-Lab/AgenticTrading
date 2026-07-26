@@ -819,7 +819,7 @@
                             <canvas id="agentAllocationChart"></canvas>
                         </div>
                         <div class="allocation-detail">
-                            <ul class="allocation-legend" id="agentAllocationLegend"></ul>
+                            <div class="allocation-legend-host" id="agentAllocationLegend"></div>
                         </div>
                     </div>
                 </section>
@@ -855,6 +855,7 @@
                             <p class="agents-category-sub">A prompting game — give it money, an instruction, and a model, then backtest.</p>
                         </div>
                         <div id="agentsGridBuiltin" class="agents-grid"></div>
+                        <div id="agentsGridFooterBuiltin" class="agents-grid-footer" hidden></div>
                         <p id="agentsEmptyBuiltin" class="control-helper" hidden>No foundation agents yet. Click <strong>Add Agent</strong> to create one.</p>
                     </section>
                     <section class="agents-category" data-category="external">
@@ -863,6 +864,7 @@
                             <p class="agents-category-sub">Bring your own agent and connect it with an API key.</p>
                         </div>
                         <div id="agentsGridExternal" class="agents-grid"></div>
+                        <div id="agentsGridFooterExternal" class="agents-grid-footer" hidden></div>
                         <p id="agentsEmptyExternal" class="control-helper" hidden>No external agents match your search.</p>
                     </section>
                 </div>
@@ -1499,9 +1501,9 @@
     <script src="market-events/marketEventRelativeTime.js"></script>
     <script src="market-events/MarketEventCard.js"></script>
     <script src="market-events/MarketEventFeed.js"></script>
-    <script src="js/portfolio.js?v=13"></script>
+    <script src="js/portfolio.js?v=15"></script>
     <script src="js/agent-editor.js?v=11"></script>
-    <script src="app.js?v=42"></script>
+    <script src="app.js?v=44"></script>
     <script src="js/leaderboard.js?v=16"></script>
     <script src="home-page.js?v=36"></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

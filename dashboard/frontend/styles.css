@@ -7142,6 +7142,128 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     gap: 10px;
 }
 
+.allocation-legend-host {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+}
+
+.allocation-legend-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.allocation-legend-scroll {
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 4px;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(34, 211, 238, 0.35) transparent;
+    overscroll-behavior: contain;
+}
+
+.allocation-legend-scroll:not(.allocation-legend-scroll--expanded) {
+    /* Fade hints that more items are below without expanding. */
+    mask-image: linear-gradient(to bottom, #000 75%, transparent 100%);
+}
+
+.allocation-legend-scroll::-webkit-scrollbar {
+    width: 6px;
+}
+
+.allocation-legend-scroll::-webkit-scrollbar-thumb {
+    background: rgba(34, 211, 238, 0.35);
+    border-radius: 999px;
+}
+
+.allocation-legend-toggle-row {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.allocation-legend-toggle {
+    width: 100%;
+    margin-top: 2px;
+    padding: 6px 10px;
+    border: 1px solid rgba(34, 211, 238, 0.28);
+    border-radius: 8px;
+    background: rgba(34, 211, 238, 0.08);
+    color: var(--home-accent-cyan, #22d3ee);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease;
+}
+
+.allocation-legend-toggle:hover {
+    background: rgba(34, 211, 238, 0.14);
+    border-color: rgba(34, 211, 238, 0.45);
+}
+
+.allocation-legend-hint {
+    margin: 0;
+    font-size: 12px;
+    color: var(--text-muted);
+    line-height: 1.4;
+}
+
+.agents-grid-footer {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    margin-top: 12px;
+    padding: 8px 14px;
+}
+
+.agents-grid-footer-count {
+    font-size: 13px;
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+    min-width: 140px;
+    text-align: center;
+}
+
+.agents-grid-footer-btn {
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.agents-grid-footer-btn--nav {
+    width: 36px;
+    height: 36px;
+    padding: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 16px;
+    line-height: 1;
+    border-radius: 999px;
+}
+
+.agents-grid-footer-btn--nav:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.agents-grid-footer-btn--nav:not(:disabled):hover {
+    color: var(--home-accent-cyan, #22d3ee);
+    border-color: rgba(34, 211, 238, 0.45);
+    background: rgba(34, 211, 238, 0.08);
+}
+
 /* Legacy allocation helpers still used by the donut legend rows */
 .allocation-card {
     display: flex;
@@ -7364,6 +7486,11 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 }
 
 /* Status-aware agent cards (PAPER / BACKTESTED / DRAFT) */
+.agents-section .agents-grid:not(.agents-grid--list) {
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 16px;
+}
+
 .agents-grid {
     grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: 16px;
