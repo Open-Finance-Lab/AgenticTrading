@@ -1,7 +1,7 @@
 # TradingAgents 接入 ATL 第一版设计规格
 
 - **日期：** 2026-07-26
-- **状态：** 设计已批准，等待书面规格审阅
+- **状态：** 设计与书面规格已批准，进入实施计划
 - **项目：** AgenticTrading（ATL）
 - **上游项目：** `TauricResearch/TradingAgents`
 - **参考版本：** TradingAgents v0.3.1；ATL `origin/main` 3a7781a
@@ -255,7 +255,11 @@ TradingAgents 版本、股票、分析日期、决策文件哈希、两套数据
 - 至少有一个 `status=valid` 的决策。
 - `ATL_API_KEY`、`ATL_BASE_URL` 和 `ATL_AGENT_VERSION_ID` 已配置。
 - 所选股票属于 `us-equity-hourly-v1` 的允许股票列表。
-- 回测日期范围覆盖每个需要执行的分析日期之后至少一个 ATL 交易时段。
+- 每个分析日期都早于回测 `end_date`，且开始、结束日期顺序合法。
+
+ATL 公共 SDK 在创建 run 前不提供未来全部小时 Step，因此启动前不能准确预知节假日后的
+最后一个可执行时段。回放器在 run 完成后必须检查是否仍有未处理记录；若有，则打印
+具体分析日期、返回非零退出状态并保留 `run_id`，不能把不完整回放报告为成功。
 
 ### 9.2 T+1 执行
 
@@ -341,8 +345,8 @@ status=error, atl_action=HOLD, attempts=2, error_type, sanitized error_message
   非零。离线回放本身不应接近 60 秒时限，因此出现该值即视为需要调查的集成错误。
 
 第一版本地完成摘要至少显示：有效信号数、主动 HOLD 数、错误 HOLD 数、被覆盖信号数、
-ATL 拒单数、超时 HOLD 数、成交数、run_id 和结果链接。每步 `rationale` 让错误原因也能
-在 ATL 决策日志中被检查。
+未处理记录数、ATL 拒单数、超时 HOLD 数、成交数、run_id 和结果链接。存在未处理记录
+时命令返回非零退出状态。每步 `rationale` 让错误原因也能在 ATL 决策日志中被检查。
 
 ## 12. 用户入口
 
@@ -416,6 +420,7 @@ docs/source/lab/external_agents.rst
 - UTC Step 时间正确转换为 `America/New_York` 日期，周末和节假日由下一条实际 Step
   自然处理。
 - 每条信号只执行一次，同日后续小时 HOLD；多个待执行信号只保留最新一个。
+- 回放结束后仍有未处理记录时返回错误，并列出对应分析日期。
 - BUY 补到 25% 目标而不是重复加 25%；SELL 全部清仓；空仓 SELL 不做空。
 - 价格过高导致目标股数为 0 时产生带原因的 HOLD。
 
