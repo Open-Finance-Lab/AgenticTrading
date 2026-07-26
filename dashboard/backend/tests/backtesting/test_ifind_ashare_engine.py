@@ -482,3 +482,87 @@ def test_ifind_djia_baseline_is_a_noop(monkeypatch):
     monkeypatch.setattr(engine_module, "generate_baselines", fail_baseline_call)
 
     assert backtester.run_djia_baseline() == (None, [])
+
+
+# ---------------------------------------------------------------------------
+# FX bootstrap error reporting
+#
+# A gap in the rate series and a bad token are different problems; sending the
+# operator to "check your credentials" for a data gap wastes the investigation.
+# ---------------------------------------------------------------------------
+
+def _ifind_backtester(monkeypatch, provider):
+    monkeypatch.setattr(
+        engine_module,
+        "create_market_data_provider",
+        lambda _source, universe=None: provider,
+    )
+    monkeypatch.setattr(engine_module, "HAS_ANTHROPIC", True)
+    monkeypatch.setattr(engine_module, "make_llm_client", lambda: None)
+    monkeypatch.setattr(engine_module, "db", RecordingDB())
+    return HourlyBacktester(
+        START,
+        END,
+        session_id="ifind-fx-error-test",
+        use_llm=False,
+        data_source=IFIND_ASHARE,
+        decision_source=RULE_BASED_DECISION_SOURCE,
+    )
+
+
+def test_provider_without_fx_capability_is_named_not_blamed_on_credentials(monkeypatch):
+    class NoFxProvider:
+        """A bars-only provider — no fetch_usd_cny at all."""
+
+        def __init__(self, bars):
+            self.bars = bars
+
+        def fetch_bars(self, symbols, start, end):
+            return {symbol: self.bars[symbol] for symbol in symbols}
+
+    backtester = _ifind_backtester(monkeypatch, NoFxProvider(make_cn_bars()))
+
+    with pytest.raises(MarketDataUnavailableError) as excinfo:
+        backtester.load_data()
+
+    message = str(excinfo.value)
+    assert "conversion rate" in message
+    assert "token" not in message
+
+
+def test_fx_validation_failure_surfaces_its_reason_instead_of_credentials(monkeypatch):
+    from dashboard.backend.infrastructure.market_data.ifind_fx import (
+        IFindFxValidationError,
+    )
+
+    class GappyProvider(RecordingProvider):
+        def fetch_usd_cny(self, symbols, start, end):
+            raise IFindFxValidationError(
+                "iFinD historical FX returned no usable daily rates "
+                "(resolved=0/20 dates; blank_closes=120)"
+            )
+
+    backtester = _ifind_backtester(monkeypatch, GappyProvider(make_cn_bars()))
+
+    with pytest.raises(MarketDataUnavailableError) as excinfo:
+        backtester.load_data()
+
+    message = str(excinfo.value)
+    assert "no usable daily rates" in message
+    assert "blank_closes=120" in message
+    assert "permission" not in message
+
+
+def test_transport_failure_still_points_at_credentials(monkeypatch):
+    from dashboard.backend.infrastructure.market_data.ifind_client import (
+        IFindHttpError,
+    )
+
+    class ForbiddenProvider(RecordingProvider):
+        def fetch_usd_cny(self, symbols, start, end):
+            raise IFindHttpError("iFinD request failed status=403", 403)
+
+    backtester = _ifind_backtester(monkeypatch, ForbiddenProvider(make_cn_bars()))
+
+    with pytest.raises(MarketDataUnavailableError, match="permission"):
+        backtester.load_data()

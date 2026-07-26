@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, timedelta
 import logging
+import math
 import os
 import time
 from typing import Any
@@ -19,6 +20,9 @@ HIGH_FREQUENCY_ENDPOINT = "/api/v1/high_frequency"
 HISTORY_QUOTATION_ENDPOINT = "/api/v1/cmd_history_quotation"
 DEFAULT_TIMEOUT = (3.0, 20.0)
 _RETRY_DELAYS = (0.5, 1.0)
+# Honour a server-supplied Retry-After, but never park a backtest thread on an
+# arbitrarily large one — past this we fail fast and let the caller retry.
+MAX_RETRY_AFTER_SECONDS = 30.0
 
 
 class IFindClientError(RuntimeError):
@@ -55,6 +59,28 @@ class IFindBusinessError(IFindClientError):
     def __init__(self, message: str, errorcode: int | None):
         super().__init__(message)
         self.errorcode = errorcode
+
+
+def _retry_after_seconds(response: object) -> float | None:
+    """Read a clamped Retry-After delay, or None when there isn't a usable one.
+
+    Only the delta-seconds form is honoured: the HTTP-date form would need a
+    trusted clock, and iFinD does not document sending one.
+    """
+    headers = getattr(response, "headers", None) or {}
+    try:
+        raw = headers.get("Retry-After")
+    except AttributeError:
+        return None
+    if raw is None:
+        return None
+    try:
+        delay = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(delay) or delay < 0:
+        return None
+    return min(delay, MAX_RETRY_AFTER_SECONDS)
 
 
 class IFindHttpClient:
@@ -185,7 +211,13 @@ class IFindHttpClient:
             if not 200 <= status_code < 300:
                 retryable = status_code == 429 or 500 <= status_code < 600
                 if retryable and attempt < len(_RETRY_DELAYS):
-                    self._sleep(_RETRY_DELAYS[attempt])
+                    # A throttled server knows better than our fixed backoff
+                    # how long it wants us gone; a bare 0.5s retry into a 429
+                    # just burns the attempt budget.
+                    delay = _retry_after_seconds(response)
+                    if delay is None:
+                        delay = _RETRY_DELAYS[attempt]
+                    self._sleep(delay)
                     continue
                 message = self._failure_message(
                     endpoint,

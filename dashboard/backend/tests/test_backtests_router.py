@@ -99,10 +99,12 @@ class _Spy:
     def __init__(self):
         self.calls = 0
         self.last_args = None
+        self.last_kwargs = None
 
     def __call__(self, *a, **k):
         self.calls += 1
         self.last_args = a
+        self.last_kwargs = k
 
 
 def _run_record(metadata=None):
@@ -250,7 +252,7 @@ def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
     assert resp.status_code == 200
     assert resp.json()["session_id"] == agent_session
     assert spy.calls == 1
-    assert spy.last_args[2] == agent_session
+    assert spy.last_kwargs["session_id"] == agent_session
 
 
 def test_backtest_run_forwards_selected_assets(client, monkeypatch):
@@ -271,8 +273,12 @@ def test_backtest_run_forwards_selected_assets(client, monkeypatch):
     assert resp.status_code == 200, resp.text
     assert resp.json()["assets"] == mag7
     assert spy.calls == 1
-    assert spy.last_args[-2] == mag7
-    assert spy.last_args[-1] == "llm"
+    # By name, not position: universe/timeframe were inserted mid-signature
+    # once, and an index-based assertion would have kept passing on the wrong
+    # argument.
+    assert spy.last_args == ()
+    assert spy.last_kwargs["assets"] == mag7
+    assert spy.last_kwargs["decision_source"] == "llm"
 
 
 def test_backtest_run_rejects_bad_assets(monkeypatch):
@@ -521,3 +527,87 @@ def test_backtest_run_rate_limited_per_client(monkeypatch):
     assert client.post("/backtest/run", json=body, headers=headers).status_code == 200
     assert client.post("/backtest/run", json=body, headers=headers).status_code == 200
     assert client.post("/backtest/run", json=body, headers=headers).status_code == 429
+
+
+def test_rule_based_still_validates_llm_only_fields_before_dropping(monkeypatch):
+    """Dropping them before validation answered 200 to a malformed model."""
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "data_source": "ifind_ashare",
+            "universe": "a_share_demo_6",
+            "timeframe": "60m",
+            "decision_source": "rule_based",
+            "model": "x; rm -rf /",
+        },
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 422
+    assert "Invalid model id" in resp.text
+    assert spy.calls == 0
+
+
+def test_rule_based_reports_the_llm_fields_it_dropped(monkeypatch):
+    """Dropping them is right; doing it invisibly is what hid the bad input."""
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "data_source": "ifind_ashare",
+            "universe": "a_share_demo_6",
+            "timeframe": "60m",
+            "decision_source": "rule_based",
+            "model": "gpt-5.2",
+            "strategy_prompt": "buy low",
+        },
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["decision_source"] == "rule_based"
+    assert sorted(resp.json()["ignored_fields"]) == ["model", "strategy_prompt"]
+
+
+def test_llm_run_reports_no_ignored_fields(monkeypatch):
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={"start_date": "2026-05-01", "end_date": "2026-05-02"},
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "ignored_fields" not in resp.json()
+
+
+def test_subprocess_log_dump_is_redacted_but_not_truncated(monkeypatch):
+    """print() is the only prod log channel; trimming drops every run's head."""
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "super-secret-token")
+    head = "UNIVERSE-LINE-AT-THE-VERY-TOP"
+    noise = "x" * 8000
+    log = f"{head}\n{noise}\naccess_token=super-secret-token\n"
+
+    redacted = bt._redact_credentials(log)
+
+    assert head in redacted
+    assert len(redacted) > 8000
+    assert "super-secret-token" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_error_summary_stays_bounded(monkeypatch):
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "super-secret-token")
+
+    summary = bt._sanitize_backtest_error("y" * 5000 + " super-secret-token", 500)
+
+    assert len(summary) == 500
+    assert "super-secret-token" not in summary

@@ -37,6 +37,18 @@ class Spy:
         self.calls.append((args, kwargs))
 
 
+# The market-profile half of run_backtest_background's signature.
+_PROFILE_KWARGS = (
+    "data_source",
+    "live_run_id",
+    "universe",
+    "timeframe",
+    "initial_capital",
+    "assets",
+    "decision_source",
+)
+
+
 def session_headers():
     return {"X-Session-Id": str(uuid.uuid4())}
 
@@ -282,13 +294,13 @@ def test_enabled_simulation_is_passed_to_background_runner(monkeypatch):
     assert body["success"] is True
     assert body["data_source"] == VNPY_SIMULATION
     assert len(spy.calls) == 1
-    # Positional args: start, end, session, prompt, model, pipeline, agent_id,
-    # data_source, live_run_id, universe, timeframe, initial_capital, assets,
-    # decision_source.
-    args = spy.calls[0][0]
-    assert args[7] == VNPY_SIMULATION
-    assert args[8] == body["live_run_id"]
-    assert str(args[8]).startswith("agent_")
+    # The worker is scheduled by keyword, so assert by name: an index-based
+    # assertion silently follows a mid-signature insertion onto the wrong value.
+    args, kwargs = spy.calls[0]
+    assert args == ()
+    assert kwargs["data_source"] == VNPY_SIMULATION
+    assert kwargs["live_run_id"] == body["live_run_id"]
+    assert str(kwargs["live_run_id"]).startswith("agent_")
 
 
 def test_enabled_ifind_profile_is_passed_to_background_runner(monkeypatch):
@@ -329,16 +341,16 @@ def test_enabled_ifind_profile_is_passed_to_background_runner(monkeypatch):
     }
     assert len(spy.calls) == 1
     args, kwargs = spy.calls[0]
-    assert kwargs == {}
-    assert args[7:] == (
-        IFIND_ASHARE,
-        body["live_run_id"],
-        A_SHARE_DEMO_6,
-        "60m",
-        None,
-        list(A_SHARE_DEMO_6_SYMBOLS),
-        "llm",
-    )
+    assert args == ()
+    assert {key: kwargs[key] for key in _PROFILE_KWARGS} == {
+        "data_source": IFIND_ASHARE,
+        "live_run_id": body["live_run_id"],
+        "universe": A_SHARE_DEMO_6,
+        "timeframe": "60m",
+        "initial_capital": None,
+        "assets": list(A_SHARE_DEMO_6_SYMBOLS),
+        "decision_source": "llm",
+    }
 
 
 @pytest.mark.parametrize("universe", [A_SHARE_DEMO_6, CSI300_SAMPLE_20_2026H2])
@@ -373,10 +385,10 @@ def test_ifind_explicit_llm_is_preflighted_and_scheduled(monkeypatch, universe):
     assert response.status_code == 200, response.text
     assert response.json()["decision_source"] == "llm"
     assert preflight_calls == [True]
-    args = spy.calls[0][0]
-    assert args[3] == "A-share momentum"
-    assert args[4] == "gpt-5.2"
-    assert args[-1] == "llm"
+    kwargs = spy.calls[0][1]
+    assert kwargs["strategy_prompt"] == "A-share momentum"
+    assert kwargs["model"] == "gpt-5.2"
+    assert kwargs["decision_source"] == "llm"
 
 
 def test_ifind_body_decision_source_overrides_query(monkeypatch):
@@ -406,9 +418,13 @@ def test_ifind_body_decision_source_overrides_query(monkeypatch):
     assert response.status_code == 200, response.text
     assert response.json()["decision_source"] == "rule_based"
     assert preflight_calls == []
-    args = spy.calls[0][0]
-    assert args[3:6] == (None, None, None)
-    assert args[-1] == "rule_based"
+    kwargs = spy.calls[0][1]
+    assert (
+        kwargs["strategy_prompt"],
+        kwargs["model"],
+        kwargs["pipeline"],
+    ) == (None, None, None)
+    assert kwargs["decision_source"] == "rule_based"
 
 
 def test_ifind_explicit_llm_configuration_error_is_sanitized(monkeypatch):
@@ -476,16 +492,16 @@ def test_enabled_ifind_csi300_sample20_is_passed_to_background_runner(
     assert body["assets"] == list(CSI300_SAMPLE_20_2026H2_SYMBOLS)
     assert body["decision_source"] == "llm"
     assert len(spy.calls) == 1
-    args = spy.calls[0][0]
-    assert args[7:] == (
-        IFIND_ASHARE,
-        body["live_run_id"],
-        CSI300_SAMPLE_20_2026H2,
-        "60m",
-        None,
-        list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
-        "llm",
-    )
+    kwargs = spy.calls[0][1]
+    assert {key: kwargs[key] for key in _PROFILE_KWARGS} == {
+        "data_source": IFIND_ASHARE,
+        "live_run_id": body["live_run_id"],
+        "universe": CSI300_SAMPLE_20_2026H2,
+        "timeframe": "60m",
+        "initial_capital": None,
+        "assets": list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
+        "decision_source": "llm",
+    }
 
 
 @pytest.mark.parametrize(

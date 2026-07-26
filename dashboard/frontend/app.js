@@ -5441,10 +5441,23 @@ function formatBacktestRunSecondary(run) {
     return [sourceLabel, costLabel, when].filter(Boolean).join(' · ');
 }
 
+// Belt-and-braces: the backend already omits US market indexes for iFinD runs
+// (include_market_indexes=False). Match on the structural run_id the backend
+// mints for them ("index:^DJI", "index:^NDX") rather than the display label —
+// a renamed label would silently disable a label-only filter.
+const MARKET_INDEX_RUN_ID_PREFIX = 'index:';
+const US_INDEX_SERIES_LABELS = new Set(['DJIA index', 'Nasdaq-100']);
+
+function isUsMarketIndexSeries(entry) {
+    if (typeof entry?.run_id === 'string' && entry.run_id.startsWith(MARKET_INDEX_RUN_ID_PREFIX)) {
+        return true;
+    }
+    return US_INDEX_SERIES_LABELS.has(entry?.label);
+}
+
 function filterIfindChartSeries(series, run = window.SELECTED_RUN) {
     if (run?.data_source !== IFIND_ASHARE_SOURCE) return series;
-    const usIndexLabels = new Set(['DJIA index', 'Nasdaq-100']);
-    return series.filter((entry) => !usIndexLabels.has(entry.label));
+    return series.filter((entry) => !isUsMarketIndexSeries(entry));
 }
 
 function formatBacktestRunLabel(run) {

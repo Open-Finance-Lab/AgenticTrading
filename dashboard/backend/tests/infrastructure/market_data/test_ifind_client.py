@@ -18,10 +18,11 @@ TOKEN = "private-ifind-token"
 
 
 class FakeResponse:
-    def __init__(self, status_code=200, payload=None, json_error=None):
+    def __init__(self, status_code=200, payload=None, json_error=None, headers=None):
         self.status_code = status_code
         self._payload = {"errorcode": 0, "tables": []} if payload is None else payload
         self._json_error = json_error
+        self.headers = dict(headers or {})
 
     def json(self):
         if self._json_error is not None:
@@ -261,6 +262,60 @@ def test_retries_retryable_http_statuses_twice_then_succeeds(status_code):
     assert result == {"errorcode": 0}
     assert len(session.calls) == 3
     assert sleeps == [0.5, 1.0]
+
+
+def test_throttled_retry_honours_retry_after_over_the_fixed_backoff():
+    sleeps = []
+    session = FakeSession(
+        [
+            FakeResponse(status_code=429, headers={"Retry-After": "5"}),
+            FakeResponse(payload={"errorcode": 0}),
+        ]
+    )
+
+    result = make_client(session, sleep=sleeps.append).fetch_hourly_bars(
+        ["600519.SH"], START, END
+    )
+
+    assert result == {"errorcode": 0}
+    assert sleeps == [5.0]
+
+
+def test_retry_after_is_clamped_so_a_backtest_thread_cannot_be_parked():
+    from dashboard.backend.infrastructure.market_data.ifind_client import (
+        MAX_RETRY_AFTER_SECONDS,
+    )
+
+    sleeps = []
+    session = FakeSession(
+        [
+            FakeResponse(status_code=429, headers={"Retry-After": "86400"}),
+            FakeResponse(payload={"errorcode": 0}),
+        ]
+    )
+
+    make_client(session, sleep=sleeps.append).fetch_hourly_bars(
+        ["600519.SH"], START, END
+    )
+
+    assert sleeps == [MAX_RETRY_AFTER_SECONDS]
+
+
+@pytest.mark.parametrize("raw", ["", "not-a-number", "-1", "Wed, 21 Oct 2026 07:28:00 GMT"])
+def test_unusable_retry_after_falls_back_to_the_fixed_backoff(raw):
+    sleeps = []
+    session = FakeSession(
+        [
+            FakeResponse(status_code=429, headers={"Retry-After": raw}),
+            FakeResponse(payload={"errorcode": 0}),
+        ]
+    )
+
+    make_client(session, sleep=sleeps.append).fetch_hourly_bars(
+        ["600519.SH"], START, END
+    )
+
+    assert sleeps == [0.5]
 
 
 def test_persistent_connection_failure_stops_after_three_attempts(caplog):

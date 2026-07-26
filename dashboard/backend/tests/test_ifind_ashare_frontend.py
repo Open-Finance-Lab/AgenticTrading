@@ -289,6 +289,15 @@ def test_ifind_chart_does_not_render_us_index_series(js):
     assert re.search(r"filterIfindChartSeries\(\s*series", js)
 
 
+def test_us_index_filter_keys_on_structural_run_id_not_only_the_label(js):
+    """A renamed chart label must not silently disable the filter."""
+    assert "MARKET_INDEX_RUN_ID_PREFIX = 'index:'" in js
+    assert re.search(
+        r"run_id\.startsWith\(MARKET_INDEX_RUN_ID_PREFIX\)",
+        js,
+    )
+
+
 def test_ifind_errors_are_mapped_to_short_actionable_messages(js):
     assert re.search(r"function\s+formatBacktestError\s*\(", js)
     for marker in (

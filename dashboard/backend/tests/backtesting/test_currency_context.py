@@ -87,3 +87,34 @@ def test_identity_context_keeps_legacy_usd_schema():
 
     assert context.reporting_equity_record(record) == record
     assert context.rate_at(date(2026, 4, 1)) == 1.0
+
+
+def test_currency_context_is_hashable():
+    """frozen=True generates a __hash__ that would raise on the proxied rates."""
+    from dashboard.backend.domain.backtesting.currency import CurrencyContext
+
+    context = CurrencyContext(
+        native_currency="CNY",
+        reporting_currency="USD",
+        timezone="Asia/Shanghai",
+        rates={date(2026, 4, 1): 7.0},
+    )
+    twin = CurrencyContext(
+        native_currency="CNY",
+        reporting_currency="USD",
+        timezone="Asia/Shanghai",
+        rates={date(2026, 4, 1): 7.0},
+    )
+
+    assert hash(context) == hash(twin)
+    assert len({context, twin}) == 1
+    assert context == twin
+
+
+def test_identity_contexts_hash_independently_of_rates():
+    from dashboard.backend.domain.backtesting.currency import CurrencyContext
+
+    usd = CurrencyContext.identity("USD", "US/Eastern")
+    cny = CurrencyContext.identity("CNY", "Asia/Shanghai")
+
+    assert len({usd, cny, CurrencyContext.identity("USD", "US/Eastern")}) == 2

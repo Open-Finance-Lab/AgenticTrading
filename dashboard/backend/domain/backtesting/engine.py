@@ -292,6 +292,14 @@ class HourlyBacktester:
 
     def _initialize_ifind_currency_context(self) -> None:
         """Load the iFinD historical conversion series for this A-share run."""
+        # Assert the capability instead of catching AttributeError around the
+        # whole block: a bare AttributeError catch also swallows typos inside
+        # it and reports them as a credentials problem.
+        if not hasattr(self.data_loader, "fetch_usd_cny"):
+            raise MarketDataUnavailableError(
+                f"{self.data_source} market data provider cannot supply the "
+                "historical conversion rate an A-share run requires"
+            )
         try:
             rates = self.data_loader.fetch_usd_cny(
                 self.symbols,
@@ -307,10 +315,20 @@ class HourlyBacktester:
                 fx_policy="daily_implied_median_forward_fill",
             )
             context.rate_at(self._ifind_common_start)
-        except (IFindClientError, IFindFxError, CurrencyContextError, AttributeError) as exc:
+        except IFindClientError as exc:
+            # Transport/auth/business failures really are a credentials or
+            # permission story; the client's message is already sanitized.
             raise MarketDataUnavailableError(
                 "iFinD historical conversion rate is unavailable; check the "
                 "historical quotation currency permission, token, and date range"
+            ) from exc
+        except (IFindFxError, CurrencyContextError) as exc:
+            # These say *why* the series is unusable (gaps, disagreement, no
+            # rate before the first bar). Both message families are built from
+            # counts only, so they are safe to surface verbatim — and pointing
+            # the operator at credentials here would send them to the wrong place.
+            raise MarketDataUnavailableError(
+                f"iFinD historical conversion rate is unusable: {exc}"
             ) from exc
 
         self.currency_context = context
@@ -393,25 +411,25 @@ class HourlyBacktester:
             "reporting_currency": profile.reporting_currency,
         }
         if self.data_source == IFIND_ASHARE:
-            profile = self._effective_profile()
             metadata.update(
                 {
                     "market": profile.market,
                     "universe": profile.universe,
                     "timeframe": profile.timeframe,
                     "timezone": profile.timezone,
+                    # Baselines make no model calls, so rule_based is the honest
+                    # value here. Agent runs overwrite it in _agent_run_metadata
+                    # with the decision source they actually resolved.
                     "decision_source": RULE_BASED_DECISION_SOURCE,
                     "benchmark": profile.benchmark,
                 }
             )
             context = self._require_currency_context()
-            timestamps = [
-                timestamp
-                for frame in self.all_data.values()
-                for timestamp in frame.index
-            ]
-            first_timestamp = min(timestamps)
-            last_timestamp = max(timestamps)
+            # Frames arrive sorted (the adapter rejects non-increasing
+            # timestamps), so read the ends instead of materializing every
+            # timestamp across every symbol just to take min/max.
+            first_timestamp = min(frame.index[0] for frame in self.all_data.values())
+            last_timestamp = max(frame.index[-1] for frame in self.all_data.values())
             metadata.update(
                 {
                     "fx_pair": context.fx_pair,
@@ -587,7 +605,16 @@ class HourlyBacktester:
             f"{self.profile.market} {self.profile.timeframe} sessions...\n"
         )
         total_steps = len(all_timestamps)
-        
+        # Declare the run length so a strict-LLM run can absorb a small number
+        # of unusable responses instead of discarding hours of work on the
+        # first one. Left unset the budget is 0 (fatal on the first strike).
+        manager.strict_llm_total_steps = total_steps
+        if self.strict_llm:
+            print(
+                "   Strict LLM: aborting after more than "
+                f"{manager.strict_llm_fallback_budget()} unusable response(s)\n"
+            )
+
         # Build forward-filled price cache to handle missing hourly data
         print("   Pre-computing forward-filled price cache...")
         price_cache = {}

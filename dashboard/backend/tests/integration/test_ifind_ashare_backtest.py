@@ -102,15 +102,35 @@ class _FakeIFindClient:
 class _CapturingThread:
     last = None
 
-    def __init__(self, *, target, args, daemon):
+    def __init__(self, *, target, args=(), kwargs=None, daemon=False):
         self.target = target
         self.args = args
+        self.kwargs = dict(kwargs or {})
         self.daemon = daemon
         self.started = False
         type(self).last = self
 
     def start(self):
         self.started = True
+
+    def run_target(self):
+        return self.target(*self.args, **self.kwargs)
+
+
+def _scheduled_profile(thread):
+    """The market-profile arguments the worker was scheduled with, by name."""
+    return tuple(
+        thread.kwargs[key]
+        for key in (
+            "data_source",
+            "live_run_id",
+            "universe",
+            "timeframe",
+            "initial_capital",
+            "assets",
+            "decision_source",
+        )
+    )
 
 
 class _FakeLLMMessages:
@@ -198,7 +218,8 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
     thread = _CapturingThread.last
     assert thread is not None and thread.started
     assert thread.target is backtests_router.run_backtest_background
-    assert thread.args[7:] == (
+    assert thread.args == ()
+    assert _scheduled_profile(thread) == (
         IFIND_ASHARE,
         body["live_run_id"],
         universe,
@@ -216,7 +237,7 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
-    thread.target(*thread.args)
+    thread.run_target()
 
     command = captured["command"]
     assert command[command.index("--data-source") + 1] == IFIND_ASHARE
@@ -333,8 +354,8 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     assert body["decision_source"] == "llm"
     thread = _CapturingThread.last
     assert thread is not None and thread.started
-    assert thread.args[-1] == "llm"
-    thread.target(*thread.args)
+    assert thread.kwargs["decision_source"] == "llm"
+    thread.run_target()
 
     assert backtests_router.backtest_status["error"] is None
     assert fake_ifind.calls == [(symbols, START, END)]

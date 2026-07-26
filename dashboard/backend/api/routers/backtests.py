@@ -441,10 +441,13 @@ def run_backtest_background(
         
         # Print script output for debugging
         print(f"\n📋 === BACKTEST SCRIPT OUTPUT ===", flush=True)
+        # Redact, but do NOT truncate: print() is the only log channel that
+        # survives in the deployed config, so trimming the dump would drop the
+        # head of every run (universe, decision source, FX bootstrap).
         if result.stdout:
-            print(f"STDOUT:\n{_sanitize_backtest_error(result.stdout, 4000)}", flush=True)
+            print(f"STDOUT:\n{_redact_credentials(result.stdout)}", flush=True)
         if result.stderr:
-            print(f"STDERR:\n{_sanitize_backtest_error(result.stderr, 4000)}", flush=True)
+            print(f"STDERR:\n{_redact_credentials(result.stderr)}", flush=True)
         print(f"Return code: {result.returncode}", flush=True)
         print(f"=== END BACKTEST OUTPUT ===", flush=True)
         
@@ -489,9 +492,14 @@ def run_backtest_background(
         print("✋ Backtest background thread finished", flush=True)
 
 
-def _sanitize_backtest_error(error: object, max_chars: int = 500) -> str:
-    """Return a bounded background error summary without credentials."""
-    message = str(error)
+def _redact_credentials(text: object) -> str:
+    """Strip credentials from text without dropping any of it.
+
+    Kept separate from truncation on purpose: the subprocess log dump needs
+    redaction over its FULL length, while only the operator-facing error
+    summary needs a length bound.
+    """
+    message = str(text)
     token = os.getenv("IFIND_ACCESS_TOKEN", "").strip()
     if token:
         message = message.replace(token, "[REDACTED]")
@@ -505,7 +513,12 @@ def _sanitize_backtest_error(error: object, max_chars: int = 500) -> str:
         r"\1[REDACTED]",
         message,
     )
-    return message[-max_chars:]
+    return message
+
+
+def _sanitize_backtest_error(error: object, max_chars: int = 500) -> str:
+    """Return a bounded background error summary without credentials."""
+    return _redact_credentials(error)[-max_chars:]
 
 
 def _maybe_writeback_adapted_pipeline(agent_id: Optional[str], run_id: Optional[str]) -> None:
@@ -843,6 +856,7 @@ async def run_backtest_endpoint(
                 detail=f"initial_capital cannot exceed {MAX_BACKTEST_INITIAL_CAPITAL:g}.",
             )
 
+    ignored_llm_fields: List[str] = []
     if resolved_decision_source == LLM_DECISION_SOURCE:
         pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
         if agent_id and not model:
@@ -850,6 +864,23 @@ async def run_backtest_endpoint(
             if agent and agent.get("model_name"):
                 model = agent["model_name"]
     else:
+        # A rule-based run drops the LLM-only fields — but validate them FIRST.
+        # Dropping them before _validate_backtest_params meant a malformed model
+        # was answered 200 instead of 422, so the caller never learned their
+        # input was garbage. Rejecting the *combination* outright is not an
+        # option: a body-level decision_source deliberately overrides a query
+        # one, and leftover query params are exactly what that override exists
+        # to neutralize. Validate, drop, then say what was dropped.
+        _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipeline)
+        ignored_llm_fields = [
+            name
+            for name, value in (
+                ("strategy_prompt", strategy_prompt),
+                ("model", model),
+                ("pipeline", pipeline),
+            )
+            if value
+        ]
         strategy_prompt = None
         model = None
         pipeline = None
@@ -926,29 +957,32 @@ async def run_backtest_endpoint(
 
     # Start backtest in background thread
     print(f"🧵 Starting background thread for backtest", flush=True)
+    # Keyword args, not positional: this call passes 14 of them and universe /
+    # timeframe were inserted mid-signature. By name, a future insertion in the
+    # wrong slot is a TypeError instead of a silently shifted argument.
     thread = threading.Thread(
         target=run_backtest_background,
-        args=(
-            start_date,
-            end_date,
-            session_id,
-            strategy_prompt,
-            model,
-            pipeline,
-            agent_id,
-            data_source,
-            live_run_id,
-            profile.universe,
-            profile.timeframe,
-            initial_capital,
-            selected_assets,
-            resolved_decision_source,
-        ),
+        kwargs={
+            "start_date": start_date,
+            "end_date": end_date,
+            "session_id": session_id,
+            "strategy_prompt": strategy_prompt,
+            "model": model,
+            "pipeline": pipeline,
+            "agent_id": agent_id,
+            "data_source": data_source,
+            "live_run_id": live_run_id,
+            "universe": profile.universe,
+            "timeframe": profile.timeframe,
+            "initial_capital": initial_capital,
+            "assets": selected_assets,
+            "decision_source": resolved_decision_source,
+        },
         daemon=True
     )
     thread.start()
     
-    return {
+    response = {
         "success": True,
         "message": "Backtest started in background. Check /backtest/status for progress.",
         "status_url": "/backtest/status",
@@ -964,6 +998,12 @@ async def run_backtest_endpoint(
         "benchmark": profile.benchmark,
         "assets": selected_assets or list(DJIA_30),
     }
+    if ignored_llm_fields:
+        # Say what a rule-based run threw away. Dropping LLM-only fields is
+        # correct, doing it invisibly is not: the caller otherwise cannot tell
+        # a honoured model from an ignored one.
+        response["ignored_fields"] = ignored_llm_fields
+    return response
 
 @router.get("/backtest/status")
 async def get_backtest_status(request: Request):

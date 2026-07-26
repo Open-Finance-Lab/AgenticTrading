@@ -62,6 +62,22 @@ class CurrencyContext:
         object.__setattr__(self, "rates", MappingProxyType(dict(sorted(normalized.items()))))
         object.__setattr__(self, "_rate_dates", tuple(sorted(normalized)))
 
+    def __hash__(self) -> int:
+        # frozen=True generates a __hash__ over the declared fields, and `rates`
+        # is a MappingProxyType — unhashable, so the generated one raises. Hash
+        # the (sorted) rate items instead so the value stays usable as a dict
+        # key / set member and remains consistent with the generated __eq__.
+        return hash(
+            (
+                self.native_currency,
+                self.reporting_currency,
+                self.timezone,
+                tuple(self.rates.items()),
+                self.fx_source,
+                self.fx_policy,
+            )
+        )
+
     @classmethod
     def identity(cls, currency: str, timezone: str) -> "CurrencyContext":
         """Create a no-conversion context for a single-currency market."""
