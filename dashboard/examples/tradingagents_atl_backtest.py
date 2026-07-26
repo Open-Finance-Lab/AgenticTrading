@@ -190,6 +190,12 @@ def run_from_args(
     symbol = str(args.symbol).strip().upper()
     if not symbol:
         raise CLIConfigurationError("--symbol cannot be empty")
+    client = client_factory(
+        base_url=settings.base_url,
+        api_key=settings.api_key,
+    )
+    runner = runner_factory(client)
+    runner.validate_symbol(symbol)
 
     if args.decisions_file:
         artifact_path = Path(args.decisions_file).expanduser()
@@ -213,11 +219,7 @@ def run_from_args(
             f"--symbol {symbol} does not match artifact symbol {artifact_symbol}"
         )
 
-    client = client_factory(
-        base_url=settings.base_url,
-        api_key=settings.api_key,
-    )
-    outcome = runner_factory(client).run_backtest(
+    outcome = runner.run_backtest(
         artifact=artifact,
         artifact_sha256=artifact_sha256,
         agent_version_id=settings.agent_version_id,

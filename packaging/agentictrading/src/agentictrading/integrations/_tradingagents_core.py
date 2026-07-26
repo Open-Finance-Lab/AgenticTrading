@@ -169,6 +169,10 @@ class TradingAgentsDecisionArtifact:
             )
         if not isinstance(self.manifest, dict):
             raise ArtifactValidationError("manifest must be an object")
+        if _safe_value(self.manifest) != self.manifest:
+            raise ArtifactValidationError(
+                "manifest contains sensitive keys or credential-shaped values"
+            )
         symbol = self.manifest.get("symbol")
         if not isinstance(symbol, str) or not symbol.strip():
             raise ArtifactValidationError("manifest symbol must be non-empty")
@@ -526,4 +530,3 @@ class TradingAgentsDecisionGenerator:
             error_type=type(error).__name__,
             error_message=message,
         )
-

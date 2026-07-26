@@ -249,6 +249,16 @@ def test_safe_manifest_excludes_nested_credentials_and_scrubs_values():
     assert len(manifest["safe_config_sha256"]) == 64
 
 
+def test_artifact_rejects_manually_supplied_sensitive_manifest():
+    unsafe = _manifest()
+    unsafe["api_key"] = "sk-manual-secret"
+    with pytest.raises(ArtifactValidationError, match="sensitive"):
+        TradingAgentsDecisionArtifact(
+            manifest=unsafe,
+            decisions=(_record(),),
+        )
+
+
 def test_error_sanitizer_removes_common_secret_shapes_and_caps_length():
     message = (
         "OPENAI_API_KEY=sk-abc123 Authorization: Bearer bearer-secret "
@@ -1131,6 +1141,9 @@ def test_cli_decisions_file_replay_never_constructs_generator(tmp_path):
     runner_calls = []
 
     class FakeRunner:
+        def validate_symbol(self, symbol):
+            assert symbol == "AAPL"
+
         def run_backtest(self, **kwargs):
             runner_calls.append(kwargs)
             return expected
@@ -1182,13 +1195,19 @@ def test_cli_generation_writes_artifact_and_forwards_safe_model_config(tmp_path)
     )
     generation_calls = []
     runner_calls = []
+    events = []
 
     class FakeGenerator:
         def generate(self, **kwargs):
+            assert events == ["preflight"]
             generation_calls.append(kwargs)
             return _artifact(_record())
 
     class FakeRunner:
+        def validate_symbol(self, symbol):
+            assert symbol == "AAPL"
+            events.append("preflight")
+
         def run_backtest(self, **kwargs):
             runner_calls.append(kwargs)
             return TradingAgentsATLRunOutcome(

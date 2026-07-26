@@ -91,6 +91,7 @@ class TradingAgentsATLRunner:
 
     def __init__(self, client: Any) -> None:
         self.client = client
+        self._validated_symbols = set()
 
     def run_backtest(
         self,
@@ -128,7 +129,7 @@ class TradingAgentsATLRunner:
                 "artifact must contain at least one valid TradingAgents decision"
             )
 
-        self._preflight_environment(str(artifact.manifest["symbol"]).upper())
+        self.validate_symbol(str(artifact.manifest["symbol"]).upper())
         planner = TradingAgentsReplayPlanner(artifact, artifact_sha256)
         integration_config = {
             "id": "tradingagents",
@@ -224,7 +225,11 @@ class TradingAgentsATLRunner:
         except ATLAPIError as exc:
             raise exc.with_run_id(run.id if run is not None else None)
 
-    def _preflight_environment(self, symbol: str) -> None:
+    def validate_symbol(self, symbol: str) -> None:
+        """Fail before model generation when ATL cannot trade ``symbol``."""
+        symbol = str(symbol or "").strip().upper()
+        if symbol in self._validated_symbols:
+            return
         environments = self.client.list_environments()
         environment = next(
             (
@@ -243,6 +248,7 @@ class TradingAgentsATLRunner:
             raise TradingAgentsReplayValidationError(
                 f"{symbol} is not in the {self.ENVIRONMENT_ID} universe"
             )
+        self._validated_symbols.add(symbol)
 
     def _wait(
         self,
@@ -279,4 +285,3 @@ class TradingAgentsATLRunner:
                 f"{field} must be canonical YYYY-MM-DD, got {value!r}"
             )
         return parsed
-
