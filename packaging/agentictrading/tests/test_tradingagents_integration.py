@@ -8,6 +8,7 @@ import sys
 
 import pytest
 
+from agentictrading import Observation, Step
 from agentictrading.integrations.tradingagents import (
     ARTIFACT_SCHEMA_VERSION,
     ArtifactValidationError,
@@ -16,6 +17,8 @@ from agentictrading.integrations.tradingagents import (
     TradingAgentsDecisionRecord,
     TradingAgentsDependencyError,
     TradingAgentsGenerationError,
+    TradingAgentsReplayPlanner,
+    TradingAgentsReplayValidationError,
     TradingAgentsVersionError,
     build_safe_manifest,
     load_decision_artifact,
@@ -452,3 +455,264 @@ def test_default_generator_loads_dependency_only_when_generate_is_called(monkeyp
             config={},
             selected_analysts=("market",),
         )
+
+
+# ---------------------------------------------------------------------------
+# Pure T+1 replay planner
+# ---------------------------------------------------------------------------
+
+
+def _artifact(*records):
+    return TradingAgentsDecisionArtifact(
+        manifest=_manifest(symbol="AAPL"),
+        decisions=tuple(records or (_record(),)),
+    )
+
+
+def _step(
+    timestamp: str,
+    *,
+    sequence: int = 0,
+    price=100.0,
+    equity=1_000.0,
+    positions=None,
+    allowed_symbols=None,
+    max_position_weight=0.25,
+    step_id=None,
+):
+    features = {} if price is None else {"AAPL": {"price": price}}
+    observation = Observation(
+        market={"features": features},
+        portfolio={
+            "cash": equity,
+            "equity": equity,
+            "positions": list(positions or []),
+        },
+    )
+    constraints = {}
+    if allowed_symbols is not None:
+        constraints["allowed_symbols"] = allowed_symbols
+    else:
+        constraints["allowed_symbols"] = ["AAPL"]
+    if max_position_weight is not None:
+        constraints["max_position_weight"] = max_position_weight
+    return Step(
+        status="awaiting_decision",
+        run_id="run_1",
+        step_id=step_id or f"step_{sequence}",
+        sequence=sequence,
+        timestamp=timestamp,
+        observation=observation,
+        constraints=constraints,
+    )
+
+
+def _error_record(date="2026-04-03"):
+    return TradingAgentsDecisionRecord(
+        analysis_date=date,
+        rating="",
+        atl_action="HOLD",
+        status="error",
+        attempts=2,
+        raw_final_trade_decision="",
+        raw_sha256=sha256_text(""),
+        error_type="RuntimeError",
+        error_message="provider unavailable",
+    )
+
+
+def test_replay_waits_until_first_new_york_trading_date_after_analysis():
+    planner = TradingAgentsReplayPlanner(_artifact(_record()), "a" * 64)
+
+    same_day = planner.decision_for_step(
+        _step("2026-04-03T14:00:00+00:00", sequence=0)
+    )
+    monday_open = planner.decision_for_step(
+        _step("2026-04-06T13:30:00+00:00", sequence=1)
+    )
+    monday_later = planner.decision_for_step(
+        _step("2026-04-06T14:30:00+00:00", sequence=2)
+    )
+
+    assert same_day.orders == []
+    assert len(monday_open.orders) == 1
+    assert monday_open.orders[0].side == "buy"
+    assert monday_later.orders == []
+    diagnostics = planner.finalize()
+    assert diagnostics.processed_dates == ("2026-04-03",)
+    assert diagnostics.unprocessed_dates == ()
+    assert diagnostics.buy_orders == 1
+    assert diagnostics.passive_holds == 2
+
+
+def test_replay_same_step_is_idempotent():
+    planner = TradingAgentsReplayPlanner(_artifact(_record()), "b" * 64)
+    step = _step("2026-04-06T13:30:00+00:00", step_id="same")
+
+    first = planner.decision_for_step(step)
+    second = planner.decision_for_step(step)
+
+    assert second is first
+    assert planner.finalize().buy_orders == 1
+
+
+def test_replay_uses_latest_when_multiple_records_become_eligible():
+    planner = TradingAgentsReplayPlanner(
+        _artifact(
+            _record("2026-04-03", rating="Buy", action="BUY"),
+            _record("2026-04-10", rating="Sell", action="SELL"),
+        ),
+        "c" * 64,
+    )
+    decision = planner.decision_for_step(
+        _step(
+            "2026-04-13T13:30:00+00:00",
+            positions=[{"symbol": "AAPL", "quantity": 2}],
+        )
+    )
+
+    assert decision.orders[0].side == "sell"
+    assert decision.orders[0].quantity == 2
+    diagnostics = planner.finalize()
+    assert diagnostics.superseded == 1
+    assert diagnostics.processed_dates == ("2026-04-03", "2026-04-10")
+
+
+def test_replay_error_record_is_an_explicit_generation_error_hold():
+    planner = TradingAgentsReplayPlanner(_artifact(_error_record()), "d" * 64)
+
+    decision = planner.decision_for_step(
+        _step("2026-04-06T13:30:00+00:00")
+    )
+
+    assert decision.orders == []
+    assert "generation_error" in decision.rationale
+    assert "2026-04-03" in decision.rationale
+    assert planner.finalize().error_holds == 1
+
+
+def test_replay_model_hold_is_distinct_from_passive_hold():
+    record = _record("2026-04-03", rating="Hold", action="HOLD")
+    planner = TradingAgentsReplayPlanner(_artifact(record), "e" * 64)
+
+    decision = planner.decision_for_step(
+        _step("2026-04-06T13:30:00+00:00")
+    )
+
+    assert decision.orders == []
+    assert "rating=Hold" in decision.rationale
+    diagnostics = planner.finalize()
+    assert diagnostics.model_holds == 1
+    assert diagnostics.passive_holds == 0
+
+
+def test_replay_buy_only_tops_up_to_environment_weight_cap():
+    planner = TradingAgentsReplayPlanner(_artifact(_record()), "f" * 64)
+    decision = planner.decision_for_step(
+        _step(
+            "2026-04-06T13:30:00+00:00",
+            price=100,
+            equity=1_000,
+            positions=[{"symbol": "AAPL", "quantity": 1}],
+        )
+    )
+
+    order = decision.orders[0]
+    assert order.symbol == "AAPL"
+    assert order.side == "buy"
+    assert order.quantity_type == "shares"
+    assert order.quantity == 1  # floor(1000 * .25 / 100) - one already held
+    assert order.order_type == "market"
+    assert "rating=Buy" in decision.rationale
+    assert "artifact=" + "f" * 12 in decision.rationale
+
+
+@pytest.mark.parametrize(
+    ("price", "held", "reason"),
+    [
+        (100, 2, "already_at_target"),
+        (300, 0, "price_too_high_for_target"),
+        (None, 0, "missing_price"),
+    ],
+)
+def test_replay_buy_constraint_holds_have_specific_reason(price, held, reason):
+    planner = TradingAgentsReplayPlanner(_artifact(_record()), "1" * 64)
+    positions = [] if not held else [{"symbol": "AAPL", "quantity": held}]
+
+    decision = planner.decision_for_step(
+        _step(
+            "2026-04-06T13:30:00+00:00",
+            price=price,
+            positions=positions,
+        )
+    )
+
+    assert decision.orders == []
+    assert reason in decision.rationale
+    assert planner.finalize().constraint_holds == 1
+
+
+def test_replay_sell_closes_all_shares_and_never_shorts():
+    sell = _record("2026-04-03", rating="Underweight", action="SELL")
+    planner = TradingAgentsReplayPlanner(_artifact(sell), "2" * 64)
+    decision = planner.decision_for_step(
+        _step(
+            "2026-04-06T13:30:00+00:00",
+            positions=[{"symbol": "AAPL", "quantity": 3}],
+        )
+    )
+    assert decision.orders[0].side == "sell"
+    assert decision.orders[0].quantity == 3
+
+    empty_planner = TradingAgentsReplayPlanner(_artifact(sell), "3" * 64)
+    empty = empty_planner.decision_for_step(
+        _step("2026-04-06T13:30:00+00:00")
+    )
+    assert empty.orders == []
+    assert "sell_without_position" in empty.rationale
+    assert empty_planner.finalize().sell_orders == 0
+
+
+@pytest.mark.parametrize(
+    ("step", "message"),
+    [
+        (
+            _step(
+                "2026-04-06T13:30:00+00:00",
+                allowed_symbols=["MSFT"],
+            ),
+            "allowed_symbols",
+        ),
+        (
+            _step(
+                "2026-04-06T13:30:00+00:00",
+                max_position_weight=None,
+            ),
+            "max_position_weight",
+        ),
+        (
+            _step("2026-04-06T13:30:00"),
+            "timezone",
+        ),
+    ],
+)
+def test_replay_fails_loudly_on_invalid_step_contract(step, message):
+    planner = TradingAgentsReplayPlanner(_artifact(_record()), "4" * 64)
+    with pytest.raises(TradingAgentsReplayValidationError, match=message):
+        planner.decision_for_step(step)
+
+
+def test_replay_finalize_lists_unprocessed_analysis_dates():
+    planner = TradingAgentsReplayPlanner(
+        _artifact(
+            _record("2026-04-03"),
+            _record("2026-04-10", rating="Hold", action="HOLD"),
+        ),
+        "5" * 64,
+    )
+    planner.decision_for_step(_step("2026-04-06T13:30:00+00:00"))
+
+    diagnostics = planner.finalize()
+
+    assert diagnostics.processed_dates == ("2026-04-03",)
+    assert diagnostics.unprocessed_dates == ("2026-04-10",)
