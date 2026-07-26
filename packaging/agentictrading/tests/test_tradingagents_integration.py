@@ -8,7 +8,16 @@ import sys
 
 import pytest
 
-from agentictrading import Observation, Step
+from agentictrading import (
+    ATLConflictError,
+    ATLRunFailedError,
+    ATLValidationError,
+    ExecutionResult,
+    Observation,
+    Run,
+    RunResult,
+    Step,
+)
 from agentictrading.integrations.tradingagents import (
     ARTIFACT_SCHEMA_VERSION,
     ArtifactValidationError,
@@ -17,6 +26,9 @@ from agentictrading.integrations.tradingagents import (
     TradingAgentsDecisionRecord,
     TradingAgentsDependencyError,
     TradingAgentsGenerationError,
+    TradingAgentsATLRunner,
+    TradingAgentsATLRunOutcome,
+    TradingAgentsReplayIncompleteError,
     TradingAgentsReplayPlanner,
     TradingAgentsReplayValidationError,
     TradingAgentsVersionError,
@@ -716,3 +728,264 @@ def test_replay_finalize_lists_unprocessed_analysis_dates():
 
     assert diagnostics.processed_dates == ("2026-04-03",)
     assert diagnostics.unprocessed_dates == ("2026-04-10",)
+
+
+# ---------------------------------------------------------------------------
+# ATLClient orchestration loop (fake client, no network)
+# ---------------------------------------------------------------------------
+
+
+class _FakeATLClient:
+    def __init__(self, steps, *, result=None, execution_results=None):
+        self.steps = list(steps)
+        self.result = result or RunResult(
+            run_id="run_1",
+            status="completed",
+            metrics={"total_return": 0.05, "timeout_holds": 0},
+            raw={"compare_url": "http://atl.local/app?run=run_1"},
+        )
+        self.execution_results = list(execution_results or [])
+        self.created = []
+        self.submitted = []
+        self.waits = []
+        self.environment_calls = 0
+
+    def list_environments(self):
+        self.environment_calls += 1
+        return [
+            {
+                "environment_id": "us-equity-hourly-v1",
+                "universe": ["AAPL", "MSFT"],
+            }
+        ]
+
+    def create_run(self, agent_version_id, **kwargs):
+        self.created.append((agent_version_id, kwargs))
+        return Run(run_id="run_1", status="created")
+
+    def get_next_step(self, run_id):
+        assert run_id == "run_1"
+        return self.steps.pop(0)
+
+    def submit_decision(self, run_id, step_id, decision):
+        self.submitted.append((run_id, step_id, decision))
+        if self.execution_results:
+            result = self.execution_results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return ExecutionResult(
+            run_id=run_id,
+            step_id=step_id,
+            accepted=True,
+            validation={"passed": True, "rejections": []},
+            fills=[],
+            run_status="running",
+        )
+
+    def get_run_result(self, run_id):
+        assert run_id == "run_1"
+        return self.result
+
+    def wait(self, seconds):
+        self.waits.append(seconds)
+
+
+def _completed_step():
+    return Step(status="completed", run_id="run_1", result_run_id="ext_1")
+
+
+def test_atl_runner_drives_full_loop_and_returns_structured_outcome():
+    artifact = _artifact(
+        _record("2026-04-03", rating="Buy", action="BUY"),
+        _record("2026-04-10", rating="Hold", action="HOLD"),
+    )
+    executions = [
+        ExecutionResult(
+            run_id="run_1",
+            step_id="step_0",
+            accepted=True,
+            validation={"passed": True, "rejections": []},
+            fills=[{"symbol": "AAPL", "side": "buy", "filled_quantity": 2}],
+            run_status="running",
+        ),
+        ExecutionResult(
+            run_id="run_1",
+            step_id="step_1",
+            accepted=True,
+            validation={
+                "passed": False,
+                "rejections": [{"reason": "test_rejection"}],
+            },
+            fills=[],
+            run_status="running",
+        ),
+    ]
+    client = _FakeATLClient(
+        [
+            Step(status="loading", run_id="run_1"),
+            _step("2026-04-06T13:30:00+00:00", sequence=0),
+            _step("2026-04-13T13:30:00+00:00", sequence=1),
+            _completed_step(),
+        ],
+        execution_results=executions,
+    )
+
+    outcome = TradingAgentsATLRunner(client).run_backtest(
+        artifact=artifact,
+        artifact_sha256="a" * 64,
+        agent_version_id="agv_1",
+        start_date="2026-04-06",
+        end_date="2026-04-14",
+        poll_interval=0.01,
+    )
+
+    assert isinstance(outcome, TradingAgentsATLRunOutcome)
+    assert outcome.result.metrics["total_return"] == 0.05
+    assert outcome.run_id == "run_1"
+    assert outcome.compare_url == "http://atl.local/app?run=run_1"
+    assert outcome.fills_count == 1
+    assert outcome.rejections == ({"reason": "test_rejection"},)
+    assert outcome.replay.buy_orders == 1
+    assert outcome.replay.model_holds == 1
+    assert outcome.timeout_holds == 0
+    assert client.waits == [0.01]
+    assert len(client.submitted) == 2
+
+    agent_version_id, create_kwargs = client.created[0]
+    assert agent_version_id == "agv_1"
+    assert create_kwargs["environment_id"] == "us-equity-hourly-v1"
+    assert create_kwargs["symbols"] == ["AAPL"]
+    integration = create_kwargs["config"]["integration"]
+    assert integration["id"] == "tradingagents"
+    assert integration["artifact_sha256"] == "a" * 64
+    assert integration["analysis_dates"] == ["2026-04-03", "2026-04-10"]
+    assert integration["decision_data_source"] == "tradingagents_configured_vendors"
+    assert integration["execution_data_source"] == "atl_alpaca"
+    serialized = json.dumps(create_kwargs["config"])
+    assert "raw_final_trade_decision" not in serialized
+    assert "/Users/" not in serialized
+
+
+def test_atl_runner_incomplete_replay_raises_with_run_id_and_dates():
+    artifact = _artifact(
+        _record("2026-04-03"),
+        _record("2026-04-10", rating="Hold", action="HOLD"),
+    )
+    client = _FakeATLClient(
+        [_step("2026-04-06T13:30:00+00:00"), _completed_step()]
+    )
+
+    with pytest.raises(TradingAgentsReplayIncompleteError) as error:
+        TradingAgentsATLRunner(client).run_backtest(
+            artifact=artifact,
+            artifact_sha256="b" * 64,
+            agent_version_id="agv_1",
+            start_date="2026-04-06",
+            end_date="2026-04-11",
+        )
+
+    assert error.value.run_id == "run_1"
+    assert error.value.analysis_dates == ("2026-04-10",)
+    assert error.value.result.metrics["total_return"] == 0.05
+
+
+def test_atl_runner_attaches_run_id_to_api_errors():
+    client = _FakeATLClient(
+        [_step("2026-04-06T13:30:00+00:00")],
+        execution_results=[ATLValidationError("rejected", code="bad_order")],
+    )
+
+    with pytest.raises(ATLValidationError) as error:
+        TradingAgentsATLRunner(client).run_backtest(
+            artifact=_artifact(_record()),
+            artifact_sha256="c" * 64,
+            agent_version_id="agv_1",
+            start_date="2026-04-06",
+            end_date="2026-04-07",
+        )
+
+    assert error.value.run_id == "run_1"
+
+
+def test_atl_runner_continues_after_server_auto_hold_conflict():
+    client = _FakeATLClient(
+        [_step("2026-04-06T13:30:00+00:00"), _completed_step()],
+        result=RunResult(
+            run_id="run_1",
+            status="completed",
+            metrics={"timeout_holds": 1},
+        ),
+        execution_results=[
+            ATLConflictError(
+                "late", code="decision_deadline_exceeded", status_code=409
+            )
+        ],
+    )
+
+    outcome = TradingAgentsATLRunner(client).run_backtest(
+        artifact=_artifact(_record()),
+        artifact_sha256="d" * 64,
+        agent_version_id="agv_1",
+        start_date="2026-04-06",
+        end_date="2026-04-07",
+    )
+
+    assert outcome.timeout_holds == 1
+
+
+def test_atl_runner_failed_step_raises_run_failed_error():
+    client = _FakeATLClient(
+        [Step(status="failed", run_id="run_1", message="engine failed")]
+    )
+    with pytest.raises(ATLRunFailedError, match="engine failed") as error:
+        TradingAgentsATLRunner(client).run_backtest(
+            artifact=_artifact(_record()),
+            artifact_sha256="e" * 64,
+            agent_version_id="agv_1",
+            start_date="2026-04-06",
+            end_date="2026-04-07",
+        )
+    assert error.value.run_id == "run_1"
+
+
+def test_atl_runner_rejects_invalid_input_before_creating_run():
+    all_error = _artifact(_error_record())
+    client = _FakeATLClient([])
+    with pytest.raises(TradingAgentsGenerationError, match="valid"):
+        TradingAgentsATLRunner(client).run_backtest(
+            artifact=all_error,
+            artifact_sha256="f" * 64,
+            agent_version_id="agv_1",
+            start_date="2026-04-06",
+            end_date="2026-04-07",
+        )
+    assert client.environment_calls == 0
+    assert client.created == []
+
+    with pytest.raises(ArtifactValidationError, match="start_date"):
+        TradingAgentsATLRunner(client).run_backtest(
+            artifact=_artifact(_record()),
+            artifact_sha256="f" * 64,
+            agent_version_id="agv_1",
+            start_date="2026-04-07",
+            end_date="2026-04-06",
+        )
+    assert client.created == []
+
+
+def test_atl_runner_preflights_symbol_against_environment():
+    client = _FakeATLClient([])
+    client.list_environments = lambda: [
+        {"environment_id": "us-equity-hourly-v1", "universe": ["MSFT"]}
+    ]
+
+    with pytest.raises(TradingAgentsReplayValidationError, match="universe"):
+        TradingAgentsATLRunner(client).run_backtest(
+            artifact=_artifact(_record()),
+            artifact_sha256="1" * 64,
+            agent_version_id="agv_1",
+            start_date="2026-04-06",
+            end_date="2026-04-07",
+        )
+    assert client.created == []

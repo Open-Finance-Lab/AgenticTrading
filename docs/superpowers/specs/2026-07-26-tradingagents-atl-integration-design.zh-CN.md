@@ -385,10 +385,15 @@ TradingAgents 所选供应商要求的 LLM / 数据 Key
 packaging/agentictrading/src/agentictrading/integrations/
   __init__.py
   tradingagents.py
+    - 稳定公开导入门面
+  _tradingagents_core.py
     - TradingAgentsDecisionGenerator
     - load/save/validate decision artifact
     - five-tier rating mapping
-    - TradingAgentsATLRunner
+  _tradingagents_replay.py
+    - T+1 信号选择、目标仓位和本地诊断
+  _tradingagents_runner.py
+    - ATLClient 生命周期和结果汇总
 
 packaging/agentictrading/tests/
   test_tradingagents_integration.py
