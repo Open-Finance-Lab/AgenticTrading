@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -28,6 +30,7 @@ from agentictrading.integrations.tradingagents import (
     TradingAgentsGenerationError,
     TradingAgentsATLRunner,
     TradingAgentsATLRunOutcome,
+    TradingAgentsReplayDiagnostics,
     TradingAgentsReplayIncompleteError,
     TradingAgentsReplayPlanner,
     TradingAgentsReplayValidationError,
@@ -989,3 +992,250 @@ def test_atl_runner_preflights_symbol_against_environment():
             end_date="2026-04-07",
         )
     assert client.created == []
+
+
+# ---------------------------------------------------------------------------
+# Example CLI
+# ---------------------------------------------------------------------------
+
+
+def _load_cli_module():
+    repo_root = Path(__file__).resolve().parents[3]
+    path = repo_root / "dashboard" / "examples" / "tradingagents_atl_backtest.py"
+    spec = importlib.util.spec_from_file_location("tradingagents_atl_cli", path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_cli_parser_accepts_repeated_explicit_analysis_dates():
+    cli = _load_cli_module()
+    args = cli.build_parser().parse_args(
+        [
+            "--symbol",
+            "AAPL",
+            "--analysis-date",
+            "2026-04-03",
+            "--analysis-date",
+            "2026-04-10",
+            "--start-date",
+            "2026-04-06",
+            "--end-date",
+            "2026-04-14",
+        ]
+    )
+
+    assert args.symbol == "AAPL"
+    assert args.analysis_dates == ["2026-04-03", "2026-04-10"]
+    assert args.decisions_file is None
+    assert "--analysis-date" in cli.build_parser().format_help()
+
+
+def test_cli_requires_generation_dates_unless_replaying_file(tmp_path):
+    cli = _load_cli_module()
+    parser = cli.build_parser()
+    args = parser.parse_args(
+        [
+            "--symbol",
+            "AAPL",
+            "--start-date",
+            "2026-04-06",
+            "--end-date",
+            "2026-04-14",
+        ]
+    )
+    with pytest.raises(cli.CLIConfigurationError, match="analysis-date"):
+        cli.validate_args(args)
+
+    replay = parser.parse_args(
+        [
+            "--symbol",
+            "AAPL",
+            "--decisions-file",
+            str(tmp_path / "artifact.json"),
+            "--start-date",
+            "2026-04-06",
+            "--end-date",
+            "2026-04-14",
+        ]
+    )
+    cli.validate_args(replay)
+
+
+def test_cli_requires_atl_credentials_from_environment():
+    cli = _load_cli_module()
+    args = cli.build_parser().parse_args(
+        [
+            "--symbol",
+            "AAPL",
+            "--decisions-file",
+            "artifact.json",
+            "--start-date",
+            "2026-04-06",
+            "--end-date",
+            "2026-04-14",
+        ]
+    )
+
+    with pytest.raises(cli.CLIConfigurationError, match="ATL_API_KEY"):
+        cli.resolve_atl_settings(args, environ={})
+    with pytest.raises(cli.CLIConfigurationError, match="ATL_BASE_URL"):
+        cli.resolve_atl_settings(args, environ={"ATL_API_KEY": "ag_test"})
+    with pytest.raises(cli.CLIConfigurationError, match="ATL_AGENT_VERSION_ID"):
+        cli.resolve_atl_settings(
+            args,
+            environ={"ATL_API_KEY": "ag_test", "ATL_BASE_URL": "http://atl"},
+        )
+
+
+def test_cli_decisions_file_replay_never_constructs_generator(tmp_path):
+    cli = _load_cli_module()
+    artifact = _artifact(_record())
+    artifact_path = tmp_path / "artifact.json"
+    artifact_hash = save_decision_artifact(artifact, artifact_path)
+    args = cli.build_parser().parse_args(
+        [
+            "--symbol",
+            "AAPL",
+            "--decisions-file",
+            str(artifact_path),
+            "--start-date",
+            "2026-04-06",
+            "--end-date",
+            "2026-04-07",
+        ]
+    )
+    replay = TradingAgentsReplayDiagnostics(
+        processed_dates=("2026-04-03",),
+        unprocessed_dates=(),
+        buy_orders=1,
+        sell_orders=0,
+        model_holds=0,
+        error_holds=0,
+        passive_holds=0,
+        constraint_holds=0,
+        superseded=0,
+    )
+    expected = TradingAgentsATLRunOutcome(
+        result=RunResult(
+            run_id="run_1",
+            status="completed",
+            metrics={"timeout_holds": 0},
+        ),
+        replay=replay,
+        fills=(),
+        rejections=(),
+    )
+    runner_calls = []
+
+    class FakeRunner:
+        def run_backtest(self, **kwargs):
+            runner_calls.append(kwargs)
+            return expected
+
+    result = cli.run_from_args(
+        args,
+        environ={
+            "ATL_API_KEY": "ag_test",
+            "ATL_BASE_URL": "http://atl.local",
+            "ATL_AGENT_VERSION_ID": "agv_test",
+        },
+        client_factory=lambda **kwargs: ("client", kwargs),
+        runner_factory=lambda client: FakeRunner(),
+        generator_factory=lambda: pytest.fail(
+            "generator must not be constructed for --decisions-file"
+        ),
+    )
+
+    assert result.outcome is expected
+    assert result.artifact_path == artifact_path
+    assert result.artifact_sha256 == artifact_hash
+    assert runner_calls[0]["artifact"] == artifact
+
+
+def test_cli_generation_writes_artifact_and_forwards_safe_model_config(tmp_path):
+    cli = _load_cli_module()
+    output = tmp_path / "generated.json"
+    args = cli.build_parser().parse_args(
+        [
+            "--symbol",
+            "aapl",
+            "--analysis-date",
+            "2026-04-03",
+            "--start-date",
+            "2026-04-06",
+            "--end-date",
+            "2026-04-07",
+            "--output",
+            str(output),
+            "--llm-provider",
+            "openai",
+            "--deep-think-llm",
+            "deep-test",
+            "--quick-think-llm",
+            "quick-test",
+            "--selected-analyst",
+            "market",
+        ]
+    )
+    generation_calls = []
+    runner_calls = []
+
+    class FakeGenerator:
+        def generate(self, **kwargs):
+            generation_calls.append(kwargs)
+            return _artifact(_record())
+
+    class FakeRunner:
+        def run_backtest(self, **kwargs):
+            runner_calls.append(kwargs)
+            return TradingAgentsATLRunOutcome(
+                result=RunResult(
+                    run_id="run_1",
+                    status="completed",
+                    metrics={"timeout_holds": 0},
+                ),
+                replay=TradingAgentsReplayDiagnostics(
+                    processed_dates=("2026-04-03",),
+                    unprocessed_dates=(),
+                    buy_orders=1,
+                    sell_orders=0,
+                    model_holds=0,
+                    error_holds=0,
+                    passive_holds=0,
+                    constraint_holds=0,
+                    superseded=0,
+                ),
+                fills=(),
+                rejections=(),
+            )
+
+    result = cli.run_from_args(
+        args,
+        environ={
+            "ATL_API_KEY": "ag_test",
+            "ATL_BASE_URL": "http://atl.local",
+            "ATL_AGENT_VERSION_ID": "agv_test",
+        },
+        client_factory=lambda **kwargs: object(),
+        runner_factory=lambda client: FakeRunner(),
+        generator_factory=FakeGenerator,
+    )
+
+    assert output.is_file()
+    assert result.artifact_path == output
+    assert generation_calls == [
+        {
+            "symbol": "AAPL",
+            "analysis_dates": ("2026-04-03",),
+            "config": {
+                "llm_provider": "openai",
+                "deep_think_llm": "deep-test",
+                "quick_think_llm": "quick-test",
+            },
+            "selected_analysts": ("market",),
+        }
+    ]
+    assert runner_calls[0]["artifact_sha256"] == result.artifact_sha256
