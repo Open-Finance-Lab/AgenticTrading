@@ -3,7 +3,6 @@
 import ast
 from pathlib import Path
 
-from dashboard.backend.infrastructure.llm import token_cost as tc
 from dashboard.backend.infrastructure.llm.token_cost import (
     CHARS_PER_TOKEN,
     estimate_cost_usd,

@@ -12,15 +12,10 @@ Tests:
 
 import pytest
 import json
-import sys
-from pathlib import Path
 
-# Add backend to path
 from dashboard.backend.infrastructure.llm.validator import (
     validate_llm_response,
-    LLMTradingDecision,
     TradingAction,
-    DJIA_30,
     create_safe_prompt
 )
 

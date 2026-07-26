@@ -1,8 +1,6 @@
 """Tests for registered external agents API."""
 
-import sys
 import uuid
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -273,7 +271,8 @@ def test_leaked_session_id_cannot_take_over_agent(client):
     leaked_session_id = created["session_id"]
 
     attacker = {"X-Session-Id": leaked_session_id}
-    assert client.delete(f"/api/v1/agents/{agent_id}", headers=attacker).status_code == 403
+    delete_response = client.delete(f"/api/v1/agents/{agent_id}", headers=attacker)
+    assert delete_response.status_code == 403
     assert (
         client.post(f"/api/v1/agents/{agent_id}/rotate-api-key", headers=attacker).status_code
         == 403
@@ -349,7 +348,6 @@ def test_builtin_listing_batches_run_stats_queries(client, monkeypatch):
     """LOW #9 — the public, unauthenticated /agents/builtin listing must not
     issue one runs-by-session query per agent (N+1): the stats lookup happens
     in a single batched query no matter how many builtin agents exist."""
-    headers = {"X-Session-Id": str(uuid.uuid4())}
     for i in range(3):
         resp = client.post(
             "/api/v1/agents",

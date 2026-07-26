@@ -15,7 +15,6 @@ from dashboard.backend.domain.leaderboard import strategies as canon
 from dashboard.backend.domain.leaderboard.strategies import (
     llm_agent as llm_agent_module,
 )
-from dashboard.backend.domain.leaderboard.strategies.base import BaselineStrategy
 from dashboard.backend.domain.leaderboard.strategies.buy_hold import BuyHoldStrategy
 from dashboard.backend.domain.leaderboard.strategies.equal_weight_buyhold import (
     EqualWeightBuyHoldStrategy,

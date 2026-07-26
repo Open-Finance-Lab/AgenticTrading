@@ -5,21 +5,19 @@ Uses a temporary test database.
 
 import pytest
 import tempfile
-import sys
 from pathlib import Path
 
 # Add backend to path
 from fastapi.testclient import TestClient
-from dashboard.backend.app import app
-from dashboard.backend.database import BacktestDatabase
 import uuid
 
 @pytest.fixture
 def temp_db():
     """Create a temporary test database."""
+    import dashboard.backend.database as db_module
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = Path(tmpdir) / "test.db"
-        test_db = BacktestDatabase(db_path=db_path)
+        test_db = db_module.BacktestDatabase(db_path=db_path)
         yield test_db
         # Cleanup happens automatically when tmpdir is deleted
 
@@ -37,7 +35,7 @@ def client(temp_db, monkeypatch):
     monkeypatch.setattr(db_module, "db", temp_db)
     monkeypatch.setattr(backtests_module, "db", temp_db)
 
-    return TestClient(app)
+    return TestClient(app_module.app)
 
 def test_runs_listing_is_public_by_design(client, temp_db):
     """GET /runs is a PUBLIC listing (run metadata only): the route docstring

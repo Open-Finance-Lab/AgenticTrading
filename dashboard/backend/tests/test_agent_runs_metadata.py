@@ -9,8 +9,6 @@ records its effective cap there.
 
 import sqlite3
 
-import pytest
-
 from dashboard.backend.database import BacktestDatabase
 
 

@@ -8,14 +8,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
-from dashboard.backend.users import UserStore
+import dashboard.backend.users as users_module
 from dashboard.backend.api import discord_oauth
 
 
 @pytest.fixture
 def temp_user_store(tmp_path, monkeypatch):
-    store = UserStore(db_path=tmp_path / "discord_auth.db")
-    import dashboard.backend.users as users_module
+    store = users_module.UserStore(db_path=tmp_path / "discord_auth.db")
 
     monkeypatch.setattr(users_module, "user_store", store)
     # discord router imports user_store at module level — re-bind it too

@@ -1,8 +1,5 @@
 """Tests for baseline run pairing with external backtests."""
 
-import sys
-from pathlib import Path
-
 from dashboard.backend.baseline_resolver import resolve_baselines_for_run
 
 

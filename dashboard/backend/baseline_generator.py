@@ -15,7 +15,6 @@ Same logic, different contexts.
 
 import json
 import os
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from datetime import datetime, time
 
@@ -29,14 +28,6 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
 # The baseline calculations operate on already-normalized bars and keep their
 # market-session filtering local so A-share timestamps are not interpreted as
 # US/Eastern dates.
-
-# Try to import numpy
-try:
-    import numpy as np
-except ImportError:
-    import subprocess
-    subprocess.check_call(["pip", "install", "numpy"])
-    import numpy as np
 
 try:
     import pandas as pd

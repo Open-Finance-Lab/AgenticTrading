@@ -13,9 +13,8 @@ DO NOT expose websearch, browser, or HTTP tools to the LLM.
 
 import json
 import logging
+import os
 from typing import Dict, Optional, Any
-from datetime import datetime
-import asyncio
 
 # NOTE: This requires anthropic library
 # pip install anthropic
@@ -26,8 +25,7 @@ from anthropic import Anthropic
 from dashboard.backend.infrastructure.llm.validator import (
     validate_llm_response,
     create_safe_prompt,
-    log_audit_trail,
-    PortfolioConstraints
+    log_audit_trail
 )
 
 logger = logging.getLogger(__name__)

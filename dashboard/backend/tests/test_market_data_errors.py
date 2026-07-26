@@ -13,11 +13,6 @@ import pytest
 
 import dashboard.backend.baseline_generator as bg_mod
 import dashboard.backend.infrastructure.market_data.alpaca_bars as bars_mod
-from dashboard.backend.baseline_generator import BaselineGenerator
-from dashboard.backend.infrastructure.market_data.alpaca_bars import (
-    AlpacaDataLoader,
-    MarketDataUnavailableError,
-)
 
 
 def _clear_creds(monkeypatch, tmp_path, mod):
@@ -31,20 +26,20 @@ def _clear_creds(monkeypatch, tmp_path, mod):
 def test_market_data_error_is_a_plain_exception():
     """The whole point of the class fix: `except Exception` at server
     boundaries must catch it (SystemExit never was)."""
-    assert issubclass(MarketDataUnavailableError, Exception)
-    assert not issubclass(MarketDataUnavailableError, SystemExit)
+    assert issubclass(bars_mod.MarketDataUnavailableError, Exception)
+    assert not issubclass(bars_mod.MarketDataUnavailableError, SystemExit)
 
 
 def test_alpaca_loader_missing_credentials_raises_not_exits(monkeypatch, tmp_path):
     _clear_creds(monkeypatch, tmp_path, bars_mod)
-    with pytest.raises(MarketDataUnavailableError):
-        AlpacaDataLoader()
+    with pytest.raises(bars_mod.MarketDataUnavailableError):
+        bars_mod.AlpacaDataLoader()
 
 
 def test_baseline_fetch_missing_credentials_raises_not_exits(monkeypatch, tmp_path):
     _clear_creds(monkeypatch, tmp_path, bg_mod)
-    generator = BaselineGenerator()
-    with pytest.raises(MarketDataUnavailableError):
+    generator = bg_mod.BaselineGenerator()
+    with pytest.raises(bars_mod.MarketDataUnavailableError):
         generator._ensure_credentials()
 
 
@@ -59,7 +54,7 @@ def test_engine_load_data_empty_raises_not_exits():
     backtester.end_date = "2026-01-02"
     backtester.data_source = "alpaca"
     backtester.symbols = ["AAPL"]
-    with pytest.raises(MarketDataUnavailableError):
+    with pytest.raises(bars_mod.MarketDataUnavailableError):
         backtester.load_data()
 
 

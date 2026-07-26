@@ -24,9 +24,8 @@ import json
 import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List
 import argparse
-import sys
 import uuid
 import requests
 
@@ -38,7 +37,7 @@ except ImportError:
     subprocess.check_call(["pip", "install", "numpy"])
     import numpy as np
 
-from backtest_engine import BacktestEngine, TradeType
+from backtest_engine import BacktestEngine
 
 # Direct-execution bootstrap: make the repo root importable so canonical
 # `dashboard.backend.*` imports resolve (no-op when run as part of the package).
@@ -142,15 +141,6 @@ class PriceFetcher:
         except Exception as e:
             print(f"    ❌ Error fetching {symbol}: {e}")
             return {}
-            if current.weekday() < 5:
-                # Random walk with slight upward drift
-                change = np.random.normal(0.0005, 0.02)  # 0.05% drift, 2% volatility
-                price = price * (1 + change)
-                prices[current.strftime("%Y-%m-%d")] = round(price, 2)
-            
-            current += timedelta(days=1)
-        
-        return prices
 
 
 # ============================================================================

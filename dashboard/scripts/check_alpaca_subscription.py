@@ -4,7 +4,6 @@ Check your Alpaca account data subscription tier.
 """
 
 import json
-from pathlib import Path
 import sys
 
 # Direct-execution bootstrap: make the repo root importable so canonical

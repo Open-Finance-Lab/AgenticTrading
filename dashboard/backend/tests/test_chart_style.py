@@ -7,7 +7,6 @@ from dashboard.backend.chart_style import (
     series_kind,
 )
 from dashboard.backend.equity_plot import (
-    gapless_chart_x_labels,
     resolve_agent_chart_label,
 )
 

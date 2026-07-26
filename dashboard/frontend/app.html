@@ -371,6 +371,7 @@
     <div id="homeView" class="page-view home-view">
         <div class="home-page home-page--pager">
             <div class="home-pager-track" id="homePagerTrack" data-page="0">
+
                 <section class="home-pager-screen" id="homeScreenLanding" aria-label="Welcome">
                     <div class="home-landing-hero">
                     <div class="home-landing-hero-grid-bg" aria-hidden="true"></div>
@@ -839,7 +840,7 @@
                             <canvas id="agentAllocationChart"></canvas>
                         </div>
                         <div class="allocation-detail">
-                            <ul class="allocation-legend" id="agentAllocationLegend"></ul>
+                            <div class="allocation-legend-host" id="agentAllocationLegend"></div>
                         </div>
                     </div>
                 </section>
@@ -875,6 +876,7 @@
                             <p class="agents-category-sub">A prompting game — give it money, an instruction, and a model, then backtest.</p>
                         </div>
                         <div id="agentsGridBuiltin" class="agents-grid"></div>
+                        <div id="agentsGridFooterBuiltin" class="agents-grid-footer" hidden></div>
                         <p id="agentsEmptyBuiltin" class="control-helper" hidden>No foundation agents yet. Click <strong>Add Agent</strong> to create one.</p>
                     </section>
                     <section class="agents-category" data-category="external">
@@ -883,6 +885,7 @@
                             <p class="agents-category-sub">Bring your own agent and connect it with an API key.</p>
                         </div>
                         <div id="agentsGridExternal" class="agents-grid"></div>
+                        <div id="agentsGridFooterExternal" class="agents-grid-footer" hidden></div>
                         <p id="agentsEmptyExternal" class="control-helper" hidden>No external agents match your search.</p>
                     </section>
                 </div>
@@ -1116,7 +1119,7 @@
             </div>
         </section>
 
-        <!-- Right Panel: Metrics & Performance Drivers -->
+        <!-- Right Panel: Metrics -->
         <aside class="right-panel">
             <!-- Trading Performance Summary -->
             <div class="section-card compact">
@@ -1139,28 +1142,8 @@
                     <span class="metric-value" data-metric="sharpe" title="Annualized for hourly data (sqrt(252*6.5))">--</span>
                 </div>
                 
-                <button class="view-more-btn">View More Metrics →</button>
             </div>
 
-            <!-- Performance Drivers -->
-            <div class="section-card compact">
-                <h3 class="section-title">Performance Drivers</h3>
-                
-                <div class="driver-item positive">
-                    <span class="driver-icon">▲</span>
-                    <span class="driver-text">Lower slippage improved execution quality.</span>
-                </div>
-                <div class="driver-item positive">
-                    <span class="driver-icon">▲</span>
-                    <span class="driver-text">Higher transaction cost reduced returns.</span>
-                </div>
-                <div class="driver-item positive">
-                    <span class="driver-icon">▲</span>
-                    <span class="driver-text">Balanced risk level helped stability.</span>
-                </div>
-                
-                <button class="view-details-btn">View Details →</button>
-            </div>
 
 
         </aside>
@@ -1567,7 +1550,7 @@
     <script src="market-events/marketEventRelativeTime.js"></script>
     <script src="market-events/MarketEventCard.js"></script>
     <script src="market-events/MarketEventFeed.js"></script>
-    <script src="js/portfolio.js?v=13"></script>
+    <script src="js/portfolio.js?v=15"></script>
     <script src="js/agent-editor.js?v=11"></script>
     <script src="app.js?v=46"></script>
     <script src="js/leaderboard.js?v=16"></script>

@@ -2,7 +2,7 @@ import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { Terminal, Bot, User, Search, LineChart, CheckCircle2, ChevronDown } from "lucide-react";
 import { useState, useEffect } from "react";
-import { useSignedIn } from "@/lib/session";
+import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 
 const HEADLINE_LINE_1 = ["Talk", "to", "Agents"] as const;
 const HEADLINE_LINE_2 = ["Test", "Trading", "Ideas"] as const;
@@ -60,8 +60,6 @@ function HeadlineWords({
 
 export function Hero() {
   const [hintHidden, setHintHidden] = useState(false);
-  const signedIn = useSignedIn();
-  const primaryCtaLabel = signedIn ? "Open Dashboard" : "Get Started";
   // Start line 2 only after line 1's last word has finished + LINE_GAP.
   const line2Delay =
     LINE1_START +
@@ -107,11 +105,13 @@ export function Hero() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.5, delay: ctaDelay }}
           >
-            <Button size="lg" className="w-full sm:w-auto bg-primary text-primary-foreground glow-primary hover:bg-primary/90 text-base h-12 px-8" asChild>
-              <a href="/app?view=home">{primaryCtaLabel}</a>
-            </Button>
-            <Button size="lg" variant="secondary" className="w-full sm:w-auto bg-secondary border-secondary-border text-secondary-foreground hover:bg-secondary/80 text-base h-12 px-8" asChild>
-              <a href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join Discord</a>
+            <Button
+              size="lg"
+              type="button"
+              data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+              className="w-full sm:w-auto bg-primary text-primary-foreground glow-primary hover:bg-primary/90 text-base h-12 px-8"
+            >
+              {PRIMARY_LANDING_CTA.label}
             </Button>
           </motion.div>
         </div>

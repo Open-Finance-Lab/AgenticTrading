@@ -389,6 +389,20 @@ const MOCK_AGENTS = [
 // Holds the most recently loaded agents so the toolbar can re-filter without refetching.
 let allAgents = [];
 let agentViewMode = 'grid';
+const AGENT_GRID_PAGE_SIZE = 5;
+/** Per-category page index (0-based). Reset on search change. */
+let agentGridPage = { builtin: 0, external: 0 };
+
+function agentGridPageCount(total) {
+  return Math.max(1, Math.ceil(total / AGENT_GRID_PAGE_SIZE));
+}
+
+function normalizeAgentGridPage(categoryKey, total) {
+  const maxPage = agentGridPageCount(total) - 1;
+  const page = agentGridPage[categoryKey] || 0;
+  agentGridPage[categoryKey] = Math.min(Math.max(page, 0), maxPage);
+  return agentGridPage[categoryKey];
+}
 
 /** @returns {{ key: 'paper'|'backtested'|'draft', label: string, className: string }} */
 function resolveAgentStatusBadge(agent) {
@@ -836,9 +850,8 @@ function applyAgentNameOverride(agent) {
   }
 }
 
-function applyAgentFilters() {
+function getFilteredAgents() {
   const query = (document.getElementById('agentSearchInput')?.value || '').trim().toLowerCase();
-
   let list = allAgents.map(decorateAgent);
   if (query) {
     list = list.filter(
@@ -847,8 +860,14 @@ function applyAgentFilters() {
         String(a.model_name || '').toLowerCase().includes(query),
     );
   }
+  return list;
+}
 
-  renderAgentCategories(list);
+function applyAgentFilters(resetPagination = true) {
+  if (resetPagination) {
+    agentGridPage = { builtin: 0, external: 0 };
+  }
+  renderAgentCategories(getFilteredAgents());
 }
 
 function setAgentViewMode(mode) {
@@ -904,6 +923,13 @@ function renderAgentsError() {
   const errorEl = document.getElementById('agentsErrorState');
   document.querySelectorAll('.agents-section .agents-grid').forEach((grid) => {
     grid.innerHTML = '';
+  });
+  ['agentsGridFooterBuiltin', 'agentsGridFooterExternal'].forEach((id) => {
+    const footer = document.getElementById(id);
+    if (footer) {
+      footer.hidden = true;
+      footer.innerHTML = '';
+    }
   });
   const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
   if (builtinEmpty) builtinEmpty.hidden = true;
@@ -964,12 +990,35 @@ function bindAgentCardMenus(grid) {
   });
 }
 
-function renderAgentCards(grid, agents) {
+function renderAgentGridFooter(categoryKey, total, page, pageCount) {
+  const footerId = categoryKey === 'builtin' ? 'agentsGridFooterBuiltin' : 'agentsGridFooterExternal';
+  const footer = document.getElementById(footerId);
+  if (!footer) return;
+  if (pageCount <= 1) {
+    footer.hidden = true;
+    footer.innerHTML = '';
+    return;
+  }
+  footer.hidden = false;
+  const atStart = page <= 0;
+  const atEnd = page >= pageCount - 1;
+  footer.innerHTML = `
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="上一页" ${atStart ? 'disabled' : ''}>←</button>
+    <span class="agents-grid-footer-count">第 ${page + 1} / ${pageCount} 页 · 共 ${total} 个</span>
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="下一页" ${atEnd ? 'disabled' : ''}>→</button>`;
+}
+
+function renderAgentCards(grid, agents, categoryKey) {
   grid.innerHTML = '';
+  const total = agents.length;
+  const pageCount = agentGridPageCount(total);
+  const page = normalizeAgentGridPage(categoryKey, total);
+  const start = page * AGENT_GRID_PAGE_SIZE;
+  const visibleAgents = agents.slice(start, start + AGENT_GRID_PAGE_SIZE);
 
   const defaultId = getDefaultAgentId();
 
-  agents.forEach((agent) => {
+  visibleAgents.forEach((agent) => {
     const isBuiltin = agent.agent_type === 'builtin';
     const statusBadge = resolveAgentStatusBadge(agent);
     const card = document.createElement('div');
@@ -996,9 +1045,11 @@ function renderAgentCards(grid, agents) {
 
   bindAgentCardMenus(grid);
 
+  renderAgentGridFooter(categoryKey, total, page, pageCount);
+
   grid.querySelectorAll('.agent-configure-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const agent = agents.find((a) => a.agent_id === btn.dataset.agentId);
+      const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       if (!agent || !window.AgentEditor) return;
       navigateToPage('playground', { playgroundTab: 'agents' });
       showPlaygroundPanel('agents');
@@ -1015,7 +1066,7 @@ function renderAgentCards(grid, agents) {
 
   grid.querySelectorAll('.agent-open-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const agent = agents.find((a) => a.agent_id === btn.dataset.agentId);
+      const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       await openAgentInPaper(agent);
     });
   });
@@ -1037,7 +1088,7 @@ function renderAgentCards(grid, agents) {
 
   grid.querySelectorAll('.agent-run-backtest-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const agent = agents.find((a) => a.agent_id === btn.dataset.agentId);
+      const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       if (!agent) return;
       openRunBacktestModal(agent);
     });
@@ -1045,7 +1096,7 @@ function renderAgentCards(grid, agents) {
 
   grid.querySelectorAll('.agent-rotate-key-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const agent = agents.find((a) => a.agent_id === btn.dataset.agentId);
+      const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       if (!agent) return;
       if (!confirm(`Create a new API key for "${agent.name}"? The current key will stop working immediately.`)) {
         return;
@@ -1108,8 +1159,8 @@ function renderAgentCategories(agents) {
   const builtin = pinDefaultFirst(agents.filter((a) => a.agent_type === 'builtin'));
   const external = pinDefaultFirst(agents.filter((a) => a.agent_type !== 'builtin'));
 
-  renderAgentCards(builtinGrid, builtin);
-  renderAgentCards(externalGrid, external);
+  renderAgentCards(builtinGrid, builtin, 'builtin');
+  renderAgentCards(externalGrid, external, 'external');
 
   const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
   if (builtinEmpty) {
@@ -5289,6 +5340,15 @@ function initNavigation() {
     });
 
     document.getElementById('agentSearchInput')?.addEventListener('input', applyAgentFilters);
+    document.getElementById('agentsCategories')?.addEventListener('click', (event) => {
+      const prevBtn = event.target.closest('[data-agent-grid-prev]');
+      const nextBtn = event.target.closest('[data-agent-grid-next]');
+      const key = prevBtn?.dataset.agentGridPrev || nextBtn?.dataset.agentGridNext;
+      if (!key) return;
+      const page = agentGridPage[key] || 0;
+      agentGridPage[key] = prevBtn ? Math.max(0, page - 1) : page + 1;
+      applyAgentFilters(false);
+    });
     document.getElementById('agentViewGrid')?.addEventListener('click', () => setAgentViewMode('grid'));
     document.getElementById('agentViewList')?.addEventListener('click', () => setAgentViewMode('list'));
 
@@ -5950,7 +6010,6 @@ function displayAccountMetrics(account) {
     const dayPnLEl = document.getElementById('dayPnL');
     if (dayPnLEl) {
         const dayPnL = parseFloat(account.day_pnl) || 0;
-        const dayPnLPercent = parseFloat(account.equity) ? (dayPnL / parseFloat(account.equity)) * 100 : 0;
         dayPnLEl.textContent = (dayPnL >= 0 ? '+' : '') + formatCurrency(dayPnL);
         dayPnLEl.className = 'paper-value ' + (dayPnL >= 0 ? 'positive' : 'negative');
     }
@@ -6165,9 +6224,6 @@ function displayTrades(trades) {
             const idParts = trade.id.split('::');
             if (idParts[0].length >= 14) {
                 const ts = idParts[0];
-                const year = parseInt(ts.substring(0, 4));
-                const month = parseInt(ts.substring(4, 6));
-                const day = parseInt(ts.substring(6, 8));
                 const hour = parseInt(ts.substring(8, 10));
                 const minute = parseInt(ts.substring(10, 12));
                 timeStr = `${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}`;

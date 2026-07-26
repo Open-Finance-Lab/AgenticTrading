@@ -7,7 +7,6 @@ Let's inspect what Alpaca is actually returning.
 """
 
 import json
-from pathlib import Path
 from datetime import datetime, timedelta
 import sys
 

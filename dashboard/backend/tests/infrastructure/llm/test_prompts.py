@@ -3,7 +3,6 @@
 import ast
 from pathlib import Path
 
-from dashboard.backend.infrastructure.llm import prompts as prompts_mod
 from dashboard.backend.infrastructure.llm.prompts import (
     create_custom_algo_prompt,
     parse_risk_rules,

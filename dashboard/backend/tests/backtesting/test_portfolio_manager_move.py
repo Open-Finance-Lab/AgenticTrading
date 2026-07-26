@@ -12,6 +12,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from dashboard.backend.domain.backtesting import portfolio_manager
 from dashboard.backend.domain.backtesting.portfolio_manager import (
     LLMDecisionError,
     PortfolioManager as CanonicalPortfolioManager,
@@ -473,8 +474,7 @@ def test_safe_trading_threads_custom_strategy_prompt(monkeypatch):
 
 
 def test_module_docstring_no_longer_claims_verbatim_identity():
-    import dashboard.backend.domain.backtesting.portfolio_manager as pm_mod
-    doc = pm_mod.__doc__ or ""
+    doc = portfolio_manager.__doc__ or ""
     assert "functionally identical" not in doc
     assert "Moved verbatim" not in doc
     # It must instead disclose the safe_trading divergence.

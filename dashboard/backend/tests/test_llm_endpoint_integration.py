@@ -12,13 +12,10 @@ These are endpoint-level tests (not just unit tests of the validator).
 
 import pytest
 import json
-import sys
-from pathlib import Path
-from unittest.mock import AsyncMock, patch, MagicMock
 
 # Add backend to path
 from fastapi.testclient import TestClient
-from dashboard.backend.infrastructure.llm.validator import validate_llm_response, LLMTradingDecision
+from dashboard.backend.infrastructure.llm.validator import validate_llm_response
 
 
 # ============================================================================

@@ -13,8 +13,6 @@ import pytest
 from dashboard.backend.domain.runs import repository
 from dashboard.backend.domain.runs.repository import RunStore
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-
 _RUN_KEYS = {
     "run_id", "agent_id", "agent_version_id", "session_id", "environment_id",
     "environment_type", "config", "backtest_id", "result_run_id", "status",

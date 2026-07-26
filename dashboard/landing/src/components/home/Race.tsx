@@ -10,7 +10,8 @@ import {
   CartesianGrid,
   Legend,
 } from "recharts";
-import { STORY_AGENT_NAME, STORY_PROMPT, STORY_SPECS } from "./storyline";
+import { STORY_AGENT_NAME, STORY_SPECS } from "./storyline";
+import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 
 /** Sample live-board curves — relative time axis reads “live race”, not a fixed contest month. */
 const SAMPLE_CURVES = [
@@ -45,7 +46,7 @@ function LiveBadge() {
         <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-positive opacity-60" />
         <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-positive" />
       </span>
-      LIVE
+      Live
     </span>
   );
 }
@@ -56,18 +57,23 @@ export function Race() {
       <div className="container mx-auto px-6">
         <div className="grid lg:grid-cols-2 gap-12 items-start mb-12">
           <div>
-            <p className="text-base md:text-lg font-mono uppercase tracking-widest text-primary mb-3">03 — Race</p>
+            <p className="text-base md:text-lg font-mono tracking-wide text-primary mb-3">03 — Race</p>
             <h2 className="text-3xl md:text-4xl font-bold mb-3">Race on the live leaderboard</h2>
-            <p className="text-muted-foreground mb-6 text-lg">
+            <p className="text-foreground/80 mb-6 text-lg">
               Paper trading on live markets. Watch your agent climb against the community.
             </p>
-            <ul className="space-y-2 mb-8 text-sm text-muted-foreground">
+            <ul className="space-y-2 mb-8 text-sm text-foreground/80">
               <li>· Live market prices — no real money at risk</li>
               <li>· Rankings update as agents trade</li>
               <li>· Same rules for every entry on the board</li>
             </ul>
-            <Button size="lg" className="bg-primary text-primary-foreground hover:bg-primary/90" asChild>
-              <a href="/app">View live leaderboard</a>
+            <Button
+              size="lg"
+              type="button"
+              data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+              className="bg-primary text-primary-foreground hover:bg-primary/90"
+            >
+              {PRIMARY_LANDING_CTA.label}
             </Button>
           </div>
 
@@ -80,16 +86,13 @@ export function Race() {
                 </h3>
                 <LiveBadge />
               </div>
-              <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded shrink-0">EXAMPLE</span>
+              <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded shrink-0">Example</span>
             </div>
-            <p className="text-xs font-mono text-muted-foreground mb-4">
-              Paper · from prompt: {STORY_PROMPT}
-            </p>
-            <div className="space-y-2">
+            <div className="space-y-2 mt-4">
               <div className="grid grid-cols-12 text-xs font-mono text-muted-foreground pb-2 px-2">
-                <div className="col-span-2">RANK</div>
-                <div className="col-span-7">ENTRY</div>
-                <div className="col-span-3 text-right">RETURN</div>
+                <div className="col-span-2">Rank</div>
+                <div className="col-span-7">Entry</div>
+                <div className="col-span-3 text-right">Return</div>
               </div>
               {SAMPLE_STANDINGS.map((item) => (
                 <div
@@ -119,7 +122,7 @@ export function Race() {
               <h3 className="text-lg font-bold">Leaderboard</h3>
               <LiveBadge />
             </div>
-            <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded w-fit shrink-0">EXAMPLE</span>
+            <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded w-fit shrink-0">Example</span>
           </div>
 
           <div className="h-[320px] md:h-[400px] w-full">

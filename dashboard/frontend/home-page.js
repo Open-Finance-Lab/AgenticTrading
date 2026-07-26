@@ -592,6 +592,8 @@ function navigateToLeaderboard() {
     }
 }
 
+
+
 function initLandingPlaygroundChat() {
     const root = document.getElementById('homePlaygroundChat');
     if (!root || root.dataset.simStarted === '1') return;

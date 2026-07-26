@@ -13,8 +13,6 @@ import pytest
 from dashboard.backend.domain.agents import repository
 from dashboard.backend.domain.agents.repository import AgentStore
 
-_REPO_ROOT = Path(__file__).resolve().parents[5]
-
 
 @pytest.fixture
 def store(tmp_path):

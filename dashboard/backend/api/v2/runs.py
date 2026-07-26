@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Header, Request, Response
+from fastapi import APIRouter, Depends, Response
 from pydantic import BaseModel, Field
 
 from dashboard.backend.domain.backtesting import external_run_service as ext
