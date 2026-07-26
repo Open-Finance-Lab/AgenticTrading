@@ -84,6 +84,8 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/v1/agents"),
     ("POST", "/api/v1/agents"),
     ("GET", "/api/v1/agents/builtin"),
+    ("GET", "/api/v1/agents/marketplace"),
+    ("POST", "/api/v1/agents/marketplace/{template_id}/clone"),
     ("POST", "/api/v1/agents/claim-account"),
     ("POST", "/api/v1/agents/import-session"),
     ("GET", "/api/v1/agents/resolve"),

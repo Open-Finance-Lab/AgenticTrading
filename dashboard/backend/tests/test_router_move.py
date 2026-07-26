@@ -35,6 +35,8 @@ EXPECTED_AGENT_ROUTES = {
     ("POST", "/v1/agents", "create_agent"),
     ("GET", "/v1/agents", "list_agents"),
     ("GET", "/v1/agents/builtin", "list_builtin_agents"),
+    ("GET", "/v1/agents/marketplace", "list_marketplace_agents"),
+    ("POST", "/v1/agents/marketplace/{template_id}/clone", "clone_marketplace_agent"),
     ("POST", "/v1/agents/claim-account", "claim_account_agents"),
     ("POST", "/v1/agents/import-session", "import_session_agent"),
     ("GET", "/v1/agents/resolve", "resolve_api_key"),

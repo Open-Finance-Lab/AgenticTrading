@@ -528,3 +528,43 @@ def test_patch_agent_model_name(client):
     )
     assert only_model.status_code == 200
     assert only_model.json()["agent"]["model_name"] == "openai/gpt-5.5"
+
+
+def test_marketplace_listing_and_clone(client):
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+
+    marketplace_mod.reload_marketplace_catalog()
+    listing = client.get("/api/v1/agents/marketplace")
+    assert listing.status_code == 200
+    templates = listing.json()["templates"]
+    assert templates
+    assert any(t["template_id"] == "balanced-starter" for t in templates)
+
+    browser_session = str(uuid.uuid4())
+    headers = {"X-Session-Id": browser_session}
+    cloned = client.post(
+        "/api/v1/agents/marketplace/balanced-starter/clone",
+        json={},
+        headers=headers,
+    )
+    assert cloned.status_code == 200
+    agent = cloned.json()["agent"]
+    assert agent["name"] == "Balanced Starter"
+    assert agent["agent_type"] == "builtin"
+    assert agent.get("pipeline")
+    assert agent["pipeline"][0]["presetKey"] == "simple_instruction"
+
+    listed = client.get("/api/v1/agents", headers=headers)
+    assert listed.status_code == 200
+    assert any(a["agent_id"] == agent["agent_id"] for a in listed.json()["agents"])
+
+
+def test_marketplace_clone_unknown_template(client):
+    browser_session = str(uuid.uuid4())
+    headers = {"X-Session-Id": browser_session}
+    resp = client.post(
+        "/api/v1/agents/marketplace/does-not-exist/clone",
+        json={},
+        headers=headers,
+    )
+    assert resp.status_code == 404

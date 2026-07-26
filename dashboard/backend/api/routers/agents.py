@@ -19,9 +19,11 @@ from dashboard.backend.domain.backtesting.constants import (
 from dashboard.backend.domain.agents.repository import _UNSET
 from dashboard.backend.domain.agents.service import (
     AgentNotFoundError,
+    MarketplaceTemplateNotFoundError,
     NoExternalRunsError,
     agent_service,
 )
+from dashboard.backend.domain.agents import marketplace as marketplace_catalog
 from dashboard.backend.api.dependencies import (
     _owner_context,
     _require_agent_access,
@@ -147,6 +149,49 @@ async def list_agents(
         trading_session_id=ctx.get("trading_session"),
     )
     return {"agents": agents}
+
+
+@router.get("/marketplace")
+async def list_marketplace_agents():
+    """List open agent templates available in the Agent Marketplace.
+
+    Public and unauthenticated. Templates are config-driven and do not expose
+    API keys or owner information.
+    """
+    return {"templates": marketplace_catalog.list_marketplace_templates()}
+
+
+class CloneMarketplaceBody(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+
+
+@router.post("/marketplace/{template_id}/clone")
+async def clone_marketplace_agent(
+    template_id: str,
+    body: CloneMarketplaceBody,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Copy a marketplace template into the caller's My Agents list."""
+    ctx = _require_owner_context(request, authorization)
+    cash = float(DEFAULT_AGENT_CASH_ALLOCATION)
+    if ctx["user_id"] and cash > 0:
+        try:
+            portfolio_service.ensure_cash_for_new_agent(ctx["user_id"], cash)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        agent = agent_service.clone_marketplace_template(
+            template_id=template_id,
+            owner_user_id=ctx["user_id"],
+            owner_browser_session=ctx["browser_session"],
+            name=body.name.strip() if body.name else None,
+        )
+    except MarketplaceTemplateNotFoundError:
+        raise HTTPException(status_code=404, detail="Marketplace template not found")
+    if ctx["user_id"]:
+        portfolio_service.get_or_create_portfolio(ctx["user_id"])
+    return {"agent": agent}
 
 
 @router.get("/builtin")

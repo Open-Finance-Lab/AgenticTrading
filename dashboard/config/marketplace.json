@@ -1,0 +1,72 @@
+{
+  "templates": [
+    {
+      "template_id": "balanced-starter",
+      "name": "Balanced Starter",
+      "model_name": "anthropic/claude-haiku-4-5",
+      "description": "A simple foundation agent that diversifies across strong stocks, buys dips, and takes profits after run-ups.",
+      "category": "Foundation",
+      "tags": ["starter", "diversified"],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_balanced_starter",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "momentum-scout",
+      "name": "Momentum Scout",
+      "model_name": "anthropic/claude-haiku-4-5",
+      "description": "Focus on recent price strength and volume. Favor leaders with positive momentum and trim laggards quickly.",
+      "category": "Foundation",
+      "tags": ["momentum", "trend"],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_momentum_instruction",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Prioritize stocks showing the strongest recent momentum and healthy volume. Add to winners on pullbacks, cut positions that lose momentum, and keep cash when the tape is unclear.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "pipeline-analyst",
+      "name": "Pipeline Analyst",
+      "model_name": "anthropic/claude-sonnet-4-6",
+      "description": "A three-step pipeline: gather market facts, convert them into signals, then produce executable orders.",
+      "category": "Advanced",
+      "tags": ["pipeline", "multi-step"],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_gather",
+          "presetKey": "info_gather",
+          "label": "Information Gathering",
+          "prompt": "You are the information-gathering sub-agent. Collect key facts relevant to trading decisions from market data, news, and macro events. Filter noise and keep high-confidence facts and indicator changes.",
+          "outputFormat": "JSON: { \"timestamp\": \"ISO8601\", \"symbols\": [\"...\"], \"facts\": [{ \"source\": \"...\", \"summary\": \"...\", \"impact\": \"bullish|bearish|neutral\" }], \"confidence\": 0.0-1.0 }"
+        },
+        {
+          "id": "sub_signal",
+          "presetKey": "info_to_signal",
+          "label": "Information to Signal",
+          "prompt": "You are the signal-generation sub-agent. Based on upstream information-gathering output, convert facts and indicators into executable trading signals (direction, strength, time horizon).",
+          "outputFormat": "JSON: { \"signals\": [{ \"symbol\": \"...\", \"direction\": \"long|short|flat\", \"strength\": 0.0-1.0, \"horizon\": \"1h|4h|1d\", \"rationale\": \"...\" }] }"
+        },
+        {
+          "id": "sub_exec",
+          "presetKey": "signal_to_execution",
+          "label": "Signal to Execution",
+          "prompt": "You are the trade-execution sub-agent. Turn signals into concrete order instructions, respecting position limits, liquidity, and slippage. Output a submit-ready buy/sell plan.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    }
+  ]
+}

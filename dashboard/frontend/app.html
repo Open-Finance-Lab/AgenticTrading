@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=63">
+    <link rel="stylesheet" href="styles.css?v=64">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
     (function () {
@@ -25,6 +25,7 @@
             backtest: { page: 'playground', playgroundTab: 'backtest' },
             paper: { page: 'playground', playgroundTab: 'paper' },
             agents: { page: 'playground', playgroundTab: 'agents' },
+            marketplace: { page: 'playground', playgroundTab: 'marketplace' },
             playground: { page: 'playground', playgroundTab: 'agents' },
             'my-algo': { page: 'playground', playgroundTab: 'agents' },
             contest: { page: 'competition', competitionTab: 'daily' },
@@ -81,10 +82,13 @@
     html[data-nav-boot][data-nav-page="community"] .primary-nav [data-mode="community"] { background-color: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="playground"] .playground-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="agents"] .playground-subtabs [data-playground-tab="agents"],
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="marketplace"] .playground-subtabs [data-playground-tab="marketplace"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .playground-subtabs [data-playground-tab="backtest"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] .playground-subtabs [data-playground-tab="paper"] { background: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] #playgroundAgentsPanel,
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="marketplace"] #playgroundAgentsPanel,
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #playgroundAgentsPanel { display: none !important; }
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="marketplace"] #playgroundMarketplacePanel { display: block !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .main-container.playground-backtest-panel { display: grid !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #paperTradingView { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"] .competition-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
@@ -795,6 +799,7 @@
     <div id="playgroundView" class="page-view playground-view" style="display: none;">
         <div class="subtab-bar playground-subtabs">
             <button class="subtab-btn active" data-playground-tab="agents">My Agents</button>
+            <button class="subtab-btn" data-playground-tab="marketplace">Agent Marketplace</button>
             <button class="subtab-btn" data-playground-tab="backtest">Backtest</button>
             <button class="subtab-btn" data-playground-tab="paper">Paper Trading</button>
         </div>
@@ -869,6 +874,23 @@
                     </section>
                 </div>
                 <p id="agentsErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't reach the server to load agents. Check your connection and try again.</p>
+            </div>
+        </div>
+        <div id="playgroundMarketplacePanel" class="playground-panel" style="display: none;">
+            <div class="marketplace-section">
+                <div class="marketplace-section-head">
+                    <div>
+                        <h2 class="page-title">Agent Marketplace</h2>
+                        <p class="marketplace-section-sub">Browse open agent templates and copy them into My Agents to customize and backtest.</p>
+                    </div>
+                    <div class="agent-toolbar-search marketplace-search">
+                        <svg class="agent-toolbar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                        <input id="marketplaceSearchInput" type="search" placeholder="Search templates..." aria-label="Search marketplace templates">
+                    </div>
+                </div>
+                <div id="marketplaceGrid" class="agents-grid marketplace-grid"></div>
+                <p id="marketplaceEmptyState" class="control-helper" hidden>No templates match your search.</p>
+                <p id="marketplaceErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't load the marketplace. Check your connection and try again.</p>
             </div>
         </div>
     </div>
