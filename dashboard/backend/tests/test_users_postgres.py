@@ -69,17 +69,14 @@ def temp_postgres_store():
 
 @pytest.fixture
 def pg_client(temp_postgres_store, monkeypatch):
-    import dashboard.backend.api.auth as auth_module
     import dashboard.backend.users as users_module
 
+    # api/auth.py resolves users_module.user_store at call time (issue #185),
+    # so this single patch redirects every auth route. Before that fix it also
+    # needed dashboard.backend.api.auth patched, and without it this "postgres"
+    # test silently exercised SQLite -- caught only when CI first ran the live
+    # tier and it collided with test_auth.py's alice@example.com.
     monkeypatch.setattr(users_module, "user_store", temp_postgres_store)
-    # api/auth.py binds the singleton into its own namespace at import time
-    # (`from dashboard.backend.users import user_store`), so patching
-    # users_module alone leaves every auth route on the original SQLite
-    # store -- which is how this "postgres" test silently exercised SQLite
-    # until CI first ran the live tier and it collided with test_auth.py's
-    # alice@example.com (409 instead of 200).
-    monkeypatch.setattr(auth_module, "user_store", temp_postgres_store)
     return TestClient(app)
 
 

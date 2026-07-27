@@ -16,13 +16,9 @@ from dashboard.backend.api import discord_oauth
 def temp_user_store(tmp_path, monkeypatch):
     store = users_module.UserStore(db_path=tmp_path / "discord_auth.db")
 
+    # Both api/auth.py and the discord router resolve users_module.user_store at
+    # call time (issue #185), so this single patch redirects every route below.
     monkeypatch.setattr(users_module, "user_store", store)
-    # discord router imports user_store at module level — re-bind it too
-    import dashboard.backend.api.routers.discord as discord_router_mod
-    import dashboard.backend.api.auth as auth_mod
-
-    monkeypatch.setattr(discord_router_mod, "user_store", store)
-    monkeypatch.setattr(auth_mod, "user_store", store)
     return store
 
 

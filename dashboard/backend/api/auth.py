@@ -12,7 +12,8 @@ from pydantic import BaseModel, Field, field_validator
 from dashboard.backend.api import discord_oauth
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
-from dashboard.backend.users import public_user, user_store, verify_password
+from dashboard.backend import users as users_module
+from dashboard.backend.users import public_user, verify_password
 from dashboard.backend.password_policy import validate_new_password
 
 logger = logging.getLogger(__name__)
@@ -123,7 +124,7 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> dic
     token = _extract_bearer_token(authorization)
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    user = user_store.get_user_for_token(token)
+    user = users_module.user_store.get_user_for_token(token)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
     return user
@@ -136,7 +137,7 @@ async def signup(payload: SignupRequest):
         raise HTTPException(status_code=400, detail=" ".join(violations))
 
     try:
-        user = user_store.create_user(
+        user = users_module.user_store.create_user(
             email=payload.email,
             display_name=payload.display_name,
             password=payload.password,
@@ -146,17 +147,17 @@ async def signup(payload: SignupRequest):
             raise HTTPException(status_code=409, detail="Email is already registered") from exc
         raise
 
-    token = user_store.create_session(user["id"])
+    token = users_module.user_store.create_session(user["id"])
     return {"user": user, "token": token}
 
 
 @router.post("/login", response_model=AuthResponse)
 async def login(payload: LoginRequest):
-    user = user_store.authenticate(payload.email, payload.password)
+    user = users_module.user_store.authenticate(payload.email, payload.password)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    token = user_store.create_session(user["id"])
+    token = users_module.user_store.create_session(user["id"])
     return {"user": public_user(user), "token": token}
 
 
@@ -169,7 +170,7 @@ async def me(current_user: dict = Depends(get_current_user)):
 async def logout(authorization: Optional[str] = Header(default=None)):
     token = _extract_bearer_token(authorization)
     if token:
-        user_store.delete_session(token)
+        users_module.user_store.delete_session(token)
     return {"status": "ok"}
 
 
@@ -184,7 +185,7 @@ async def change_password(
     violations = validate_new_password(payload.new_password, current_user["email"])
     if violations:
         raise HTTPException(status_code=400, detail=" ".join(violations))
-    user_store.update_password(current_user["id"], payload.new_password)
+    users_module.user_store.update_password(current_user["id"], payload.new_password)
     # Best-effort: revoke every other session so a stolen token dies with the old
     # password. Deliberately NOT atomic with the update above -- the two are separate
     # transactions/connections in both twin stores. The password change is already
@@ -194,7 +195,7 @@ async def change_password(
     # print() (logger output is invisible under the deployed config) and still
     # return ok. Revocation is defence-in-depth, not a hard guarantee.
     try:
-        user_store.delete_other_sessions(
+        users_module.user_store.delete_other_sessions(
             current_user["id"], keep_token=_extract_bearer_token(authorization)
         )
     except Exception as exc:  # noqa: BLE001 -- password change already committed
@@ -216,7 +217,7 @@ def _store_avatar(user_id: int, value: Optional[str]) -> dict:
     why it is worth pinning down before account deletion lands in a later phase.
     """
     try:
-        return user_store.set_avatar(user_id, value)
+        return users_module.user_store.set_avatar(user_id, value)
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Session is no longer valid.") from exc
 
@@ -445,7 +446,7 @@ async def discord_oauth_callback(code: Optional[str] = None, state: Optional[str
             discord_oauth.fetch_discord_user, access_token
         )
         await asyncio.to_thread(
-            user_store.link_discord_user, user_id, str(discord_user["id"])
+            users_module.user_store.link_discord_user, user_id, str(discord_user["id"])
         )
     except ValueError as exc:
         reason = str(exc) if str(exc) in {"discord_already_linked", "user_not_found"} else "link_failed"

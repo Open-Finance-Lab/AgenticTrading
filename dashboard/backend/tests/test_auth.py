@@ -232,9 +232,8 @@ def test_change_password_revocation_failure_still_succeeds(client, monkeypatch, 
     # The password write and the other-session revocation are two separate
     # transactions. If revocation raises, the (already-durable) password change
     # must still report success rather than a misleading 500. Patch at the CLASS
-    # level so it fails regardless of which UserStore instance the route resolves
-    # (the `client` fixture only reassigns users_module.user_store; api/auth.py may
-    # still hold the original singleton binding). `UserStore` is already imported.
+    # level so it fails for any UserStore instance, including the fixture's.
+    # `UserStore` is already imported.
     token = _signup_and_token(client, email="quinn@example.com")
 
     def _boom(*args, **kwargs):
@@ -371,3 +370,28 @@ def test_signup_response_includes_avatar_field(client):
     )
     assert response.status_code == 200
     assert response.json()["user"]["avatar"] is None
+
+
+def test_auth_routes_resolve_the_store_at_call_time(temp_user_store, monkeypatch):
+    """Issue #185: api/auth.py must not bind the user_store singleton at import.
+
+    Patching only dashboard.backend.users must be enough to redirect every auth
+    route. When auth.py holds its own import-time binding, this signup lands in
+    the process-wide store and the temp store below stays empty -- silently, with
+    the test still green, which is exactly how #185 survived this long.
+    """
+    from dashboard.backend import users as users_module
+
+    monkeypatch.setattr(users_module, "user_store", temp_user_store)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "callsite@example.com",
+            "display_name": "Callsite",
+            "password": "securepass1",
+        },
+    )
+    assert response.status_code == 200
+    assert temp_user_store.get_user_by_email("callsite@example.com") is not None
