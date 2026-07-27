@@ -302,9 +302,24 @@ a replayable decision artifact, and ATL handles T+1 simulation, metrics, curves,
 Agent Cards, and leaderboard attribution. Expensive multi-agent analysis is
 completed before the hourly ATL loop, so replay stays inside the step deadline.
 
-See the
-`TradingAgents integration guide <https://github.com/Open-Finance-Lab/AgenticTrading/blob/main/docs/integrations/tradingagents.md>`_
-and ``dashboard/examples/tradingagents_atl_backtest.py``.
+The artifact records a five-tier rating per analysis date, which ATL maps to
+``BUY`` (Buy/Overweight), ``HOLD``, or ``SELL`` (Underweight/Sell). Each record
+executes on the first ATL step whose America/New_York date is strictly after the
+analysis date. Replaying an existing artifact makes no LLM calls at all.
+
+.. warning::
+
+   ``us-equity-hourly-v1`` starts with **$1,000** and caps one position at 25%
+   of equity, so a single position may cost at most **$250**. A stock trading
+   above roughly $250/share can therefore never be bought — about a third of the
+   DJIA-30 universe (MSFT, GS, UNH, HD, MCD, CAT, V, …). Those signals are
+   reported separately as ``price_too_high``; pick a lower-priced symbol
+   (AAPL, KO, …) if you want the strategy itself to drive the result.
+
+Run it with ``dashboard/examples/tradingagents_atl_backtest.py`` (English
+``--help`` and console output). The full setup guide,
+`TradingAgents 接入 ATL <https://github.com/Open-Finance-Lab/AgenticTrading/blob/main/docs/integrations/tradingagents.zh-CN.md>`_,
+is written in Simplified Chinese.
 
 
 Raw HTTP (no SDK)

@@ -306,7 +306,7 @@ git commit -m "feat(sdk): run TradingAgents artifacts on ATL"
 **文件：**
 
 - 新建：`dashboard/examples/tradingagents_atl_backtest.py`
-- 新建：`docs/integrations/tradingagents.md`
+- 新建：`docs/integrations/tradingagents.zh-CN.md`
 - 修改：`docs/source/lab/external_agents.rst`
 - 修改：`packaging/agentictrading/tests/test_tradingagents_integration.py`
 
@@ -356,7 +356,7 @@ python dashboard/examples/tradingagents_atl_backtest.py --help
 python -m pytest packaging/agentictrading/tests/test_tradingagents_integration.py -v
 git diff --check
 git add dashboard/examples/tradingagents_atl_backtest.py \
-  docs/integrations/tradingagents.md docs/source/lab/external_agents.rst \
+  docs/integrations/tradingagents.zh-CN.md docs/source/lab/external_agents.rst \
   packaging/agentictrading/tests/test_tradingagents_integration.py
 git commit -m "docs: add TradingAgents ATL quickstart"
 ```

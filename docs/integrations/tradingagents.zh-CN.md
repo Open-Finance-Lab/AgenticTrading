@@ -1,5 +1,11 @@
 # TradingAgents 接入 ATL：本地决策、统一回测
 
+> **Language / 语言:** This guide is written in Simplified Chinese. English
+> readers: see the "TradingAgents integration" section of
+> `docs/source/lab/external_agents.rst` for an overview, and
+> `dashboard/examples/tradingagents_atl_backtest.py` for the runnable command —
+> its `--help` output and all console messages are in English.
+
 这项集成让 [TradingAgents](https://github.com/TauricResearch/TradingAgents) 用户把本地的
 多 Agent 研究结论放到 Agentic Trading Lab（ATL）中模拟成交，得到交易记录、指标、
 收益曲线、Agent Card 和排行榜结果。
@@ -160,6 +166,27 @@ python dashboard/examples/tradingagents_atl_backtest.py \
 当前 ATL 环境限制单只股票最多占总资产 25%。BUY 会计算达到 25% 目标所需的整数股数，
 不会每次额外增加 25%；SELL 只卖掉已有股票，没有持仓时不会做空。
 
+### 单股价格上限：约 250 美元
+
+`us-equity-hourly-v1` 固定以 **1000 美元** 起始资金运行（SDK 会拒绝任何其他初始
+资金），单个持仓上限 25%，因此单个持仓预算是 **250 美元**。只要一股价格高于
+约 250 美元，`floor(250 / 价格)` 就等于 0，这条 BUY 在数学上无法成交，与当时行情
+无关。
+
+DJIA-30 中约有三分之一的成分股长期处于这个区间（例如 MSFT、GS、UNH、HD、MCD、
+CAT、V），而 AAPL、KO 等价格较低的成分股可以正常买入。选股票时请先确认这一点：
+否则一次“成功”的回测会以 0% 收益结束，而原因并不是模型判断。
+
+这类 BUY 会单独记为 `price_too_high`，不会混进普通的 constraint Hold，rationale 里
+写明当时的价格和预算，例如：
+
+```text
+price_too_high_for_target price=430.00 max_position_budget=250.00
+```
+
+如果一次回测里所有 BUY 都因此被丢弃，命令会在 stderr 打印 WARNING，明确说明这次
+0% 收益反映的是资金上限而不是 TradingAgents 的结论。
+
 TradingAgents 可能在一个分析日期使用当天完整数据，因此 ATL 只在该日期之后的第一个
 实际小时 Step 执行。周五分析通常在下周第一个实际交易日执行，不会回到周五交易。
 
@@ -171,11 +198,20 @@ TradingAgents 可能在一个分析日期使用当天完整数据，因此 ATL �
 - 单个分析日期两次失败后的 error Hold；
 - 两次分析之间的 passive Hold；
 - 已到目标仓位、无仓可卖或缺少价格导致的 constraint Hold；
+- 单股价格超过持仓预算导致的 `price_too_high` Hold（见第 6 节）；
 - ATL 拒单、成交和服务器 timeout Hold；
-- 回测范围结束后仍未执行的分析日期。
+- `autoheld_steps`：ATL 在收到本地决策之前就关闭 Step 的次数。
 
 单个日期失败会重试一次。只要还有其他有效评级，回测可以继续；如果所有日期都失败，
 命令不会创建一条看似正常的全空仓曲线。ATL 网络或鉴权错误也不会被静默改成 Hold。
+
+连续 3 个分析日期全部失败时，命令会立即停止并报错，不再为后面的日期继续付费：
+连续失败几乎都是凭证、模型或数据供应商的问题，而不是某个日期本身的问题。
+
+`autoheld_steps` 对应的分析日期**不会**被消费：ATL 没有收到决策，就说明什么都
+没有成交。这些记录会在下一个 Step 重试；如果回测在此之前结束，它们会出现在
+“未执行的分析日期”里，命令以退出码 2 结束。因此本地计数器不会出现“报告了一笔
+从未成交的订单”的情况，可以直接和 ATL 返回的 `timeout_holds` 对照。
 
 ## 8. 在 ATL 查看结果
 
@@ -205,8 +241,15 @@ TradingAgents 可能在一个分析日期使用当天完整数据，因此 ATL �
 
 **买入信号没有成交**
 
-检查命令摘要和 rationale。常见原因包括：当前价格高于 25% 目标资金能买到的最小一股、
-已经达到目标仓位、ATL 拒单或回测日期没有覆盖 T+1 Step。
+检查命令摘要和 rationale。最常见的原因是**股价高于约 250 美元的单股上限**（见第 6
+节的完整说明，摘要里记作 `price_too_high`）；其他原因包括已经达到目标仓位、ATL
+拒单，或回测日期没有覆盖 T+1 Step。
+
+**提示缺少时区数据库（ZoneInfoNotFoundError）**
+
+回放需要把 ATL 的 Step 时间戳换算成美东日期，这依赖系统的 IANA 时区数据库。
+Windows 不自带，精简版容器镜像也常常删掉它。在 Windows 上安装 `agentictrading`
+会自动带上 `tzdata` 依赖；其他环境下手动执行 `pip install tzdata` 即可。
 
 **出现 timeout_holds**
 
