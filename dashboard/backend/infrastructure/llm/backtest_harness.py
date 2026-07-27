@@ -61,8 +61,8 @@ LLM_MODEL_NAME = anthropic_native.DEFAULT_MODEL
 
 # Same default model, but as the CommonStack gateway slug. CommonStack expects
 # ``provider/model`` ids, so when routing through CommonStack we must send the
-# gateway slug rather than the native Anthropic id (see the integration report's
-# "slug/gateway coupling" note). Pricing in token_cost.py matches "claude-haiku-4".
+# gateway slug rather than a native Anthropic id (see the integration report's
+# "slug/gateway coupling" note). Default is DeepSeek (see commonstack.py).
 COMMONSTACK_MODEL_NAME = commonstack.DEFAULT_MODEL
 
 # CommonStack / OpenRouter base URLs (env-overridable). Re-exported for

@@ -140,7 +140,7 @@ def test_chat_model_falls_back_to_default_when_unset(monkeypatch):
 
 
 def test_chat_uses_commonstack_slug_when_key_present(monkeypatch):
-    # With a CommonStack key, the chat routes through the gateway slug.
+    # With a CommonStack key and no CHAT_MODEL, chat uses COMMONSTACK_MODEL_NAME.
     monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
     monkeypatch.delenv("CHAT_MODEL", raising=False)
     fake = _install_client(monkeypatch, response=_text_response("ok"))
@@ -148,6 +148,69 @@ def test_chat_uses_commonstack_slug_when_key_present(monkeypatch):
     asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="hello"))
 
     assert fake.calls[0]["model"] == chat_service.COMMONSTACK_MODEL_NAME
+
+
+def test_synthesize_strategy_uses_idea_and_preferred_model(monkeypatch):
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+    fake = _install_client(
+        monkeypatch,
+        response=_text_response("Equal-weight Mag7; rebalance monthly"),
+    )
+
+    prompt = asyncio.run(
+        chat_service.synthesize_strategy_prompt(
+            user_id="u1",
+            agent_id="a1",
+            extra="buy big 7",
+            model="deepseek/deepseek-v4-pro",
+        )
+    )
+
+    assert "Mag7" in prompt
+    assert fake.calls[0]["model"] == "deepseek/deepseek-v4-pro"
+    assert "buy big 7" in fake.calls[0]["messages"][-1]["content"]
+
+
+def test_synthesize_strategy_skips_commonstack_stub_greeting(monkeypatch):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+
+    stub = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text="Hi! How can I help you today?")],
+        usage=SimpleNamespace(input_tokens=10),
+    )
+    good = _text_response("Buy AAPL MSFT GOOGL AMZN NVDA META TSLA equal weight.")
+
+    class _Seq:
+        def __init__(self):
+            self.calls = []
+            self._n = 0
+
+        async def create(self, **kwargs):
+            self.calls.append(kwargs)
+            self._n += 1
+            return stub if self._n == 1 else good
+
+    fake_messages = _Seq()
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    prompt = asyncio.run(
+        chat_service.synthesize_strategy_prompt(
+            user_id="u1",
+            agent_id="a1",
+            extra="buy big 7",
+            model="anthropic/claude-haiku-4-5",
+        )
+    )
+
+    assert "AAPL" in prompt
+    assert fake_messages.calls[0]["model"] == "anthropic/claude-haiku-4-5"
+    assert fake_messages.calls[1]["model"] == "openai/gpt-4o-mini"
 
 
 def test_chat_history_trimmed_to_12(monkeypatch):
