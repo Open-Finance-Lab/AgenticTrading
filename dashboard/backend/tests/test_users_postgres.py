@@ -289,3 +289,19 @@ def test_avatar_column_lazy_migration_postgres():
                 "WHERE table_name = 'users' AND column_name = 'avatar'"
             )
             assert cur.fetchone() is not None
+
+
+@pg_only
+def test_update_display_name_postgres(temp_postgres_store):
+    user = temp_postgres_store.create_user("pgname@example.com", "PG Name", "securepass1")
+
+    updated = temp_postgres_store.update_display_name(user["id"], "  PG Renamed  ")
+
+    assert updated["display_name"] == "PG Renamed"
+    assert temp_postgres_store.get_user_by_id(user["id"])["display_name"] == "PG Renamed"
+
+
+@pg_only
+def test_update_display_name_missing_user_postgres(temp_postgres_store):
+    with pytest.raises(ValueError, match="user_not_found"):
+        temp_postgres_store.update_display_name(999_999, "Ghost")

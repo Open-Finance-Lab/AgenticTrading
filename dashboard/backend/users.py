@@ -325,6 +325,21 @@ class UserStore:
             raise ValueError("user_not_found")
         return public_user(row)
 
+    def update_display_name(self, user_id: int, display_name: str) -> Dict[str, Any]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET display_name = ? WHERE id = ?",
+            (display_name.strip(), user_id),
+        )
+        conn.commit()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
     def get_user_by_discord_id(self, discord_user_id: str) -> Optional[Dict[str, Any]]:
         discord_id = str(discord_user_id).strip()
         if not discord_id:
