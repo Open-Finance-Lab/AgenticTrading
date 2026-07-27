@@ -6,7 +6,9 @@ a remote HTTP client: it talks to the same REST endpoints documented in
 [`agent-environment-protocol-v1.md`](./agent-environment-protocol-v1.md) and works
 whether the backend runs on your machine or is deployed elsewhere.
 
-The SDK adds no third-party dependencies (standard-library `urllib` only).
+The SDK is dependency-free on macOS and Linux (standard-library `urllib` only).
+On Windows it also installs the `tzdata` data wheel, because `zoneinfo` has no
+system IANA time-zone database there.
 
 ## The layers
 
@@ -228,6 +230,16 @@ except ATLValidationError as exc:
   submits real orders from a deterministic rule.
 - `dashboard/examples/sdk_custom_agent_runner.py` — implements only `decide()`
   and lets `AgentRunner` manage the loop.
+- `dashboard/examples/sdk_quickstart_selftest.py` — one command that signs in,
+  registers an agent, and runs a short backtest end to end against a live
+  backend.
+- `dashboard/examples/tradingagents_atl_backtest.py` — bridges
+  [TradingAgents](https://github.com/TauricResearch/TradingAgents): it runs the
+  multi-agent analysis locally (your model and data credentials never leave the
+  machine), writes a replayable decision artifact, and replays that artifact
+  through ATL at T+1. Setup guide:
+  [`docs/integrations/tradingagents.zh-CN.md`](../integrations/tradingagents.zh-CN.md)
+  (Simplified Chinese).
 
 All examples read credentials from environment variables; do not place real API
 keys, passwords, or tokens in source code.
