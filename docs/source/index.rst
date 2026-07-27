@@ -15,7 +15,9 @@ Welcome to the **Agentic Trading** documentation.
    lab/key_features
    lab/getting_started
    lab/accounts
+   lab/marketplace
    lab/external_agents
+   lab/live_trading
    lab/architecture
    lab/agent_api
 

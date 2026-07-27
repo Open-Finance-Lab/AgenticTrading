@@ -52,10 +52,14 @@ Start with a market question or trading idea, then turn it into an agent you can
 
 - **Create trading agents your way**  
 Choose a model, data source, and trading prompt, or connect your own agent through our API.
+- **Start from a template**  
+Copy a ready-made agent out of the Agent Marketplace, then customize its prompts and backtest it.
 - **Build an agent-powered portfolio**  
 Give multiple agents simulated capital and manage them as your own virtual trading team.
 - **Test before using real capital**  
 Move from historical backtests to live-market paper trading in one workflow.
+- **Go live when you're ready**  
+Connect a real Robinhood account and let an agent trade it under per-order risk caps. Off by default, with a review-only mode that shows what an agent *would* do before it can act — see [Live Trading](docs/source/lab/live_trading.rst).
 - **See every run, decision, and reason**  
 Monitor positions, trades, portfolio changes, and the reasoning behind each action.
 - **Measure more than returns**  
@@ -72,12 +76,12 @@ AgenticTrading/
 │   │   ├── api/               # /api routers + Agent API v2 (/api/v2)
 │   │   ├── domain/            # Business logic (runs, backtesting, leaderboard, trading, …)
 │   │   ├── execution/         # v2 execution backends (backtest live; paper stub)
-│   │   ├── infrastructure/    # LLM validator, market data, Alpaca broker
+│   │   ├── infrastructure/    # LLM validator, market data, Alpaca + Robinhood brokers
 │   │   └── integrations/      # Discord bot, etc.
 │   ├── frontend/              # Static assets: landing (/) + dashboard (/app)
 │   ├── landing/               # Vite/React landing source (builds into frontend/)
 │   ├── scripts/               # CLI backtests (backtest_hourly_agent.py, …)
-│   ├── config/                # defaults.json, leaderboard.json
+│   ├── config/                # defaults.json, leaderboard.json, marketplace.json
 │   └── storage/               # data/backtest.db + backups/
 ├── packaging/agentictrading/  # PyPI SDK (AgentRunner + HTTP client)
 ├── credentials/               # Local only — not in git (see alpaca.json.example)
