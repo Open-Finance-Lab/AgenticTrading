@@ -248,6 +248,18 @@ class PostgresAgentStore:
                         """,
                         (owner_user_id,),
                     )
+                    # Also surface unclaimed agents created in this browser
+                    # before login/claim (same rationale as the SQLite twin).
+                    if owner_browser_session:
+                        _add_rows(
+                            """
+                            SELECT * FROM external_agents
+                            WHERE owner_browser_session = %s
+                              AND owner_user_id IS NULL
+                            ORDER BY created_at DESC
+                            """,
+                            (owner_browser_session,),
+                        )
                 elif owner_browser_session:
                     _add_rows(
                         """

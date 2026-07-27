@@ -286,6 +286,20 @@ class AgentStore:
                 """,
                 (owner_user_id,),
             )
+            # Also surface unclaimed agents created in this browser before
+            # login/claim. Without this, a signed-in list drops the guest
+            # "My Foundation Agent" whenever claim races or is skipped, while
+            # logout (browser-only list) still shows it.
+            if owner_browser_session:
+                _add_rows(
+                    """
+                    SELECT * FROM external_agents
+                    WHERE owner_browser_session = ?
+                      AND owner_user_id IS NULL
+                    ORDER BY created_at DESC
+                    """,
+                    (owner_browser_session,),
+                )
         elif owner_browser_session:
             _add_rows(
                 """

@@ -177,6 +177,32 @@ window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT = SIMPLE_INSTRUCTION_OUTPUT_FORMAT;
 const DEFAULT_STARTER_INSTRUCTION =
   'Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.';
 
+function defaultAgentProvisionGuardKey() {
+  // Prefer the signed-in account so a brand-new user on a browser that already
+  // provisioned (or deleted) a guest starter still gets their own default.
+  // Guests keep the browser-scoped key so logout→login claim can find it.
+  const user = typeof getStoredAuthUser === 'function' ? getStoredAuthUser() : null;
+  if (user?.id != null) {
+    return `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}u:${user.id}`;
+  }
+  return `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}b:${window.BROWSER_OWNER_ID || 'anon'}`;
+}
+
+function hasDefaultAgentProvisionGuard() {
+  try {
+    const key = defaultAgentProvisionGuardKey();
+    if (localStorage.getItem(key)) return true;
+    // Pre-fix legacy key (no u:/b: prefix). Honor it for guests only so we
+    // do not duplicate a starter that was already provisioned; signed-in users
+    // intentionally ignore it so a new account still gets onboarding.
+    const user = typeof getStoredAuthUser === 'function' ? getStoredAuthUser() : null;
+    if (user?.id != null) return false;
+    const legacy = `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}${window.BROWSER_OWNER_ID || 'anon'}`;
+    return Boolean(localStorage.getItem(legacy));
+  } catch (e) {
+    return true; // no storage → cannot guard → do not provision
+  }
+}
 function formatAgentCashAllocation(value) {
   if (value == null || value === '') return '—';
   return new Intl.NumberFormat('en-US', {
@@ -1334,55 +1360,76 @@ async function onBacktestAgentSelectChange() {
 
 // First-visit onboarding: a brand-new owner gets one real Foundation agent so
 // the row is never empty. The guard key means "we provisioned once for this
-// browser identity" — deleting the agent must NOT resurrect it.
-let defaultAgentProvisionInFlight = false;
+// identity" — deleting the agent must NOT resurrect it.
+let defaultAgentProvisionInFlight = null;
 
 async function ensureDefaultFoundationAgent(agents) {
   if (isDemoMode()) return false;
-  if (agents.some((a) => a.agent_type === 'builtin')) return false;
-  const guardKey = `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}${window.BROWSER_OWNER_ID || 'anon'}`;
-  try {
-    if (localStorage.getItem(guardKey)) return false;
-  } catch (e) {
-    return false; // no storage → cannot guard → do not provision
-  }
-  if (defaultAgentProvisionInFlight) return false;
-  defaultAgentProvisionInFlight = true;
-  try {
-    const data = await API.post(`${API_BASE}/api/v1/agents`, {
-      name: 'My Foundation Agent',
-      model_name: DEFAULT_FOUNDATION_MODEL,
-      agent_type: 'builtin',
-      description: 'Your starter agent — configure it and run a backtest.',
-      cash_allocation: DEFAULT_AGENT_CASH_ALLOCATION,
-    });
-    const agent = data?.agent;
-    if (!agent?.agent_id) return false;
-    localStorage.setItem(guardKey, agent.agent_id);
+  const builtins = agents.filter((a) => a.agent_type === 'builtin');
+  if (builtins.length) {
+    // Claimed guest starters (or any existing builtin) count as onboarding done
+    // for this identity, so a later delete does not resurrect the default.
     try {
-      await API.patch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}`, {
-        pipeline: [
-          {
-            id: `sub_starter_${agent.agent_id}`,
-            presetKey: SIMPLE_INSTRUCTION_PRESET_KEY,
-            label: 'Trading instruction',
-            prompt: DEFAULT_STARTER_INSTRUCTION,
-            outputFormat: SIMPLE_INSTRUCTION_OUTPUT_FORMAT,
-          },
-        ],
-      });
-    } catch (seedError) {
-      // Non-fatal: the agent exists; the editor just opens with a blank instruction.
-      console.warn('Starter instruction seed failed:', seedError.message);
+      const guardKey = defaultAgentProvisionGuardKey();
+      if (!localStorage.getItem(guardKey)) {
+        localStorage.setItem(guardKey, builtins[0].agent_id);
+      }
+    } catch (e) {
+      /* storage unavailable — delete-guard simply won't persist */
     }
-    if (!getDefaultAgentId()) setDefaultAgentId(agent.agent_id);
-    return true;
-  } catch (error) {
-    // Non-fatal: the row falls back to its empty state with the Add Agent CTA.
-    console.warn('Default agent provisioning skipped:', error.message);
     return false;
+  }
+  const guardKey = defaultAgentProvisionGuardKey();
+  if (hasDefaultAgentProvisionGuard()) return false;
+  if (defaultAgentProvisionInFlight) {
+    // Another loadAgents is already creating the starter — wait for it so a
+    // signup race does not skip provisioning and leave My Agents empty.
+    try {
+      return await defaultAgentProvisionInFlight;
+    } catch (e) {
+      return false;
+    }
+  }
+  defaultAgentProvisionInFlight = (async () => {
+    try {
+      const data = await API.post(`${API_BASE}/api/v1/agents`, {
+        name: 'My Foundation Agent',
+        model_name: DEFAULT_FOUNDATION_MODEL,
+        agent_type: 'builtin',
+        description: 'Your starter agent — configure it and run a backtest.',
+        cash_allocation: DEFAULT_AGENT_CASH_ALLOCATION,
+      });
+      const agent = data?.agent;
+      if (!agent?.agent_id) return false;
+      localStorage.setItem(guardKey, agent.agent_id);
+      try {
+        await API.patch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}`, {
+          pipeline: [
+            {
+              id: `sub_starter_${agent.agent_id}`,
+              presetKey: SIMPLE_INSTRUCTION_PRESET_KEY,
+              label: 'Trading instruction',
+              prompt: DEFAULT_STARTER_INSTRUCTION,
+              outputFormat: SIMPLE_INSTRUCTION_OUTPUT_FORMAT,
+            },
+          ],
+        });
+      } catch (seedError) {
+        // Non-fatal: the agent exists; the editor just opens with a blank instruction.
+        console.warn('Starter instruction seed failed:', seedError.message);
+      }
+      if (!getDefaultAgentId()) setDefaultAgentId(agent.agent_id);
+      return true;
+    } catch (error) {
+      // Non-fatal: the row falls back to its empty state with the Add Agent CTA.
+      console.warn('Default agent provisioning skipped:', error.message);
+      return false;
+    }
+  })();
+  try {
+    return await defaultAgentProvisionInFlight;
   } finally {
-    defaultAgentProvisionInFlight = false;
+    defaultAgentProvisionInFlight = null;
   }
 }
 
@@ -2175,7 +2222,7 @@ function setAuthState(user, token) {
   updateAuthUI();
 }
 
-async function claimAgentsForUser() {
+async function claimAgentsForUser({ reload = true } = {}) {
   const token = localStorage.getItem(AUTH_TOKEN_KEY);
   if (!token) return;
   try {
@@ -2183,7 +2230,9 @@ async function claimAgentsForUser() {
   } catch (error) {
     console.warn('Agent account claim skipped:', error.message);
   }
-  await loadAgents();
+  if (reload) {
+    await loadAgents();
+  }
 }
 
 function clearAuthState() {
@@ -2725,7 +2774,8 @@ async function refreshAuthUser() {
   }
 }
 
-function initAuthUI() {
+function initAuthUI(options = {}) {
+  const { refresh = true } = options;
   const signInBtn = document.getElementById('authSignInBtn');
   const accountBtn = document.getElementById('authAccountBtn');
   const accountSignInBtn = document.getElementById('accountSignInBtn');
@@ -2822,6 +2872,11 @@ function initAuthUI() {
       // post-sign-in housekeeping and must not hold the modal open — a slow or
       // hung backend used to leave the popup up over an already-signed-in UI.
       closeAuthModal();
+      // First-time accounts should greet on Home, not a leftover My Agents tab
+      // from browsing while logged out (nav-state restore).
+      if (authMode === 'signup') {
+        navigateToPage('home');
+      }
       claimAgentsForUser()
         .then(() => {
           // If we arrived here from a Discord deep link that needed this account
@@ -2859,7 +2914,11 @@ function initAuthUI() {
   wireDiscordAccountButtons();
   initChangePasswordForm();
   initAvatarControls();
-  refreshAuthUser();
+  // Boot claims + loads agents itself so landing signup → /app does not race
+  // a fire-and-forget refresh against the first My Agents paint.
+  if (refresh) {
+    refreshAuthUser();
+  }
 }
 
 // Store default run IDs
@@ -2890,9 +2949,18 @@ let defaultConfig = null;
 document.addEventListener('DOMContentLoaded', async () => {
     // Initialize session FIRST (before any API calls)
     initSession();
-    initAuthUI();
+    // Defer refreshAuthUser: claim must finish before the first loadAgents so a
+    // landing signup → /app handoff does not miss the guest Foundation agent.
+    initAuthUI({ refresh: false });
     bindCashStepInputs();
     await restoreActiveAgentSession();
+    if (localStorage.getItem(AUTH_TOKEN_KEY)) {
+        try {
+            await refreshAuthUser();
+        } catch (error) {
+            console.warn('Boot refreshAuthUser failed:', error?.message || error);
+        }
+    }
     // Portfolio overview must not wait on the agents waterfall. Paint any
     // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
     // then show the page while loadAgents continues in the background.
@@ -2914,9 +2982,12 @@ document.addEventListener('DOMContentLoaded', async () => {
             console.warn('Portfolio prefetch failed:', error?.message || error);
         });
     }
-    const agentsReady = loadAgents().catch((error) => {
-        console.warn('Initial loadAgents failed:', error.message);
-    });
+    // refreshAuthUser → claimAgentsForUser already loadAgents when signed in.
+    const agentsReady = localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser()
+        ? Promise.resolve()
+        : loadAgents().catch((error) => {
+            console.warn('Initial loadAgents failed:', error.message);
+        });
     applyInitialNavigation();
     // Home modules / agent cards catch up once the list lands; do not block
     // first navigation on that wait.

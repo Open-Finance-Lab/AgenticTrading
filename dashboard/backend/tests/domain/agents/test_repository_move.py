@@ -133,6 +133,23 @@ def test_list_agents_owner_filters(store):
     assert store.list_agents() == []
 
 
+def test_list_agents_signed_in_includes_unclaimed_browser_agents(store):
+    """Signed-in listing must not hide guest-provisioned agents awaiting claim."""
+    owned = store.create_agent(name="Owned", owner_user_id=7, owner_browser_session="b1")
+    unclaimed = store.create_agent(name="Guest", owner_browser_session="b1")
+    other_user = store.create_agent(
+        name="Other", owner_user_id=99, owner_browser_session="b1"
+    )
+    other_browser = store.create_agent(name="Elsewhere", owner_browser_session="b2")
+
+    listed = store.list_agents(owner_user_id=7, owner_browser_session="b1")
+    ids = {a["agent_id"] for a in listed}
+    assert owned["agent_id"] in ids
+    assert unclaimed["agent_id"] in ids
+    assert other_user["agent_id"] not in ids
+    assert other_browser["agent_id"] not in ids
+
+
 def test_rotate_api_key(store):
     created = store.create_agent(name="A")
     new_key = store.rotate_api_key(created["agent_id"])
