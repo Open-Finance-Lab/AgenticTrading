@@ -2576,7 +2576,26 @@ async function openDiscordWithAccount(event) {
   }
 }
 
-/** Handle /app?robinhood=linked|error after OAuth callback. */
+/** Shared success handling once a Robinhood link is confirmed (reopen editor + confirm). */
+async function finishRobinhoodLinkSuccess(agentId) {
+  if (agentId && window.AgentEditor?.open) {
+    try {
+      const headers = { 'x-session-id': SESSION_ID };
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, { headers });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.agent) window.AgentEditor.open(data.agent);
+      }
+    } catch (error) {
+      console.warn('Could not reopen agent editor after Robinhood link:', error);
+    }
+  }
+  alert('Robinhood connected. Enable live trading, save, then Run Live.');
+}
+
+/** Handle /app?robinhood=linked|pending|error after OAuth callback. */
 async function handleRobinhoodOAuthReturn() {
   const params = new URLSearchParams(window.location.search);
   const robinhood = (params.get('robinhood') || '').toLowerCase();
@@ -2584,29 +2603,52 @@ async function handleRobinhoodOAuthReturn() {
 
   const agentId = params.get('agent_id');
   const reason = params.get('reason');
+  const linkCode = params.get('link_code');
   params.delete('robinhood');
   params.delete('agent_id');
   params.delete('reason');
+  params.delete('link_code');
   const clean = params.toString();
   const next = `${window.location.pathname}${clean ? `?${clean}` : ''}${window.location.hash}`;
   window.history.replaceState(getNavigationState(), '', next);
 
   if (robinhood === 'linked') {
-    if (agentId && window.AgentEditor?.open) {
-      try {
-        const headers = { 'x-session-id': SESSION_ID };
-        const token = localStorage.getItem(AUTH_TOKEN_KEY);
-        if (token) headers.Authorization = `Bearer ${token}`;
-        const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, { headers });
-        if (response.ok) {
-          const data = await response.json();
-          if (data.agent) window.AgentEditor.open(data.agent);
-        }
-      } catch (error) {
-        console.warn('Could not reopen agent editor after Robinhood link:', error);
+    await finishRobinhoodLinkSuccess(agentId);
+    return;
+  }
+
+  if (robinhood === 'pending') {
+    try {
+      const headers = { 'Content-Type': 'application/json', 'x-session-id': SESSION_ID };
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(`${API_BASE}/api/auth/robinhood/complete`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ link_code: linkCode }),
+      });
+      if (response.ok) {
+        await finishRobinhoodLinkSuccess(agentId);
+        return;
       }
+      let detail = null;
+      try {
+        const data = await response.json();
+        detail = data && data.detail;
+      } catch (parseError) {
+        // Non-JSON error body - fall back to the generic messages below.
+      }
+      if (response.status === 403) {
+        alert(detail || 'Robinhood link was started from a different account.');
+      } else if (response.status === 400) {
+        alert(detail || 'Robinhood link expired - please connect again.');
+      } else {
+        alert(detail || 'Could not complete Robinhood link. Please try again.');
+      }
+    } catch (error) {
+      console.warn('Robinhood link completion failed:', error);
+      alert('Could not complete Robinhood link. Please try again.');
     }
-    alert('Robinhood connected. Enable live trading, save, then Run Live.');
     return;
   }
 
