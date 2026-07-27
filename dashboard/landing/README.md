@@ -42,7 +42,7 @@ React bundle. That layer is, by design, all that remains hand-written in
   a click delegation that funnels the landing's CTAs into it.
 
 Everything else the landing shows — the nav (with its native `data-landing-auth`
-Sign In / Get Started buttons), the Discord-prompt and paper-trading sections, the
+**Start Free** button), the Discord-prompt and paper-trading sections, the
 fixed-height agent playground — is now rendered **natively by the React source**.
 (An earlier shipped bundle injected those via a `MutationObserver` patch; the source
 has since absorbed them, and that obsolete patch machinery was removed so it can't
@@ -55,14 +55,26 @@ npm run build
 cp dist/public/assets/* ../frontend/assets/     # new content-hashed JS/CSS/img
 # remove the superseded ../frontend/assets/index-*.{js,css} + atl-logo-*.png
 # In ../frontend/index.html: point the <script>/<link> at the NEW asset
-#   filenames and bump ?v=N. KEEP the auth-gate <script>, #landingAuthModal
-#   markup, <style id="landing-auth-patch">, and the end-of-body auth <script>.
+#   filenames. KEEP the auth-gate <script>, #landingAuthModal markup,
+#   <style id="landing-auth-patch">, and the end-of-body auth <script>.
 ```
+
+The asset filenames are content-hashed, so **no `?v=` cache-buster is needed** —
+a new build produces a new name, which is the cache bust. (Older revisions of this
+file told you to bump one; the shipped `index.html` has carried none since the
+`frontend/` refresh, and adding one now would just be noise.)
+
+`dashboard/backend/tests/test_frontend_bundle_integrity.py` guards the mechanical
+half of the steps above in CI: every `/assets/...` reference in `index.html` must
+resolve, no superseded bundle may be left behind, and the four hand-written auth
+markers must still be present. It does **not** rebuild the bundle — Vite's content
+hashes move with toolchain versions, so a reproducibility check would be flaky.
 
 The auth layer binds to native `data-landing-auth` buttons + CTA labels, so it no
 longer depends on any patch-injected DOM. Still: it touches the live signup/login
 flow, so verify in a browser (or headlessly — load `/`, confirm each section renders
-once, the modal opens on "Get Started", and there are no console errors) before
+once, the modal opens on every **Start Free** button, and the only console error is
+the `/_vercel/insights/script.js` 404, which exists off Vercel and is expected) before
 shipping. Longer term, folding the auth modal + gate into the React source would
 remove even this remnant, making the build output *exactly* the shipped page.
 
