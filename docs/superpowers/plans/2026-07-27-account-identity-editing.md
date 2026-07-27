@@ -2556,6 +2556,7 @@ rather than behavioural -- an ordering and a CSS source-order requirement -- so
 they are asserted against the shipped source directly.
 """
 
+import re
 from pathlib import Path
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
@@ -2577,11 +2578,23 @@ def test_logout_button_is_last_in_the_account_card():
     for marker in ("id=\"avatarUploadBtn\"", "id=\"changePasswordForm\""):
         assert card.index(marker) < logout_at, f"{marker} must come before Log out"
 
+    # "after those two" is not "last" -- a section appended later would keep the
+    # assertions above green. Nothing else in the card may carry an id.
+    tail = card[logout_at + len('id="authLogoutBtn"'):]
+    assert 'id="' not in tail, f"something with an id follows Log out: {tail!r}"
+
 
 def test_logout_button_carries_the_danger_class():
     card = _account_card()
-    assert "auth-btn-danger" in card
-    assert "auth-btn-secondary" not in card.split('id="authLogoutBtn"')[0][-80:]
+    match = re.search(r'<button[^>]*id="authLogoutBtn"[^>]*>', card)
+    assert match, "logout button not found in the account card"
+    tag = match.group(0)
+    # Assert on the button's OWN tag. A substring search over the whole card
+    # would pass if "auth-btn-danger" appeared anywhere else, and a fixed-width
+    # window before the id cannot see the class at all -- this file's markup
+    # puts id= before class=.
+    assert "auth-btn-danger" in tag
+    assert "auth-btn-secondary" not in tag
 
 
 def test_header_dropdown_logout_is_untouched():

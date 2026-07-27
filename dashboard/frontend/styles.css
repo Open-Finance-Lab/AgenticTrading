@@ -395,8 +395,12 @@ a.header-brand:hover .title-section h1 {
    thing making this one win. A copy of .agent-delete-btn's palette rather than
    a reuse of it -- that class is agent-scoped, and the codebase already makes
    this same "same look, own class" split between .account-menu-item--danger
-   and .agent-menu-item--danger. Note the repo carries two reds: #f87171 for
-   destructive controls, --danger-color #ff4141 for negative P&L. */
+   and .agent-menu-item--danger. #f87171 is what every other destructive
+   control here uses (.agent-delete-btn, .agent-menu-item--danger,
+   .account-menu-item--danger), while --danger-color #ff4141 is the more
+   common choice for negative P&L -- but neither is an absolute rule and there
+   are exceptions both ways, so match the nearest precedent rather than
+   assuming a clean split. */
 .auth-btn-danger {
     border-color: rgba(248, 113, 113, 0.55);
     background: rgba(248, 113, 113, 0.1);
