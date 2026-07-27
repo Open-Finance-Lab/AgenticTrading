@@ -89,18 +89,23 @@ def map_rating(rating: str) -> str:
         ) from exc
 
 
-def _canonical_date(value: str) -> str:
+def _canonical_date(value: str, *, field: str = "analysis_date") -> date:
+    """Parse a strictly canonical ``YYYY-MM-DD`` string into a ``date``.
+
+    ``date.fromisoformat`` also accepts forms ATL never emits, so the round-trip
+    check rejects anything whose canonical spelling differs from the input.
+    """
     try:
         parsed = date.fromisoformat(value)
     except (TypeError, ValueError) as exc:
         raise ArtifactValidationError(
-            f"analysis_date must be YYYY-MM-DD, got {value!r}"
+            f"{field} must be YYYY-MM-DD, got {value!r}"
         ) from exc
     if parsed.isoformat() != value:
         raise ArtifactValidationError(
-            f"analysis_date must be canonical YYYY-MM-DD, got {value!r}"
+            f"{field} must be canonical YYYY-MM-DD, got {value!r}"
         )
-    return value
+    return parsed
 
 
 @dataclass(frozen=True)
@@ -257,6 +262,26 @@ def sanitize_error_message(error: Union[str, BaseException]) -> str:
     """Remove common credential shapes and cap persisted error detail."""
     cleaned = _redact_string(str(error)).replace("\n", " ").replace("\r", " ")
     return cleaned[:_MAX_ERROR_MESSAGE_LENGTH]
+
+
+def default_decision_artifact_path(symbol: str) -> Path:
+    """Return the conventional on-disk location for ``symbol``'s artifact.
+
+    This is part of the artifact contract, not of any one front-end: a CLI, a
+    notebook, and a future integration all have to agree on where decisions
+    land, so the convention lives beside save/load rather than in one caller.
+    """
+    clean_symbol = str(symbol or "").strip().lower()
+    if not clean_symbol:
+        raise ArtifactValidationError("symbol must be non-empty")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    return (
+        Path.home()
+        / ".agentictrading"
+        / "tradingagents"
+        / "decisions"
+        / f"{clean_symbol}-{stamp}.json"
+    )
 
 
 def save_decision_artifact(

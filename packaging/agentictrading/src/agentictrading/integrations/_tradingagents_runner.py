@@ -6,17 +6,14 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any, Dict, Optional, Tuple
 
-from ..exceptions import (
-    ATLAPIError,
-    ATLConflictError,
-    ATLRunFailedError,
-    ATLTimeoutError,
-)
+from ..exceptions import ATLAPIError, ATLConflictError, ATLRunFailedError
 from ..models import RunResult
+from ..runner import _FAILED_STATES, _STEP_AUTOHELD_CODES, wait_for_poll
 from ._tradingagents_core import (
     ArtifactValidationError,
     TradingAgentsDecisionArtifact,
     TradingAgentsGenerationError,
+    _canonical_date,
 )
 from ._tradingagents_replay import (
     TradingAgentsReplayDiagnostics,
@@ -94,11 +91,6 @@ class TradingAgentsATLRunner:
     """Drive an offline TradingAgents artifact through ATL's typed Run API."""
 
     ENVIRONMENT_ID = "us-equity-hourly-v1"
-    _AUTOHELD_CODES = {
-        "decision_deadline_exceeded",
-        "step_already_finalized",
-    }
-    _FAILED_STATES = {"failed", "cancelled", "canceled"}
 
     def __init__(self, client: Any) -> None:
         self.client = client
@@ -120,8 +112,8 @@ class TradingAgentsATLRunner:
         if poll_interval <= 0:
             raise ArtifactValidationError("poll_interval must be greater than 0")
 
-        start = self._parse_run_date(start_date, "start_date")
-        end = self._parse_run_date(end_date, "end_date")
+        start = _canonical_date(start_date, field="start_date")
+        end = _canonical_date(end_date, field="end_date")
         if start >= end:
             raise ArtifactValidationError("start_date must be before end_date")
         if any(
@@ -183,7 +175,7 @@ class TradingAgentsATLRunner:
                 status = step.status
                 if status == "completed":
                     break
-                if status in self._FAILED_STATES:
+                if status in _FAILED_STATES:
                     raise ATLRunFailedError(
                         step.message or f"run entered state {status!r}",
                         code=status,
@@ -196,7 +188,7 @@ class TradingAgentsATLRunner:
                             run.id, step.id, decision
                         )
                     except ATLConflictError as exc:
-                        if exc.code not in self._AUTOHELD_CODES:
+                        if exc.code not in _STEP_AUTOHELD_CODES:
                             raise
                         # ATL closed this step without our decision, so nothing
                         # was executed. Roll the proposal back: the records stay
@@ -212,11 +204,12 @@ class TradingAgentsATLRunner:
                     )
                     continue
                 if status in ("loading", "pending", "executing"):
-                    waited = self._wait(
-                        poll_interval=poll_interval,
-                        waited=waited,
-                        max_wait_seconds=max_wait_seconds,
-                        status=str(status),
+                    waited = wait_for_poll(
+                        self.client,
+                        poll_interval,
+                        waited,
+                        max_wait_seconds,
+                        str(status),
                     )
                     continue
                 raise ATLAPIError(
@@ -272,38 +265,3 @@ class TradingAgentsATLRunner:
             )
         self._validated_symbols.add(symbol)
 
-    def _wait(
-        self,
-        *,
-        poll_interval: float,
-        waited: float,
-        max_wait_seconds: Optional[float],
-        status: str,
-    ) -> float:
-        if max_wait_seconds is not None and waited >= max_wait_seconds:
-            raise ATLTimeoutError(
-                f"exceeded max_wait_seconds={max_wait_seconds} while run was {status!r}",
-                code="runner_wait_timeout",
-            )
-        sleep_for = poll_interval
-        if max_wait_seconds is not None:
-            sleep_for = min(
-                poll_interval,
-                max(0.0, max_wait_seconds - waited),
-            )
-        self.client.wait(sleep_for)
-        return waited + sleep_for
-
-    @staticmethod
-    def _parse_run_date(value: str, field: str) -> date:
-        try:
-            parsed = date.fromisoformat(value)
-        except (TypeError, ValueError) as exc:
-            raise ArtifactValidationError(
-                f"{field} must be YYYY-MM-DD, got {value!r}"
-            ) from exc
-        if parsed.isoformat() != value:
-            raise ArtifactValidationError(
-                f"{field} must be canonical YYYY-MM-DD, got {value!r}"
-            )
-        return parsed

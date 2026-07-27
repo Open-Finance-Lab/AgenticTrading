@@ -1,45 +1,8 @@
-"""Optional client-side integrations for external agent frameworks."""
+"""Optional client-side integrations for external agent frameworks.
 
-from .tradingagents import (
-    ARTIFACT_SCHEMA_VERSION,
-    ArtifactValidationError,
-    TradingAgentsDecisionArtifact,
-    TradingAgentsDecisionGenerator,
-    TradingAgentsDecisionRecord,
-    TradingAgentsATLRunner,
-    TradingAgentsATLRunOutcome,
-    TradingAgentsDependencyError,
-    TradingAgentsGenerationError,
-    TradingAgentsReplayDiagnostics,
-    TradingAgentsReplayIncompleteError,
-    TradingAgentsReplayPlanner,
-    TradingAgentsReplayValidationError,
-    TradingAgentsVersionError,
-    build_safe_manifest,
-    load_decision_artifact,
-    map_rating,
-    sanitize_error_message,
-    save_decision_artifact,
-)
+The public surface is defined once, by :mod:`.tradingagents`. Re-exporting it
+by name here meant two hand-maintained lists, which had already drifted apart.
+"""
 
-__all__ = [
-    "ARTIFACT_SCHEMA_VERSION",
-    "ArtifactValidationError",
-    "TradingAgentsDecisionArtifact",
-    "TradingAgentsDecisionGenerator",
-    "TradingAgentsDecisionRecord",
-    "TradingAgentsATLRunner",
-    "TradingAgentsATLRunOutcome",
-    "TradingAgentsDependencyError",
-    "TradingAgentsGenerationError",
-    "TradingAgentsReplayDiagnostics",
-    "TradingAgentsReplayIncompleteError",
-    "TradingAgentsReplayPlanner",
-    "TradingAgentsReplayValidationError",
-    "TradingAgentsVersionError",
-    "build_safe_manifest",
-    "load_decision_artifact",
-    "map_rating",
-    "sanitize_error_message",
-    "save_decision_artifact",
-]
+from .tradingagents import *  # noqa: F401,F403
+from .tradingagents import __all__
