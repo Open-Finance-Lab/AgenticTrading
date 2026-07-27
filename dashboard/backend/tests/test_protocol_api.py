@@ -212,6 +212,41 @@ def test_create_run_and_first_step(client):
     assert step["constraints"]["allow_short"] is False
 
 
+def test_observation_bars_are_complete_and_scoped_to_allowed_symbols(client):
+    agent_id, key, _ = _new_agent(client)
+    version_id = _new_version(client, agent_id, key)
+    resp = client.post(
+        "/api/v1/runs",
+        json={
+            "agent_version_id": version_id,
+            "environment": {
+                "type": "backtest",
+                "environment_id": "us-equity-hourly-v1",
+            },
+            "config": {
+                "start_date": "2026-04-15",
+                "end_date": "2026-04-16",
+                "symbols": ["AAPL"],
+            },
+        },
+        headers={"X-API-Key": key},
+    )
+    assert resp.status_code == 200, resp.text
+
+    step = _wait_for_step(client, resp.json()["run_id"], key)
+    bars = step["observation"]["market"]["bars"]
+
+    assert set(bars) == {"AAPL"}
+    assert bars["AAPL"] == {
+        "timestamp": step["timestamp"],
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.0,
+        "volume": 1_000_000.0,
+    }
+
+
 def test_create_run_requires_api_key(client):
     resp = client.post("/api/v1/runs", json={"config": {"start_date": "2026-04-15", "end_date": "2026-04-16"}})
     assert resp.status_code == 401

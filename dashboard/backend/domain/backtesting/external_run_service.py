@@ -18,6 +18,7 @@ import os
 import uuid
 import threading
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -734,6 +735,44 @@ class ExternalBacktestSession:
             sym: float(sig.get("price") or 0)
             for sym, sig in state["market_signals"].items()
         }
+
+    def protocol_bars(self, timestamp=None) -> Dict[str, Dict[str, Any]]:
+        """Return normalized current OHLCV bars for protocol observations."""
+        if timestamp is None and self.timestamps:
+            idx = max(0, min(self.step_index, self.total_steps - 1))
+            timestamp = self.timestamps[idx]
+        if timestamp is None:
+            return {}
+
+        allowed = set(self.symbols) if self.symbols else None
+        bars: Dict[str, Dict[str, Any]] = {}
+        for symbol, row in self._market_data_at(timestamp).items():
+            if allowed is not None and symbol not in allowed:
+                continue
+
+            values = {
+                field: float(row[field])
+                for field in ("open", "high", "low", "close", "volume")
+            }
+            prices = [values[field] for field in ("open", "high", "low", "close")]
+            if (
+                not all(isfinite(price) and price > 0 for price in prices)
+                or not isfinite(values["volume"])
+                or values["volume"] < 0
+                or values["high"] < max(values["open"], values["close"])
+                or values["low"] > min(values["open"], values["close"])
+            ):
+                raise ValueError(
+                    f"Invalid protocol OHLCV bar for {symbol} at {timestamp!r}"
+                )
+
+            bars[symbol] = {
+                "timestamp": timestamp.isoformat()
+                if hasattr(timestamp, "isoformat")
+                else str(timestamp),
+                **values,
+            }
+        return bars
 
     def executed_step_timestamp(self):
         """Timestamp of the most recently advanced step (post-submit)."""

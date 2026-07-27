@@ -948,7 +948,8 @@ def get_result(run_id: str) -> Dict[str, Any]:
 
 def _build_step_view(run, session, seq, step_id, step) -> Dict[str, Any]:
     snapshot = step.get("market_snapshot", {})
-    portfolio = session.protocol_portfolio(session.timestamps[seq])
+    timestamp = session.timestamps[seq]
+    portfolio = session.protocol_portfolio(timestamp)
     return {
         "protocol_version": PROTOCOL_VERSION,
         "run_id": run.run_id,
@@ -959,7 +960,7 @@ def _build_step_view(run, session, seq, step_id, step) -> Dict[str, Any]:
         "status": "awaiting_decision",
         "observation": {
             "market": {
-                "bars": {},
+                "bars": session.protocol_bars(timestamp),
                 "features": snapshot.get("top_signals", {}),
                 "events": [],
             },

@@ -245,6 +245,35 @@ it runs the whole poll/submit loop:
    print(result["metrics"], result.get("compare_url"))
 
 
+Run a local vn.py CTA strategy
+------------------------------
+
+The vn.py CTA adapter runs a trusted local ``CtaTemplate`` strategy against
+ATL's hourly AAPL backtest data. ATL supplies OHLCV bars and remains the source
+of truth for fills, positions, the equity curve, and metrics; the local adapter
+translates ``BarData`` and ``buy``/``sell`` calls without uploading strategy
+source code.
+
+Install the optional dependencies and run the bundled double-moving-average
+example:
+
+.. code-block:: bash
+
+   python -m pip install -e 'packaging/agentictrading[vnpy]'
+   export ATL_BASE_URL="https://agentictrading.onrender.com"
+   export ATL_API_KEY="ag_xxxxxxxx"
+   export ATL_AGENT_VERSION_ID="agv_xxxxxxxx"
+
+   python dashboard/examples/vnpy_cta_atl_backtest.py \
+     --start 2026-04-01 --end 2026-04-23 --symbol AAPL
+
+The MVP is long-only, uses T+1 market execution, and does not connect a broker
+or vn.py Gateway. See the `Chinese vn.py CTA guide
+<https://github.com/Open-Finance-Lab/AgenticTrading/blob/main/docs/integrations/vnpy-cta.md>`_
+for settings, custom ``module:Class`` strategies, audit artifacts, and the full
+compatibility limits.
+
+
 Plugging in an LLM
 ------------------
 
