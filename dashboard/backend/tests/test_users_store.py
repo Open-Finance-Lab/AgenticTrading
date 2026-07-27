@@ -115,8 +115,11 @@ def test_advance_email_change_moves_to_stage_new_and_resets_attempts(store, user
 def test_record_email_change_attempt_increments_and_returns_the_count(store, user):
     row = store.create_email_change_request(user["id"], "next@example.com", hash_code("A"))
 
-    assert store.record_email_change_attempt(row["id"]) == 1
-    assert store.record_email_change_attempt(row["id"]) == 2
+    first_attempt = store.record_email_change_attempt(row["id"])
+    second_attempt = store.record_email_change_attempt(row["id"])
+
+    assert first_attempt == 1
+    assert second_attempt == 2
 
 
 def test_mark_email_change_used_deactivates_but_keeps_the_row(store, user):

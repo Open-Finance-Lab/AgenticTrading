@@ -574,9 +574,10 @@ def test_email_change_request_is_cooldown_limited(client, sent_emails):
     body = {"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"}
     headers = {"Authorization": f"Bearer {token}"}
 
-    assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
+    first = client.post("/api/auth/email-change", headers=headers, json=body)
     second = client.post("/api/auth/email-change", headers=headers, json=body)
 
+    assert first.status_code == 200
     assert second.status_code == 429
     assert second.headers["Retry-After"] == "60"
     assert len(sent_emails) == 1
@@ -591,8 +592,11 @@ def test_email_change_cooldown_survives_cancel_and_resend(client, sent_emails):
     headers = {"Authorization": f"Bearer {token}"}
     body = {"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"}
 
-    assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
-    assert client.delete("/api/auth/email-change", headers=headers).status_code == 200
+    first = client.post("/api/auth/email-change", headers=headers, json=body)
+    cancel = client.delete("/api/auth/email-change", headers=headers)
+
+    assert first.status_code == 200
+    assert cancel.status_code == 200
 
     second = client.post("/api/auth/email-change", headers=headers, json=body)
 
@@ -687,7 +691,8 @@ def test_email_change_cancel_clears_the_request(client, sent_emails):
         json={"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"},
     )
 
-    assert client.delete("/api/auth/email-change", headers=headers).status_code == 200
+    cancel = client.delete("/api/auth/email-change", headers=headers)
+    assert cancel.status_code == 200
     assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is False
 
 
@@ -743,14 +748,16 @@ def test_email_change_full_two_stage_happy_path(client, sent_emails):
     assert done.json()["status"] == "ok"
     assert done.json()["user"]["email"] == "fresh@example.com"
     # Durable, and the old address no longer signs in.
-    assert client.post(
+    fresh_login = client.post(
         "/api/auth/login",
         json={"email": "fresh@example.com", "password": "orig-sturdy-pw-1"},
-    ).status_code == 200
-    assert client.post(
+    )
+    assert fresh_login.status_code == 200
+    stale_login = client.post(
         "/api/auth/login",
         json={"email": "two@example.com", "password": "orig-sturdy-pw-1"},
-    ).status_code == 401
+    )
+    assert stale_login.status_code == 401
 
 
 def test_email_change_verify_accepts_a_lowercase_code(client, sent_emails):
@@ -789,9 +796,10 @@ def test_email_change_verify_gives_up_after_five_attempts(client, sent_emails):
     wrong = "ZZZZZZ" if real_code != "ZZZZZZ" else "YYYYYY"
 
     for _ in range(4):
-        assert client.post(
+        attempt = client.post(
             "/api/auth/email-change/verify", headers=headers, json={"code": wrong}
-        ).status_code == 400
+        )
+        assert attempt.status_code == 400
 
     fifth = client.post(
         "/api/auth/email-change/verify", headers=headers, json={"code": wrong}
@@ -801,9 +809,10 @@ def test_email_change_verify_gives_up_after_five_attempts(client, sent_emails):
 
     # The request is gone -- even the correct code is dead now.
     assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is False
-    assert client.post(
+    after_reset = client.post(
         "/api/auth/email-change/verify", headers=headers, json={"code": real_code}
-    ).status_code == 400
+    )
+    assert after_reset.status_code == 400
 
 
 def test_email_change_verify_rejects_an_expired_request(client, sent_emails):
@@ -930,13 +939,14 @@ def test_changing_the_password_cancels_a_pending_email_change(client, sent_email
     _start_email_change(client, token)
     assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is True
 
-    assert client.post(
+    password_change = client.post(
         "/api/auth/change-password",
         headers=headers,
         json={
             "current_password": "orig-sturdy-pw-1",
             "new_password": "new-sturdy-pw-2",
         },
-    ).status_code == 200
+    )
+    assert password_change.status_code == 200
 
     assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is False
