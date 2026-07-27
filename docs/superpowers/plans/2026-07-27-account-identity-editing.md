@@ -590,8 +590,8 @@ def test_alphabet_excludes_the_characters_users_misread():
     # 0/O and 1/I/L are the pairs users transcribe wrong off a phone screen.
     for ambiguous in "0O1IL":
         assert ambiguous not in CODE_ALPHABET
-    assert len(CODE_ALPHABET) == 32
-    assert len(set(CODE_ALPHABET)) == 32
+    assert len(CODE_ALPHABET) == 31
+    assert len(set(CODE_ALPHABET)) == 31
 
 
 def test_generated_codes_are_not_all_identical():
@@ -629,11 +629,11 @@ helpers inside api/auth.py.
 import hashlib
 import secrets
 
-# 32 symbols: digits and uppercase letters, minus 0/O and 1/I/L -- the pairs a
-# user misreads off a phone screen and types back wrong. 32**6 is about
-# 1.07e9 combinations, which a 5-attempt cap and a 15-minute expiry make
+# 31 symbols: digits and uppercase letters, minus 0/O and 1/I/L -- the pairs a
+# user misreads off a phone screen and types back wrong. 31**6 is about
+# 8.9e8 combinations, which a 5-attempt cap and a 15-minute expiry make
 # comfortably unguessable.
-CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"
 CODE_LENGTH = 6
 
 
