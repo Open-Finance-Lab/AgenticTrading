@@ -20,6 +20,9 @@ SESSION_TTL_DAYS = 7
 BCRYPT_ROUNDS = 12
 LEGACY_PBKDF2_ITERATIONS = 100_000
 BCRYPT_MAX_BYTES = 72
+EMAIL_CHANGE_TTL_MINUTES = 15
+EMAIL_CHANGE_MAX_ATTEMPTS = 5
+EMAIL_CHANGE_COOLDOWN_SECONDS = 60
 
 
 def _utcnow() -> datetime:
@@ -28,6 +31,23 @@ def _utcnow() -> datetime:
 
 def _utcnow_iso() -> str:
     return _utcnow().replace(microsecond=0).isoformat()
+
+
+def parse_stored_timestamp(value: str) -> datetime:
+    """Read a timestamp written by either twin.
+
+    Both stores write _utcnow_iso() (offset-aware ISO-8601), but rows predating
+    that convention -- or written by SQLite's CURRENT_TIMESTAMP default -- come
+    back naive. Treat naive as UTC, which is what every writer here means.
+    """
+    parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def is_expired(expires_at: str) -> bool:
+    return parse_stored_timestamp(expires_at) < _utcnow()
 
 
 def _bcrypt_secret(password: str) -> bytes:
@@ -175,6 +195,29 @@ class UserStore:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_user_id
             ON users(discord_user_id)
             WHERE discord_user_id IS NOT NULL
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_change_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                new_email TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                used_at TIMESTAMP,
+                cancelled_at TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_email_change_requests_user_id
+            ON email_change_requests(user_id)
             """
         )
         conn.commit()
@@ -333,6 +376,168 @@ class UserStore:
             (display_name.strip(), user_id),
         )
         conn.commit()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def _email_change_expiry(self) -> str:
+        return (
+            (_utcnow() + timedelta(minutes=EMAIL_CHANGE_TTL_MINUTES))
+            .replace(microsecond=0)
+            .isoformat()
+        )
+
+    def create_email_change_request(
+        self, user_id: int, new_email: str, code_hash: str
+    ) -> Dict[str, Any]:
+        """Replace any in-flight request for this user with a fresh stage-'old' one."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM email_change_requests WHERE user_id = ?", (user_id,))
+        cursor.execute(
+            """
+            INSERT INTO email_change_requests
+                (user_id, new_email, stage, code_hash, created_at, expires_at)
+            VALUES (?, ?, 'old', ?, ?, ?)
+            """,
+            (
+                user_id,
+                new_email.strip().lower(),
+                code_hash,
+                _utcnow_iso(),
+                self._email_change_expiry(),
+            ),
+        )
+        conn.commit()
+        request_id = cursor.lastrowid
+        cursor.execute(
+            "SELECT * FROM email_change_requests WHERE id = ?", (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row)
+
+    def get_active_email_change(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """The user's in-flight request, or None if absent, used, cancelled, or expired."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM email_change_requests
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row or is_expired(row["expires_at"]):
+            return None
+        return dict(row)
+
+    def advance_email_change(self, request_id: int, code_hash: str) -> Dict[str, Any]:
+        """Move a verified stage-'old' request to stage 'new' with a fresh code."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE email_change_requests
+            SET stage = 'new', code_hash = ?, attempts = 0, expires_at = ?
+            WHERE id = ?
+            """,
+            (code_hash, self._email_change_expiry(), request_id),
+        )
+        conn.commit()
+        cursor.execute(
+            "SELECT * FROM email_change_requests WHERE id = ?", (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return dict(row)
+
+    def record_email_change_attempt(self, request_id: int) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE email_change_requests SET attempts = attempts + 1 WHERE id = ?",
+            (request_id,),
+        )
+        conn.commit()
+        cursor.execute(
+            "SELECT attempts FROM email_change_requests WHERE id = ?", (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return int(row["attempts"])
+
+    def mark_email_change_used(self, request_id: int) -> None:
+        """Retire a completed request without deleting it.
+
+        used_at makes get_active_email_change skip the row while
+        last_email_change_request_at still sees it, so the cooldown applies to a
+        change that just succeeded as well as one still in flight.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE email_change_requests SET used_at = ? WHERE id = ?",
+            (_utcnow_iso(), request_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def cancel_email_change(self, user_id: int) -> None:
+        """Deactivate the user's request without deleting it.
+
+        Mirrors mark_email_change_used: cancelled_at makes get_active_email_change
+        skip the row while last_email_change_request_at still sees it. Deleting
+        instead would let an authenticated caller who knows the password loop
+        request/cancel/request with the 60-second cooldown never enforced --
+        mail-bombing the account and burning the shared Brevo quota.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE email_change_requests SET cancelled_at = ? WHERE user_id = ?",
+            (_utcnow_iso(), user_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def last_email_change_request_at(self, user_id: int) -> Optional[str]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT created_at FROM email_change_requests
+            WHERE user_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return str(row["created_at"]) if row else None
+
+    def update_email(self, user_id: int, new_email: str) -> Dict[str, Any]:
+        normalized_email = new_email.strip().lower()
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE users SET email = ? WHERE id = ?",
+                (normalized_email, user_id),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            conn.close()
+            raise ValueError("email_already_registered") from exc
         cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
         row = cursor.fetchone()
         conn.close()
