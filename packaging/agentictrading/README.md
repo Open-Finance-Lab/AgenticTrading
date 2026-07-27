@@ -4,7 +4,7 @@
 
 Agentic Trading Lab lets you turn trading ideas into traceable experiments: prototype agents, run backtests and paper-trading simulations, inspect reasoning and decision logs, benchmark against market baselines, and study how agents behave under realistic financial constraints.
 
-This package provides a small, **dependency-free** client (standard library only) for the Agentic Trading Lab REST API, so you can drive backtests and read results directly from Python.
+This package provides a small client (standard library only) for the Agentic Trading Lab REST API, so you can drive backtests and read results directly from Python. The install is **dependency-free on macOS and Linux**; on Windows it also pulls the `tzdata` data wheel, because `zoneinfo` has no system IANA time-zone database there.
 
 - **Live demo:** https://agentic-trading-lab.vercel.app/
 - **Docs:** https://finagent-orchestration.readthedocs.io/

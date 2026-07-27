@@ -14,6 +14,7 @@ import pytest
 
 from dashboard.backend.domain.backtesting import portfolio_manager
 from dashboard.backend.domain.backtesting.portfolio_manager import (
+    LLMDecisionError,
     PortfolioManager as CanonicalPortfolioManager,
 )
 from dashboard.scripts import backtest_hourly_agent as bha
@@ -184,6 +185,166 @@ def test_make_trading_decision_with_llm_buy_and_tokens():
     assert pm.llm_calls == 1
 
 
+def test_strict_llm_rejects_missing_client_without_rule_fallback(monkeypatch):
+    pm = CanonicalPortfolioManager(100000)
+    fallback_calls = []
+    monkeypatch.setattr(
+        pm,
+        "make_trading_decision",
+        lambda _state: fallback_calls.append(True) or {"actions": []},
+    )
+
+    with pytest.raises(LLMDecisionError, match="client"):
+        pm.make_trading_decision_with_llm(
+            _llm_state(),
+            None,
+            strict_llm=True,
+        )
+
+    assert fallback_calls == []
+
+
+def test_strict_llm_propagates_request_failure_without_rule_fallback(monkeypatch):
+    class _BoomClient:
+        class messages:
+            @staticmethod
+            def create(**_kwargs):
+                raise RuntimeError("upstream-secret-detail")
+
+    pm = CanonicalPortfolioManager(100000)
+    fallback_calls = []
+    monkeypatch.setattr(
+        pm,
+        "make_trading_decision",
+        lambda _state: fallback_calls.append(True) or {"actions": []},
+    )
+
+    with pytest.raises(LLMDecisionError) as exc_info:
+        pm.make_trading_decision_with_llm(
+            _llm_state(),
+            _BoomClient(),
+            strict_llm=True,
+        )
+
+    assert "upstream-secret-detail" not in str(exc_info.value)
+    assert fallback_calls == []
+
+
+def test_strict_llm_rejects_unparseable_response():
+    pm = CanonicalPortfolioManager(100000)
+    client = _FakeClient(_FakeResp("not json", _FakeUsage(3, 2)))
+
+    with pytest.raises(LLMDecisionError, match="parse"):
+        pm.make_trading_decision_with_llm(
+            _llm_state(),
+            client,
+            strict_llm=True,
+        )
+
+    assert pm.llm_calls == 1
+    assert pm.llm_decisions == 0
+
+
+def test_strict_llm_accepts_empty_actions_as_model_hold():
+    pm = CanonicalPortfolioManager(100000)
+    client = _FakeClient(_FakeResp('{"actions": []}', _FakeUsage(3, 2)))
+
+    result = pm.make_trading_decision_with_llm(
+        _llm_state(),
+        client,
+        strict_llm=True,
+    )
+
+    assert result == {"actions": []}
+    assert pm.llm_calls == 1
+    assert pm.llm_decisions == 1
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {
+            "symbol": "NOT_ALLOWED.SH",
+            "action": "buy",
+            "confidence": 0.9,
+            "position_size": 1,
+        },
+        {
+            "symbol": "AAPL",
+            "action": "dance",
+            "confidence": 0.9,
+            "position_size": 1,
+        },
+    ],
+)
+def test_strict_llm_rejects_invalid_action_batch(action):
+    pm = CanonicalPortfolioManager(100000, allowed_symbols=["AAPL"])
+    client = _FakeClient(
+        _FakeResp(json.dumps({"actions": [action]}), _FakeUsage(3, 2))
+    )
+
+    with pytest.raises(LLMDecisionError, match="invalid action"):
+        pm.make_trading_decision_with_llm(
+            _llm_state(),
+            client,
+            strict_llm=True,
+        )
+
+    assert pm.llm_decisions == 0
+
+
+def test_market_context_is_added_to_snapshot_and_llm_request(monkeypatch):
+    from dashboard.backend.domain.backtesting import portfolio_manager as pm_mod
+
+    captured = {}
+    market_context = {
+        "market": "CN",
+        "timezone": "Asia/Shanghai",
+        "timeframe": "60m",
+        "symbols": ["AAPL"],
+        "paper_backtest": True,
+    }
+
+    def fake_create_prompt(snapshot, **_kwargs):
+        captured["snapshot_market"] = snapshot["market"]
+        return "PROMPT"
+
+    def fake_request(_client, **kwargs):
+        captured["request_market"] = kwargs["market_context"]
+        return _FakeResp(
+            json.dumps(
+                {
+                    "actions": [
+                        {
+                            "symbol": "AAPL",
+                            "action": "hold",
+                            "confidence": 0.9,
+                            "reasoning": "wait",
+                        }
+                    ]
+                }
+            ),
+            _FakeUsage(3, 2),
+        )
+
+    monkeypatch.setattr(pm_mod, "create_prompt", fake_create_prompt)
+    monkeypatch.setattr(pm_mod, "_request_trading_decision", fake_request)
+
+    pm = CanonicalPortfolioManager(100000, allowed_symbols=["AAPL"])
+    result = pm.make_trading_decision_with_llm(
+        _llm_state(),
+        object(),
+        market_context=market_context,
+        strict_llm=True,
+    )
+
+    assert result == {"actions": []}
+    assert captured == {
+        "snapshot_market": market_context,
+        "request_market": market_context,
+    }
+
+
 # ---------------------------------------------------------------------------
 # MEDIUM #7 — safe_trading candidate ranking is trend-based, NOT RSI-extremity
 # (the module docstring previously claimed the class was "functionally
@@ -335,3 +496,129 @@ def test_simple_subclass_works():
     assert pm.cash == 99900.0
     assert pm.custom() == "ok"
     assert [c.__name__ for c in MyPM.__mro__] == ["MyPM", "PortfolioManager", "object"]
+
+
+# ---------------------------------------------------------------------------
+# Strict-LLM strike budget
+#
+# A single truncated response must not discard a multi-hour backtest, but the
+# surviving curve still has to be honestly publishable — so the budget is a
+# fraction of the run, not an unbounded retry.
+# ---------------------------------------------------------------------------
+
+def test_strict_llm_budget_is_zero_until_the_run_declares_its_length():
+    pm = CanonicalPortfolioManager(100000)
+
+    assert pm.strict_llm_total_steps is None
+    assert pm.strict_llm_fallback_budget() == 0
+
+
+def test_strict_llm_budget_scales_with_run_length():
+    pm = CanonicalPortfolioManager(100000)
+
+    pm.strict_llm_total_steps = 500
+    assert pm.strict_llm_fallback_budget() == 10
+    pm.strict_llm_total_steps = 10
+    assert pm.strict_llm_fallback_budget() == 0
+
+
+def test_strict_llm_budget_clears_h6():
+    """Surviving the strike budget must still clear the leaderboard's H6 floor.
+
+    The two constants live in modules that cannot import each other (the H6 one
+    pulls in the db singleton), so this test is what keeps them consistent.
+    """
+    from dashboard.backend.domain.backtesting.portfolio_manager import (
+        STRICT_LLM_MAX_FALLBACK_RATIO,
+    )
+    from dashboard.backend.domain.leaderboard.service import (
+        MIN_LLM_DECISION_COVERAGE,
+    )
+
+    assert STRICT_LLM_MAX_FALLBACK_RATIO <= 1 - MIN_LLM_DECISION_COVERAGE
+
+
+def test_strict_llm_absorbs_a_bad_response_within_budget(monkeypatch):
+    pm = CanonicalPortfolioManager(100000)
+    pm.strict_llm_total_steps = 200  # budget of 4
+    monkeypatch.setattr(
+        pm, "make_trading_decision", lambda _state: {"actions": ["rule-based"]}
+    )
+    client = _FakeClient(_FakeResp("not json", _FakeUsage(3, 2)))
+
+    result = pm.make_trading_decision_with_llm(
+        _llm_state(), client, strict_llm=True
+    )
+
+    assert result == {"actions": ["rule-based"]}
+    assert pm.strict_llm_fallbacks == 1
+    # The step was rule-based, so it must NOT count toward H6 coverage.
+    assert pm.llm_decisions == 0
+    assert pm.llm_calls == 1
+
+
+def test_strict_llm_aborts_once_the_budget_is_spent(monkeypatch):
+    pm = CanonicalPortfolioManager(100000)
+    pm.strict_llm_total_steps = 100  # budget of 2
+    monkeypatch.setattr(
+        pm, "make_trading_decision", lambda _state: {"actions": []}
+    )
+
+    def bad_step():
+        return pm.make_trading_decision_with_llm(
+            _llm_state(),
+            _FakeClient(_FakeResp("not json", _FakeUsage(3, 2))),
+            strict_llm=True,
+        )
+
+    assert bad_step() == {"actions": []}
+    assert bad_step() == {"actions": []}
+    with pytest.raises(LLMDecisionError, match="parse"):
+        bad_step()
+
+    assert pm.strict_llm_fallbacks == 3
+    assert pm.llm_decisions == 0
+
+
+def test_strict_llm_missing_client_stays_fatal_regardless_of_budget(monkeypatch):
+    """A missing client is not transient — no budget should absorb it."""
+    pm = CanonicalPortfolioManager(100000)
+    pm.strict_llm_total_steps = 10_000
+    fallback_calls = []
+    monkeypatch.setattr(
+        pm,
+        "make_trading_decision",
+        lambda _state: fallback_calls.append(True) or {"actions": []},
+    )
+
+    with pytest.raises(LLMDecisionError, match="client"):
+        pm.make_trading_decision_with_llm(_llm_state(), None, strict_llm=True)
+
+    assert fallback_calls == []
+    assert pm.strict_llm_fallbacks == 0
+
+
+def test_strict_llm_absorbed_upstream_error_still_hides_provider_detail(
+    monkeypatch, capsys
+):
+    class _BoomClient:
+        class messages:
+            @staticmethod
+            def create(**_kwargs):
+                raise RuntimeError("upstream-secret-detail")
+
+    pm = CanonicalPortfolioManager(100000)
+    pm.strict_llm_total_steps = 200
+    monkeypatch.setattr(
+        pm, "make_trading_decision", lambda _state: {"actions": ["rule-based"]}
+    )
+
+    result = pm.make_trading_decision_with_llm(
+        _llm_state(), _BoomClient(), strict_llm=True
+    )
+
+    assert result == {"actions": ["rule-based"]}
+    assert pm.strict_llm_fallbacks == 1
+    # Absorbing a strike must not turn the provider's message into log output;
+    # print() is the channel that actually reaches prod, so assert on capsys.
+    assert "upstream-secret-detail" not in capsys.readouterr().out

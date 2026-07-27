@@ -11,6 +11,7 @@ import {
   Legend,
   ReferenceLine,
 } from "recharts";
+import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 import { STORY_AGENT_NAME, STORY_DECISIONS, STORY_SPECS } from "./storyline";
 
 const C0 = STORY_SPECS.initialCapitalNum;
@@ -349,8 +350,13 @@ export function Test() {
         </div>
 
         <div>
-          <Button size="lg" className="bg-primary text-primary-foreground glow-primary hover:bg-primary/90" asChild>
-            <a href="#race">Race this agent ↓</a>
+          <Button
+            size="lg"
+            type="button"
+            data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+            className="bg-primary text-primary-foreground glow-primary hover:bg-primary/90"
+          >
+            {PRIMARY_LANDING_CTA.label}
           </Button>
         </div>
       </div>

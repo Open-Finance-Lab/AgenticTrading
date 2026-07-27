@@ -66,6 +66,24 @@ def test_data_source_provenance_roundtrips_for_api_projection(tmp_path):
     )
 
 
+def test_ifind_profile_provenance_roundtrips_without_credentials(tmp_path):
+    db = _make_db(tmp_path)
+    metadata = {
+        "data_source": "ifind_ashare",
+        "market": "CN",
+        "universe": "a_share_demo_6",
+        "timeframe": "60m",
+        "timezone": "Asia/Shanghai",
+        "decision_source": "rule_based",
+        "benchmark": "equal_weight_buyhold",
+    }
+    _insert_minimal(db, "run_ifind_source", metadata=metadata)
+
+    stored = db.get_run("run_ifind_source")["metadata"]
+    assert stored == metadata
+    assert "token" not in str(stored).lower()
+
+
 def test_migration_adds_metadata_column(tmp_path):
     """A DB created before the column must gain it on open (both
     _init_schema's CREATE IF NOT EXISTS and _migrate_schema must know it)."""
@@ -130,12 +148,16 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
     assert backtester._agent_run_metadata() == {
         "data_source": "alpaca",
         "symbols": ["AAPL", "MSFT"],
+        "native_currency": "USD",
+        "reporting_currency": "USD",
         "llm_max_output_tokens": 777,
     }
     backtester.use_llm = False
     assert backtester._agent_run_metadata() == {
         "data_source": "alpaca",
         "symbols": ["AAPL", "MSFT"],
+        "native_currency": "USD",
+        "reporting_currency": "USD",
     }
 
 
@@ -164,6 +186,8 @@ def test_baseline_metadata_is_provenance_only(monkeypatch):
     assert backtester._run_metadata() == {
         "data_source": "vnpy_simulation",
         "symbols": ["AAPL"],
+        "native_currency": "USD",
+        "reporting_currency": "USD",
     }
 
 
