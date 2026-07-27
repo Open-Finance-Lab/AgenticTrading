@@ -72,6 +72,16 @@ def test_create_email_change_request_replaces_any_prior_request(store, user):
     active = store.get_active_email_change(user["id"])
     assert active["new_email"] == "second@example.com"
 
+    # The assertion above is satisfied by ORDER BY id DESC alone -- it would still
+    # pass if the prior row were never deleted. Assert the replacement directly.
+    conn = store._get_connection()
+    row = conn.execute(
+        "SELECT COUNT(*) AS n FROM email_change_requests WHERE user_id = ?",
+        (user["id"],),
+    ).fetchone()
+    conn.close()
+    assert row["n"] == 1
+
 
 def test_get_active_email_change_is_none_without_a_request(store, user):
     assert store.get_active_email_change(user["id"]) is None

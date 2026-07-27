@@ -210,6 +210,15 @@ class UserStore:
                 expires_at TIMESTAMP NOT NULL,
                 used_at TIMESTAMP,
                 cancelled_at TIMESTAMP,
+                -- Declared but not enforced: SQLite disables FK checks per
+                -- connection unless PRAGMA foreign_keys = ON is issued, and
+                -- _get_connection() never issues it (turning it on would change
+                -- deletion semantics for every table in this store, well beyond
+                -- this task). Deleting a user therefore leaves this row orphaned
+                -- rather than cascaded away -- tolerable because users.id is
+                -- AUTOINCREMENT and ids are never reused, so an orphaned row can
+                -- never be misattributed to a different user. The Postgres twin
+                -- declares the same constraint and does enforce it.
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
             """
