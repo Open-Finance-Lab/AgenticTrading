@@ -2542,6 +2542,20 @@ function initEmailChangeForm() {
       }
     } catch (error) {
       showError(error.message);
+      // A failed verify can mean the server tore the whole request down --
+      // it cancels on the 5th wrong code and on a commit-time 409. The client
+      // only learns `stage` from successful responses, so re-read the
+      // authoritative state instead of leaving a dead code box on screen.
+      if (stage) {
+        try {
+          const state = await AuthAPI.emailChangeStatus();
+          stage = state.pending ? state.stage : null;
+          if (codeInput) codeInput.value = '';
+          renderEmailChangeState(state);
+        } catch (statusError) {
+          // Keep the current view; the error above already told the user.
+        }
+      }
     } finally {
       if (submitBtn) submitBtn.disabled = false;
     }
@@ -2565,7 +2579,15 @@ function initEmailChangeForm() {
         stage = state.pending ? state.stage : null;
         renderEmailChangeState(state);
       })
-      .catch(() => renderEmailChangeState({ pending: false }));
+      .catch(() => {
+        // Fail-closed, and deliberately not fail-visible: a failed status check
+        // is indistinguishable here from "nothing pending", and we show the idle
+        // form rather than blocking the page. If a change really was in flight,
+        // the next submit either hits the 60s cooldown (429) or replaces it --
+        // self-healing, but the user is not told which happened. Accepted
+        // tradeoff; see the fail-closed-is-not-fail-visible note in CLAUDE.md.
+        renderEmailChangeState({ pending: false });
+      });
   }
 }
 

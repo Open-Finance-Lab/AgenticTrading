@@ -82,9 +82,17 @@ def test_account_card_section_order():
 
 def test_email_change_copy_mentions_the_spam_folder():
     """An unauthenticated single sender has materially degraded inbox placement,
-    and a code silently in spam is indistinguishable from one never sent."""
+    and a code silently in spam is indistinguishable from one never sent. BOTH
+    stages must say so -- a file-wide count could be satisfied by two mentions
+    in one branch, or by unrelated text elsewhere in the file."""
     js = (_FRONTEND / "app.js").read_text(encoding="utf-8")
-    assert js.lower().count("spam folder") >= 2  # one line per stage
+    mentions = [line.lower() for line in js.splitlines() if "spam folder" in line.lower()]
+
+    assert len(mentions) >= 2
+    # stage 'new' -- code went to the new address
+    assert any("code sent to" in line for line in mentions)
+    # stage 'old' -- code went to the current address
+    assert any("we sent a 6-character code" in line for line in mentions)
 
 
 def test_cache_bust_versions_were_bumped():
