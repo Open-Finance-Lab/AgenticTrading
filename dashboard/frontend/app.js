@@ -2521,8 +2521,11 @@ function initEmailChangeForm() {
     try {
       if (!stage) {
         const newEmail = (document.getElementById('newEmailInput')?.value || '').trim();
-        const password = (document.getElementById('emailChangePasswordInput')?.value || '').trim();
-        if (!newEmail || !password) {
+        // Emptiness is checked on the trimmed value, but the RAW password is what
+        // gets sent -- leading/trailing whitespace can be meaningful in a password,
+        // and the sibling change-password form reads its field raw too.
+        const password = document.getElementById('emailChangePasswordInput')?.value || '';
+        if (!newEmail || !password.trim()) {
           showError('Enter a new email address and your current password.');
           return;
         }
