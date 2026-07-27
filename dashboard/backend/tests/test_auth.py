@@ -4,6 +4,7 @@ Auth API tests using a temporary SQLite database.
 
 import base64
 import tempfile
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -696,6 +697,7 @@ def test_email_change_cancel_clears_the_request(client, sent_emails):
         ("post", "/api/auth/email-change"),
         ("get", "/api/auth/email-change"),
         ("delete", "/api/auth/email-change"),
+        ("post", "/api/auth/email-change/verify"),
     ],
 )
 def test_email_change_routes_require_auth(client, method, path):
@@ -704,3 +706,237 @@ def test_email_change_routes_require_auth(client, method, path):
     kwargs = {"json": {}} if method == "post" else {}
     response = getattr(client, method)(path, **kwargs)
     assert response.status_code == 401
+
+
+def _start_email_change(client, token, new_email="fresh@example.com"):
+    response = client.post(
+        "/api/auth/email-change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "orig-sturdy-pw-1", "new_email": new_email},
+    )
+    assert response.status_code == 200, response.text
+    return response
+
+
+def test_email_change_full_two_stage_happy_path(client, sent_emails):
+    token = _signup_and_token(client, email="two@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    _start_email_change(client, token)
+
+    first_code = _code_from(sent_emails[0]["body"])
+    stage_two = client.post(
+        "/api/auth/email-change/verify", headers=headers, json={"code": first_code}
+    )
+
+    assert stage_two.status_code == 200
+    assert stage_two.json() == {"stage": "new", "new_email": "fresh@example.com"}
+    # The second code goes to the NEW address -- that is the reachability proof.
+    assert len(sent_emails) == 2
+    assert sent_emails[1]["to"] == "fresh@example.com"
+
+    second_code = _code_from(sent_emails[1]["body"])
+    done = client.post(
+        "/api/auth/email-change/verify", headers=headers, json={"code": second_code}
+    )
+
+    assert done.status_code == 200
+    assert done.json()["status"] == "ok"
+    assert done.json()["user"]["email"] == "fresh@example.com"
+    # Durable, and the old address no longer signs in.
+    assert client.post(
+        "/api/auth/login",
+        json={"email": "fresh@example.com", "password": "orig-sturdy-pw-1"},
+    ).status_code == 200
+    assert client.post(
+        "/api/auth/login",
+        json={"email": "two@example.com", "password": "orig-sturdy-pw-1"},
+    ).status_code == 401
+
+
+def test_email_change_verify_accepts_a_lowercase_code(client, sent_emails):
+    token = _signup_and_token(client, email="lower@example.com")
+    _start_email_change(client, token)
+
+    code = _code_from(sent_emails[0]["body"]).lower()
+    response = client.post(
+        "/api/auth/email-change/verify",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"code": code},
+    )
+
+    assert response.status_code == 200
+
+
+def test_email_change_verify_rejects_a_wrong_code(client, sent_emails):
+    token = _signup_and_token(client, email="badcode@example.com")
+    _start_email_change(client, token)
+
+    response = client.post(
+        "/api/auth/email-change/verify",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"code": "ZZZZZZ"},
+    )
+
+    assert response.status_code == 400
+    assert "not correct" in response.json()["detail"]
+
+
+def test_email_change_verify_gives_up_after_five_attempts(client, sent_emails):
+    token = _signup_and_token(client, email="attempts@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    _start_email_change(client, token)
+    real_code = _code_from(sent_emails[0]["body"])
+    wrong = "ZZZZZZ" if real_code != "ZZZZZZ" else "YYYYYY"
+
+    for _ in range(4):
+        assert client.post(
+            "/api/auth/email-change/verify", headers=headers, json={"code": wrong}
+        ).status_code == 400
+
+    fifth = client.post(
+        "/api/auth/email-change/verify", headers=headers, json={"code": wrong}
+    )
+    assert fifth.status_code == 400
+    assert "start the email change again" in fifth.json()["detail"].lower()
+
+    # The request is gone -- even the correct code is dead now.
+    assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is False
+    assert client.post(
+        "/api/auth/email-change/verify", headers=headers, json={"code": real_code}
+    ).status_code == 400
+
+
+def test_email_change_verify_rejects_an_expired_request(client, sent_emails):
+    from dashboard.backend.users import _utcnow
+
+    token = _signup_and_token(client, email="expired@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    _start_email_change(client, token)
+    code = _code_from(sent_emails[0]["body"])
+
+    # The `client` fixture patched users_module.user_store to the temp store,
+    # so this reaches exactly the database the route just wrote to.
+    from dashboard.backend import users as users_module
+
+    stale = (_utcnow() - timedelta(minutes=1)).replace(microsecond=0).isoformat()
+    conn = users_module.user_store._get_connection()
+    conn.execute("UPDATE email_change_requests SET expires_at = ?", (stale,))
+    conn.commit()
+    conn.close()
+
+    response = client.post(
+        "/api/auth/email-change/verify", headers=headers, json={"code": code}
+    )
+    assert response.status_code == 400
+    assert "no email change" in response.json()["detail"].lower()
+
+
+def test_email_change_verify_without_a_request_400s(client):
+    token = _signup_and_token(client, email="norequest@example.com")
+
+    response = client.post(
+        "/api/auth/email-change/verify",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"code": "ABC234"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_email_change_stage_two_mail_failure_leaves_stage_old_intact(
+    client, sent_emails
+):
+    # Send before persist, the case that matters most: if stage 'new' were
+    # written first and the send then failed, the user would be waiting on a
+    # code that never went out while the code they DO hold stopped working.
+    token = _signup_and_token(client, email="stuck@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    _start_email_change(client, token)
+    code = _code_from(sent_emails[0]["body"])
+    sent_emails.fail_sends()
+
+    response = client.post(
+        "/api/auth/email-change/verify", headers=headers, json={"code": code}
+    )
+
+    assert response.status_code == 503
+    # Still stage 'old' -- nothing was persisted ahead of the failed send.
+    assert client.get("/api/auth/email-change", headers=headers).json()["stage"] == "old"
+
+    # And this is the point of the ordering: the code the user already holds is
+    # still valid, so once mail recovers they simply resubmit it. No dead end.
+    sent_emails.resume_sends()
+    retry = client.post(
+        "/api/auth/email-change/verify", headers=headers, json={"code": code}
+    )
+    assert retry.status_code == 200
+    assert retry.json()["stage"] == "new"
+
+
+def test_email_change_commit_conflicts_when_the_address_was_taken_meanwhile(
+    client, sent_emails
+):
+    # TOCTOU backstop: the request-time 409 cannot cover a signup that lands
+    # between the two stages.
+    token = _signup_and_token(client, email="race@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    _start_email_change(client, token, new_email="contested@example.com")
+
+    first_code = _code_from(sent_emails[0]["body"])
+    client.post("/api/auth/email-change/verify", headers=headers, json={"code": first_code})
+    second_code = _code_from(sent_emails[1]["body"])
+
+    _signup_and_token(client, email="contested@example.com")
+
+    response = client.post(
+        "/api/auth/email-change/verify", headers=headers, json={"code": second_code}
+    )
+    assert response.status_code == 409
+
+
+def test_email_change_commit_revokes_other_sessions_but_keeps_the_caller(
+    client, sent_emails
+):
+    token_a = _signup_and_token(client, email="sessions@example.com")
+    token_b = client.post(
+        "/api/auth/login",
+        json={"email": "sessions@example.com", "password": "orig-sturdy-pw-1"},
+    ).json()["token"]
+    headers = {"Authorization": f"Bearer {token_a}"}
+    _start_email_change(client, token_a)
+
+    client.post(
+        "/api/auth/email-change/verify",
+        headers=headers,
+        json={"code": _code_from(sent_emails[0]["body"])},
+    )
+    client.post(
+        "/api/auth/email-change/verify",
+        headers=headers,
+        json={"code": _code_from(sent_emails[1]["body"])},
+    )
+
+    assert client.get("/api/auth/me", headers=headers).status_code == 200
+    assert client.get(
+        "/api/auth/me", headers={"Authorization": f"Bearer {token_b}"}
+    ).status_code == 401
+
+
+def test_changing_the_password_cancels_a_pending_email_change(client, sent_emails):
+    # D7: a user who suspects compromise changes their password; an attacker's
+    # in-flight email change must die with it.
+    token = _signup_and_token(client, email="d7@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    _start_email_change(client, token)
+    assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is True
+
+    assert client.post(
+        "/api/auth/change-password",
+        headers=headers,
+        json={
+            "current_password": "orig-sturdy-pw-1",
+            "new_password": "new-sturdy-pw-2",
+        },
+    ).status_code == 200
+
+    assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is False

@@ -224,6 +224,17 @@ async def change_password(
             f"WARNING: change-password committed for user {current_user['id']} but "
             f"other-session revocation failed: {exc!r}"
         )
+    # D7: a user changing their password may be reacting to a compromise, so an
+    # attacker's in-flight email change dies with it. Best-effort and next to
+    # the session revocation above, so the whole "invalidate what the old
+    # password could reach" policy sits in one place.
+    try:
+        users_module.user_store.cancel_email_change(current_user["id"])
+    except Exception as exc:  # noqa: BLE001 -- password change already committed
+        print(
+            f"WARNING: change-password committed for user {current_user['id']} but "
+            f"cancelling the pending email change failed: {exc!r}"
+        )
     return {"status": "ok"}
 
 
@@ -338,6 +349,86 @@ async def cancel_email_change(current_user: dict = Depends(get_current_user)):
     """
     users_module.user_store.cancel_email_change(current_user["id"])
     return {"status": "ok"}
+
+
+@router.post("/email-change/verify")
+async def verify_email_change(
+    payload: EmailChangeVerifyRequest,
+    current_user: dict = Depends(get_current_user),
+    authorization: Optional[str] = Header(default=None),
+):
+    """One stage-driven endpoint, not two.
+
+    The server already knows which stage is outstanding; separate
+    verify-current and confirm endpoints would only give the client a way to
+    call the wrong one.
+    """
+    store = users_module.user_store
+    request_row = store.get_active_email_change(current_user["id"])
+    if not request_row:
+        raise HTTPException(
+            status_code=400, detail="No email change is in progress. Start again."
+        )
+
+    if hash_code(payload.code) != request_row["code_hash"]:
+        attempts = store.record_email_change_attempt(request_row["id"])
+        if attempts >= users_module.EMAIL_CHANGE_MAX_ATTEMPTS:
+            store.cancel_email_change(current_user["id"])
+            raise HTTPException(
+                status_code=400,
+                detail="Too many incorrect codes. Start the email change again.",
+            )
+        raise HTTPException(status_code=400, detail="That code is not correct.")
+
+    new_email = str(request_row["new_email"])
+
+    if request_row["stage"] == "old":
+        code = generate_code()
+        # Send BEFORE persisting stage 'new'. The other order strands the user:
+        # waiting on a code that was never delivered, while the code they do
+        # hold is no longer accepted, with Cancel the only exit and nothing on
+        # screen to explain it. Failing here leaves stage 'old' untouched, so
+        # they can simply resubmit the code they already have.
+        sent = await email_sender.send_email(
+            to=new_email,
+            subject="Confirm your new Agentic Trading Lab email address",
+            text_body=_email_change_body(code, new_email),
+        )
+        if not sent:
+            raise HTTPException(
+                status_code=503,
+                detail="Could not send the confirmation email. Please try again.",
+            )
+        store.advance_email_change(request_row["id"], hash_code(code))
+        return {"stage": "new", "new_email": new_email}
+
+    try:
+        user = store.update_email(current_user["id"], new_email)
+    except ValueError as exc:
+        if str(exc) == "email_already_registered":
+            store.cancel_email_change(current_user["id"])
+            raise HTTPException(
+                status_code=409, detail="Email is already registered"
+            ) from exc
+        raise HTTPException(
+            status_code=401, detail="Session is no longer valid."
+        ) from exc
+
+    store.mark_email_change_used(request_row["id"])
+    # Best-effort, exactly as in change-password: an email change is an identity
+    # change, so other sessions end -- but the durable write already landed, so a
+    # revocation failure is a WARNING, not a 500. ERROR is reserved for the mail
+    # failures above, where the user genuinely gets nothing.
+    try:
+        store.delete_other_sessions(
+            current_user["id"], keep_token=_extract_bearer_token(authorization)
+        )
+    except Exception as exc:  # noqa: BLE001 -- email change already committed
+        print(
+            f"WARNING: email change committed for user {current_user['id']} but "
+            f"other-session revocation failed: {exc!r}"
+        )
+    return {"status": "ok", "user": user}
 
 
 def _store_avatar(user_id: int, value: Optional[str]) -> dict:

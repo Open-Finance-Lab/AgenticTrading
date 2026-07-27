@@ -74,6 +74,7 @@ EXPECTED_FULL_CONTRACT = {
     ("POST", "/api/auth/email-change"),
     ("GET", "/api/auth/email-change"),
     ("DELETE", "/api/auth/email-change"),
+    ("POST", "/api/auth/email-change/verify"),
     ("PUT", "/api/auth/avatar"),
     ("DELETE", "/api/auth/avatar"),
     ("GET", "/api/auth/discord/callback"),
