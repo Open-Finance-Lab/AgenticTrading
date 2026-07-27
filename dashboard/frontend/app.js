@@ -202,9 +202,9 @@ function parseAgentCashAllocationInput(raw) {
 }
 
 /**
- * Native number spinners sometimes step by 1 on the first click even when
- * step="100" (leaving values like 1101). Intercept arrows and snap ±1 glitches
- * so capital inputs always move in $100 increments.
+ * Native number spinners sometimes step by 1 on the first click even when a
+ * larger step is configured. Intercept arrows and snap ±1 glitches so each
+ * capital input follows its configured increment.
  */
 const CASH_STEP_INPUT_IDS = [
   'externalAgentCashAllocation',
@@ -389,6 +389,20 @@ const MOCK_AGENTS = [
 // Holds the most recently loaded agents so the toolbar can re-filter without refetching.
 let allAgents = [];
 let agentViewMode = 'grid';
+const AGENT_GRID_PAGE_SIZE = 5;
+/** Per-category page index (0-based). Reset on search change. */
+let agentGridPage = { builtin: 0, external: 0 };
+
+function agentGridPageCount(total) {
+  return Math.max(1, Math.ceil(total / AGENT_GRID_PAGE_SIZE));
+}
+
+function normalizeAgentGridPage(categoryKey, total) {
+  const maxPage = agentGridPageCount(total) - 1;
+  const page = agentGridPage[categoryKey] || 0;
+  agentGridPage[categoryKey] = Math.min(Math.max(page, 0), maxPage);
+  return agentGridPage[categoryKey];
+}
 
 /** @returns {{ key: 'paper'|'backtested'|'draft', label: string, className: string }} */
 function resolveAgentStatusBadge(agent) {
@@ -836,9 +850,8 @@ function applyAgentNameOverride(agent) {
   }
 }
 
-function applyAgentFilters() {
+function getFilteredAgents() {
   const query = (document.getElementById('agentSearchInput')?.value || '').trim().toLowerCase();
-
   let list = allAgents.map(decorateAgent);
   if (query) {
     list = list.filter(
@@ -847,8 +860,14 @@ function applyAgentFilters() {
         String(a.model_name || '').toLowerCase().includes(query),
     );
   }
+  return list;
+}
 
-  renderAgentCategories(list);
+function applyAgentFilters(resetPagination = true) {
+  if (resetPagination) {
+    agentGridPage = { builtin: 0, external: 0 };
+  }
+  renderAgentCategories(getFilteredAgents());
 }
 
 function setAgentViewMode(mode) {
@@ -904,6 +923,13 @@ function renderAgentsError() {
   const errorEl = document.getElementById('agentsErrorState');
   document.querySelectorAll('.agents-section .agents-grid').forEach((grid) => {
     grid.innerHTML = '';
+  });
+  ['agentsGridFooterBuiltin', 'agentsGridFooterExternal'].forEach((id) => {
+    const footer = document.getElementById(id);
+    if (footer) {
+      footer.hidden = true;
+      footer.innerHTML = '';
+    }
   });
   const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
   if (builtinEmpty) builtinEmpty.hidden = true;
@@ -964,12 +990,35 @@ function bindAgentCardMenus(grid) {
   });
 }
 
-function renderAgentCards(grid, agents) {
+function renderAgentGridFooter(categoryKey, total, page, pageCount) {
+  const footerId = categoryKey === 'builtin' ? 'agentsGridFooterBuiltin' : 'agentsGridFooterExternal';
+  const footer = document.getElementById(footerId);
+  if (!footer) return;
+  if (pageCount <= 1) {
+    footer.hidden = true;
+    footer.innerHTML = '';
+    return;
+  }
+  footer.hidden = false;
+  const atStart = page <= 0;
+  const atEnd = page >= pageCount - 1;
+  footer.innerHTML = `
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="上一页" ${atStart ? 'disabled' : ''}>←</button>
+    <span class="agents-grid-footer-count">第 ${page + 1} / ${pageCount} 页 · 共 ${total} 个</span>
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="下一页" ${atEnd ? 'disabled' : ''}>→</button>`;
+}
+
+function renderAgentCards(grid, agents, categoryKey) {
   grid.innerHTML = '';
+  const total = agents.length;
+  const pageCount = agentGridPageCount(total);
+  const page = normalizeAgentGridPage(categoryKey, total);
+  const start = page * AGENT_GRID_PAGE_SIZE;
+  const visibleAgents = agents.slice(start, start + AGENT_GRID_PAGE_SIZE);
 
   const defaultId = getDefaultAgentId();
 
-  agents.forEach((agent) => {
+  visibleAgents.forEach((agent) => {
     const isBuiltin = agent.agent_type === 'builtin';
     const statusBadge = resolveAgentStatusBadge(agent);
     const card = document.createElement('div');
@@ -996,9 +1045,11 @@ function renderAgentCards(grid, agents) {
 
   bindAgentCardMenus(grid);
 
+  renderAgentGridFooter(categoryKey, total, page, pageCount);
+
   grid.querySelectorAll('.agent-configure-btn').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const agent = agents.find((a) => a.agent_id === btn.dataset.agentId);
+      const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       if (!agent || !window.AgentEditor) return;
       navigateToPage('playground', { playgroundTab: 'agents' });
       showPlaygroundPanel('agents');
@@ -1015,7 +1066,7 @@ function renderAgentCards(grid, agents) {
 
   grid.querySelectorAll('.agent-open-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const agent = agents.find((a) => a.agent_id === btn.dataset.agentId);
+      const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       await openAgentInPaper(agent);
     });
   });
@@ -1037,7 +1088,7 @@ function renderAgentCards(grid, agents) {
 
   grid.querySelectorAll('.agent-run-backtest-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const agent = agents.find((a) => a.agent_id === btn.dataset.agentId);
+      const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       if (!agent) return;
       openRunBacktestModal(agent);
     });
@@ -1045,7 +1096,7 @@ function renderAgentCards(grid, agents) {
 
   grid.querySelectorAll('.agent-rotate-key-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      const agent = agents.find((a) => a.agent_id === btn.dataset.agentId);
+      const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       if (!agent) return;
       if (!confirm(`Create a new API key for "${agent.name}"? The current key will stop working immediately.`)) {
         return;
@@ -1108,8 +1159,8 @@ function renderAgentCategories(agents) {
   const builtin = pinDefaultFirst(agents.filter((a) => a.agent_type === 'builtin'));
   const external = pinDefaultFirst(agents.filter((a) => a.agent_type !== 'builtin'));
 
-  renderAgentCards(builtinGrid, builtin);
-  renderAgentCards(externalGrid, external);
+  renderAgentCards(builtinGrid, builtin, 'builtin');
+  renderAgentCards(externalGrid, external, 'external');
 
   const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
   if (builtinEmpty) {
@@ -1223,14 +1274,37 @@ function populateBacktestAgentSelect() {
   select.value = selectedId;
 }
 
+function normalizeBacktestModelId(modelName) {
+  const raw = String(modelName || '').trim().toLowerCase();
+  const providerless = raw.includes('/') ? raw.split('/').pop() : raw;
+  return providerless
+    .replace(/_/g, '-')
+    .replace(/-(\d+)-(\d+)(?=-|$)/g, '-$1.$2');
+}
+
+function findBacktestModelOption(modelSelect, modelName) {
+  const normalized = normalizeBacktestModelId(modelName);
+  if (!normalized) return null;
+  return Array.from(modelSelect?.options || []).find(
+    (option) => normalizeBacktestModelId(option.value) === normalized,
+  ) || null;
+}
+
+function resolveBacktestModelRequest(modelSelect, agent) {
+  const selectedModel = modelSelect?.value || '';
+  const agentOption = findBacktestModelOption(modelSelect, agent?.model_name);
+  if (agentOption?.value === selectedModel && agent?.model_name) {
+    return agent.model_name;
+  }
+  return selectedModel || agent?.model_name || 'claude-haiku-4.5';
+}
+
 function syncModelSelectFromAgent(agent) {
   const modelSelect = document.getElementById('modelSelect');
   if (!modelSelect || !agent?.model_name) return;
-  const hasOption = Array.from(modelSelect.options).some(
-    (option) => option.value === agent.model_name,
-  );
-  if (hasOption) {
-    modelSelect.value = agent.model_name;
+  const option = findBacktestModelOption(modelSelect, agent.model_name);
+  if (option) {
+    modelSelect.value = option.value;
   }
 }
 
@@ -1649,8 +1723,10 @@ async function loadMarketDataFeatures() {
   try {
     const features = await API.get(`${API_BASE}/config/features`);
     window.VNPY_SIMULATION_ENABLED = features.vnpy_simulation_enabled === true;
+    window.IFIND_ASHARE_ENABLED = features.ifind_ashare_enabled === true;
   } catch (error) {
     window.VNPY_SIMULATION_ENABLED = false;
+    window.IFIND_ASHARE_ENABLED = false;
     console.warn('Could not load optional market-data features:', error.message);
   }
 
@@ -1662,23 +1738,99 @@ async function loadMarketDataFeatures() {
     select.appendChild(option);
   } else if (!window.VNPY_SIMULATION_ENABLED && existing) {
     existing.remove();
-    select.value = 'alpaca';
+    if (select.value === 'vnpy_simulation') select.value = 'alpaca';
+  }
+
+  const existingIFind = select.querySelector('option[value="ifind_ashare"]');
+  if (window.IFIND_ASHARE_ENABLED && !existingIFind) {
+    const option = document.createElement('option');
+    option.value = 'ifind_ashare';
+    option.textContent = 'iFinD China A-Shares (60 min)';
+    select.appendChild(option);
+  } else if (!window.IFIND_ASHARE_ENABLED && existingIFind) {
+    existingIFind.remove();
+    if (select.value === 'ifind_ashare') select.value = 'alpaca';
   }
 
   syncMarketDataSourceUI();
 }
 
-function syncMarketDataSourceUI() {
+function syncMarketDataSourceUI(options = {}) {
   const select = document.getElementById('marketDataSourceSelect');
   const modelSelect = document.getElementById('modelSelect');
+  const startDateInput = document.getElementById('startDate');
+  const endDateInput = document.getElementById('endDate');
+  const modelSelectHint = document.getElementById('modelSelectHint');
   const notice = document.getElementById('vnpySimulationNotice');
+  const ifindNotice = document.getElementById('ifindAshareNotice');
+  const ifindUniverse = document.getElementById('ifindAshareUniverse');
+  const universeTabs = document.getElementById('universeTabs');
+  const builtinTab = document.getElementById('builtinTab');
+  const customTab = document.getElementById('customTab');
   const isSimulation = select?.value === 'vnpy_simulation';
+  const isIFind = select?.value === 'ifind_ashare';
+  const resetIFindDecisionSource = options?.resetIFindDecisionSource === true;
+  const enteringIFind = isIFind && !window.IFIND_PREVIOUS_UI_STATE;
 
-  if (modelSelect) {
+  if (enteringIFind) {
+    const activeTab = document.querySelector('.universe-tab.active');
+    window.IFIND_PREVIOUS_UI_STATE = {
+      previousUniverse: selectedUniverse,
+      previousModel: modelSelect?.value || '',
+      previousTab: activeTab?.dataset.tab || 'builtin',
+      previousStartDate: startDateInput?.value || '',
+      previousEndDate: endDateInput?.value || '',
+    };
+    if (startDateInput) startDateInput.value = IFIND_ASHARE_START_DATE;
+    if (endDateInput) endDateInput.value = IFIND_ASHARE_END_DATE;
+  }
+
+  if (ifindUniverse) ifindUniverse.hidden = !isIFind;
+  if (universeTabs) universeTabs.hidden = isIFind;
+
+  if (isIFind) {
+    renderIFindAshareUniverse({
+      resetDecisionSource: enteringIFind || resetIFindDecisionSource,
+    });
+    if (builtinTab) {
+      builtinTab.classList.remove('active');
+      builtinTab.style.display = 'none';
+    }
+    if (customTab) {
+      customTab.classList.remove('active');
+      customTab.style.display = 'none';
+    }
+  } else if (window.IFIND_PREVIOUS_UI_STATE) {
+    const {
+      previousUniverse,
+      previousModel,
+      previousTab,
+      previousStartDate,
+      previousEndDate,
+    } = window.IFIND_PREVIOUS_UI_STATE;
+    const tab = document.querySelector(`.universe-tab[data-tab="${previousTab}"]`);
+    if (tab) handleUniverseTabSwitch(tab);
+    selectPreset(previousUniverse);
+    if (modelSelect) {
+      modelSelect.querySelector('option[value="rule_based"]')?.remove();
+      if (previousModel) modelSelect.value = previousModel;
+    }
+    if (startDateInput) startDateInput.value = previousStartDate;
+    if (endDateInput) endDateInput.value = previousEndDate;
+    window.IFIND_PREVIOUS_UI_STATE = null;
+  }
+
+  if (modelSelect && !isIFind) {
     modelSelect.disabled = isSimulation;
     modelSelect.setAttribute('aria-disabled', String(isSimulation));
   }
+  if (modelSelectHint && !isIFind) {
+    modelSelectHint.textContent = isSimulation
+      ? 'vn.py simulation uses rule-based decisions.'
+      : 'Defaults to this agent’s model. Changing it here is temporary and is not saved to the agent.';
+  }
   if (notice) notice.hidden = !isSimulation;
+  if (ifindNotice) ifindNotice.hidden = !isIFind;
 }
 
 function renderBacktestDataSourceBadge(run) {
@@ -1690,8 +1842,11 @@ function renderBacktestDataSourceBadge(run) {
   }
 
   const isSimulation = run.data_source === 'vnpy_simulation';
-  badge.textContent = isSimulation ? 'vn.py simulated data' : 'Alpaca data';
-  badge.className = `data-source-badge ${isSimulation ? 'is-simulated' : 'is-alpaca'}`;
+  const isIFind = run.data_source === 'ifind_ashare';
+  badge.textContent = isIFind
+    ? 'iFinD China A-Shares · 60m'
+    : (isSimulation ? 'vn.py simulated data' : 'Alpaca data');
+  badge.className = `data-source-badge ${isIFind ? 'is-ifind' : (isSimulation ? 'is-simulated' : 'is-alpaca')}`;
   badge.hidden = false;
 }
 
@@ -2498,11 +2653,14 @@ let chartInstance = null;
 let liveBacktestChartActive = false;
 /** When set, Backtest view is pinned to this in-flight run (blocks history chart paint). */
 let liveBacktestRunId = null;
+let liveBacktestLaunchPending = false;
+let liveBacktestLaunchError = false;
 /** Active status-poll timer id (so dropdown can re-attach to a running job). */
 let backtestPollTimer = null;
 let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
 let tradingLogFilter = 'all';
+let tradingLogEmptyMessage = 'No trades yet.';
 let currentMode = "home";
 let currentPage = "home";
 let playgroundTab = "agents";
@@ -2613,6 +2771,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     const backtestRunSelect = document.getElementById('backtestRunSelect');
     if (backtestRunSelect) {
         backtestRunSelect.addEventListener('change', async () => {
+            liveBacktestLaunchPending = false;
+            liveBacktestLaunchError = false;
             const runId = backtestRunSelect.value;
             if (runId) {
                 localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
@@ -2630,7 +2790,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             renderTradingLog(tradingLogCache, {
                 emptyMessage: tradingLogCache.length
                     ? 'No trades match this filter.'
-                    : 'Run a backtest to see trades here.',
+                    : tradingLogEmptyMessage,
             });
         });
     }
@@ -2646,6 +2806,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (marketDataSourceSelect) {
         marketDataSourceSelect.addEventListener('change', syncMarketDataSourceUI);
     }
+    document.getElementById('ifindAshareUniverseSelect')?.addEventListener(
+        'change',
+        () => renderIFindAshareUniverse(),
+    );
 
     // Setup universe tabs
     document.querySelectorAll('.universe-tab').forEach(tab => {
@@ -3212,6 +3376,124 @@ const ASSET_UNIVERSES = {
     }
 };
 
+const IFIND_ASHARE_SOURCE = 'ifind_ashare';
+const IFIND_ASHARE_TIMEFRAME = '60m';
+const IFIND_ASHARE_START_DATE = '2026-04-01';
+const IFIND_ASHARE_END_DATE = '2026-05-01';
+const IFIND_ASHARE_DEFAULT_UNIVERSE = 'a_share_demo_6';
+const RULE_BASED_DECISION_SOURCE = 'rule_based';
+const LLM_DECISION_SOURCE = 'llm';
+const IFIND_ASHARE_UNIVERSES = {
+    a_share_demo_6: {
+        name: 'A-Share Demo 6',
+        allowedDecisionSources: ['rule_based', 'llm'],
+        assets: [
+            { symbol: '600519.SH', name: 'Kweichow Moutai' },
+            { symbol: '601318.SH', name: 'Ping An Insurance' },
+            { symbol: '600036.SH', name: 'China Merchants Bank' },
+            { symbol: '000001.SZ', name: 'Ping An Bank' },
+            { symbol: '000858.SZ', name: 'Wuliangye Yibin' },
+            { symbol: '300750.SZ', name: 'CATL' },
+        ],
+    },
+    csi300_sample_20_2026h2: {
+        name: 'CSI 300 Sample 20 (2026 H2)',
+        allowedDecisionSources: ['rule_based', 'llm'],
+        assets: [
+            { symbol: '600519.SH', name: 'Kweichow Moutai' },
+            { symbol: '601318.SH', name: 'Ping An Insurance' },
+            { symbol: '600036.SH', name: 'China Merchants Bank' },
+            { symbol: '300750.SZ', name: 'CATL' },
+            { symbol: '000333.SZ', name: 'Midea Group' },
+            { symbol: '002594.SZ', name: 'BYD' },
+            { symbol: '600276.SH', name: 'Hengrui Medicine' },
+            { symbol: '300760.SZ', name: 'Mindray' },
+            { symbol: '688981.SH', name: 'SMIC' },
+            { symbol: '002415.SZ', name: 'Hikvision' },
+            { symbol: '601766.SH', name: 'CRRC' },
+            { symbol: '600309.SH', name: 'Wanhua Chemical' },
+            { symbol: '601899.SH', name: 'Zijin Mining' },
+            { symbol: '601857.SH', name: 'PetroChina' },
+            { symbol: '600900.SH', name: 'China Yangtze Power' },
+            { symbol: '600050.SH', name: 'China Unicom' },
+            { symbol: '000725.SZ', name: 'BOE Technology' },
+            { symbol: '600030.SH', name: 'CITIC Securities' },
+            { symbol: '600887.SH', name: 'Yili' },
+            { symbol: '600048.SH', name: 'Poly Developments' },
+        ],
+    },
+};
+
+function getSelectedIFindUniverse() {
+    const value = document.getElementById('ifindAshareUniverseSelect')?.value;
+    return IFIND_ASHARE_UNIVERSES[value]
+        ? value
+        : IFIND_ASHARE_DEFAULT_UNIVERSE;
+}
+
+function getIFindUniverseProfile(universe = getSelectedIFindUniverse()) {
+    return IFIND_ASHARE_UNIVERSES[universe]
+        || IFIND_ASHARE_UNIVERSES[IFIND_ASHARE_DEFAULT_UNIVERSE];
+}
+
+function syncIFindModelControl({ resetDecisionSource = false } = {}) {
+    const modelSelect = document.getElementById('modelSelect');
+    const modelSelectHint = document.getElementById('modelSelectHint');
+    if (!modelSelect) return;
+
+    const previousValue = modelSelect.value;
+    let ruleOption = modelSelect.querySelector(
+        `option[value="${RULE_BASED_DECISION_SOURCE}"]`,
+    );
+    if (!ruleOption) {
+        ruleOption = document.createElement('option');
+        ruleOption.value = RULE_BASED_DECISION_SOURCE;
+        ruleOption.textContent = 'Rule-based';
+        modelSelect.insertBefore(ruleOption, modelSelect.firstChild);
+    }
+
+    const profile = getIFindUniverseProfile();
+    const allowsLLM = profile.allowedDecisionSources.includes(LLM_DECISION_SOURCE);
+    if (!allowsLLM) {
+        modelSelect.value = RULE_BASED_DECISION_SOURCE;
+    } else if (resetDecisionSource) {
+        const preferredModel = runBacktestModalAgent?.model_name || previousValue;
+        const llmOptions = Array.from(modelSelect.options).filter(
+            (option) => option.value !== RULE_BASED_DECISION_SOURCE,
+        );
+        const selectedOption = findBacktestModelOption(modelSelect, preferredModel)
+            || llmOptions[0];
+        if (selectedOption) modelSelect.value = selectedOption.value;
+    }
+    modelSelect.disabled = !allowsLLM;
+    modelSelect.setAttribute('aria-disabled', String(!allowsLLM));
+    if (modelSelectHint) {
+        modelSelectHint.textContent = allowsLLM
+            ? "Uses this agent's model by default. Choose Rule-based for deterministic decisions without LLM calls."
+            : 'This universe supports rule-based decisions only.';
+    }
+}
+
+function renderIFindAshareUniverse({ resetDecisionSource = false } = {}) {
+    const universe = getSelectedIFindUniverse();
+    const profile = getIFindUniverseProfile(universe);
+    const select = document.getElementById('ifindAshareUniverseSelect');
+    const title = document.getElementById('ifindAshareUniverseTitle');
+    const grid = document.getElementById('ifindAshareSymbolGrid');
+    if (select) select.value = universe;
+    if (title) title.textContent = `${profile.name} · ${profile.assets.length} stocks`;
+    if (grid) {
+        grid.innerHTML = profile.assets.map(({ symbol, name }) => `
+            <div class="ifind-symbol-item" title="${escapeHtml(name)} (${escapeHtml(symbol)})">
+                <span>${escapeHtml(symbol)}</span>
+                <small>${escapeHtml(name)}</small>
+            </div>
+        `).join('');
+        grid.setAttribute('aria-label', `${profile.name}, ${profile.assets.length} stocks`);
+    }
+    syncIFindModelControl({ resetDecisionSource });
+}
+
 // Popular stocks for autocomplete
 // S&P 100 stocks
 const POPULAR_STOCKS = {
@@ -3465,6 +3747,11 @@ function setupAssetSearch() {
  * Get selected assets based on Preset or Custom tab
  */
 function getSelectedAssets() {
+    const dataSource = document.getElementById('marketDataSourceSelect')?.value;
+    if (dataSource === IFIND_ASHARE_SOURCE) {
+        return getIFindUniverseProfile().assets.map(({ symbol }) => symbol);
+    }
+
     const builtinTab = document.getElementById('builtinTab');
     const isBuiltin = builtinTab?.classList.contains('active');
     
@@ -3477,6 +3764,37 @@ function getSelectedAssets() {
         // Get assets from selected built-in universe
         return ASSET_UNIVERSES[selectedUniverse].assets;
     }
+}
+
+function formatBacktestError(error, dataSource = null) {
+    const source = dataSource || window.ACTIVE_BACKTEST_DATA_SOURCE || 'alpaca';
+    const raw = String(error?.message || error?.detail || error || 'Backtest failed.');
+    if (source !== IFIND_ASHARE_SOURCE) return raw;
+
+    const status = Number(error?.status || 0);
+    const lower = raw.toLowerCase();
+    if (status === 403) return 'iFinD A-share access is disabled (403). Ask the server operator to enable it.';
+    if (lower.includes('llm provider client is unavailable') || lower.includes('llm client is unavailable')) {
+        return 'The selected LLM provider is not configured. Configure the provider or choose Rule-based.';
+    }
+    if (status === 503) return 'iFinD A-share access is not configured (503). Ask the server operator to finish API setup.';
+    if (status === 429 || lower.includes('429')) return 'iFinD is rate limited (429). Wait briefly, then run again.';
+    if (
+        lower.includes('50 bars')
+        || lower.includes('fewer than 50')
+        || lower.includes('at least 50')
+        || lower.includes('minimum=50')
+        || lower.includes('valid bars')
+    ) {
+        return 'iFinD returned fewer than 50 valid bars. Use a wider date range (about one month) or check data permissions.';
+    }
+    if (lower.includes('authentication') || lower.includes('credential') || lower.includes('permission') || lower.includes('token')) {
+        return 'iFinD authentication or data permission failed. Ask the server operator to check the account.';
+    }
+    if (lower.includes('response') || lower.includes('tables') || lower.includes('structure') || lower.includes('format')) {
+        return 'The iFinD response format was not recognized. Check the backend log for the sanitized summary.';
+    }
+    return 'The iFinD backtest failed. Check the backend log for the sanitized error summary.';
 }
 
 /**
@@ -3535,6 +3853,14 @@ function showBacktestRunProgress(show, { isError = false } = {}) {
     if (!panel) return;
     panel.hidden = !show;
     panel.classList.toggle('is-error', !!isError);
+    const title = panel.querySelector('.backtest-run-progress-title');
+    const elapsed = panel.querySelector('.backtest-run-elapsed');
+    const track = panel.querySelector('.backtest-run-progress-track');
+    const hint = panel.querySelector('.backtest-run-progress-hint');
+    if (title) title.textContent = isError ? 'Backtest did not start' : 'Backtest in progress';
+    if (elapsed) elapsed.hidden = !!isError;
+    if (track) track.hidden = !!isError;
+    if (hint) hint.hidden = !!isError;
 }
 
 function updateBacktestRunProgress({ elapsedSeconds, message = '', maxSeconds = BACKTEST_POLL_MAX_SECONDS, stepPct = null } = {}) {
@@ -3679,6 +4005,8 @@ function initLiveBacktestChart() {
 function prepareLiveBacktestView(launchConfig = null) {
     liveBacktestChartActive = true;
     liveBacktestRunId = null;
+    liveBacktestLaunchPending = true;
+    liveBacktestLaunchError = false;
     localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
     const runSelect = document.getElementById('backtestRunSelect');
     if (runSelect) runSelect.value = '';
@@ -3692,6 +4020,8 @@ function prepareLiveBacktestView(launchConfig = null) {
 /** Switch the Backtest surface onto an in-flight run (chart + log + config). */
 function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
     if (!runId) return;
+    liveBacktestLaunchPending = false;
+    liveBacktestLaunchError = false;
     const alreadyLive =
         liveBacktestChartActive &&
         liveBacktestRunId === runId &&
@@ -3742,6 +4072,18 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
         clearTradingLog('Backtest running… trades will appear here.');
     }
     ensureBacktestPolling();
+}
+
+function showBacktestLaunchFailure(message, launchConfig) {
+    liveBacktestChartActive = false;
+    liveBacktestRunId = null;
+    liveBacktestLaunchPending = false;
+    liveBacktestLaunchError = true;
+    renderBacktestRunConfig(null, { launchConfig, statusLabel: 'Failed' });
+    displayNoMetrics();
+    clearTradingLog('Backtest did not start.');
+    showBacktestRunProgress(true, { isError: true });
+    updateBacktestRunProgress({ elapsedSeconds: 0, message });
 }
 
 function stopBacktestPolling() {
@@ -3805,10 +4147,12 @@ function ensureBacktestPolling() {
 
                 if (status.error) {
                     if (viewingLive) {
+                        const source = getBacktestLaunchConfig(liveId || finishedId)?.dataSource;
+                        const message = formatBacktestError(status.error, source);
                         showBacktestRunProgress(true, { isError: true });
                         updateBacktestRunProgress({
                             elapsedSeconds: displayElapsed,
-                            message: status.error,
+                            message,
                         });
                     }
                     return;
@@ -3876,6 +4220,9 @@ function normalizeTradeRecord(trade) {
         quantity,
         price,
         value,
+        nativePrice: trade?.native_price == null ? null : Number(trade.native_price),
+        nativeValue: trade?.native_value == null ? null : Number(trade.native_value),
+        fxRate: trade?.fx_rate == null ? null : Number(trade.fx_rate),
     };
 }
 
@@ -3901,6 +4248,7 @@ function renderTradingLog(trades, { emptyMessage = 'No trades yet.' } = {}) {
     if (!tbody) return;
 
     tradingLogCache = Array.isArray(trades) ? trades.map(normalizeTradeRecord) : [];
+    tradingLogEmptyMessage = emptyMessage;
     let filtered = tradingLogCache;
     if (tradingLogFilter === 'buy') {
         filtered = tradingLogCache.filter((trade) => trade.side === 'BUY');
@@ -3920,13 +4268,22 @@ function renderTradingLog(trades, { emptyMessage = 'No trades yet.' } = {}) {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
         });
+        const hasNativeAudit = Number.isFinite(trade.nativePrice)
+            && Number.isFinite(trade.nativeValue)
+            && Number.isFinite(trade.fxRate);
+        const priceAudit = hasNativeAudit
+            ? `<div class="trading-log-native">¥${trade.nativePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>`
+            : '';
+        const valueAudit = hasNativeAudit
+            ? `<div class="trading-log-native">¥${trade.nativeValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · FX ${trade.fxRate.toFixed(4)}</div>`
+            : '';
         return `<tr>
             <td>${formatTradeTimestamp(trade.timestamp)}</td>
             <td><span class="${actionClass}">${actionLabel}</span></td>
             <td>${trade.symbol}</td>
             <td>${trade.quantity} shares</td>
-            <td>$${trade.price.toFixed(2)}</td>
-            <td>$${totalValue}</td>
+            <td>$${trade.price.toFixed(2)}${priceAudit}</td>
+            <td>$${totalValue}${valueAudit}</td>
         </tr>`;
     }).join('');
 }
@@ -3948,10 +4305,12 @@ async function loadTradingLogForRun(runId) {
     }
     try {
         const data = await API.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/trades?t=${Date.now()}`);
-        renderTradingLog(data.trades || [], { emptyMessage: 'No trades recorded for this run.' });
+        renderTradingLog(data.trades || [], {
+            emptyMessage: 'No trades were executed. The selected strategy produced no executable orders.',
+        });
     } catch (error) {
         console.warn('Could not load trades:', error.message);
-        clearTradingLog('No trades recorded for this run.');
+        clearTradingLog('Trade log unavailable for this run.');
     }
 }
 
@@ -4023,7 +4382,10 @@ function setBacktestConfigText(id, value) {
     if (el) el.textContent = value;
 }
 
-function renderBacktestRunConfig(run, { running = false, launchConfig = null } = {}) {
+function renderBacktestRunConfig(
+    run,
+    { running = false, launchConfig = null, statusLabel = null } = {},
+) {
     const empty = document.getElementById('backtestConfigEmpty');
     const list = document.getElementById('backtestConfigList');
     const cfg = launchConfig || (run?.run_id ? getBacktestLaunchConfig(run.run_id) : null);
@@ -4038,12 +4400,45 @@ function renderBacktestRunConfig(run, { running = false, launchConfig = null } =
     if (empty) empty.hidden = true;
     if (list) list.hidden = false;
 
+    const metadata = run?.metadata && typeof run.metadata === 'object'
+        ? run.metadata
+        : {};
+    const dataSource = cfg?.dataSource || metadata.data_source || run?.data_source || null;
+    const universeKey = cfg?.universeKey || metadata.universe || run?.universe || null;
+    const runSymbols = cfg?.assets || metadata.symbols || run?.symbols || null;
+    const ifindProfile = dataSource === IFIND_ASHARE_SOURCE
+        ? getIFindUniverseProfile(universeKey)
+        : null;
     const agentName = cfg?.agentName || run?.agent_name || '—';
     const model = cfg?.model || run?.llm_model || '—';
     const capital = cfg?.initialCapital ?? run?.initial_equity;
+    const nativeInitialCapital = metadata.native_initial_capital
+        ?? run?.native_initial_capital;
+    const startFxRate = metadata.fx_start_rate ?? run?.fx_start_rate;
+    const rawFxSource = metadata.fx_source ?? run?.fx_source;
     const start = cfg?.startDate || run?.start_date;
     const end = cfg?.endDate || run?.end_date;
-    const universe = cfg?.universeLabel || describeUniverseFromAssets(cfg?.assets) || '—';
+    const universe = cfg?.universeLabel
+        || ifindProfile?.name
+        || describeUniverseFromAssets(runSymbols)
+        || universeKey
+        || '—';
+    const symbolCount = cfg?.symbolCount
+        ?? (Array.isArray(runSymbols) ? runSymbols.length : null);
+    const timeframe = cfg?.timeframe || metadata.timeframe || run?.timeframe || '60m';
+    const decisionSource = cfg?.decisionSource
+        || metadata.decision_source
+        || run?.decision_source
+        || (dataSource === 'vnpy_simulation' ? 'rule_based' : null);
+    const decisionSourceLabel = decisionSource === LLM_DECISION_SOURCE
+        ? formatAgentModelLabel(model)
+        : (decisionSource === RULE_BASED_DECISION_SOURCE
+            ? 'Rule-based'
+            : (decisionSource || 'LLM / Rule-based'));
+    const marketData = cfg?.marketDataLabel
+        || (dataSource === IFIND_ASHARE_SOURCE
+            ? 'iFinD A-Share'
+            : (dataSource === 'vnpy_simulation' ? 'vn.py Simulation' : 'Alpaca'));
     const started = run?.created_at
         ? new Date(String(run.created_at).replace(' ', 'T')).toLocaleString()
         : (cfg?.startedAt
@@ -4058,12 +4453,47 @@ function renderBacktestRunConfig(run, { running = false, launchConfig = null } =
         'backtestConfigCapital',
         Number.isFinite(Number(capital)) ? `$${Number(capital).toLocaleString()}` : '—',
     );
+    setBacktestConfigText('backtestConfigMarketData', marketData);
+    const showFx = dataSource === IFIND_ASHARE_SOURCE
+        && Number.isFinite(Number(nativeInitialCapital))
+        && Number.isFinite(Number(startFxRate));
+    const nativeCapitalRow = document.getElementById('backtestConfigNativeCapitalRow');
+    const fxSourceRow = document.getElementById('backtestConfigFxSourceRow');
+    const fxRateRow = document.getElementById('backtestConfigFxRateRow');
+    if (nativeCapitalRow) nativeCapitalRow.hidden = !showFx;
+    if (fxSourceRow) fxSourceRow.hidden = !showFx;
+    if (fxRateRow) fxRateRow.hidden = !showFx;
+    if (showFx) {
+        setBacktestConfigText(
+            'backtestConfigNativeCapital',
+            `¥${Number(nativeInitialCapital).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        );
+        setBacktestConfigText(
+            'backtestConfigFxSource',
+            rawFxSource === 'ifind_history_currency_conversion'
+                ? 'iFinD Historical Conversion Rate'
+                : (rawFxSource || 'iFinD Historical Conversion Rate'),
+        );
+        setBacktestConfigText('backtestConfigFxRate', Number(startFxRate).toFixed(4));
+    }
     setBacktestConfigText('backtestConfigUniverse', universe);
+    setBacktestConfigText(
+        'backtestConfigSymbols',
+        Number.isFinite(Number(symbolCount)) ? String(symbolCount) : '—',
+    );
+    setBacktestConfigText('backtestConfigTimeframe', timeframe);
+    setBacktestConfigText(
+        'backtestConfigDecisionSource',
+        decisionSourceLabel,
+    );
     setBacktestConfigText(
         'backtestConfigWindow',
         start && end ? `${start} → ${end}` : '—',
     );
-    setBacktestConfigText('backtestConfigStatus', running ? 'Running' : 'Completed');
+    setBacktestConfigText(
+        'backtestConfigStatus',
+        statusLabel || (running ? 'Running' : 'Completed'),
+    );
 
     const promptRow = document.getElementById('backtestConfigPromptRow');
     const promptEl = document.getElementById('backtestConfigPrompt');
@@ -4116,6 +4546,7 @@ function openRunBacktestModal(agent) {
     selectPreset('djia');
     const builtinTabBtn = document.querySelector('#runBacktestModal .universe-tab[data-tab="builtin"]');
     if (builtinTabBtn) handleUniverseTabSwitch(builtinTabBtn);
+    syncMarketDataSourceUI({ resetIFindDecisionSource: true });
 
     const pipeline = loadAgentPipelineForBacktest(agent);
     const prompt = formatPromptFromPipeline(pipeline);
@@ -4176,6 +4607,22 @@ async function runBacktest() {
     const marketDataSourceSelect = document.getElementById('marketDataSourceSelect');
     const dataSource = marketDataSourceSelect?.value || 'alpaca';
     const isSimulation = dataSource === 'vnpy_simulation';
+    const isIFind = dataSource === IFIND_ASHARE_SOURCE;
+    const selectedIFindUniverse = isIFind ? getSelectedIFindUniverse() : null;
+    const selectedIFindProfile = isIFind
+        ? getIFindUniverseProfile(selectedIFindUniverse)
+        : null;
+    const selectedModel = modelSelect?.value || '';
+    const ifindAllowsLLM = selectedIFindProfile
+        ?.allowedDecisionSources.includes(LLM_DECISION_SOURCE) === true;
+    const decisionSource = isSimulation
+        ? RULE_BASED_DECISION_SOURCE
+        : (isIFind
+            ? (ifindAllowsLLM && selectedModel !== RULE_BASED_DECISION_SOURCE
+                ? LLM_DECISION_SOURCE
+                : RULE_BASED_DECISION_SOURCE)
+            : LLM_DECISION_SOURCE);
+    const isRuleBasedDecision = decisionSource === RULE_BASED_DECISION_SOURCE;
     const activeAgent = runBacktestModalAgent || getSelectedBacktestAgent();
     if (!activeAgent) {
         alert('Please create or select an agent first.');
@@ -4183,10 +4630,13 @@ async function runBacktest() {
     }
 
     await activateAgent(activeAgent);
-    const pipeline = loadAgentPipelineForBacktest(activeAgent);
-    const model = isSimulation
+    if (!isIFind) {
+        syncModelSelectFromAgent(activeAgent);
+    }
+    const pipeline = isRuleBasedDecision ? null : loadAgentPipelineForBacktest(activeAgent);
+    const model = isRuleBasedDecision
         ? null
-        : (modelSelect?.value || activeAgent?.model_name || 'claude-haiku-4.5');
+        : resolveBacktestModelRequest(modelSelect, activeAgent);
 
     const capitalInput = document.getElementById('backtestInitialCapital');
     let initialCapital = 1000;
@@ -4205,16 +4655,17 @@ async function runBacktest() {
     }
 
     const promptSummary = formatPromptFromPipeline(pipeline);
-    const universeLabel =
-        document.getElementById('builtinTab')?.classList.contains('active')
+    const universeLabel = isIFind
+        ? selectedIFindProfile.name
+        : (document.getElementById('builtinTab')?.classList.contains('active')
             ? (ASSET_UNIVERSES[selectedUniverse]?.name || selectedUniverse)
-            : describeUniverseFromAssets(assets);
+            : describeUniverseFromAssets(assets));
     
     console.log(`Running backtest: ${startDate} to ${endDate}`);
     console.log(`Assets: ${assets.join(', ')}`);
     console.log(`Market data: ${dataSource}`);
     console.log(`Initial capital (simulation): $${initialCapital}`);
-    console.log(`Model: ${model || 'disabled for simulation'}`);
+    console.log(`Model: ${model || 'rule-based'}`);
     if (activeAgent?.agent_id) {
         console.log(`Agent: ${activeAgent.name} (${activeAgent.agent_id})`);
     }
@@ -4231,16 +4682,29 @@ async function runBacktest() {
     const launchConfigBase = {
         agentId: activeAgent.agent_id,
         agentName: activeAgent.name,
-        model: model || null,
+        model: isRuleBasedDecision ? 'Rule-based' : (model || null),
         prompt: promptSummary,
         initialCapital,
         startDate,
         endDate,
         assets: [...assets],
         universeLabel,
+        universeKey: selectedIFindUniverse,
+        symbolCount: assets.length,
+        timeframe: isIFind ? IFIND_ASHARE_TIMEFRAME : '60m',
+        decisionSource,
+        marketDataLabel: isIFind
+            ? 'iFinD A-Share'
+            : (isSimulation ? 'vn.py Simulation' : 'Alpaca'),
         dataSource,
         startedAt: new Date().toISOString(),
     };
+
+    window.ACTIVE_BACKTEST_DATA_SOURCE = dataSource;
+    renderBacktestDataSourceBadge({
+        data_source: dataSource,
+        timeframe: isIFind ? IFIND_ASHARE_TIMEFRAME : null,
+    });
 
     // Pin live view BEFORE navigateToPage → showPlaygroundPanel → loadData(),
     // otherwise the async history load paints the previous run over the chart.
@@ -4271,28 +4735,30 @@ async function runBacktest() {
             // Body is authoritative; query `assets` kept for older callers/logs.
             assets: [...assets],
         };
-        if (model) {
+        params.set('decision_source', decisionSource);
+        payload.decision_source = decisionSource;
+        if (isIFind) {
+            params.set('universe', selectedIFindUniverse);
+            params.set('timeframe', IFIND_ASHARE_TIMEFRAME);
+            payload.universe = selectedIFindUniverse;
+            payload.timeframe = '60m';
+        }
+        if (decisionSource === LLM_DECISION_SOURCE && model) {
             params.set('model', model);
             payload.model = model;
         }
         if (activeAgent?.agent_id && !String(activeAgent.agent_id).startsWith('mock-')) {
             payload.agent_id = activeAgent.agent_id;
         }
-        if (pipeline?.length) {
+        if (decisionSource === LLM_DECISION_SOURCE && pipeline?.length) {
             payload.pipeline = pipeline;
         }
         const data = await API.post(`${API_BASE}/backtest/run?${params.toString()}`, payload);
         
         if (!data.success) {
-            console.error('❌ Backtest failed:', data.error || 'Unknown error');
-            liveBacktestChartActive = false;
-            liveBacktestRunId = null;
-            showBacktestRunProgress(true, { isError: true });
-            updateBacktestRunProgress({
-                elapsedSeconds: 0,
-                message: data.error || 'Failed to start backtest.',
-            });
-            setTimeout(() => showBacktestRunProgress(false), 5000);
+            const message = formatBacktestError(data.error || data.message, dataSource);
+            console.error('❌ Backtest failed:', message);
+            showBacktestLaunchFailure(message, launchConfigBase);
             return;
         }
 
@@ -4306,15 +4772,9 @@ async function runBacktest() {
         await pollBacktestStatus(null);
         
     } catch (error) {
-        console.error('❌ Error starting backtest:', error.message);
-        liveBacktestChartActive = false;
-        liveBacktestRunId = null;
-        showBacktestRunProgress(true, { isError: true });
-        updateBacktestRunProgress({
-            elapsedSeconds: 0,
-            message: error.message || 'Failed to start backtest.',
-        });
-        setTimeout(() => showBacktestRunProgress(false), 5000);
+        const message = formatBacktestError(error, dataSource);
+        console.error('❌ Error starting backtest:', message);
+        showBacktestLaunchFailure(message, launchConfigBase);
     }
 }
 
@@ -4880,6 +5340,15 @@ function initNavigation() {
     });
 
     document.getElementById('agentSearchInput')?.addEventListener('input', applyAgentFilters);
+    document.getElementById('agentsCategories')?.addEventListener('click', (event) => {
+      const prevBtn = event.target.closest('[data-agent-grid-prev]');
+      const nextBtn = event.target.closest('[data-agent-grid-next]');
+      const key = prevBtn?.dataset.agentGridPrev || nextBtn?.dataset.agentGridNext;
+      if (!key) return;
+      const page = agentGridPage[key] || 0;
+      agentGridPage[key] = prevBtn ? Math.max(0, page - 1) : page + 1;
+      applyAgentFilters(false);
+    });
     document.getElementById('agentViewGrid')?.addEventListener('click', () => setAgentViewMode('grid'));
     document.getElementById('agentViewList')?.addEventListener('click', () => setAgentViewMode('list'));
 
@@ -4966,8 +5435,29 @@ function formatBacktestRunSecondary(run) {
     const when = run.created_at ? new Date(run.created_at).toLocaleString() : '';
     const cost = formatUsd(run.est_cost_usd);
     const costLabel = cost && Number(run.est_cost_usd) > 0 ? cost : '';
-    const sourceLabel = run.data_source === 'vnpy_simulation' ? 'vn.py simulated' : '';
+    const sourceLabel = run.data_source === 'ifind_ashare'
+        ? 'iFinD China A-Shares · 60m'
+        : (run.data_source === 'vnpy_simulation' ? 'vn.py simulated' : '');
     return [sourceLabel, costLabel, when].filter(Boolean).join(' · ');
+}
+
+// Belt-and-braces: the backend already omits US market indexes for iFinD runs
+// (include_market_indexes=False). Match on the structural run_id the backend
+// mints for them ("index:^DJI", "index:^NDX") rather than the display label —
+// a renamed label would silently disable a label-only filter.
+const MARKET_INDEX_RUN_ID_PREFIX = 'index:';
+const US_INDEX_SERIES_LABELS = new Set(['DJIA index', 'Nasdaq-100']);
+
+function isUsMarketIndexSeries(entry) {
+    if (typeof entry?.run_id === 'string' && entry.run_id.startsWith(MARKET_INDEX_RUN_ID_PREFIX)) {
+        return true;
+    }
+    return US_INDEX_SERIES_LABELS.has(entry?.label);
+}
+
+function filterIfindChartSeries(series, run = window.SELECTED_RUN) {
+    if (run?.data_source !== IFIND_ASHARE_SOURCE) return series;
+    return series.filter((entry) => !isUsMarketIndexSeries(entry));
 }
 
 function formatBacktestRunLabel(run) {
@@ -5159,6 +5649,10 @@ async function loadData() {
                 /* status optional while browsing history */
             }
 
+            if (!runningId && (liveBacktestLaunchPending || liveBacktestLaunchError)) {
+                return;
+            }
+
             const selectableRuns = sessionRuns.filter(r => !isBaselineRun(r));
             populateBacktestRunSelector(selectableRuns, { runningId });
 
@@ -5253,8 +5747,9 @@ function initializeCharts() {
 
         const ctx = perfCtx.getContext('2d');
         const { timestamps, x_labels: xLabels, series } = backtestChartData;
+        const visibleSeries = filterIfindChartSeries(series);
 
-        const datasets = series.map((entry) => ({
+        const datasets = visibleSeries.map((entry) => ({
             label: entry.label,
             data: entry.values,
             borderColor: entry.color,

@@ -99,10 +99,12 @@ class _Spy:
     def __init__(self):
         self.calls = 0
         self.last_args = None
+        self.last_kwargs = None
 
     def __call__(self, *a, **k):
         self.calls += 1
         self.last_args = a
+        self.last_kwargs = k
 
 
 def _run_record(metadata=None):
@@ -129,6 +131,65 @@ def test_run_metadata_response_exposes_simulation_source():
 
 def test_run_metadata_response_defaults_legacy_runs_to_alpaca():
     assert bt._run_metadata_response(_run_record()).data_source == "alpaca"
+
+
+def test_run_metadata_response_exposes_complete_ifind_profile():
+    response = bt._run_metadata_response(
+        _run_record(
+            {
+                "data_source": "ifind_ashare",
+                "market": "CN",
+                "universe": "a_share_demo_6",
+                "timeframe": "60m",
+                "timezone": "Asia/Shanghai",
+                "decision_source": "rule_based",
+                "benchmark": "equal_weight_buyhold",
+                "symbols": ["600519.SH", "601318.SH"],
+                "native_currency": "CNY",
+                "reporting_currency": "USD",
+                "native_initial_capital": 7_000,
+                "fx_pair": "USD/CNY",
+                "fx_source": "ifind_history_currency_conversion",
+                "fx_policy": "daily_implied_median_forward_fill",
+                "fx_start_rate": 7.0,
+                "fx_end_rate": 7.1,
+            }
+        )
+    )
+
+    assert response.data_source == "ifind_ashare"
+    assert response.market == "CN"
+    assert response.universe == "a_share_demo_6"
+    assert response.timeframe == "60m"
+    assert response.timezone == "Asia/Shanghai"
+    assert response.decision_source == "rule_based"
+    assert response.benchmark == "equal_weight_buyhold"
+    assert response.symbols == ["600519.SH", "601318.SH"]
+    assert response.native_currency == "CNY"
+    assert response.reporting_currency == "USD"
+    assert response.native_initial_capital == 7_000
+    assert response.fx_pair == "USD/CNY"
+    assert response.fx_source == "ifind_history_currency_conversion"
+    assert response.fx_start_rate == 7.0
+    assert response.fx_end_rate == 7.1
+
+
+def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
+    response = bt._run_metadata_response(_run_record())
+
+    assert response.market is None
+    assert response.universe is None
+    assert response.timeframe is None
+    assert response.timezone is None
+    assert response.decision_source is None
+    assert response.benchmark is None
+    assert response.symbols is None
+    assert response.native_currency is None
+    assert response.reporting_currency is None
+    assert response.native_initial_capital is None
+    assert response.fx_pair is None
+    assert response.fx_source is None
+    assert response.fx_start_rate is None
 
 
 @pytest.fixture(autouse=True)
@@ -191,7 +252,7 @@ def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
     assert resp.status_code == 200
     assert resp.json()["session_id"] == agent_session
     assert spy.calls == 1
-    assert spy.last_args[2] == agent_session
+    assert spy.last_kwargs["session_id"] == agent_session
 
 
 def test_backtest_run_forwards_selected_assets(client, monkeypatch):
@@ -212,7 +273,12 @@ def test_backtest_run_forwards_selected_assets(client, monkeypatch):
     assert resp.status_code == 200, resp.text
     assert resp.json()["assets"] == mag7
     assert spy.calls == 1
-    assert spy.last_args[-1] == mag7
+    # By name, not position: universe/timeframe were inserted mid-signature
+    # once, and an index-based assertion would have kept passing on the wrong
+    # argument.
+    assert spy.last_args == ()
+    assert spy.last_kwargs["assets"] == mag7
+    assert spy.last_kwargs["decision_source"] == "llm"
 
 
 def test_backtest_run_rejects_bad_assets(monkeypatch):
@@ -269,6 +335,67 @@ def test_backtest_run_accepts_frontend_model_options(model):
         headers=_sess(),
     )
     assert resp.status_code == 200, (model, resp.text)
+
+
+@pytest.mark.parametrize("model", [
+    "claude-haiku-4.5", "claude-sonnet-4.6", "claude-opus-4.7",
+    "gpt-5.2", "gpt-5-mini", "deepseek-v4-flash", "deepseek-v4-pro",
+    "gemini-3.5-flash", "gemini-2.5-pro",
+])
+def test_ifind_llm_accepts_every_frontend_model(monkeypatch, model):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    monkeypatch.setattr(
+        bt,
+        "ensure_llm_client_available",
+        object,
+        raising=False,
+    )
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "data_source": "ifind_ashare",
+            "universe": "a_share_demo_6",
+            "timeframe": "60m",
+            "decision_source": "llm",
+            "model": model,
+        },
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, (model, resp.text)
+    assert resp.json()["decision_source"] == "llm"
+
+
+def test_explicit_llm_requires_model_before_scheduling(monkeypatch):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(
+        bt,
+        "ensure_llm_client_available",
+        object,
+        raising=False,
+    )
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "data_source": "ifind_ashare",
+            "universe": "a_share_demo_6",
+            "timeframe": "60m",
+            "decision_source": "llm",
+        },
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 422
+    assert "model" in resp.text.lower()
+    assert spy.calls == 0
 
 
 @pytest.mark.parametrize("model", [
@@ -400,3 +527,87 @@ def test_backtest_run_rate_limited_per_client(monkeypatch):
     assert client.post("/backtest/run", json=body, headers=headers).status_code == 200
     assert client.post("/backtest/run", json=body, headers=headers).status_code == 200
     assert client.post("/backtest/run", json=body, headers=headers).status_code == 429
+
+
+def test_rule_based_still_validates_llm_only_fields_before_dropping(monkeypatch):
+    """Dropping them before validation answered 200 to a malformed model."""
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "data_source": "ifind_ashare",
+            "universe": "a_share_demo_6",
+            "timeframe": "60m",
+            "decision_source": "rule_based",
+            "model": "x; rm -rf /",
+        },
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 422
+    assert "Invalid model id" in resp.text
+    assert spy.calls == 0
+
+
+def test_rule_based_reports_the_llm_fields_it_dropped(monkeypatch):
+    """Dropping them is right; doing it invisibly is what hid the bad input."""
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "data_source": "ifind_ashare",
+            "universe": "a_share_demo_6",
+            "timeframe": "60m",
+            "decision_source": "rule_based",
+            "model": "gpt-5.2",
+            "strategy_prompt": "buy low",
+        },
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["decision_source"] == "rule_based"
+    assert sorted(resp.json()["ignored_fields"]) == ["model", "strategy_prompt"]
+
+
+def test_llm_run_reports_no_ignored_fields(monkeypatch):
+    resp = TestClient(app).post(
+        "/backtest/run",
+        json={"start_date": "2026-05-01", "end_date": "2026-05-02"},
+        headers=_sess(),
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "ignored_fields" not in resp.json()
+
+
+def test_subprocess_log_dump_is_redacted_but_not_truncated(monkeypatch):
+    """print() is the only prod log channel; trimming drops every run's head."""
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "super-secret-token")
+    head = "UNIVERSE-LINE-AT-THE-VERY-TOP"
+    noise = "x" * 8000
+    log = f"{head}\n{noise}\naccess_token=super-secret-token\n"
+
+    redacted = bt._redact_credentials(log)
+
+    assert head in redacted
+    assert len(redacted) > 8000
+    assert "super-secret-token" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_error_summary_stays_bounded(monkeypatch):
+    monkeypatch.setenv("IFIND_ACCESS_TOKEN", "super-secret-token")
+
+    summary = bt._sanitize_backtest_error("y" * 5000 + " super-secret-token", 500)
+
+    assert len(summary) == 500
+    assert "super-secret-token" not in summary
