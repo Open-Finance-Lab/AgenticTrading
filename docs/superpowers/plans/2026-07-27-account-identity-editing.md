@@ -17,7 +17,7 @@
 - **`print()`, never `logging`.** Logger output from `dashboard.backend.*` is invisible under the deployed uvicorn config. Tests assert on `capsys`, never `caplog`.
 - **`ERROR:` prefix = the user got nothing** (mail failures). **`WARNING:` prefix = the durable write already succeeded**, only best-effort cleanup failed (session revocation, pending-change cancellation). Do not level-shift either.
 - **Send before persist.** Both mail steps attempt delivery first and write state only on success.
-- **Code alphabet:** `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` (32 symbols; `0`,`O`,`1`,`I`,`L` removed). Length 6. TTL 15 minutes. Max 5 attempts. Cooldown 60 seconds.
+- **Code alphabet:** `23456789ABCDEFGHJKMNPQRSTUVWXYZ` (31 symbols; `0`,`O`,`1`,`I`,`L` removed — note: original text listed 32 but that was unsatisfiable against the test). Length 6. TTL 15 minutes. Max 5 attempts. Cooldown 60 seconds.
 - **Route-contract freeze:** every new route tuple goes into `EXPECTED_FULL_CONTRACT` (`dashboard/backend/tests/test_app_composition.py`) **in the same commit that adds the route**. Otherwise `test_full_route_contract_unchanged` turns red on every open PR, not just this one.
 - **Seed-DB caution:** running the suite or the app locally in SQLite mode lazily creates `email_change_requests` inside the committed `dashboard/storage/data/backtest.db`, and the write can hide in the untracked `-wal` sidecar. Run `git status --short dashboard/storage/data/backtest.db` before **every** commit; it must show nothing.
 - **`@pg_only` fails open.** `TEST_POSTGRES_URL` is unset locally, so the Postgres tier silently skips. A green local run proves nothing about Task 7 — verify by grepping the CI job log.

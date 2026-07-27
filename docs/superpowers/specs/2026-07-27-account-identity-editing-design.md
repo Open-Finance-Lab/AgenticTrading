@@ -173,8 +173,8 @@ prod while being rejected locally — twin drift that a SQLite-only test run can
 
 ### Code format
 
-Six characters from `23456789ABCDEFGHJKLMNPQRSTUVWXYZ` — 32 symbols, with `0`, `O`, `1`,
-`I` and `L` removed so a code cannot be misread off a phone screen. 32⁶ ≈ 1.07 × 10⁹,
+Six characters from `23456789ABCDEFGHJKMNPQRSTUVWXYZ` — 31 symbols, with `0`, `O`, `1`,
+`I` and `L` removed so a code cannot be misread off a phone screen (note: original text listed 32 but that was unsatisfiable against the test). 31⁶ ≈ 8.9 × 10⁸,
 which is safe given a 5-attempt cap and a 15-minute expiry. Generated with
 `secrets.choice`, compared case-insensitively (input uppercased before hashing).
 

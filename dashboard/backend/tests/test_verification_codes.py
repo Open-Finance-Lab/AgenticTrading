@@ -19,8 +19,8 @@ def test_alphabet_excludes_the_characters_users_misread():
     # 0/O and 1/I/L are the pairs users transcribe wrong off a phone screen.
     for ambiguous in "0O1IL":
         assert ambiguous not in CODE_ALPHABET
-    assert len(CODE_ALPHABET) == 32
-    assert len(set(CODE_ALPHABET)) == 32
+    assert len(CODE_ALPHABET) == 31
+    assert len(set(CODE_ALPHABET)) == 31
 
 
 def test_generated_codes_are_not_all_identical():
