@@ -71,6 +71,32 @@ _FAILED_STATES = {"failed", "cancelled", "canceled"}
 _STEP_AUTOHELD_CODES = {"decision_deadline_exceeded", "step_already_finalized"}
 
 
+def wait_for_poll(
+    client: Any,
+    poll_interval: float,
+    waited: float,
+    max_wait_seconds: Optional[float],
+    status: str,
+) -> float:
+    """Sleep one poll interval and return the new cumulative idle time.
+
+    Shared by every runner that drives the step loop (see
+    ``integrations._tradingagents_runner``) so the timeout arithmetic and its
+    error code exist once. Callers must reject ``poll_interval <= 0`` before
+    entering the loop, which is what keeps ``sleep_for`` non-zero here.
+    """
+    if max_wait_seconds is not None and waited >= max_wait_seconds:
+        raise ATLTimeoutError(
+            f"exceeded max_wait_seconds={max_wait_seconds} while run was '{status}'",
+            code="runner_wait_timeout",
+        )
+    sleep_for = poll_interval
+    if max_wait_seconds is not None:
+        sleep_for = min(poll_interval, max(0.0, max_wait_seconds - waited))
+    client.wait(sleep_for)
+    return waited + sleep_for
+
+
 class AgentRunner:
     """Drive an agent through a full run via an :class:`ATLClient`."""
 
@@ -206,16 +232,9 @@ class AgentRunner:
         max_wait_seconds: Optional[float],
         status: str,
     ) -> float:
-        if max_wait_seconds is not None and waited >= max_wait_seconds:
-            raise ATLTimeoutError(
-                f"exceeded max_wait_seconds={max_wait_seconds} while run was '{status}'",
-                code="runner_wait_timeout",
-            )
-        sleep_for = poll_interval
-        if max_wait_seconds is not None:
-            sleep_for = min(poll_interval, max(0.0, max_wait_seconds - waited))
-        self.client.wait(sleep_for)
-        return waited + (sleep_for or poll_interval)
+        return wait_for_poll(
+            self.client, poll_interval, waited, max_wait_seconds, status
+        )
 
     def _fire(self, hook: str, payload: Any) -> None:
         fn = getattr(self.agent, hook, None)

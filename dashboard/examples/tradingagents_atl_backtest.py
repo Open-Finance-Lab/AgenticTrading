@@ -12,7 +12,6 @@ import hashlib
 import os
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Optional, Sequence
 
@@ -27,6 +26,7 @@ from agentictrading.integrations.tradingagents import (
     TradingAgentsReplayIncompleteError,
     TradingAgentsReplayValidationError,
     TradingAgentsVersionError,
+    default_decision_artifact_path,
     load_decision_artifact,
     sanitize_error_message,
     save_decision_artifact,
@@ -159,32 +159,29 @@ def resolve_atl_settings(
     )
 
 
-def _default_artifact_path(symbol: str) -> Path:
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    return (
-        Path.home()
-        / ".agentictrading"
-        / "tradingagents"
-        / "decisions"
-        / f"{symbol.lower()}-{stamp}.json"
-    )
-
-
 def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+_GENERATION_CONFIG_KEYS = (
+    "llm_provider",
+    "deep_think_llm",
+    "quick_think_llm",
+    "temperature",
+)
+
+
 def _generation_config(args: argparse.Namespace) -> dict:
-    config = {}
-    for argument, key in (
-        (args.llm_provider, "llm_provider"),
-        (args.deep_think_llm, "deep_think_llm"),
-        (args.quick_think_llm, "quick_think_llm"),
-        (args.temperature, "temperature"),
-    ):
-        if argument is not None:
-            config[key] = argument
-    return config
+    """Collect the TradingAgents overrides the caller actually supplied.
+
+    The argparse dest names are the upstream config keys, so there is nothing
+    to translate — only omitted (``None``) values to drop.
+    """
+    return {
+        key: getattr(args, key)
+        for key in _GENERATION_CONFIG_KEYS
+        if getattr(args, key) is not None
+    }
 
 
 def run_from_args(
@@ -219,7 +216,7 @@ def run_from_args(
             selected_analysts=tuple(args.selected_analysts or DEFAULT_ANALYSTS),
         )
         artifact_path = Path(
-            args.output or _default_artifact_path(symbol)
+            args.output or default_decision_artifact_path(symbol)
         ).expanduser()
         artifact_sha256 = save_decision_artifact(artifact, artifact_path)
 

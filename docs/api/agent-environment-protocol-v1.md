@@ -316,9 +316,14 @@ GET /api/v1/runs/{run_id}/result
   "llm_calls": 22,
   "input_tokens": 14200,
   "output_tokens": 1800,
-  "est_cost_usd": 0.0
+  "est_cost_usd": 0.0,
+  "timeout_holds": 0
 }
 ```
+
+`timeout_holds` counts the steps the backend auto-held because no decision
+arrived before the deadline, each recorded with `status: "timed_out"` (see §9).
+It is `null` for runs recorded before the counter existed.
 
 `result` is available only once the run is `completed`; otherwise it returns
 `409 run_not_completed`.

@@ -46,7 +46,7 @@ POST /api/v1/runs/{id}/steps/{step_id}/decision -> {protocol_version, run_id,
 GET /api/v1/runs/{id}/result -> {protocol_version, run_id, result_run_id, status,
     run:{...}, equity_curve:[...], trades:[...], decisions:[...], metrics:{
     total_return, sharpe_ratio, max_drawdown, num_trades, final_equity,
-    llm_calls, input_tokens, output_tokens, est_cost_usd}}
+    llm_calls, input_tokens, output_tokens, est_cost_usd, timeout_holds}}
 
 GET /api/v1/runs/{id}/trades     -> {protocol_version, run_id, trades:[...], count}
 GET /api/v1/runs/{id}/decisions  -> {protocol_version, run_id, decisions:[...], count}

@@ -37,6 +37,7 @@ from agentictrading.integrations.tradingagents import (
     TradingAgentsReplayValidationError,
     TradingAgentsVersionError,
     build_safe_manifest,
+    default_decision_artifact_path,
     load_decision_artifact,
     map_rating,
     sanitize_error_message,
@@ -195,47 +196,39 @@ def test_artifact_requires_unique_sorted_iso_dates():
         )
 
 
+_ERROR_RECORD_FIELDS = dict(
+    analysis_date="2026-04-03",
+    status="error",
+    attempts=2,
+    raw_final_trade_decision="",
+    raw_sha256=sha256_text(""),
+    error_type="RuntimeError",
+    error_message="provider failed",
+)
+
+
 def test_error_record_has_explicit_hold_and_sanitized_error():
     record = TradingAgentsDecisionRecord(
-        analysis_date="2026-04-03",
-        rating="",
-        atl_action="HOLD",
-        status="error",
-        attempts=2,
-        raw_final_trade_decision="",
-        raw_sha256=sha256_text(""),
-        error_type="RuntimeError",
-        error_message="provider failed",
+        rating="", atl_action="HOLD", **_ERROR_RECORD_FIELDS
     )
     assert record.atl_action == "HOLD"
     assert record.error_type == "RuntimeError"
 
-    with pytest.raises(ArtifactValidationError, match="HOLD"):
-        TradingAgentsDecisionRecord(
-            analysis_date="2026-04-03",
-            rating="",
-            atl_action="BUY",
-            status="error",
-            attempts=2,
-            raw_final_trade_decision="",
-            raw_sha256=sha256_text(""),
-            error_type="RuntimeError",
-            error_message="provider failed",
-        )
 
-    # A failed analysis produced no opinion, so it cannot carry a rating that
-    # replay or downstream reporting would read as one.
-    with pytest.raises(ArtifactValidationError, match="rating"):
+@pytest.mark.parametrize(
+    ("rating", "atl_action", "message"),
+    [
+        # An errored analysis never traded, so it cannot claim a direction.
+        ("", "BUY", "HOLD"),
+        # It produced no opinion either, so it cannot carry a rating that
+        # replay or downstream reporting would read as one.
+        ("Buy", "HOLD", "rating"),
+    ],
+)
+def test_error_record_rejects_action_or_rating(rating, atl_action, message):
+    with pytest.raises(ArtifactValidationError, match=message):
         TradingAgentsDecisionRecord(
-            analysis_date="2026-04-03",
-            rating="Buy",
-            atl_action="HOLD",
-            status="error",
-            attempts=2,
-            raw_final_trade_decision="",
-            raw_sha256=sha256_text(""),
-            error_type="RuntimeError",
-            error_message="provider failed",
+            rating=rating, atl_action=atl_action, **_ERROR_RECORD_FIELDS
         )
 
 
@@ -289,6 +282,24 @@ def test_error_sanitizer_removes_common_secret_shapes_and_caps_length():
     assert "bearer-secret" not in cleaned
     assert "hunter2" not in cleaned
     assert len(cleaned) <= 300
+
+
+def test_default_artifact_path_follows_the_storage_convention():
+    """The default location is library contract, not a CLI detail.
+
+    Every front-end that writes decisions has to agree on where they land, so
+    this is asserted directly rather than only through a CLI run that always
+    passes --output explicitly.
+    """
+    path = default_decision_artifact_path("aapl")
+    assert path.parent == Path.home() / ".agentictrading" / "tradingagents" / "decisions"
+    assert path.name.startswith("aapl-")
+    assert path.suffix == ".json"
+    # Case and surrounding whitespace must not produce a second directory.
+    assert default_decision_artifact_path("  AAPL ").parent == path.parent
+    assert default_decision_artifact_path("  AAPL ").name.startswith("aapl-")
+    with pytest.raises(ArtifactValidationError):
+        default_decision_artifact_path("   ")
 
 
 def test_artifact_module_does_not_import_tradingagents():
@@ -1282,6 +1293,32 @@ def _load_cli_module():
     return module
 
 
+def _outcome_with(**replay_overrides):
+    """A completed single-BUY outcome, with any diagnostic counter overridden."""
+    counters = {
+        "processed_dates": ("2026-04-03",),
+        "unprocessed_dates": (),
+        "buy_orders": 0,
+        "sell_orders": 0,
+        "model_holds": 0,
+        "error_holds": 0,
+        "passive_holds": 0,
+        "constraint_holds": 0,
+        "superseded": 0,
+    }
+    counters.update(replay_overrides)
+    return TradingAgentsATLRunOutcome(
+        result=RunResult(
+            run_id="run_1",
+            status="completed",
+            metrics={"total_return": 0.0, "timeout_holds": 0},
+        ),
+        replay=TradingAgentsReplayDiagnostics(**counters),
+        fills=(),
+        rejections=(),
+    )
+
+
 def test_cli_parser_accepts_repeated_explicit_analysis_dates():
     cli = _load_cli_module()
     args = cli.build_parser().parse_args(
@@ -1379,27 +1416,7 @@ def test_cli_decisions_file_replay_never_constructs_generator(tmp_path):
             "2026-04-07",
         ]
     )
-    replay = TradingAgentsReplayDiagnostics(
-        processed_dates=("2026-04-03",),
-        unprocessed_dates=(),
-        buy_orders=1,
-        sell_orders=0,
-        model_holds=0,
-        error_holds=0,
-        passive_holds=0,
-        constraint_holds=0,
-        superseded=0,
-    )
-    expected = TradingAgentsATLRunOutcome(
-        result=RunResult(
-            run_id="run_1",
-            status="completed",
-            metrics={"timeout_holds": 0},
-        ),
-        replay=replay,
-        fills=(),
-        rejections=(),
-    )
+    expected = _outcome_with(buy_orders=1)
     runner_calls = []
 
     class FakeRunner:
@@ -1472,26 +1489,7 @@ def test_cli_generation_writes_artifact_and_forwards_safe_model_config(tmp_path)
 
         def run_backtest(self, **kwargs):
             runner_calls.append(kwargs)
-            return TradingAgentsATLRunOutcome(
-                result=RunResult(
-                    run_id="run_1",
-                    status="completed",
-                    metrics={"timeout_holds": 0},
-                ),
-                replay=TradingAgentsReplayDiagnostics(
-                    processed_dates=("2026-04-03",),
-                    unprocessed_dates=(),
-                    buy_orders=1,
-                    sell_orders=0,
-                    model_holds=0,
-                    error_holds=0,
-                    passive_holds=0,
-                    constraint_holds=0,
-                    superseded=0,
-                ),
-                fills=(),
-                rejections=(),
-            )
+            return _outcome_with(buy_orders=1)
 
     result = cli.run_from_args(
         args,
@@ -1520,31 +1518,6 @@ def test_cli_generation_writes_artifact_and_forwards_safe_model_config(tmp_path)
         }
     ]
     assert runner_calls[0]["artifact_sha256"] == result.artifact_sha256
-
-
-def _outcome_with(**replay_overrides):
-    counters = {
-        "processed_dates": ("2026-04-03",),
-        "unprocessed_dates": (),
-        "buy_orders": 0,
-        "sell_orders": 0,
-        "model_holds": 0,
-        "error_holds": 0,
-        "passive_holds": 0,
-        "constraint_holds": 0,
-        "superseded": 0,
-    }
-    counters.update(replay_overrides)
-    return TradingAgentsATLRunOutcome(
-        result=RunResult(
-            run_id="run_1",
-            status="completed",
-            metrics={"total_return": 0.0, "timeout_holds": 0},
-        ),
-        replay=TradingAgentsReplayDiagnostics(**counters),
-        fills=(),
-        rejections=(),
-    )
 
 
 def test_cli_summary_warns_when_every_buy_was_priced_out(capsys):

@@ -34,7 +34,7 @@ The interaction is a loop driven by your client:
    5. GET  /api/v1/backtest/runs/{run_id}/result   -> trades, decisions, equity curve
 
 Important: each step has a **decision timeout** (``decision_timeout_seconds``,
-default 30s). If you don't submit in time, the Lab auto-submits a **hold** for
+default 60s). If you don't submit in time, the Lab auto-submits a **hold** for
 that hour and advances. Keep model latency under the timeout, or expect holds.
 
 All backtest endpoints are scoped to a **session** via the ``X-Session-Id``
@@ -127,7 +127,7 @@ Poll the current step and act when ``status == "waiting_decision"``.
      "step_index": 12,
      "total_steps": 60,
      "timestamp": "2026-04-15T14:30:00+00:00",
-     "decision_timeout_seconds": 30,
+     "decision_timeout_seconds": 60,
      "decision_deadline_at": "2026-04-15T...Z",
      "market_snapshot": {
        "timestamp": "...",
