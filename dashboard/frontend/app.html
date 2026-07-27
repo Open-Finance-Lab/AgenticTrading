@@ -1542,9 +1542,6 @@
                 <span class="account-label">Email</span>
                 <span id="accountEmail" class="account-value">—</span>
             </div>
-            <div class="account-actions">
-                <button id="authLogoutBtn" class="auth-btn auth-btn-secondary" type="button">Log out</button>
-            </div>
             <div class="account-section">
                 <h3 class="account-section-title">Profile photo</h3>
                 <div class="account-avatar-row">
@@ -1577,6 +1574,9 @@
                     <p id="changePasswordSuccess" class="account-success" hidden>Password updated. Other devices were signed out.</p>
                     <button class="auth-btn auth-btn-primary" type="submit">Update password</button>
                 </form>
+            </div>
+            <div class="account-section account-actions">
+                <button id="authLogoutBtn" class="auth-btn auth-btn-danger" type="button">Log out</button>
             </div>
         </div>
         <div id="accountSignedOut" class="account-card account-card--empty" hidden>
