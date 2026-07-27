@@ -160,7 +160,8 @@ that user before insert.
 | `attempts` | `INTEGER NOT NULL DEFAULT 0` | same | wrong-code counter |
 | `created_at` | `TIMESTAMP` | `TEXT NOT NULL` (ISO) | store-native, matching each twin's convention |
 | `expires_at` | `TIMESTAMP NOT NULL` | `TEXT NOT NULL` | `created_at` + 15 min |
-| `used_at` | `TIMESTAMP` nullable | `TEXT` nullable | set on commit; also what the cooldown reads |
+| `used_at` | `TIMESTAMP` nullable | `TEXT` nullable | set on commit |
+| `cancelled_at` | `TIMESTAMP` nullable | `TEXT` nullable | set on cancel (see "Cancel does not reset the cooldown" below) — never deleted, so `created_at` stays intact for the cooldown read |
 
 Plus `CREATE INDEX ... ON email_change_requests(user_id)`.
 
@@ -192,12 +193,30 @@ query — from yielding a live code.
 - `advance_email_change(request_id, code_hash) -> dict` — sets `stage='new'`, replaces
   `code_hash`, resets `attempts`, refreshes `expires_at`.
 - `record_email_change_attempt(request_id) -> int` — increments and returns `attempts`.
-- `cancel_email_change(user_id) -> None` — deletes any row for the user.
+- `mark_email_change_used(request_id) -> None` — sets `used_at`; does not delete the row.
+- `cancel_email_change(user_id) -> None` — sets `cancelled_at`; does not delete the row.
 - `update_email(user_id, new_email) -> dict` — normalizes, updates, returns
   `public_user(...)`. Maps `sqlite3.IntegrityError` / `psycopg.errors.UniqueViolation` to
   `ValueError("email_already_registered")` exactly as `create_user` does
   (`users.py:197`, `users_postgres.py:104`).
 - `last_email_change_request_at(user_id) -> str | None` — for the cooldown.
+
+### Cancel does not reset the cooldown
+
+`cancel_email_change` deactivates the row (`cancelled_at`) instead of deleting it, the same
+move `mark_email_change_used` already makes for a *completed* change. Deleting would also
+erase the row `last_email_change_request_at` reads, and `DELETE /api/auth/email-change`
+requires only a valid session, not the password — so a caller who already knows the
+account's password could loop request (send, password-gated) → cancel (wipe the cooldown
+clock, session-only) → request again, with the cooldown never enforced. That mail-bombs the
+original address and burns the platform's shared 300-emails/day Brevo quota in well under a
+minute. The 5-wrong-attempts path in `POST /api/auth/email-change/verify` calls the same
+`cancel_email_change`, so keeping the row closes that trigger too, with one change instead
+of two.
+
+`get_active_email_change` excludes a row once either `used_at` or `cancelled_at` is set, so
+a cancelled (or completed) request cannot be resumed — only its timestamp survives, purely
+to keep the cooldown clock honest.
 
 ### Routes
 
@@ -209,16 +228,18 @@ resource.
 | `POST /api/auth/email-change` | `{current_password, new_email}` | Verify password (400 on mismatch) → reject same-as-current (400) → reject already-registered (409) → 60-second cooldown (429) → create request → mail code to the **original** address. 503 if the mail send fails. |
 | `POST /api/auth/email-change/verify` | `{code}` | Stage-driven. Correct code at `stage='old'` → advance to `'new'`, mail a fresh code to the **new** address, return `{"stage": "new", "new_email": "..."}`. Correct code at `stage='new'` → commit, return `{"status": "ok", "user": {...}}`. Wrong code → increment attempts, 400; at 5 attempts the request is deleted and the response says to start over. No active request → 400. |
 | `GET /api/auth/email-change` | – | `{"pending": bool, "stage": ..., "new_email": ..., "expires_at": ...}` so a page reload does not strand the user mid-flow. |
-| `DELETE /api/auth/email-change` | – | Cancel. Also serves as the resend path: cancel, then restart, which re-verifies the password. |
+| `DELETE /api/auth/email-change` | – | Cancel — deactivates, does not delete (see above), so the 60-second cooldown still applies to the next request. Also serves as the resend path: cancel, then restart, which re-verifies the password. |
 
 Request models reuse the existing `_normalize_email` (`auth.py:29`) as a
 `@field_validator("email")`, matching `SignupRequest:41–44`.
 
 The duplicate-email check at request time is an account-enumeration oracle, and that is
-accepted: the caller is already authenticated and cooldown-limited to one probe per
-minute, while `POST /api/auth/signup` already returns 409 on a duplicate, unauthenticated
-and unlimited. It is not a new exposure, and failing early beats walking a user through
-two codes only to 409 at commit. The commit-time check remains as the TOCTOU backstop.
+accepted: `POST /api/auth/signup` already returns 409 on a duplicate, unauthenticated and
+unlimited, so this path is strictly narrower, not a new exposure. It runs **before** the
+cooldown check (see the order below), so the cooldown does not bound it — what bounds it is
+that this path additionally requires a valid session and the account's own password, which
+signup does not. Failing early beats walking a user through two codes only to 409 at
+commit. The commit-time check remains as the TOCTOU backstop.
 
 Password verification runs **before** the cooldown check, so a mistyped password does not
 burn the user's one-per-minute allowance. Full order for `POST /api/auth/email-change`:
@@ -377,11 +398,12 @@ refreshAuthUser();`), with `applyUpdatedUser(data.user)` (`:2133–2137`) on suc
 summary rows and the header dropdown refresh together. `initAuthUI()` itself is invoked
 once from `DOMContentLoaded` (`:2677`).
 
-Cache-bust bumps: `styles.css?v=64` → `65` (`app.html:12`) and `app.js?v=46` → `47`
+Cache-bust bumps: `styles.css?v=64` → `65` (`app.html:12`) and `app.js?v=47` → `48`
 (`app.html:1555`). **Re-read both lines at branch time** rather than trusting these
-numbers — they moved from 63 and 44 during the drafting of this spec alone, and they are a
-standing merge-conflict magnet across concurrent PRs. Bump to one above whatever `main`
-actually carries.
+numbers — they moved from 63/44 to 64/47 between this spec being drafted and PR #227
+landing on `main` afterward, and they are a standing merge-conflict magnet across
+concurrent PRs. Bump to one above whatever `main` actually carries; do not assume the
+numbers above are still one below current `main` by the time you branch.
 
 ## Testing
 
@@ -393,7 +415,9 @@ actually carries.
   the destructive-fixture localhost guard `require_local_postgres_url`, which is
   *imported* at `:20` and defined in `dashboard/backend/tests/_postgres_testing.py:21`.
 - **API (`test_auth.py`).** Full happy path across both stages; wrong password; wrong
-  code; attempt cap; expired code; cooldown → 429; new email already registered at request
+  code; attempt cap; expired code; cooldown → 429; **cooldown survives cancel-then-resend**
+  (the DELETE route needs only a session, not the password — this is the regression test
+  for the cancel/cooldown bypass); new email already registered at request
   (409) and at commit (409); same-as-current → 400; cancel; `GET` pending state;
   unauthenticated → 401 on every new route; other sessions revoked while the caller's
   survives; password change cancels a pending request (D7); **provider unconfigured → 503
@@ -406,8 +430,10 @@ actually carries.
   request payload shape, the timeout, and that a non-2xx returns `False` after printing
   ERROR.
 - **Route-contract freeze.** The five new route tuples go into `EXPECTED_FULL_CONTRACT`
-  (`test_app_composition.py:53–166`; the nine existing auth entries are `:68–76`) **in the
-  same commit** — otherwise `test_full_route_contract_unchanged` (`:237`) turns red on
+  (`test_app_composition.py:53–166`; the existing auth entries — nine at this spec's
+  `116874e` base, twelve as of PR #227's three `/api/auth/robinhood/*` additions — are
+  `:68–79`; re-grep before editing, `main` may have moved further by execution time) **in
+  the same commit** — otherwise `test_full_route_contract_unchanged` (`:237`) turns red on
   every open PR, not just this one. That set is the **only** frozen list in the suite that
   enumerates `/api/auth/*`: `test_router_move.py` holds nine `EXPECTED_*` sets but none is
   an auth set (its "auth" references are `protocol_auth`, the `/api/v1` agent-key path).
@@ -420,13 +446,18 @@ actually carries.
 
 ## Delivery
 
-1. **Operator step, before merge.** Create the Brevo account, verify a sender address, and
-   set `BREVO_API_KEY`, `ACCOUNT_EMAIL_FROM`, `ACCOUNT_EMAIL_FROM_NAME` in the **Render
-   dashboard**. Same rule as `CONTENT_DATABASE_URL`: `render.yaml` is documentation, not
-   the mechanism. Unset in prod means email change 503s while display name and logout work
+1. **Operator step, before merge.** Sender decided: `ACCOUNT_EMAIL_FROM=flymiss.privateserver@gmail.com`
+   (a personal Gmail address, not a domain we control — accepting the D1 free-mail-sender
+   caveats: Brevo rewrites the visible From and inbox placement is worse than an
+   authenticated domain). `BREVO_API_KEY` is issued and set locally in the (gitignored)
+   `dashboard/.env` for dev/internal testing; it still needs to be set in the **Render
+   dashboard** before this can work in prod — `render.yaml` is documentation, not the
+   mechanism. Unset in prod means email change 503s while display name and logout work
    normally.
 2. Branch `feat/account-identity-editing`, worktree `/mnt/d/github/atl-wt-account`, cut
-   from `origin/main` @ `116874e`.
+   from `origin/main` @ `116874e`. `origin/main` has since advanced (PR #227, #234), both
+   touching the exact files Parts A–C edit here — rebase onto current `origin/main` before
+   opening the PR; see the plan's Task 12, Step 1.
 3. `main` has no branch protection and the observed norm is that any collaborator merges
    any open PR at any moment. The PR therefore **opens as a draft** with
    `DO NOT MERGE until BREVO_API_KEY / ACCOUNT_EMAIL_FROM are set in Render` as the

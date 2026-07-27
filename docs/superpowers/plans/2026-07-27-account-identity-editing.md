@@ -22,6 +22,7 @@
 - **Seed-DB caution:** running the suite or the app locally in SQLite mode lazily creates `email_change_requests` inside the committed `dashboard/storage/data/backtest.db`, and the write can hide in the untracked `-wal` sidecar. Run `git status --short dashboard/storage/data/backtest.db` before **every** commit; it must show nothing.
 - **`@pg_only` fails open.** `TEST_POSTGRES_URL` is unset locally, so the Postgres tier silently skips. A green local run proves nothing about Task 7 — verify by grepping the CI job log.
 - **Worktree:** `/mnt/d/github/atl-wt-account`, branch `feat/account-identity-editing`, cut from `origin/main` @ `116874e`. Run all commands from that directory. Test command: `python -m pytest dashboard/backend/tests/ -q`.
+- **Base-commit drift:** `origin/main` has moved twice since this plan's `116874e` cut (PR #227, #234), and PR #227 alone edits `api/auth.py`, `test_app_composition.py`, `app.html`, `app.js`, and `styles.css` — the same files Tasks 2/5/8/9/10/11 edit. Every bare "currently line N" citation below is anchored to `116874e` and will be off by the time you read it; the named-anchor and literal-snippet text around each citation is what actually locates the edit — trust that over the number. Task 12, Step 1 rebases onto current `origin/main` before the suite runs and the PR opens.
 
 ---
 
@@ -253,7 +254,11 @@ _PROVIDER_ERROR_SNIPPET_CHARS = 200
 
 
 def email_configured() -> bool:
-    """True when the provider credentials needed to send anything are present."""
+    """True when the provider credentials needed to send anything are present.
+
+    Public and called from send_email() below (not just tested standalone) so
+    the "are we configured" check exists in exactly one place.
+    """
     return bool(os.getenv("BREVO_API_KEY") and os.getenv("ACCOUNT_EMAIL_FROM"))
 
 
@@ -269,14 +274,14 @@ def _one_line(value: str) -> str:
 
 async def send_email(to: str, subject: str, text_body: str) -> bool:
     """Send one plain-text transactional email. True on a 2xx, False otherwise."""
-    api_key = os.getenv("BREVO_API_KEY")
-    sender_email = os.getenv("ACCOUNT_EMAIL_FROM")
-    if not api_key or not sender_email:
+    if not email_configured():
         print(
             "ERROR: transactional email requested but BREVO_API_KEY / "
             "ACCOUNT_EMAIL_FROM are not set -- no message was sent"
         )
         return False
+    api_key = os.getenv("BREVO_API_KEY")
+    sender_email = os.getenv("ACCOUNT_EMAIL_FROM")
 
     payload = {
         "sender": {
@@ -903,7 +908,18 @@ class DisplayNameRequest(BaseModel):
 
 - [ ] **Step 4: Add the route**
 
-Insert after the `change_password` route (after its `return {"status": "ok"}`, currently line 200):
+Insert after the `change_password` route. `return {"status": "ok"}` is not a unique anchor
+— it also closes `logout` (currently line 173) — so anchor on the tail of
+`change_password` specifically, currently ending at line 205:
+
+```python
+    except Exception as exc:  # noqa: BLE001 -- password change already committed
+        print(
+            f"WARNING: change-password committed for user {current_user['id']} but "
+            f"other-session revocation failed: {exc!r}"
+        )
+    return {"status": "ok"}
+```
 
 ```python
 @router.put("/display-name")
@@ -930,7 +946,7 @@ async def update_display_name(
 
 - [ ] **Step 5: Update the route-contract freeze**
 
-In `dashboard/backend/tests/test_app_composition.py`, add to `EXPECTED_FULL_CONTRACT` beside the other `/api/auth/*` entries (currently lines 68-76):
+In `dashboard/backend/tests/test_app_composition.py`, add to `EXPECTED_FULL_CONTRACT` beside the other `/api/auth/*` entries (currently 12 entries at lines 68-79 — nine at this plan's `116874e` base, plus three `/api/auth/robinhood/*` tuples PR #227 added afterward; re-grep before editing, `main` may have moved further by execution time):
 
 ```python
     ("PUT", "/api/auth/display-name"),
@@ -973,11 +989,12 @@ git commit -m "feat(auth): add PUT /api/auth/display-name"
   - `update_email(user_id: int, new_email: str) -> dict`
   - `last_email_change_request_at(user_id: int) -> str | None`
 
-**Two deliberate deviations from the spec, both resolving gaps in it:**
+**Three deliberate deviations from the spec:**
 
 1. **`mark_email_change_used` is an eighth method the spec's list omits.** The spec gives `used_at` the job "set on commit; also what the cooldown reads" but lists no method that ever writes it, and has the cooldown read `created_at` instead. Deleting the row on commit would work, but then a user could start a second change one second after finishing the first. Marking it used keeps `get_active_email_change` returning `None` (the `used_at IS NULL` filter) *and* keeps the row visible to `last_email_change_request_at`, so the cooldown survives a completed change.
 
-2. **`created_at` is written explicitly rather than defaulted.** The spec's column table has SQLite use `DEFAULT CURRENT_TIMESTAMP`, which produces `'2026-07-27 10:00:00'` — space-separated, no offset — while the Postgres twin stores `_utcnow_iso()` (`'2026-07-27T10:00:00+00:00'`). One parser has to read both. Writing `_utcnow_iso()` in both twins makes the stored format identical, so `parse_stored_timestamp` has one job instead of two.
+2. **`created_at` is written explicitly rather than defaulted.** A bare SQLite `TIMESTAMP` column with no application-side write reads back as whatever the driver's default formatting produces — `'2026-07-27 10:00:00'`, space-separated, no offset — while the Postgres twin stores `_utcnow_iso()` (`'2026-07-27T10:00:00+00:00'`). One parser has to read both. Writing `_utcnow_iso()` explicitly in both twins makes the stored format identical, so `parse_stored_timestamp` has one job instead of two.
+3. **`cancel_email_change` deactivates rather than deletes.** The spec's store-methods list has it "delete[] any row for the user" (Part B). Deleting also erases the row `last_email_change_request_at` reads for the 60-second cooldown, and `DELETE /api/auth/email-change` (Task 8) needs only a valid session, not the password — so a caller who already knows the account's password could loop request (send, password-gated) → cancel (wipe the cooldown clock, session-only) → request again, with the cooldown never enforced: mail-bombing the original address and burning the platform's shared 300/day Brevo quota in well under a minute. `mark_email_change_used` already solves exactly this for the success path by setting `used_at` instead of deleting; `cancel_email_change` gets a matching `cancelled_at` column instead of a `DELETE`, so the cooldown survives a cancel exactly as it survives a completed change. The Task 9 five-wrong-attempts path calls this same method, so one change closes both trigger paths.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1071,13 +1088,16 @@ def test_mark_email_change_used_deactivates_but_keeps_the_row(store, user):
     assert store.last_email_change_request_at(user["id"]) is not None
 
 
-def test_cancel_email_change_removes_the_request(store, user):
-    store.create_email_change_request(user["id"], "next@example.com", hash_code("A"))
+def test_cancel_email_change_deactivates_but_preserves_the_cooldown(store, user):
+    row = store.create_email_change_request(user["id"], "next@example.com", hash_code("A"))
 
     store.cancel_email_change(user["id"])
 
     assert store.get_active_email_change(user["id"]) is None
-    assert store.last_email_change_request_at(user["id"]) is None
+    # The cooldown clock must survive a cancel: otherwise an authenticated caller
+    # who knows the password could loop request/cancel/request with the cooldown
+    # never enforced, mail-bombing the account and burning the shared quota.
+    assert store.last_email_change_request_at(user["id"]) == row["created_at"]
 
 
 def test_last_email_change_request_at_is_none_without_a_request(store, user):
@@ -1158,6 +1178,7 @@ In `UserStore._init_schema`, insert before `conn.commit()` (currently line 180):
                 created_at TIMESTAMP NOT NULL,
                 expires_at TIMESTAMP NOT NULL,
                 used_at TIMESTAMP,
+                cancelled_at TIMESTAMP,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
             """
@@ -1213,13 +1234,13 @@ In `dashboard/backend/users.py`, insert after `update_display_name` (added in Ta
         return dict(row)
 
     def get_active_email_change(self, user_id: int) -> Optional[Dict[str, Any]]:
-        """The user's in-flight request, or None if absent, used, or expired."""
+        """The user's in-flight request, or None if absent, used, cancelled, or expired."""
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
             SELECT * FROM email_change_requests
-            WHERE user_id = ? AND used_at IS NULL
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
             ORDER BY id DESC LIMIT 1
             """,
             (user_id,),
@@ -1265,7 +1286,9 @@ In `dashboard/backend/users.py`, insert after `update_display_name` (added in Ta
         )
         row = cursor.fetchone()
         conn.close()
-        return int(row["attempts"]) if row else 0
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return int(row["attempts"])
 
     def mark_email_change_used(self, request_id: int) -> None:
         """Retire a completed request without deleting it.
@@ -1284,10 +1307,19 @@ In `dashboard/backend/users.py`, insert after `update_display_name` (added in Ta
         conn.close()
 
     def cancel_email_change(self, user_id: int) -> None:
+        """Deactivate the user's request without deleting it.
+
+        Mirrors mark_email_change_used: cancelled_at makes get_active_email_change
+        skip the row while last_email_change_request_at still sees it. Deleting
+        instead would let an authenticated caller who knows the password loop
+        request/cancel/request with the 60-second cooldown never enforced --
+        mail-bombing the account and burning the shared Brevo quota.
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
-            "DELETE FROM email_change_requests WHERE user_id = ?", (user_id,)
+            "UPDATE email_change_requests SET cancelled_at = ? WHERE user_id = ?",
+            (_utcnow_iso(), user_id),
         )
         conn.commit()
         conn.close()
@@ -1381,7 +1413,9 @@ def test_email_change_request_lifecycle_postgres(temp_postgres_store):
     assert store.last_email_change_request_at(user["id"]) is not None
 
     store.cancel_email_change(user["id"])
-    assert store.last_email_change_request_at(user["id"]) is None
+    assert store.get_active_email_change(user["id"]) is None
+    # Deactivated, not deleted -- the cooldown clock must survive a cancel.
+    assert store.last_email_change_request_at(user["id"]) is not None
 
 
 @pg_only
@@ -1455,7 +1489,8 @@ In `_init_schema`, after the `idx_auth_sessions_user_id` index (currently ending
                         attempts INTEGER NOT NULL DEFAULT 0,
                         created_at TEXT NOT NULL,
                         expires_at TEXT NOT NULL,
-                        used_at TEXT
+                        used_at TEXT,
+                        cancelled_at TEXT
                     )
                     """
                 )
@@ -1507,13 +1542,13 @@ In `dashboard/backend/users_postgres.py`, insert after `update_display_name` (ad
         return dict(row)
 
     def get_active_email_change(self, user_id: int) -> Optional[Dict[str, Any]]:
-        """The user's in-flight request, or None if absent, used, or expired."""
+        """The user's in-flight request, or None if absent, used, cancelled, or expired."""
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     SELECT * FROM email_change_requests
-                    WHERE user_id = %s AND used_at IS NULL
+                    WHERE user_id = %s AND used_at IS NULL AND cancelled_at IS NULL
                     ORDER BY id DESC LIMIT 1
                     """,
                     (user_id,),
@@ -1554,7 +1589,9 @@ In `dashboard/backend/users_postgres.py`, insert after `update_display_name` (ad
                     (request_id,),
                 )
                 row = cur.fetchone()
-        return int(row["attempts"]) if row else 0
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return int(row["attempts"])
 
     def mark_email_change_used(self, request_id: int) -> None:
         """Retire a completed request without deleting it (see the SQLite twin)."""
@@ -1566,10 +1603,12 @@ In `dashboard/backend/users_postgres.py`, insert after `update_display_name` (ad
                 )
 
     def cancel_email_change(self, user_id: int) -> None:
+        """Deactivate without deleting (see the SQLite twin's cancel_email_change)."""
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM email_change_requests WHERE user_id = %s", (user_id,)
+                    "UPDATE email_change_requests SET cancelled_at = %s WHERE user_id = %s",
+                    (_utcnow_iso(), user_id),
                 )
 
     def last_email_change_request_at(self, user_id: int) -> Optional[str]:
@@ -1791,6 +1830,24 @@ def test_email_change_request_is_cooldown_limited(client, sent_emails):
     assert len(sent_emails) == 1
 
 
+def test_email_change_cooldown_survives_cancel_and_resend(client, sent_emails):
+    # The bug this guards against: DELETE needs only a session, not the
+    # password, so without a fix a caller who knows the password could loop
+    # request -> cancel -> request with the cooldown never enforced --
+    # mail-bombing the account and burning the shared Brevo daily quota.
+    token = _signup_and_token(client, email="bounce@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"}
+
+    assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
+    assert client.delete("/api/auth/email-change", headers=headers).status_code == 200
+
+    second = client.post("/api/auth/email-change", headers=headers, json=body)
+
+    assert second.status_code == 429
+    assert len(sent_emails) == 1
+
+
 def test_email_change_request_checks_password_before_cooldown(client, sent_emails):
     # A mistyped password must not burn the one-per-minute allowance.
     token = _signup_and_token(client, email="order@example.com")
@@ -1973,11 +2030,13 @@ async def request_email_change(
         raise HTTPException(status_code=400, detail="Current password is incorrect.")
     if payload.new_email == str(current_user["email"]).strip().lower():
         raise HTTPException(status_code=400, detail="That is already your email address.")
-    # This 409 is an account-enumeration oracle, and that is accepted: the caller
-    # is authenticated and limited to one probe a minute, while POST /signup
-    # already answers the same question unauthenticated and unlimited. Failing
-    # here beats walking someone through two codes only to 409 at commit -- the
-    # commit-time check stays as the TOCTOU backstop.
+    # This 409 is an account-enumeration oracle, and that is accepted: POST
+    # /signup already answers the same question unauthenticated and unlimited.
+    # It runs BEFORE the cooldown check below, so cooldown does not bound it --
+    # what bounds it is that this path additionally requires a valid session
+    # and the account's own password, unlike signup. Failing here beats walking
+    # someone through two codes only to 409 at commit -- the commit-time check
+    # stays as the TOCTOU backstop.
     if store.get_user_by_email(payload.new_email):
         raise HTTPException(status_code=409, detail="Email is already registered")
 
@@ -2027,7 +2086,11 @@ async def get_email_change(current_user: dict = Depends(get_current_user)):
 @router.delete("/email-change")
 async def cancel_email_change(current_user: dict = Depends(get_current_user)):
     """Cancel a pending change. Also the resend path: cancel, then start again,
-    which re-verifies the password."""
+    which re-verifies the password.
+
+    Store-level cancel deactivates rather than deletes, so a caller cannot use
+    this (session-only, no password) to reset the 60-second request cooldown.
+    """
     users_module.user_store.cancel_email_change(current_user["id"])
     return {"status": "ok"}
 ```
@@ -2617,7 +2680,7 @@ git commit -m "feat(account): move log out to the bottom in destructive red"
 - Consumes: the five routes from Tasks 5, 8, 9.
 - Produces: `initDisplayNameForm()` and `initEmailChangeForm()`, registered in the initializer block at the tail of `initAuthUI()`.
 
-**`updateAuthUI()` does not call `updateAccountPage()`** — verified at source. So every success path must call `updateAccountPage()` explicitly after `applyUpdatedUser(...)`, or the summary rows at the top of the card go stale while the header dropdown updates.
+**`applyUpdatedUser(user)` already calls `updateAuthUI()`, which calls `updateAccountPage()` at its own tail** — confirmed at source (`app.js`, `updateAuthUI`'s last statement before the `refreshHomeModules` hook). `initAvatarControls()`'s existing success handler already relies on exactly this cascade without an explicit follow-up call. So neither new success path below needs to call `updateAccountPage()` again after `applyUpdatedUser(...)` — doing so only double-renders harmlessly, and the existing convention in this file is not to.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2649,10 +2712,10 @@ def test_email_change_copy_mentions_the_spam_folder():
 def test_cache_bust_versions_were_bumped():
     html = _APP_HTML.read_text(encoding="utf-8")
     assert "styles.css?v=65" in html
-    assert "app.js?v=47" in html
+    assert "app.js?v=48" in html
 ```
 
-**Before running:** re-read the two cache-bust lines and set the assertions to *one above whatever `main` actually carries* — they moved from 63/44 to 64/46 during the spec's drafting alone.
+**Before running:** re-read the two cache-bust lines and set the assertions to *one above whatever `main` actually carries* — they moved from 63/44 to 64/47 between the spec being drafted and PR #227 landing on `main` afterward, so `app.js` is **already** at `?v=47`; the bump target below is `48`, not `47`. Do not assume the numbers in this plan are still one below current `main`.
 
 ```bash
 grep -n 'styles.css?v=\|app.js?v=' dashboard/frontend/app.html
@@ -2714,7 +2777,7 @@ Then bump both cache-bust versions (line 12 and the last `<script>`):
 
 ```html
     <link rel="stylesheet" href="styles.css?v=65">
-    <script src="app.js?v=47"></script>
+    <script src="app.js?v=48"></script>
 ```
 
 - [ ] **Step 4: Add the supporting CSS**
@@ -2812,8 +2875,7 @@ function initDisplayNameForm() {
     if (submitBtn) submitBtn.disabled = true;
     try {
       const data = await AuthAPI.updateDisplayName(value);
-      applyUpdatedUser(data.user);
-      updateAccountPage();   // updateAuthUI does NOT refresh the account card
+      applyUpdatedUser(data.user);   // cascades into updateAuthUI() -> updateAccountPage()
       if (successEl) successEl.hidden = false;
     } catch (error) {
       if (errorEl) {
@@ -2894,8 +2956,7 @@ function initEmailChangeForm() {
       } else {
         const data = await AuthAPI.verifyEmailChange(codeInput?.value || '');
         if (data.status === 'ok') {
-          applyUpdatedUser(data.user);
-          updateAccountPage();
+          applyUpdatedUser(data.user);   // cascades into updateAuthUI() -> updateAccountPage()
           reset();
           if (successEl) successEl.hidden = false;
         } else {
@@ -2976,17 +3037,29 @@ git commit -m "feat(account): add display name and email editors to the account 
 
 **Files:** none modified (verification only), plus the PR itself.
 
-- [ ] **Step 1: Run the entire suite**
+- [ ] **Step 1: Rebase onto current `origin/main`, then run the entire suite**
+
+`origin/main` has moved since this plan's stated base (`116874e`) — PR #227 and #234 landed
+during drafting, touching `api/auth.py`, `test_app_composition.py`, `app.html`, `app.js`,
+and `styles.css`, and more may land before Tasks 1-11 finish. Rebase first so "no
+regressions" is measured against what this will actually merge onto, not a stale citation:
+
+```bash
+git fetch origin main
+git rebase origin/main
+```
+
+Resolve any conflicts (they will cluster in the five files above) before continuing. Then:
 
 Run: `python -m pytest dashboard/backend/tests/ -q`
 Expected: **zero failures.** The suite has been green end-to-end since PR #71, so a red test is a real regression, not a known-flaky.
 
-Record the pass count rather than checking it against a number from memory. To confirm this branch only *added* coverage, compare against the base commit directly:
+Record the pass count rather than checking it against a number from memory. To confirm this branch only *added* coverage, compare against a disposable checkout of the (now-current, post-rebase) `main` tip — not a number from memory, and not just the commit hash printed without ever being run:
 
 ```bash
-git stash list  # ensure clean
-python -m pytest dashboard/backend/tests/ -q 2>&1 | tail -3        # this branch
-git -C /mnt/d/github/agent-trading-lab log --oneline -1            # base checkout
+git worktree add /mnt/d/github/atl-main-check origin/main
+python -m pytest /mnt/d/github/atl-main-check/dashboard/backend/tests/ -q 2>&1 | tail -3
+git worktree remove /mnt/d/github/atl-main-check
 ```
 
 If `test_deleted_shim_is_not_importable` fails with `DID NOT RAISE ModuleNotFoundError`, that is stale bytecode, not a regression: `rm -rf dashboard/backend/engines dashboard/backend/services`.
@@ -3051,10 +3124,15 @@ If the tier skipped on CI too, say so plainly rather than reporting Task 7 as ve
 
 - [ ] **Step 6: Operator handoff (blocking, and not yours to do)**
 
-Report to the user that the PR is a draft pending **their** action:
+Brevo account + sender chosen: `ACCOUNT_EMAIL_FROM=flymiss.privateserver@gmail.com`, a
+personal Gmail address (accepting D1's free-mail-sender caveats — Brevo rewrites the
+visible From, worse inbox placement than an authenticated domain). `BREVO_API_KEY` is set
+locally in the gitignored `dashboard/.env` for dev/internal testing only — it was never
+written into this doc or any other git-tracked file. Report to the user that the PR is a
+draft pending **their** remaining action:
 
-1. Create a Brevo account, verify a single sender address.
-2. Set `BREVO_API_KEY`, `ACCOUNT_EMAIL_FROM`, and optionally `ACCOUNT_EMAIL_FROM_NAME` in the **Render dashboard** — `render.yaml` is documentation, not the mechanism.
+1. ~~Create a Brevo account, verify a single sender address.~~ Done.
+2. Set `BREVO_API_KEY`, `ACCOUNT_EMAIL_FROM=flymiss.privateserver@gmail.com`, and optionally `ACCOUNT_EMAIL_FROM_NAME` in the **Render dashboard** — `render.yaml` is documentation, not the mechanism.
 3. Then the draft can be marked ready.
 
 - [ ] **Step 7: Issue follow-ups at merge (ask before filing)**
