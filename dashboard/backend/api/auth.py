@@ -65,6 +65,10 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(min_length=1, max_length=128)
 
 
+class DisplayNameRequest(BaseModel):
+    display_name: str = Field(min_length=1, max_length=100)
+
+
 AVATAR_MAX_DECODED_BYTES = 100 * 1024
 
 # Declared mime -> required leading bytes. WebP is RIFF-framed, checked separately.
@@ -204,6 +208,28 @@ async def change_password(
             f"other-session revocation failed: {exc!r}"
         )
     return {"status": "ok"}
+
+
+@router.put("/display-name")
+async def update_display_name(
+    payload: DisplayNameRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    display_name = payload.display_name.strip()
+    if not display_name:
+        # Field(min_length=1) measures the raw string, so "   " reaches here.
+        # Storing it would repeat issue #167 (a whitespace-only name persisted
+        # as an empty label with no way to tell it from a missing one).
+        raise HTTPException(status_code=400, detail="Display name cannot be empty.")
+    # No password required: a display name is not an authentication factor, and
+    # gating it behind one is not what any comparable platform does.
+    try:
+        user = users_module.user_store.update_display_name(
+            current_user["id"], display_name
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Session is no longer valid.") from exc
+    return {"user": user}
 
 
 def _store_avatar(user_id: int, value: Optional[str]) -> dict:

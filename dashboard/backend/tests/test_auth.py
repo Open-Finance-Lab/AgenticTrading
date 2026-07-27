@@ -395,3 +395,64 @@ def test_auth_routes_resolve_the_store_at_call_time(temp_user_store, monkeypatch
     )
     assert response.status_code == 200
     assert temp_user_store.get_user_by_email("callsite@example.com") is not None
+
+
+def test_update_display_name_happy_path(client):
+    token = _signup_and_token(client, email="name@example.com")
+
+    response = client.put(
+        "/api/auth/display-name",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"display_name": "New Name"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["display_name"] == "New Name"
+    # And it is durable, not just echoed back.
+    me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me.json()["user"]["display_name"] == "New Name"
+
+
+def test_update_display_name_strips_whitespace(client):
+    token = _signup_and_token(client, email="trim@example.com")
+
+    response = client.put(
+        "/api/auth/display-name",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"display_name": "  Trimmed  "},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["user"]["display_name"] == "Trimmed"
+
+
+def test_update_display_name_rejects_whitespace_only(client):
+    # Field(min_length=1) passes on "   " because pydantic measures the raw
+    # string. Storing it would repeat issue #167 on a second surface.
+    token = _signup_and_token(client, email="blank@example.com")
+
+    response = client.put(
+        "/api/auth/display-name",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"display_name": "     "},
+    )
+
+    assert response.status_code == 400
+    assert "empty" in response.json()["detail"].lower()
+
+
+def test_update_display_name_requires_auth(client):
+    response = client.put("/api/auth/display-name", json={"display_name": "Nope"})
+    assert response.status_code == 401
+
+
+def test_update_display_name_rejects_overlong_value(client):
+    token = _signup_and_token(client, email="long@example.com")
+
+    response = client.put(
+        "/api/auth/display-name",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"display_name": "x" * 101},
+    )
+
+    assert response.status_code == 422
