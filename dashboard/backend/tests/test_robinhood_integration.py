@@ -27,6 +27,7 @@ import time
 import pytest
 from cryptography.fernet import Fernet
 
+from dashboard.backend.db_url import describe_database_url
 from dashboard.backend.domain.brokers import repository
 from dashboard.backend.domain.brokers.repository import BrokerConnectionStore
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
@@ -233,18 +234,24 @@ def test_pending_link_pop_is_single_use():
     assert record["agent_id"] == "agent_x"
     assert record["tokens"]["access_token"] == "tok"
     # A redeemed code is spent: replaying the callback cannot re-bind tokens.
-    assert pending_links.pop(code) is None
+    # pop() mutates, so it is called outside the assert -- under `python -O`
+    # asserts are stripped and an inlined pop would silently not happen.
+    replayed = pending_links.pop(code)
+    assert replayed is None
 
 
 def test_pending_link_unknown_or_empty_code_returns_none():
-    assert pending_links.pop("never-issued") is None
-    assert pending_links.pop("") is None
+    unknown = pending_links.pop("never-issued")
+    empty = pending_links.pop("")
+    assert unknown is None
+    assert empty is None
 
 
 def test_expired_pending_link_returns_none(monkeypatch):
     monkeypatch.setattr(pending_links, "PENDING_TTL_SECONDS", -1)
     code = _put()
-    assert pending_links.pop(code) is None
+    expired = pending_links.pop(code)
+    assert expired is None
 
 
 def test_expired_records_are_purged_by_later_writes(monkeypatch):
@@ -252,18 +259,22 @@ def test_expired_records_are_purged_by_later_writes(monkeypatch):
     stale = _put(user_id=1)
     monkeypatch.setattr(pending_links, "PENDING_TTL_SECONDS", 600)
     fresh = _put(user_id=2)
+    survivor = pending_links.pop(fresh)
     assert stale not in pending_links._pending
-    assert pending_links.pop(fresh) is not None
+    assert survivor is not None
 
 
 def test_pending_link_store_evicts_instead_of_growing_unbounded(monkeypatch):
     """A replayed callback must not be able to grow the store without bound."""
     monkeypatch.setattr(pending_links, "MAX_PENDING_LINKS", 3)
     codes = [_put(user_id=i) for i in range(12)]
-    assert len(pending_links._pending) <= 3
+    stored = len(pending_links._pending)
     # Oldest evicted first; newest survives.
-    assert pending_links.pop(codes[0]) is None
-    assert pending_links.pop(codes[-1]) is not None
+    oldest = pending_links.pop(codes[0])
+    newest = pending_links.pop(codes[-1])
+    assert stored <= 3
+    assert oldest is None
+    assert newest is not None
 
 
 def test_pending_link_copies_the_token_dict():
@@ -449,12 +460,13 @@ def test_build_user_store_returns_the_postgres_twin(monkeypatch, capsys, env_var
     assert not isinstance(store, BrokerConnectionStore)
     assert constructed["url"] == url
 
-    out = capsys.readouterr().out
-    assert "broker_connections backend: postgres" in out
-    # Name the target so a typo'd/staging URL is visible...
-    assert "db.example.com" in out
-    assert "atl" in out
-    # ...but never the credentials.
+    out = capsys.readouterr().out.strip()
+    # Assert the whole line, not substrings of a URL: it pins the exact contract
+    # (name the host/db so a typo'd or staging target is visible) and cannot pass
+    # on an accidental partial match.
+    expected_target = describe_database_url(url)
+    assert out == f"broker_connections backend: postgres ({expected_target})"
+    # ...and the credentials never appear.
     assert "hunter2" not in out
     assert "atl_user" not in out
 
