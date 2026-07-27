@@ -15,7 +15,15 @@ from typing import Any, Dict, Optional
 import psycopg
 
 from dashboard.backend.db_url import require_postgres_url
-from dashboard.backend.users import _utcnow, _utcnow_iso, hash_password, public_user, verify_password
+from dashboard.backend.users import (
+    EMAIL_CHANGE_TTL_MINUTES,
+    _utcnow,
+    _utcnow_iso,
+    hash_password,
+    is_expired,
+    public_user,
+    verify_password,
+)
 
 SESSION_TTL_DAYS = 7
 
@@ -84,6 +92,28 @@ class PostgresUserStore:
                     """
                     CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
                     ON auth_sessions(user_id)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS email_change_requests (
+                        id SERIAL PRIMARY KEY,
+                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        new_email TEXT NOT NULL,
+                        stage TEXT NOT NULL,
+                        code_hash TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
+                        created_at TEXT NOT NULL,
+                        expires_at TEXT NOT NULL,
+                        used_at TEXT,
+                        cancelled_at TEXT
+                    )
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_email_change_requests_user_id
+                    ON email_change_requests(user_id)
                     """
                 )
 
@@ -227,6 +257,143 @@ class PostgresUserStore:
                     (display_name.strip(), user_id),
                 )
                 row = cur.fetchone()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def _email_change_expiry(self) -> str:
+        return (
+            (_utcnow() + timedelta(minutes=EMAIL_CHANGE_TTL_MINUTES))
+            .replace(microsecond=0)
+            .isoformat()
+        )
+
+    def create_email_change_request(
+        self, user_id: int, new_email: str, code_hash: str
+    ) -> Dict[str, Any]:
+        """Replace any in-flight request for this user with a fresh stage-'old' one."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM email_change_requests WHERE user_id = %s", (user_id,)
+                )
+                cur.execute(
+                    """
+                    INSERT INTO email_change_requests
+                        (user_id, new_email, stage, code_hash, created_at, expires_at)
+                    VALUES (%s, %s, 'old', %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (
+                        user_id,
+                        new_email.strip().lower(),
+                        code_hash,
+                        _utcnow_iso(),
+                        self._email_change_expiry(),
+                    ),
+                )
+                row = cur.fetchone()
+        return dict(row)
+
+    def get_active_email_change(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """The user's in-flight request, or None if absent, used, cancelled, or expired."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM email_change_requests
+                    WHERE user_id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        if not row or is_expired(row["expires_at"]):
+            return None
+        return dict(row)
+
+    def advance_email_change(self, request_id: int, code_hash: str) -> Dict[str, Any]:
+        """Move a verified stage-'old' request to stage 'new' with a fresh code."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_change_requests
+                    SET stage = 'new', code_hash = %s, attempts = 0, expires_at = %s
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (code_hash, self._email_change_expiry(), request_id),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return dict(row)
+
+    def record_email_change_attempt(self, request_id: int) -> int:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_change_requests
+                    SET attempts = attempts + 1
+                    WHERE id = %s
+                    RETURNING attempts
+                    """,
+                    (request_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return int(row["attempts"])
+
+    def mark_email_change_used(self, request_id: int) -> None:
+        """Retire a completed request without deleting it (see the SQLite twin)."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE email_change_requests SET used_at = %s WHERE id = %s",
+                    (_utcnow_iso(), request_id),
+                )
+
+    def cancel_email_change(self, user_id: int) -> None:
+        """Deactivate without deleting (see the SQLite twin's cancel_email_change)."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE email_change_requests SET cancelled_at = %s WHERE user_id = %s",
+                    (_utcnow_iso(), user_id),
+                )
+
+    def last_email_change_request_at(self, user_id: int) -> Optional[str]:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT created_at FROM email_change_requests
+                    WHERE user_id = %s ORDER BY id DESC LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        return str(row["created_at"]) if row else None
+
+    def update_email(self, user_id: int, new_email: str) -> Dict[str, Any]:
+        # .lower() is mandatory, not stylistic: this twin's users.email UNIQUE is
+        # case-SENSITIVE (the SQLite twin's is COLLATE NOCASE), so skipping it
+        # would let two casings of one address coexist in prod while being
+        # rejected locally -- twin drift no SQLite-only test run can see.
+        normalized_email = new_email.strip().lower()
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE users SET email = %s WHERE id = %s RETURNING *",
+                        (normalized_email, user_id),
+                    )
+                    row = cur.fetchone()
+        except psycopg.errors.UniqueViolation as exc:
+            raise ValueError("email_already_registered") from exc
         if not row:
             raise ValueError("user_not_found")
         return public_user(row)

@@ -62,6 +62,7 @@ def temp_postgres_store():
     store = users_postgres_module.PostgresUserStore(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute("DELETE FROM email_change_requests")
             cur.execute("DELETE FROM auth_sessions")
             cur.execute("DELETE FROM users")
     yield store
@@ -305,3 +306,78 @@ def test_update_display_name_postgres(temp_postgres_store):
 def test_update_display_name_missing_user_postgres(temp_postgres_store):
     with pytest.raises(ValueError, match="user_not_found"):
         temp_postgres_store.update_display_name(999_999, "Ghost")
+
+
+@pg_only
+def test_email_change_request_lifecycle_postgres(temp_postgres_store):
+    from dashboard.backend.verification_codes import hash_code
+
+    store = temp_postgres_store
+    user = store.create_user("pgmail@example.com", "PG Mail", "securepass1")
+
+    row = store.create_email_change_request(user["id"], "  NEXT@Example.COM ", hash_code("A"))
+    assert row["stage"] == "old"
+    assert row["new_email"] == "next@example.com"
+    assert row["attempts"] == 0
+
+    assert store.record_email_change_attempt(row["id"]) == 1
+
+    advanced = store.advance_email_change(row["id"], hash_code("Z9Y8X7"))
+    assert advanced["stage"] == "new"
+    assert advanced["attempts"] == 0
+    assert advanced["code_hash"] == hash_code("Z9Y8X7")
+
+    store.mark_email_change_used(row["id"])
+    assert store.get_active_email_change(user["id"]) is None
+    assert store.last_email_change_request_at(user["id"]) is not None
+
+    store.cancel_email_change(user["id"])
+    assert store.get_active_email_change(user["id"]) is None
+    # Deactivated, not deleted -- the cooldown clock must survive a cancel.
+    assert store.last_email_change_request_at(user["id"]) is not None
+
+
+@pg_only
+def test_update_email_postgres(temp_postgres_store):
+    store = temp_postgres_store
+    user = store.create_user("pgold@example.com", "PG Old", "securepass1")
+
+    updated = store.update_email(user["id"], "  PGNEW@Example.COM  ")
+
+    # Lowercasing is mandatory here: this twin's UNIQUE is NOT case-insensitive,
+    # so an un-normalized write would let two casings of one address coexist in
+    # prod while SQLite rejects them locally.
+    assert updated["email"] == "pgnew@example.com"
+    assert store.get_user_by_email("pgnew@example.com") is not None
+
+
+@pg_only
+def test_update_email_conflict_postgres(temp_postgres_store):
+    store = temp_postgres_store
+    user = store.create_user("pgmine@example.com", "PG Mine", "securepass1")
+    store.create_user("pgtaken@example.com", "PG Taken", "securepass1")
+
+    with pytest.raises(ValueError, match="email_already_registered"):
+        store.update_email(user["id"], "pgtaken@example.com")
+
+
+def test_store_twins_expose_the_same_public_surface():
+    """A method in one twin and not the other is a prod-only crash.
+
+    This compares classes, not instances, so it needs no live Postgres -- which
+    matters because every @pg_only case above fails open when TEST_POSTGRES_URL
+    is unset.
+    """
+    import dashboard.backend.users as users_module
+    import dashboard.backend.users_postgres as users_postgres_module
+
+    def public_methods(cls):
+        return {
+            name
+            for name in dir(cls)
+            if not name.startswith("_") and callable(getattr(cls, name))
+        }
+
+    sqlite_methods = public_methods(users_module.UserStore)
+    postgres_methods = public_methods(users_postgres_module.PostgresUserStore)
+    assert sqlite_methods == postgres_methods
