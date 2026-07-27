@@ -25,6 +25,7 @@
             backtest: { page: 'playground', playgroundTab: 'backtest' },
             paper: { page: 'playground', playgroundTab: 'paper' },
             agents: { page: 'playground', playgroundTab: 'agents' },
+            marketplace: { page: 'playground', playgroundTab: 'marketplace' },
             playground: { page: 'playground', playgroundTab: 'agents' },
             'my-algo': { page: 'playground', playgroundTab: 'agents' },
             contest: { page: 'competition', competitionTab: 'daily' },
@@ -81,10 +82,13 @@
     html[data-nav-boot][data-nav-page="community"] .primary-nav [data-mode="community"] { background-color: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="playground"] .playground-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="agents"] .playground-subtabs [data-playground-tab="agents"],
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="marketplace"] .playground-subtabs [data-playground-tab="marketplace"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .playground-subtabs [data-playground-tab="backtest"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] .playground-subtabs [data-playground-tab="paper"] { background: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] #playgroundAgentsPanel,
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="marketplace"] #playgroundAgentsPanel,
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #playgroundAgentsPanel { display: none !important; }
+    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="marketplace"] #playgroundMarketplacePanel { display: block !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .main-container.playground-backtest-panel { display: grid !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #paperTradingView { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"] .competition-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
@@ -816,6 +820,7 @@
     <div id="playgroundView" class="page-view playground-view" style="display: none;">
         <div class="subtab-bar playground-subtabs">
             <button class="subtab-btn active" data-playground-tab="agents">My Agents</button>
+            <button class="subtab-btn" data-playground-tab="marketplace">Agent Marketplace</button>
             <button class="subtab-btn" data-playground-tab="backtest">Backtest</button>
             <button class="subtab-btn" data-playground-tab="paper">Paper Trading</button>
         </div>
@@ -892,6 +897,23 @@
                 <p id="agentsErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't reach the server to load agents. Check your connection and try again.</p>
             </div>
         </div>
+        <div id="playgroundMarketplacePanel" class="playground-panel" style="display: none;">
+            <div class="marketplace-section">
+                <div class="marketplace-section-head">
+                    <div>
+                        <h2 class="page-title">Agent Marketplace</h2>
+                        <p class="marketplace-section-sub">Browse open agent templates and copy them into My Agents to customize and backtest.</p>
+                    </div>
+                    <div class="agent-toolbar-search marketplace-search">
+                        <svg class="agent-toolbar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                        <input id="marketplaceSearchInput" type="search" placeholder="Search templates..." aria-label="Search marketplace templates">
+                    </div>
+                </div>
+                <div id="marketplaceGrid" class="agents-grid marketplace-grid"></div>
+                <p id="marketplaceEmptyState" class="control-helper" hidden>No templates match your search.</p>
+                <p id="marketplaceErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't load the marketplace. Check your connection and try again.</p>
+            </div>
+        </div>
     </div>
 
     <!-- Fullscreen Agent Editor -->
@@ -913,6 +935,24 @@
                     <span class="agent-editor-cash-label">Allocated capital (paper, max $3,000)</span>
                     <input id="agentEditorCashAllocation" class="agent-editor-cash-input" type="number" min="0" max="3000" step="100" placeholder="0" aria-label="Allocated capital for paper trading">
                 </label>
+                <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
+                    <div class="agent-editor-broker-head">
+                        <h3 class="agent-editor-intro-title">Robinhood live trading</h3>
+                        <span id="agentEditorRobinhoodStatus" class="agent-editor-broker-status">Checking…</span>
+                    </div>
+                    <p class="agent-editor-intro-text">Connect your Robinhood Agentic account to run this agent with real money. Orders only execute when live trading is enabled and the server execute switch is on.</p>
+                    <div id="agentEditorRobinhoodMeta" class="agent-editor-broker-meta" hidden></div>
+                    <label class="agent-editor-live-toggle">
+                        <input id="agentEditorLiveTradingEnabled" type="checkbox">
+                        <span>Enable live trading for this agent</span>
+                    </label>
+                    <div class="agent-editor-broker-actions">
+                        <button id="agentEditorConnectRobinhoodBtn" class="home-btn home-btn-secondary" type="button">Connect Robinhood</button>
+                        <button id="agentEditorDisconnectRobinhoodBtn" class="home-btn home-btn-secondary" type="button" hidden>Disconnect</button>
+                        <button id="agentEditorRunLiveBtn" class="home-btn home-btn-primary" type="button">Run Live</button>
+                    </div>
+                    <p id="agentEditorLiveRunResult" class="agent-editor-live-result" hidden></p>
+                </div>
             </div>
             <div class="agent-editor-header-actions">
                 <div class="agent-editor-mode-toggle" role="group" aria-label="Editor mode">
@@ -1551,8 +1591,8 @@
     <script src="market-events/MarketEventCard.js"></script>
     <script src="market-events/MarketEventFeed.js"></script>
     <script src="js/portfolio.js?v=15"></script>
-    <script src="js/agent-editor.js?v=11"></script>
-    <script src="app.js?v=46"></script>
+    <script src="js/agent-editor.js?v=12"></script>
+    <script src="app.js?v=47"></script>
     <script src="js/leaderboard.js?v=16"></script>
     <script src="home-page.js?v=36"></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

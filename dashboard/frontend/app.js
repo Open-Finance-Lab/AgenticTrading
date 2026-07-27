@@ -1467,6 +1467,140 @@ async function loadAgents() {
   }
 }
 
+let marketplaceTemplates = [];
+let marketplaceCloneInFlight = false;
+
+function getFilteredMarketplaceTemplates() {
+  const query = (document.getElementById('marketplaceSearchInput')?.value || '').trim().toLowerCase();
+  let list = marketplaceTemplates.slice();
+  if (query) {
+    list = list.filter((template) => {
+      const haystack = [
+        template.name,
+        template.description,
+        template.category,
+        template.author,
+        ...(template.tags || []),
+        template.model_name,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  }
+  return list;
+}
+
+function renderMarketplaceGrid() {
+  const grid = document.getElementById('marketplaceGrid');
+  const emptyEl = document.getElementById('marketplaceEmptyState');
+  const errorEl = document.getElementById('marketplaceErrorState');
+  if (!grid) return;
+
+  if (errorEl) errorEl.hidden = true;
+  const templates = getFilteredMarketplaceTemplates();
+  grid.innerHTML = '';
+
+  if (!templates.length) {
+    if (emptyEl) emptyEl.hidden = marketplaceTemplates.length > 0;
+    return;
+  }
+  if (emptyEl) emptyEl.hidden = true;
+
+  templates.forEach((template) => {
+    const card = document.createElement('div');
+    card.className = 'section-card agent-card marketplace-card';
+    const modeLabel = template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction';
+    const tags = (template.tags || [])
+      .slice(0, 3)
+      .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
+      .join('');
+    card.innerHTML = `
+      <div class="agent-card-top">
+        <div class="agent-card-identity">
+          ${agentRobotIcon()}
+          <div class="agent-card-identity-text">
+            <h3 class="agent-name">${escapeHtml(template.name)}</h3>
+            <p class="agent-card-submeta">${escapeHtml(template.model_name || 'local-model')} · ${escapeHtml(template.category || 'General')}</p>
+          </div>
+        </div>
+        <span class="marketplace-mode-chip">${escapeHtml(modeLabel)}</span>
+      </div>
+      <div class="marketplace-card-body">
+        <p class="marketplace-card-description">${escapeHtml(template.description || 'Open agent template.')}</p>
+        <div class="marketplace-card-meta">
+          <span>By ${escapeHtml(template.author || 'Community')}</span>
+          ${template.step_count ? `<span>${template.step_count} step${template.step_count === 1 ? '' : 's'}</span>` : ''}
+        </div>
+        ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
+      </div>
+      <div class="agent-card-actions agent-card-actions--status">
+        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Copy to My Agents</button>
+      </div>`;
+    grid.appendChild(card);
+  });
+
+  grid.querySelectorAll('.marketplace-clone-btn').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const templateId = btn.dataset.templateId;
+      const template = marketplaceTemplates.find((item) => item.template_id === templateId);
+      if (!template || marketplaceCloneInFlight) return;
+      marketplaceCloneInFlight = true;
+      btn.disabled = true;
+      const prevLabel = btn.textContent;
+      btn.textContent = 'Copying…';
+      try {
+        await cloneMarketplaceTemplate(template);
+      } catch (error) {
+        alert(error.message || 'Failed to copy template');
+      } finally {
+        marketplaceCloneInFlight = false;
+        btn.disabled = false;
+        btn.textContent = prevLabel;
+      }
+    });
+  });
+}
+
+function renderMarketplaceError() {
+  const grid = document.getElementById('marketplaceGrid');
+  const emptyEl = document.getElementById('marketplaceEmptyState');
+  const errorEl = document.getElementById('marketplaceErrorState');
+  if (grid) grid.innerHTML = '';
+  if (emptyEl) emptyEl.hidden = true;
+  if (errorEl) errorEl.hidden = false;
+}
+
+async function loadMarketplace() {
+  try {
+    const data = await API.get(`${API_BASE}/api/v1/agents/marketplace`);
+    marketplaceTemplates = data.templates || [];
+    renderMarketplaceGrid();
+  } catch (error) {
+    console.warn('Failed to load marketplace:', error.message);
+    marketplaceTemplates = [];
+    renderMarketplaceError();
+  }
+}
+
+async function cloneMarketplaceTemplate(template) {
+  const data = await API.post(
+    `${API_BASE}/api/v1/agents/marketplace/${encodeURIComponent(template.template_id)}/clone`,
+    {},
+  );
+  const agent = data?.agent;
+  if (!agent?.agent_id) {
+    throw new Error('Copy failed — no agent returned');
+  }
+  applyActiveAgent(agent);
+  await loadAgents();
+  switchPlaygroundTab('agents');
+  if (window.AgentEditor) {
+    window.AgentEditor.open(agent);
+  }
+}
+
 function openCreateExternalAgentModal() {
   closeAddAgentModal();
   const modal = document.getElementById('createExternalAgentModal');
@@ -2442,6 +2576,87 @@ async function openDiscordWithAccount(event) {
   }
 }
 
+/** Shared success handling once a Robinhood link is confirmed (reopen editor + confirm). */
+async function finishRobinhoodLinkSuccess(agentId) {
+  if (agentId && window.AgentEditor?.open) {
+    try {
+      const headers = { 'x-session-id': SESSION_ID };
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, { headers });
+      if (response.ok) {
+        const data = await response.json();
+        if (data.agent) window.AgentEditor.open(data.agent);
+      }
+    } catch (error) {
+      console.warn('Could not reopen agent editor after Robinhood link:', error);
+    }
+  }
+  alert('Robinhood connected. Enable live trading, save, then Run Live.');
+}
+
+/** Handle /app?robinhood=linked|pending|error after OAuth callback. */
+async function handleRobinhoodOAuthReturn() {
+  const params = new URLSearchParams(window.location.search);
+  const robinhood = (params.get('robinhood') || '').toLowerCase();
+  if (!robinhood) return;
+
+  const agentId = params.get('agent_id');
+  const reason = params.get('reason');
+  const linkCode = params.get('link_code');
+  params.delete('robinhood');
+  params.delete('agent_id');
+  params.delete('reason');
+  params.delete('link_code');
+  const clean = params.toString();
+  const next = `${window.location.pathname}${clean ? `?${clean}` : ''}${window.location.hash}`;
+  window.history.replaceState(getNavigationState(), '', next);
+
+  if (robinhood === 'linked') {
+    await finishRobinhoodLinkSuccess(agentId);
+    return;
+  }
+
+  if (robinhood === 'pending') {
+    try {
+      const headers = { 'Content-Type': 'application/json', 'x-session-id': SESSION_ID };
+      const token = localStorage.getItem(AUTH_TOKEN_KEY);
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const response = await fetch(`${API_BASE}/api/auth/robinhood/complete`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ link_code: linkCode }),
+      });
+      if (response.ok) {
+        await finishRobinhoodLinkSuccess(agentId);
+        return;
+      }
+      let detail = null;
+      try {
+        const data = await response.json();
+        detail = data && data.detail;
+      } catch (parseError) {
+        // Non-JSON error body - fall back to the generic messages below.
+      }
+      if (response.status === 403) {
+        alert(detail || 'Robinhood link was started from a different account.');
+      } else if (response.status === 400) {
+        alert(detail || 'Robinhood link expired - please connect again.');
+      } else {
+        alert(detail || 'Could not complete Robinhood link. Please try again.');
+      }
+    } catch (error) {
+      console.warn('Robinhood link completion failed:', error);
+      alert('Could not complete Robinhood link. Please try again.');
+    }
+    return;
+  }
+
+  if (robinhood === 'error') {
+    alert(`Robinhood connection failed (${reason || 'oauth_failed'}). Use localhost and a desktop browser.`);
+  }
+}
+
 /** Handle /app?discord=linked|error after OAuth callback. */
 async function handleDiscordOAuthReturn() {
   const params = new URLSearchParams(window.location.search);
@@ -2640,6 +2855,7 @@ function initAuthUI() {
   updateAuthUI();
   openAuthFromUrl();
   handleDiscordOAuthReturn();
+  handleRobinhoodOAuthReturn();
   wireDiscordAccountButtons();
   initChangePasswordForm();
   initAvatarControls();
@@ -4872,6 +5088,7 @@ function viewParamForNavState(state) {
     if (state.page === 'playground') {
         if (state.playgroundTab === 'backtest') return 'backtest';
         if (state.playgroundTab === 'paper') return 'paper';
+        if (state.playgroundTab === 'marketplace') return 'marketplace';
         return 'agents';
     }
     if (state.page === 'competition') {
@@ -5114,11 +5331,13 @@ function showPlaygroundPanel(tab) {
     updatePlaygroundSubtabs();
 
     const agents = document.getElementById('playgroundAgentsPanel');
+    const marketplace = document.getElementById('playgroundMarketplacePanel');
     const backtest = document.querySelector('.playground-backtest-panel')
       || document.querySelector('.main-container');
     const paper = document.getElementById('paperTradingView');
 
     if (agents) agents.style.display = tab === 'agents' ? 'block' : 'none';
+    if (marketplace) marketplace.style.display = tab === 'marketplace' ? 'block' : 'none';
     if (backtest) backtest.style.display = tab === 'backtest' ? 'grid' : 'none';
     if (paper) paper.style.display = tab === 'paper' ? 'block' : 'none';
 
@@ -5131,6 +5350,9 @@ function showPlaygroundPanel(tab) {
     } else if (tab === 'paper') {
         currentMode = 'paper';
         loadPaperTradingData();
+    } else if (tab === 'marketplace') {
+        currentMode = 'marketplace';
+        loadMarketplace();
     } else {
         currentMode = 'agents';
         // Cache-only repaint so the panel is not blank while agents load;
@@ -5218,6 +5440,7 @@ function navigateToPage(page, options = {}) {
     hide(myAlgoView);
     hide(leaderboardView);
     hide(document.getElementById('playgroundAgentsPanel'));
+    hide(document.getElementById('playgroundMarketplacePanel'));
     hide(document.getElementById('competitionParticipantsPanel'));
     hide(document.getElementById('competitionAboutPanel'));
 
@@ -5340,6 +5563,7 @@ function initNavigation() {
     });
 
     document.getElementById('agentSearchInput')?.addEventListener('input', applyAgentFilters);
+    document.getElementById('marketplaceSearchInput')?.addEventListener('input', renderMarketplaceGrid);
     document.getElementById('agentsCategories')?.addEventListener('click', (event) => {
       const prevBtn = event.target.closest('[data-agent-grid-prev]');
       const nextBtn = event.target.closest('[data-agent-grid-next]');

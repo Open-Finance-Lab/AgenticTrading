@@ -78,6 +78,10 @@ class NoExternalRunsError(AgentServiceError):
     """Raised when importing a session that has no external backtest runs."""
 
 
+class MarketplaceTemplateNotFoundError(AgentServiceError):
+    """Raised when a marketplace template id is unknown."""
+
+
 class InvalidVersionFieldError(AgentServiceError):
     """Raised when an agent-version field is outside its allowed set."""
 
@@ -249,6 +253,7 @@ class AgentService:
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
         cash_allocation: Any = _UNSET,
+        live_trading_enabled: Any = _UNSET,
     ) -> Dict[str, Any]:
         agent = self.agents.update_agent(
             agent_id,
@@ -257,6 +262,7 @@ class AgentService:
             description=description,
             pipeline=pipeline,
             cash_allocation=cash_allocation,
+            live_trading_enabled=live_trading_enabled,
         )
         if not agent:
             raise AgentNotFoundError()
@@ -288,6 +294,35 @@ class AgentService:
             description=description,
             cash_allocation=cash_allocation,
         )
+
+    def clone_marketplace_template(
+        self,
+        *,
+        template_id: str,
+        owner_user_id: Optional[int],
+        owner_browser_session: Optional[str],
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Copy a marketplace template into the caller's My Agents list."""
+        from dashboard.backend.domain.agents import marketplace as marketplace_mod
+
+        template = marketplace_mod.get_marketplace_template(template_id)
+        if not template:
+            raise MarketplaceTemplateNotFoundError()
+
+        resolved_name = (name or template.get("name") or "Marketplace Agent").strip()
+        agent = self.create_agent(
+            name=resolved_name,
+            model_name=str(template.get("model_name") or "local-model").strip() or "local-model",
+            owner_user_id=owner_user_id,
+            owner_browser_session=owner_browser_session,
+            agent_type="builtin",
+            description=template.get("description"),
+        )
+        pipeline = template.get("pipeline")
+        if isinstance(pipeline, list) and pipeline:
+            agent = self.agents.update_agent(agent["agent_id"], pipeline=pipeline) or agent
+        return self.attach_equity_sparklines([self.agent_with_stats(agent)])[0]
 
     def list_builtin_agents_with_stats(self) -> List[Dict[str, Any]]:
         """List all built-in agents (platform-wide) enriched with run stats.

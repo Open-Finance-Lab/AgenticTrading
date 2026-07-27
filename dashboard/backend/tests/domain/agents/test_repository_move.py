@@ -72,7 +72,7 @@ def test_create_agent_schema(store):
     assert set(agent.keys()) == {
         "agent_id", "name", "session_id", "model_name", "agent_type",
         "description", "pipeline", "cash_allocation", "api_key_prefix", "owner_user_id", "scopes",
-        "created_at", "last_used_at", "api_key",
+        "created_at", "last_used_at", "api_key", "live_trading_enabled",
     }
     assert agent["name"] == "My Agent"
     assert agent["model_name"] == "gpt-x"

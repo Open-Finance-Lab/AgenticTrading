@@ -216,6 +216,281 @@
     );
   }
 
+  function authHeaders() {
+    const headers = { 'x-session-id': window.SESSION_ID };
+    const token = localStorage.getItem('auth-token');
+    if (token) headers.Authorization = `Bearer ${token}`;
+    return headers;
+  }
+
+  function formatUsd(value) {
+    if (value == null || Number.isNaN(Number(value))) return '—';
+    return `$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  }
+
+  function setBrokerMessage(message, isError) {
+    const resultEl = document.getElementById('agentEditorLiveRunResult');
+    if (!resultEl) return;
+    resultEl.hidden = !message;
+    resultEl.textContent = message || '';
+    resultEl.classList.toggle('agent-editor-live-result--error', !!isError);
+  }
+
+  function fetchWithTimeout(url, options, timeoutMs) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+  }
+
+  async function refreshRobinhoodStatus() {
+    const statusEl = document.getElementById('agentEditorRobinhoodStatus');
+    const metaEl = document.getElementById('agentEditorRobinhoodMeta');
+    const connectBtn = document.getElementById('agentEditorConnectRobinhoodBtn');
+    const disconnectBtn = document.getElementById('agentEditorDisconnectRobinhoodBtn');
+    const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
+    const token = localStorage.getItem('auth-token');
+
+    if (!token) {
+      if (statusEl) {
+        statusEl.textContent = 'Sign in required';
+        statusEl.className = 'agent-editor-broker-status agent-editor-broker-status--warn';
+      }
+      if (connectBtn) {
+        connectBtn.hidden = false;
+        connectBtn.disabled = false;
+        connectBtn.textContent = 'Sign in to connect';
+      }
+      if (disconnectBtn) disconnectBtn.hidden = true;
+      if (metaEl) metaEl.hidden = true;
+      setBrokerMessage('Log in to your ATL account, then click Connect Robinhood.', true);
+      return;
+    }
+
+    if (connectBtn) {
+      connectBtn.hidden = false;
+      connectBtn.disabled = false;
+      connectBtn.textContent = 'Connect Robinhood';
+    }
+
+    if (statusEl) {
+      statusEl.textContent = 'Checking…';
+      statusEl.className = 'agent-editor-broker-status';
+    }
+
+    try {
+      const response = await fetchWithTimeout(
+        `${API_BASE}/api/v1/robinhood/status`,
+        { headers: authHeaders() },
+        8000,
+      );
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Status check failed');
+
+      const connected = Boolean(data.connected);
+      if (statusEl) {
+        statusEl.textContent = connected ? 'Connected' : 'Not connected';
+        statusEl.className = connected
+          ? 'agent-editor-broker-status agent-editor-broker-status--ok'
+          : 'agent-editor-broker-status agent-editor-broker-status--warn';
+      }
+      if (connectBtn) {
+        connectBtn.hidden = connected;
+        connectBtn.disabled = false;
+        connectBtn.textContent = 'Connect Robinhood';
+      }
+      if (disconnectBtn) disconnectBtn.hidden = !connected;
+      if (metaEl) {
+        if (connected) {
+          metaEl.hidden = false;
+          const parts = [];
+          if (data.buying_power != null) parts.push(`Buying power: ${formatUsd(data.buying_power)}`);
+          if (data.portfolio_value != null) parts.push(`Portfolio: ${formatUsd(data.portfolio_value)}`);
+          parts.push(`Execute switch: ${data.execute_enabled ? 'ON' : 'OFF (review only)'}`);
+          metaEl.textContent = parts.join(' · ') || 'Connected — click Connect again to refresh account details.';
+        } else {
+          metaEl.hidden = true;
+        }
+      }
+      if (!connected) {
+        setBrokerMessage('Not connected yet. Click Connect Robinhood to authorize.');
+      } else {
+        setBrokerMessage('');
+      }
+    } catch (error) {
+      const timedOut = error?.name === 'AbortError';
+      if (statusEl) {
+        statusEl.textContent = timedOut ? 'Not connected' : 'Unavailable';
+        statusEl.className = 'agent-editor-broker-status agent-editor-broker-status--warn';
+      }
+      if (connectBtn) {
+        connectBtn.hidden = false;
+        connectBtn.disabled = false;
+        connectBtn.textContent = 'Connect Robinhood';
+      }
+      if (disconnectBtn) disconnectBtn.hidden = true;
+      setBrokerMessage(
+        timedOut
+          ? 'Status check timed out. You can still click Connect Robinhood.'
+          : (error.message || 'Could not check Robinhood status.'),
+        true,
+      );
+      console.warn('Robinhood status failed:', error);
+    }
+
+    if (liveToggle && currentAgent) {
+      liveToggle.checked = Boolean(currentAgent.live_trading_enabled);
+    }
+  }
+
+  async function connectRobinhood() {
+    const token = localStorage.getItem('auth-token');
+    if (!token) {
+      setBrokerMessage('Please sign in first.', true);
+      if (typeof window.openAuthModal === 'function') window.openAuthModal('login');
+      else alert('Please sign in to your ATL account first.');
+      return;
+    }
+    if (!currentAgent?.agent_id) {
+      setBrokerMessage('Open a saved agent before connecting Robinhood.', true);
+      return;
+    }
+    if (isDemoAgent(currentAgent.agent_id)) {
+      setBrokerMessage('Create a real agent in My Agents first (demo agents cannot connect).', true);
+      return;
+    }
+
+    const connectBtn = document.getElementById('agentEditorConnectRobinhoodBtn');
+    if (connectBtn) {
+      connectBtn.disabled = true;
+      connectBtn.textContent = 'Connecting…';
+    }
+    setBrokerMessage('Starting Robinhood authorization…');
+
+    try {
+      const response = await fetch(`${API_BASE}/api/auth/robinhood/start`, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_id: currentAgent.agent_id }),
+      });
+      let data = {};
+      try {
+        data = await response.json();
+      } catch (_) {
+        data = {};
+      }
+      if (!response.ok) {
+        const detail = data.detail;
+        const msg = typeof detail === 'string' ? detail : 'Could not start Robinhood OAuth';
+        throw new Error(msg);
+      }
+      if (data.already_linked) {
+        setBrokerMessage('Robinhood is already connected for your account.');
+        await refreshRobinhoodStatus();
+        return;
+      }
+      if (data.authorize_url) {
+        setBrokerMessage('Redirecting to Robinhood…');
+        window.location.href = data.authorize_url;
+        return;
+      }
+      throw new Error('No authorize URL returned from server');
+    } catch (error) {
+      const msg = error.message || 'Robinhood connect failed';
+      setBrokerMessage(msg, true);
+      showSaveStatus(msg, true);
+      if (/failed to fetch|networkerror/i.test(msg)) {
+        alert('Cannot reach the backend. Start it with: uvicorn dashboard.backend.app:app --reload');
+      }
+    } finally {
+      if (connectBtn) {
+        connectBtn.disabled = false;
+        connectBtn.textContent = 'Connect Robinhood';
+      }
+    }
+  }
+
+  async function disconnectRobinhood() {
+    if (!window.confirm('Disconnect Robinhood from your ATL account?')) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/v1/robinhood/disconnect`, {
+        method: 'DELETE',
+        headers: authHeaders(),
+      });
+      if (!response.ok) {
+        const data = await response.json();
+        throw new Error(data.detail || 'Disconnect failed');
+      }
+      await refreshRobinhoodStatus();
+      showSaveStatus('Robinhood disconnected');
+    } catch (error) {
+      showSaveStatus(error.message || 'Disconnect failed', true);
+    }
+  }
+
+  async function runLive() {
+    if (!currentAgent?.agent_id || isDemoAgent(currentAgent.agent_id)) {
+      showSaveStatus('Save a real agent before running live', true);
+      return;
+    }
+    const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
+    if (!liveToggle?.checked) {
+      showSaveStatus('Enable live trading for this agent first', true);
+      return;
+    }
+
+    if (isDirty) {
+      showSaveStatus('Save changes before Run Live', true);
+      return;
+    }
+
+    const confirmMsg =
+      'Run this agent against your Robinhood Agentic account? Real orders may be placed if the server execute switch is ON.';
+    if (!window.confirm(confirmMsg)) return;
+
+    const resultEl = document.getElementById('agentEditorLiveRunResult');
+    const runBtn = document.getElementById('agentEditorRunLiveBtn');
+    if (runBtn) {
+      runBtn.disabled = true;
+      runBtn.textContent = 'Running…';
+    }
+    if (resultEl) {
+      resultEl.hidden = false;
+      resultEl.textContent = 'Running live cycle…';
+    }
+
+    try {
+      const response = await fetch(
+        `${API_BASE}/api/v1/robinhood/agents/${encodeURIComponent(currentAgent.agent_id)}/live-run`,
+        {
+          method: 'POST',
+          headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          body: JSON.stringify({ dry_run: false }),
+        }
+      );
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || 'Live run failed');
+      const execCount = Array.isArray(data.executions) ? data.executions.length : 0;
+      const submitted = (data.executions || []).filter((e) => e.status === 'submitted').length;
+      if (resultEl) {
+        resultEl.textContent = data.dry_run
+          ? `Dry run ${data.run_id}: reviewed ${execCount} order(s), none submitted (ROBINHOOD_EXECUTE is off).`
+          : `Live run ${data.run_id}: ${submitted} order(s) submitted, ${execCount} total reviewed.`;
+      }
+      showSaveStatus(data.dry_run ? 'Live review completed (execute off)' : 'Live run completed');
+    } catch (error) {
+      if (resultEl) {
+        resultEl.hidden = false;
+        resultEl.textContent = error.message || 'Live run failed';
+      }
+      showSaveStatus(error.message || 'Live run failed', true);
+    } finally {
+      if (runBtn) {
+        runBtn.disabled = false;
+        runBtn.textContent = 'Run Live';
+      }
+    }
+  }
+
   function getEditorState() {
     const nameInput = document.getElementById('agentEditorNameInput');
     const descInput = document.getElementById('agentEditorDescription');
@@ -265,11 +540,13 @@
       subAgentsOut = collectPipelineFromDom();
       sendPipeline = true;
     }
+    const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
     return {
       name: nameInput ? nameInput.value.trim() : '',
       description: descInput ? descInput.value.trim() : '',
       cash_allocation,
       model_name: modelSelect ? modelSelect.value : '',
+      live_trading_enabled: Boolean(liveToggle?.checked),
       subAgents: subAgentsOut,
       sendPipeline,
     };
@@ -539,6 +816,8 @@
     if (meta) {
       meta.textContent = agent.agent_type === 'builtin' ? 'Built-in agent' : 'External agent';
     }
+    const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
+    if (liveToggle) liveToggle.checked = Boolean(agent.live_trading_enabled);
   }
 
   function populateModelSelect(agent) {
@@ -577,11 +856,12 @@
     }));
   }
 
-  async function patchAgent(agent, name, description, pipeline, cash_allocation, model_name) {
+  async function patchAgent(agent, name, description, pipeline, cash_allocation, model_name, live_trading_enabled) {
     const payload = {
       name,
       description: description || null,
       cash_allocation,
+      live_trading_enabled: Boolean(live_trading_enabled),
     };
     if (pipeline) payload.pipeline = serializePipeline(pipeline);
     if (model_name) payload.model_name = model_name;
@@ -753,6 +1033,7 @@
     renderPipeline();
     setEditorMode(isSimplePipeline(subAgents) ? 'simple' : 'advanced');
     refreshRunHistory(currentAgent);
+    refreshRobinhoodStatus();
 
     const view = document.getElementById('agentEditorView');
     if (view) {
@@ -855,7 +1136,8 @@
         state.description,
         state.sendPipeline ? subAgents : null,
         state.cash_allocation,
-        state.model_name
+        state.model_name,
+        state.live_trading_enabled
       );
       currentAgent = state.sendPipeline
         ? { ...currentAgent, ...updated, pipeline: subAgents }
@@ -947,6 +1229,9 @@
     document.getElementById('agentEditorResetBtn')?.addEventListener('click', resetPipeline);
     document.getElementById('agentEditorModeSimple')?.addEventListener('click', () => setEditorMode('simple'));
     document.getElementById('agentEditorModeAdvanced')?.addEventListener('click', () => setEditorMode('advanced'));
+    document.getElementById('agentEditorConnectRobinhoodBtn')?.addEventListener('click', connectRobinhood);
+    document.getElementById('agentEditorDisconnectRobinhoodBtn')?.addEventListener('click', disconnectRobinhood);
+    document.getElementById('agentEditorRunLiveBtn')?.addEventListener('click', runLive);
     document.getElementById('agentEditorRunBacktestBtn')?.addEventListener('click', () => {
       if (!currentAgent) return;
       if (typeof window.openRunBacktestModal === 'function') {

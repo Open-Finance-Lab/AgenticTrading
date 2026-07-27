@@ -221,6 +221,8 @@ dashboard/storage/data/cache/*.csv
 dashboard/storage/data/cache/*.json
 dashboard/storage/data/temp/
 dashboard/storage/data
+# Broker audit trail: order records + portfolio holdings. Never commit.
+dashboard/storage/audit/
 *.tmp
 
 # Log files

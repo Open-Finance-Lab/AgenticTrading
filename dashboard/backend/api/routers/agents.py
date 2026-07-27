@@ -19,9 +19,11 @@ from dashboard.backend.domain.backtesting.constants import (
 from dashboard.backend.domain.agents.repository import _UNSET
 from dashboard.backend.domain.agents.service import (
     AgentNotFoundError,
+    MarketplaceTemplateNotFoundError,
     NoExternalRunsError,
     agent_service,
 )
+from dashboard.backend.domain.agents import marketplace as marketplace_catalog
 from dashboard.backend.api.dependencies import (
     _owner_context,
     _require_agent_access,
@@ -66,6 +68,7 @@ class UpdateAgentBody(BaseModel):
         ge=0,
         le=MAX_AGENT_CASH_ALLOCATION,
     )
+    live_trading_enabled: Optional[bool] = None
 
     @field_validator("name", "model_name")
     @classmethod
@@ -147,6 +150,49 @@ async def list_agents(
         trading_session_id=ctx.get("trading_session"),
     )
     return {"agents": agents}
+
+
+@router.get("/marketplace")
+async def list_marketplace_agents():
+    """List open agent templates available in the Agent Marketplace.
+
+    Public and unauthenticated. Templates are config-driven and do not expose
+    API keys or owner information.
+    """
+    return {"templates": marketplace_catalog.list_marketplace_templates()}
+
+
+class CloneMarketplaceBody(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+
+
+@router.post("/marketplace/{template_id}/clone")
+async def clone_marketplace_agent(
+    template_id: str,
+    body: CloneMarketplaceBody,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Copy a marketplace template into the caller's My Agents list."""
+    ctx = _require_owner_context(request, authorization)
+    cash = float(DEFAULT_AGENT_CASH_ALLOCATION)
+    if ctx["user_id"] and cash > 0:
+        try:
+            portfolio_service.ensure_cash_for_new_agent(ctx["user_id"], cash)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        agent = agent_service.clone_marketplace_template(
+            template_id=template_id,
+            owner_user_id=ctx["user_id"],
+            owner_browser_session=ctx["browser_session"],
+            name=body.name.strip() if body.name else None,
+        )
+    except MarketplaceTemplateNotFoundError:
+        raise HTTPException(status_code=404, detail="Marketplace template not found")
+    if ctx["user_id"]:
+        portfolio_service.get_or_create_portfolio(ctx["user_id"])
+    return {"agent": agent}
 
 
 @router.get("/builtin")
@@ -274,12 +320,14 @@ async def update_agent(
     fields_set = body.model_fields_set
     pipeline_provided = "pipeline" in fields_set
     cash_allocation_provided = "cash_allocation" in fields_set
+    live_trading_provided = "live_trading_enabled" in fields_set
     if (
         body.name is None
         and body.model_name is None
         and body.description is None
         and not pipeline_provided
         and not cash_allocation_provided
+        and not live_trading_provided
     ):
         raise HTTPException(status_code=400, detail="No fields to update")
 
@@ -293,6 +341,7 @@ async def update_agent(
         pipeline_arg = _UNSET
 
     cash_allocation_arg = body.cash_allocation if cash_allocation_provided else _UNSET
+    live_trading_arg = body.live_trading_enabled if live_trading_provided else _UNSET
 
     # When a signed-in owner changes cash_allocation, the portfolio ledger has
     # to follow (#175). Validate it *first* -- writing nothing -- so a rejected
@@ -324,6 +373,7 @@ async def update_agent(
             description=body.description,
             pipeline=pipeline_arg,
             cash_allocation=cash_allocation_arg,
+            live_trading_enabled=live_trading_arg,
         )
     except AgentNotFoundError:
         raise HTTPException(status_code=404, detail="Agent not found")
