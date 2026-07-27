@@ -16,16 +16,18 @@ Same logic, different contexts.
 import json
 import os
 from typing import Dict, List, Optional, Tuple
+from datetime import datetime, time
 
 from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
+from dashboard.backend.domain.backtesting.currency import CurrencyContext
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
 )
 
-# NOTE: domain.leaderboard.strategies._common is imported lazily inside the
-# methods that need it — the strategies package imports this module back
-# (buy_hold et al.), so a top-level import here is a circular import.
+# The baseline calculations operate on already-normalized bars and keep their
+# market-session filtering local so A-share timestamps are not interpreted as
+# US/Eastern dates.
 
 try:
     import pandas as pd
@@ -33,6 +35,76 @@ except ImportError:
     import subprocess
     subprocess.check_call(["pip", "install", "pandas"])
     import pandas as pd
+
+
+def _market_hours_only(timestamps, market_timezone: str):
+    """Keep regular sessions in the timezone belonging to the market profile."""
+    import pytz
+
+    market_tz = pytz.timezone(market_timezone)
+    kept = []
+    for timestamp in timestamps:
+        local = timestamp.astimezone(market_tz)
+        local_time = local.time()
+        if market_timezone == "Asia/Shanghai":
+            in_session = (
+                time(9, 30) <= local_time <= time(11, 30)
+                or time(13, 0) <= local_time <= time(15, 0)
+            )
+        else:
+            in_session = (
+                (local.hour > 9 and local.hour < 16)
+                or (local.hour == 9 and local.minute >= 30)
+                or (local.hour == 16 and local.minute == 0)
+            )
+        if in_session:
+            kept.append(timestamp)
+    return kept
+
+
+def _timestamps_in_window(timestamps, start_date: str, end_date: str, market_timezone: str):
+    import pytz
+
+    start = datetime.strptime(start_date, "%Y-%m-%d").date()
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    market_tz = pytz.timezone(market_timezone)
+    return [
+        timestamp
+        for timestamp in timestamps
+        if start <= timestamp.astimezone(market_tz).date() <= end
+    ]
+
+
+def _equity_point(
+    timestamp,
+    equity: float,
+    cash: float,
+    positions_value: float,
+    currency_context: CurrencyContext | None,
+) -> Dict:
+    record = {
+        "timestamp": timestamp,
+        "equity": equity,
+        "cash": cash,
+        "positions_value": positions_value,
+        "daily_return": 0,
+    }
+    if currency_context is not None:
+        record = currency_context.reporting_equity_record(record)
+    record["timestamp"] = (
+        timestamp.isoformat() if hasattr(timestamp, "isoformat") else str(timestamp)
+    )
+    for field in (
+        "equity",
+        "cash",
+        "positions_value",
+        "native_equity",
+        "native_cash",
+        "native_positions_value",
+    ):
+        if field in record:
+            record[field] = round(float(record[field]), 2)
+    return record
 
 
 class BaselineGenerator:
@@ -143,7 +215,9 @@ class BaselineGenerator:
         start_date: str,
         end_date: str,
         initial_capital: float = INITIAL_CAPITAL,
-        symbols_to_buy: Optional[List[str]] = None
+        symbols_to_buy: Optional[List[str]] = None,
+        market_timezone: str = "US/Eastern",
+        currency_context: CurrencyContext | None = None,
     ) -> List[Dict]:
         """
         Generate Buy & Hold baseline curve.
@@ -181,29 +255,10 @@ class BaselineGenerator:
         if not all_timestamps:
             return []
         
-        # Filter: only keep regular market hours (9:30 AM - 4:00 PM ET)
-        import pytz
-        et_tz = pytz.timezone('US/Eastern')
-        market_hours_only = []
-        
-        for ts in all_timestamps:
-            ts_et = ts.astimezone(et_tz)
-            hour = ts_et.hour
-            minute = ts_et.minute
-            
-            # Market hours: 9:30 AM through 4:00 PM ET
-            is_market_hours = (hour > 9 and hour < 16) or \
-                             (hour == 9 and minute >= 30) or \
-                             (hour == 16 and minute == 0)
-            
-            if is_market_hours:
-                market_hours_only.append(ts)
-        
-        all_timestamps = market_hours_only
-        from dashboard.backend.domain.leaderboard.strategies._common import (
-            timestamps_in_contest,
+        all_timestamps = _market_hours_only(all_timestamps, market_timezone)
+        all_timestamps = _timestamps_in_window(
+            all_timestamps, start_date, end_date, market_timezone
         )
-        all_timestamps = timestamps_in_contest(all_timestamps, start_date, end_date)
 
         if not all_timestamps:
             return []
@@ -211,19 +266,33 @@ class BaselineGenerator:
         first_ts = all_timestamps[0]
 
         # Buy equal amounts of available stocks
+        native_initial_capital = (
+            currency_context.to_native(initial_capital, first_ts)
+            if currency_context is not None
+            else initial_capital
+        )
+        native_symbol = (
+            "¥"
+            if currency_context is not None
+            and currency_context.native_currency == "CNY"
+            else "$"
+        )
         positions = {}
-        cash = initial_capital
+        cash = native_initial_capital
         num_symbols = len(bars_subset)
         
         print(f"\n   📋 Baseline buying {num_symbols} stocks equally:")
-        print(f"      Allocation per stock: ${initial_capital / num_symbols:,.0f}")
+        print(
+            f"      Allocation per stock: {native_symbol}"
+            f"{native_initial_capital / num_symbols:,.0f}"
+        )
         
         for symbol, df in bars_subset.items():
             if first_ts not in df.index:
                 continue
             
             price = df.loc[first_ts, "close"]
-            allocation = initial_capital / num_symbols
+            allocation = native_initial_capital / num_symbols
             shares = int(allocation / price)
             
             if shares > 0:
@@ -231,8 +300,8 @@ class BaselineGenerator:
                 cash -= shares * price
         
         print(f"      Stocks bought: {len(positions)} ({', '.join(sorted(positions.keys())[:10])}{'...' if len(positions) > 10 else ''})")
-        print(f"      Total invested: ${initial_capital - cash:,.0f}")
-        print(f"      Cash remaining: ${cash:,.0f}")
+        print(f"      Total invested: {native_symbol}{native_initial_capital - cash:,.0f}")
+        print(f"      Cash remaining: {native_symbol}{cash:,.0f}")
         
         # Build forward-filled price cache for smooth equity curve
         price_cache = {}
@@ -263,13 +332,15 @@ class BaselineGenerator:
             
             total_equity = cash + positions_value
             
-            equity_curve.append({
-                "timestamp": timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
-                "equity": round(total_equity, 2),
-                "cash": round(cash, 2),
-                "positions_value": round(positions_value, 2),
-                "daily_return": 0
-            })
+            equity_curve.append(
+                _equity_point(
+                    timestamp,
+                    total_equity,
+                    cash,
+                    positions_value,
+                    currency_context,
+                )
+            )
         
         return equity_curve
     
@@ -279,7 +350,9 @@ class BaselineGenerator:
         start_date: str,
         end_date: str,
         initial_capital: float = INITIAL_CAPITAL,
-        symbols_to_track: Optional[List[str]] = None
+        symbols_to_track: Optional[List[str]] = None,
+        market_timezone: str = "US/Eastern",
+        currency_context: CurrencyContext | None = None,
     ) -> List[Dict]:
         """
         Generate Index baseline curve (equal-weight index).
@@ -314,34 +387,26 @@ class BaselineGenerator:
         if not all_timestamps:
             return []
         
-        # Filter: only keep regular market hours (9:30 AM - 4:00 PM ET)
-        import pytz
-        et_tz = pytz.timezone('US/Eastern')
-        market_hours_only = []
-        
-        for ts in all_timestamps:
-            ts_et = ts.astimezone(et_tz)
-            hour = ts_et.hour
-            minute = ts_et.minute
-            
-            # Market hours: 9:30 AM through 4:00 PM ET
-            is_market_hours = (hour > 9 and hour < 16) or \
-                             (hour == 9 and minute >= 30) or \
-                             (hour == 16 and minute == 0)
-            
-            if is_market_hours:
-                market_hours_only.append(ts)
-        
-        all_timestamps = market_hours_only
-        from dashboard.backend.domain.leaderboard.strategies._common import (
-            timestamps_in_contest,
+        all_timestamps = _market_hours_only(all_timestamps, market_timezone)
+        all_timestamps = _timestamps_in_window(
+            all_timestamps, start_date, end_date, market_timezone
         )
-        all_timestamps = timestamps_in_contest(all_timestamps, start_date, end_date)
 
         if not all_timestamps:
             return []
 
         first_ts = all_timestamps[0]
+        native_initial_capital = (
+            currency_context.to_native(initial_capital, first_ts)
+            if currency_context is not None
+            else initial_capital
+        )
+        native_symbol = (
+            "¥"
+            if currency_context is not None
+            and currency_context.native_currency == "CNY"
+            else "$"
+        )
 
         # Get initial prices
         initial_prices = {}
@@ -373,7 +438,7 @@ class BaselineGenerator:
         
         print(f"\n   📋 Index baseline tracking {num_symbols} stocks equally (equal-weight):")
         print(f"      Stocks tracked: {', '.join(sorted(initial_prices.keys())[:10])}{'...' if len(initial_prices) > 10 else ''}")
-        print(f"      Initial capital: ${initial_capital:,.0f}")
+        print(f"      Initial capital: {native_symbol}{native_initial_capital:,.0f}")
         print(f"      Portfolio: 100% invested in {num_symbols}-stock equal-weight index")
         print()
         
@@ -390,19 +455,21 @@ class BaselineGenerator:
             
             if valid_count > 0:
                 avg_return = index_return / valid_count
-                total_equity = initial_capital * (1 + avg_return)
+                total_equity = native_initial_capital * (1 + avg_return)
                 positions_value = total_equity  # All in positions, no cash
             else:
-                total_equity = initial_capital
+                total_equity = native_initial_capital
                 positions_value = 0
             
-            equity_curve.append({
-                "timestamp": timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
-                "equity": round(total_equity, 2),
-                "cash": 0,
-                "positions_value": round(positions_value, 2),
-                "daily_return": 0
-            })
+            equity_curve.append(
+                _equity_point(
+                    timestamp,
+                    total_equity,
+                    0,
+                    positions_value,
+                    currency_context,
+                )
+            )
         
         return equity_curve
 
@@ -412,7 +479,9 @@ def generate_baselines(
     start_date: str,
     end_date: str,
     initial_capital: float = INITIAL_CAPITAL,
-    symbols_list: Optional[List[str]] = None
+    symbols_list: Optional[List[str]] = None,
+    market_timezone: str = "US/Eastern",
+    currency_context: CurrencyContext | None = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Generate both baselines (Buy & Hold, Index).
@@ -430,11 +499,23 @@ def generate_baselines(
     generator = BaselineGenerator()
     
     buyhold_curve = generator.generate_buyhold_baseline(
-        bars_by_symbol, start_date, end_date, initial_capital, symbols_list
+        bars_by_symbol,
+        start_date,
+        end_date,
+        initial_capital,
+        symbols_list,
+        market_timezone,
+        currency_context,
     )
     
     index_curve = generator.generate_index_baseline(
-        bars_by_symbol, start_date, end_date, initial_capital, symbols_list
+        bars_by_symbol,
+        start_date,
+        end_date,
+        initial_capital,
+        symbols_list,
+        market_timezone,
+        currency_context,
     )
     
     return buyhold_curve, index_curve

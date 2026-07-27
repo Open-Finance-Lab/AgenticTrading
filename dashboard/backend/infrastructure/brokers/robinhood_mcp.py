@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from mcp import ClientSession
 from mcp.client.streamable_http import streamablehttp_client
 
-from dashboard.backend.api import robinhood_oauth
+from dashboard.backend.infrastructure.brokers import robinhood_oauth
 
 logger = logging.getLogger(__name__)
 

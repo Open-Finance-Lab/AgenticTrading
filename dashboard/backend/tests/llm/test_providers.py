@@ -267,6 +267,42 @@ def test_make_llm_client_explicit_openrouter_missing_key_returns_none(monkeypatc
     assert make_llm_client("openrouter") is None
 
 
+def test_ensure_llm_client_available_rejects_missing_sdk(monkeypatch):
+    monkeypatch.setattr(providers_pkg, "HAS_ANTHROPIC", False)
+    monkeypatch.setattr(providers_pkg, "_Anthropic", None)
+
+    with pytest.raises(
+        providers_pkg.LLMProviderConfigurationError,
+        match="SDK",
+    ):
+        providers_pkg.ensure_llm_client_available()
+
+
+def test_ensure_llm_client_available_rejects_missing_key_without_leaking_it(
+    monkeypatch,
+):
+    secret = "secret-that-must-not-appear"
+    monkeypatch.setattr(providers_pkg, "HAS_ANTHROPIC", True)
+    monkeypatch.setattr(providers_pkg, "_Anthropic", object())
+    monkeypatch.setenv("ANTHROPIC_API_KEY", secret)
+    monkeypatch.setattr(providers_pkg, "make_llm_client", lambda _integration=None: None)
+
+    with pytest.raises(providers_pkg.LLMProviderConfigurationError) as exc_info:
+        providers_pkg.ensure_llm_client_available("anthropic")
+
+    assert "anthropic" in str(exc_info.value)
+    assert secret not in str(exc_info.value)
+
+
+def test_ensure_llm_client_available_returns_constructed_client(monkeypatch):
+    client = object()
+    monkeypatch.setattr(providers_pkg, "HAS_ANTHROPIC", True)
+    monkeypatch.setattr(providers_pkg, "_Anthropic", object())
+    monkeypatch.setattr(providers_pkg, "make_llm_client", lambda _integration=None: client)
+
+    assert providers_pkg.ensure_llm_client_available("commonstack") is client
+
+
 def test_harness_reexports_provider_factory(monkeypatch):
     from dashboard.backend.infrastructure.llm import backtest_harness as bh
 

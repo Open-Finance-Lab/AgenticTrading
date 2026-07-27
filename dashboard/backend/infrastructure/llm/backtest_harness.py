@@ -72,6 +72,10 @@ OPENROUTER_MODEL_NAME = openrouter.DEFAULT_MODEL
 OPENROUTER_BASE_URL = openrouter.base_url()
 
 
+class LLMConfigurationError(RuntimeError):
+    """Raised when an explicitly requested LLM cannot be initialized."""
+
+
 def make_llm_client(
     integration: Optional[str] = None,
     *,
@@ -120,6 +124,35 @@ IMPORTANT INSTRUCTIONS:
 
 Make precise, actionable trading decisions based on the technical indicators provided."""
 
+A_SHARE_SYSTEM_PROMPT = """You are an expert quantitative trading advisor analyzing Chinese A-share stocks.
+
+This is a historical paper backtest using 60m bars in the Asia/Shanghai timezone.
+It never sends real orders or uses real money.
+
+You have deep knowledge of:
+- Technical analysis (RSI, MACD, Bollinger Bands, Moving Averages)
+- Indicator interpretation and confluence
+- Risk management and position sizing
+- Trading psychology and market microstructure
+
+IMPORTANT INSTRUCTIONS:
+1. Analyze EACH stock signal provided (don't skip any)
+2. For each stock, decide: BUY, SELL, or HOLD
+3. Always include a confidence score (0.0-1.0)
+4. Return a JSON object with an "actions" array containing one entry per stock
+5. Even if you decide HOLD, include it in the actions array
+6. Respond with ONLY valid JSON - no explanations outside JSON
+
+Make precise, actionable trading decisions based on the technical indicators provided."""
+
+
+def system_prompt_for_market(market_context: Optional[Dict] = None) -> str:
+    """Return a backend-owned system prompt for the selected market."""
+    market = str((market_context or {}).get("market") or "").strip().upper()
+    if market == "CN":
+        return A_SHARE_SYSTEM_PROMPT
+    return SYSTEM_PROMPT
+
 
 # Per-request output-token ceiling. Defaults to 2000 (unchanged) but can be
 # lowered via env (e.g. LLM_MAX_OUTPUT_TOKENS=600) to cap spend in small demos.
@@ -155,6 +188,7 @@ def request_trading_decision(
     model: Optional[str] = None,
     max_tokens: Optional[int] = None,
     temperature: Optional[float] = None,
+    market_context: Optional[Dict] = None,
 ):
     """Submit the prompt to the Anthropic client and return the raw response.
 
@@ -167,7 +201,7 @@ def request_trading_decision(
     request_kwargs = {
         "model": model or LLM_MODEL_NAME,
         "max_tokens": max_tokens or DEFAULT_MAX_OUTPUT_TOKENS,
-        "system": SYSTEM_PROMPT,
+        "system": system_prompt_for_market(market_context),
         "messages": [{"role": "user", "content": prompt}],
     }
     if temperature is not None:

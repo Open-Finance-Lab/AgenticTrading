@@ -13,6 +13,7 @@ registered before ``/api/backtest/{run_id}`` and ``/runs/latest/metrics`` before
 """
 
 import json
+import os
 import re
 import threading
 import time
@@ -39,11 +40,23 @@ from dashboard.backend.paths import DASHBOARD_DIR, REPO_ROOT, SCRIPTS_DIR
 from dashboard.backend.middleware import get_session_id_from_request
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
-    VNPY_SIMULATION,
+    IFIND_ASHARE,
+    MarketDataCredentialsError,
     MarketDataDependencyError,
     MarketDataSourceDisabled,
     UnsupportedMarketDataSource,
     ensure_market_data_source_available,
+    validate_market_data_source,
+)
+from dashboard.backend.infrastructure.market_data.profiles import (
+    LLM_DECISION_SOURCE,
+    MarketProfile,
+    get_market_profile,
+    resolve_decision_source,
+)
+from dashboard.backend.infrastructure.llm.providers import (
+    LLMProviderConfigurationError,
+    ensure_llm_client_available,
 )
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.agents.service import agent_service
@@ -53,8 +66,10 @@ from dashboard.backend.domain.backtesting.constants import (
 )
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 from dashboard.backend.equity_plot import (
+    align_equity,
     build_backtest_chart_data,
     curve_timestamps_and_values,
+    equity_lookup,
     market_index_baselines_for_run,
     render_backtest_equity_png,
     resolve_agent_chart_label,
@@ -67,18 +82,24 @@ router = APIRouter()
 # Helper: Filter to Market Hours Only
 # ============================================================================
 
-def filter_market_hours(equity_points: List[dict]) -> List[dict]:
+def filter_market_hours(
+    equity_points: List[dict],
+    *,
+    market: str = "US",
+    market_timezone: str = "US/Eastern",
+) -> List[dict]:
     """
     Filter equity data to only include market hours.
     Requirements:
     - Weekday (Monday-Friday): 0=Mon, 6=Sun
-    - Time: 9:30 AM - 4:00 PM ET
+    - US: 9:30 AM - 4:00 PM local time
+    - CN: 9:30 AM - 11:30 AM and 1:00 PM - 3:00 PM local time
     - Removes weekends, pre-market, after-hours, and overnight data
     """
     if not equity_points:
         return []
     
-    et_tz = pytz.timezone('US/Eastern')
+    local_tz = pytz.timezone(market_timezone)
     filtered = []
     removed_count = 0
     
@@ -86,16 +107,23 @@ def filter_market_hours(equity_points: List[dict]) -> List[dict]:
         try:
             # Parse timestamp
             ts = datetime.fromisoformat(point['timestamp'].replace('Z', '+00:00'))
-            ts_et = ts.astimezone(et_tz)
+            ts_local = ts.astimezone(local_tz)
             
             # Check weekday (0=Mon, 4=Fri, 5=Sat, 6=Sun)
-            weekday = ts_et.weekday()
+            weekday = ts_local.weekday()
             is_weekday = weekday < 5  # Monday-Friday only
             
-            # Check time: 9:30 AM through 4:00 PM ET
-            hour = ts_et.hour
-            minute = ts_et.minute
-            is_market_hours = ((hour == 9 and minute >= 30) or (hour > 9 and hour < 16) or (hour == 16 and minute == 0))
+            # Check the configured market's local trading sessions.
+            hour = ts_local.hour
+            minute = ts_local.minute
+            minutes = hour * 60 + minute
+            if market == "CN":
+                is_market_hours = (
+                    9 * 60 + 30 <= minutes <= 11 * 60 + 30
+                    or 13 * 60 <= minutes <= 15 * 60
+                )
+            else:
+                is_market_hours = 9 * 60 + 30 <= minutes <= 16 * 60
             
             if is_weekday and is_market_hours:
                 filtered.append(point)
@@ -115,6 +143,45 @@ def filter_market_hours(equity_points: List[dict]) -> List[dict]:
     return filtered
 
 
+def _market_profile_for_run(run: Dict[str, Any]) -> MarketProfile:
+    metadata = run.get("metadata")
+    data_source = (
+        metadata.get("data_source") if isinstance(metadata, dict) else ALPACA
+    ) or ALPACA
+    universe = metadata.get("universe") if isinstance(metadata, dict) else None
+    try:
+        return get_market_profile(data_source, universe)
+    except ValueError:
+        return get_market_profile(ALPACA)
+
+
+def _filter_equity_for_run(
+    run: Dict[str, Any], equity_points: List[dict]
+) -> List[dict]:
+    profile = _market_profile_for_run(run)
+    if profile.market == "US" and profile.timezone == "US/Eastern":
+        return filter_market_hours(equity_points)
+    return filter_market_hours(
+        equity_points,
+        market=profile.market,
+        market_timezone=profile.timezone,
+    )
+
+
+def _stored_buyhold_baseline(
+    run: Dict[str, Any],
+) -> List[tuple[str, str, List[dict]]]:
+    run_id = run.get("baseline_buyhold_run_id")
+    if not run_id:
+        return []
+    baseline_run = db.get_run(run_id)
+    baseline_curve = db.get_equity_curve(run_id)
+    if not baseline_curve:
+        return []
+    label = (baseline_run or {}).get("agent_name") or "buy-and-hold"
+    return [(label, run_id, baseline_curve)]
+
+
 # ============================================================================
 # Pydantic Models (Response structures)
 # ============================================================================
@@ -125,6 +192,10 @@ class EquityPoint(BaseModel):
     cash: float
     positions_value: float
     daily_return: Optional[float] = None
+    native_equity: Optional[float] = None
+    native_cash: Optional[float] = None
+    native_positions_value: Optional[float] = None
+    fx_rate: Optional[float] = None
 
 
 class RunMetadata(BaseModel):
@@ -144,6 +215,21 @@ class RunMetadata(BaseModel):
     baseline_buyhold_run_id: Optional[str] = None
     llm_model: Optional[str] = None
     data_source: str = ALPACA
+    market: Optional[str] = None
+    universe: Optional[str] = None
+    timeframe: Optional[str] = None
+    timezone: Optional[str] = None
+    decision_source: Optional[str] = None
+    benchmark: Optional[str] = None
+    symbols: Optional[List[str]] = None
+    native_currency: Optional[str] = None
+    reporting_currency: Optional[str] = None
+    native_initial_capital: Optional[float] = None
+    fx_pair: Optional[str] = None
+    fx_source: Optional[str] = None
+    fx_policy: Optional[str] = None
+    fx_start_rate: Optional[float] = None
+    fx_end_rate: Optional[float] = None
 
 
 class EquityCurve(BaseModel):
@@ -179,6 +265,26 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
     data_source = metadata.get("data_source") if isinstance(metadata, dict) else None
     payload = dict(run)
     payload["data_source"] = data_source or ALPACA
+    if isinstance(metadata, dict):
+        for field in (
+            "market",
+            "universe",
+            "timeframe",
+            "timezone",
+            "decision_source",
+            "benchmark",
+            "symbols",
+            "native_currency",
+            "reporting_currency",
+            "native_initial_capital",
+            "fx_pair",
+            "fx_source",
+            "fx_policy",
+            "fx_start_rate",
+            "fx_end_rate",
+        ):
+            if field in metadata:
+                payload[field] = metadata[field]
     return RunMetadata(**payload)
 
 
@@ -222,8 +328,11 @@ def run_backtest_background(
     agent_id: Optional[str] = None,
     data_source: str = ALPACA,
     live_run_id: Optional[str] = None,
+    universe: Optional[str] = None,
+    timeframe: Optional[str] = None,
     initial_capital: Optional[float] = None,
     assets: Optional[List[str]] = None,
+    decision_source: Optional[str] = None,
 ):
     """Run backtest in background thread."""
     global backtest_status, backtest_session_id
@@ -234,8 +343,15 @@ def run_backtest_background(
     try:
         import subprocess
         import sys
-        import os
         import tempfile
+
+        profile = get_market_profile(data_source, universe)
+        decision_source = resolve_decision_source(profile, decision_source)
+        uses_llm = decision_source == LLM_DECISION_SOURCE
+        universe = profile.universe
+        timeframe = timeframe or profile.timeframe
+        if timeframe != profile.timeframe:
+            raise ValueError("Backtest market profile does not match the data source")
         
         backtest_status["running"] = True
         backtest_status["error"] = None
@@ -270,38 +386,37 @@ def run_backtest_background(
         print(f"📁 Database dir exists: {db_path.parent.exists()}", flush=True)
         print(f"📁 Can write to {db_path.parent}: {os.access(db_path.parent, os.W_OK)}", flush=True)
         
-        # Set environment variables for LLM-backed Alpaca runs.
         env = os.environ.copy()
-        if data_source == VNPY_SIMULATION:
-            print("Simulation data selected; LLM is disabled", flush=True)
-        elif "ANTHROPIC_API_KEY" not in env:
-            print("⚠️ Warning: ANTHROPIC_API_KEY not set, LLM will be disabled", flush=True)
+        if uses_llm:
+            print(f"{data_source} selected; LLM decision source enabled", flush=True)
         else:
-            print(f"✅ ANTHROPIC_API_KEY is set, LLM enabled", flush=True)
+            print(f"{data_source} selected; rule-based decision source", flush=True)
         
         cmd = [
             python_exe, str(script_path),
             "--start", start_date, "--end", end_date,
             "--session-id", session_id,
             "--data-source", data_source,
+            "--universe", universe,
+            "--timeframe", timeframe,
+            "--decision-source", decision_source,
         ]
-        cmd.append("--no-llm" if data_source == VNPY_SIMULATION else "--use-llm")
 
         # Optional free-form strategy prompt: written to a temp file (avoids
         # shell-escaping a long prompt) and passed via --strategy-prompt-file.
-        if strategy_prompt and strategy_prompt.strip() and not pipeline:
+        if uses_llm and strategy_prompt and strategy_prompt.strip() and not pipeline:
             fd, strategy_prompt_path = tempfile.mkstemp(prefix="strategy_prompt_", suffix=".txt")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(strategy_prompt.strip())
             cmd += ["--strategy-prompt-file", strategy_prompt_path]
 
-        if pipeline:
+        if uses_llm and pipeline:
             fd, pipeline_path = tempfile.mkstemp(prefix="agent_pipeline_", suffix=".json")
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(pipeline, f)
             cmd += ["--pipeline-file", pipeline_path]
 
-        if model and model.strip():
+        if uses_llm and model and model.strip():
             cmd += ["--model", model.strip()]
 
         cmd += ["--run-id", live_run_id, "--progress-file", progress_file]
@@ -326,16 +441,22 @@ def run_backtest_background(
         
         # Print script output for debugging
         print(f"\n📋 === BACKTEST SCRIPT OUTPUT ===", flush=True)
+        # Redact, but do NOT truncate: print() is the only log channel that
+        # survives in the deployed config, so trimming the dump would drop the
+        # head of every run (universe, decision source, FX bootstrap).
         if result.stdout:
-            print(f"STDOUT:\n{result.stdout}", flush=True)
+            print(f"STDOUT:\n{_redact_credentials(result.stdout)}", flush=True)
         if result.stderr:
-            print(f"STDERR:\n{result.stderr}", flush=True)
+            print(f"STDERR:\n{_redact_credentials(result.stderr)}", flush=True)
         print(f"Return code: {result.returncode}", flush=True)
         print(f"=== END BACKTEST OUTPUT ===", flush=True)
         
         if result.returncode != 0:
             error_msg = result.stderr if result.stderr else result.stdout
-            backtest_status["error"] = f"Backtest failed with return code {result.returncode}. {error_msg[-500:]}"
+            summary = _sanitize_backtest_error(error_msg, 500)
+            backtest_status["error"] = (
+                f"Backtest failed with return code {result.returncode}. {summary}"
+            )
             print(f"❌ Backtest failed (returncode={result.returncode})", flush=True)
         else:
             runs = db.get_runs_by_mode("backtest")
@@ -345,11 +466,10 @@ def run_backtest_background(
                 print(f"   Latest run IDs: {[r['run_id'] for r in runs[:3]]}", flush=True)
             _maybe_writeback_adapted_pipeline(agent_id, live_run_id)
     except Exception as e:
-        backtest_status["error"] = str(e)
-        print(f"❌ Backtest exception: {e}", flush=True)
+        summary = _sanitize_backtest_error(e, 500)
+        backtest_status["error"] = summary
+        print(f"❌ Backtest exception: {summary}", flush=True)
     finally:
-        import os
-
         backtest_status["running"] = False
         backtest_status["started_at"] = None
         backtest_status["live_run_id"] = None
@@ -370,6 +490,35 @@ def run_backtest_background(
             except OSError:
                 pass
         print("✋ Backtest background thread finished", flush=True)
+
+
+def _redact_credentials(text: object) -> str:
+    """Strip credentials from text without dropping any of it.
+
+    Kept separate from truncation on purpose: the subprocess log dump needs
+    redaction over its FULL length, while only the operator-facing error
+    summary needs a length bound.
+    """
+    message = str(text)
+    token = os.getenv("IFIND_ACCESS_TOKEN", "").strip()
+    if token:
+        message = message.replace(token, "[REDACTED]")
+    message = re.sub(
+        r"(?i)(access[_-]?token\s*[=:]\s*)[^\s,;]+",
+        r"\1[REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(authorization\s*[=:]\s*)(?:bearer\s+)?[^\s,;]+",
+        r"\1[REDACTED]",
+        message,
+    )
+    return message
+
+
+def _sanitize_backtest_error(error: object, max_chars: int = 500) -> str:
+    """Return a bounded background error summary without credentials."""
+    return _redact_credentials(error)[-max_chars:]
 
 
 def _maybe_writeback_adapted_pipeline(agent_id: Optional[str], run_id: Optional[str]) -> None:
@@ -417,7 +566,10 @@ class BacktestRunRequest(BaseModel):
     model: Optional[str] = None
     agent_id: Optional[str] = None
     pipeline: Optional[List[Dict[str, Any]]] = None
-    data_source: Optional[Literal["alpaca", "vnpy_simulation"]] = None
+    data_source: Optional[Literal["alpaca", "vnpy_simulation", "ifind_ashare"]] = None
+    universe: Optional[str] = None
+    timeframe: Optional[str] = None
+    decision_source: Optional[Literal["rule_based", "llm"]] = None
     # Simulation starting cash for this run only — independent of portfolio sleeves.
     initial_capital: Optional[float] = None
     # Tradeable universe for this run. Accepts a list or a comma-separated string.
@@ -547,6 +699,53 @@ def _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipe
         )
 
 
+def _resolve_market_profile_request(
+    data_source: str,
+    universe: Optional[str],
+    timeframe: Optional[str],
+    decision_source: Optional[str],
+) -> tuple[MarketProfile, str]:
+    """Validate source, profile, decision capability, then credentials."""
+    try:
+        validate_market_data_source(data_source)
+    except UnsupportedMarketDataSource as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MarketDataSourceDisabled as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+
+    try:
+        profile = get_market_profile(data_source, universe)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+    if timeframe is not None and timeframe != profile.timeframe:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"data_source={data_source!r} requires "
+                f"timeframe={profile.timeframe!r}."
+            ),
+        )
+
+    try:
+        resolved_decision_source = resolve_decision_source(
+            profile,
+            decision_source,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    try:
+        ensure_market_data_source_available(data_source)
+    except MarketDataSourceDisabled as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except (MarketDataDependencyError, MarketDataCredentialsError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return profile, resolved_decision_source
+
+
 def _resolve_backtest_pipeline(
     agent_id: Optional[str],
     body_pipeline: Any,
@@ -593,6 +792,9 @@ async def run_backtest_endpoint(
     strategy_prompt: Optional[str] = None,
     model: Optional[str] = None,
     data_source: str = ALPACA,
+    universe: Optional[str] = None,
+    timeframe: Optional[str] = None,
+    decision_source: Optional[Literal["rule_based", "llm"]] = None,
     assets: Optional[str] = None,
     body: Optional[BacktestRunRequest] = None,
 ):
@@ -616,6 +818,10 @@ async def run_backtest_endpoint(
         strategy_prompt = body.strategy_prompt or strategy_prompt
         model = body.model or model
         data_source = body.data_source or data_source
+        universe = body.universe or universe
+        timeframe = body.timeframe or timeframe
+        if body.decision_source is not None:
+            decision_source = body.decision_source
         agent_id = body.agent_id
         if body.pipeline is not None:
             pipeline = body.pipeline
@@ -624,7 +830,18 @@ async def run_backtest_endpoint(
         if body.assets is not None:
             raw_assets = body.assets
 
-    selected_assets = _normalize_backtest_assets(raw_assets)
+    decision_source_was_explicit = decision_source is not None
+    profile, resolved_decision_source = _resolve_market_profile_request(
+        data_source,
+        universe,
+        timeframe,
+        decision_source,
+    )
+    selected_assets = (
+        list(profile.symbols)
+        if data_source == IFIND_ASHARE
+        else _normalize_backtest_assets(raw_assets)
+    )
 
     if initial_capital is not None:
         try:
@@ -639,25 +856,55 @@ async def run_backtest_endpoint(
                 detail=f"initial_capital cannot exceed {MAX_BACKTEST_INITIAL_CAPITAL:g}.",
             )
 
-    pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
+    ignored_llm_fields: List[str] = []
+    if resolved_decision_source == LLM_DECISION_SOURCE:
+        pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
+        if agent_id and not model:
+            agent = agent_service.get_agent(agent_id)
+            if agent and agent.get("model_name"):
+                model = agent["model_name"]
+    else:
+        # A rule-based run drops the LLM-only fields — but validate them FIRST.
+        # Dropping them before _validate_backtest_params meant a malformed model
+        # was answered 200 instead of 422, so the caller never learned their
+        # input was garbage. Rejecting the *combination* outright is not an
+        # option: a body-level decision_source deliberately overrides a query
+        # one, and leftover query params are exactly what that override exists
+        # to neutralize. Validate, drop, then say what was dropped.
+        _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipeline)
+        ignored_llm_fields = [
+            name
+            for name, value in (
+                ("strategy_prompt", strategy_prompt),
+                ("model", model),
+                ("pipeline", pipeline),
+            )
+            if value
+        ]
+        strategy_prompt = None
+        model = None
+        pipeline = None
 
-    if agent_id and not model:
-        agent = agent_service.get_agent(agent_id)
-        if agent and agent.get("model_name"):
-            model = agent["model_name"]
+    if (
+        decision_source_was_explicit
+        and resolved_decision_source == LLM_DECISION_SOURCE
+        and not (model or "").strip()
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="model is required when decision_source='llm'.",
+        )
 
     # Guard operator LLM spend BEFORE scheduling anything. Validation first (so a
     # caller correcting a bad request isn't charged rate budget for a typo), then
     # the per-client run budget.
     _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipeline)
-    try:
-        ensure_market_data_source_available(data_source)
-    except UnsupportedMarketDataSource as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    except MarketDataSourceDisabled as exc:
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except MarketDataDependencyError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if decision_source_was_explicit and resolved_decision_source == LLM_DECISION_SOURCE:
+        try:
+            ensure_llm_client_available()
+        except LLMProviderConfigurationError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     if not _backtest_rate_limiter.allow(client_key(request)):
         raise HTTPException(
@@ -669,6 +916,7 @@ async def run_backtest_endpoint(
     print(f"📌 /backtest/run endpoint called: start_date={start_date}, end_date={end_date}", flush=True)
     print(f"   Session: {session_id[:8]}...", flush=True)
     print(f"   Market data: {data_source}", flush=True)
+    print(f"   Decision source: {resolved_decision_source}", flush=True)
     if strategy_prompt and not pipeline:
         print(f"   Custom strategy prompt: {len(strategy_prompt)} chars", flush=True)
     if pipeline:
@@ -709,26 +957,32 @@ async def run_backtest_endpoint(
 
     # Start backtest in background thread
     print(f"🧵 Starting background thread for backtest", flush=True)
+    # Keyword args, not positional: this call passes 14 of them and universe /
+    # timeframe were inserted mid-signature. By name, a future insertion in the
+    # wrong slot is a TypeError instead of a silently shifted argument.
     thread = threading.Thread(
         target=run_backtest_background,
-        args=(
-            start_date,
-            end_date,
-            session_id,
-            strategy_prompt,
-            model,
-            pipeline,
-            agent_id,
-            data_source,
-            live_run_id,
-            initial_capital,
-            selected_assets,
-        ),
+        kwargs={
+            "start_date": start_date,
+            "end_date": end_date,
+            "session_id": session_id,
+            "strategy_prompt": strategy_prompt,
+            "model": model,
+            "pipeline": pipeline,
+            "agent_id": agent_id,
+            "data_source": data_source,
+            "live_run_id": live_run_id,
+            "universe": profile.universe,
+            "timeframe": profile.timeframe,
+            "initial_capital": initial_capital,
+            "assets": selected_assets,
+            "decision_source": resolved_decision_source,
+        },
         daemon=True
     )
     thread.start()
     
-    return {
+    response = {
         "success": True,
         "message": "Backtest started in background. Check /backtest/status for progress.",
         "status_url": "/backtest/status",
@@ -736,8 +990,20 @@ async def run_backtest_endpoint(
         "data_source": data_source,
         "live_run_id": live_run_id,
         "run_id": live_run_id,
+        "market": profile.market,
+        "universe": profile.universe,
+        "timeframe": profile.timeframe,
+        "timezone": profile.timezone,
+        "decision_source": resolved_decision_source,
+        "benchmark": profile.benchmark,
         "assets": selected_assets or list(DJIA_30),
     }
+    if ignored_llm_fields:
+        # Say what a rule-based run threw away. Dropping LLM-only fields is
+        # correct, doing it invisibly is not: the caller otherwise cannot tell
+        # a honoured model from an ignored one.
+        response["ignored_fields"] = ignored_llm_fields
+    return response
 
 @router.get("/backtest/status")
 async def get_backtest_status(request: Request):
@@ -837,7 +1103,7 @@ async def compare_latest_backtests(request: Request):
     comparison_runs = []
     for agent, run in latest_by_agent.items():
         equity_data = db.get_equity_curve(run['run_id'])
-        equity_data = filter_market_hours(equity_data)
+        equity_data = _filter_equity_for_run(run, equity_data)
         
         if equity_data:
             comparison_runs.append(EquityCurve(
@@ -879,7 +1145,8 @@ async def get_backtest_chart_data(run_id: str, request: Request):
     if not run:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found or not yours")
 
-    agent_curve = filter_market_hours(db.get_equity_curve(run_id))
+    profile = _market_profile_for_run(run)
+    agent_curve = _filter_equity_for_run(run, db.get_equity_curve(run_id))
     if not agent_curve:
         raise HTTPException(status_code=404, detail="No equity data to plot for this run")
 
@@ -899,6 +1166,13 @@ async def get_backtest_chart_data(run_id: str, request: Request):
             initial_capital=initial_capital,
             agent_curve=agent_curve,
             card_name=card_name,
+            stored_baselines=(
+                _stored_buyhold_baseline(run)
+                if not profile.index_baseline_enabled
+                else []
+            ),
+            include_market_indexes=profile.index_baseline_enabled,
+            market_timezone=profile.timezone,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -989,7 +1263,7 @@ async def get_equity_curve(run_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Run not found or not yours")
     
     equity_data = db.get_equity_curve(run_id)
-    equity_data = filter_market_hours(equity_data)
+    equity_data = _filter_equity_for_run(run, equity_data)
     
     return EquityCurve(
         run_id=run_id,
@@ -1049,18 +1323,27 @@ def _render_run_plot_png(run_id: str) -> bytes:
         run.get("llm_model"),
         (agent_card or {}).get("name"),
     )
-    agent_curve = filter_market_hours(db.get_equity_curve(run_id))
+    profile = _market_profile_for_run(run)
+    agent_curve = _filter_equity_for_run(run, db.get_equity_curve(run_id))
     timestamps, agent_values = curve_timestamps_and_values(agent_curve)
     if not timestamps:
         raise HTTPException(status_code=404, detail="No equity data to plot for this run")
 
     initial_capital = float(run.get("initial_equity") or agent_values[0] or 1_000)
-    baselines = market_index_baselines_for_run(
-        timestamps,
-        run.get("start_date") or "",
-        run.get("end_date") or "",
-        initial_capital,
-    )
+    if profile.index_baseline_enabled:
+        baselines = market_index_baselines_for_run(
+            timestamps,
+            run.get("start_date") or "",
+            run.get("end_date") or "",
+            initial_capital,
+        )
+    else:
+        baselines = [
+            (label, baseline_run_id, align_equity(
+                timestamps, equity_lookup(curve)
+            ))
+            for label, baseline_run_id, curve in _stored_buyhold_baseline(run)
+        ]
 
     try:
         return render_backtest_equity_png(
@@ -1069,6 +1352,7 @@ def _render_run_plot_png(run_id: str) -> bytes:
             timestamps=timestamps,
             agent_values=agent_values,
             baselines=baselines,
+            market_timezone=profile.timezone,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -1099,7 +1383,7 @@ async def compare_runs(run_ids: str, request: Request):
             continue
         
         equity_data = db.get_equity_curve(run_id)
-        equity_data = filter_market_hours(equity_data)
+        equity_data = _filter_equity_for_run(run, equity_data)
         if equity_data:
             final_equities.append(run['final_equity'] or 0)
             

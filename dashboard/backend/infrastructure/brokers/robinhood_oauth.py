@@ -6,20 +6,33 @@ import base64
 import hashlib
 import hmac
 import json
+import logging
 import os
 import secrets
+import threading
 import time
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlencode
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 MCP_URL = (os.getenv("ROBINHOOD_MCP_URL") or "https://agent.robinhood.com/mcp/trading").strip()
 METADATA_URL = f"{MCP_URL.rsplit('/mcp/', 1)[0]}/.well-known/oauth-authorization-server/mcp/trading"
 STATE_TTL_SECONDS = 900
 _HTTP_TIMEOUT = 40.0
+_METADATA_TTL_SECONDS = 3600
 
+_metadata_lock = threading.Lock()
 _metadata_cache: Optional[Dict[str, Any]] = None
+_metadata_fetched_at: float = 0.0
+
+_client_lock = threading.Lock()
+_client_id_cache: Dict[str, str] = {}
+
+_state_key_lock = threading.Lock()
+_ephemeral_state_key: Optional[bytes] = None
 
 
 def redirect_uri() -> str:
@@ -33,13 +46,49 @@ def oauth_configured() -> bool:
     return bool(redirect_uri())
 
 
-def _state_signing_key() -> bytes:
+def _configured_state_secret() -> Optional[str]:
+    """Return the operator-supplied state signing secret, if any."""
     raw = (
         os.getenv("ROBINHOOD_OAUTH_STATE_SECRET")
         or os.getenv("DISCORD_CLIENT_SECRET")
-        or "dev-robinhood-oauth-state"
-    )
-    return raw.encode("utf-8")
+        or ""
+    ).strip()
+    return raw or None
+
+
+def state_secret_is_ephemeral() -> bool:
+    """True when OAuth state is signed with a random per-process key.
+
+    Callers (and tests) can use this to tell a properly configured deployment
+    apart from one that will invalidate in-flight OAuth links on restart.
+    """
+    return _configured_state_secret() is None
+
+
+def _state_signing_key() -> bytes:
+    """Return the HMAC key used to sign/verify OAuth ``state``.
+
+    Prefers ``ROBINHOOD_OAUTH_STATE_SECRET`` (then ``DISCORD_CLIENT_SECRET``).
+    With neither set we generate a random per-process key instead of falling
+    back to a constant: a constant committed to a public repository lets anyone
+    forge OAuth state, whereas an ephemeral key only breaks links that outlive
+    the process.
+    """
+    global _ephemeral_state_key
+
+    configured = _configured_state_secret()
+    if configured is not None:
+        return configured.encode("utf-8")
+
+    with _state_key_lock:
+        if _ephemeral_state_key is None:
+            _ephemeral_state_key = secrets.token_bytes(32)
+            logger.warning(
+                "Robinhood OAuth state is signed with an ephemeral per-process key: "
+                "authorize links break across restarts and are not shared between "
+                "workers. Set ROBINHOOD_OAUTH_STATE_SECRET to a stable random secret."
+            )
+        return _ephemeral_state_key
 
 
 def _pkce_pair() -> Tuple[str, str]:
@@ -54,35 +103,74 @@ def generate_pkce_pair() -> Tuple[str, str]:
     return _pkce_pair()
 
 
+def _metadata_is_fresh(now: float) -> bool:
+    return _metadata_cache is not None and (now - _metadata_fetched_at) < _METADATA_TTL_SECONDS
+
+
 def fetch_metadata() -> Dict[str, Any]:
-    global _metadata_cache
-    if _metadata_cache is not None:
-        return _metadata_cache
-    with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-        resp = client.get(METADATA_URL)
-        resp.raise_for_status()
-        _metadata_cache = resp.json()
-        return _metadata_cache
+    """Return the authorization-server metadata document, cached with a TTL.
+
+    The cache expires after ``_METADATA_TTL_SECONDS`` so a rotated endpoint
+    list is eventually picked up without a restart. The refresh happens under a
+    lock, so concurrent callers issue one request rather than a thundering herd.
+    """
+    global _metadata_cache, _metadata_fetched_at
+
+    cached = _metadata_cache
+    if cached is not None and _metadata_is_fresh(time.monotonic()):
+        return cached
+
+    with _metadata_lock:
+        cached = _metadata_cache
+        if cached is not None and _metadata_is_fresh(time.monotonic()):
+            return cached
+        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+            resp = client.get(METADATA_URL)
+            resp.raise_for_status()
+            data = resp.json()
+        _metadata_cache = data
+        _metadata_fetched_at = time.monotonic()
+        return data
 
 
-def register_client() -> str:
+def register_client(*, force: bool = False) -> str:
+    """Return this process's RFC 7591 client_id for the current redirect URI.
+
+    The registration is cached per redirect URI, so repeated "Connect" clicks
+    reuse the already-registered client instead of burning a fresh dynamic
+    registration on every call. Pass ``force=True`` to re-register and replace
+    the cached value (e.g. after the provider revokes the client).
+    """
+    uri = redirect_uri()
+    if not force:
+        cached = _client_id_cache.get(uri)
+        if cached:
+            return cached
+
     meta = fetch_metadata()
     registration_endpoint = meta["registration_endpoint"]
     payload = {
-        "redirect_uris": [redirect_uri()],
+        "redirect_uris": [uri],
         "client_name": "Agentic Trading Lab",
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
         "token_endpoint_auth_method": "none",
     }
-    with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
-        resp = client.post(registration_endpoint, json=payload)
-        resp.raise_for_status()
-        data = resp.json()
-    client_id = data.get("client_id")
-    if not client_id:
-        raise ValueError("registration_missing_client_id")
-    return str(client_id)
+
+    with _client_lock:
+        if not force:
+            cached = _client_id_cache.get(uri)
+            if cached:
+                return cached
+        with httpx.Client(timeout=_HTTP_TIMEOUT) as client:
+            resp = client.post(registration_endpoint, json=payload)
+            resp.raise_for_status()
+            data = resp.json()
+        client_id = str(data.get("client_id") or "")
+        if not client_id:
+            raise ValueError("registration_missing_client_id")
+        _client_id_cache[uri] = client_id
+        return client_id
 
 
 def mint_oauth_state(

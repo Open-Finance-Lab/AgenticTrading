@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import logging
 import os
 from typing import Optional
 from urllib.parse import urlencode
@@ -9,10 +10,12 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from dashboard.backend.api import discord_oauth
-from dashboard.backend.api import robinhood_oauth
 from dashboard.backend.domain.brokers.repository import broker_store
+from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
 from dashboard.backend.users import public_user, user_store, verify_password
 from dashboard.backend.password_policy import validate_new_password
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -254,7 +257,15 @@ async def robinhood_oauth_start(
             "user": public_user(current_user),
         }
 
-    client_id = robinhood_oauth.register_client()
+    # register_client() and build_authorize_url() both make synchronous httpx
+    # calls with a 40s timeout, so running them inline would stall the whole
+    # event loop for up to ~80s per click. Push both onto worker threads.
+    try:
+        client_id = await asyncio.to_thread(robinhood_oauth.register_client)
+    except Exception as exc:  # noqa: BLE001 -- upstream/network failure, not a client error
+        logger.exception("Robinhood dynamic client registration failed")
+        raise HTTPException(status_code=502, detail="Could not reach Robinhood") from exc
+
     code_verifier, code_challenge = robinhood_oauth.generate_pkce_pair()
     agent_id = body.agent_id if body else None
     state = robinhood_oauth.mint_oauth_state(
@@ -263,21 +274,45 @@ async def robinhood_oauth_start(
         code_verifier=code_verifier,
         client_id=client_id,
     )
-    return {
-        "already_linked": False,
-        "authorize_url": robinhood_oauth.build_authorize_url(
+    try:
+        authorize_url = await asyncio.to_thread(
+            robinhood_oauth.build_authorize_url,
             state=state,
             client_id=client_id,
             code_challenge=code_challenge,
-        ),
+        )
+    except Exception as exc:  # noqa: BLE001 -- metadata fetch failure
+        logger.exception("Robinhood authorize URL construction failed")
+        raise HTTPException(status_code=502, detail="Could not reach Robinhood") from exc
+
+    return {
+        "already_linked": False,
+        "authorize_url": authorize_url,
         "agent_id": agent_id,
         "user": public_user(current_user),
     }
 
 
+class RobinhoodCompleteBody(BaseModel):
+    link_code: str = Field(min_length=8, max_length=128)
+
+
 @router.get("/robinhood/callback")
 async def robinhood_oauth_callback(code: Optional[str] = None, state: Optional[str] = None):
-    """OAuth redirect: exchange code, persist Robinhood tokens, return to /app."""
+    """OAuth redirect: exchange the code, park the tokens, return to /app.
+
+    Deliberately unauthenticated -- it is a browser redirect from Robinhood, and
+    this app authenticates with an ``Authorization: Bearer`` header only (there
+    are no cookies), so no session can be proven here. That makes the ``uid``
+    inside the signed state a *hint about who started the flow*, never proof of
+    who finished it: an attacker can start the flow on their own account and
+    hand the resulting authorize_url to a victim.
+
+    So this endpoint never writes to ``broker_store``. It parks the exchanged
+    tokens in a single-use, short-lived slot and returns only the opaque code
+    for it; ``POST /auth/robinhood/complete`` redeems that code against a real
+    session and refuses to bind the tokens to a different account.
+    """
     if not code or not state:
         return _app_redirect({"robinhood": "error", "reason": "missing_params"})
     try:
@@ -286,30 +321,82 @@ async def robinhood_oauth_callback(code: Optional[str] = None, state: Optional[s
         reason = str(exc) if str(exc) in {"invalid_state", "state_expired"} else "invalid_state"
         return _app_redirect({"robinhood": "error", "reason": reason})
 
-    user_id = int(payload["uid"])
+    try:
+        started_by_user_id = int(payload["uid"])
+    except (KeyError, TypeError, ValueError):
+        return _app_redirect({"robinhood": "error", "reason": "invalid_state"})
+
+    client_id = str(payload["cid"])
     agent_id = payload.get("aid")
     try:
         token_data = await asyncio.to_thread(
             robinhood_oauth.exchange_code_for_tokens,
             code=code,
-            client_id=str(payload["cid"]),
+            client_id=client_id,
             code_verifier=str(payload["cv"]),
         )
-        await asyncio.to_thread(
-            broker_store.upsert_tokens,
-            user_id,
-            access_token=str(token_data["access_token"]),
-            refresh_token=token_data.get("refresh_token"),
-            client_id=str(payload["cid"]),
-            token_expires_at=robinhood_oauth.token_expires_at_iso(token_data.get("expires_in")),
-        )
-    except Exception:
+    except Exception:  # noqa: BLE001 -- any exchange failure is one user-facing outcome
+        logger.exception("Robinhood token exchange failed")
         return _app_redirect({"robinhood": "error", "reason": "oauth_failed"})
 
-    query: dict[str, str] = {"robinhood": "linked"}
+    if not isinstance(token_data, dict) or not token_data.get("access_token"):
+        logger.warning("Robinhood token exchange returned no access_token")
+        return _app_redirect({"robinhood": "error", "reason": "oauth_failed"})
+
+    link_code = pending_links.put(
+        user_id=started_by_user_id,
+        agent_id=str(agent_id) if agent_id else None,
+        tokens=token_data,
+        client_id=client_id,
+    )
+
+    query: dict[str, str] = {"robinhood": "pending", "link_code": link_code}
     if agent_id:
         query["agent_id"] = str(agent_id)
     return _app_redirect(query)
+
+
+@router.post("/robinhood/complete")
+async def robinhood_oauth_complete(
+    body: RobinhoodCompleteBody,
+    current_user: dict = Depends(get_current_user),
+):
+    """Second leg of the link: bind parked Robinhood tokens to the caller's account.
+
+    This is the only place broker tokens are persisted, and it runs under a real
+    session -- so the account that receives live-trading credentials is always
+    the account that redeemed them.
+    """
+    record = pending_links.pop(body.link_code)
+    if record is None:
+        raise HTTPException(status_code=400, detail="Link expired - please connect again.")
+
+    user_id = int(current_user["id"])
+    if record["user_id"] != user_id:
+        # The flow was started by one account and finished by another. That is the
+        # account-linking CSRF this two-legged handshake exists to stop, so drop the
+        # record on the floor rather than re-storing it -- discarding it is the point.
+        logger.warning(
+            "Robinhood link rejected: pending record was started by user %s "
+            "but redeemed by user %s",
+            record["user_id"],
+            user_id,
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="This Robinhood link was started from a different account.",
+        )
+
+    tokens = record["tokens"]
+    await asyncio.to_thread(
+        broker_store.upsert_tokens,
+        user_id,
+        access_token=str(tokens["access_token"]),
+        refresh_token=tokens.get("refresh_token"),
+        client_id=record["client_id"],
+        token_expires_at=robinhood_oauth.token_expires_at_iso(tokens.get("expires_in")),
+    )
+    return {"status": "ok", "connected": True, "agent_id": record.get("agent_id")}
 
 
 @router.post("/discord/start")

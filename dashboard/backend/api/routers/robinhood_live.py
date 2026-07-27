@@ -2,19 +2,25 @@
 
 from __future__ import annotations
 
+import logging
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from dashboard.backend.api.auth import get_current_user
 from dashboard.backend.domain.agents.service import agent_service
-from dashboard.backend.domain.brokers import live_service
+from dashboard.backend.execution import robinhood_live_service as live_service
 from dashboard.backend.domain.brokers.repository import broker_store
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/robinhood", tags=["robinhood"])
 
 
 class LiveRunBody(BaseModel):
     dry_run: bool = Field(default=True)
+    idempotency_key: Optional[str] = Field(default=None, max_length=128)
 
 
 @router.get("/status")
@@ -27,23 +33,25 @@ async def robinhood_status(
             int(current_user["id"]),
             include_portfolio=portfolio,
         )
-    except ValueError as exc:
-        if str(exc) == "robinhood_not_connected":
-            return {
-                "connected": False,
-                "broker": "robinhood",
-                "execute_enabled": live_service.execute_enabled(),
-            }
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"robinhood_status_failed:{exc}") from exc
+        logger.exception("robinhood_status_failed")
+        raise HTTPException(status_code=502, detail="Failed to fetch Robinhood status") from exc
     return status
 
 
 @router.delete("/disconnect")
 async def robinhood_disconnect(current_user: dict = Depends(get_current_user)):
-    broker_store.delete(int(current_user["id"]))
-    return {"status": "ok", "connected": False}
+    user_id = int(current_user["id"])
+    revoked_upstream = False
+    revoke = getattr(live_service, "revoke_connection", None)
+    if callable(revoke):
+        try:
+            await revoke(user_id)
+            revoked_upstream = True
+        except Exception:
+            logger.warning("robinhood_revoke_failed for user_id=%s", user_id, exc_info=True)
+    broker_store.delete(user_id)
+    return {"status": "ok", "connected": False, "revoked_upstream": revoked_upstream}
 
 
 @router.post("/agents/{agent_id}/live-run")
@@ -63,6 +71,7 @@ async def robinhood_live_run(
             user_id=int(current_user["id"]),
             agent=agent,
             dry_run=body.dry_run,
+            idempotency_key=body.idempotency_key,
         )
     except ValueError as exc:
         code = str(exc)
@@ -70,7 +79,16 @@ async def robinhood_live_run(
             raise HTTPException(status_code=409, detail="Connect Robinhood first") from exc
         if code == "live_trading_not_enabled":
             raise HTTPException(status_code=409, detail="Enable live trading for this agent") from exc
+        if code == "live_run_in_progress":
+            raise HTTPException(
+                status_code=409, detail="A live run is already in progress for this account."
+            ) from exc
+        if code == "llm_unavailable":
+            raise HTTPException(
+                status_code=503, detail="No LLM provider is configured, so no decision was made."
+            ) from exc
         raise HTTPException(status_code=400, detail=code) from exc
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"live_run_failed:{exc}") from exc
+        logger.exception("live_run_failed")
+        raise HTTPException(status_code=502, detail="Live run failed") from exc
     return result
