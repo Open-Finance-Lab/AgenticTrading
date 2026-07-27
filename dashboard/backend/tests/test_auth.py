@@ -456,3 +456,251 @@ def test_update_display_name_rejects_overlong_value(client):
     )
 
     assert response.status_code == 422
+
+
+class _Outbox(list):
+    """Captured messages, plus a switch to make sending start failing.
+
+    Subclasses list rather than pairing a bare list with a flag: a plain list
+    rejects attribute assignment (`outbox.ok = False` raises AttributeError),
+    and the tests read better asserting on the outbox directly.
+    """
+
+    ok = True
+
+    def fail_sends(self):
+        self.ok = False
+
+    def resume_sends(self):
+        self.ok = True
+
+
+@pytest.fixture
+def sent_emails(monkeypatch):
+    """Capture outbound mail instead of sending it; control success/failure.
+
+    Patches the attribute on the sender module, which is exactly how
+    api/auth.py reaches it (`from ...email import sender as email_sender`,
+    then `email_sender.send_email(...)`) -- one place to patch, and patching
+    it works.
+    """
+    from dashboard.backend.infrastructure.email import sender as email_sender
+
+    outbox = _Outbox()
+
+    async def _fake_send(to, subject, text_body):
+        outbox.append({"to": to, "subject": subject, "body": text_body})
+        return outbox.ok
+
+    monkeypatch.setattr(email_sender, "send_email", _fake_send)
+    return outbox
+
+
+def _code_from(email_body):
+    """Pull the 6-character code out of a captured message body."""
+    import re
+
+    from dashboard.backend.verification_codes import CODE_ALPHABET
+
+    match = re.search(rf"code is: ([{CODE_ALPHABET}]{{6}})", email_body)
+    assert match, f"no code found in: {email_body!r}"
+    return match.group(1)
+
+
+def test_email_change_request_mails_the_original_address(client, sent_emails):
+    # Not "orig@example.com": its local part "orig" is a substring of the
+    # default signup password ("orig-sturdy-pw-1"), which password_policy's
+    # email-name blocklist check would then reject at signup.
+    token = _signup_and_token(client, email="before@example.com")
+
+    response = client.post(
+        "/api/auth/email-change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"stage": "old", "new_email": "fresh@example.com"}
+    assert len(sent_emails) == 1
+    # The authorizing code goes to the address the user already controls.
+    assert sent_emails[0]["to"] == "before@example.com"
+    assert "fresh@example.com" in sent_emails[0]["body"]
+
+
+def test_email_change_request_rejects_a_wrong_password(client, sent_emails):
+    token = _signup_and_token(client, email="wrongpw@example.com")
+
+    response = client.post(
+        "/api/auth/email-change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "not-the-password", "new_email": "fresh@example.com"},
+    )
+
+    assert response.status_code == 400
+    assert "Current password is incorrect" in response.json()["detail"]
+    assert sent_emails == []
+
+
+def test_email_change_request_rejects_the_current_address(client, sent_emails):
+    token = _signup_and_token(client, email="same@example.com")
+
+    response = client.post(
+        "/api/auth/email-change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "orig-sturdy-pw-1", "new_email": "SAME@example.com"},
+    )
+
+    assert response.status_code == 400
+    assert sent_emails == []
+
+
+def test_email_change_request_rejects_a_registered_address(client, sent_emails):
+    _signup_and_token(client, email="taken@example.com")
+    token = _signup_and_token(client, email="mover@example.com")
+
+    response = client.post(
+        "/api/auth/email-change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "orig-sturdy-pw-1", "new_email": "taken@example.com"},
+    )
+
+    assert response.status_code == 409
+    assert sent_emails == []
+
+
+def test_email_change_request_is_cooldown_limited(client, sent_emails):
+    token = _signup_and_token(client, email="fast@example.com")
+    body = {"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"}
+    headers = {"Authorization": f"Bearer {token}"}
+
+    assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
+    second = client.post("/api/auth/email-change", headers=headers, json=body)
+
+    assert second.status_code == 429
+    assert second.headers["Retry-After"] == "60"
+    assert len(sent_emails) == 1
+
+
+def test_email_change_cooldown_survives_cancel_and_resend(client, sent_emails):
+    # The bug this guards against: DELETE needs only a session, not the
+    # password, so without a fix a caller who knows the password could loop
+    # request -> cancel -> request with the cooldown never enforced --
+    # mail-bombing the account and burning the shared Brevo daily quota.
+    token = _signup_and_token(client, email="bounce@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    body = {"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"}
+
+    assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
+    assert client.delete("/api/auth/email-change", headers=headers).status_code == 200
+
+    second = client.post("/api/auth/email-change", headers=headers, json=body)
+
+    assert second.status_code == 429
+    assert len(sent_emails) == 1
+
+
+def test_email_change_request_checks_password_before_cooldown(client, sent_emails):
+    # A mistyped password must not burn the one-per-minute allowance.
+    token = _signup_and_token(client, email="order@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    client.post(
+        "/api/auth/email-change",
+        headers=headers,
+        json={"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"},
+    )
+    response = client.post(
+        "/api/auth/email-change",
+        headers=headers,
+        json={"current_password": "wrong", "new_email": "other@example.com"},
+    )
+
+    assert response.status_code == 400  # not 429
+
+
+def test_email_change_request_503s_when_mail_fails_and_persists_nothing(
+    client, sent_emails
+):
+    # Send before persist: a failed send must not burn the cooldown for a code
+    # that does not exist.
+    token = _signup_and_token(client, email="nomail@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    sent_emails.fail_sends()
+
+    response = client.post(
+        "/api/auth/email-change",
+        headers=headers,
+        json={"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"},
+    )
+
+    assert response.status_code == 503
+    assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is False
+
+
+def test_email_change_request_503s_when_the_provider_is_unconfigured(client, capsys):
+    # No sent_emails fixture here: exercise the real sender with no credentials.
+    token = _signup_and_token(client, email="unconfigured@example.com")
+
+    response = client.post(
+        "/api/auth/email-change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"},
+    )
+
+    assert response.status_code == 503
+    # Fail-VISIBLE: an operator can tell "not configured" from "provider down".
+    # capsys, not caplog -- logger output is invisible in the deployment.
+    assert "ERROR" in capsys.readouterr().out
+
+
+def test_email_change_status_reports_the_pending_request(client, sent_emails):
+    token = _signup_and_token(client, email="status@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    assert client.get("/api/auth/email-change", headers=headers).json() == {
+        "pending": False,
+        "stage": None,
+        "new_email": None,
+        "expires_at": None,
+    }
+
+    client.post(
+        "/api/auth/email-change",
+        headers=headers,
+        json={"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"},
+    )
+    pending = client.get("/api/auth/email-change", headers=headers).json()
+
+    assert pending["pending"] is True
+    assert pending["stage"] == "old"
+    assert pending["new_email"] == "fresh@example.com"
+    assert pending["expires_at"]
+
+
+def test_email_change_cancel_clears_the_request(client, sent_emails):
+    token = _signup_and_token(client, email="cancel@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    client.post(
+        "/api/auth/email-change",
+        headers=headers,
+        json={"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"},
+    )
+
+    assert client.delete("/api/auth/email-change", headers=headers).status_code == 200
+    assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is False
+
+
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("post", "/api/auth/email-change"),
+        ("get", "/api/auth/email-change"),
+        ("delete", "/api/auth/email-change"),
+    ],
+)
+def test_email_change_routes_require_auth(client, method, path):
+    # GET/DELETE on this httpx/starlette pairing reject a `json=` kwarg outright
+    # (TypeError, not a response) -- only POST carries a body here.
+    kwargs = {"json": {}} if method == "post" else {}
+    response = getattr(client, method)(path, **kwargs)
+    assert response.status_code == 401

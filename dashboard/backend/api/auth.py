@@ -2,6 +2,7 @@ import asyncio
 import base64
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -12,9 +13,11 @@ from pydantic import BaseModel, Field, field_validator
 from dashboard.backend.api import discord_oauth
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
+from dashboard.backend.infrastructure.email import sender as email_sender
 from dashboard.backend import users as users_module
-from dashboard.backend.users import public_user, verify_password
+from dashboard.backend.users import parse_stored_timestamp, public_user, verify_password
 from dashboard.backend.password_policy import validate_new_password
+from dashboard.backend.verification_codes import generate_code, hash_code
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +70,20 @@ class ChangePasswordRequest(BaseModel):
 
 class DisplayNameRequest(BaseModel):
     display_name: str = Field(min_length=1, max_length=100)
+
+
+class EmailChangeRequest(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_email: str = Field(min_length=3, max_length=254)
+
+    @field_validator("new_email")
+    @classmethod
+    def validate_email(cls, value: str) -> str:
+        return _normalize_email(value)
+
+
+class EmailChangeVerifyRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=32)
 
 
 AVATAR_MAX_DECODED_BYTES = 100 * 1024
@@ -230,6 +247,97 @@ async def update_display_name(
     except ValueError as exc:
         raise HTTPException(status_code=401, detail="Session is no longer valid.") from exc
     return {"user": user}
+
+
+def _seconds_since(timestamp: str) -> float:
+    return (
+        datetime.now(timezone.utc) - parse_stored_timestamp(timestamp)
+    ).total_seconds()
+
+
+def _email_change_body(code: str, new_email: str) -> str:
+    return (
+        "Someone asked to change the email address on your Agentic Trading Lab "
+        f"account to {new_email}.\n\n"
+        f"Your confirmation code is: {code}\n\n"
+        f"It expires in {users_module.EMAIL_CHANGE_TTL_MINUTES} minutes. If this "
+        "was not you, ignore this message and change your password."
+    )
+
+
+@router.post("/email-change")
+async def request_email_change(
+    payload: EmailChangeRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    store = users_module.user_store
+    if not verify_password(payload.current_password, current_user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+    if payload.new_email == str(current_user["email"]).strip().lower():
+        raise HTTPException(status_code=400, detail="That is already your email address.")
+    # This 409 is an account-enumeration oracle, and that is accepted: POST
+    # /signup already answers the same question unauthenticated and unlimited.
+    # It runs BEFORE the cooldown check below, so cooldown does not bound it --
+    # what bounds it is that this path additionally requires a valid session
+    # and the account's own password, unlike signup. Failing here beats walking
+    # someone through two codes only to 409 at commit -- the commit-time check
+    # stays as the TOCTOU backstop.
+    if store.get_user_by_email(payload.new_email):
+        raise HTTPException(status_code=409, detail="Email is already registered")
+
+    # Cooldown AFTER the password check, so a typo does not burn the allowance.
+    last_at = store.last_email_change_request_at(current_user["id"])
+    cooldown = users_module.EMAIL_CHANGE_COOLDOWN_SECONDS
+    if last_at and _seconds_since(last_at) < cooldown:
+        raise HTTPException(
+            status_code=429,
+            detail="Please wait a minute before requesting another code.",
+            headers={"Retry-After": str(cooldown)},
+        )
+
+    code = generate_code()
+    # Send BEFORE persisting. Persisting first and then failing to send would
+    # burn the cooldown on a code that does not exist.
+    sent = await email_sender.send_email(
+        to=str(current_user["email"]),
+        subject="Confirm your Agentic Trading Lab email change",
+        text_body=_email_change_body(code, payload.new_email),
+    )
+    if not sent:
+        raise HTTPException(
+            status_code=503,
+            detail="Could not send the confirmation email. Please try again later.",
+        )
+    store.create_email_change_request(
+        current_user["id"], payload.new_email, hash_code(code)
+    )
+    return {"stage": "old", "new_email": payload.new_email}
+
+
+@router.get("/email-change")
+async def get_email_change(current_user: dict = Depends(get_current_user)):
+    """Let a reloaded page pick the flow back up instead of stranding the user."""
+    row = users_module.user_store.get_active_email_change(current_user["id"])
+    if not row:
+        return {"pending": False, "stage": None, "new_email": None, "expires_at": None}
+    return {
+        "pending": True,
+        "stage": row["stage"],
+        "new_email": row["new_email"],
+        "expires_at": str(row["expires_at"]),
+    }
+
+
+@router.delete("/email-change")
+async def cancel_email_change(current_user: dict = Depends(get_current_user)):
+    """Cancel a pending change. Also the resend path: cancel, then start again,
+    which re-verifies the password.
+
+    Store-level cancel deactivates rather than deletes, so a caller cannot use
+    this (session-only, no password) to reset the 60-second request cooldown.
+    """
+    users_module.user_store.cancel_email_change(current_user["id"])
+    return {"status": "ok"}
 
 
 def _store_avatar(user_id: int, value: Optional[str]) -> dict:
