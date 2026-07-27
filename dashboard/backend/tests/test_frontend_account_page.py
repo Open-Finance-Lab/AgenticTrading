@@ -63,3 +63,31 @@ def test_auth_btn_danger_is_declared_after_the_generic_hover():
     css = _STYLES_CSS.read_text(encoding="utf-8")
     assert css.index(".auth-btn-danger:hover") > css.index(".auth-btn:hover")
     assert css.index(".auth-btn-danger {") > css.index(".auth-btn {")
+
+
+def test_account_card_section_order():
+    card = _account_card()
+    order = [
+        'id="accountDisplayName"',      # read-only summary row
+        'id="accountEmail"',            # read-only summary row
+        'id="accountDisplayNameForm"',  # editor
+        'id="accountEmailForm"',        # editor
+        'id="avatarUploadBtn"',
+        'id="changePasswordForm"',
+        'id="authLogoutBtn"',
+    ]
+    positions = [card.index(marker) for marker in order]
+    assert positions == sorted(positions), "account card sections are out of order"
+
+
+def test_email_change_copy_mentions_the_spam_folder():
+    """An unauthenticated single sender has materially degraded inbox placement,
+    and a code silently in spam is indistinguishable from one never sent."""
+    js = (_FRONTEND / "app.js").read_text(encoding="utf-8")
+    assert js.lower().count("spam folder") >= 2  # one line per stage
+
+
+def test_cache_bust_versions_were_bumped():
+    html = _APP_HTML.read_text(encoding="utf-8")
+    assert "styles.css?v=65" in html
+    assert "app.js?v=48" in html

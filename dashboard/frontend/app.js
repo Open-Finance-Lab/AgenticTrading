@@ -2151,6 +2151,35 @@ const AuthAPI = {
     return this.request('/api/auth/avatar', { method: 'DELETE' });
   },
 
+  updateDisplayName(displayName) {
+    return this.request('/api/auth/display-name', {
+      method: 'PUT',
+      body: JSON.stringify({ display_name: displayName }),
+    });
+  },
+
+  requestEmailChange(currentPassword, newEmail) {
+    return this.request('/api/auth/email-change', {
+      method: 'POST',
+      body: JSON.stringify({ current_password: currentPassword, new_email: newEmail }),
+    });
+  },
+
+  verifyEmailChange(code) {
+    return this.request('/api/auth/email-change/verify', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
+  },
+
+  emailChangeStatus() {
+    return this.request('/api/auth/email-change', { method: 'GET' });
+  },
+
+  cancelEmailChange() {
+    return this.request('/api/auth/email-change', { method: 'DELETE' });
+  },
+
   discordStart() {
     return this.request('/api/auth/discord/start', { method: 'POST' });
   },
@@ -2206,6 +2235,11 @@ function updateAccountPage() {
     signedOut.hidden = true;
     if (nameEl) nameEl.textContent = user.display_name || '—';
     if (emailEl) emailEl.textContent = user.email || '—';
+    const nameInput = document.getElementById('displayNameInput');
+    // Skip while focused so a re-render mid-edit does not stomp what is typed.
+    if (nameInput && document.activeElement !== nameInput) {
+      nameInput.value = user.display_name || '';
+    }
     renderAvatar(document.getElementById('accountAvatarPreview'), user);
     const removeBtn = document.getElementById('avatarRemoveBtn');
     if (removeBtn) removeBtn.hidden = !user.avatar;
@@ -2388,6 +2422,151 @@ function initChangePasswordForm() {
       if (submitBtn) submitBtn.disabled = false;
     }
   });
+}
+
+function initDisplayNameForm() {
+  const form = document.getElementById('accountDisplayNameForm');
+  if (!form) return;
+  const input = document.getElementById('displayNameInput');
+  const errorEl = document.getElementById('displayNameError');
+  const successEl = document.getElementById('displayNameSuccess');
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (errorEl) errorEl.hidden = true;
+    if (successEl) successEl.hidden = true;
+
+    const value = (input?.value || '').trim();
+    if (!value) {
+      if (errorEl) {
+        errorEl.textContent = 'Display name cannot be empty.';
+        errorEl.hidden = false;
+      }
+      return;
+    }
+
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const data = await AuthAPI.updateDisplayName(value);
+      applyUpdatedUser(data.user);   // cascades into updateAuthUI() -> updateAccountPage()
+      if (successEl) successEl.hidden = false;
+    } catch (error) {
+      if (errorEl) {
+        errorEl.textContent = error.message;
+        errorEl.hidden = false;
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+}
+
+function renderEmailChangeState(state) {
+  const idle = document.getElementById('emailChangeIdle');
+  const codeStep = document.getElementById('emailChangeCodeStep');
+  const copy = document.getElementById('emailChangeStepCopy');
+  const submitBtn = document.getElementById('emailChangeSubmitBtn');
+  const cancelBtn = document.getElementById('emailChangeCancelBtn');
+  if (!idle || !codeStep) return;
+
+  const pending = Boolean(state && state.pending);
+  idle.hidden = pending;
+  codeStep.hidden = !pending;
+  if (cancelBtn) cancelBtn.hidden = !pending;
+
+  if (!pending) {
+    if (submitBtn) submitBtn.textContent = 'Send code';
+    return;
+  }
+
+  const user = getStoredAuthUser();
+  if (copy) {
+    // textContent, never innerHTML: new_email is user-supplied.
+    copy.textContent = state.stage === 'new'
+      ? `Code sent to ${state.new_email}. Enter it to finish — check your spam folder if it doesn't arrive.`
+      : `We sent a 6-character code to ${user?.email || 'your current address'}. Check your spam folder if it doesn't arrive.`;
+  }
+  if (submitBtn) submitBtn.textContent = state.stage === 'new' ? 'Confirm' : 'Verify';
+}
+
+function initEmailChangeForm() {
+  const form = document.getElementById('accountEmailForm');
+  if (!form) return;
+  const errorEl = document.getElementById('emailChangeError');
+  const successEl = document.getElementById('emailChangeSuccess');
+  const codeInput = document.getElementById('emailChangeCodeInput');
+  const cancelBtn = document.getElementById('emailChangeCancelBtn');
+  let stage = null;
+
+  const showError = (message) => {
+    if (errorEl) {
+      errorEl.textContent = message;
+      errorEl.hidden = false;
+    }
+  };
+
+  const reset = () => {
+    stage = null;
+    form.reset();
+    renderEmailChangeState({ pending: false });
+  };
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitBtn = document.getElementById('emailChangeSubmitBtn');
+    if (errorEl) errorEl.hidden = true;
+    if (successEl) successEl.hidden = true;
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      if (!stage) {
+        const newEmail = (document.getElementById('newEmailInput')?.value || '').trim();
+        const password = document.getElementById('emailChangePasswordInput')?.value;
+        const state = await AuthAPI.requestEmailChange(password, newEmail);
+        stage = state.stage;
+        renderEmailChangeState({ pending: true, ...state });
+        const pwInput = document.getElementById('emailChangePasswordInput');
+        if (pwInput) pwInput.value = '';
+      } else {
+        const data = await AuthAPI.verifyEmailChange(codeInput?.value || '');
+        if (data.status === 'ok') {
+          applyUpdatedUser(data.user);   // cascades into updateAuthUI() -> updateAccountPage()
+          reset();
+          if (successEl) successEl.hidden = false;
+        } else {
+          // Stage advanced: a fresh code just went to the new address.
+          stage = data.stage;
+          if (codeInput) codeInput.value = '';
+          renderEmailChangeState({ pending: true, ...data });
+        }
+      }
+    } catch (error) {
+      showError(error.message);
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+
+  cancelBtn?.addEventListener('click', async () => {
+    if (errorEl) errorEl.hidden = true;
+    try {
+      await AuthAPI.cancelEmailChange();
+    } catch (error) {
+      showError(error.message);
+      return;
+    }
+    reset();
+  });
+
+  // Re-entering the page mid-flow must not strand the user on the idle form.
+  if (getStoredAuthUser()) {
+    AuthAPI.emailChangeStatus()
+      .then((state) => {
+        stage = state.pending ? state.stage : null;
+        renderEmailChangeState(state);
+      })
+      .catch(() => renderEmailChangeState({ pending: false }));
+  }
 }
 
 function toggleAccountMenu(force) {
@@ -2858,6 +3037,8 @@ function initAuthUI() {
   handleRobinhoodOAuthReturn();
   wireDiscordAccountButtons();
   initChangePasswordForm();
+  initDisplayNameForm();
+  initEmailChangeForm();
   initAvatarControls();
   refreshAuthUser();
 }
