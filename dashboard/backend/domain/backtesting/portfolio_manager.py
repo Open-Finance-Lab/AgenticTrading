@@ -56,6 +56,21 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 from dashboard.backend.infrastructure.llm.pipeline_runner import run_pipeline_decision
 
 
+class LLMDecisionError(RuntimeError):
+    """Raised when an explicitly required LLM cannot drive a decision step."""
+
+
+# A strict-LLM run may absorb this fraction of its steps as unusable model
+# responses before it aborts. One truncated response should not discard hours
+# of a multi-hour backtest, but the surviving curve still has to be honestly
+# publishable, so this stays well inside the leaderboard's H6 coverage floor
+# (``domain/leaderboard/service.py::MIN_LLM_DECISION_COVERAGE``, 0.95 — it
+# cannot be imported here: that module pulls in the database singleton, which
+# this module's docstring forbids). ``test_strict_llm_budget_clears_h6``
+# asserts the two stay consistent.
+STRICT_LLM_MAX_FALLBACK_RATIO = 0.02
+
+
 class PortfolioManager:
     """Manages portfolio with hourly trading decisions based on indicators."""
     
@@ -75,12 +90,18 @@ class PortfolioManager:
         self.llm_decisions = 0    # steps the model actually drove (H6 coverage)
         self.input_tokens = 0
         self.output_tokens = 0
+        # Strict-LLM tolerance. The runner sets ``strict_llm_total_steps`` once
+        # it knows the run length; left None the budget is 0, so an unusable
+        # response is fatal on the first strike (the conservative default for
+        # callers that never declare a length).
+        self.strict_llm_total_steps: Optional[int] = None
+        self.strict_llm_fallbacks = 0
         # Latest decision-pipeline step outputs (for daily post-trade analysis).
         self.last_pipeline_step_outputs = []
         # Tradeable universe for this run (defaults to DJIA_30).
         symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
         self.allowed_symbols = [str(s).strip().upper() for s in symbols if s]
-        self._allowed_set = set(self.allowed_symbols)    
+        self._allowed_set = set(self.allowed_symbols)
     def get_portfolio_state(self, market_data: Dict[str, pd.Series], price_cache: Dict = None, timestamp = None) -> Dict:
         """Get current portfolio state with market indicators.
 
@@ -122,6 +143,8 @@ class PortfolioManager:
         strategy_prompt: str = None,
         pipeline: List[Dict] = None,
         temperature: Optional[float] = None,
+        market_context: Optional[Dict] = None,
+        strict_llm: bool = False,
     ) -> Dict:
         """
         Make trading decisions using Claude LLM with technical indicators.
@@ -142,6 +165,8 @@ class PortfolioManager:
             {"actions": [list of trading actions]}
         """
         if not HAS_ANTHROPIC or not llm_client:
+            if strict_llm:
+                raise LLMDecisionError("Required LLM client is not available")
             print("\u26a0️  LLM client not available, using rule-based fallback")
             return self.make_trading_decision(portfolio_state)
         
@@ -193,6 +218,8 @@ class PortfolioManager:
                 "recent_trades": recent_trades,  # Last 24h of trades (memory)
                 "top_signals": {}
             }
+            if market_context:
+                market_snapshot["market"] = dict(market_context)
             
             # Add market signals to snapshot
             signals = portfolio_state["market_signals"]
@@ -273,6 +300,10 @@ class PortfolioManager:
             try:
                 json.dumps(market_snapshot)  # Verify it's serializable
             except TypeError as e:
+                if strict_llm:
+                    raise LLMDecisionError(
+                        "LLM market snapshot could not be serialized"
+                    ) from e
                 print(f"   ⚠️  Market snapshot serialization error: {e}")
                 print(f"   Falling back to rule-based logic")
                 return self.make_trading_decision(portfolio_state)
@@ -311,6 +342,10 @@ class PortfolioManager:
                 self.llm_calls += pipeline_calls
                 self.last_pipeline_step_outputs = step_outputs or []
                 if decision is None:
+                    if strict_llm:
+                        raise LLMDecisionError(
+                            "LLM pipeline returned no parseable decision"
+                        )
                     print("   Falling back to rule-based logic")
                     return self.make_trading_decision(portfolio_state)
             else:
@@ -344,6 +379,7 @@ class PortfolioManager:
                                 prompt=prompt,
                                 model=model,
                                 temperature=temperature,
+                                market_context=market_context,
                             )
                         finally:
                             if prev_effort is None:
@@ -356,6 +392,7 @@ class PortfolioManager:
                             prompt=prompt,
                             model=model,
                             temperature=temperature,
+                            market_context=market_context,
                         )
                     try:
                         input_delta, output_delta = _extract_token_usage(response)
@@ -383,6 +420,10 @@ class PortfolioManager:
                 # ================================================================
                 decision = _parse_llm_response(llm_response)
                 if decision is None:
+                    if strict_llm:
+                        raise LLMDecisionError(
+                            "LLM response could not be parsed as a decision"
+                        )
                     return {"actions": []}
 
             # ================================================================
@@ -392,6 +433,16 @@ class PortfolioManager:
             llm_actions = decision.get("actions", [])
 
             if not llm_actions:
+                if strict_llm:
+                    # H6 coverage increment #1 of 2 (see the success exit
+                    # below). An empty action list is a *valid* model decision
+                    # — "do nothing this step" — and under strict_llm nothing
+                    # rule-based ran, so the model genuinely drove the step and
+                    # it must count. The non-strict branch below is the
+                    # opposite case: it silently swaps in a rule-based decision,
+                    # which is exactly what must NOT count.
+                    self.llm_decisions += 1
+                    return {"actions": []}
                 print(f"   ⚠️  LLM returned no actions. Decision object: {decision}")
                 print(f"   Falling back to rule-based logic")
                 return self.make_trading_decision(portfolio_state)
@@ -402,11 +453,34 @@ class PortfolioManager:
             # actions) — bound the work instead of iterating it all.
             max_actions = max(len(self.allowed_symbols), 1)
             if len(llm_actions) > max_actions:
+                if strict_llm:
+                    raise LLMDecisionError(
+                        "LLM returned an invalid action batch"
+                    )
                 print(
                     f"   ⚠️  LLM returned {len(llm_actions)} actions; "
                     f"processing only the first {max_actions}"
                 )
                 llm_actions = llm_actions[:max_actions]
+
+            if strict_llm:
+                valid_action_types = {"buy", "sell", "hold"}
+                for llm_action in llm_actions:
+                    if not isinstance(llm_action, dict):
+                        raise LLMDecisionError(
+                            "LLM returned an invalid action batch"
+                        )
+                    symbol = str(llm_action.get("symbol") or "").strip().upper()
+                    action_type = str(
+                        llm_action.get("action") or ""
+                    ).strip().lower()
+                    if (
+                        symbol not in self._allowed_set
+                        or action_type not in valid_action_types
+                    ):
+                        raise LLMDecisionError(
+                            "LLM returned an invalid action batch"
+                        )
 
             for llm_action in llm_actions:
                 symbol = str(llm_action.get("symbol") or "").strip().upper()
@@ -479,22 +553,64 @@ class PortfolioManager:
                 
                 # else: HOLD is implicit (don't add to actions)
             
-            # Count this step as model-driven only here, at the single success
-            # exit — the model's actions were parsed AND processed without error,
-            # so the returned decision is genuinely the model's. This is the H6
-            # coverage numerator, distinct from llm_calls (billed calls): any
-            # exception in the processing loop above is caught below and swapped
-            # for a rule-based decision, which must NOT count. (Actions filtered
-            # for low confidence / invalid symbol still count: the model drove
-            # the step, our policy merely declined to act on it.)
+            # H6 coverage increment #2 of 2 — the main success exit: the model's
+            # actions were parsed AND processed without error, so the returned
+            # decision is genuinely the model's. This is the H6 coverage
+            # numerator, distinct from llm_calls (billed calls): any exception in
+            # the processing loop above is caught below and swapped for a
+            # rule-based decision, which must NOT count. (Actions filtered for
+            # low confidence / invalid symbol still count: the model drove the
+            # step, our policy merely declined to act on it.)
+            #
+            # These two sites are the ONLY writes to llm_decisions. Adding a
+            # third means re-checking that the step really was model-driven with
+            # no rule-based fallback — that invariant is what the leaderboard's
+            # H6 guard rests on.
             self.llm_decisions += 1
             print(f"   ✅ Total actions: {len(actions)}\n")
             return {"actions": actions}
 
+        except LLMDecisionError as strict_error:
+            return self._absorb_strict_llm_failure(portfolio_state, strict_error)
         except Exception as e:
+            if strict_llm:
+                # Same treatment as an explicit strict violation. Built rather
+                # than raised because the budget may still absorb it; the cause
+                # is attached by hand so the traceback survives either way.
+                strict_error = LLMDecisionError("LLM decision processing failed")
+                strict_error.__cause__ = e
+                return self._absorb_strict_llm_failure(portfolio_state, strict_error)
             print(f"\n❌ LLM decision error: {e}")
             print(f"   Falling back to rule-based logic\n")
             return self.make_trading_decision(portfolio_state)
+
+    def strict_llm_fallback_budget(self) -> int:
+        """How many unusable model responses this strict run may absorb."""
+        total_steps = self.strict_llm_total_steps
+        if not total_steps or total_steps <= 0:
+            return 0
+        return int(total_steps * STRICT_LLM_MAX_FALLBACK_RATIO)
+
+    def _absorb_strict_llm_failure(
+        self,
+        portfolio_state: Dict,
+        error: LLMDecisionError,
+    ) -> Dict:
+        """Spend one strike on an unusable response, or abort the run.
+
+        The step falls back to rule-based logic and deliberately does NOT
+        increment ``llm_decisions``: the model did not drive it, so it counts
+        against H6 coverage exactly as an ordinary fallback would.
+        """
+        self.strict_llm_fallbacks += 1
+        budget = self.strict_llm_fallback_budget()
+        if self.strict_llm_fallbacks > budget:
+            raise error
+        print(
+            f"\n⚠️  Strict LLM step failed ({error}); using rule-based logic for "
+            f"this step. Strike {self.strict_llm_fallbacks}/{budget}.\n"
+        )
+        return self.make_trading_decision(portfolio_state)
     
     def execute_actions(self, actions: List[Dict], market_data: Dict, timestamp: datetime):
         """Execute trading decisions."""

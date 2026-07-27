@@ -21,6 +21,7 @@ from dashboard.backend.chart_style import PLAYGROUND_THEME, series_color
 from dashboard.backend.domain.leaderboard.strategies._yahoo import fetch_index_hourly
 
 _ET = pytz.timezone("US/Eastern")
+_DEFAULT_MARKET_TIMEZONE = "US/Eastern"
 _HOUR_WIDTH = 1.0 / 24.0
 DJIA_INDEX = "^DJI"
 NASDAQ_100_INDEX = "^NDX"
@@ -34,6 +35,14 @@ def _to_et(ts: datetime) -> datetime:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=pytz.UTC)
     return ts.astimezone(_ET)
+
+
+def _to_market_timezone(
+    ts: datetime, market_timezone: str = _DEFAULT_MARKET_TIMEZONE
+) -> datetime:
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=pytz.UTC)
+    return ts.astimezone(pytz.timezone(market_timezone))
 
 
 def is_market_hour(ts: datetime) -> bool:
@@ -97,14 +106,17 @@ def market_index_baselines_for_run(
     return baselines
 
 
-def gapless_market_axis(timestamps: Sequence[datetime]) -> Tuple[List[float], List[datetime]]:
+def gapless_market_axis(
+    timestamps: Sequence[datetime],
+    market_timezone: str = _DEFAULT_MARKET_TIMEZONE,
+) -> Tuple[List[float], List[datetime]]:
     """Map market datetimes to gapless matplotlib x coords (1 market hour = 1h wide)."""
     if not timestamps:
         return [], []
-    ts_et = [_to_et(ts) for ts in timestamps]
-    origin = mdates.date2num(ts_et[0])
-    x = [origin + i * _HOUR_WIDTH for i in range(len(ts_et))]
-    return x, ts_et
+    ts_local = [_to_market_timezone(ts, market_timezone) for ts in timestamps]
+    origin = mdates.date2num(ts_local[0])
+    x = [origin + i * _HOUR_WIDTH for i in range(len(ts_local))]
+    return x, ts_local
 
 
 def equity_lookup(curve: Sequence[Dict[str, Any]]) -> Dict[datetime, float]:
@@ -158,18 +170,21 @@ def resolve_agent_chart_label(
     return name or "Agent"
 
 
-def gapless_chart_x_labels(timestamps: Sequence[datetime]) -> List[str]:
+def gapless_chart_x_labels(
+    timestamps: Sequence[datetime],
+    market_timezone: str = _DEFAULT_MARKET_TIMEZONE,
+) -> List[str]:
     """Chart.js x labels: YYYY-MM-DD on the first bar of each trading day."""
     if not timestamps:
         return []
-    ts_et = [_to_et(ts) for ts in timestamps]
-    labels = [""] * len(ts_et)
+    ts_local = [_to_market_timezone(ts, market_timezone) for ts in timestamps]
+    labels = [""] * len(ts_local)
     i = 0
-    while i < len(ts_et):
-        labels[i] = ts_et[i].strftime("%Y-%m-%d")
-        day = ts_et[i].date()
+    while i < len(ts_local):
+        labels[i] = ts_local[i].strftime("%Y-%m-%d")
+        day = ts_local[i].date()
         i += 1
-        while i < len(ts_et) and ts_et[i].date() == day:
+        while i < len(ts_local) and ts_local[i].date() == day:
             i += 1
     return labels
 
@@ -184,6 +199,11 @@ def build_backtest_chart_data(
     initial_capital: float,
     agent_curve: Sequence[Dict[str, Any]],
     card_name: Optional[str] = None,
+    stored_baselines: Sequence[
+        Tuple[str, str, Sequence[Dict[str, Any]]]
+    ] = (),
+    include_market_indexes: bool = True,
+    market_timezone: str = _DEFAULT_MARKET_TIMEZONE,
 ) -> Dict[str, Any]:
     """JSON chart payload for the Playground backtest page (matches plot.png baselines)."""
     timestamps, agent_values = curve_timestamps_and_values(agent_curve)
@@ -201,9 +221,20 @@ def build_backtest_chart_data(
         }
     ]
 
-    for bl_label, bl_run_id, bl_values in market_index_baselines_for_run(
-        timestamps, start_date, end_date, initial_capital
-    ):
+    baseline_values: List[Tuple[str, str, List[float]]] = []
+    for bl_label, bl_run_id, bl_curve in stored_baselines:
+        baseline_values.append(
+            (bl_label, bl_run_id, align_equity(timestamps, equity_lookup(bl_curve)))
+        )
+
+    if include_market_indexes:
+        baseline_values.extend(
+            market_index_baselines_for_run(
+                timestamps, start_date, end_date, initial_capital
+            )
+        )
+
+    for bl_label, bl_run_id, bl_values in baseline_values:
         series.append(
             {
                 "run_id": bl_run_id,
@@ -217,7 +248,7 @@ def build_backtest_chart_data(
     return {
         "agent_run_id": run_id,
         "timestamps": [t.isoformat() for t in timestamps],
-        "x_labels": gapless_chart_x_labels(timestamps),
+        "x_labels": gapless_chart_x_labels(timestamps, market_timezone),
         "series": series,
     }
 
@@ -243,6 +274,7 @@ def render_backtest_equity_png(
     timestamps: Sequence[datetime],
     agent_values: Sequence[float],
     baselines: Sequence[Tuple[str, str, Sequence[float]]],
+    market_timezone: str = _DEFAULT_MARKET_TIMEZONE,
     title: str = "Trading Performance",
     xlabel: str = "Date",
     ylabel: str = "Portfolio value ($)",
@@ -252,7 +284,7 @@ def render_backtest_equity_png(
         raise ValueError("No equity data to plot")
 
     theme = PLAYGROUND_THEME
-    x, ts_et = gapless_market_axis(timestamps)
+    x, ts_local = gapless_market_axis(timestamps, market_timezone)
 
     fig = Figure(figsize=(10, 5), dpi=150)
     fig.patch.set_facecolor(theme["figure_bg"])
@@ -286,13 +318,13 @@ def render_backtest_equity_png(
 
     day_ticks, day_labels = [], []
     i = 0
-    while i < len(ts_et):
+    while i < len(ts_local):
         j = i
-        while j < len(ts_et) and ts_et[j].date() == ts_et[i].date():
+        while j < len(ts_local) and ts_local[j].date() == ts_local[i].date():
             j += 1
         # Anchor each date at the first market bar of that day (not the midpoint).
         day_ticks.append(x[i])
-        day_labels.append(ts_et[i].strftime("%Y-%m-%d"))
+        day_labels.append(ts_local[i].strftime("%Y-%m-%d"))
         i = j
 
     ax.xaxis.set_major_locator(FixedLocator(day_ticks))
