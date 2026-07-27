@@ -11,6 +11,13 @@ Run a backtest in the dashboard
 
 Results appear in **Trading Performance** (agent vs. buy-and-hold vs. DJIA).
 
+Start from a template
+---------------------
+
+Rather than writing an agent from scratch, open **Playground → Agent
+Marketplace** and copy a ready-made template into **My Agents**, then edit its
+prompts and backtest it. See :doc:`marketplace`.
+
 Accounts (optional)
 -------------------
 
@@ -61,6 +68,13 @@ Use **either** environment variables **or** a local credentials file.
    cp credentials/alpaca.json.example credentials/alpaca.json
 
 The ``credentials/`` directory is not tracked in git. See ``credentials/README.md``.
+
+Configure Robinhood live trading (optional)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Live trading against a real brokerage account is off unless you configure it,
+and orders are never sent unless you also set ``ROBINHOOD_EXECUTE=true``. See
+:ref:`robinhood-config` for the full variable list.
 
 Start the API server
 ~~~~~~~~~~~~~~~~~~~~

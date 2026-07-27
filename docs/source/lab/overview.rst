@@ -10,7 +10,7 @@ Goals
 
 The platform bridges alpha-seeking research and deployable trading workflows. Beyond asking whether an agent can generate profitable signals, the lab surfaces the full pipeline—data handling, agent decisions, backtesting, paper trading, execution constraints, risk, and governance.
 
-See also :doc:`operating_modes`, :doc:`key_features`, :doc:`getting_started`, :doc:`accounts`, and :doc:`architecture`. For the multi-agent framework, see :doc:`../orchestration/index`.
+See also :doc:`operating_modes`, :doc:`key_features`, :doc:`getting_started`, :doc:`accounts`, :doc:`marketplace`, :doc:`live_trading`, and :doc:`architecture`. For the multi-agent framework, see :doc:`../orchestration/index`.
 
 Repository layout
 -----------------
