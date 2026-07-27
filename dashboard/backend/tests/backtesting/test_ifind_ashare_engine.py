@@ -340,7 +340,8 @@ def test_ifind_default_decision_source_matches_alpaca_llm_default(monkeypatch):
         lambda _source, universe=None: provider,
     )
     monkeypatch.setattr(engine_module, "HAS_ANTHROPIC", True)
-    monkeypatch.setattr(engine_module, "make_llm_client", lambda: object())
+    llm_client = object()
+    monkeypatch.setattr(engine_module, "make_llm_client", lambda: llm_client)
 
     backtester = HourlyBacktester(
         START,
