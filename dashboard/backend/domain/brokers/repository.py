@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import os
 import sqlite3
@@ -23,23 +21,47 @@ def _utcnow_iso() -> str:
 
 _fernet_instance: Optional[Any] = None
 
+_KEY_ENV_VAR = "BROKER_TOKEN_ENCRYPTION_KEY"
+
+_GENERATE_KEY_HINT = (
+    'Generate one with: python -c "from cryptography.fernet import Fernet; '
+    'print(Fernet.generate_key().decode())"'
+)
+
 
 def _get_fernet():
+    """Return the process-wide Fernet, or raise if no usable key is configured.
+
+    Fails closed. The previous fallback derived a key from the literal
+    ``"dev-broker-token-encryption"`` when the env var was unset -- a constant
+    published in this public repository, so anyone holding a copy of the
+    database could decrypt every live-brokerage refresh token in it. That is
+    plaintext storage wearing a ciphertext costume, and it applied by default.
+
+    Raises at *call* time, never at import time: this module is imported
+    transitively by the composition root, so an import-time raise would take
+    the entire app down at boot instead of failing only the requests that
+    actually touch broker credentials.
+    """
     global _fernet_instance
     if _fernet_instance is None:
         from cryptography.fernet import Fernet
 
-        raw = (os.getenv("BROKER_TOKEN_ENCRYPTION_KEY") or "").strip()
-        if raw:
-            _fernet_instance = Fernet(raw.encode())
-        else:
-            seed = (
-                os.getenv("ROBINHOOD_OAUTH_STATE_SECRET")
-                or os.getenv("DISCORD_CLIENT_SECRET")
-                or "dev-broker-token-encryption"
+        raw = (os.getenv(_KEY_ENV_VAR) or "").strip()
+        if not raw:
+            raise RuntimeError(
+                f"{_KEY_ENV_VAR} is not set - refusing to store broker credentials. "
+                f"{_GENERATE_KEY_HINT}"
             )
-            key = base64.urlsafe_b64encode(hashlib.sha256(seed.encode()).digest())
-            _fernet_instance = Fernet(key)
+        try:
+            _fernet_instance = Fernet(raw.encode())
+        except (ValueError, TypeError) as exc:
+            # Name the variable, never echo its value: this message reaches
+            # logs and, via a 500, potentially a response body.
+            raise RuntimeError(
+                f"{_KEY_ENV_VAR} is set but is not a valid Fernet key "
+                f"(expected 32 url-safe base64-encoded bytes). {_GENERATE_KEY_HINT}"
+            ) from exc
     return _fernet_instance
 
 
@@ -77,8 +99,21 @@ class BrokerConnectionStore:
         self._init_schema()
 
     def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+        # timeout=30 matches database.py: this file is shared with the backtest
+        # DB layer, whose finalize writes can hold the write lock for seconds,
+        # and the 5s sqlite3 default surfaces that as "database is locked" on a
+        # token read.
+        conn = sqlite3.connect(str(self.db_path), timeout=30)
         conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:
+            # journal_mode is persisted in the file, so this is a no-op after
+            # the first successful switch. Filesystems without shared-memory
+            # support (some network mounts) and read-only files refuse it --
+            # keep the default rollback journal there rather than raising from
+            # a method _init_schema calls at import time.
+            pass
         return conn
 
     def _init_schema(self) -> None:
@@ -235,12 +270,28 @@ class BrokerConnectionStore:
 
 
 def _build_user_store():
+    """Select the broker-connection backend from the environment.
+
+    print(), not logger.info(): dashboard.backend.* loggers sit at WARNING in
+    every real deployment, so an info() line would be invisible exactly where
+    it matters. Name the target too -- "postgres" alone reads the same whether
+    this is the intended Neon database or a typo'd/staging URL.
+    """
     url = (os.getenv("USERS_DATABASE_URL") or os.getenv("CONTENT_DATABASE_URL") or "").strip()
     if url:
-        host_db = describe_database_url(url)
-        print(f"broker_connections backend: postgres ({host_db})")
-        # Postgres twin not required for dev MVP — SQLite on CONTENT_DATABASE_URL
-        # agents use postgres but broker store can share DATABASE_PATH for now.
+        # Imported inside the branch so environments without psycopg installed
+        # still import this module and boot on SQLite.
+        from dashboard.backend.domain.brokers.repository_postgres import (
+            BrokerConnectionStorePostgres,
+        )
+
+        print(f"broker_connections backend: postgres ({describe_database_url(url)})")
+        # Deliberately no try/except: a construction failure must abort boot.
+        # Silently falling back to SQLite would park live-brokerage refresh
+        # tokens on the disk-less Render free tier, where the file resets to the
+        # committed seed database on every deploy -- exactly the failure this
+        # twin exists to prevent, and one that reports itself as a healthy app.
+        return BrokerConnectionStorePostgres(url)
     print(f"broker_connections backend: sqlite ({DB_PATH})")
     return BrokerConnectionStore()
 
