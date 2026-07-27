@@ -2521,14 +2521,23 @@ function initEmailChangeForm() {
     try {
       if (!stage) {
         const newEmail = (document.getElementById('newEmailInput')?.value || '').trim();
-        const password = document.getElementById('emailChangePasswordInput')?.value;
+        const password = (document.getElementById('emailChangePasswordInput')?.value || '').trim();
+        if (!newEmail || !password) {
+          showError('Enter a new email address and your current password.');
+          return;
+        }
         const state = await AuthAPI.requestEmailChange(password, newEmail);
         stage = state.stage;
         renderEmailChangeState({ pending: true, ...state });
         const pwInput = document.getElementById('emailChangePasswordInput');
         if (pwInput) pwInput.value = '';
       } else {
-        const data = await AuthAPI.verifyEmailChange(codeInput?.value || '');
+        const code = (codeInput?.value || '').trim();
+        if (!code) {
+          showError('Enter the 6-character code from your email.');
+          return;
+        }
+        const data = await AuthAPI.verifyEmailChange(code);
         if (data.status === 'ok') {
           applyUpdatedUser(data.user);   // cascades into updateAuthUI() -> updateAccountPage()
           reset();
@@ -2550,7 +2559,11 @@ function initEmailChangeForm() {
         try {
           const state = await AuthAPI.emailChangeStatus();
           stage = state.pending ? state.stage : null;
-          if (codeInput) codeInput.value = '';
+          // Clear the code only when the request is actually gone. On a
+          // stage-two send failure the backend deliberately leaves stage 'old'
+          // intact so the code the user already holds stays valid -- wiping the
+          // box would force a needless retype of a code that still works.
+          if (!state.pending && codeInput) codeInput.value = '';
           renderEmailChangeState(state);
         } catch (statusError) {
           // Keep the current view; the error above already told the user.

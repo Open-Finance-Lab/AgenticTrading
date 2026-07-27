@@ -96,6 +96,12 @@ def test_email_change_copy_mentions_the_spam_folder():
 
 
 def test_cache_bust_versions_were_bumped():
+    """Parsed >= rather than a literal ==: these counters are bumped by unrelated
+    work too, and an equality assert turns CI red on every open PR the moment
+    anyone else bumps one (which is what blocked #88-#91 here before)."""
     html = _APP_HTML.read_text(encoding="utf-8")
-    assert "styles.css?v=65" in html
-    assert "app.js?v=48" in html
+    styles_version = int(re.search(r"styles\.css\?v=(\d+)", html).group(1))
+    app_version = int(re.search(r"app\.js\?v=(\d+)", html).group(1))
+
+    assert styles_version >= 65
+    assert app_version >= 48
