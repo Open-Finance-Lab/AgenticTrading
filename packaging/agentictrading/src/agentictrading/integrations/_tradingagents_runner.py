@@ -66,10 +66,21 @@ class TradingAgentsATLRunOutcome:
 
     @property
     def timeout_holds(self) -> int:
+        """Auto-held steps as counted by ATL (server-side metric)."""
         try:
             return int(self.result.metrics.get("timeout_holds") or 0)
         except (TypeError, ValueError):
             return 0
+
+    @property
+    def autoheld_steps(self) -> int:
+        """Auto-held steps this client observed, to reconcile with ATL's count.
+
+        A gap between the two means submissions were rejected for a reason the
+        client did not classify as an auto-hold, or the run auto-held steps this
+        client never reached.
+        """
+        return self.replay.autoheld_steps
 
     @property
     def compare_url(self) -> Optional[str]:
@@ -187,7 +198,14 @@ class TradingAgentsATLRunner:
                     except ATLConflictError as exc:
                         if exc.code not in self._AUTOHELD_CODES:
                             raise
+                        # ATL closed this step without our decision, so nothing
+                        # was executed. Roll the proposal back: the records stay
+                        # eligible for the next step, and a run that ends first
+                        # reports them as unprocessed instead of counting an
+                        # order that never reached the exchange.
+                        planner.discard(step)
                         continue
+                    planner.commit(step)
                     fills.extend(dict(item) for item in execution.fills)
                     rejections.extend(
                         dict(item) for item in execution.rejections
@@ -223,6 +241,10 @@ class TradingAgentsATLRunner:
                 )
             return outcome
         except ATLAPIError as exc:
+            raise exc.with_run_id(run.id if run is not None else None)
+        except TradingAgentsReplayValidationError as exc:
+            # A mid-run contract break aborts before the run reaches a terminal
+            # state; without the id the caller cannot find the run it left open.
             raise exc.with_run_id(run.id if run is not None else None)
 
     def validate_symbol(self, symbol: str) -> None:

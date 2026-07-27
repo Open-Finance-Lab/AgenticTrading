@@ -6,8 +6,8 @@ import math
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
-from typing import Any, Dict, Mapping, Sequence, Tuple
-from zoneinfo import ZoneInfo
+from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..models import Decision, Order, Step
 from ._tradingagents_core import (
@@ -15,14 +15,64 @@ from ._tradingagents_core import (
     TradingAgentsDecisionRecord,
 )
 
+MARKET_TIMEZONE = "America/New_York"
+
 
 class TradingAgentsReplayValidationError(ValueError):
     """Raised when an ATL Step cannot safely execute the replay contract."""
 
+    def __init__(self, message: str, *, run_id: Optional[str] = None) -> None:
+        self.message = str(message)
+        self.run_id = run_id
+        super().__init__(self._format())
+
+    def _format(self) -> str:
+        if self.run_id:
+            return f"{self.message} {{run {self.run_id}}}"
+        return self.message
+
+    def with_run_id(
+        self, run_id: Optional[str]
+    ) -> "TradingAgentsReplayValidationError":
+        """Attach the ATL run id (if unset) and refresh the message.
+
+        Mirrors ``ATLAPIError.with_run_id`` so a mid-run abort still names the
+        run an operator has to inspect. Returns ``self`` so callers can
+        ``raise exc.with_run_id(run.id)`` without losing the traceback.
+        """
+        if run_id and not self.run_id:
+            self.run_id = run_id
+            self.args = (self._format(),)
+        return self
+
+
+def market_timezone() -> ZoneInfo:
+    """Return the exchange timezone, or explain how to install the tz database.
+
+    ``zoneinfo`` reads the operating system's IANA database. Windows never
+    ships one and slim containers often strip it, so this SDK declares the
+    ``tzdata`` wheel as a Windows dependency. Anywhere else a missing database
+    must still fail with a fixable instruction instead of a bare
+    ``ZoneInfoNotFoundError`` raised from the middle of a replay.
+    """
+    try:
+        return ZoneInfo(MARKET_TIMEZONE)
+    except ZoneInfoNotFoundError as exc:
+        raise TradingAgentsReplayValidationError(
+            "the IANA time-zone database is unavailable, so ATL step "
+            f"timestamps cannot be converted to {MARKET_TIMEZONE}; "
+            "install it with 'pip install tzdata'"
+        ) from exc
+
 
 @dataclass(frozen=True)
 class TradingAgentsReplayDiagnostics:
-    """Local audit counters collected while replaying one artifact."""
+    """Local audit counters collected while replaying one artifact.
+
+    Every counter records a decision ATL *accepted*. Steps the server finalized
+    on its own (deadline exceeded) are counted in ``autoheld_steps`` only, and
+    the records they would have consumed stay in ``unprocessed_dates``.
+    """
 
     processed_dates: Tuple[str, ...]
     unprocessed_dates: Tuple[str, ...]
@@ -32,6 +82,18 @@ class TradingAgentsReplayDiagnostics:
     error_holds: int
     passive_holds: int
     constraint_holds: int
+    superseded: int
+    price_too_high_holds: int = 0
+    autoheld_steps: int = 0
+
+
+@dataclass(frozen=True)
+class _PendingPlan:
+    """A decision proposed for one step and not yet accepted by ATL."""
+
+    decision: Decision
+    counter: str
+    consumed_dates: Tuple[str, ...]
     superseded: int
 
 
@@ -52,20 +114,33 @@ class TradingAgentsReplayPlanner:
         self.symbol = str(artifact.manifest["symbol"]).upper()
         self._processed = set()
         self._decision_cache: Dict[str, Decision] = {}
+        self._pending: Dict[str, _PendingPlan] = {}
         self._buy_orders = 0
         self._sell_orders = 0
         self._model_holds = 0
         self._error_holds = 0
         self._passive_holds = 0
         self._constraint_holds = 0
+        self._price_too_high_holds = 0
         self._superseded = 0
+        self._autoheld_steps = 0
 
     def decision_for_step(self, step: Step) -> Decision:
-        """Return the decision for one ATL Step without external calls."""
+        """Propose the decision for one ATL Step without external calls.
+
+        Nothing is consumed here: an artifact record is only marked processed
+        once :meth:`commit` confirms ATL accepted the decision built from it.
+        Proposing and consuming in one move would let a step the server
+        auto-holds report an order that never reached the exchange while
+        silently dropping the signal behind it.
+        """
         cache_key = self._step_key(step)
-        cached = self._decision_cache.get(cache_key)
-        if cached is not None:
-            return cached
+        committed = self._decision_cache.get(cache_key)
+        if committed is not None:
+            return committed
+        pending = self._pending.get(cache_key)
+        if pending is not None:
+            return pending.decision
 
         trading_date = self._trading_date(step)
         eligible = [
@@ -75,27 +150,52 @@ class TradingAgentsReplayPlanner:
             and date.fromisoformat(record.analysis_date) < trading_date
         ]
         if not eligible:
-            decision = Decision(
-                orders=[],
-                rationale=(
-                    f"TradingAgents passive_hold: no record eligible on "
-                    f"{trading_date.isoformat()}"
+            plan = _PendingPlan(
+                decision=Decision(
+                    orders=[],
+                    rationale=(
+                        f"TradingAgents passive_hold: no record eligible on "
+                        f"{trading_date.isoformat()}"
+                    ),
                 ),
+                counter="_passive_holds",
+                consumed_dates=(),
+                superseded=0,
             )
-            self._passive_holds += 1
-            self._decision_cache[cache_key] = decision
-            return decision
+        else:
+            decision, counter = self._decision_for_record(step, eligible[-1])
+            plan = _PendingPlan(
+                decision=decision,
+                counter=counter,
+                consumed_dates=tuple(
+                    record.analysis_date for record in eligible
+                ),
+                superseded=len(eligible) - 1,
+            )
+        self._pending[cache_key] = plan
+        return plan.decision
 
-        chosen = eligible[-1]
-        decision, counter = self._decision_for_record(step, chosen)
+    def commit(self, step: Step) -> None:
+        """Consume the proposal for ``step`` after ATL accepted the decision."""
+        cache_key = self._step_key(step)
+        plan = self._pending.pop(cache_key, None)
+        if plan is None:
+            return
+        self._processed.update(plan.consumed_dates)
+        self._superseded += plan.superseded
+        setattr(self, plan.counter, getattr(self, plan.counter) + 1)
+        self._decision_cache[cache_key] = plan.decision
 
-        for stale in eligible[:-1]:
-            self._processed.add(stale.analysis_date)
-        self._superseded += len(eligible) - 1
-        self._processed.add(chosen.analysis_date)
-        setattr(self, counter, getattr(self, counter) + 1)
-        self._decision_cache[cache_key] = decision
-        return decision
+    def discard(self, step: Step) -> None:
+        """Roll back the proposal for a step ATL finalized without our decision.
+
+        The records it would have consumed stay eligible, so the next step
+        executes them; if the run ends first they surface through
+        ``unprocessed_dates`` instead of vanishing.
+        """
+        if self._pending.pop(self._step_key(step), None) is None:
+            return
+        self._autoheld_steps += 1
 
     def finalize(self) -> TradingAgentsReplayDiagnostics:
         """Return an immutable snapshot, including records never reached."""
@@ -116,6 +216,8 @@ class TradingAgentsReplayPlanner:
             passive_holds=self._passive_holds,
             constraint_holds=self._constraint_holds,
             superseded=self._superseded,
+            price_too_high_holds=self._price_too_high_holds,
+            autoheld_steps=self._autoheld_steps,
         )
 
     @staticmethod
@@ -138,7 +240,7 @@ class TradingAgentsReplayPlanner:
             raise TradingAgentsReplayValidationError(
                 "Step timestamp must include a timezone"
             )
-        return parsed.astimezone(ZoneInfo("America/New_York")).date()
+        return parsed.astimezone(market_timezone()).date()
 
     def _decision_for_record(
         self,
@@ -243,17 +345,22 @@ class TradingAgentsReplayPlanner:
         equity = self._positive_number(
             observation.portfolio.get("equity"), field="portfolio.equity"
         )
-        target_shares = math.floor(equity * weight / price)
+        budget = equity * weight
+        target_shares = math.floor(budget / price)
         if target_shares <= 0:
+            # One share costs more than the position cap allows, so this BUY is
+            # unexecutable by arithmetic, not by market conditions. Name both
+            # numbers: otherwise it is indistinguishable from a model HOLD.
             return (
                 Decision(
                     orders=[],
                     rationale=(
                         f"{prefix} rating={record.rating}; "
-                        "price_too_high_for_target"
+                        f"price_too_high_for_target price={price:.2f} "
+                        f"max_position_budget={budget:.2f}"
                     ),
                 ),
-                "_constraint_holds",
+                "_price_too_high_holds",
             )
         buy_shares = target_shares - held
         if buy_shares <= 0:

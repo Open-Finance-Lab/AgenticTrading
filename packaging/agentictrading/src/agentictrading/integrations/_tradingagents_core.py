@@ -148,6 +148,10 @@ class TradingAgentsDecisionRecord:
         else:
             if self.atl_action != "HOLD":
                 raise ArtifactValidationError("error decision records must use HOLD")
+            if self.rating:
+                raise ArtifactValidationError(
+                    "error decision records cannot carry a rating"
+                )
             if not self.error_type or not self.error_message:
                 raise ArtifactValidationError(
                     "error decision records require error_type and error_message"
@@ -259,14 +263,21 @@ def save_decision_artifact(
     artifact: TradingAgentsDecisionArtifact,
     path: Union[str, Path],
 ) -> str:
-    """Write an artifact as UTF-8 JSON and return its file SHA-256."""
+    """Write an artifact as UTF-8 JSON and return its file SHA-256.
+
+    Bytes are written verbatim rather than through ``write_text``, whose
+    newline translation would give the same logical artifact a different digest
+    on Windows. The digest is recorded as ATL run provenance, so it has to
+    identify the content rather than the platform that wrote it.
+    """
     destination = Path(path).expanduser()
     destination.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(
         artifact.to_dict(), ensure_ascii=False, indent=2, sort_keys=True
     ) + "\n"
-    destination.write_text(payload, encoding="utf-8")
-    return hashlib.sha256(destination.read_bytes()).hexdigest()
+    data = payload.encode("utf-8")
+    destination.write_bytes(data)
+    return hashlib.sha256(data).hexdigest()
 
 
 def load_decision_artifact(
@@ -372,6 +383,8 @@ class TradingAgentsDecisionGenerator:
     not need the large optional upstream dependency.
     """
 
+    MAX_CONSECUTIVE_FAILURES = 3
+
     def __init__(
         self,
         *,
@@ -379,11 +392,17 @@ class TradingAgentsDecisionGenerator:
         rating_parser: Optional[Callable[..., str]] = None,
         version_resolver: Optional[Callable[[], str]] = None,
         clock: Optional[Callable[[], str]] = None,
+        max_consecutive_failures: Optional[int] = MAX_CONSECUTIVE_FAILURES,
     ) -> None:
+        if max_consecutive_failures is not None and max_consecutive_failures < 1:
+            raise ArtifactValidationError(
+                "max_consecutive_failures must be a positive integer or None"
+            )
         self._graph_factory = graph_factory
         self._rating_parser = rating_parser
         self._version_resolver = version_resolver
         self._clock = clock or _utc_now
+        self._max_consecutive_failures = max_consecutive_failures
 
     def _components(self):
         if (
@@ -449,7 +468,8 @@ class TradingAgentsDecisionGenerator:
 
         records = []
         valid_count = 0
-        for analysis_date in dates:
+        consecutive_failures = 0
+        for index, analysis_date in enumerate(dates):
             record = self._generate_date(
                 graph=graph,
                 rating_parser=rating_parser,
@@ -459,6 +479,25 @@ class TradingAgentsDecisionGenerator:
             records.append(record)
             if record.status == "valid":
                 valid_count += 1
+                consecutive_failures = 0
+                continue
+            # Each failed date has already burned two full multi-agent runs.
+            # A streak of them is a credential, model, or vendor problem that
+            # the remaining dates will hit too, so stop paying for it.
+            consecutive_failures += 1
+            if (
+                self._max_consecutive_failures is not None
+                and consecutive_failures >= self._max_consecutive_failures
+            ):
+                unattempted = len(dates) - index - 1
+                raise TradingAgentsGenerationError(
+                    f"stopped after {consecutive_failures} consecutive failed "
+                    f"analysis dates (last {analysis_date}: "
+                    f"{record.error_type}: {record.error_message}); "
+                    f"{unattempted} later date(s) were not attempted. Repeated "
+                    "failures usually mean a credential, model, or data-vendor "
+                    "problem rather than a bad date."
+                )
 
         if valid_count == 0:
             raise TradingAgentsGenerationError(

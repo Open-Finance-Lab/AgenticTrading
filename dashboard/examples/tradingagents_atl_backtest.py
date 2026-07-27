@@ -34,6 +34,16 @@ from agentictrading.integrations.tradingagents import (
 
 DEFAULT_ANALYSTS = ("market", "social", "news", "fundamentals")
 
+# The us-equity-hourly-v1 environment fixes starting capital at $1,000 and caps
+# any single position at 25% of equity, and the SDK rejects any other initial
+# cash. One share therefore has to cost under ~$250 for a BUY to be executable
+# at all, which rules out roughly a third of the DJIA-30 universe.
+ENVIRONMENT_POSITION_CAP_NOTE = (
+    "The us-equity-hourly-v1 environment starts with $1,000 and caps one "
+    "position at 25% of equity, so a share priced above ~$250 can never be "
+    "bought; see the per-step rationale for the exact price and budget."
+)
+
 
 class CLIConfigurationError(ValueError):
     """Raised when command arguments or required environment values are absent."""
@@ -235,6 +245,37 @@ def run_from_args(
     )
 
 
+def warn_about_unexecutable_signals(outcome: TradingAgentsATLRunOutcome) -> None:
+    """Report when a flat result came from arithmetic rather than the model.
+
+    A run whose every BUY was priced out finishes green at 0% and looks exactly
+    like a strategy that chose to stay in cash, so the difference has to be
+    stated rather than left in the per-step rationale.
+    """
+    replay = outcome.replay
+    if replay.price_too_high_holds and not replay.buy_orders:
+        print(
+            f"WARNING: all {replay.price_too_high_holds} BUY signal(s) were "
+            "dropped because one share costs more than the position cap "
+            f"allows. {ENVIRONMENT_POSITION_CAP_NOTE} This run's return "
+            "reflects that limit, not the TradingAgents strategy.",
+            file=sys.stderr,
+        )
+    elif replay.price_too_high_holds:
+        print(
+            f"NOTE: {replay.price_too_high_holds} BUY signal(s) were priced "
+            f"out of the position cap. {ENVIRONMENT_POSITION_CAP_NOTE}",
+            file=sys.stderr,
+        )
+    if replay.autoheld_steps:
+        print(
+            f"NOTE: ATL auto-held {replay.autoheld_steps} step(s) before "
+            "accepting a decision. Those records were not consumed; they "
+            "executed on a later step or are listed as unprocessed above.",
+            file=sys.stderr,
+        )
+
+
 def print_summary(result: CommandResult) -> None:
     outcome = result.outcome
     replay = outcome.replay
@@ -250,14 +291,17 @@ def print_summary(result: CommandResult) -> None:
         f"model_hold={replay.model_holds}, error_hold={replay.error_holds}, "
         f"passive_hold={replay.passive_holds}, "
         f"constraint_hold={replay.constraint_holds}, "
+        f"price_too_high={replay.price_too_high_holds}, "
         f"superseded={replay.superseded}, "
         f"unprocessed={len(replay.unprocessed_dates)}"
     )
     print(
         f"Execution: fills={outcome.fills_count}, "
         f"rejections={len(outcome.rejections)}, "
-        f"timeout_holds={outcome.timeout_holds}"
+        f"timeout_holds={outcome.timeout_holds}, "
+        f"autoheld_steps={outcome.autoheld_steps}"
     )
+    warn_about_unexecutable_signals(outcome)
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -279,6 +323,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ATLAPIError,
     ) as exc:
         print(f"ERROR: {sanitize_error_message(exc)}", file=sys.stderr)
+        run_id = getattr(exc, "run_id", None)
+        if run_id:
+            # The run is still open server-side until the reaper sweeps it, so
+            # name it rather than making the operator hunt for the orphan.
+            print(f"Aborted ATL run id: {run_id}", file=sys.stderr)
         return 1
     print_summary(result)
     return 0

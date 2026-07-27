@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -123,6 +124,9 @@ def test_artifact_round_trip_and_file_hash(tmp_path):
     digest = save_decision_artifact(artifact, path)
 
     assert digest == hashlib.sha256(path.read_bytes()).hexdigest()
+    # The digest is ATL run provenance, so it must identify the content and not
+    # the platform: no newline translation may reach the file on any OS.
+    assert b"\r\n" not in path.read_bytes()
     assert load_decision_artifact(path) == artifact
     payload = json.loads(path.read_text(encoding="utf-8"))
     assert payload["schema_version"] == ARTIFACT_SCHEMA_VERSION
@@ -211,6 +215,21 @@ def test_error_record_has_explicit_hold_and_sanitized_error():
             analysis_date="2026-04-03",
             rating="",
             atl_action="BUY",
+            status="error",
+            attempts=2,
+            raw_final_trade_decision="",
+            raw_sha256=sha256_text(""),
+            error_type="RuntimeError",
+            error_message="provider failed",
+        )
+
+    # A failed analysis produced no opinion, so it cannot carry a rating that
+    # replay or downstream reporting would read as one.
+    with pytest.raises(ArtifactValidationError, match="rating"):
+        TradingAgentsDecisionRecord(
+            analysis_date="2026-04-03",
+            rating="Buy",
+            atl_action="HOLD",
             status="error",
             attempts=2,
             raw_final_trade_decision="",
@@ -445,6 +464,70 @@ def test_generator_refuses_to_return_artifact_when_every_date_fails():
         )
 
 
+def test_generator_stops_paying_for_dates_after_a_failure_streak():
+    """Three dead dates in a row is a systemic fault, not three bad dates.
+
+    Each failed date has already burned two full multi-agent analyses, so the
+    remaining dates must not be attempted once the cause is clearly not
+    date-specific.
+    """
+    graph = _FakeGraph(
+        {
+            "2026-04-03": ["Rating: Buy"],
+            "2026-04-06": [RuntimeError("down"), RuntimeError("down")],
+            "2026-04-07": [RuntimeError("down"), RuntimeError("down")],
+            "2026-04-08": [RuntimeError("down"), RuntimeError("down")],
+            "2026-04-09": ["Rating: Buy"],
+        }
+    )
+
+    with pytest.raises(TradingAgentsGenerationError, match="consecutive"):
+        _generator(graph).generate(
+            symbol="AAPL",
+            analysis_dates=(
+                "2026-04-03",
+                "2026-04-06",
+                "2026-04-07",
+                "2026-04-08",
+                "2026-04-09",
+            ),
+            config={},
+            selected_analysts=("market",),
+        )
+
+    assert ("AAPL", "2026-04-09") not in graph.calls
+
+
+def test_generator_failure_streak_resets_on_a_successful_date():
+    graph = _FakeGraph(
+        {
+            "2026-04-03": [RuntimeError("down"), RuntimeError("down")],
+            "2026-04-06": [RuntimeError("down"), RuntimeError("down")],
+            "2026-04-07": ["Rating: Buy"],
+            "2026-04-08": [RuntimeError("down"), RuntimeError("down")],
+        }
+    )
+
+    artifact = _generator(graph).generate(
+        symbol="AAPL",
+        analysis_dates=("2026-04-03", "2026-04-06", "2026-04-07", "2026-04-08"),
+        config={},
+        selected_analysts=("market",),
+    )
+
+    assert [record.status for record in artifact.decisions] == [
+        "error",
+        "error",
+        "valid",
+        "error",
+    ]
+
+
+def test_generator_rejects_a_non_positive_failure_budget():
+    with pytest.raises(ArtifactValidationError, match="max_consecutive_failures"):
+        TradingAgentsDecisionGenerator(max_consecutive_failures=0)
+
+
 @pytest.mark.parametrize("version", ["0.2.9", "0.4.0", "1.0.0", "unknown"])
 def test_generator_rejects_unverified_tradingagents_versions(version):
     graph = _FakeGraph({"2026-04-03": ["Rating: Buy"]})
@@ -532,6 +615,13 @@ def _step(
     )
 
 
+def _accepted(planner, step):
+    """Propose a decision and accept it, as a successful ATL submission does."""
+    decision = planner.decision_for_step(step)
+    planner.commit(step)
+    return decision
+
+
 def _error_record(date="2026-04-03"):
     return TradingAgentsDecisionRecord(
         analysis_date=date,
@@ -549,14 +639,14 @@ def _error_record(date="2026-04-03"):
 def test_replay_waits_until_first_new_york_trading_date_after_analysis():
     planner = TradingAgentsReplayPlanner(_artifact(_record()), "a" * 64)
 
-    same_day = planner.decision_for_step(
-        _step("2026-04-03T14:00:00+00:00", sequence=0)
+    same_day = _accepted(
+        planner, _step("2026-04-03T14:00:00+00:00", sequence=0)
     )
-    monday_open = planner.decision_for_step(
-        _step("2026-04-06T13:30:00+00:00", sequence=1)
+    monday_open = _accepted(
+        planner, _step("2026-04-06T13:30:00+00:00", sequence=1)
     )
-    monday_later = planner.decision_for_step(
-        _step("2026-04-06T14:30:00+00:00", sequence=2)
+    monday_later = _accepted(
+        planner, _step("2026-04-06T14:30:00+00:00", sequence=2)
     )
 
     assert same_day.orders == []
@@ -578,6 +668,8 @@ def test_replay_same_step_is_idempotent():
     second = planner.decision_for_step(step)
 
     assert second is first
+    planner.commit(step)
+    assert planner.decision_for_step(step) is first
     assert planner.finalize().buy_orders == 1
 
 
@@ -589,11 +681,12 @@ def test_replay_uses_latest_when_multiple_records_become_eligible():
         ),
         "c" * 64,
     )
-    decision = planner.decision_for_step(
+    decision = _accepted(
+        planner,
         _step(
             "2026-04-13T13:30:00+00:00",
             positions=[{"symbol": "AAPL", "quantity": 2}],
-        )
+        ),
     )
 
     assert decision.orders[0].side == "sell"
@@ -606,9 +699,7 @@ def test_replay_uses_latest_when_multiple_records_become_eligible():
 def test_replay_error_record_is_an_explicit_generation_error_hold():
     planner = TradingAgentsReplayPlanner(_artifact(_error_record()), "d" * 64)
 
-    decision = planner.decision_for_step(
-        _step("2026-04-06T13:30:00+00:00")
-    )
+    decision = _accepted(planner, _step("2026-04-06T13:30:00+00:00"))
 
     assert decision.orders == []
     assert "generation_error" in decision.rationale
@@ -620,9 +711,7 @@ def test_replay_model_hold_is_distinct_from_passive_hold():
     record = _record("2026-04-03", rating="Hold", action="HOLD")
     planner = TradingAgentsReplayPlanner(_artifact(record), "e" * 64)
 
-    decision = planner.decision_for_step(
-        _step("2026-04-06T13:30:00+00:00")
-    )
+    decision = _accepted(planner, _step("2026-04-06T13:30:00+00:00"))
 
     assert decision.orders == []
     assert "rating=Hold" in decision.rationale
@@ -653,49 +742,77 @@ def test_replay_buy_only_tops_up_to_environment_weight_cap():
 
 
 @pytest.mark.parametrize(
-    ("price", "held", "reason"),
+    ("price", "held", "reason", "counter"),
     [
-        (100, 2, "already_at_target"),
-        (300, 0, "price_too_high_for_target"),
-        (None, 0, "missing_price"),
+        (100, 2, "already_at_target", "constraint_holds"),
+        (300, 0, "price_too_high_for_target", "price_too_high_holds"),
+        (None, 0, "missing_price", "constraint_holds"),
     ],
 )
-def test_replay_buy_constraint_holds_have_specific_reason(price, held, reason):
+def test_replay_buy_constraint_holds_have_specific_reason(
+    price, held, reason, counter
+):
     planner = TradingAgentsReplayPlanner(_artifact(_record()), "1" * 64)
     positions = [] if not held else [{"symbol": "AAPL", "quantity": held}]
 
-    decision = planner.decision_for_step(
+    decision = _accepted(
+        planner,
         _step(
             "2026-04-06T13:30:00+00:00",
             price=price,
             positions=positions,
-        )
+        ),
     )
 
     assert decision.orders == []
     assert reason in decision.rationale
-    assert planner.finalize().constraint_holds == 1
+    diagnostics = planner.finalize()
+    assert getattr(diagnostics, counter) == 1
+
+
+def test_replay_price_too_high_is_counted_apart_from_other_constraint_holds():
+    """A signal priced out of the cap must not read as an ordinary hold.
+
+    $1,000 of equity at a 25% cap buys nothing above $250/share, so the BUY is
+    unexecutable by arithmetic. The rationale has to name both numbers and the
+    counter has to stay distinct, or the run is indistinguishable from a
+    strategy that simply chose to stay in cash.
+    """
+    planner = TradingAgentsReplayPlanner(_artifact(_record()), "7" * 64)
+
+    decision = _accepted(
+        planner, _step("2026-04-06T13:30:00+00:00", price=430.0, equity=1_000.0)
+    )
+
+    assert decision.orders == []
+    assert "price=430.00" in decision.rationale
+    assert "max_position_budget=250.00" in decision.rationale
+    diagnostics = planner.finalize()
+    assert diagnostics.price_too_high_holds == 1
+    assert diagnostics.constraint_holds == 0
+    assert diagnostics.buy_orders == 0
 
 
 def test_replay_sell_closes_all_shares_and_never_shorts():
     sell = _record("2026-04-03", rating="Underweight", action="SELL")
     planner = TradingAgentsReplayPlanner(_artifact(sell), "2" * 64)
-    decision = planner.decision_for_step(
+    decision = _accepted(
+        planner,
         _step(
             "2026-04-06T13:30:00+00:00",
             positions=[{"symbol": "AAPL", "quantity": 3}],
-        )
+        ),
     )
     assert decision.orders[0].side == "sell"
     assert decision.orders[0].quantity == 3
 
     empty_planner = TradingAgentsReplayPlanner(_artifact(sell), "3" * 64)
-    empty = empty_planner.decision_for_step(
-        _step("2026-04-06T13:30:00+00:00")
-    )
+    empty = _accepted(empty_planner, _step("2026-04-06T13:30:00+00:00"))
     assert empty.orders == []
     assert "sell_without_position" in empty.rationale
-    assert empty_planner.finalize().sell_orders == 0
+    diagnostics = empty_planner.finalize()
+    assert diagnostics.sell_orders == 0
+    assert diagnostics.constraint_holds == 1
 
 
 @pytest.mark.parametrize(
@@ -727,6 +844,36 @@ def test_replay_fails_loudly_on_invalid_step_contract(step, message):
         planner.decision_for_step(step)
 
 
+def test_replay_explains_how_to_fix_a_missing_timezone_database(monkeypatch):
+    """Windows ships no IANA database; a bare lookup error is not actionable."""
+    from zoneinfo import ZoneInfoNotFoundError
+
+    from agentictrading.integrations import _tradingagents_replay as replay_module
+
+    def _no_database(key):
+        raise ZoneInfoNotFoundError(key)
+
+    monkeypatch.setattr(replay_module, "ZoneInfo", _no_database)
+    planner = TradingAgentsReplayPlanner(_artifact(_record()), "c" * 64)
+
+    with pytest.raises(TradingAgentsReplayValidationError, match="pip install tzdata"):
+        planner.decision_for_step(_step("2026-04-06T13:30:00+00:00"))
+
+
+def test_sdk_declares_tzdata_where_zoneinfo_has_no_system_database():
+    """Guard the dependency the replay planner's zoneinfo use now requires."""
+    pyproject = (
+        Path(__file__).resolve().parents[1] / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    declared = re.search(
+        r"^dependencies\s*=\s*\[(.*?)\]", pyproject, re.MULTILINE | re.DOTALL
+    )
+
+    assert declared is not None
+    assert "tzdata" in declared.group(1)
+    assert "Windows" in declared.group(1)
+
+
 def test_replay_finalize_lists_unprocessed_analysis_dates():
     planner = TradingAgentsReplayPlanner(
         _artifact(
@@ -735,12 +882,66 @@ def test_replay_finalize_lists_unprocessed_analysis_dates():
         ),
         "5" * 64,
     )
-    planner.decision_for_step(_step("2026-04-06T13:30:00+00:00"))
+    _accepted(planner, _step("2026-04-06T13:30:00+00:00"))
 
     diagnostics = planner.finalize()
 
     assert diagnostics.processed_dates == ("2026-04-03",)
     assert diagnostics.unprocessed_dates == ("2026-04-10",)
+
+
+def test_replay_uncommitted_proposal_consumes_nothing():
+    """A proposal ATL never accepted must leave the artifact untouched.
+
+    Consuming the record at proposal time would report an order that was never
+    executed while permanently dropping the signal behind it.
+    """
+    planner = TradingAgentsReplayPlanner(_artifact(_record()), "8" * 64)
+    step = _step("2026-04-06T13:30:00+00:00")
+
+    decision = planner.decision_for_step(step)
+    assert decision.orders[0].side == "buy"
+
+    planner.discard(step)
+
+    diagnostics = planner.finalize()
+    assert diagnostics.buy_orders == 0
+    assert diagnostics.processed_dates == ()
+    assert diagnostics.unprocessed_dates == ("2026-04-03",)
+    assert diagnostics.autoheld_steps == 1
+
+
+def test_replay_discarded_record_executes_on_the_next_step():
+    planner = TradingAgentsReplayPlanner(_artifact(_record()), "9" * 64)
+    autoheld = _step("2026-04-06T13:30:00+00:00", sequence=0)
+
+    planner.decision_for_step(autoheld)
+    planner.discard(autoheld)
+    retried = _accepted(planner, _step("2026-04-06T14:30:00+00:00", sequence=1))
+
+    assert retried.orders[0].side == "buy"
+    diagnostics = planner.finalize()
+    assert diagnostics.buy_orders == 1
+    assert diagnostics.autoheld_steps == 1
+    assert diagnostics.unprocessed_dates == ()
+
+
+def test_replay_discard_rolls_back_superseded_records_too():
+    planner = TradingAgentsReplayPlanner(
+        _artifact(
+            _record("2026-04-03", rating="Buy", action="BUY"),
+            _record("2026-04-10", rating="Hold", action="HOLD"),
+        ),
+        "b" * 64,
+    )
+    step = _step("2026-04-13T13:30:00+00:00")
+
+    planner.decision_for_step(step)
+    planner.discard(step)
+
+    diagnostics = planner.finalize()
+    assert diagnostics.superseded == 0
+    assert diagnostics.unprocessed_dates == ("2026-04-03", "2026-04-10")
 
 
 # ---------------------------------------------------------------------------
@@ -921,9 +1122,14 @@ def test_atl_runner_attaches_run_id_to_api_errors():
     assert error.value.run_id == "run_1"
 
 
-def test_atl_runner_continues_after_server_auto_hold_conflict():
+def test_atl_runner_retries_auto_held_record_on_the_next_step():
+    """An auto-held step must not consume the signal it failed to submit."""
     client = _FakeATLClient(
-        [_step("2026-04-06T13:30:00+00:00"), _completed_step()],
+        [
+            _step("2026-04-06T13:30:00+00:00", sequence=0),
+            _step("2026-04-06T14:30:00+00:00", sequence=1),
+            _completed_step(),
+        ],
         result=RunResult(
             run_id="run_1",
             status="completed",
@@ -945,6 +1151,62 @@ def test_atl_runner_continues_after_server_auto_hold_conflict():
     )
 
     assert outcome.timeout_holds == 1
+    assert outcome.autoheld_steps == 1
+    # The BUY landed on the retry, and it is counted exactly once.
+    assert outcome.replay.buy_orders == 1
+    assert outcome.replay.processed_dates == ("2026-04-03",)
+    assert outcome.replay.unprocessed_dates == ()
+    assert len(client.submitted) == 2
+
+
+def test_atl_runner_auto_hold_on_the_last_step_reports_an_incomplete_replay():
+    """A dropped signal has to fail loudly instead of counting as an order."""
+    client = _FakeATLClient(
+        [_step("2026-04-06T13:30:00+00:00"), _completed_step()],
+        result=RunResult(
+            run_id="run_1",
+            status="completed",
+            metrics={"timeout_holds": 1},
+        ),
+        execution_results=[
+            ATLConflictError(
+                "late", code="decision_deadline_exceeded", status_code=409
+            )
+        ],
+    )
+
+    with pytest.raises(TradingAgentsReplayIncompleteError) as error:
+        TradingAgentsATLRunner(client).run_backtest(
+            artifact=_artifact(_record()),
+            artifact_sha256="d" * 64,
+            agent_version_id="agv_1",
+            start_date="2026-04-06",
+            end_date="2026-04-07",
+        )
+
+    assert error.value.analysis_dates == ("2026-04-03",)
+    diagnostics = error.value.diagnostics
+    assert diagnostics.buy_orders == 0
+    assert diagnostics.autoheld_steps == 1
+
+
+def test_atl_runner_attaches_run_id_to_replay_validation_errors():
+    """A mid-run contract break must name the run it leaves open."""
+    client = _FakeATLClient(
+        [_step("2026-04-06T13:30:00+00:00", allowed_symbols=["MSFT"])]
+    )
+
+    with pytest.raises(TradingAgentsReplayValidationError) as error:
+        TradingAgentsATLRunner(client).run_backtest(
+            artifact=_artifact(_record()),
+            artifact_sha256="d" * 64,
+            agent_version_id="agv_1",
+            start_date="2026-04-06",
+            end_date="2026-04-07",
+        )
+
+    assert error.value.run_id == "run_1"
+    assert "run_1" in str(error.value)
 
 
 def test_atl_runner_failed_step_raises_run_failed_error():
@@ -1258,3 +1520,88 @@ def test_cli_generation_writes_artifact_and_forwards_safe_model_config(tmp_path)
         }
     ]
     assert runner_calls[0]["artifact_sha256"] == result.artifact_sha256
+
+
+def _outcome_with(**replay_overrides):
+    counters = {
+        "processed_dates": ("2026-04-03",),
+        "unprocessed_dates": (),
+        "buy_orders": 0,
+        "sell_orders": 0,
+        "model_holds": 0,
+        "error_holds": 0,
+        "passive_holds": 0,
+        "constraint_holds": 0,
+        "superseded": 0,
+    }
+    counters.update(replay_overrides)
+    return TradingAgentsATLRunOutcome(
+        result=RunResult(
+            run_id="run_1",
+            status="completed",
+            metrics={"total_return": 0.0, "timeout_holds": 0},
+        ),
+        replay=TradingAgentsReplayDiagnostics(**counters),
+        fills=(),
+        rejections=(),
+    )
+
+
+def test_cli_summary_warns_when_every_buy_was_priced_out(capsys):
+    """A 0% run caused by the position cap must not read as a model decision."""
+    cli = _load_cli_module()
+    result = cli.CommandResult(
+        artifact_path=Path("artifact.json"),
+        artifact_sha256="a" * 64,
+        outcome=_outcome_with(price_too_high_holds=2, autoheld_steps=1),
+    )
+
+    cli.print_summary(result)
+
+    captured = capsys.readouterr()
+    assert "price_too_high=2" in captured.out
+    assert "autoheld_steps=1" in captured.out
+    assert "WARNING" in captured.err
+    assert "$250" in captured.err
+    assert "auto-held 1 step" in captured.err
+
+
+def test_cli_summary_stays_quiet_when_orders_actually_executed(capsys):
+    cli = _load_cli_module()
+    result = cli.CommandResult(
+        artifact_path=Path("artifact.json"),
+        artifact_sha256="a" * 64,
+        outcome=_outcome_with(buy_orders=1),
+    )
+
+    cli.print_summary(result)
+
+    assert capsys.readouterr().err == ""
+
+
+def test_cli_reports_the_run_id_left_open_by_a_mid_run_abort(capsys):
+    cli = _load_cli_module()
+    argv = [
+        "--symbol",
+        "AAPL",
+        "--decisions-file",
+        "artifact.json",
+        "--start-date",
+        "2026-04-06",
+        "--end-date",
+        "2026-04-07",
+    ]
+
+    def _abort(*args, **kwargs):
+        raise TradingAgentsReplayValidationError(
+            "AAPL is missing from Step constraints.allowed_symbols"
+        ).with_run_id("run_42")
+
+    original = cli.run_from_args
+    cli.run_from_args = _abort
+    try:
+        assert cli.main(argv) == 1
+    finally:
+        cli.run_from_args = original
+
+    assert "Aborted ATL run id: run_42" in capsys.readouterr().err
