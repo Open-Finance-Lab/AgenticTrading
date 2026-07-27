@@ -38,7 +38,11 @@ classifiers = [
     "Topic :: Office/Business :: Financial :: Investment",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-dependencies = []
+# Windows ships no IANA time-zone database, so `zoneinfo` cannot resolve
+# "America/New_York" there (used by the TradingAgents replay planner). This is
+# the only dependency, and it installs on Windows alone: POSIX platforms keep a
+# zero-dependency install.
+dependencies = ["tzdata; platform_system == 'Windows'"]
 
 [project.urls]
 Homepage = "https://agentic-trading-lab.vercel.app/"
