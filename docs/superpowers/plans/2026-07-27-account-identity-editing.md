@@ -1,5 +1,12 @@
 # Account Identity Editing Implementation Plan
 
+> **✅ EXECUTED — this is now a historical record, not a work list.** Rate limiting was
+> revised after execution: the single 60-second cooldown described throughout this plan
+> was joined by a 7-day minimum interval between *completed* changes and a rolling
+> 3-per-24h request cap, and `email_change_requests` became append-only to support them.
+> The code blocks below predate that. **Read the spec's "Rate limiting (revised
+> 2026-07-28)" section for the current design**, not this file.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Let a signed-in user change their display name and (behind their current password plus two 6-character emailed codes) their email address, and move the account-page log out button to the bottom in destructive red.
