@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from pathlib import Path
 
-from dashboard.backend.database import db, DB_PATH
+import dashboard.backend.database as _database
 from dashboard.backend.paths import FRONTEND_DIR
 from dashboard.backend.middleware import SessionMiddleware, CSPHeaderMiddleware
 from dashboard.backend.api.router import api_router
@@ -25,6 +25,16 @@ from dashboard.backend.api.routers.market import router as market_router
 from dashboard.backend.api.routers.admin import router as admin_router
 from dashboard.backend.api.v2.errors import ApiError, api_error_handler, validation_error_handler
 from dashboard.backend.domain.backtesting.baselines.paper import create_paper_baselines_if_not_exists
+
+# Re-exported from database.py. ``DB_PATH`` is used below; ``db`` is not
+# referenced in this module at all -- it exists so tests can swap the shared
+# connection with `monkeypatch.setattr(app_module, "db", temp_db)`
+# (test_external_backtest_api.py, test_backtest_isolation.py). That reference
+# is a *string*, so neither grep nor AST analysis sees it, and dropping the
+# name as an "unused import" errors 9 tests. Bound explicitly so the
+# re-export reads as deliberate rather than as a stale import.
+db = _database.db
+DB_PATH = _database.DB_PATH
 
 # Load .env from project root (ANTHROPIC_API_KEY, ALPACA_*)
 _env_path = Path(__file__).resolve().parent.parent / ".env"

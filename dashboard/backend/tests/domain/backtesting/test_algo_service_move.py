@@ -136,7 +136,7 @@ def test_execute_algo_writes_config_and_forwards(monkeypatch, tmp_path):
         captured["args"] = kwargs.get("args")
 
         class _T:
-            def start(self_inner):
+            def start(self):
                 captured["started"] = True
 
         return _T()
