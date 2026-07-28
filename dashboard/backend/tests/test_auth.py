@@ -645,6 +645,23 @@ def _backdate_email_change_rows(store, user_id, **columns):
     conn.close()
 
 
+def _backdate_latest_email_change_row(store, user_id, **columns):
+    """Age only the NEWEST request row, leaving earlier rows' timestamps alone.
+
+    The all-rows variant above cannot give rows distinct ages: every call
+    rewrites the earlier rows' timestamps too.
+    """
+    assignments = ", ".join(f"{name} = ?" for name in columns)
+    conn = store._get_connection()
+    conn.execute(
+        f"UPDATE email_change_requests SET {assignments} "  # noqa: S608
+        "WHERE id = (SELECT MAX(id) FROM email_change_requests WHERE user_id = ?)",
+        (*columns.values(), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def _stored_time(**delta):
     from dashboard.backend.users import _utcnow, format_stored_timestamp
 
@@ -742,10 +759,11 @@ def test_email_change_requests_are_capped_per_day(client, sent_emails, temp_user
     for attempt in range(EMAIL_CHANGE_MAX_REQUESTS_PER_DAY):
         response = client.post("/api/auth/email-change", headers=headers, json=body)
         assert response.status_code == 200, f"request {attempt} -> {response.text}"
-        # Step past the 60s cooldown only. Each row keeps a distinct age so the
-        # window's oldest entry -- which is what Retry-After is measured from --
-        # is well defined.
-        _backdate_email_change_rows(
+        # Step past the 60s cooldown, and give each row a DISTINCT age (3h,
+        # 2h, 1h): only the newest row is touched, so earlier backdates
+        # survive and the window's oldest entry -- which is what Retry-After
+        # is measured from -- is distinguishable from its newest.
+        _backdate_latest_email_change_row(
             temp_user_store,
             user["id"],
             created_at=_stored_time(hours=EMAIL_CHANGE_MAX_REQUESTS_PER_DAY - attempt),
@@ -756,8 +774,12 @@ def test_email_change_requests_are_capped_per_day(client, sent_emails, temp_user
     assert capped.status_code == 429
     assert "Too many email-change requests today" in capped.json()["detail"]
     assert len(sent_emails) == EMAIL_CHANGE_MAX_REQUESTS_PER_DAY
-    # The window frees when the oldest of those requests ages out, ~21h from now.
-    assert 0 < int(capped.headers["Retry-After"]) <= 86400
+    # The window frees when the OLDEST of those requests ages out: 24h minus
+    # the oldest row's 3h age, less the moment the test took to get here.
+    # Measured from the newest row instead, this would read ~23h and fail.
+    oldest_age = EMAIL_CHANGE_MAX_REQUESTS_PER_DAY * 3600
+    retry_after = int(capped.headers["Retry-After"])
+    assert 86400 - oldest_age - 60 < retry_after <= 86400 - oldest_age
 
 
 def test_email_change_daily_cap_counts_cancelled_requests(
@@ -969,6 +991,35 @@ def test_email_change_full_two_stage_happy_path(client, sent_emails):
         json={"email": "two@example.com", "password": "orig-sturdy-pw-1"},
     )
     assert stale_login.status_code == 401
+
+
+def test_stage_two_mail_reads_correctly_for_a_recipient_with_no_account(
+    client, sent_emails
+):
+    """The new address may belong to someone else entirely.
+
+    Its owner has no Agentic Trading Lab account and no password there, so
+    copy reused from the stage-one mail -- "your ... account", "change your
+    password" -- is wrong for them, and instructions that cannot apply to the
+    reader are exactly what phishing looks like.
+    """
+    token = _signup_and_token(client, email="holder@example.com")
+    _start_email_change(client, token)
+    advanced = client.post(
+        "/api/auth/email-change/verify",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"code": _code_from(sent_emails[0]["body"])},
+    )
+    assert advanced.status_code == 200
+
+    owner_body, recipient_body = (mail["body"] for mail in sent_emails)
+    # The account owner is told how to react to a hijack attempt...
+    assert "your Agentic Trading Lab account" in owner_body
+    assert "change your password" in owner_body
+    # ...but the stage-two recipient is a bystander until they opt in.
+    assert "their Agentic Trading Lab account" in recipient_body
+    assert "your Agentic Trading Lab account" not in recipient_body
+    assert "change your password" not in recipient_body
 
 
 def test_email_change_verify_accepts_a_lowercase_code(client, sent_emails):

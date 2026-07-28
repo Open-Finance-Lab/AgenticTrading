@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import hmac
 import logging
 import math
 import os
@@ -302,13 +303,32 @@ def _humanize_wait(seconds: float) -> str:
     return f"{minutes} minute{'s' if minutes != 1 else ''}"
 
 
-def _email_change_body(code: str, new_email: str) -> str:
+def _email_change_old_body(code: str, new_email: str) -> str:
+    """Stage 'old', to the CURRENT address: the account owner."""
     return (
         "Someone asked to change the email address on your Agentic Trading Lab "
         f"account to {new_email}.\n\n"
         f"Your confirmation code is: {code}\n\n"
         f"It expires in {users_module.EMAIL_CHANGE_TTL_MINUTES} minutes. If this "
         "was not you, ignore this message and change your password."
+    )
+
+
+def _email_change_new_body(code: str) -> str:
+    """Stage 'new', to the address being adopted -- possibly a bystander's.
+
+    Its owner may have no Agentic Trading Lab account, so no "your account"
+    and no advice to change a password they do not have: instructions that
+    cannot apply to the reader are exactly what phishing looks like.
+    """
+    return (
+        "Someone asked to make this address the contact email for their "
+        "Agentic Trading Lab account.\n\n"
+        f"Your confirmation code is: {code}\n\n"
+        f"It expires in {users_module.EMAIL_CHANGE_TTL_MINUTES} minutes. If "
+        "this was you, enter it on the account page to finish. If not, ignore "
+        "this message and do not share the code -- without it, nothing gets "
+        "linked to this address."
     )
 
 
@@ -389,7 +409,7 @@ async def request_email_change(
     sent = await email_sender.send_email(
         to=str(current_user["email"]),
         subject="Confirm your Agentic Trading Lab email change",
-        text_body=_email_change_body(code, payload.new_email),
+        text_body=_email_change_old_body(code, payload.new_email),
     )
     if not sent:
         raise HTTPException(
@@ -447,7 +467,9 @@ async def verify_email_change(
             status_code=400, detail="No email change is in progress. Start again."
         )
 
-    if hash_code(payload.code) != request_row["code_hash"]:
+    # Constant-time out of idiom rather than necessity -- comparing two
+    # fixed-length digests already denies a byte-by-byte timing oracle.
+    if not hmac.compare_digest(hash_code(payload.code), str(request_row["code_hash"])):
         attempts = store.record_email_change_attempt(request_row["id"])
         if attempts >= users_module.EMAIL_CHANGE_MAX_ATTEMPTS:
             store.cancel_email_change(current_user["id"])
@@ -469,7 +491,7 @@ async def verify_email_change(
         sent = await email_sender.send_email(
             to=new_email,
             subject="Confirm your new Agentic Trading Lab email address",
-            text_body=_email_change_body(code, new_email),
+            text_body=_email_change_new_body(code),
         )
         if not sent:
             raise HTTPException(
