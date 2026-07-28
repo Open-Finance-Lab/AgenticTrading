@@ -33,6 +33,13 @@ _DEFINITION = re.compile(r"(?:const|let|var)\s+(?:API_BASE|API)\s*=\s*([^;]{0,30
 
 _BARE_ORIGIN = re.compile(r"(?:API_BASE|API)\s*=\s*window\.location\.origin\s*;")
 
+# Anchored to the exact quoted literal, not a bare substring: a check like
+# ``"onrender.com" in initializer`` would also pass for a typo'd host such as
+# ``'https://evil.example/onrender.com'`` (CodeQL: py/incomplete-url-substring
+# -sanitization). Quote-delimiting the literal makes the match exact.
+_LOCALHOST_LITERAL = re.compile(r"""['"]localhost['"]""")
+_ONRENDER_HOST_LITERAL = re.compile(r"""['"]https://agentictrading\.onrender\.com['"]""")
+
 
 def _definitions():
     for path in _SOURCES:
@@ -53,10 +60,10 @@ def test_the_known_api_base_definers_are_still_matched():
 
 def test_every_api_base_definition_targets_the_backend_off_localhost():
     for name, initializer in _definitions():
-        assert "localhost" in initializer, (
+        assert _LOCALHOST_LITERAL.search(initializer), (
             f"{name}: the API base must special-case local development"
         )
-        assert "onrender.com" in initializer, (
+        assert _ONRENDER_HOST_LITERAL.search(initializer), (
             f"{name}: the API base must point at the hosted backend when not on "
             "localhost -- the Vercel origin serves no /api routes"
         )
