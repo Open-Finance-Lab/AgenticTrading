@@ -1,8 +1,14 @@
 /**
  * agent-editor.js — Fullscreen agent Configure screen.
- * Simple mode: capital + one plain-language instruction (stored as a 1-step
- * pipeline) + model. Advanced mode: the multi-step sub-agent chain.
- * Agent fields: PATCH /api/v1/agents/{id}. Pipeline cache: localStorage.
+ * One mode only: capital + one plain-language instruction (stored as a 1-step
+ * pipeline) + model. Agent fields: PATCH /api/v1/agents/{id}.
+ *
+ * The multi-step "Advanced" sub-agent editor was removed. Multi-step pipelines
+ * still EXECUTE server-side (infrastructure/llm/pipeline_runner.py) and the
+ * marketplace still ships a 3-step template, so an agent may legitimately hold a
+ * pipeline this screen cannot author. Such a pipeline is carried opaquely in
+ * `subAgents` and re-sent untouched unless the user types an instruction — see
+ * `sendPipeline` in getEditorState().
  */
 (function () {
   'use strict';
@@ -19,9 +25,9 @@
       ? window.location.origin
       : 'https://agentictrading.onrender.com';
 
-  // The Simple-mode contract (preset key + trading-actions output format) has a
-  // single source of truth in app.js, published on `window`. app.js loads AFTER
-  // this file, so read lazily at call time — every use below is inside an
+  // The simple-instruction contract (preset key + trading-actions output format)
+  // has a single source of truth in app.js, published on `window`. app.js loads
+  // AFTER this file, so read lazily at call time — every use below is inside an
   // event-driven function, by which point window.* is populated. The fallbacks
   // only matter if app.js somehow failed to load (whole app is broken anyway).
   function simplePresetKey() {
@@ -35,6 +41,9 @@
       (typeof window !== 'undefined' && window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT) || ''
     );
   }
+  function defaultStarterInstruction() {
+    return (typeof window !== 'undefined' && window.DEFAULT_STARTER_INSTRUCTION) || '';
+  }
 
   // Demo/mock agents (see MOCK_AGENTS in app.js) only exist in the frontend —
   // they have no database row, so PATCH would 404. We persist their edits
@@ -43,71 +52,11 @@
     return typeof agentId === 'string' && agentId.startsWith('mock-');
   }
 
-  const SUB_AGENT_PRESETS = [
-    {
-      presetKey: 'info_gather',
-      label: 'Information Gathering',
-      defaultPrompt:
-        'You are the information-gathering sub-agent. Collect key facts relevant to trading decisions from market data, news, and macro events. Filter noise and keep high-confidence facts and indicator changes.',
-      defaultOutputFormat:
-        'JSON: { "timestamp": "ISO8601", "symbols": ["..."], "facts": [{ "source": "...", "summary": "...", "impact": "bullish|bearish|neutral" }], "confidence": 0.0-1.0 }',
-    },
-    {
-      presetKey: 'info_to_signal',
-      label: 'Information to Signal',
-      defaultPrompt:
-        'You are the signal-generation sub-agent. Based on upstream information-gathering output, convert facts and indicators into executable trading signals (direction, strength, time horizon).',
-      defaultOutputFormat:
-        'JSON: { "signals": [{ "symbol": "...", "direction": "long|short|flat", "strength": 0.0-1.0, "horizon": "1h|4h|1d", "rationale": "..." }] }',
-    },
-    {
-      presetKey: 'signal_to_execution',
-      label: 'Signal to Execution',
-      defaultPrompt:
-        'You are the trade-execution sub-agent. Turn signals into concrete order instructions, respecting position limits, liquidity, and slippage. Output a submit-ready buy/sell plan.',
-      defaultOutputFormat:
-        'JSON: { "orders": [{ "symbol": "...", "side": "buy|sell|hold", "qty": number, "order_type": "market|limit", "limit_price": number|null, "reason": "..." }] }',
-    },
-    {
-      presetKey: 'global_strategy',
-      label: 'Global Trading Strategy',
-      defaultPrompt:
-        'You are the global strategy sub-agent. Coordinate asset allocation, risk budget, and conflicting signals so the overall portfolio stays within strategy constraints and target return/risk profile.',
-      defaultOutputFormat:
-        'JSON: { "portfolio_targets": [{ "symbol": "...", "target_weight": 0.0-1.0 }], "risk_budget": { "max_drawdown": number, "max_single_position": number }, "strategy_notes": "..." }',
-    },
-    {
-      presetKey: 'stop_loss_take_profit',
-      label: 'Stop Loss / Take Profit',
-      defaultPrompt:
-        'You are the risk-management sub-agent. Set stop-loss and take-profit rules for open positions, monitor unrealized P/L, and output close or reduce instructions when triggers fire.',
-      defaultOutputFormat:
-        'JSON: { "risk_actions": [{ "symbol": "...", "action": "stop_loss|take_profit|trail|hold", "trigger_price": number, "size_pct": 0.0-1.0, "reason": "..." }] }',
-    },
-    {
-      presetKey: 'post_trade_analysis',
-      label: 'Post-trade Analysis',
-      defaultPrompt:
-        'You are the post-trade analysis sub-agent. Once per trading day, review that day\'s trades, equity change, and the current decision-step prompts. Identify what went wrong in those prompts (missed risk, bad signal rules, weak execution constraints). Then propose revised prompts for the upstream sub-agents so the next trading day can improve. Do not invent market facts beyond the episode context you are given.',
-      defaultOutputFormat:
-        'JSON: { "summary": "...", "prompt_problems": [{ "step_id": "...", "presetKey": "...", "issue": "..." }], "prompt_patches": [{ "step_id": "...", "presetKey": "...", "new_prompt": "...", "change_rationale": "..." }] }',
-    },
-    {
-      presetKey: 'custom',
-      label: 'Custom Sub-agent',
-      defaultPrompt: 'Describe this sub-agent\'s responsibilities and decision boundaries.',
-      defaultOutputFormat: 'JSON: { "output": "..." }',
-    },
-  ];
-
-  const presetByKey = Object.fromEntries(SUB_AGENT_PRESETS.map((p) => [p.presetKey, p]));
-
   let currentAgent = null;
   let subAgents = [];
   let saveStatusTimer = null;
   let isDirty = false;
   let savedSnapshot = '';
-  let editorMode = 'simple';
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -125,52 +74,16 @@
     return `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  function createSubAgentFromPreset(presetKey, customLabel) {
-    const preset = presetByKey[presetKey] || presetByKey.custom;
-    const label =
-      presetKey === 'custom' && customLabel
-        ? customLabel.trim()
-        : preset.label;
-    return {
-      id: newSubAgentId(),
-      presetKey,
-      label,
-      prompt: preset.defaultPrompt,
-      outputFormat: preset.defaultOutputFormat,
-    };
-  }
-
-  function defaultPipeline() {
-    return SUB_AGENT_PRESETS.filter((p) => p.presetKey !== 'custom').map((preset) => ({
-      id: newSubAgentId(),
-      presetKey: preset.presetKey,
-      label: preset.label,
-      prompt: preset.defaultPrompt,
-      outputFormat: preset.defaultOutputFormat,
-    }));
-  }
-
+  // Structural only: this screen no longer knows about sub-agent presets, it
+  // just round-trips whatever shape is already stored.
   function normalizeLoadedSubAgent(item) {
-    const presetKey = item.presetKey || 'custom';
-    const preset = presetByKey[presetKey];
-    const isCustom = presetKey === 'custom' || !preset;
     return {
       id: item.id || newSubAgentId(),
-      presetKey,
-      label: isCustom ? (item.label || 'Sub-agent') : preset.label,
-      prompt: item.prompt || (preset ? preset.defaultPrompt : ''),
-      outputFormat: item.outputFormat || (preset ? preset.defaultOutputFormat : ''),
+      presetKey: item.presetKey || 'custom',
+      label: item.label || 'Sub-agent',
+      prompt: item.prompt || '',
+      outputFormat: item.outputFormat || '',
     };
-  }
-
-  // For real agents the backend-stored pipeline is the source of truth; fall
-  // back to any locally cached / default pipeline when the agent has none yet.
-  // Demo (mock) agents have no backend row, so they always use localStorage.
-  function resolvePipeline(agent) {
-    if (!isDemoAgent(agent.agent_id) && Array.isArray(agent.pipeline) && agent.pipeline.length) {
-      return agent.pipeline.map(normalizeLoadedSubAgent);
-    }
-    return loadPipeline(agent.agent_id);
   }
 
   function isSimplePipeline(pipeline) {
@@ -181,9 +94,9 @@
     );
   }
 
-  // The pipeline the agent ACTUALLY has (backend row, then local cache) — with
-  // NO default-5-step substitution, so a fresh agent opens in Simple mode.
-  // Demo agents keep resolvePipeline's default behavior.
+  // The pipeline the agent ACTUALLY has (backend row, then local cache). Returns
+  // [] when it has none, which is what triggers the starter-instruction backfill
+  // in open() for agents created before server-side seeding existed.
   function loadStoredPipeline(agent) {
     if (Array.isArray(agent.pipeline) && agent.pipeline.length) {
       return agent.pipeline.map(normalizeLoadedSubAgent);
@@ -200,20 +113,6 @@
       /* fall through to empty */
     }
     return [];
-  }
-
-  function loadPipeline(agentId) {
-    try {
-      const raw = localStorage.getItem(storageKey(agentId));
-      if (!raw) return defaultPipeline();
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed.subAgents) || !parsed.subAgents.length) {
-        return defaultPipeline();
-      }
-      return parsed.subAgents.map(normalizeLoadedSubAgent);
-    } catch {
-      return defaultPipeline();
-    }
   }
 
   function savePipelineLocal(agentId, agents) {
@@ -516,36 +415,33 @@
       cash_allocation = 1000;
     }
     const modelSelect = document.getElementById('agentEditorModelSelect');
+    const instruction = (
+      document.getElementById('agentEditorSimpleInstruction')?.value || ''
+    ).trim();
     let subAgentsOut;
     let sendPipeline;
-    if (editorMode === 'simple') {
-      const instruction = (
-        document.getElementById('agentEditorSimpleInstruction')?.value || ''
-      ).trim();
-      if (instruction) {
-        const existing =
-          subAgents.length === 1 && subAgents[0].presetKey === simplePresetKey()
-            ? subAgents[0]
-            : null;
-        subAgentsOut = [
-          {
-            id: existing ? existing.id : newSubAgentId(),
-            presetKey: simplePresetKey(),
-            label: 'Trading instruction',
-            prompt: instruction,
-            outputFormat: simpleOutputFormat(),
-          },
-        ];
-        sendPipeline = true;
-      } else {
-        // Empty instruction never touches the stored pipeline: not sent to the
-        // server, not cached locally, not folded into currentAgent.
-        subAgentsOut = subAgents;
-        sendPipeline = false;
-      }
-    } else {
-      subAgentsOut = collectPipelineFromDom();
+    if (instruction) {
+      const existing =
+        subAgents.length === 1 && subAgents[0].presetKey === simplePresetKey()
+          ? subAgents[0]
+          : null;
+      subAgentsOut = [
+        {
+          id: existing ? existing.id : newSubAgentId(),
+          presetKey: simplePresetKey(),
+          label: 'Trading instruction',
+          prompt: instruction,
+          outputFormat: simpleOutputFormat(),
+        },
+      ];
       sendPipeline = true;
+    } else {
+      // Empty instruction never touches the stored pipeline: not sent to the
+      // server, not cached locally, not folded into currentAgent. This is what
+      // stops a rename-only save from destroying a multi-step pipeline this
+      // screen cannot display.
+      subAgentsOut = subAgents;
+      sendPipeline = false;
     }
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
     return {
@@ -578,25 +474,6 @@
     setDirty(false);
   }
 
-  function collectPipelineFromDom() {
-    const pipeline = document.getElementById('agentEditorPipeline');
-    if (!pipeline) return subAgents;
-
-    return subAgents.map((sub) => {
-      const card = pipeline.querySelector(`[data-sub-id="${sub.id}"]`);
-      if (!card) return sub;
-      const labelInput = card.querySelector('[data-field="label"]');
-      const promptInput = card.querySelector('[data-field="prompt"]');
-      const outputInput = card.querySelector('[data-field="outputFormat"]');
-      return {
-        ...sub,
-        label: labelInput ? labelInput.value.trim() || sub.label : sub.label,
-        prompt: promptInput ? promptInput.value : sub.prompt,
-        outputFormat: outputInput ? outputInput.value : sub.outputFormat,
-      };
-    });
-  }
-
   function showSaveStatus(message, isError) {
     const el = document.getElementById('agentEditorSaveStatus');
     if (!el) return;
@@ -609,204 +486,11 @@
     }, 3000);
   }
 
-  function updateStepCount() {
-    const el = document.getElementById('agentEditorStepCount');
-    if (!el) return;
-    const n = subAgents.length;
-    el.textContent = `${n} step${n === 1 ? '' : 's'}`;
-  }
-
-  function refreshAddSelect() {
-    const select = document.getElementById('agentEditorAddSelect');
-    const customName = document.getElementById('agentEditorCustomName');
-    if (!select) return;
-
-    const usedPresetKeys = new Set(
-      subAgents.filter((s) => s.presetKey !== 'custom').map((s) => s.presetKey)
-    );
-
-    select.innerHTML = '<option value="">— Select type —</option>';
-    SUB_AGENT_PRESETS.forEach((preset) => {
-      if (preset.presetKey !== 'custom' && usedPresetKeys.has(preset.presetKey)) return;
-      const opt = document.createElement('option');
-      opt.value = preset.presetKey;
-      opt.textContent = preset.label;
-      select.appendChild(opt);
-    });
-
-    const customOpt = document.createElement('option');
-    customOpt.value = 'custom';
-    customOpt.textContent = 'Custom Sub-agent';
-    select.appendChild(customOpt);
-
-    if (customName) {
-      customName.hidden = select.value !== 'custom';
-    }
-  }
-
-  function moveSubAgent(index, delta) {
-    const next = index + delta;
-    if (next < 0 || next >= subAgents.length) return;
-    subAgents = collectPipelineFromDom();
-    const tmp = subAgents[index];
-    subAgents[index] = subAgents[next];
-    subAgents[next] = tmp;
-    renderPipeline();
-    markDirtyFromInput();
-  }
-
-  function duplicateSubAgent(subId) {
-    subAgents = collectPipelineFromDom();
-    const idx = subAgents.findIndex((s) => s.id === subId);
-    if (idx < 0) return;
-    const src = subAgents[idx];
-    const copy = {
-      ...src,
-      id: newSubAgentId(),
-      presetKey: 'custom',
-      label: `${src.label} (copy)`,
-    };
-    subAgents.splice(idx + 1, 0, copy);
-    renderPipeline();
-    markDirtyFromInput();
-    showSaveStatus('Sub-agent duplicated');
-  }
-
-  function restoreSubAgentDefaults(subId) {
-    subAgents = collectPipelineFromDom();
-    const sub = subAgents.find((s) => s.id === subId);
-    if (!sub) return;
-    const preset = presetByKey[sub.presetKey];
-    if (!preset || sub.presetKey === 'custom') return;
-    sub.prompt = preset.defaultPrompt;
-    sub.outputFormat = preset.defaultOutputFormat;
-    renderPipeline();
-    markDirtyFromInput();
-    showSaveStatus('Restored default prompt for this step');
-  }
-
-  function renderPipeline() {
-    const pipeline = document.getElementById('agentEditorPipeline');
-    if (!pipeline) return;
-
-    pipeline.innerHTML = '';
-    updateStepCount();
-
-    subAgents.forEach((sub, index) => {
-      const card = document.createElement('article');
-      card.className = 'section-card agent-sub-card';
-      card.setAttribute('role', 'listitem');
-      card.dataset.subId = sub.id;
-
-      const isCustom = sub.presetKey === 'custom';
-      const isFirst = index === 0;
-      const isLast = index === subAgents.length - 1;
-      const canRestore = !isCustom && presetByKey[sub.presetKey];
-
-      const isPostTrade = sub.presetKey === 'post_trade_analysis';
-      const nextIsPostTrade =
-        !isLast && subAgents[index + 1] && subAgents[index + 1].presetKey === 'post_trade_analysis';
-      const labelField = isCustom
-        ? `<input class="agent-sub-label-input" type="text" data-field="label" value="${escapeHtml(sub.label)}" placeholder="Sub-agent name" aria-label="Sub-agent name">`
-        : `<span class="agent-sub-preset-label">${escapeHtml(sub.label)}${
-            isPostTrade
-              ? '<span class="agent-sub-freq-badge" title="Runs once per trading day after trades">daily after trades</span>'
-              : ''
-          }</span>`;
-
-      card.innerHTML = `
-        <div class="agent-sub-head">
-          <div class="agent-sub-head-left">
-            <span class="agent-sub-index" aria-hidden="true">${index + 1}</span>
-            ${labelField}
-          </div>
-          <div class="agent-sub-actions">
-            <div class="agent-sub-reorder" role="group" aria-label="Reorder sub-agent">
-              <button class="agent-sub-move-btn" type="button" data-action="up" data-sub-id="${escapeHtml(sub.id)}" aria-label="Move up" ${isFirst ? 'disabled' : ''}>↑</button>
-              <button class="agent-sub-move-btn" type="button" data-action="down" data-sub-id="${escapeHtml(sub.id)}" aria-label="Move down" ${isLast ? 'disabled' : ''}>↓</button>
-            </div>
-            <button class="agent-sub-icon-btn" type="button" data-action="duplicate" data-sub-id="${escapeHtml(sub.id)}" title="Duplicate">⧉</button>
-            ${canRestore ? `<button class="agent-sub-icon-btn" type="button" data-action="restore" data-sub-id="${escapeHtml(sub.id)}" title="Restore defaults">↺</button>` : ''}
-            <button class="agent-sub-remove-btn" type="button" data-action="remove" data-sub-id="${escapeHtml(sub.id)}" aria-label="Remove sub-agent">Remove</button>
-          </div>
-        </div>
-        <div class="agent-sub-fields">
-          <label class="agent-sub-field">
-            <span class="agent-sub-field-label">Task prompt</span>
-            <span class="agent-sub-field-hint">What this sub-agent should do</span>
-            <textarea data-field="prompt" rows="5" placeholder="Describe this sub-agent's role…">${escapeHtml(sub.prompt)}</textarea>
-          </label>
-          <label class="agent-sub-field">
-            <span class="agent-sub-field-label">Output format</span>
-            <span class="agent-sub-field-hint">Structure passed to the next model</span>
-            <textarea data-field="outputFormat" rows="4" placeholder="JSON or structured text…">${escapeHtml(sub.outputFormat)}</textarea>
-          </label>
-        </div>
-        ${
-          !isLast
-            ? `<div class="agent-sub-connector" aria-hidden="true"><span>${
-                nextIsPostTrade
-                  ? '↓ Then post-trade analysis (once per day)'
-                  : '↓ Output to next sub-agent'
-              }</span></div>`
-            : ''
-        }
-      `;
-
-      pipeline.appendChild(card);
-    });
-
-    pipeline.querySelectorAll('[data-action]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const action = btn.dataset.action;
-        const subId = btn.dataset.subId;
-        const idx = subAgents.findIndex((s) => s.id === subId);
-        if (action === 'up') moveSubAgent(idx, -1);
-        else if (action === 'down') moveSubAgent(idx, 1);
-        else if (action === 'duplicate') duplicateSubAgent(subId);
-        else if (action === 'restore') restoreSubAgentDefaults(subId);
-        else if (action === 'remove') {
-          if (subAgents.length <= 1) {
-            showSaveStatus('Keep at least one sub-agent', true);
-            return;
-          }
-          subAgents = collectPipelineFromDom().filter((s) => s.id !== subId);
-          renderPipeline();
-          refreshAddSelect();
-          markDirtyFromInput();
-        }
-      });
-    });
-
-    refreshAddSelect();
-  }
-
+  // Warn only when the agent holds a pipeline this screen cannot author, since
+  // saving an instruction would replace it.
   function updateSimpleReplaceNote() {
     const note = document.getElementById('agentEditorSimpleReplaceNote');
-    if (note) note.hidden = !(editorMode === 'simple' && !isSimplePipeline(subAgents));
-  }
-
-  function setEditorMode(mode) {
-    editorMode = mode === 'advanced' ? 'advanced' : 'simple';
-    const simplePanel = document.getElementById('agentEditorSimplePanel');
-    const advancedPanel = document.getElementById('agentEditorAdvancedPanel');
-    const resetBtn = document.getElementById('agentEditorResetBtn');
-    if (simplePanel) simplePanel.hidden = editorMode !== 'simple';
-    if (advancedPanel) advancedPanel.hidden = editorMode !== 'advanced';
-    if (resetBtn) resetBtn.hidden = editorMode !== 'advanced';
-    const modeSimpleBtn = document.getElementById('agentEditorModeSimple');
-    const modeAdvancedBtn = document.getElementById('agentEditorModeAdvanced');
-    modeSimpleBtn?.classList.toggle('active', editorMode === 'simple');
-    modeAdvancedBtn?.classList.toggle('active', editorMode === 'advanced');
-    modeSimpleBtn?.setAttribute('aria-pressed', editorMode === 'simple' ? 'true' : 'false');
-    modeAdvancedBtn?.setAttribute('aria-pressed', editorMode === 'advanced' ? 'true' : 'false');
-    if (editorMode === 'advanced' && subAgents.length === 0) {
-      // First look at Advanced on a fresh agent: start from the default chain.
-      subAgents = defaultPipeline();
-      renderPipeline();
-    }
-    updateSimpleReplaceNote();
-    markDirtyFromInput();
+    if (note) note.hidden = isSimplePipeline(subAgents);
   }
 
   function fillHeader(agent) {
@@ -1022,23 +706,17 @@
     if (!agent || !agent.agent_id) return;
 
     currentAgent = { ...agent };
-    if (isDemoAgent(agent.agent_id)) {
-      subAgents = resolvePipeline(agent); // demo agents keep the legacy default chain
-    } else {
-      subAgents = loadStoredPipeline(agent);
-    }
+    subAgents = loadStoredPipeline(agent);
     fillHeader(agent);
     populateModelSelect(agent);
+
     const instructionEl = document.getElementById('agentEditorSimpleInstruction');
-    if (instructionEl) {
-      const simpleStep =
-        subAgents.length === 1 && subAgents[0].presetKey === simplePresetKey()
-          ? subAgents[0]
-          : null;
-      instructionEl.value = simpleStep ? simpleStep.prompt : '';
-    }
-    renderPipeline();
-    setEditorMode(isSimplePipeline(subAgents) ? 'simple' : 'advanced');
+    const simpleStep =
+      subAgents.length === 1 && subAgents[0].presetKey === simplePresetKey()
+        ? subAgents[0]
+        : null;
+    if (instructionEl) instructionEl.value = simpleStep ? simpleStep.prompt : '';
+    updateSimpleReplaceNote();
     refreshRunHistory(currentAgent);
     refreshRobinhoodStatus();
 
@@ -1051,7 +729,18 @@
     const playgroundView = document.getElementById('playgroundView');
     if (playgroundView) playgroundView.setAttribute('aria-hidden', 'true');
 
+    // Baseline the STORED state first, then backfill — capturing the snapshot
+    // after the injection would re-baseline it and the default would never be
+    // recognised as an unsaved change.
     captureSavedSnapshot();
+    if (!subAgents.length && instructionEl && defaultStarterInstruction()) {
+      // Agent predates server-side seeding (its pipeline is empty). Offer the
+      // starter instruction so Configure is never a blank box, and mark it dirty
+      // so a Save persists it.
+      instructionEl.value = defaultStarterInstruction();
+      markDirtyFromInput();
+    }
+
     document.getElementById('agentEditorNameInput')?.focus();
   }
 
@@ -1059,8 +748,6 @@
     if (!force && isDirty) {
       if (!window.confirm('Discard unsaved changes?')) return;
     }
-
-    subAgents = collectPipelineFromDom();
 
     const view = document.getElementById('agentEditorView');
     if (view) view.hidden = true;
@@ -1091,7 +778,6 @@
     }
 
     subAgents = state.subAgents;
-    renderPipeline();
     updateSimpleReplaceNote();
     const saveBtn = document.getElementById('agentEditorSaveBtn');
     if (saveBtn) {
@@ -1186,56 +872,9 @@
     }
   }
 
-  function resetPipeline() {
-    if (!window.confirm('Reset the pipeline to the default 5 sub-agents? Unsaved prompt edits will be lost.')) {
-      return;
-    }
-    subAgents = defaultPipeline();
-    renderPipeline();
-    markDirtyFromInput();
-    showSaveStatus('Pipeline reset to defaults');
-  }
-
-  function addSubAgent() {
-    const select = document.getElementById('agentEditorAddSelect');
-    const customNameEl = document.getElementById('agentEditorCustomName');
-    const presetKey = select ? select.value : '';
-    if (!presetKey) {
-      showSaveStatus('Select a sub-agent type to add', true);
-      return;
-    }
-
-    subAgents = collectPipelineFromDom();
-
-    let customLabel = null;
-    if (presetKey === 'custom' && customNameEl) {
-      customLabel = customNameEl.value.trim() || 'Custom Sub-agent';
-    }
-
-    subAgents.push(createSubAgentFromPreset(presetKey, customLabel));
-    renderPipeline();
-    markDirtyFromInput();
-    showSaveStatus('Sub-agent added');
-
-    if (select) select.value = '';
-    if (customNameEl) {
-      customNameEl.value = '';
-      customNameEl.hidden = true;
-    }
-
-    const pipeline = document.getElementById('agentEditorPipeline');
-    if (pipeline && pipeline.lastElementChild) {
-      pipeline.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-  }
-
   function bindEvents() {
     document.getElementById('agentEditorBackBtn')?.addEventListener('click', () => close(false));
     document.getElementById('agentEditorSaveBtn')?.addEventListener('click', () => save());
-    document.getElementById('agentEditorAddBtn')?.addEventListener('click', addSubAgent);
-    document.getElementById('agentEditorResetBtn')?.addEventListener('click', resetPipeline);
-    document.getElementById('agentEditorModeSimple')?.addEventListener('click', () => setEditorMode('simple'));
-    document.getElementById('agentEditorModeAdvanced')?.addEventListener('click', () => setEditorMode('advanced'));
     document.getElementById('agentEditorConnectRobinhoodBtn')?.addEventListener('click', connectRobinhood);
     document.getElementById('agentEditorDisconnectRobinhoodBtn')?.addEventListener('click', disconnectRobinhood);
     document.getElementById('agentEditorRunLiveBtn')?.addEventListener('click', runLive);
@@ -1244,11 +883,6 @@
       if (typeof window.openRunBacktestModal === 'function') {
         window.openRunBacktestModal(currentAgent);
       }
-    });
-
-    document.getElementById('agentEditorAddSelect')?.addEventListener('change', (e) => {
-      const customName = document.getElementById('agentEditorCustomName');
-      if (customName) customName.hidden = e.target.value !== 'custom';
     });
 
     const body = document.getElementById('agentEditorView');
@@ -1278,5 +912,5 @@
 
   bindEvents();
 
-  window.AgentEditor = { open, close, save, loadPipeline };
+  window.AgentEditor = { open, close, save };
 })();
