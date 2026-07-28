@@ -2151,6 +2151,35 @@ const AuthAPI = {
     return this.request('/api/auth/avatar', { method: 'DELETE' });
   },
 
+  updateDisplayName(displayName) {
+    return this.request('/api/auth/display-name', {
+      method: 'PUT',
+      body: JSON.stringify({ display_name: displayName }),
+    });
+  },
+
+  requestEmailChange(currentPassword, newEmail) {
+    return this.request('/api/auth/email-change', {
+      method: 'POST',
+      body: JSON.stringify({ current_password: currentPassword, new_email: newEmail }),
+    });
+  },
+
+  verifyEmailChange(code) {
+    return this.request('/api/auth/email-change/verify', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
+  },
+
+  emailChangeStatus() {
+    return this.request('/api/auth/email-change', { method: 'GET' });
+  },
+
+  cancelEmailChange() {
+    return this.request('/api/auth/email-change', { method: 'DELETE' });
+  },
+
   discordStart() {
     return this.request('/api/auth/discord/start', { method: 'POST' });
   },
@@ -2190,6 +2219,11 @@ function clearAuthState() {
   localStorage.removeItem(AUTH_TOKEN_KEY);
   localStorage.removeItem(AUTH_USER_KEY);
   window.AUTH_USER = null;
+  // The email-change form keeps its stage in a closure keyed to nobody: left
+  // alone, the next user to sign in on this tab resumes the previous user's
+  // half-finished change. Reset here -- every sign-out path (logout button,
+  // missing token, expired session) funnels through clearAuthState.
+  resetEmailChangeForm();
   updateAuthUI();
 }
 
@@ -2206,6 +2240,11 @@ function updateAccountPage() {
     signedOut.hidden = true;
     if (nameEl) nameEl.textContent = user.display_name || '—';
     if (emailEl) emailEl.textContent = user.email || '—';
+    const nameInput = document.getElementById('displayNameInput');
+    // Skip while focused so a re-render mid-edit does not stomp what is typed.
+    if (nameInput && document.activeElement !== nameInput) {
+      nameInput.value = user.display_name || '';
+    }
     renderAvatar(document.getElementById('accountAvatarPreview'), user);
     const removeBtn = document.getElementById('avatarRemoveBtn');
     if (removeBtn) removeBtn.hidden = !user.avatar;
@@ -2388,6 +2427,196 @@ function initChangePasswordForm() {
       if (submitBtn) submitBtn.disabled = false;
     }
   });
+}
+
+function initDisplayNameForm() {
+  const form = document.getElementById('accountDisplayNameForm');
+  if (!form) return;
+  const input = document.getElementById('displayNameInput');
+  const errorEl = document.getElementById('displayNameError');
+  const successEl = document.getElementById('displayNameSuccess');
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (errorEl) errorEl.hidden = true;
+    if (successEl) successEl.hidden = true;
+
+    const value = (input?.value || '').trim();
+    if (!value) {
+      if (errorEl) {
+        errorEl.textContent = 'Display name cannot be empty.';
+        errorEl.hidden = false;
+      }
+      return;
+    }
+
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const data = await AuthAPI.updateDisplayName(value);
+      applyUpdatedUser(data.user);   // cascades into updateAuthUI() -> updateAccountPage()
+      if (successEl) successEl.hidden = false;
+    } catch (error) {
+      if (errorEl) {
+        errorEl.textContent = error.message;
+        errorEl.hidden = false;
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+}
+
+function renderEmailChangeState(state) {
+  const idle = document.getElementById('emailChangeIdle');
+  const codeStep = document.getElementById('emailChangeCodeStep');
+  const copy = document.getElementById('emailChangeStepCopy');
+  const submitBtn = document.getElementById('emailChangeSubmitBtn');
+  const cancelBtn = document.getElementById('emailChangeCancelBtn');
+  if (!idle || !codeStep) return;
+
+  const pending = Boolean(state && state.pending);
+  idle.hidden = pending;
+  codeStep.hidden = !pending;
+  if (cancelBtn) cancelBtn.hidden = !pending;
+
+  if (!pending) {
+    if (submitBtn) submitBtn.textContent = 'Send code';
+    return;
+  }
+
+  const user = getStoredAuthUser();
+  if (copy) {
+    // textContent, never innerHTML: new_email is user-supplied.
+    copy.textContent = state.stage === 'new'
+      ? `Code sent to ${state.new_email}. Enter it to finish — check your spam folder if it doesn't arrive.`
+      : `We sent a 6-character code to ${user?.email || 'your current address'}. Check your spam folder if it doesn't arrive.`;
+  }
+  if (submitBtn) submitBtn.textContent = state.stage === 'new' ? 'Confirm' : 'Verify';
+}
+
+// Rebound to the form's real reset by initEmailChangeForm(); the no-op covers
+// clearAuthState() firing before init (e.g. token expiry on page load).
+let resetEmailChangeForm = () => {};
+
+function initEmailChangeForm() {
+  const form = document.getElementById('accountEmailForm');
+  if (!form) return;
+  const errorEl = document.getElementById('emailChangeError');
+  const successEl = document.getElementById('emailChangeSuccess');
+  const codeInput = document.getElementById('emailChangeCodeInput');
+  const cancelBtn = document.getElementById('emailChangeCancelBtn');
+  let stage = null;
+
+  const showError = (message) => {
+    if (errorEl) {
+      errorEl.textContent = message;
+      errorEl.hidden = false;
+    }
+  };
+
+  const reset = () => {
+    stage = null;
+    form.reset();
+    if (errorEl) errorEl.hidden = true;
+    if (successEl) successEl.hidden = true;
+    renderEmailChangeState({ pending: false });
+  };
+  resetEmailChangeForm = reset;
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitBtn = document.getElementById('emailChangeSubmitBtn');
+    if (errorEl) errorEl.hidden = true;
+    if (successEl) successEl.hidden = true;
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      if (!stage) {
+        const newEmail = (document.getElementById('newEmailInput')?.value || '').trim();
+        // Emptiness is checked on the trimmed value, but the RAW password is what
+        // gets sent -- leading/trailing whitespace can be meaningful in a password,
+        // and the sibling change-password form reads its field raw too.
+        const password = document.getElementById('emailChangePasswordInput')?.value || '';
+        if (!newEmail || !password.trim()) {
+          showError('Enter a new email address and your current password.');
+          return;
+        }
+        const state = await AuthAPI.requestEmailChange(password, newEmail);
+        stage = state.stage;
+        renderEmailChangeState({ pending: true, ...state });
+        const pwInput = document.getElementById('emailChangePasswordInput');
+        if (pwInput) pwInput.value = '';
+      } else {
+        const code = (codeInput?.value || '').trim();
+        if (!code) {
+          showError('Enter the 6-character code from your email.');
+          return;
+        }
+        const data = await AuthAPI.verifyEmailChange(code);
+        if (data.status === 'ok') {
+          applyUpdatedUser(data.user);   // cascades into updateAuthUI() -> updateAccountPage()
+          reset();
+          if (successEl) successEl.hidden = false;
+        } else {
+          // Stage advanced: a fresh code just went to the new address.
+          stage = data.stage;
+          if (codeInput) codeInput.value = '';
+          renderEmailChangeState({ pending: true, ...data });
+        }
+      }
+    } catch (error) {
+      showError(error.message);
+      // A failed verify can mean the server tore the whole request down --
+      // it cancels on the 5th wrong code and on a commit-time 409. The client
+      // only learns `stage` from successful responses, so re-read the
+      // authoritative state instead of leaving a dead code box on screen.
+      if (stage) {
+        try {
+          const state = await AuthAPI.emailChangeStatus();
+          stage = state.pending ? state.stage : null;
+          // Clear the code only when the request is actually gone. On a
+          // stage-two send failure the backend deliberately leaves stage 'old'
+          // intact so the code the user already holds stays valid -- wiping the
+          // box would force a needless retype of a code that still works.
+          if (!state.pending && codeInput) codeInput.value = '';
+          renderEmailChangeState(state);
+        } catch (statusError) {
+          // Keep the current view; the error above already told the user.
+        }
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+
+  cancelBtn?.addEventListener('click', async () => {
+    if (errorEl) errorEl.hidden = true;
+    try {
+      await AuthAPI.cancelEmailChange();
+    } catch (error) {
+      showError(error.message);
+      return;
+    }
+    reset();
+  });
+
+  // Re-entering the page mid-flow must not strand the user on the idle form.
+  if (getStoredAuthUser()) {
+    AuthAPI.emailChangeStatus()
+      .then((state) => {
+        stage = state.pending ? state.stage : null;
+        renderEmailChangeState(state);
+      })
+      .catch(() => {
+        // Fail-closed, and deliberately not fail-visible: a failed status check
+        // is indistinguishable here from "nothing pending", and we show the idle
+        // form rather than blocking the page. If a change really was in flight,
+        // the next submit either hits the 60s cooldown (429) or replaces it --
+        // self-healing, but the user is not told which happened. Accepted
+        // tradeoff; see the fail-closed-is-not-fail-visible note in CLAUDE.md.
+        renderEmailChangeState({ pending: false });
+      });
+  }
 }
 
 function toggleAccountMenu(force) {
@@ -2858,6 +3087,8 @@ function initAuthUI() {
   handleRobinhoodOAuthReturn();
   wireDiscordAccountButtons();
   initChangePasswordForm();
+  initDisplayNameForm();
+  initEmailChangeForm();
   initAvatarControls();
   refreshAuthUser();
 }

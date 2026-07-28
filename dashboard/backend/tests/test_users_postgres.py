@@ -9,9 +9,16 @@ Two tiers:
      docker run --rm -e POSTGRES_PASSWORD=test -e POSTGRES_DB=atl_test \
        -p 5433:5432 postgres:18-alpine
      export TEST_POSTGRES_URL=postgresql://postgres:test@localhost:5433/atl_test
+
+Both modules under test are imported in module form (``import x as x_module``)
+throughout, never ``from x import Name``. The monkeypatch fixtures below need
+the module object to rebind ``PostgresUserStore`` on it, so the two forms cannot
+both be used -- mixing them is a real inconsistency, not a style preference, and
+CodeQL's py/import-and-import-from flags it.
 """
 
 import os
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -62,6 +69,7 @@ def temp_postgres_store():
     store = users_postgres_module.PostgresUserStore(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute("DELETE FROM email_change_requests")
             cur.execute("DELETE FROM auth_sessions")
             cur.execute("DELETE FROM users")
     yield store
@@ -69,17 +77,14 @@ def temp_postgres_store():
 
 @pytest.fixture
 def pg_client(temp_postgres_store, monkeypatch):
-    import dashboard.backend.api.auth as auth_module
     import dashboard.backend.users as users_module
 
+    # api/auth.py resolves users_module.user_store at call time (issue #185),
+    # so this single patch redirects every auth route. Before that fix it also
+    # needed dashboard.backend.api.auth patched, and without it this "postgres"
+    # test silently exercised SQLite -- caught only when CI first ran the live
+    # tier and it collided with test_auth.py's alice@example.com.
     monkeypatch.setattr(users_module, "user_store", temp_postgres_store)
-    # api/auth.py binds the singleton into its own namespace at import time
-    # (`from dashboard.backend.users import user_store`), so patching
-    # users_module alone leaves every auth route on the original SQLite
-    # store -- which is how this "postgres" test silently exercised SQLite
-    # until CI first ran the live tier and it collided with test_auth.py's
-    # alice@example.com (409 instead of 200).
-    monkeypatch.setattr(auth_module, "user_store", temp_postgres_store)
     return TestClient(app)
 
 
@@ -202,10 +207,10 @@ def test_unreachable_postgres_raises_instead_of_falling_back():
     """
     import psycopg
 
-    from dashboard.backend.users_postgres import PostgresUserStore
+    import dashboard.backend.users_postgres as users_postgres_module
 
     with pytest.raises(psycopg.OperationalError):
-        PostgresUserStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
+        users_postgres_module.PostgresUserStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
 
 
 def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
@@ -214,10 +219,10 @@ def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
     USERS_DATABASE_URL has held a live Neon credential in prod since the account
     persistence fix shipped, so this store had the longest exposure to the leak.
     """
-    from dashboard.backend.users_postgres import PostgresUserStore
+    import dashboard.backend.users_postgres as users_postgres_module
 
     with pytest.raises(ValueError) as excinfo:
-        PostgresUserStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
+        users_postgres_module.PostgresUserStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
     assert "sup3r-s3cret" not in str(excinfo.value)
 
 
@@ -277,14 +282,14 @@ def test_change_password_and_avatar_postgres(pg_client, temp_postgres_store):
 def test_avatar_column_lazy_migration_postgres():
     """A pre-avatar users table gains the column on next store init."""
     require_local_postgres_url(TEST_POSTGRES_URL)
-    from dashboard.backend.users_postgres import PostgresUserStore
+    import dashboard.backend.users_postgres as users_postgres_module
 
-    store = PostgresUserStore(TEST_POSTGRES_URL)
+    store = users_postgres_module.PostgresUserStore(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("ALTER TABLE users DROP COLUMN IF EXISTS avatar")
 
-    migrated = PostgresUserStore(TEST_POSTGRES_URL)  # re-init runs the lazy ALTER
+    migrated = users_postgres_module.PostgresUserStore(TEST_POSTGRES_URL)  # re-init runs the lazy ALTER
     with migrated._get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -292,3 +297,139 @@ def test_avatar_column_lazy_migration_postgres():
                 "WHERE table_name = 'users' AND column_name = 'avatar'"
             )
             assert cur.fetchone() is not None
+
+
+@pg_only
+def test_update_display_name_postgres(temp_postgres_store):
+    user = temp_postgres_store.create_user("pgname@example.com", "PG Name", "securepass1")
+
+    updated = temp_postgres_store.update_display_name(user["id"], "  PG Renamed  ")
+
+    assert updated["display_name"] == "PG Renamed"
+    assert temp_postgres_store.get_user_by_id(user["id"])["display_name"] == "PG Renamed"
+
+
+@pg_only
+def test_update_display_name_missing_user_postgres(temp_postgres_store):
+    with pytest.raises(ValueError, match="user_not_found"):
+        temp_postgres_store.update_display_name(999_999, "Ghost")
+
+
+@pg_only
+def test_email_change_request_lifecycle_postgres(temp_postgres_store):
+    from dashboard.backend.verification_codes import hash_code
+
+    store = temp_postgres_store
+    user = store.create_user("pgmail@example.com", "PG Mail", "securepass1")
+
+    row = store.create_email_change_request(user["id"], "  NEXT@Example.COM ", hash_code("A"))
+    assert row["stage"] == "old"
+    assert row["new_email"] == "next@example.com"
+    assert row["attempts"] == 0
+
+    # Hoisted: record_... increments a counter, and -O would strip the call.
+    attempts = store.record_email_change_attempt(row["id"])
+    assert attempts == 1
+
+    advanced = store.advance_email_change(row["id"], hash_code("Z9Y8X7"))
+    assert advanced["stage"] == "new"
+    assert advanced["attempts"] == 0
+    assert advanced["code_hash"] == hash_code("Z9Y8X7")
+
+    store.mark_email_change_used(row["id"])
+    assert store.get_active_email_change(user["id"]) is None
+    assert store.last_email_change_request_at(user["id"]) is not None
+    assert store.last_email_change_completed_at(user["id"]) is not None
+
+    store.cancel_email_change(user["id"])
+    assert store.get_active_email_change(user["id"]) is None
+    # Deactivated, not deleted -- the cooldown clock must survive a cancel.
+    assert store.last_email_change_request_at(user["id"]) is not None
+    # And cancel must not relabel the completed change as a cancelled one.
+    assert store.last_email_change_completed_at(user["id"]) is not None
+
+
+@pg_only
+def test_email_change_request_log_is_append_only_postgres(temp_postgres_store):
+    """The daily cap and the 7-day interval both read history off this table.
+
+    Mirrors the SQLite twin's supersede-but-retain and windowing cases. Worth
+    running against real Postgres rather than trusting parity: the created_at
+    window is a lexicographic TEXT comparison, which is a property of the column
+    type in each engine, not of the shared Python above it.
+    """
+    import dashboard.backend.users as users_module
+    from dashboard.backend.verification_codes import hash_code
+
+    def stored_time(**delta):
+        return users_module.format_stored_timestamp(users_module._utcnow() - timedelta(**delta))
+
+    store = temp_postgres_store
+    user = store.create_user("pgwindow@example.com", "PG Window", "securepass1")
+
+    first = store.create_email_change_request(user["id"], "one@example.com", hash_code("A"))
+    store.create_email_change_request(user["id"], "two@example.com", hash_code("B"))
+
+    # Superseded, not deleted.
+    day = stored_time(days=1)
+    assert len(store.email_change_request_times_since(user["id"], day)) == 2
+
+    # ...and the older one is no longer active.
+    assert store.get_active_email_change(user["id"])["new_email"] == "two@example.com"
+
+    with store._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE email_change_requests SET created_at = %s WHERE id = %s",
+                (stored_time(days=2), first["id"]),
+            )
+
+    within_a_day = store.email_change_request_times_since(user["id"], day)
+    assert len(within_a_day) == 1
+    assert within_a_day == sorted(within_a_day)
+
+
+@pg_only
+def test_update_email_postgres(temp_postgres_store):
+    store = temp_postgres_store
+    user = store.create_user("pgold@example.com", "PG Old", "securepass1")
+
+    updated = store.update_email(user["id"], "  PGNEW@Example.COM  ")
+
+    # Lowercasing is mandatory here: this twin's UNIQUE is NOT case-insensitive,
+    # so an un-normalized write would let two casings of one address coexist in
+    # prod while SQLite rejects them locally.
+    assert updated["email"] == "pgnew@example.com"
+    assert store.get_user_by_email("pgnew@example.com") is not None
+
+
+@pg_only
+def test_update_email_conflict_postgres(temp_postgres_store):
+    store = temp_postgres_store
+    user = store.create_user("pgmine@example.com", "PG Mine", "securepass1")
+    store.create_user("pgtaken@example.com", "PG Taken", "securepass1")
+
+    with pytest.raises(ValueError, match="email_already_registered"):
+        store.update_email(user["id"], "pgtaken@example.com")
+
+
+def test_store_twins_expose_the_same_public_surface():
+    """A method in one twin and not the other is a prod-only crash.
+
+    This compares classes, not instances, so it needs no live Postgres -- which
+    matters because every @pg_only case above fails open when TEST_POSTGRES_URL
+    is unset.
+    """
+    import dashboard.backend.users as users_module
+    import dashboard.backend.users_postgres as users_postgres_module
+
+    def public_methods(cls):
+        return {
+            name
+            for name in dir(cls)
+            if not name.startswith("_") and callable(getattr(cls, name))
+        }
+
+    sqlite_methods = public_methods(users_module.UserStore)
+    postgres_methods = public_methods(users_postgres_module.PostgresUserStore)
+    assert sqlite_methods == postgres_methods

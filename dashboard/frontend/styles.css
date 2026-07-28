@@ -390,6 +390,29 @@ a.header-brand:hover .title-section h1 {
     color: var(--text-secondary);
 }
 
+/* Destructive-control red. MUST stay after .auth-btn:hover above: the two
+   hover rules have identical (0,2,0) specificity, so source order is the only
+   thing making this one win. A copy of .agent-delete-btn's palette rather than
+   a reuse of it -- that class is agent-scoped, and the codebase already makes
+   this same "same look, own class" split between .account-menu-item--danger
+   and .agent-menu-item--danger. #f87171 is what every other destructive
+   control here uses (.agent-delete-btn, .agent-menu-item--danger,
+   .account-menu-item--danger), while --danger-color #ff4141 is the more
+   common choice for negative P&L -- but neither is an absolute rule and there
+   are exceptions both ways, so match the nearest precedent rather than
+   assuming a clean split. */
+.auth-btn-danger {
+    border-color: rgba(248, 113, 113, 0.55);
+    background: rgba(248, 113, 113, 0.1);
+    color: #f87171;
+}
+
+.auth-btn-danger:hover {
+    border-color: #f87171;
+    background: rgba(248, 113, 113, 0.2);
+    color: #fca5a5;
+}
+
 .auth-modal[hidden] {
     display: none !important;
 }
@@ -9189,6 +9212,18 @@ body.agent-editor-open {
 .account-success {
     font-size: 12px;
     color: #34d399;
+}
+
+.account-hint {
+    margin: 0 0 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.account-email-actions {
+    display: flex;
+    gap: 8px;
+    align-items: center;
 }
 
 .auth-avatar--large {

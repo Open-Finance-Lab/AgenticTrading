@@ -1,5 +1,13 @@
 """
 User accounts and auth session storage (SQLite, same database file as backtests).
+
+Identity is ``users.id``, never ``users.email``. Email is a *mutable contact
+attribute* -- it is the login handle and nothing else, and get_user_by_email()
+exists only to resolve it back to an id at authenticate() time. Anything that
+grants or withholds something (sessions, agents, portfolios, and any future
+entitlement or billing record) must key on the id, or a user could shed or
+inherit state by editing their address. ``email_change_requests`` is kept
+append-only so that history stays auditable for exactly that reason.
 """
 
 import base64
@@ -9,7 +17,7 @@ import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import bcrypt
 
@@ -20,6 +28,17 @@ SESSION_TTL_DAYS = 7
 BCRYPT_ROUNDS = 12
 LEGACY_PBKDF2_ITERATIONS = 100_000
 BCRYPT_MAX_BYTES = 72
+EMAIL_CHANGE_TTL_MINUTES = 15
+EMAIL_CHANGE_MAX_ATTEMPTS = 5
+# Three windows, deliberately distinct -- see api/auth.py::request_email_change.
+#   COOLDOWN   throttles one request against the next.
+#   PER_DAY    bounds the shared Brevo quota one account can consume.
+#   MIN_DAYS   is the product policy: email is a contact attribute, not a thing
+#              you churn. It is keyed on a *completed* change, not a request, so
+#              a mistyped address does not cost the user a week.
+EMAIL_CHANGE_COOLDOWN_SECONDS = 60
+EMAIL_CHANGE_MAX_REQUESTS_PER_DAY = 3
+EMAIL_CHANGE_MIN_INTERVAL_DAYS = 7
 
 
 def _utcnow() -> datetime:
@@ -27,7 +46,37 @@ def _utcnow() -> datetime:
 
 
 def _utcnow_iso() -> str:
-    return _utcnow().replace(microsecond=0).isoformat()
+    # Delegates so the write format and the format callers build bounds in
+    # (format_stored_timestamp, below) cannot drift apart.
+    return format_stored_timestamp(_utcnow())
+
+
+def parse_stored_timestamp(value: str) -> datetime:
+    """Read a timestamp written by either twin.
+
+    Both stores write _utcnow_iso() (offset-aware ISO-8601), but rows predating
+    that convention -- or written by SQLite's CURRENT_TIMESTAMP default -- come
+    back naive. Treat naive as UTC, which is what every writer here means.
+    """
+    parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def format_stored_timestamp(value: datetime) -> str:
+    """Render a datetime the way every writer in this module stores one.
+
+    The inverse of parse_stored_timestamp, and public for the same reason:
+    callers that build a comparison bound (a rolling-window start, say) must
+    produce the exact form the columns hold, because those comparisons run as
+    string comparisons in SQL.
+    """
+    return value.replace(microsecond=0).isoformat()
+
+
+def is_expired(expires_at: str) -> bool:
+    return parse_stored_timestamp(expires_at) < _utcnow()
 
 
 def _bcrypt_secret(password: str) -> bytes:
@@ -177,6 +226,38 @@ class UserStore:
             WHERE discord_user_id IS NOT NULL
             """
         )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_change_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                new_email TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                used_at TIMESTAMP,
+                cancelled_at TIMESTAMP,
+                -- Declared but not enforced: SQLite disables FK checks per
+                -- connection unless PRAGMA foreign_keys = ON is issued, and
+                -- _get_connection() never issues it (turning it on would change
+                -- deletion semantics for every table in this store, well beyond
+                -- this task). Deleting a user therefore leaves this row orphaned
+                -- rather than cascaded away -- tolerable because users.id is
+                -- AUTOINCREMENT and ids are never reused, so an orphaned row can
+                -- never be misattributed to a different user. The Postgres twin
+                -- declares the same constraint and does enforce it.
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_email_change_requests_user_id
+            ON email_change_requests(user_id)
+            """
+        )
         conn.commit()
         conn.close()
 
@@ -318,6 +399,257 @@ class UserStore:
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET avatar = ? WHERE id = ?", (avatar, user_id))
         conn.commit()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def update_display_name(self, user_id: int, display_name: str) -> Dict[str, Any]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET display_name = ? WHERE id = ?",
+            (display_name.strip(), user_id),
+        )
+        conn.commit()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def _email_change_expiry(self) -> str:
+        return (
+            (_utcnow() + timedelta(minutes=EMAIL_CHANGE_TTL_MINUTES))
+            .replace(microsecond=0)
+            .isoformat()
+        )
+
+    def create_email_change_request(
+        self, user_id: int, new_email: str, code_hash: str
+    ) -> Dict[str, Any]:
+        """Supersede any in-flight request for this user with a fresh stage-'old' one.
+
+        Supersede, not DELETE: this table is an append-only log. Deleting would
+        erase the used_at that EMAIL_CHANGE_MIN_INTERVAL_DAYS reads and the
+        created_at rows EMAIL_CHANGE_MAX_REQUESTS_PER_DAY counts, so the very
+        act of making another request would clear both limits.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE email_change_requests SET cancelled_at = ?
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            """,
+            (_utcnow_iso(), user_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO email_change_requests
+                (user_id, new_email, stage, code_hash, created_at, expires_at)
+            VALUES (?, ?, 'old', ?, ?, ?)
+            """,
+            (
+                user_id,
+                new_email.strip().lower(),
+                code_hash,
+                _utcnow_iso(),
+                self._email_change_expiry(),
+            ),
+        )
+        conn.commit()
+        request_id = cursor.lastrowid
+        cursor.execute(
+            "SELECT * FROM email_change_requests WHERE id = ?", (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row)
+
+    def get_active_email_change(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """The user's in-flight request, or None if absent, used, cancelled, or expired."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM email_change_requests
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row or is_expired(row["expires_at"]):
+            return None
+        return dict(row)
+
+    def advance_email_change(self, request_id: int, code_hash: str) -> Dict[str, Any]:
+        """Move a verified stage-'old' request to stage 'new' with a fresh code."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE email_change_requests
+            SET stage = 'new', code_hash = ?, attempts = 0, expires_at = ?
+            WHERE id = ?
+            """,
+            (code_hash, self._email_change_expiry(), request_id),
+        )
+        conn.commit()
+        cursor.execute(
+            "SELECT * FROM email_change_requests WHERE id = ?", (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return dict(row)
+
+    def record_email_change_attempt(self, request_id: int) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE email_change_requests SET attempts = attempts + 1 WHERE id = ?",
+            (request_id,),
+        )
+        conn.commit()
+        cursor.execute(
+            "SELECT attempts FROM email_change_requests WHERE id = ?", (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return int(row["attempts"])
+
+    def mark_email_change_used(self, request_id: int) -> None:
+        """Retire a completed request without deleting it.
+
+        used_at makes get_active_email_change skip the row while
+        last_email_change_request_at still sees it, so the cooldown applies to a
+        change that just succeeded as well as one still in flight.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE email_change_requests SET used_at = ? WHERE id = ?",
+            (_utcnow_iso(), request_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def cancel_email_change(self, user_id: int) -> None:
+        """Deactivate the user's request without deleting it.
+
+        Mirrors mark_email_change_used: cancelled_at makes get_active_email_change
+        skip the row while last_email_change_request_at still sees it. Deleting
+        instead would let an authenticated caller who knows the password loop
+        request/cancel/request with the 60-second cooldown never enforced --
+        mail-bombing the account and burning the shared Brevo quota.
+
+        Scoped to rows that are still active. Stamping cancelled_at over an
+        already-used row would claim a change that actually completed had been
+        cancelled, which is wrong in a log that is now kept for audit.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE email_change_requests SET cancelled_at = ?
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            """,
+            (_utcnow_iso(), user_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def last_email_change_request_at(self, user_id: int) -> Optional[str]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT created_at FROM email_change_requests
+            WHERE user_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return str(row["created_at"]) if row else None
+
+    def last_email_change_completed_at(self, user_id: int) -> Optional[str]:
+        """When this user's email last actually changed, or None if it never has.
+
+        Ordered by used_at rather than id: a request created earlier can be
+        completed later, so row order is not completion order.
+
+        Set by mark_email_change_used in a separate transaction from the
+        update_email that precedes it. A crash between the two leaves the email
+        changed with the clock unstarted -- accepted, because this is a churn
+        policy rather than a security boundary, and the 24-hour and 60-second
+        limits both still apply. Making it atomic would mean a column on
+        ``users``, i.e. an ALTER on the live accounts table, for a window of a
+        few milliseconds.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT used_at FROM email_change_requests
+            WHERE user_id = ? AND used_at IS NOT NULL
+            ORDER BY used_at DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return str(row["used_at"]) if row else None
+
+    def email_change_request_times_since(self, user_id: int, since: str) -> List[str]:
+        """created_at of every request made at or after `since`, oldest first.
+
+        Returns the timestamps rather than a bare count so the caller can say
+        *when* the rolling window frees up -- the answer is the oldest entry
+        plus the window, which a COUNT(*) cannot supply.
+
+        String comparison, not date arithmetic: both twins write
+        _utcnow_iso(), a fixed-width offset-aware ISO-8601 form that sorts
+        lexicographically. parse_stored_timestamp tolerates naive legacy rows on
+        read, but none can exist here -- this table has only ever been written
+        by the code above it.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT created_at FROM email_change_requests
+            WHERE user_id = ? AND created_at >= ?
+            ORDER BY created_at ASC
+            """,
+            (user_id, since),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [str(row["created_at"]) for row in rows]
+
+    def update_email(self, user_id: int, new_email: str) -> Dict[str, Any]:
+        normalized_email = new_email.strip().lower()
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE users SET email = ? WHERE id = ?",
+                (normalized_email, user_id),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            conn.close()
+            raise ValueError("email_already_registered") from exc
         cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
         row = cursor.fetchone()
         conn.close()

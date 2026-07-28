@@ -62,6 +62,14 @@ os.environ.pop("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", None)
 os.environ.pop("MAX_ACTIVE_RUNS_GLOBAL", None)
 os.environ.pop("AGENT_AUTH_CACHE_TTL_SECONDS", None)
 
+# Mail credentials: a developer with a real BREVO_API_KEY exported would
+# otherwise have the suite send live email, and would see the
+# unconfigured-provider tests fail for a reason that has nothing to do with
+# their change. Individual tests set these back via monkeypatch.
+os.environ.pop("BREVO_API_KEY", None)
+os.environ.pop("ACCOUNT_EMAIL_FROM", None)
+os.environ.pop("ACCOUNT_EMAIL_FROM_NAME", None)
+
 
 @atexit.register
 def _cleanup_test_db_dir() -> None:
