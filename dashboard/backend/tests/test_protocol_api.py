@@ -247,6 +247,37 @@ def test_observation_bars_are_complete_and_scoped_to_allowed_symbols(client):
     }
 
 
+class _BadBarLoader:
+    def fetch_bars(self, symbols, start, end):
+        data = _synthetic_bars()
+        data["AAPL"] = data["AAPL"].copy()
+        data["AAPL"].loc[data["AAPL"].index[0], "close"] = float("nan")
+        return data
+
+
+def test_observation_bars_drops_invalid_symbol_without_500ing_the_poll_loop(client, monkeypatch):
+    """A malformed bar must not raise out of /steps/next: the offending symbol
+    is dropped from ``bars`` and the endpoint stays pollable, instead of
+    permanently wedging the run with an unstructured 500.
+    """
+    import dashboard.backend.domain.backtesting.external_run_service as ebs
+
+    monkeypatch.setattr(ebs, "AlpacaDataLoader", _BadBarLoader)
+
+    agent_id, key, _ = _new_agent(client)
+    version_id = _new_version(client, agent_id, key)
+    run_id = _create_run(client, key, version_id)
+
+    step = _wait_for_step(client, run_id, key)
+    bars = step["observation"]["market"]["bars"]
+
+    assert "AAPL" not in bars
+    assert "MSFT" in bars
+
+    resp = client.get(f"/api/v1/runs/{run_id}/steps/next", headers={"X-API-Key": key})
+    assert resp.status_code == 200, resp.text
+
+
 def test_create_run_requires_api_key(client):
     resp = client.post("/api/v1/runs", json={"config": {"start_date": "2026-04-15", "end_date": "2026-04-16"}})
     assert resp.status_code == 401
