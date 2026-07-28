@@ -18,6 +18,7 @@ import os
 import uuid
 import threading
 from datetime import datetime, timedelta, timezone
+from math import isfinite
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -311,7 +312,7 @@ class ExternalBacktestSession:
         for symbol in symbols:
             signal = signals[symbol]
             snapshot["top_signals"][symbol] = {
-                "price": float(signal.get("price") or 0),
+                "price": float(signal.get("price") if pd.notna(signal.get("price")) else 0),
                 "rsi": float(signal.get("rsi") if pd.notna(signal.get("rsi")) else 50),
                 "macd": float(signal.get("macd") if pd.notna(signal.get("macd")) else 0),
                 "macd_signal": float(
@@ -687,13 +688,24 @@ class ExternalBacktestSession:
     # Protocol adapters (read-only; used by the Agent-Environment Protocol)
     # ------------------------------------------------------------------
 
-    def _portfolio_state_at(self, timestamp) -> Dict[str, Any]:
-        market_data = self._market_data_at(timestamp)
+    def _portfolio_state_at(
+        self, timestamp, market_data: Optional[Dict[str, pd.Series]] = None
+    ) -> Dict[str, Any]:
+        if market_data is None:
+            market_data = self._market_data_at(timestamp)
         state = self.manager.get_portfolio_state(market_data, self.price_cache, timestamp)
         state["timestamp"] = timestamp
         return state
 
-    def protocol_portfolio(self, timestamp=None) -> Dict[str, Any]:
+    def protocol_market_data(self, timestamp) -> Dict[str, pd.Series]:
+        """Raw per-symbol OHLCV rows at ``timestamp``, for callers building more than
+        one protocol view (e.g. bars + portfolio) from a single snapshot without
+        repeating the lookup."""
+        return self._market_data_at(timestamp)
+
+    def protocol_portfolio(
+        self, timestamp=None, market_data: Optional[Dict[str, pd.Series]] = None
+    ) -> Dict[str, Any]:
         """Normalized {cash, equity, positions[]} snapshot for the protocol."""
         if timestamp is None and self.timestamps:
             idx = self.step_index if self.step_index < self.total_steps else self.total_steps - 1
@@ -705,7 +717,7 @@ class ExternalBacktestSession:
                 "equity": round(self.manager.cash, 2),
                 "positions": [],
             }
-        state = self._portfolio_state_at(timestamp)
+        state = self._portfolio_state_at(timestamp, market_data)
         positions = [
             {
                 "symbol": p["symbol"],
@@ -734,6 +746,58 @@ class ExternalBacktestSession:
             sym: float(sig.get("price") or 0)
             for sym, sig in state["market_signals"].items()
         }
+
+    def protocol_bars(
+        self, timestamp=None, market_data: Optional[Dict[str, pd.Series]] = None
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return normalized current OHLCV bars for protocol observations.
+
+        Called unconditionally on every ``GET /steps/next`` poll for every running
+        agent, so a malformed bar must never raise out of here: that would
+        permanently wedge the polling run with an unstructured 500 (the step
+        timestamp doesn't advance until a decision is submitted, so the same bad
+        row would be hit again on every retry). Symbols that fail the sanity
+        check are dropped instead, mirroring protocol_current_prices's leniency.
+        """
+        if timestamp is None and self.timestamps:
+            idx = max(0, min(self.step_index, self.total_steps - 1))
+            timestamp = self.timestamps[idx]
+        if timestamp is None:
+            return {}
+
+        allowed = set(self.symbols) if self.symbols else None
+        if market_data is None:
+            market_data = self._market_data_at(timestamp)
+        bars: Dict[str, Dict[str, Any]] = {}
+        for symbol, row in market_data.items():
+            if allowed is not None and symbol not in allowed:
+                continue
+
+            values = {
+                field: float(row[field])
+                for field in ("open", "high", "low", "close", "volume")
+            }
+            prices = [values[field] for field in ("open", "high", "low", "close")]
+            if (
+                not all(isfinite(price) and price > 0 for price in prices)
+                or not isfinite(values["volume"])
+                or values["volume"] < 0
+                or values["high"] < max(values["open"], values["close"])
+                or values["low"] > min(values["open"], values["close"])
+            ):
+                print(
+                    f"⚠️ Dropping invalid protocol OHLCV bar for {symbol} at "
+                    f"{timestamp!r}: {values!r}"
+                )
+                continue
+
+            bars[symbol] = {
+                "timestamp": timestamp.isoformat()
+                if hasattr(timestamp, "isoformat")
+                else str(timestamp),
+                **values,
+            }
+        return bars
 
     def executed_step_timestamp(self):
         """Timestamp of the most recently advanced step (post-submit)."""

@@ -44,6 +44,12 @@ classifiers = [
 # zero-dependency install.
 dependencies = ["tzdata; platform_system == 'Windows'"]
 
+[project.optional-dependencies]
+vnpy = [
+    "vnpy==4.4.0",
+    "vnpy_ctastrategy==1.3.0",
+]
+
 [project.urls]
 Homepage = "https://agentic-trading-lab.vercel.app/"
 Documentation = "https://finagent-orchestration.readthedocs.io/"
