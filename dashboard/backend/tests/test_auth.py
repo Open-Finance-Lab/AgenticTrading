@@ -772,8 +772,12 @@ def test_email_change_daily_cap_counts_cancelled_requests(
     body = {"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"}
 
     for _ in range(EMAIL_CHANGE_MAX_REQUESTS_PER_DAY):
-        assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
-        assert client.delete("/api/auth/email-change", headers=headers).status_code == 200
+        # Requests hoisted out of the asserts: -O strips assert statements, and
+        # a stripped assert here would drop the HTTP call the loop exists for.
+        requested = client.post("/api/auth/email-change", headers=headers, json=body)
+        assert requested.status_code == 200, requested.text
+        cancelled = client.delete("/api/auth/email-change", headers=headers)
+        assert cancelled.status_code == 200, cancelled.text
         _backdate_email_change_rows(
             temp_user_store, user["id"], created_at=_stored_time(minutes=2)
         )
@@ -793,18 +797,22 @@ def test_email_change_daily_cap_window_rolls(client, sent_emails, temp_user_stor
     body = {"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"}
 
     for _ in range(EMAIL_CHANGE_MAX_REQUESTS_PER_DAY):
-        assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
+        # Hoisted out of the assert -- see the sibling test above.
+        requested = client.post("/api/auth/email-change", headers=headers, json=body)
+        assert requested.status_code == 200, requested.text
         _backdate_email_change_rows(
             temp_user_store, user["id"], created_at=_stored_time(minutes=2)
         )
-    assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 429
+    capped = client.post("/api/auth/email-change", headers=headers, json=body)
+    assert capped.status_code == 429, capped.text
 
     # Age every request out of the 24h window; the allowance comes back.
     _backdate_email_change_rows(
         temp_user_store, user["id"], created_at=_stored_time(days=1, minutes=1)
     )
 
-    assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
+    recovered = client.post("/api/auth/email-change", headers=headers, json=body)
+    assert recovered.status_code == 200, recovered.text
 
 
 def test_email_change_request_checks_password_before_cooldown(client, sent_emails):

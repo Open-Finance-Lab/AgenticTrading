@@ -327,7 +327,9 @@ def test_email_change_request_lifecycle_postgres(temp_postgres_store):
     assert row["new_email"] == "next@example.com"
     assert row["attempts"] == 0
 
-    assert store.record_email_change_attempt(row["id"]) == 1
+    # Hoisted: record_... increments a counter, and -O would strip the call.
+    attempts = store.record_email_change_attempt(row["id"])
+    assert attempts == 1
 
     advanced = store.advance_email_change(row["id"], hash_code("Z9Y8X7"))
     assert advanced["stage"] == "new"
