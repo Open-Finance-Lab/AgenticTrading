@@ -30,17 +30,72 @@ Sign in and out
 - **Sign in:** header **Sign in**, then enter your email and password.
 - Once signed in, the header shows your avatar (or your initials). Click it to
   open the account menu: your name and email, **Account**, and **Log out**.
+- **Log out** appears both in that menu and at the bottom of the **Account**
+  page. Either one ends the session on this device only; your other devices
+  stay signed in.
 
 
 Manage your profile
 -------------------
 
-Open the account menu and choose **Account**.
+Open the account menu and choose **Account**. The page has four sections, in
+this order: display name, email address, profile photo, and password.
+
+**Display name.** Edit the field and click **Save name**. This is the name shown
+on the leaderboard and in the account menu. No password is required — a display
+name is not a credential. It cannot be left blank.
+
+**Profile photo.** Click **Upload photo** and pick a JPEG, PNG, or WebP image.
+It is resized in your browser before upload and then shows on your avatar across
+the dashboard. **Remove** clears it back to your initials.
 
 **Change your password.** Enter your current password, then the new one twice.
 The new password must meet the same rules as at sign-up. Changing it signs out
-your other devices; the session you are using stays active.
+your other devices; the session you are using stays active. It also cancels any
+email change you had in progress.
 
-**Profile photo.** Under **Account**, click **Upload photo** and pick a JPEG,
-PNG, or WebP image. It is resized in your browser before upload and then shows
-on your avatar across the dashboard. **Remove** clears it back to your initials.
+
+.. _accounts-change-email:
+
+Change your email address
+-------------------------
+
+Your email address is how you sign in, so changing it is confirmed twice —
+once against the address you have now, and once against the one you are moving
+to. Under **Account → Email address**:
+
+1. Enter the new address and your **current password**, then click **Send code**.
+2. A 6-character code goes to your **current** address. Enter it and click
+   **Verify**. This proves you control the account.
+3. A second code goes to the **new** address. Enter that one and click
+   **Confirm**. This proves the new address reaches you.
+
+Only after the second code does the address actually change. Until then you keep
+signing in with the old one.
+
+A few things worth knowing:
+
+- **Codes expire after 15 minutes**, and five wrong codes cancels the request.
+  Codes are not case-sensitive.
+- **Check your spam folder.** A code sitting in spam looks exactly like a code
+  that was never sent.
+- **Cancel** abandons the change. It is also how you resend: cancel, then start
+  again — which re-checks your password.
+- Leaving the page mid-flow is safe. Come back and the form picks up where you
+  left off.
+- Finishing a change **signs out your other devices**, the same as a password
+  change.
+
+Limits
+~~~~~~
+
+- **One completed change every 7 days.** The clock starts when a change
+  *finishes*, so a mistyped address costs you nothing — start again straight
+  away.
+- **Three requests per day**, and one per minute. These bound how much mail one
+  account can trigger.
+
+If you hit a limit the page tells you how long is left. Your email address is
+only a contact and sign-in detail — everything tied to your account (agents, API
+keys, leaderboard history) follows the account itself, not the address, so
+changing it never moves or resets any of it.
