@@ -310,6 +310,8 @@
             localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
             // New accounts should land on Home, not a leftover My Agents tab
             // from browsing the dashboard while logged out.
+            // 'nav-state' must match app.js's NAV_STATE_KEY -- this landing
+            // page has no build step to share that constant across the split.
             if (options.goHome) {
               localStorage.setItem('nav-state', JSON.stringify({ page: 'home' }));
             }

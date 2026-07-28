@@ -13,6 +13,8 @@ const ACTIVE_AGENT_NAME_KEY = 'active-agent-name';
 const BROWSER_OWNER_KEY = 'browser-owner-id';
 const HIDDEN_DEMO_AGENTS_KEY = 'hidden-demo-agent-ids';
 const SELECTED_BACKTEST_RUN_KEY = 'selected-backtest-run-id';
+// index.html's goToDashboardLoggedIn() writes this same key as a bare string
+// literal (no build step to share this constant across the landing/app split).
 const NAV_STATE_KEY = 'nav-state';
 const DISCORD_SERVER_URL = 'https://discord.gg/9HnQ6XDG98';
 const BACKTEST_POLL_MAX_SECONDS = 600; // 10 minutes at 1-second polling intervals
@@ -203,6 +205,7 @@ function hasDefaultAgentProvisionGuard() {
     return true; // no storage → cannot guard → do not provision
   }
 }
+
 function formatAgentCashAllocation(value) {
   if (value == null || value === '') return '—';
   return new Intl.NumberFormat('en-US', {
@@ -1367,15 +1370,25 @@ async function ensureDefaultFoundationAgent(agents) {
   if (isDemoMode()) return false;
   const builtins = agents.filter((a) => a.agent_type === 'builtin');
   if (builtins.length) {
-    // Claimed guest starters (or any existing builtin) count as onboarding done
-    // for this identity, so a later delete does not resurrect the default.
-    try {
-      const guardKey = defaultAgentProvisionGuardKey();
-      if (!localStorage.getItem(guardKey)) {
-        localStorage.setItem(guardKey, builtins[0].agent_id);
+    // A builtin visible only via the unclaimed-browser-session fallback (#235)
+    // is not proof claim-account actually landed — owner_user_id is still null
+    // server-side. Stamping the guard against it would permanently mark this
+    // identity "onboarded" for an agent it may never end up owning. Still skip
+    // provisioning either way (never worth creating a duplicate starter), but
+    // only persist the guard once ownership is confirmed.
+    const user = typeof getStoredAuthUser === 'function' ? getStoredAuthUser() : null;
+    const owned = user?.id != null
+      ? builtins.find((a) => a.owner_user_id === user.id)
+      : builtins[0];
+    if (owned) {
+      try {
+        const guardKey = defaultAgentProvisionGuardKey();
+        if (!localStorage.getItem(guardKey)) {
+          localStorage.setItem(guardKey, owned.agent_id);
+        }
+      } catch (e) {
+        /* storage unavailable — delete-guard simply won't persist */
       }
-    } catch (e) {
-      /* storage unavailable — delete-guard simply won't persist */
     }
     return false;
   }

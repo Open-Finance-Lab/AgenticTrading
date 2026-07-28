@@ -256,6 +256,7 @@ def test_signed_in_list_includes_unclaimed_browser_foundation_agent(client):
     assert agent_id in ids
     assert any(a.get("name") == "My Foundation Agent" for a in listed.json()["agents"])
 
+
 def test_rotate_api_key(client):
     browser_session = str(uuid.uuid4())
     headers = {"X-Session-Id": browser_session, "X-Browser-Id": browser_session}

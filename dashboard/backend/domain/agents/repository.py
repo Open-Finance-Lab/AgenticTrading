@@ -321,6 +321,10 @@ class AgentStore:
             )
 
         conn.close()
+        # Each _add_rows call is independently sorted, but the groups are
+        # appended query-by-query, so a recent unclaimed browser agent could
+        # otherwise land after an older owned agent. Re-sort the union once.
+        rows.sort(key=lambda row: row["created_at"], reverse=True)
         return [_public_agent(row) for row in rows]
 
     def list_builtin_agents(self) -> List[Dict[str, Any]]:
