@@ -281,6 +281,29 @@ def test_update_agent_partial_updates_postgres(pg_agent_store):
 
 
 @pg_only
+def test_update_agent_live_trading_enabled_postgres(pg_agent_store):
+    """#227 regression: live_trading_enabled reached only the SQLite twin.
+
+    The missing kwarg TypeError'd EVERY update_agent call on prod (the service
+    always passes it, as _UNSET), so any Configure save — rename-only included
+    — 500'd. Round-trip the flag against a real Postgres: default False, on,
+    off, and untouched by an unrelated update.
+    """
+    created = pg_agent_store.create_agent(name="Live Toggle PG")
+    assert created["live_trading_enabled"] is False
+
+    enabled = pg_agent_store.update_agent(created["agent_id"], live_trading_enabled=True)
+    assert enabled["live_trading_enabled"] is True
+
+    # Omitting the kwarg (service sends _UNSET) leaves the stored flag alone.
+    renamed = pg_agent_store.update_agent(created["agent_id"], name="Renamed Live")
+    assert renamed["live_trading_enabled"] is True
+
+    disabled = pg_agent_store.update_agent(created["agent_id"], live_trading_enabled=False)
+    assert disabled["live_trading_enabled"] is False
+
+
+@pg_only
 def test_update_agent_model_name_postgres(pg_agent_store):
     created = pg_agent_store.create_agent(
         name="Model Swap PG",
@@ -344,8 +367,9 @@ def test_builtin_listing_and_delete_postgres(pg_agent_store):
 def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
     """#135: the twin must ADD COLUMN IF NOT EXISTS for post-ship columns.
 
-    Simulate a deployment created before the five lazy-migration columns
-    (agent_type, description, pipeline_config, cash_allocation, scopes) existed:
+    Simulate a deployment created before the six lazy-migration columns
+    (agent_type, description, pipeline_config, cash_allocation, scopes,
+    live_trading_enabled) existed:
     a table with only the original base schema, already holding a real agent row
     that predates those columns. Re-running _init_schema() -- what every redeploy
     does -- must bring it up to the current shape. CREATE TABLE IF NOT EXISTS
@@ -425,6 +449,7 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
         "pipeline_config",
         "cash_allocation",
         "scopes",
+        "live_trading_enabled",
     } <= columns
     # The pre-existing row was backfilled with the column defaults, not NULL.
     assert legacy["agent_type"] == "external"
