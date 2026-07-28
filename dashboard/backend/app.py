@@ -53,7 +53,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    # PATCH backs the agent Configure screen's Save. Frontend and API are
+    # separate origins in prod, so a method absent here fails at the preflight
+    # even though the route exists (test_cors_preflight_allows_every_routed_method).
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["content-type", "authorization", "x-session-id", "x-browser-id", "x-api-key", "accept"],
     # x-ratelimit-*/retry-after: the v2 spec promises these to agent clients;
     # browsers strip headers absent from Access-Control-Expose-Headers.
