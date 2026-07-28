@@ -1057,7 +1057,7 @@ function renderAgentCards(grid, agents, categoryKey) {
     const statusBadge = resolveAgentStatusBadge(agent);
     const card = document.createElement('div');
     card.className = `section-card agent-card agent-card--status agent-card--${statusBadge.key}${isBuiltin ? ' agent-card-builtin' : ''}`;
-    const model = escapeHtml(agent.model_name || 'local-model');
+    const model = escapeHtml(formatAgentModelLabel(agent.model_name));
     const type = escapeHtml(agentTypeLabel(agent));
 
     card.innerHTML = `
