@@ -2219,6 +2219,11 @@ function clearAuthState() {
   localStorage.removeItem(AUTH_TOKEN_KEY);
   localStorage.removeItem(AUTH_USER_KEY);
   window.AUTH_USER = null;
+  // The email-change form keeps its stage in a closure keyed to nobody: left
+  // alone, the next user to sign in on this tab resumes the previous user's
+  // half-finished change. Reset here -- every sign-out path (logout button,
+  // missing token, expired session) funnels through clearAuthState.
+  resetEmailChangeForm();
   updateAuthUI();
 }
 
@@ -2490,6 +2495,10 @@ function renderEmailChangeState(state) {
   if (submitBtn) submitBtn.textContent = state.stage === 'new' ? 'Confirm' : 'Verify';
 }
 
+// Rebound to the form's real reset by initEmailChangeForm(); the no-op covers
+// clearAuthState() firing before init (e.g. token expiry on page load).
+let resetEmailChangeForm = () => {};
+
 function initEmailChangeForm() {
   const form = document.getElementById('accountEmailForm');
   if (!form) return;
@@ -2509,8 +2518,11 @@ function initEmailChangeForm() {
   const reset = () => {
     stage = null;
     form.reset();
+    if (errorEl) errorEl.hidden = true;
+    if (successEl) successEl.hidden = true;
     renderEmailChangeState({ pending: false });
   };
+  resetEmailChangeForm = reset;
 
   form.addEventListener('submit', async (event) => {
     event.preventDefault();

@@ -110,6 +110,22 @@ def test_email_form_states_the_change_interval_before_the_user_submits():
     assert f"once every {EMAIL_CHANGE_MIN_INTERVAL_DAYS} days" in idle
 
 
+def test_logging_out_resets_the_email_change_form():
+    """initEmailChangeForm keeps its `stage` in a closure, so without a reset
+    on sign-out, user B logging in on the same tab resumes user A's
+    half-finished change: a code box for a request B cannot complete.
+    clearAuthState is the choke point every sign-out path funnels through
+    (explicit logout, missing token, expired session) -- the reset must live
+    there, not just on the logout button."""
+    js = (_FRONTEND / "app.js").read_text(encoding="utf-8")
+
+    clear_fn = js[js.index("function clearAuthState") : js.index("function updateAccountPage")]
+    assert "resetEmailChangeForm()" in clear_fn
+    # ...and the hook must actually be bound to the closure's reset, or the
+    # call above is a no-op forever.
+    assert "resetEmailChangeForm = reset" in js
+
+
 def test_cache_bust_versions_were_bumped():
     """Parsed >= rather than a literal ==: these counters are bumped by unrelated
     work too, and an equality assert turns CI red on every open PR the moment
