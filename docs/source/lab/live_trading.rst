@@ -63,7 +63,8 @@ Run an agent live
 
 1. Tick **Enable live trading for this agent**. This is per agent, so connecting
    your brokerage account does not arm every agent you own.
-2. Click **Run Live**.
+2. Click **Run Live**. The button stays disabled until a Robinhood account is
+   connected, so it never looks ready before the broker behind it is.
 
 The run then:
 
