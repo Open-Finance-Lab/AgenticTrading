@@ -188,8 +188,13 @@ The command prints:
 
 The ATL URL shows the persisted equity curve, trades, and common metrics. The
 local JSON artifact records each input bar, signal bar, captured CTA request,
-mapped order, ATL fill or rejection, and error classification. It never stores
-the ATL API key or strategy source.
+mapped order, ATL fill or rejection, and error classification. The ATL API key
+and strategy source are never intentionally recorded, and settings fields with
+sensitive names (`api_key`, `token`, `secret`, `password`, ...) are redacted
+recursively; free-form text such as exception messages is best-effort
+redacted against common credential shapes (`key=value`, `key: value`,
+`Bearer <token>`, URL-embedded credentials), not guaranteed against every
+possible format.
 
 `clean: true` means the run had no error HOLDs, rejections, timeouts, or fatal
 data errors. It does not mean the strategy is profitable. A profitable backtest

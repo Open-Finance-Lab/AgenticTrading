@@ -268,7 +268,7 @@ example:
      --start 2026-04-01 --end 2026-04-23 --symbol AAPL
 
 The MVP is long-only, uses T+1 market execution, and does not connect a broker
-or vn.py Gateway. See the `Chinese vn.py CTA guide
+or vn.py Gateway. See the `vn.py CTA integration guide
 <https://github.com/Open-Finance-Lab/AgenticTrading/blob/main/docs/integrations/vnpy-cta.md>`_
 for settings, custom ``module:Class`` strategies, audit artifacts, and the full
 compatibility limits.
