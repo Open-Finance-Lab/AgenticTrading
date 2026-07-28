@@ -7611,7 +7611,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 /* Status-aware agent cards (PAPER / BACKTESTED / DRAFT) */
 .agents-section .agents-grid:not(.agents-grid--list) {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: 16px;
 }
 
