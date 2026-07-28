@@ -183,6 +183,69 @@ def test_browser_claim_and_ownership_postgres(pg_agent_store):
 
 
 @pg_only
+def test_list_agents_signed_in_includes_unclaimed_browser_agents_postgres(
+    pg_agent_store,
+):
+    """Postgres mirror of the SQLite regression test in test_repository_move.py.
+
+    #235 added an unclaimed-browser-session fallback to list_agents so a
+    signed-in user still sees a guest-provisioned agent whose claim hasn't
+    landed yet. The SQLite twin had a test for the exclusion boundaries
+    (other user's claimed agent, other browser's agent); this store's twin
+    -- the one CONTENT_DATABASE_URL actually points prod at -- had none.
+    """
+    owned = pg_agent_store.create_agent(
+        name="Owned", owner_user_id=7, owner_browser_session="b1"
+    )
+    unclaimed = pg_agent_store.create_agent(name="Guest", owner_browser_session="b1")
+    other_user = pg_agent_store.create_agent(
+        name="Other", owner_user_id=99, owner_browser_session="b1"
+    )
+    other_browser = pg_agent_store.create_agent(name="Elsewhere", owner_browser_session="b2")
+
+    listed = pg_agent_store.list_agents(owner_user_id=7, owner_browser_session="b1")
+    ids = {a["agent_id"] for a in listed}
+    assert owned["agent_id"] in ids
+    assert unclaimed["agent_id"] in ids
+    assert other_user["agent_id"] not in ids
+    assert other_browser["agent_id"] not in ids
+
+
+@pg_only
+def test_list_agents_merges_owned_and_unclaimed_by_recency_postgres(
+    pg_agent_store, monkeypatch
+):
+    """The owned-rows and unclaimed-browser-rows groups must merge into one
+    global ORDER BY, not just be independently sorted within each group.
+
+    Without the merge, a browser agent created after every owned agent would
+    still sort last, because list_agents appends the unclaimed-browser group
+    only after the owned group is fully built.
+    """
+    import itertools
+
+    import dashboard.backend.domain.agents.repository_postgres as repo_pg
+
+    day = itertools.count(1)
+    monkeypatch.setattr(
+        repo_pg, "_utcnow_iso", lambda: f"2020-01-{next(day):02d}T00:00:00+00:00"
+    )
+
+    older_owned = pg_agent_store.create_agent(
+        name="Older Owned", owner_user_id=7, owner_browser_session="b1"
+    )
+    newer_unclaimed = pg_agent_store.create_agent(
+        name="Newer Guest", owner_browser_session="b1"
+    )
+
+    listed = pg_agent_store.list_agents(owner_user_id=7, owner_browser_session="b1")
+    assert [a["agent_id"] for a in listed] == [
+        newer_unclaimed["agent_id"],
+        older_owned["agent_id"],
+    ]
+
+
+@pg_only
 def test_register_or_get_agent_is_idempotent_postgres(pg_agent_store):
     first = pg_agent_store.register_or_get_agent(session_id="sess-1", name="A")
     again = pg_agent_store.register_or_get_agent(session_id="sess-1", name="A renamed")

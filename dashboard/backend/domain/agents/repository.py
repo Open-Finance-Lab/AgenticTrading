@@ -286,6 +286,20 @@ class AgentStore:
                 """,
                 (owner_user_id,),
             )
+            # Also surface unclaimed agents created in this browser before
+            # login/claim. Without this, a signed-in list drops the guest
+            # "My Foundation Agent" whenever claim races or is skipped, while
+            # logout (browser-only list) still shows it.
+            if owner_browser_session:
+                _add_rows(
+                    """
+                    SELECT * FROM external_agents
+                    WHERE owner_browser_session = ?
+                      AND owner_user_id IS NULL
+                    ORDER BY created_at DESC
+                    """,
+                    (owner_browser_session,),
+                )
         elif owner_browser_session:
             _add_rows(
                 """
@@ -307,6 +321,10 @@ class AgentStore:
             )
 
         conn.close()
+        # Each _add_rows call is independently sorted, but the groups are
+        # appended query-by-query, so a recent unclaimed browser agent could
+        # otherwise land after an older owned agent. Re-sort the union once.
+        rows.sort(key=lambda row: row["created_at"], reverse=True)
         return [_public_agent(row) for row in rows]
 
     def list_builtin_agents(self) -> List[Dict[str, Any]]:

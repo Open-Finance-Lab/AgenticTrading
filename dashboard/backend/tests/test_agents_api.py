@@ -217,6 +217,46 @@ def test_claim_account_links_browser_agents(client):
     assert listed.json()["agents"][0]["agent_id"] == agent_id
 
 
+def test_signed_in_list_includes_unclaimed_browser_foundation_agent(client):
+    """Regression: logout shows guest starter; signup must still see it pre-claim."""
+    browser_session = str(uuid.uuid4())
+    anon_headers = {"X-Session-Id": browser_session, "X-Browser-Id": browser_session}
+
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "My Foundation Agent",
+            "model_name": "deepseek/deepseek-v4-pro",
+            "agent_type": "builtin",
+        },
+        headers=anon_headers,
+    )
+    assert created.status_code == 200
+    agent_id = created.json()["agent"]["agent_id"]
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "foundation-list@example.com",
+            "display_name": "Foundation List",
+            "password": "securepass123",
+        },
+    )
+    assert signup.status_code == 200
+    token = signup.json()["token"]
+    auth_headers = {
+        **anon_headers,
+        "Authorization": f"Bearer {token}",
+    }
+
+    # Before claim-account: signed-in listing must still surface the guest agent.
+    listed = client.get("/api/v1/agents", headers=auth_headers)
+    assert listed.status_code == 200
+    ids = [a["agent_id"] for a in listed.json()["agents"]]
+    assert agent_id in ids
+    assert any(a.get("name") == "My Foundation Agent" for a in listed.json()["agents"])
+
+
 def test_rotate_api_key(client):
     browser_session = str(uuid.uuid4())
     headers = {"X-Session-Id": browser_session, "X-Browser-Id": browser_session}

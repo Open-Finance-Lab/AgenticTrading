@@ -133,6 +133,48 @@ def test_list_agents_owner_filters(store):
     assert store.list_agents() == []
 
 
+def test_list_agents_signed_in_includes_unclaimed_browser_agents(store):
+    """Signed-in listing must not hide guest-provisioned agents awaiting claim."""
+    owned = store.create_agent(name="Owned", owner_user_id=7, owner_browser_session="b1")
+    unclaimed = store.create_agent(name="Guest", owner_browser_session="b1")
+    other_user = store.create_agent(
+        name="Other", owner_user_id=99, owner_browser_session="b1"
+    )
+    other_browser = store.create_agent(name="Elsewhere", owner_browser_session="b2")
+
+    listed = store.list_agents(owner_user_id=7, owner_browser_session="b1")
+    ids = {a["agent_id"] for a in listed}
+    assert owned["agent_id"] in ids
+    assert unclaimed["agent_id"] in ids
+    assert other_user["agent_id"] not in ids
+    assert other_browser["agent_id"] not in ids
+
+
+def test_list_agents_merges_owned_and_unclaimed_by_recency(store, monkeypatch):
+    """The owned-rows and unclaimed-browser-rows groups must merge into one
+    global ORDER BY, not just be independently sorted within each group.
+
+    Without the merge, a browser agent created after every owned agent would
+    still sort last, because list_agents appends the unclaimed-browser group
+    only after the owned group is fully built.
+    """
+    import itertools
+
+    day = itertools.count(1)
+    monkeypatch.setattr(
+        repository, "_utcnow_iso", lambda: f"2020-01-{next(day):02d}T00:00:00+00:00"
+    )
+
+    older_owned = store.create_agent(name="Older Owned", owner_user_id=7, owner_browser_session="b1")
+    newer_unclaimed = store.create_agent(name="Newer Guest", owner_browser_session="b1")
+
+    listed = store.list_agents(owner_user_id=7, owner_browser_session="b1")
+    assert [a["agent_id"] for a in listed] == [
+        newer_unclaimed["agent_id"],
+        older_owned["agent_id"],
+    ]
+
+
 def test_rotate_api_key(store):
     created = store.create_agent(name="A")
     new_key = store.rotate_api_key(created["agent_id"])

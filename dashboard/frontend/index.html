@@ -303,12 +303,20 @@
           return data;
         }
 
-        function goToDashboardLoggedIn(user, token) {
+        function goToDashboardLoggedIn(user, token, options) {
+          options = options || {};
           try {
             localStorage.setItem(AUTH_TOKEN_KEY, token);
             localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
+            // New accounts should land on Home, not a leftover My Agents tab
+            // from browsing the dashboard while logged out.
+            // 'nav-state' must match app.js's NAV_STATE_KEY -- this landing
+            // page has no build step to share that constant across the split.
+            if (options.goHome) {
+              localStorage.setItem('nav-state', JSON.stringify({ page: 'home' }));
+            }
           } catch (e) { /* ignore */ }
-          window.location.href = APP_URL;
+          window.location.href = options.goHome ? (APP_URL + '?view=home') : APP_URL;
         }
 
         function initAuthModal() {
@@ -363,7 +371,9 @@
                     email: email,
                     password: password,
                   });
-              goToDashboardLoggedIn(data.user, data.token);
+              goToDashboardLoggedIn(data.user, data.token, {
+                goHome: authMode === 'signup',
+              });
             } catch (error) {
               if (errorEl) {
                 errorEl.textContent = error.message || 'Something went wrong.';
