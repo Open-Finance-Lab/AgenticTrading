@@ -12,7 +12,7 @@ from types import ModuleType
 from typing import Any, Callable, Dict, Mapping, Optional, Sequence, Tuple
 
 from ..models import ExecutionResult
-from ._vnpy_cta_core import CapturedCtaOrder, sanitize_error_message
+from ._vnpy_cta_core import CapturedCtaOrder, sanitize_error_message, validate_ohlcv_values
 
 
 class VnpyCtaDependencyError(RuntimeError):
@@ -303,21 +303,7 @@ class VnpyCtaRuntime:
 
     def _bar_data(self, payload: Mapping[str, Any]) -> Any:
         timestamp = _aware_datetime(payload.get("timestamp"))
-        try:
-            values = {
-                field: float(payload[field])
-                for field in ("open", "high", "low", "close", "volume")
-            }
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError("bar payload is missing numeric OHLCV fields") from exc
-        if (
-            not all(math.isfinite(values[key]) and values[key] > 0 for key in ("open", "high", "low", "close"))
-            or not math.isfinite(values["volume"])
-            or values["volume"] < 0
-            or values["high"] < max(values["open"], values["close"])
-            or values["low"] > min(values["open"], values["close"])
-        ):
-            raise ValueError("bar payload violates the OHLCV contract")
+        values = validate_ohlcv_values(payload)
         return self.bindings.BarData(
             gateway_name="ATL",
             symbol=self.symbol,
@@ -337,6 +323,17 @@ class VnpyCtaRuntime:
         bar = self._bar_data(payload)
         self.engine.current_timestamp = bar.datetime.isoformat()
         self.strategy.on_bar(bar)
+        return self.drain_captured_orders()
+
+    def drain_captured_orders(self) -> Tuple[CapturedCtaOrder, ...]:
+        """Orders captured by the engine since the last drain.
+
+        Exposed at the runtime's lifecycle level (rather than requiring
+        callers to reach into ``self.engine``) so a caller recovering from a
+        ``strategy.on_bar()`` exception can collect whatever orders the
+        strategy sent before it raised, without depending on the concrete
+        engine implementation.
+        """
         return self.engine.drain_captured_orders()
 
     def _enum_member(self, enum: Any, name: str) -> Any:
@@ -397,6 +394,36 @@ class VnpyCtaRuntime:
             return "sell"
         return None
 
+    @staticmethod
+    def _closest_quantity_match(
+        candidate_indices: list[int],
+        items: Sequence[Mapping[str, Any]],
+        volume: float,
+        quantity_of: Callable[[Mapping[str, Any]], Any],
+    ) -> Optional[int]:
+        """Among same-symbol/same-side candidates, prefer the one whose
+        submitted quantity is closest to ``volume``. ATL's ``orders-v1`` wire
+        schema carries no client-supplied order id to correlate fills or
+        rejections back to a specific captured order, so (symbol, side) alone
+        is ambiguous whenever a strategy emits more than one same-side order
+        in a single ``on_bar()`` call; matching on quantity too is a
+        best-effort tie-breaker, not a guarantee.
+        """
+        best_index: Optional[int] = None
+        best_distance: Optional[float] = None
+        for index in candidate_indices:
+            try:
+                requested = float(quantity_of(items[index]))
+            except (TypeError, ValueError):
+                continue
+            distance = abs(requested - float(volume))
+            if best_distance is None or distance < best_distance:
+                best_distance = distance
+                best_index = index
+        if best_index is not None:
+            return best_index
+        return candidate_indices[0] if candidate_indices else None
+
     def apply_execution_result(
         self,
         result: ExecutionResult,
@@ -408,14 +435,17 @@ class VnpyCtaRuntime:
         rejections = list(result.rejections)
         for captured in captured_orders:
             side = self._captured_side(captured)
-            fill_index = next(
-                (
-                    index
-                    for index, fill in enumerate(unused_fills)
-                    if str(fill.get("symbol", "")).upper() == self.symbol
-                    and str(fill.get("side", "")).lower() == side
-                ),
-                None,
+            fill_candidates = [
+                index
+                for index, fill in enumerate(unused_fills)
+                if str(fill.get("symbol", "")).upper() == self.symbol
+                and str(fill.get("side", "")).lower() == side
+            ]
+            fill_index = self._closest_quantity_match(
+                fill_candidates,
+                unused_fills,
+                captured.volume,
+                lambda fill: fill.get("requested_quantity"),
             )
             if fill_index is not None:
                 fill = unused_fills.pop(fill_index)
@@ -456,16 +486,18 @@ class VnpyCtaRuntime:
                     self.strategy.on_trade(trade)
                 continue
 
-            rejection_index = next(
-                (
-                    index
-                    for index, item in enumerate(rejections)
-                    if str((item.get("order") or {}).get("symbol", "")).upper()
-                    == self.symbol
-                    and str((item.get("order") or {}).get("side", "")).lower()
-                    == side
-                ),
-                None,
+            rejection_candidates = [
+                index
+                for index, item in enumerate(rejections)
+                if str((item.get("order") or {}).get("symbol", "")).upper()
+                == self.symbol
+                and str((item.get("order") or {}).get("side", "")).lower() == side
+            ]
+            rejection_index = self._closest_quantity_match(
+                rejection_candidates,
+                rejections,
+                captured.volume,
+                lambda item: (item.get("order") or {}).get("quantity"),
             )
             if rejection_index is not None:
                 rejection = rejections.pop(rejection_index)

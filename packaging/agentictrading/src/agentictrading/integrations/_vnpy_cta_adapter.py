@@ -16,6 +16,7 @@ from ._vnpy_cta_core import (
     build_safe_manifest,
     map_captured_order,
     sanitize_error_message,
+    validate_ohlcv_values,
 )
 
 
@@ -81,23 +82,9 @@ class VnpyCtaAdapter:
             raise VnpyCtaDataError("Bar timestamps must be strictly increasing")
 
         try:
-            values = {
-                field: float(raw[field])
-                for field in ("open", "high", "low", "close", "volume")
-            }
-        except (KeyError, TypeError, ValueError) as exc:
-            raise VnpyCtaDataError("Bar is missing numeric OHLCV fields") from exc
-        if (
-            not all(
-                math.isfinite(values[field]) and values[field] > 0
-                for field in ("open", "high", "low", "close")
-            )
-            or not math.isfinite(values["volume"])
-            or values["volume"] < 0
-            or values["high"] < max(values["open"], values["close"])
-            or values["low"] > min(values["open"], values["close"])
-        ):
-            raise VnpyCtaDataError("Bar violates the OHLCV contract")
+            values = validate_ohlcv_values(raw)
+        except ValueError as exc:
+            raise VnpyCtaDataError(f"Bar failed OHLCV validation: {exc}") from exc
         return {"symbol": self.symbol, "timestamp": timestamp_text, **values}
 
     def _position_from(self, observation: Observation) -> int:
@@ -185,7 +172,7 @@ class VnpyCtaAdapter:
             try:
                 captured = tuple(self.runtime.on_bar(signal_bar))
             except Exception as exc:
-                captured = tuple(self.runtime.engine.drain_captured_orders())
+                captured = tuple(self.runtime.drain_captured_orders())
                 status = "error_hold"
                 error = sanitize_error_message(exc)
                 for captured_order in captured:

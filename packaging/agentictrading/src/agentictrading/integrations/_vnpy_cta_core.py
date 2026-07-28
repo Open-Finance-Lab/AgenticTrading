@@ -43,7 +43,7 @@ _SENSITIVE_KEYS = {
 }
 _KEY_VALUE_RE = re.compile(
     r"(?i)\b([a-z0-9_-]*(?:api[_-]?key|authorization|credential|password|passwd|secret|token))"
-    r"\s*=\s*[^\s,;]+"
+    r"['\"]?\s*[:=]\s*['\"]?[^\s,;'\"]+['\"]?"
 )
 _BEARER_RE = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _URL_CREDENTIAL_RE = re.compile(r"(https?://)[^/@\s]+@", re.IGNORECASE)
@@ -119,6 +119,39 @@ def _finite_number(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     return number if math.isfinite(number) else None
+
+
+_OHLCV_FIELDS = ("open", "high", "low", "close", "volume")
+
+
+def validate_ohlcv_values(raw: Mapping[str, Any]) -> Dict[str, float]:
+    """Extract and sanity-check an OHLCV bar's numeric fields.
+
+    Shared by both the adapter (validating an incoming ATL observation) and
+    the runtime (validating a bar payload before building vn.py's BarData) —
+    same package, same contract, so one copy instead of two independently
+    drifting ones. Raises ``ValueError`` on any missing/non-numeric field or
+    contract violation (non-finite, non-positive price, negative volume,
+    high/low inconsistent with open/close); callers decide what to do with
+    that (reject the bar, hold, etc.) since the right response differs by
+    caller.
+    """
+    try:
+        values = {field: float(raw[field]) for field in _OHLCV_FIELDS}
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("bar is missing numeric OHLCV fields") from exc
+    if (
+        not all(
+            math.isfinite(values[field]) and values[field] > 0
+            for field in ("open", "high", "low", "close")
+        )
+        or not math.isfinite(values["volume"])
+        or values["volume"] < 0
+        or values["high"] < max(values["open"], values["close"])
+        or values["low"] > min(values["open"], values["close"])
+    ):
+        raise ValueError("bar violates the OHLCV contract")
+    return values
 
 
 def map_captured_order(

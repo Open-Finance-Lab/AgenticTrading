@@ -201,6 +201,21 @@ def test_safe_manifest_and_error_message_remove_credentials():
     assert "alice:pw" not in error
 
 
+def test_error_message_redacts_colon_and_json_style_credentials():
+    """The equals-only regex missed header-dump and JSON-embedded credentials
+    (e.g. an HTTP client's ``X-API-Key: <key>`` header repr, or a stringified
+    JSON payload) — both are plausible shapes for a credential to leak into
+    an exception's ``str()``.
+    """
+    error = sanitize_error_message(
+        "request failed headers={'X-API-Key': 'ag_live_abc123'} "
+        'body={"api_key": "sk-json-secret", "symbol": "AAPL"}'
+    )
+    assert "ag_live_abc123" not in error
+    assert "sk-json-secret" not in error
+    assert "AAPL" in error  # non-sensitive fields must survive redaction
+
+
 def test_artifact_round_trip_has_stable_summary_and_sha256(tmp_path):
     artifact = build_audit_artifact(
         manifest=build_safe_manifest({"strategy": "demo:DoubleMaStrategy"}),
@@ -486,6 +501,94 @@ def test_runtime_syncs_position_and_emits_fill_callbacks():
     assert runtime.strategy.pos == 7
 
 
+class _TwoOrderStrategy(_CtaTemplate):
+    """Emits two same-side orders of different sizes from a single on_bar()."""
+
+    def __init__(self, engine, strategy_name, vt_symbol, setting):
+        self.cta_engine = engine
+        self.pos = 0
+        self.events = []
+
+    def on_init(self):
+        return None
+
+    def on_start(self):
+        return None
+
+    def on_stop(self):
+        return None
+
+    def on_bar(self, bar):
+        self.events.append(("bar", bar))
+        self.cta_engine.send_order(
+            self, _Direction.LONG, _Offset.OPEN, bar.close_price, 1, False, False, False
+        )
+        self.cta_engine.send_order(
+            self, _Direction.LONG, _Offset.OPEN, bar.close_price, 3, False, False, False
+        )
+
+    def on_order(self, order):
+        self.events.append(("order", order))
+
+    def on_trade(self, trade):
+        self.events.append(("trade", trade))
+
+
+def test_apply_execution_result_matches_multiple_same_side_orders_by_quantity():
+    """(symbol, side) alone can't disambiguate two same-side captured orders;
+    ATL's orders-v1 wire schema has no client order id, so requested_quantity
+    is the only extra signal available — verify it's used to avoid pairing
+    fills to the wrong captured order.
+    """
+    runtime = VnpyCtaRuntime(
+        _TwoOrderStrategy,
+        symbol="AAPL",
+        settings={},
+        bindings=_fake_bindings(),
+    )
+    runtime.start()
+    captured = runtime.on_bar(_bar_payload())
+    assert [order.volume for order in captured] == [1, 3]
+
+    # Fills listed in the OPPOSITE order from submission: a pure (symbol, side)
+    # first-match would pair the 1-share order with the 3-share fill.
+    result = ExecutionResult(
+        accepted=True,
+        fills=[
+            {
+                "symbol": "AAPL",
+                "side": "buy",
+                "requested_quantity": 3,
+                "filled_quantity": 3,
+                "fill_price": 103.0,
+            },
+            {
+                "symbol": "AAPL",
+                "side": "buy",
+                "requested_quantity": 1,
+                "filled_quantity": 1,
+                "fill_price": 101.0,
+            },
+        ],
+        validation={"passed": True, "warnings": [], "rejections": []},
+    )
+
+    runtime.apply_execution_result(
+        result,
+        captured_orders=captured,
+        timestamp="2026-04-15T11:00:00-04:00",
+    )
+
+    trades = [event[1] for event in runtime.strategy.events if event[0] == "trade"]
+    assert len(trades) == 2
+    by_order_id = {trade.orderid: trade for trade in trades}
+    assert by_order_id[captured[0].order_id].volume == 1
+    assert by_order_id[captured[0].order_id].price == 101.0
+    assert by_order_id[captured[1].order_id].volume == 3
+    assert by_order_id[captured[1].order_id].price == 103.0
+    assert runtime.strategy.pos == 4
+
+
 def test_runtime_emits_rejected_order_callback_without_trade():
     runtime = VnpyCtaRuntime(
         _RecordingStrategy,
@@ -594,6 +697,9 @@ class _AdapterRuntime:
 
     def reject_captured_order(self, captured, *, reason, timestamp):
         self.rejected.append((captured, reason, timestamp))
+
+    def drain_captured_orders(self):
+        return self.engine.drain_captured_orders()
 
 
 def _observation(hour: int, *, position: int = 0, bar_overrides=None) -> Observation:
