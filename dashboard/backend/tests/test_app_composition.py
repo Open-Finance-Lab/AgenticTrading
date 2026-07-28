@@ -326,6 +326,40 @@ def test_middleware_order_preserved():
     assert names == ["CSPHeaderMiddleware", "SessionMiddleware", "CORSMiddleware"]
 
 
+def test_cors_preflight_allows_every_routed_method():
+    """A routed method missing from ``allow_methods`` is unreachable in prod.
+
+    The frontend (Vercel) and the API (Render) are separate origins, so any
+    request the browser preflights -- PATCH among them -- dies at the preflight
+    when the method is absent, even though the route exists and answers fine to
+    curl. ``PATCH /api/v1/agents/{id}`` shipped that way: the only PATCH route
+    in the app, and the one behind the agent Configure screen's Save.
+    """
+    from fastapi.testclient import TestClient
+
+    routed = {
+        method
+        for route in app.routes
+        for method in (getattr(route, "methods", None) or set())
+    } - {"HEAD", "OPTIONS"}
+    assert "PATCH" in routed, "guard the guard: the PATCH route must still exist"
+
+    client = TestClient(app)
+    for method in sorted(routed):
+        response = client.options(
+            "/api/v1/agents/some-agent",
+            headers={
+                "Origin": "https://agentic-trading-lab.vercel.app",
+                "Access-Control-Request-Method": method,
+            },
+        )
+        assert response.status_code == 200, (
+            f"{method} preflight rejected ({response.status_code}): {response.text}"
+        )
+        allowed = response.headers.get("access-control-allow-methods", "")
+        assert method in allowed, f"{method} missing from allow_methods: {allowed!r}"
+
+
 # ---------------------------------------------------------------------------
 # Boundaries
 # ---------------------------------------------------------------------------

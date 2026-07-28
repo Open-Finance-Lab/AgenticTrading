@@ -10,7 +10,14 @@
   const STORAGE_PREFIX = 'agent-pipeline-config:';
   const NAME_OVERRIDE_PREFIX = 'agent-name-override:';
   const CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
-  const API_BASE = window.location.origin;
+  // Match app.js: same-origin locally, hosted backend everywhere else. In
+  // production the static frontend (Vercel) and the API (Render) are different
+  // origins, so a bare location.origin sends every /api call to the static host
+  // -- which answers with an HTML 404 page, not JSON.
+  const API_BASE =
+    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      ? window.location.origin
+      : 'https://agentictrading.onrender.com';
 
   // The Simple-mode contract (preset key + trading-actions output format) has a
   // single source of truth in app.js, published on `window`. app.js loads AFTER
