@@ -6065,6 +6065,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     transition: background-color 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s;
 }
 .home-btn[hidden] { display: none !important; }
+.home-btn:disabled, .home-btn:disabled:hover { cursor: not-allowed; opacity: 0.5; box-shadow: none; filter: none; }
 .home-btn-primary { background: var(--home-accent-cyan); color: #041018; border-color: var(--home-accent-cyan); box-shadow: 0 6px 24px rgba(34,211,238,0.24); }
 .home-btn-primary:hover { filter: brightness(1.05); }
 .home-btn-secondary { background: rgba(8,18,40,0.55); color: var(--text-primary); border-color: rgba(148,163,184,0.22); }
@@ -7197,10 +7198,12 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     border: 1px solid rgba(34, 211, 238, 0.28);
 }
 
+/* Slate, matching AVAILABLE_SLICE_COLOR in portfolio.js — the donut beside this
+   card shows the same quantity, and two colours for it read as two concepts. */
 .pf-overview-pill--avail {
-    color: #f59e0b;
-    background: rgba(245, 158, 11, 0.12);
-    border: 1px solid rgba(245, 158, 11, 0.28);
+    color: #94a3b8;
+    background: rgba(100, 116, 139, 0.14);
+    border: 1px solid rgba(100, 116, 139, 0.32);
 }
 
 .pf-overview-bar {
@@ -7219,7 +7222,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .pf-overview-bar-avail {
     height: 100%;
-    background: #f59e0b;
+    background: #64748b;
 }
 
 .pf-allocation-card {
