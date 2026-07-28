@@ -148,6 +148,20 @@
     return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
   }
 
+  /**
+   * Run Live is the loudest button on the screen, so it must not look ready
+   * while the broker it needs is unconnected — demote it until then.
+   */
+  function setRunLiveProminence(connected) {
+    const runLiveBtn = document.getElementById('agentEditorRunLiveBtn');
+    if (!runLiveBtn) return;
+    runLiveBtn.disabled = !connected;
+    runLiveBtn.className = connected
+      ? 'home-btn home-btn-primary'
+      : 'home-btn home-btn-secondary';
+    runLiveBtn.title = connected ? '' : 'Connect Robinhood first';
+  }
+
   async function refreshRobinhoodStatus() {
     const statusEl = document.getElementById('agentEditorRobinhoodStatus');
     const metaEl = document.getElementById('agentEditorRobinhoodMeta');
@@ -168,6 +182,7 @@
       }
       if (disconnectBtn) disconnectBtn.hidden = true;
       if (metaEl) metaEl.hidden = true;
+      setRunLiveProminence(false);
       setBrokerMessage('Log in to your ATL account, then click Connect Robinhood.', true);
       return;
     }
@@ -205,6 +220,7 @@
         connectBtn.textContent = 'Connect Robinhood';
       }
       if (disconnectBtn) disconnectBtn.hidden = !connected;
+      setRunLiveProminence(connected);
       if (metaEl) {
         if (connected) {
           metaEl.hidden = false;
@@ -234,6 +250,7 @@
         connectBtn.textContent = 'Connect Robinhood';
       }
       if (disconnectBtn) disconnectBtn.hidden = true;
+      setRunLiveProminence(false);
       setBrokerMessage(
         timedOut
           ? 'Status check timed out. You can still click Connect Robinhood.'
@@ -405,10 +422,10 @@
     if (cashInput && cashInput.value !== '') {
       const value = Number(cashInput.value);
       if (!Number.isFinite(value) || value < 0) {
-        throw new Error('Allocated capital must be zero or greater.');
+        throw new Error('Paper Trading Allocated Capital must be zero or greater.');
       }
       if (value > 3000) {
-        throw new Error('Allocated capital cannot exceed $3,000.');
+        throw new Error('Paper Trading Allocated Capital cannot exceed $3,000.');
       }
       cash_allocation = Math.round(value);
     } else {
@@ -880,6 +897,12 @@
     document.getElementById('agentEditorRunLiveBtn')?.addEventListener('click', runLive);
     document.getElementById('agentEditorRunBacktestBtn')?.addEventListener('click', () => {
       if (!currentAgent) return;
+      // The modal reads the last-saved agent, so an unsaved edit would run the
+      // old instruction while the preview shows the new one. Same guard as Run Live.
+      if (isDirty) {
+        showSaveStatus('Save changes before Run Backtest', true);
+        return;
+      }
       if (typeof window.openRunBacktestModal === 'function') {
         window.openRunBacktestModal(currentAgent);
       }

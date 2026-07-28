@@ -141,6 +141,8 @@ function formatTokenCount(value) {
 // ============================================================================
 const MAX_AGENT_CASH_ALLOCATION = 3000;
 const DEFAULT_AGENT_CASH_ALLOCATION = 1000;
+/** Simulated cash ceiling for a single backtest run — unrelated to the paper sleeve above. */
+const MAX_BACKTEST_ALLOCATED_CAPITAL = 10000;
 const DEFAULT_PORTFOLIO_EQUITY = 10000;
 const AGENT_CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
 
@@ -227,10 +229,10 @@ function parseAgentCashAllocationInput(raw) {
   }
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) {
-    throw new Error(`Allocated capital must be between $0 and $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
+    throw new Error(`Paper Trading Allocated Capital must be between $0 and $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
   }
   if (value > MAX_AGENT_CASH_ALLOCATION) {
-    throw new Error(`Allocated capital cannot exceed $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
+    throw new Error(`Paper Trading Allocated Capital cannot exceed $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
   }
   return Math.round(value);
 }
@@ -450,9 +452,11 @@ function resolveAgentStatusBadge(agent) {
   }
   const runCount = Number(agent.run_count) || (Array.isArray(agent.runs) ? agent.runs.length : 0);
   if (runCount > 0 || agent.latest_run?.run_id || agent.latest_run?.total_return != null) {
-    return { key: 'backtested', label: 'IDLE', className: 'idle' };
+    return { key: 'backtested', label: 'BACKTESTED', className: 'idle' };
   }
-  return { key: 'draft', label: 'DRAFT', className: 'draft' };
+  // Not "DRAFT": the agent is saved and its capital is already reserved from
+  // My Portfolio. The only thing missing is a run.
+  return { key: 'draft', label: 'READY', className: 'draft' };
 }
 
 function formatAgentMoney(value, { cents = true } = {}) {
@@ -736,7 +740,7 @@ function renderAgentAllocatedCapitalHero(agent) {
   return `
     <div class="agent-card-hero agent-card-hero--draft">
       <div class="agent-card-hero-text">
-        <span class="agent-card-metric-label">Allocated Capital</span>
+        <span class="agent-card-metric-label">Paper Trading Allocated Capital</span>
         <p class="agent-card-metric-value">${escapeHtml(capital)}</p>
         <p class="agent-card-capital-note">From My Portfolio</p>
       </div>
@@ -755,7 +759,7 @@ function renderAgentCardBody(agent, statusKey) {
           : '';
       changeHtml = `<p class="agent-card-change ${positive ? 'is-pos' : 'is-neg'}">${escapeHtml(formatSignedMoney(m.dayPnl))}${escapeHtml(pct)} today</p>`;
     } else if (!m.hasLive) {
-      changeHtml = `<p class="agent-card-change is-muted">Allocated capital · paper session not live yet</p>`;
+      changeHtml = `<p class="agent-card-change is-muted">Paper Trading Allocated Capital · session not live yet</p>`;
     }
     const activity = m.lastActivity
       ? escapeHtml(m.lastActivity)
@@ -819,7 +823,7 @@ function renderAgentCardBody(agent, statusKey) {
           ${renderAgentSparkline(agent, m.positive, m)}
         </div>
         <p class="agent-card-latest-meta">${escapeHtml(metaParts.join(' · '))}</p>
-        <p class="agent-card-latest-note">Separate from allocated capital.</p>
+        <p class="agent-card-latest-note">Simulated — separate from Paper Trading Allocated Capital.</p>
         ${renderAgentRunsLink(agent)}
       </div>`;
   }
@@ -1324,13 +1328,41 @@ function findBacktestModelOption(modelSelect, modelName) {
   ) || null;
 }
 
+/**
+ * The picker is a live control only for iFinD A-share, where it doubles as the
+ * rule-based-vs-LLM decision source. Everywhere else the run uses the agent's
+ * saved model, so the picker is hidden behind a read-only echo of it.
+ */
+function backtestModelPickerIsLiveControl() {
+  return document.getElementById('marketDataSourceSelect')?.value === IFIND_ASHARE_SOURCE;
+}
+
 function resolveBacktestModelRequest(modelSelect, agent) {
   const selectedModel = modelSelect?.value || '';
   const agentOption = findBacktestModelOption(modelSelect, agent?.model_name);
   if (agentOption?.value === selectedModel && agent?.model_name) {
     return agent.model_name;
   }
+  // A model the nine-option list cannot represent still belongs to the agent:
+  // without this the run submits whatever value a previous agent left behind.
+  if (agent?.model_name && !backtestModelPickerIsLiveControl()) {
+    return agent.model_name;
+  }
   return selectedModel || agent?.model_name || 'claude-haiku-4.5';
+}
+
+/** Show the picker only where it is a real control; otherwise echo the agent's model. */
+function syncBacktestModelFieldMode() {
+  const modelSelect = document.getElementById('modelSelect');
+  const readonly = document.getElementById('runBacktestModelReadonly');
+  const source = document.getElementById('marketDataSourceSelect')?.value || 'alpaca';
+  const isIFind = source === IFIND_ASHARE_SOURCE;
+  if (modelSelect) modelSelect.hidden = !isIFind;
+  if (!readonly) return;
+  readonly.hidden = isIFind;
+  readonly.textContent = source === 'vnpy_simulation'
+    ? 'Rule-based — vn.py simulation makes no LLM calls'
+    : formatAgentModelLabel(runBacktestModalAgent?.model_name);
 }
 
 function syncModelSelectFromAgent(agent) {
@@ -2016,10 +2048,11 @@ function syncMarketDataSourceUI(options = {}) {
   if (modelSelectHint && !isIFind) {
     modelSelectHint.textContent = isSimulation
       ? 'vn.py simulation uses rule-based decisions.'
-      : 'Defaults to this agent’s model. Changing it here is temporary and is not saved to the agent.';
+      : 'Set on the agent in Configure — this backtest always runs the agent’s saved model.';
   }
   if (notice) notice.hidden = !isSimulation;
   if (ifindNotice) ifindNotice.hidden = !isIFind;
+  syncBacktestModelFieldMode();
 }
 
 function renderBacktestDataSourceBadge(run) {
@@ -5064,8 +5097,19 @@ function openRunBacktestModal(agent) {
     const hint = document.getElementById('runBacktestCapitalHint');
     if (hint) {
         hint.textContent = Number.isFinite(sleeve)
-            ? `Does not change Allocated Capital ($${sleeve.toLocaleString()}).`
-            : 'Does not change Allocated Capital.';
+            ? `Does not change Paper Trading Allocated Capital ($${sleeve.toLocaleString()}).`
+            : 'Does not change Paper Trading Allocated Capital.';
+    }
+
+    // Reseed on every open. The field is per-run, so leaving the previous
+    // agent's number in place silently backtests this one at the wrong size.
+    const capitalInput = document.getElementById('backtestInitialCapital');
+    if (capitalInput) {
+        capitalInput.value = String(
+            Number.isFinite(sleeve) && sleeve > 0
+                ? Math.min(Math.round(sleeve), MAX_BACKTEST_ALLOCATED_CAPITAL)
+                : DEFAULT_AGENT_CASH_ALLOCATION,
+        );
     }
 
     syncModelSelectFromAgent(agent);
@@ -5156,24 +5200,21 @@ async function runBacktest() {
     }
 
     await activateAgent(activeAgent);
-    if (!isIFind) {
-        syncModelSelectFromAgent(activeAgent);
-    }
     const pipeline = isRuleBasedDecision ? null : loadAgentPipelineForBacktest(activeAgent);
     const model = isRuleBasedDecision
         ? null
         : resolveBacktestModelRequest(modelSelect, activeAgent);
 
     const capitalInput = document.getElementById('backtestInitialCapital');
-    let initialCapital = 1000;
+    let initialCapital = DEFAULT_AGENT_CASH_ALLOCATION;
     if (capitalInput && capitalInput.value !== '') {
         const parsed = Number(capitalInput.value);
         if (!Number.isFinite(parsed) || parsed <= 0) {
-            alert('Initial capital must be greater than 0.');
+            alert('Backtest Allocated Capital must be greater than 0.');
             return;
         }
-        if (parsed > 10000) {
-            alert('Initial capital cannot exceed $10,000.');
+        if (parsed > MAX_BACKTEST_ALLOCATED_CAPITAL) {
+            alert(`Backtest Allocated Capital cannot exceed $${MAX_BACKTEST_ALLOCATED_CAPITAL.toLocaleString()}.`);
             return;
         }
         initialCapital = Math.round(parsed);
