@@ -49,7 +49,7 @@ class PostgresAgentStore:
         # in tests, and CI's Postgres service container is empty on every run,
         # so the @pg_only tier only ever exercises the CREATE path -- except
         # test_agent_schema_lazily_migrates_an_old_table_postgres, which recreates
-        # the pre-migration table to force the migrate path. The five ALTER ...
+        # the pre-migration table to force the migrate path. The six ALTER ...
         # ADD COLUMN IF NOT EXISTS statements below re-add the columns the SQLite
         # store accreted as lazy migrations, so a deployment whose table predates
         # them is brought up to shape on the next boot; on a fresh or current
@@ -80,7 +80,8 @@ class PostgresAgentStore:
                         agent_type TEXT NOT NULL DEFAULT 'external',
                         description TEXT,
                         pipeline_config TEXT,
-                        cash_allocation DOUBLE PRECISION
+                        cash_allocation DOUBLE PRECISION,
+                        live_trading_enabled BOOLEAN NOT NULL DEFAULT FALSE
                     )
                     """
                 )
@@ -106,6 +107,10 @@ class PostgresAgentStore:
                 cur.execute(
                     "ALTER TABLE external_agents "
                     f"ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT '{DEFAULT_SCOPES}'"
+                )
+                cur.execute(
+                    "ALTER TABLE external_agents "
+                    "ADD COLUMN IF NOT EXISTS live_trading_enabled BOOLEAN NOT NULL DEFAULT FALSE"
                 )
                 cur.execute(
                     """
@@ -436,6 +441,7 @@ class PostgresAgentStore:
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
         cash_allocation: Any = _UNSET,
+        live_trading_enabled: Any = _UNSET,
     ) -> Optional[Dict[str, Any]]:
         """Update display fields for an agent. Returns the updated record or None.
 
@@ -460,6 +466,9 @@ class PostgresAgentStore:
         if cash_allocation is not _UNSET:
             sets.append("cash_allocation = %s")
             params.append(cash_allocation)
+        if live_trading_enabled is not _UNSET:
+            sets.append("live_trading_enabled = %s")
+            params.append(bool(live_trading_enabled))
         if not sets:
             return self.get_agent(agent_id)
         sets.append("last_used_at = %s")
