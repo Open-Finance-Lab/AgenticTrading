@@ -4,7 +4,7 @@ import os
 from collections import defaultdict
 from typing import Any
 
-from anthropic import AsyncAnthropic
+from anthropic import APIError, AsyncAnthropic
 from dotenv import load_dotenv
 
 from dashboard.backend.infrastructure.llm.backtest_harness import (
@@ -35,12 +35,13 @@ def require_env(name: str) -> str:
 def resolve_chat_model() -> str:
     """Model id matching the client ``get_claude_client`` builds.
 
-    CommonStack expects ``provider/model`` slugs, so when routing through it we
-    use ``anthropic/claude-haiku-4-5`` (overridable via ``CHAT_MODEL``).
-    Otherwise we honor ``ANTHROPIC_MODEL`` and fall back to the native default.
+    CommonStack expects ``provider/model`` slugs. Prefer ``CHAT_MODEL`` when set;
+    otherwise use ``COMMONSTACK_MODEL_NAME`` (DeepSeek by default — Anthropic
+    slugs on CommonStack have been observed returning a canned greeting with
+    ~10 ``input_tokens`` while ignoring the request body).
     """
     if os.getenv("COMMONSTACK_API_KEY"):
-        return os.getenv("CHAT_MODEL", COMMONSTACK_MODEL_NAME)
+        return os.getenv("CHAT_MODEL") or COMMONSTACK_MODEL_NAME
     return os.getenv("ANTHROPIC_MODEL", LLM_MODEL_NAME)
 
 
@@ -71,6 +72,59 @@ def get_claude_client() -> AsyncAnthropic:
             _claude_client = AsyncAnthropic(api_key=require_env("ANTHROPIC_API_KEY"))
 
     return _claude_client
+
+
+# CommonStack Anthropic-provider stub (2026-07): ignores body, returns this
+# greeting with ~10 input_tokens. Refuse and fall back to a working provider.
+_STUB_ASSISTANT_GREETING = "Hi! How can I help you today?"
+_COMMONSTACK_CHAT_FALLBACK_MODELS = (
+    "openai/gpt-4o-mini",
+    "google/gemini-2.5-flash",
+)
+
+
+def _is_stub_assistant_reply(
+    text: str,
+    *,
+    input_tokens: int | None,
+    prompt_chars: int,
+) -> bool:
+    if (text or "").strip() == _STUB_ASSISTANT_GREETING:
+        return True
+    # Body ignored by gateway: long prompt but almost no input tokens billed.
+    if input_tokens is not None and prompt_chars > 80 and input_tokens < 20:
+        return True
+    return False
+
+
+def _chat_model_candidates(preferred: str | None) -> list[str]:
+    """Ordered models to try for chat/strategy synthesis."""
+    primary = (preferred or "").strip() or resolve_chat_model()
+    candidates = [primary]
+    if os.getenv("COMMONSTACK_API_KEY"):
+        for model in _COMMONSTACK_CHAT_FALLBACK_MODELS:
+            if model not in candidates:
+                candidates.append(model)
+    return candidates
+
+
+def _stub_reply_error(model: str, *, action: str) -> RuntimeError:
+    """Error raised when every candidate model produced a stub reply.
+
+    Only mentions CommonStack/CHAT_MODEL when a CommonStack key is actually in
+    play; the native-Anthropic path has neither, so that advice would confuse.
+    """
+    if os.getenv("COMMONSTACK_API_KEY"):
+        return RuntimeError(
+            f"Hosted model {model!r} ignored the {action} request (returned a "
+            f"canned greeting). Set CHAT_MODEL to a working CommonStack slug "
+            f"(e.g. deepseek/deepseek-v4-pro) or pick an agent whose model is "
+            f"not on the broken Anthropic route."
+        )
+    return RuntimeError(
+        f"Model {model!r} returned a canned greeting instead of a real "
+        f"{action} reply. Check ANTHROPIC_MODEL or the selected agent's model."
+    )
 
 
 # Temporary MVP memory.
@@ -134,6 +188,10 @@ async def chat_with_agent(
     This function is the main integration boundary. The Discord bot should
     not call Anthropic directly.
 
+    Tries ``model`` (or ``resolve_chat_model()``) first, then CommonStack
+    fallbacks if the primary provider returns a known stub greeting or a
+    request error.
+
     Future implementation:
     - authenticate the platform user,
     - verify agent ownership,
@@ -161,24 +219,57 @@ async def chat_with_agent(
     if len(history) > 12:
         del history[:-12]
 
-    try:
-        resolved_model = (model or "").strip() or resolve_chat_model()
-        client = get_claude_client()
+    prompt_chars = len(SYSTEM_PROMPT) + sum(
+        len(str(m.get("content") or "")) for m in history
+    )
 
-        response = await client.messages.create(
-            model=resolved_model,
-            max_tokens=1200,
-            system=SYSTEM_PROMPT,
-            messages=history,
-        )
+    try:
+        client = get_claude_client()
+        candidates = _chat_model_candidates(model)
+        last_stub_model: str | None = None
+        answer = ""
+        for index, candidate in enumerate(candidates):
+            is_last = index == len(candidates) - 1
+            try:
+                response = await client.messages.create(
+                    model=candidate,
+                    max_tokens=1200,
+                    system=SYSTEM_PROMPT,
+                    messages=history,
+                )
+            except APIError:
+                if is_last:
+                    raise
+                print(
+                    f"chat: model={candidate!r} request failed; trying fallback"
+                )
+                continue
+
+            reply = extract_text(response)
+            usage = getattr(response, "usage", None)
+            input_tokens = (
+                getattr(usage, "input_tokens", None) if usage is not None else None
+            )
+            if reply and _is_stub_assistant_reply(
+                reply, input_tokens=input_tokens, prompt_chars=prompt_chars
+            ):
+                last_stub_model = candidate
+                print(
+                    f"chat: stub reply from model={candidate!r} "
+                    f"input_tokens={input_tokens}; trying fallback"
+                )
+                continue
+
+            answer = reply
+            break
+        else:
+            raise _stub_reply_error(last_stub_model, action="chat")
     except Exception:
         # Avoid retaining a user message that never received an answer.
         if history and history[-1]["role"] == "user":
             history.pop()
 
         raise
-
-    answer = extract_text(response)
 
     if not answer:
         answer = "Claude returned an empty response."
@@ -231,6 +322,7 @@ async def synthesize_strategy_prompt(
     user_id: str,
     agent_id: str,
     extra: str | None = None,
+    model: str | None = None,
 ) -> str:
     """Compile a user's conversation (+ optional extra text) into one strategy prompt.
 
@@ -238,6 +330,11 @@ async def synthesize_strategy_prompt(
     (from prior ``chat_with_agent`` turns) and an optional ``extra`` instruction,
     and returns a single free-form strategy prompt suitable for
     ``POST /backtest/run`` (``strategy_prompt``) — no JSON, no formatting.
+
+    ``model`` should be the selected agent's model when available (same as
+    ``/ask``); otherwise ``resolve_chat_model()`` is used, with CommonStack
+    fallbacks if the primary provider returns a known stub greeting or a
+    request error.
     """
     key = (user_id, agent_id)
     history = list(conversation_history[key])
@@ -257,19 +354,46 @@ async def synthesize_strategy_prompt(
         )
 
     messages = history + [{"role": "user", "content": final_instruction}]
-
-    model = resolve_chat_model()
-    client = get_claude_client()
-
-    response = await client.messages.create(
-        model=model,
-        max_tokens=900,
-        system=STRATEGY_SYNTH_SYSTEM,
-        messages=messages,
+    prompt_chars = len(STRATEGY_SYNTH_SYSTEM) + sum(
+        len(str(m.get("content") or "")) for m in messages
     )
 
-    strategy = extract_text(response).strip()
-    if not strategy:
-        raise RuntimeError("The model returned an empty strategy prompt.")
+    client = get_claude_client()
+    candidates = _chat_model_candidates(model)
+    last_stub_model: str | None = None
+    for index, candidate in enumerate(candidates):
+        is_last = index == len(candidates) - 1
+        try:
+            response = await client.messages.create(
+                model=candidate,
+                max_tokens=900,
+                system=STRATEGY_SYNTH_SYSTEM,
+                messages=messages,
+            )
+        except APIError:
+            if is_last:
+                raise
+            print(
+                f"strategy synth: model={candidate!r} request failed; trying fallback"
+            )
+            continue
 
-    return strategy
+        strategy = extract_text(response).strip()
+        usage = getattr(response, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+        if not strategy:
+            continue
+        if _is_stub_assistant_reply(
+            strategy, input_tokens=input_tokens, prompt_chars=prompt_chars
+        ):
+            last_stub_model = candidate
+            print(
+                f"strategy synth: stub reply from model={candidate!r} "
+                f"input_tokens={input_tokens}; trying fallback"
+            )
+            continue
+        return strategy
+
+    if last_stub_model:
+        raise _stub_reply_error(last_stub_model, action="strategy")
+    raise RuntimeError("The model returned an empty strategy prompt.")

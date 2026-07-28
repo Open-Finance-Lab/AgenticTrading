@@ -13,6 +13,8 @@ import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
+import anthropic
+import httpx
 import pytest
 
 from dashboard.backend.domain.chat import service as chat_service
@@ -59,6 +61,36 @@ def _install_client(monkeypatch, *, response=None, error=None):
     fake_client = SimpleNamespace(messages=fake_messages)
     monkeypatch.setattr(chat_service, "get_claude_client", lambda: fake_client)
     return fake_messages
+
+
+def _provider_error(message: str = "boom") -> anthropic.APIConnectionError:
+    """A real anthropic SDK error, for testing the APIError-specific fallback."""
+    return anthropic.APIConnectionError(
+        message=message,
+        request=httpx.Request("POST", "https://api.commonstack.ai/v1/messages"),
+    )
+
+
+def _stub_response(*, input_tokens: int = 10):
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=chat_service._STUB_ASSISTANT_GREETING)],
+        usage=SimpleNamespace(input_tokens=input_tokens),
+    )
+
+
+class _Seq:
+    """Fake ``client.messages`` returning/raising a scripted sequence per call."""
+
+    def __init__(self, *steps):
+        self._steps = list(steps)
+        self.calls = []
+
+    async def create(self, **kwargs):
+        self.calls.append(kwargs)
+        step = self._steps.pop(0)
+        if isinstance(step, Exception):
+            raise step
+        return step
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +172,7 @@ def test_chat_model_falls_back_to_default_when_unset(monkeypatch):
 
 
 def test_chat_uses_commonstack_slug_when_key_present(monkeypatch):
-    # With a CommonStack key, the chat routes through the gateway slug.
+    # With a CommonStack key and no CHAT_MODEL, chat uses COMMONSTACK_MODEL_NAME.
     monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
     monkeypatch.delenv("CHAT_MODEL", raising=False)
     fake = _install_client(monkeypatch, response=_text_response("ok"))
@@ -148,6 +180,226 @@ def test_chat_uses_commonstack_slug_when_key_present(monkeypatch):
     asyncio.run(chat_with_agent(user_id="u1", agent_id="a1", message="hello"))
 
     assert fake.calls[0]["model"] == chat_service.COMMONSTACK_MODEL_NAME
+
+
+def test_chat_skips_commonstack_stub_greeting_and_retries(monkeypatch):
+    # /ask must get the same stub-detection + fallback protection as /strategy.
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+
+    good = _text_response("Sure, here's what I see in your portfolio.")
+    fake_messages = _Seq(_stub_response(), good)
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    answer = asyncio.run(
+        chat_service.chat_with_agent(
+            user_id="u1",
+            agent_id="a1",
+            message="what do I own",
+            model="anthropic/claude-haiku-4-5",
+        )
+    )
+
+    assert answer == "Sure, here's what I see in your portfolio."
+    assert fake_messages.calls[0]["model"] == "anthropic/claude-haiku-4-5"
+    assert fake_messages.calls[1]["model"] == "openai/gpt-4o-mini"
+    history = conversation_history[("u1", "a1")]
+    assert history[-1] == {"role": "assistant", "content": answer}
+
+
+def test_chat_falls_back_on_provider_request_error(monkeypatch):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+
+    good = _text_response("ok")
+    fake_messages = _Seq(_provider_error(), good)
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    answer = asyncio.run(
+        chat_service.chat_with_agent(user_id="u1", agent_id="a1", message="hello")
+    )
+
+    assert answer == "ok"
+    assert len(fake_messages.calls) == 2
+    assert fake_messages.calls[1]["model"] == "openai/gpt-4o-mini"
+
+
+def test_chat_last_candidate_request_error_propagates_and_pops_message(monkeypatch):
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+    _install_client(monkeypatch, error=_provider_error("no route to host"))
+
+    with pytest.raises(anthropic.APIConnectionError, match="no route to host"):
+        asyncio.run(
+            chat_service.chat_with_agent(user_id="u1", agent_id="a1", message="hello")
+        )
+
+    assert conversation_history[("u1", "a1")] == []
+
+
+def test_chat_stub_error_mentions_commonstack_when_key_set(monkeypatch):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+
+    fake_messages = _Seq(_stub_response(), _stub_response(), _stub_response())
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    with pytest.raises(RuntimeError, match="CommonStack slug"):
+        asyncio.run(
+            chat_service.chat_with_agent(user_id="u1", agent_id="a1", message="hello")
+        )
+
+    # No answer was ever produced -> the pending user message must not stick.
+    assert conversation_history[("u1", "a1")] == []
+
+
+def test_chat_stub_error_generic_without_commonstack(monkeypatch):
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+    _install_client(monkeypatch, response=_stub_response())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(
+            chat_service.chat_with_agent(user_id="u1", agent_id="a1", message="hello")
+        )
+
+    assert "CommonStack" not in str(exc_info.value)
+
+
+def test_synthesize_strategy_uses_idea_and_preferred_model(monkeypatch):
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+    fake = _install_client(
+        monkeypatch,
+        response=_text_response("Equal-weight Mag7; rebalance monthly"),
+    )
+
+    prompt = asyncio.run(
+        chat_service.synthesize_strategy_prompt(
+            user_id="u1",
+            agent_id="a1",
+            extra="buy big 7",
+            model="deepseek/deepseek-v4-pro",
+        )
+    )
+
+    assert "Mag7" in prompt
+    assert fake.calls[0]["model"] == "deepseek/deepseek-v4-pro"
+    assert "buy big 7" in fake.calls[0]["messages"][-1]["content"]
+
+
+def test_synthesize_strategy_skips_commonstack_stub_greeting(monkeypatch):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+
+    good = _text_response("Buy AAPL MSFT GOOGL AMZN NVDA META TSLA equal weight.")
+    fake_messages = _Seq(_stub_response(), good)
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    prompt = asyncio.run(
+        chat_service.synthesize_strategy_prompt(
+            user_id="u1",
+            agent_id="a1",
+            extra="buy big 7",
+            model="anthropic/claude-haiku-4-5",
+        )
+    )
+
+    assert "AAPL" in prompt
+    assert fake_messages.calls[0]["model"] == "anthropic/claude-haiku-4-5"
+    assert fake_messages.calls[1]["model"] == "openai/gpt-4o-mini"
+
+
+def test_synthesize_strategy_falls_back_on_provider_request_error(monkeypatch):
+    # A rejected/unavailable candidate (hard error, not a stub) must not abort
+    # the whole synthesis — the next fallback candidate should still be tried.
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+
+    good = _text_response("Buy AAPL MSFT GOOGL AMZN NVDA META TSLA equal weight.")
+    fake_messages = _Seq(_provider_error(), good)
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    prompt = asyncio.run(
+        chat_service.synthesize_strategy_prompt(
+            user_id="u1", agent_id="a1", extra="buy big 7"
+        )
+    )
+
+    assert "AAPL" in prompt
+    assert len(fake_messages.calls) == 2
+    assert fake_messages.calls[1]["model"] == "openai/gpt-4o-mini"
+
+
+def test_synthesize_strategy_last_candidate_request_error_propagates(monkeypatch):
+    # No CommonStack key -> a single candidate; its hard error must surface
+    # (not be swallowed) since there is nothing left to fall back to.
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+    _install_client(monkeypatch, error=_provider_error("no route to host"))
+
+    with pytest.raises(anthropic.APIConnectionError, match="no route to host"):
+        asyncio.run(
+            chat_service.synthesize_strategy_prompt(
+                user_id="u1", agent_id="a1", extra="buy big 7"
+            )
+        )
+
+
+def test_synthesize_strategy_stub_error_mentions_commonstack_when_key_set(monkeypatch):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-test-key")
+    monkeypatch.delenv("CHAT_MODEL", raising=False)
+
+    fake_messages = _Seq(_stub_response(), _stub_response(), _stub_response())
+    monkeypatch.setattr(
+        chat_service,
+        "get_claude_client",
+        lambda: SimpleNamespace(messages=fake_messages),
+    )
+
+    with pytest.raises(RuntimeError, match="CommonStack slug"):
+        asyncio.run(
+            chat_service.synthesize_strategy_prompt(
+                user_id="u1", agent_id="a1", extra="buy big 7"
+            )
+        )
+
+
+def test_synthesize_strategy_stub_error_generic_without_commonstack(monkeypatch):
+    # Native Anthropic path (no CommonStack key): only one candidate, so the
+    # error text must not suggest a CommonStack-only remedy.
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_MODEL", "claude-test-model")
+    _install_client(monkeypatch, response=_stub_response())
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(
+            chat_service.synthesize_strategy_prompt(
+                user_id="u1", agent_id="a1", extra="buy big 7"
+            )
+        )
+
+    assert "CommonStack" not in str(exc_info.value)
 
 
 def test_chat_history_trimmed_to_12(monkeypatch):

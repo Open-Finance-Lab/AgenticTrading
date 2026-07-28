@@ -13,7 +13,11 @@ import os
 from typing import Any, Optional
 
 INTEGRATION_ID = "commonstack"
-DEFAULT_MODEL = "anthropic/claude-haiku-4-5"
+# Prefer DeepSeek over Anthropic slugs: CommonStack's Anthropic provider has
+# been observed returning a canned "Hi! How can I help you today?" with
+# ~10 input_tokens while ignoring the request body (breaks Discord /strategy
+# and default LLM backtests). DeepSeek stays reliable on the same key.
+DEFAULT_MODEL = "deepseek/deepseek-v4-pro"
 DEFAULT_BASE_URL = "https://api.commonstack.ai"
 
 

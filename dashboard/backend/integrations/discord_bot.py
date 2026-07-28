@@ -1011,12 +1011,16 @@ async def strategy(
     discord_user_id = str(interaction.user.id)
     selected = selected_agent_for(discord_user_id)
     agent_id = selected["agent_id"] if selected else DEFAULT_AGENT_ID
+    # Same model resolution as /ask — previously /strategy always used
+    # resolve_chat_model()'s gateway default and ignored the selected agent.
+    model = _model_override(selected.get("model_name")) if selected else None
 
     try:
         prompt = await synthesize_strategy_prompt(
             user_id=discord_user_id,
             agent_id=agent_id,
             extra=idea,
+            model=model,
         )
     except ValueError as exc:
         await interaction.edit_original_response(content=str(exc))
