@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.domain.agents.repository import agent_store, _UNSET
 from dashboard.backend.domain.agents import auth_cache
+from dashboard.backend.domain.agents.defaults import default_starter_pipeline
 from dashboard.backend.domain.agents.version_repository import (
     VALID_EXECUTION_MODES,
     VALID_VERIFICATION_LEVELS,
@@ -278,14 +279,24 @@ class AgentService:
         agent_type: str = "external",
         description: Optional[str] = None,
         cash_allocation: Optional[float] = None,
+        seed_default_pipeline: bool = True,
     ) -> Dict[str, Any]:
+        """Register an agent.
+
+        Built-in agents are seeded with the default starter instruction so a new
+        user can run a backtest straight from My Agents without opening
+        Configure. Callers that immediately write their own pipeline (the
+        marketplace clone) pass ``seed_default_pipeline=False`` to skip the
+        write they are about to overwrite. External agents are driven by the
+        protocol API and never use the editor pipeline, so they are not seeded.
+        """
         from dashboard.backend.domain.backtesting.constants import (
             DEFAULT_AGENT_CASH_ALLOCATION,
         )
 
         if cash_allocation is None:
             cash_allocation = float(DEFAULT_AGENT_CASH_ALLOCATION)
-        return self.agents.create_agent(
+        agent = self.agents.create_agent(
             name=name,
             model_name=model_name,
             owner_user_id=owner_user_id,
@@ -294,6 +305,14 @@ class AgentService:
             description=description,
             cash_allocation=cash_allocation,
         )
+        if seed_default_pipeline and agent_type == "builtin":
+            # Merge rather than reassign: create_agent's dict carries the
+            # one-time plaintext ``api_key`` that the route pops and shows once,
+            # and update_agent re-reads the row (which only stores the hash).
+            pipeline = default_starter_pipeline()
+            self.agents.update_agent(agent["agent_id"], pipeline=pipeline)
+            agent["pipeline"] = pipeline
+        return agent
 
     def clone_marketplace_template(
         self,
@@ -311,6 +330,8 @@ class AgentService:
             raise MarketplaceTemplateNotFoundError()
 
         resolved_name = (name or template.get("name") or "Marketplace Agent").strip()
+        pipeline = template.get("pipeline")
+        has_own_pipeline = isinstance(pipeline, list) and bool(pipeline)
         agent = self.create_agent(
             name=resolved_name,
             model_name=str(template.get("model_name") or "local-model").strip() or "local-model",
@@ -318,9 +339,12 @@ class AgentService:
             owner_browser_session=owner_browser_session,
             agent_type="builtin",
             description=template.get("description"),
+            # A template carrying its own pipeline overwrites the seed below, so
+            # skip that write. A template WITHOUT one still needs the starter
+            # instruction, or the clone lands with an empty Configure screen.
+            seed_default_pipeline=not has_own_pipeline,
         )
-        pipeline = template.get("pipeline")
-        if isinstance(pipeline, list) and pipeline:
+        if has_own_pipeline:
             agent = self.agents.update_agent(agent["agent_id"], pipeline=pipeline) or agent
         return self.attach_equity_sparklines([self.agent_with_stats(agent)])[0]
 

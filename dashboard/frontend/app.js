@@ -176,8 +176,13 @@ const SIMPLE_INSTRUCTION_OUTPUT_FORMAT =
 // same preset key + output format at call time instead of keeping its own copy.
 window.SIMPLE_INSTRUCTION_PRESET_KEY = SIMPLE_INSTRUCTION_PRESET_KEY;
 window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT = SIMPLE_INSTRUCTION_OUTPUT_FORMAT;
+// Mirrors DEFAULT_STARTER_INSTRUCTION in dashboard/backend/domain/agents/defaults.py,
+// which is what actually seeds new agents. The copy here is the editor's backfill
+// for agents created before server-side seeding existed (their pipeline is empty).
+// tests/test_agent_starter_defaults.py pins the two copies together.
 const DEFAULT_STARTER_INSTRUCTION =
   'Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.';
+window.DEFAULT_STARTER_INSTRUCTION = DEFAULT_STARTER_INSTRUCTION;
 
 function defaultAgentProvisionGuardKey() {
   // Prefer the signed-in account so a brand-new user on a browser that already
@@ -1415,22 +1420,12 @@ async function ensureDefaultFoundationAgent(agents) {
       const agent = data?.agent;
       if (!agent?.agent_id) return false;
       localStorage.setItem(guardKey, agent.agent_id);
-      try {
-        await API.patch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}`, {
-          pipeline: [
-            {
-              id: `sub_starter_${agent.agent_id}`,
-              presetKey: SIMPLE_INSTRUCTION_PRESET_KEY,
-              label: 'Trading instruction',
-              prompt: DEFAULT_STARTER_INSTRUCTION,
-              outputFormat: SIMPLE_INSTRUCTION_OUTPUT_FORMAT,
-            },
-          ],
-        });
-      } catch (seedError) {
-        // Non-fatal: the agent exists; the editor just opens with a blank instruction.
-        console.warn('Starter instruction seed failed:', seedError.message);
-      }
+      // The starter instruction is seeded server-side by AgentService.create_agent
+      // for every builtin agent. It used to be a follow-up PATCH from here, which
+      // failed silently in prod for months (PATCH was missing from the CORS
+      // allow_methods, so the preflight 400'd) and left every default agent with
+      // an empty pipeline. Seeding in the same call that creates the row means it
+      // cannot half-succeed.
       if (!getDefaultAgentId()) setDefaultAgentId(agent.agent_id);
       return true;
     } catch (error) {
