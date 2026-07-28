@@ -13,6 +13,7 @@ drift, ``isSimplePipeline()`` stops matching and every default agent renders the
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Dict, List
 
 SIMPLE_INSTRUCTION_PRESET_KEY = "simple_instruction"
@@ -39,7 +40,7 @@ def default_starter_pipeline() -> List[Dict[str, Any]]:
     """The one-step pipeline a new built-in agent starts with."""
     return [
         {
-            "id": "sub_starter",
+            "id": f"sub_starter_{uuid.uuid4().hex[:8]}",
             "presetKey": SIMPLE_INSTRUCTION_PRESET_KEY,
             "label": SIMPLE_INSTRUCTION_LABEL,
             "prompt": DEFAULT_STARTER_INSTRUCTION,

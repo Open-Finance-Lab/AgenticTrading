@@ -25,12 +25,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
-from dashboard.backend.domain.agents.repository import AgentStore
+import dashboard.backend.domain.agents.repository as agent_store_module
+import dashboard.backend.domain.agents.marketplace as marketplace_module
 from dashboard.backend.domain.agents.defaults import (
     DEFAULT_STARTER_INSTRUCTION,
     SIMPLE_INSTRUCTION_OUTPUT_FORMAT,
     SIMPLE_INSTRUCTION_PRESET_KEY,
 )
+
+AgentStore = agent_store_module.AgentStore
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _APP_JS = (_FRONTEND / "app.js").read_text(encoding="utf-8")
@@ -40,7 +43,6 @@ _EDITOR_JS = (_FRONTEND / "js" / "agent-editor.js").read_text(encoding="utf-8")
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    import dashboard.backend.domain.agents.repository as agent_store_module
     import dashboard.backend.api.routers.agents as agents_api
     import dashboard.backend.database as db_module
 
@@ -125,6 +127,36 @@ def test_marketplace_clone_keeps_its_own_pipeline(client):
         "info_to_signal",
         "signal_to_execution",
     ]
+
+
+def test_marketplace_clone_without_a_pipeline_gets_the_starter_seed(client, monkeypatch):
+    """A template that ships no pipeline of its own must still land usable.
+
+    Every real template in marketplace.json currently carries a pipeline, so this
+    branch of clone_marketplace_template (seed_default_pipeline=True) is otherwise
+    untested. Fake the catalog lookup rather than editing the real config.
+    """
+    fake_template = {
+        "template_id": "no-pipeline-template",
+        "name": "No Pipeline Template",
+        "model_name": "local-model",
+        "description": "A template with no pipeline of its own.",
+    }
+    monkeypatch.setattr(
+        marketplace_module,
+        "get_marketplace_template",
+        lambda template_id: fake_template if template_id == "no-pipeline-template" else None,
+    )
+    cloned = client.post(
+        "/api/v1/agents/marketplace/no-pipeline-template/clone",
+        json={},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    pipeline = cloned.json()["agent"]["pipeline"]
+    assert len(pipeline) == 1
+    assert pipeline[0]["presetKey"] == SIMPLE_INSTRUCTION_PRESET_KEY
+    assert pipeline[0]["prompt"] == DEFAULT_STARTER_INSTRUCTION
 
 
 # --------------------------------------------------------------------------
