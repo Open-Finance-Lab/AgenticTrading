@@ -1,8 +1,9 @@
 import asyncio
 import base64
 import logging
+import math
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -15,7 +16,12 @@ from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
 from dashboard.backend.infrastructure.email import sender as email_sender
 from dashboard.backend import users as users_module
-from dashboard.backend.users import parse_stored_timestamp, public_user, verify_password
+from dashboard.backend.users import (
+    format_stored_timestamp,
+    parse_stored_timestamp,
+    public_user,
+    verify_password,
+)
 from dashboard.backend.password_policy import validate_new_password
 from dashboard.backend.verification_codes import generate_code, hash_code
 
@@ -266,6 +272,36 @@ def _seconds_since(timestamp: str) -> float:
     ).total_seconds()
 
 
+def _too_soon(detail: str, seconds_remaining: float) -> HTTPException:
+    """A 429 whose Retry-After is the wait that is actually left.
+
+    Not the window's width: with a seven-day window those differ by up to seven
+    days, and a client that honours the header would sit out the whole period
+    over a wait that had minutes to run.
+    """
+    return HTTPException(
+        status_code=429,
+        detail=detail,
+        headers={"Retry-After": str(max(1, math.ceil(seconds_remaining)))},
+    )
+
+
+def _humanize_wait(seconds: float) -> str:
+    """Round the remaining wait UP to a whole unit, for user-facing copy.
+
+    Up, so the message never invites a retry that would 429 again: "in 1 day"
+    with 4 hours left is a lie the user discovers by being refused twice.
+    """
+    if seconds >= 86400:
+        days = math.ceil(seconds / 86400)
+        return f"{days} day{'s' if days != 1 else ''}"
+    if seconds >= 3600:
+        hours = math.ceil(seconds / 3600)
+        return f"{hours} hour{'s' if hours != 1 else ''}"
+    minutes = max(1, math.ceil(seconds / 60))
+    return f"{minutes} minute{'s' if minutes != 1 else ''}"
+
+
 def _email_change_body(code: str, new_email: str) -> str:
     return (
         "Someone asked to change the email address on your Agentic Trading Lab "
@@ -296,15 +332,56 @@ async def request_email_change(
     if store.get_user_by_email(payload.new_email):
         raise HTTPException(status_code=409, detail="Email is already registered")
 
-    # Cooldown AFTER the password check, so a typo does not burn the allowance.
-    last_at = store.last_email_change_request_at(current_user["id"])
-    cooldown = users_module.EMAIL_CHANGE_COOLDOWN_SECONDS
-    if last_at and _seconds_since(last_at) < cooldown:
-        raise HTTPException(
-            status_code=429,
-            detail="Please wait a minute before requesting another code.",
-            headers={"Retry-After": str(cooldown)},
+    # Three rate limits, all AFTER the password check so a typo does not burn
+    # any allowance, and ordered widest window first: whichever fires, the user
+    # is told the longest wait that actually applies rather than the shortest.
+    user_id = current_user["id"]
+
+    # 1. Product policy: an email address is a contact attribute, not something
+    #    to churn. Keyed on the last *completed* change -- keying it on the last
+    #    request would cost a week for a single mistyped address.
+    #    It also protects anything later bound to an account (entitlements,
+    #    paid plans) from being shed or inherited by hopping addresses. Those
+    #    must key on users.id regardless; see the note atop users.py.
+    min_interval = users_module.EMAIL_CHANGE_MIN_INTERVAL_DAYS * 86400
+    completed_at = store.last_email_change_completed_at(user_id)
+    if completed_at:
+        remaining = min_interval - _seconds_since(completed_at)
+        if remaining > 0:
+            raise _too_soon(
+                "You can change your email address once every "
+                f"{users_module.EMAIL_CHANGE_MIN_INTERVAL_DAYS} days. "
+                f"Try again in {_humanize_wait(remaining)}.",
+                remaining,
+            )
+
+    # 2. Rolling daily cap. The 60-second cooldown below bounds a *cycle*, but
+    #    each cycle can send two messages -- one to this account, one to an
+    #    address the requester picked -- so on its own it still lets one account
+    #    drain the platform's shared daily provider quota in a couple of hours,
+    #    half of it aimed at a third party from our sending domain. This is what
+    #    closes that; the window frees as the oldest request in it ages out.
+    window = timedelta(days=1)
+    recent = store.email_change_request_times_since(
+        user_id, format_stored_timestamp(datetime.now(timezone.utc) - window)
+    )
+    if len(recent) >= users_module.EMAIL_CHANGE_MAX_REQUESTS_PER_DAY:
+        remaining = window.total_seconds() - _seconds_since(recent[0])
+        raise _too_soon(
+            "Too many email-change requests today. "
+            f"Try again in {_humanize_wait(remaining)}.",
+            remaining,
         )
+
+    # 3. Per-request throttle.
+    last_at = store.last_email_change_request_at(user_id)
+    cooldown = users_module.EMAIL_CHANGE_COOLDOWN_SECONDS
+    if last_at:
+        remaining = cooldown - _seconds_since(last_at)
+        if remaining > 0:
+            raise _too_soon(
+                "Please wait a minute before requesting another code.", remaining
+            )
 
     code = generate_code()
     # Send BEFORE persisting. Persisting first and then failing to send would

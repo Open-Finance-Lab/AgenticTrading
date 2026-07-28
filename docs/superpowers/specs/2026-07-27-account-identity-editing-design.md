@@ -218,6 +218,48 @@ of two.
 a cancelled (or completed) request cannot be resumed — only its timestamp survives, purely
 to keep the cooldown clock honest.
 
+### Rate limiting (revised 2026-07-28)
+
+The 60-second cooldown above bounds one *cycle*, but each cycle can send two messages: one
+to the account's own address, and — once the first code is verified — one to an address the
+requester chose. One authenticated account could therefore still drain the shared
+300-emails/day Brevo quota in about 2.5 hours, half of it aimed at a third party from our
+sending domain. Two further limits close that, and encode the product policy that an email
+address is not something to churn:
+
+| Constant | Window | Keyed on | Purpose |
+|---|---|---|---|
+| `EMAIL_CHANGE_MIN_INTERVAL_DAYS = 7` | 7 days | last **completed** change (`used_at`) | Product policy. Also protects anything later bound to an account (entitlements, paid plans) from being shed or inherited by address-hopping. |
+| `EMAIL_CHANGE_MAX_REQUESTS_PER_DAY = 3` | rolling 24 h | request `created_at` | Caps one account at 6 messages/day, so draining the shared quota needs ~50 accounts rather than one. |
+| `EMAIL_CHANGE_COOLDOWN_SECONDS = 60` | 60 s | newest request | Unchanged. |
+
+Keying the 7-day limit on a **completed** change rather than on a *request* is the whole
+point: a 7-second-to-7-day widening of the existing cooldown would lock a user out for a
+week because they mistyped the new address once. The daily cap is what bounds abuse, since
+the abuse path (request → read own code → verify → mail a third party → cancel → repeat)
+never completes.
+
+**`email_change_requests` therefore becomes append-only.** `create_email_change_request`
+supersedes prior in-flight rows (`cancelled_at`) instead of `DELETE`-ing them — a delete
+would erase both the `used_at` the 7-day limit reads and the `created_at` rows the daily cap
+counts, so the act of making a request would clear both limits. `cancel_email_change` is
+scoped to still-active rows for the same reason: stamping `cancelled_at` over a completed
+change would misrepresent it in what is now an audit trail.
+
+Two store reads support this, in both twins:
+
+- `last_email_change_completed_at(user_id) -> str | None` — ordered by `used_at`, not `id`,
+  since a row created earlier can be completed later.
+- `email_change_request_times_since(user_id, since) -> list[str]` — oldest first, so the
+  caller can report *when* the rolling window frees rather than only that it is full.
+
+`Retry-After` carries the wait that is actually left, not the window's width; at seven days
+those differ enough that a client honouring the header would sit out the whole period over a
+wait with minutes to run.
+
+**Not closed by this:** the quota is shared across accounts, so ~50 accounts still drains it,
+and signup is unlimited. Tracked separately.
+
 ### Routes
 
 All under the existing `/api/auth` router; the pending change is modeled as a singleton
@@ -225,7 +267,7 @@ resource.
 
 | Route | Body | Behavior |
 |---|---|---|
-| `POST /api/auth/email-change` | `{current_password, new_email}` | Verify password (400 on mismatch) → reject same-as-current (400) → reject already-registered (409) → 60-second cooldown (429) → create request → mail code to the **original** address. 503 if the mail send fails. |
+| `POST /api/auth/email-change` | `{current_password, new_email}` | Verify password (400 on mismatch) → reject same-as-current (400) → reject already-registered (409) → the three rate limits (429, see "Rate limiting" above) → create request → mail code to the **original** address. 503 if the mail send fails. |
 | `POST /api/auth/email-change/verify` | `{code}` | Stage-driven. Correct code at `stage='old'` → advance to `'new'`, mail a fresh code to the **new** address, return `{"stage": "new", "new_email": "..."}`. Correct code at `stage='new'` → commit, return `{"status": "ok", "user": {...}}`. Wrong code → increment attempts, 400; at 5 attempts the request is deleted and the response says to start over. No active request → 400. |
 | `GET /api/auth/email-change` | – | `{"pending": bool, "stage": ..., "new_email": ..., "expires_at": ...}` so a page reload does not strand the user mid-flow. |
 | `DELETE /api/auth/email-change` | – | Cancel — deactivates, does not delete (see above), so the 60-second cooldown still applies to the next request. Also serves as the resend path: cancel, then restart, which re-verifies the password. |
@@ -241,9 +283,11 @@ that this path additionally requires a valid session and the account's own passw
 signup does not. Failing early beats walking a user through two codes only to 409 at
 commit. The commit-time check remains as the TOCTOU backstop.
 
-Password verification runs **before** the cooldown check, so a mistyped password does not
-burn the user's one-per-minute allowance. Full order for `POST /api/auth/email-change`:
-password → same-as-current → already-registered → cooldown → generate code → send → persist.
+Password verification runs **before** every rate-limit check, so a mistyped password does
+not burn any allowance. Full order for `POST /api/auth/email-change`: password →
+same-as-current → already-registered → 7-day interval → daily cap → 60-second cooldown →
+generate code → send → persist. The three limits are ordered widest window first, so
+whichever fires reports the longest wait that actually applies rather than the shortest.
 
 ### Send before persist
 

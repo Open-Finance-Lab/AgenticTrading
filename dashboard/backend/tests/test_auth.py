@@ -579,7 +579,9 @@ def test_email_change_request_is_cooldown_limited(client, sent_emails):
 
     assert first.status_code == 200
     assert second.status_code == 429
-    assert second.headers["Retry-After"] == "60"
+    # A range, not == "60": the header carries the wait that is actually left,
+    # so it drops below the window's width as the test itself takes time.
+    assert 0 < int(second.headers["Retry-After"]) <= 60
     assert len(sent_emails) == 1
 
 
@@ -602,6 +604,207 @@ def test_email_change_cooldown_survives_cancel_and_resend(client, sent_emails):
 
     assert second.status_code == 429
     assert len(sent_emails) == 1
+
+
+@pytest.mark.parametrize(
+    "seconds, expected",
+    [
+        (1, "1 minute"),
+        (59, "1 minute"),
+        (61, "2 minutes"),          # rounds UP: "1 minute" would 429 again
+        (3601, "2 hours"),
+        (86_400, "1 day"),
+        (86_401, "2 days"),
+        (5 * 86_400 + 1, "6 days"),
+    ],
+)
+def test_humanize_wait_always_rounds_up_to_a_whole_unit(seconds, expected):
+    """Rounding down would invite a retry that is refused again.
+
+    Exact boundaries included: 86_400 must read "1 day", not "2 days" -- an
+    off-by-one in the ceiling would tell every capped user to wait a day longer
+    than they have to.
+    """
+    from dashboard.backend.api.auth import _humanize_wait
+
+    assert _humanize_wait(seconds) == expected
+
+
+def _backdate_email_change_rows(store, user_id, **columns):
+    """Age this user's request rows so a window-based limit can be exercised.
+
+    The windows are a day and a week wide, so the alternative is a frozen clock.
+    """
+    assignments = ", ".join(f"{name} = ?" for name in columns)
+    conn = store._get_connection()
+    conn.execute(
+        f"UPDATE email_change_requests SET {assignments} WHERE user_id = ?",  # noqa: S608
+        (*columns.values(), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _stored_time(**delta):
+    from dashboard.backend.users import _utcnow, format_stored_timestamp
+
+    return format_stored_timestamp(_utcnow() - timedelta(**delta))
+
+
+def _complete_email_change(client, token, sent_emails, new_email):
+    """Drive both verification stages through to a committed change."""
+    headers = {"Authorization": f"Bearer {token}"}
+    before = len(sent_emails)
+    started = client.post(
+        "/api/auth/email-change",
+        headers=headers,
+        json={"current_password": "orig-sturdy-pw-1", "new_email": new_email},
+    )
+    assert started.status_code == 200, started.text
+    stage_two = client.post(
+        "/api/auth/email-change/verify",
+        headers=headers,
+        json={"code": _code_from(sent_emails[before]["body"])},
+    )
+    assert stage_two.status_code == 200, stage_two.text
+    done = client.post(
+        "/api/auth/email-change/verify",
+        headers=headers,
+        json={"code": _code_from(sent_emails[before + 1]["body"])},
+    )
+    assert done.status_code == 200, done.text
+    return done
+
+
+def test_email_change_is_blocked_for_a_week_after_one_completes(
+    client, sent_emails, temp_user_store
+):
+    token = _signup_and_token(client, email="churn@example.com")
+    _complete_email_change(client, token, sent_emails, "second@example.com")
+    # Clear the 60s and daily limits so the 7-day one is what is under test.
+    user = temp_user_store.get_user_by_email("second@example.com")
+    _backdate_email_change_rows(
+        temp_user_store, user["id"], created_at=_stored_time(days=2)
+    )
+
+    blocked = client.post(
+        "/api/auth/email-change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "orig-sturdy-pw-1", "new_email": "third@example.com"},
+    )
+
+    assert blocked.status_code == 429
+    assert "once every 7 days" in blocked.json()["detail"]
+    # Reports the wait that is left (~5 more days), not the window's full width.
+    remaining = int(blocked.headers["Retry-After"])
+    assert 4 * 86400 < remaining <= 7 * 86400
+    assert len(sent_emails) == 2  # nothing new went out
+
+
+def test_email_change_is_allowed_again_once_the_week_has_passed(
+    client, sent_emails, temp_user_store
+):
+    token = _signup_and_token(client, email="patient@example.com")
+    _complete_email_change(client, token, sent_emails, "second@example.com")
+    user = temp_user_store.get_user_by_email("second@example.com")
+    _backdate_email_change_rows(
+        temp_user_store,
+        user["id"],
+        created_at=_stored_time(days=8),
+        used_at=_stored_time(days=8),
+    )
+
+    allowed = client.post(
+        "/api/auth/email-change",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "orig-sturdy-pw-1", "new_email": "third@example.com"},
+    )
+
+    assert allowed.status_code == 200
+    assert len(sent_emails) == 3
+
+
+def test_email_change_requests_are_capped_per_day(client, sent_emails, temp_user_store):
+    """The 60s cooldown bounds a cycle; this bounds the shared provider quota.
+
+    Without it one account can loop request -> cancel -> request all day, and
+    each completed cycle also mails an address the requester chose -- so the
+    cap is what stops a single account draining the platform's daily send
+    allowance, half of it aimed at a third party from our sending domain.
+    """
+    from dashboard.backend.users import EMAIL_CHANGE_MAX_REQUESTS_PER_DAY
+
+    token = _signup_and_token(client, email="flood@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    user = temp_user_store.get_user_by_email("flood@example.com")
+    body = {"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"}
+
+    for attempt in range(EMAIL_CHANGE_MAX_REQUESTS_PER_DAY):
+        response = client.post("/api/auth/email-change", headers=headers, json=body)
+        assert response.status_code == 200, f"request {attempt} -> {response.text}"
+        # Step past the 60s cooldown only. Each row keeps a distinct age so the
+        # window's oldest entry -- which is what Retry-After is measured from --
+        # is well defined.
+        _backdate_email_change_rows(
+            temp_user_store,
+            user["id"],
+            created_at=_stored_time(hours=EMAIL_CHANGE_MAX_REQUESTS_PER_DAY - attempt),
+        )
+
+    capped = client.post("/api/auth/email-change", headers=headers, json=body)
+
+    assert capped.status_code == 429
+    assert "Too many email-change requests today" in capped.json()["detail"]
+    assert len(sent_emails) == EMAIL_CHANGE_MAX_REQUESTS_PER_DAY
+    # The window frees when the oldest of those requests ages out, ~21h from now.
+    assert 0 < int(capped.headers["Retry-After"]) <= 86400
+
+
+def test_email_change_daily_cap_counts_cancelled_requests(
+    client, sent_emails, temp_user_store
+):
+    """Cancelling does not un-send the message the request already triggered."""
+    from dashboard.backend.users import EMAIL_CHANGE_MAX_REQUESTS_PER_DAY
+
+    token = _signup_and_token(client, email="cancels@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    user = temp_user_store.get_user_by_email("cancels@example.com")
+    body = {"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"}
+
+    for _ in range(EMAIL_CHANGE_MAX_REQUESTS_PER_DAY):
+        assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
+        assert client.delete("/api/auth/email-change", headers=headers).status_code == 200
+        _backdate_email_change_rows(
+            temp_user_store, user["id"], created_at=_stored_time(minutes=2)
+        )
+
+    capped = client.post("/api/auth/email-change", headers=headers, json=body)
+
+    assert capped.status_code == 429
+    assert "Too many email-change requests today" in capped.json()["detail"]
+
+
+def test_email_change_daily_cap_window_rolls(client, sent_emails, temp_user_store):
+    from dashboard.backend.users import EMAIL_CHANGE_MAX_REQUESTS_PER_DAY
+
+    token = _signup_and_token(client, email="rolls@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    user = temp_user_store.get_user_by_email("rolls@example.com")
+    body = {"current_password": "orig-sturdy-pw-1", "new_email": "fresh@example.com"}
+
+    for _ in range(EMAIL_CHANGE_MAX_REQUESTS_PER_DAY):
+        assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
+        _backdate_email_change_rows(
+            temp_user_store, user["id"], created_at=_stored_time(minutes=2)
+        )
+    assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 429
+
+    # Age every request out of the 24h window; the allowance comes back.
+    _backdate_email_change_rows(
+        temp_user_store, user["id"], created_at=_stored_time(days=1, minutes=1)
+    )
+
+    assert client.post("/api/auth/email-change", headers=headers, json=body).status_code == 200
 
 
 def test_email_change_request_checks_password_before_cooldown(client, sent_emails):

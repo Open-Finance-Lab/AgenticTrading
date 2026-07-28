@@ -15,6 +15,7 @@ from dashboard.backend.users import (
     EMAIL_CHANGE_TTL_MINUTES,
     UserStore,
     _utcnow,
+    format_stored_timestamp,
     parse_stored_timestamp,
 )
 from dashboard.backend.verification_codes import hash_code
@@ -24,6 +25,28 @@ from dashboard.backend.verification_codes import hash_code
 def store():
     with tempfile.TemporaryDirectory() as tmpdir:
         yield UserStore(db_path=Path(tmpdir) / "users.db")
+
+
+def _ago(**delta) -> str:
+    """A stored-format timestamp `delta` in the past."""
+    return format_stored_timestamp(_utcnow() - timedelta(**delta))
+
+
+def _backdate_email_change(store, request_id, **columns) -> None:
+    """Rewrite timestamp columns on one request row.
+
+    The windows under test are hours and days wide, so the alternative is
+    freezing the clock. Reaching into the table keeps these tests about the
+    queries rather than about a time-mocking layer.
+    """
+    assignments = ", ".join(f"{name} = ?" for name in columns)
+    conn = store._get_connection()
+    conn.execute(
+        f"UPDATE email_change_requests SET {assignments} WHERE id = ?",  # noqa: S608
+        (*columns.values(), request_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 @pytest.fixture
@@ -65,22 +88,94 @@ def test_create_email_change_request_normalizes_the_new_email(store, user):
     assert row["new_email"] == "mixed@example.com"
 
 
-def test_create_email_change_request_replaces_any_prior_request(store, user):
+def test_create_email_change_request_supersedes_but_retains_the_prior_request(store, user):
     store.create_email_change_request(user["id"], "first@example.com", hash_code("A"))
     store.create_email_change_request(user["id"], "second@example.com", hash_code("B"))
 
     active = store.get_active_email_change(user["id"])
     assert active["new_email"] == "second@example.com"
 
-    # The assertion above is satisfied by ORDER BY id DESC alone -- it would still
-    # pass if the prior row were never deleted. Assert the replacement directly.
+    # ORDER BY id DESC alone satisfies the assertion above, so check the state of
+    # the superseded row directly. It must survive -- deleting it would erase the
+    # created_at that the rolling daily cap counts and the used_at that the
+    # 7-day interval reads, so making a request would clear both limits -- and it
+    # must be inactive, or "how many are open" stops meaning anything.
     conn = store._get_connection()
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM email_change_requests WHERE user_id = ?",
+    rows = conn.execute(
+        """
+        SELECT new_email, cancelled_at FROM email_change_requests
+        WHERE user_id = ? ORDER BY id ASC
+        """,
         (user["id"],),
+    ).fetchall()
+    conn.close()
+    assert [row["new_email"] for row in rows] == ["first@example.com", "second@example.com"]
+    assert rows[0]["cancelled_at"] is not None
+    assert rows[1]["cancelled_at"] is None
+
+
+def test_cancel_email_change_leaves_an_already_used_row_alone(store, user):
+    """A completed change must not be relabelled as a cancelled one.
+
+    last_email_change_completed_at reads used_at, so this is not merely cosmetic
+    bookkeeping in a log now kept for audit.
+    """
+    row = store.create_email_change_request(user["id"], "next@example.com", hash_code("A"))
+    store.mark_email_change_used(row["id"])
+
+    store.cancel_email_change(user["id"])
+
+    conn = store._get_connection()
+    stored = conn.execute(
+        "SELECT used_at, cancelled_at FROM email_change_requests WHERE id = ?",
+        (row["id"],),
     ).fetchone()
     conn.close()
-    assert row["n"] == 1
+    assert stored["used_at"] is not None
+    assert stored["cancelled_at"] is None
+
+
+def test_last_email_change_completed_at_is_none_until_one_completes(store, user):
+    row = store.create_email_change_request(user["id"], "next@example.com", hash_code("A"))
+    assert store.last_email_change_completed_at(user["id"]) is None
+
+    store.cancel_email_change(user["id"])
+    # A cancelled request is not a completed change.
+    assert store.last_email_change_completed_at(user["id"]) is None
+
+    store.mark_email_change_used(row["id"])
+    assert store.last_email_change_completed_at(user["id"]) is not None
+
+
+def test_last_email_change_completed_at_orders_by_completion_not_by_id(store, user):
+    first = store.create_email_change_request(user["id"], "one@example.com", hash_code("A"))
+    second = store.create_email_change_request(user["id"], "two@example.com", hash_code("B"))
+    store.mark_email_change_used(first["id"])
+    store.mark_email_change_used(second["id"])
+
+    # The higher-id row completed LONG ago; the lower-id row completed recently.
+    # ORDER BY id DESC would return the stale one and hand the caller a 7-day
+    # clock that expired weeks back.
+    recent = _ago(hours=1)
+    _backdate_email_change(store, second["id"], used_at=_ago(days=30))
+    _backdate_email_change(store, first["id"], used_at=recent)
+
+    assert store.last_email_change_completed_at(user["id"]) == recent
+
+
+def test_email_change_request_times_since_windows_by_created_at(store, user):
+    old = store.create_email_change_request(user["id"], "old@example.com", hash_code("A"))
+    _backdate_email_change(store, old["id"], created_at=_ago(days=2))
+    store.create_email_change_request(user["id"], "new@example.com", hash_code("B"))
+
+    within_a_day = store.email_change_request_times_since(user["id"], _ago(hours=24))
+    assert len(within_a_day) == 1
+
+    # Cancelled and used rows still count: the cap exists to bound messages
+    # already sent, and cancelling does not un-send them.
+    everything = store.email_change_request_times_since(user["id"], _ago(days=7))
+    assert len(everything) == 2
+    assert everything == sorted(everything)  # oldest first, so [0] is when the window frees
 
 
 def test_get_active_email_change_is_none_without_a_request(store, user):

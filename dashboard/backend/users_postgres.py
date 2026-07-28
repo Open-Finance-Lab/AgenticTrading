@@ -10,7 +10,7 @@ silently deleting every account (see CLAUDE.md gotchas).
 
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import psycopg
 
@@ -271,11 +271,19 @@ class PostgresUserStore:
     def create_email_change_request(
         self, user_id: int, new_email: str, code_hash: str
     ) -> Dict[str, Any]:
-        """Replace any in-flight request for this user with a fresh stage-'old' one."""
+        """Supersede any in-flight request with a fresh stage-'old' one.
+
+        Supersede, not DELETE -- see the SQLite twin: the log has to survive for
+        the daily and 7-day limits to have anything to read.
+        """
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM email_change_requests WHERE user_id = %s", (user_id,)
+                    """
+                    UPDATE email_change_requests SET cancelled_at = %s
+                    WHERE user_id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                    """,
+                    (_utcnow_iso(), user_id),
                 )
                 cur.execute(
                     """
@@ -357,11 +365,17 @@ class PostgresUserStore:
                 )
 
     def cancel_email_change(self, user_id: int) -> None:
-        """Deactivate without deleting (see the SQLite twin's cancel_email_change)."""
+        """Deactivate without deleting, scoped to still-active rows.
+
+        See the SQLite twin's cancel_email_change for both halves of the why.
+        """
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE email_change_requests SET cancelled_at = %s WHERE user_id = %s",
+                    """
+                    UPDATE email_change_requests SET cancelled_at = %s
+                    WHERE user_id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                    """,
                     (_utcnow_iso(), user_id),
                 )
 
@@ -377,6 +391,40 @@ class PostgresUserStore:
                 )
                 row = cur.fetchone()
         return str(row["created_at"]) if row else None
+
+    def last_email_change_completed_at(self, user_id: int) -> Optional[str]:
+        """When this user's email last actually changed (see the SQLite twin)."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT used_at FROM email_change_requests
+                    WHERE user_id = %s AND used_at IS NOT NULL
+                    ORDER BY used_at DESC LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        return str(row["used_at"]) if row else None
+
+    def email_change_request_times_since(self, user_id: int, since: str) -> List[str]:
+        """created_at of every request at or after `since`, oldest first.
+
+        created_at is TEXT here, exactly as in the SQLite twin, so `>=` is the
+        same lexicographic comparison over the same fixed-width ISO-8601 form.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT created_at FROM email_change_requests
+                    WHERE user_id = %s AND created_at >= %s
+                    ORDER BY created_at ASC
+                    """,
+                    (user_id, since),
+                )
+                rows = cur.fetchall()
+        return [str(row["created_at"]) for row in rows]
 
     def update_email(self, user_id: int, new_email: str) -> Dict[str, Any]:
         # .lower() is mandatory, not stylistic: this twin's users.email UNIQUE is

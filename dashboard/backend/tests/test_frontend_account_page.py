@@ -95,6 +95,21 @@ def test_email_change_copy_mentions_the_spam_folder():
     assert any("we sent a 6-character code" in line for line in mentions)
 
 
+def test_email_form_states_the_change_interval_before_the_user_submits():
+    """The 7-day limit has to be visible up front, not discovered as a 429.
+
+    Reads the number out of the backend constant rather than hardcoding it, so
+    changing the policy without changing the copy fails here instead of quietly
+    shipping a screen that lies.
+    """
+    from dashboard.backend.users import EMAIL_CHANGE_MIN_INTERVAL_DAYS
+
+    html = _APP_HTML.read_text(encoding="utf-8")
+    idle = html[html.index('<div id="emailChangeIdle">'):html.index('<div id="emailChangeCodeStep"')]
+
+    assert f"once every {EMAIL_CHANGE_MIN_INTERVAL_DAYS} days" in idle
+
+
 def test_cache_bust_versions_were_bumped():
     """Parsed >= rather than a literal ==: these counters are bumped by unrelated
     work too, and an equality assert turns CI red on every open PR the moment

@@ -9,9 +9,16 @@ Two tiers:
      docker run --rm -e POSTGRES_PASSWORD=test -e POSTGRES_DB=atl_test \
        -p 5433:5432 postgres:18-alpine
      export TEST_POSTGRES_URL=postgresql://postgres:test@localhost:5433/atl_test
+
+Both modules under test are imported in module form (``import x as x_module``)
+throughout, never ``from x import Name``. The monkeypatch fixtures below need
+the module object to rebind ``PostgresUserStore`` on it, so the two forms cannot
+both be used -- mixing them is a real inconsistency, not a style preference, and
+CodeQL's py/import-and-import-from flags it.
 """
 
 import os
+from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -200,10 +207,10 @@ def test_unreachable_postgres_raises_instead_of_falling_back():
     """
     import psycopg
 
-    from dashboard.backend.users_postgres import PostgresUserStore
+    import dashboard.backend.users_postgres as users_postgres_module
 
     with pytest.raises(psycopg.OperationalError):
-        PostgresUserStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
+        users_postgres_module.PostgresUserStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
 
 
 def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
@@ -212,10 +219,10 @@ def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
     USERS_DATABASE_URL has held a live Neon credential in prod since the account
     persistence fix shipped, so this store had the longest exposure to the leak.
     """
-    from dashboard.backend.users_postgres import PostgresUserStore
+    import dashboard.backend.users_postgres as users_postgres_module
 
     with pytest.raises(ValueError) as excinfo:
-        PostgresUserStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
+        users_postgres_module.PostgresUserStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
     assert "sup3r-s3cret" not in str(excinfo.value)
 
 
@@ -275,14 +282,14 @@ def test_change_password_and_avatar_postgres(pg_client, temp_postgres_store):
 def test_avatar_column_lazy_migration_postgres():
     """A pre-avatar users table gains the column on next store init."""
     require_local_postgres_url(TEST_POSTGRES_URL)
-    from dashboard.backend.users_postgres import PostgresUserStore
+    import dashboard.backend.users_postgres as users_postgres_module
 
-    store = PostgresUserStore(TEST_POSTGRES_URL)
+    store = users_postgres_module.PostgresUserStore(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("ALTER TABLE users DROP COLUMN IF EXISTS avatar")
 
-    migrated = PostgresUserStore(TEST_POSTGRES_URL)  # re-init runs the lazy ALTER
+    migrated = users_postgres_module.PostgresUserStore(TEST_POSTGRES_URL)  # re-init runs the lazy ALTER
     with migrated._get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -330,11 +337,54 @@ def test_email_change_request_lifecycle_postgres(temp_postgres_store):
     store.mark_email_change_used(row["id"])
     assert store.get_active_email_change(user["id"]) is None
     assert store.last_email_change_request_at(user["id"]) is not None
+    assert store.last_email_change_completed_at(user["id"]) is not None
 
     store.cancel_email_change(user["id"])
     assert store.get_active_email_change(user["id"]) is None
     # Deactivated, not deleted -- the cooldown clock must survive a cancel.
     assert store.last_email_change_request_at(user["id"]) is not None
+    # And cancel must not relabel the completed change as a cancelled one.
+    assert store.last_email_change_completed_at(user["id"]) is not None
+
+
+@pg_only
+def test_email_change_request_log_is_append_only_postgres(temp_postgres_store):
+    """The daily cap and the 7-day interval both read history off this table.
+
+    Mirrors the SQLite twin's supersede-but-retain and windowing cases. Worth
+    running against real Postgres rather than trusting parity: the created_at
+    window is a lexicographic TEXT comparison, which is a property of the column
+    type in each engine, not of the shared Python above it.
+    """
+    import dashboard.backend.users as users_module
+    from dashboard.backend.verification_codes import hash_code
+
+    def stored_time(**delta):
+        return users_module.format_stored_timestamp(users_module._utcnow() - timedelta(**delta))
+
+    store = temp_postgres_store
+    user = store.create_user("pgwindow@example.com", "PG Window", "securepass1")
+
+    first = store.create_email_change_request(user["id"], "one@example.com", hash_code("A"))
+    store.create_email_change_request(user["id"], "two@example.com", hash_code("B"))
+
+    # Superseded, not deleted.
+    day = stored_time(days=1)
+    assert len(store.email_change_request_times_since(user["id"], day)) == 2
+
+    # ...and the older one is no longer active.
+    assert store.get_active_email_change(user["id"])["new_email"] == "two@example.com"
+
+    with store._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE email_change_requests SET created_at = %s WHERE id = %s",
+                (stored_time(days=2), first["id"]),
+            )
+
+    within_a_day = store.email_change_request_times_since(user["id"], day)
+    assert len(within_a_day) == 1
+    assert within_a_day == sorted(within_a_day)
 
 
 @pg_only
