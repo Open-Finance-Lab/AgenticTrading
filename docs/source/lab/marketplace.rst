@@ -57,9 +57,11 @@ Copy a template
    prompts. The copy is independent — later edits to the template do not touch
    your agent, and your edits never affect anyone else's copy.
 
-New agents are funded with the default cash allocation ($1,000) for backtesting.
-If you are signed in, that comes out of your account portfolio, so a copy can
-fail with *insufficient cash* until you free some up (see :doc:`accounts`).
+New agents get the default **Paper Trading Allocated Capital** ($1,000), and a
+backtest starts from that amount unless you change it in the **Run Backtest**
+dialog — see :ref:`allocated-capital`. If you are signed in, the $1,000 is
+reserved from your account portfolio, so a copy can fail with *insufficient
+cash* until you free some up.
 
 .. note::
 

@@ -221,7 +221,7 @@
         <div class="auth-modal-panel run-backtest-modal-panel" role="dialog" aria-labelledby="runBacktestModalTitle">
             <button id="runBacktestModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
             <h2 id="runBacktestModalTitle" class="auth-modal-title">Run Backtest</h2>
-            <p class="auth-modal-subtitle">Simulation settings for this agent. Does not change allocated capital.</p>
+            <p class="auth-modal-subtitle">Simulation settings for this agent. Does not change its Paper Trading Allocated Capital.</p>
 
             <div class="run-backtest-modal-body">
                 <div class="control-group">
@@ -230,12 +230,13 @@
                 </div>
 
                 <div class="control-group" id="runBacktestPromptGroup" hidden>
-                    <label>Prompt</label>
+                    <label>Trading instruction</label>
                     <pre id="runBacktestPromptPreview" class="run-backtest-prompt-preview"></pre>
                 </div>
 
                 <div class="control-group">
                     <label>Period</label>
+                    <p class="control-helper">Pre-filled with a recent window that has full market data. Change it to any range you have data for.</p>
                     <div class="date-range-inputs">
                         <div class="date-input-wrapper">
                             <input type="date" id="startDate" value="2026-04-15" class="date-input">
@@ -317,8 +318,8 @@
                 </div>
 
                 <div class="control-group">
-                    <label for="backtestInitialCapital">Initial Capital</label>
-                    <p class="control-helper">Simulation starting cash for this backtest only (max $10,000). Independent of portfolio allocation and paper trading.</p>
+                    <label for="backtestInitialCapital">Backtest Allocated Capital</label>
+                    <p class="control-helper">Simulated starting cash for this run only (max $10,000). Defaults to this agent's Paper Trading Allocated Capital, and spends no real portfolio cash.</p>
                     <input
                         class="control-select"
                         id="backtestInitialCapital"
@@ -327,15 +328,16 @@
                         max="10000"
                         step="1"
                         value="1000"
-                        aria-label="Backtest initial capital"
+                        aria-label="Backtest allocated capital"
                     >
-                    <p id="runBacktestCapitalHint" class="control-helper">Does not change Allocated Capital.</p>
+                    <p id="runBacktestCapitalHint" class="control-helper">Does not change Paper Trading Allocated Capital.</p>
                 </div>
 
                 <div class="control-group">
                     <label for="modelSelect">Model</label>
-                    <p id="modelSelectHint" class="control-helper">Defaults to this agent’s model. Changing it here is temporary and is not saved to the agent.</p>
-                    <select class="control-select" id="modelSelect">
+                    <p id="runBacktestModelReadonly" class="run-backtest-readonly" hidden>—</p>
+                    <p id="modelSelectHint" class="control-helper">Set on the agent in Configure — this backtest always runs the agent's saved model.</p>
+                    <select class="control-select" id="modelSelect" hidden>
                         <option value="claude-haiku-4.5">Claude Haiku 4.5</option>
                         <option value="claude-sonnet-4.6">Claude Sonnet 4.6</option>
                         <option value="claude-opus-4.7">Claude Opus 4.7</option>
@@ -749,10 +751,10 @@
                     <input id="externalAgentModel" type="text" maxlength="100" placeholder="gpt-4 / rule-based" autocomplete="off">
                 </label>
                 <label class="auth-field">
-                    <span>Allocated capital (max $3,000)</span>
+                    <span>Paper Trading Allocated Capital (max $3,000)</span>
                     <input id="externalAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="externalAgentCashHint">
                 </label>
-                <p id="externalAgentCashHint" class="credential-hint">Starting capital budget for this agent's backtests and trading sessions.</p>
+                <p id="externalAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createExternalAgentError" class="auth-error" hidden></p>
                 <button id="createExternalAgentSubmit" class="auth-submit-btn" type="submit">Create agent</button>
             </form>
@@ -786,10 +788,10 @@
                     <input id="builtinAgentDescription" type="text" maxlength="280" placeholder="What is this agent's edge?" autocomplete="off">
                 </label>
                 <label class="auth-field">
-                    <span>Allocated capital (max $3,000)</span>
+                    <span>Paper Trading Allocated Capital (max $3,000)</span>
                     <input id="builtinAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="builtinAgentCashHint">
                 </label>
-                <p id="builtinAgentCashHint" class="credential-hint">Starting capital budget for this agent's backtests and trading sessions.</p>
+                <p id="builtinAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createBuiltinAgentError" class="auth-error" hidden></p>
                 <button id="createBuiltinAgentSubmit" class="auth-submit-btn" type="submit">Create built-in agent</button>
             </form>
@@ -877,7 +879,7 @@
                 <div id="agentsCategories">
                     <section class="agents-category" data-category="builtin">
                         <div class="agents-category-head">
-                            <h3 class="agents-category-title">Foundation Models</h3>
+                            <h3 class="agents-category-title">Foundation Agents</h3>
                             <p class="agents-category-sub">A prompting game — give it money, an instruction, and a model, then backtest.</p>
                         </div>
                         <div id="agentsGridBuiltin" class="agents-grid"></div>
@@ -932,8 +934,8 @@
                 </label>
                 <textarea id="agentEditorDescription" class="agent-editor-description" rows="2" maxlength="280" placeholder="Optional description for this agent…" aria-label="Agent description"></textarea>
                 <label class="agent-editor-cash-field" for="agentEditorCashAllocation">
-                    <span class="agent-editor-cash-label">Allocated capital (paper, max $3,000)</span>
-                    <input id="agentEditorCashAllocation" class="agent-editor-cash-input" type="number" min="0" max="3000" step="100" placeholder="0" aria-label="Allocated capital for paper trading">
+                    <span class="agent-editor-cash-label">Paper Trading Allocated Capital (max $3,000)</span>
+                    <input id="agentEditorCashAllocation" class="agent-editor-cash-input" type="number" min="0" max="3000" step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital">
                 </label>
                 <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
                     <div class="agent-editor-broker-head">
