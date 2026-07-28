@@ -107,7 +107,7 @@ def test_escape_html_neutralizes_markup():
         "&lt;img src=x onerror=alert(1)&gt;",
         "Error: &lt;script&gt;alert(document.cookie)&lt;/script&gt;",
         "Backtest failed (code 1): Traceback ... team "
-        "&quot;&lt;svg onload=alert(1)&gt;&quot;",
+        + "&quot;&lt;svg onload=alert(1)&gt;&quot;",
     ]
 
 

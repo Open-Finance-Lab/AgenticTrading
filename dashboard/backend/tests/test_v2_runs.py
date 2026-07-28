@@ -11,7 +11,7 @@ def _register_fake(run_id="run_unit_1", session_id="sess_unit_1"):
 
 
 def test_lifecycle_create_context_decide_result():
-    backend = _register_fake()
+    _register_fake()  # registers the run; the backend handle is not needed here
     # context
     ctx = runs_mod._context_for("run_unit_1", "sess_unit_1")
     assert ctx["status"] == "waiting_decision"

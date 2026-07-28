@@ -67,7 +67,7 @@ def test_the_pop_survives_a_hostile_ambient_environment():
             "-m",
             "pytest",
             "dashboard/backend/tests/test_env_isolation.py::"
-            "test_content_database_url_is_stripped_for_the_suite",
+            + "test_content_database_url_is_stripped_for_the_suite",
             "-q",
             "-p",
             "no:cacheprovider",
