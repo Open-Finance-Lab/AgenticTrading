@@ -17,7 +17,6 @@ import pytest
 from agentictrading.integrations.vnpy_cta import (
     ARTIFACT_SCHEMA_VERSION,
     ArtifactValidationError,
-    AtlCtaEngine,
     CapturedCtaOrder,
     VnpyBindings,
     VnpyCtaAdapter,
