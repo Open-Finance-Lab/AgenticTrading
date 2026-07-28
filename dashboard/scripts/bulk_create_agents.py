@@ -32,7 +32,6 @@ Use --dry-run to print the plan without creating anything.
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 import time
 import uuid
@@ -115,7 +114,7 @@ def create_agent(
         try:
             detail = resp.json().get("detail", detail)
         except Exception:
-            pass
+            pass  # non-JSON body -- keep the raw-text fallback set above
         raise RuntimeError(f"HTTP {resp.status_code}: {detail}")
     return resp.json()
 
@@ -198,7 +197,7 @@ def main() -> int:
         existing = list_agents(args.base_url, token, browser_id)
         print(f"Existing agents: {len(existing)}")
     except SystemExit:
-        existing = []
+        pass  # informational only -- listing failure shouldn't block creation
 
     if args.dry_run:
         print("\n[dry-run] No agents created.")
