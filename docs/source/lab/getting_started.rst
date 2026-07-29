@@ -43,6 +43,19 @@ but they are different kinds of money and have their own limits:
    Allocated Capital. A backtest never spends real portfolio cash and never
    changes it. Minimum **$1**, maximum **$10,000**.
 
+Paper trading is not switched on yet, so the first of those two currently has
+nothing to spend. **Run Paper Trading** sits beside **Run Backtest** on every
+agent card but is permanently disabled (*Paper trading is coming soon*), and the
+**Playground → Paper Trading** tab is a read-only view of a connected Alpaca
+paper account rather than somewhere your agent runs. Backtesting is the only way
+to run an agent today.
+
+The reservation is real in the meantime: Paper Trading Allocated Capital leaves
+**My Portfolio** the moment you set it and reduces the cash available to your
+other agents. You can drop it to **$0** on an agent you only plan to backtest —
+give that agent its own **Backtesting** amount first, though, or its backtests
+fall back to $1,000 along with it.
+
 Start from a template
 ---------------------
 
