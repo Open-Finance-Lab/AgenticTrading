@@ -120,3 +120,31 @@ def test_run_paper_trading_is_absent_from_live_paper_cards():
     head, _, tail = actions.partition("if (statusKey === 'paper')")
     branch, _, rest = tail.partition("} else {")
     assert "Run Paper Trading" not in branch
+
+
+def test_run_backtest_lands_on_my_agents():
+    """The whole point: the user sees the agent they just started."""
+    run_backtest = _extract_function(_APP_JS, "runBacktest")
+    assert "playgroundTab: 'agents'" in run_backtest
+    assert "playgroundTab: 'backtest'" not in run_backtest
+
+
+def test_running_state_survives_a_refresh():
+    assert "sessionStorage" in _APP_JS
+    assert "function markAgentBacktestRunning(" in _APP_JS
+    assert "function clearAgentBacktestRunning(" in _APP_JS
+
+
+def test_running_card_shows_an_indicator_and_elapsed_time():
+    body = _extract_function(_APP_JS, "renderAgentRunningBody")
+    assert "Backtesting" in body
+    assert "agent-card-running-dot" in body
+    assert "agent-card-running-bar" in body
+    assert "formatBacktestElapsed" in body
+
+
+def test_running_animation_respects_reduced_motion():
+    """First continuously-animating element on the page."""
+    css = (_FRONTEND / "styles.css").read_text(encoding="utf-8")
+    start = css.index(".agent-card-running-dot")
+    assert "prefers-reduced-motion" in css[start:]
