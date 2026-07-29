@@ -265,19 +265,27 @@ class BacktestDatabase:
             # Token usage / cost tracking columns + the JSON config snapshot
             # (metadata records env-dependent knobs like the effective
             # LLM_MAX_OUTPUT_TOKENS that shaped the run).
+            # Each ALTER is spelled out in full rather than assembled from the
+            # column name and type: the Postgres-twin parity guard
+            # (tests/test_store_twin_parity.py) reads this module's DDL out of
+            # its *source text*, and an f-string collapses to a placeholder it
+            # cannot see a column name through. Literal SQL is also greppable.
             token_columns = [
-                ("llm_calls", "INTEGER DEFAULT 0"),
-                ("input_tokens", "INTEGER DEFAULT 0"),
-                ("output_tokens", "INTEGER DEFAULT 0"),
-                ("est_cost_usd", "REAL DEFAULT 0"),
-                ("metadata", "TEXT"),
+                ("llm_calls",
+                 "ALTER TABLE agent_runs ADD COLUMN llm_calls INTEGER DEFAULT 0"),
+                ("input_tokens",
+                 "ALTER TABLE agent_runs ADD COLUMN input_tokens INTEGER DEFAULT 0"),
+                ("output_tokens",
+                 "ALTER TABLE agent_runs ADD COLUMN output_tokens INTEGER DEFAULT 0"),
+                ("est_cost_usd",
+                 "ALTER TABLE agent_runs ADD COLUMN est_cost_usd REAL DEFAULT 0"),
+                ("metadata",
+                 "ALTER TABLE agent_runs ADD COLUMN metadata TEXT"),
             ]
-            for col_name, col_def in token_columns:
+            for col_name, add_column_sql in token_columns:
                 if col_name not in columns:
                     print(f"🔄 Migrating: Adding {col_name} to agent_runs...")
-                    cursor.execute(
-                        f"ALTER TABLE agent_runs ADD COLUMN {col_name} {col_def}"
-                    )
+                    cursor.execute(add_column_sql)
                     conn.commit()
                     print(f"✅ Added {col_name} to agent_runs")
             
@@ -435,15 +443,16 @@ class BacktestDatabase:
             return
 
         print("🔄 Migrating: upgrading trades table schema...")
+        # Literal SQL, not f-string assembly -- see the note on token_columns.
         additions = [
-            ("quantity", "INTEGER"),
-            ("side", "TEXT"),
-            ("value", "REAL"),
-            ("reason", "TEXT"),
+            ("quantity", "ALTER TABLE trades ADD COLUMN quantity INTEGER"),
+            ("side", "ALTER TABLE trades ADD COLUMN side TEXT"),
+            ("value", "ALTER TABLE trades ADD COLUMN value REAL"),
+            ("reason", "ALTER TABLE trades ADD COLUMN reason TEXT"),
         ]
-        for name, col_type in additions:
+        for name, add_column_sql in additions:
             if name not in columns:
-                cursor.execute(f"ALTER TABLE trades ADD COLUMN {name} {col_type}")
+                cursor.execute(add_column_sql)
 
         if "shares" in columns:
             cursor.execute("UPDATE trades SET quantity = shares WHERE quantity IS NULL")
@@ -457,23 +466,34 @@ class BacktestDatabase:
     @staticmethod
     def _migrate_currency_audit_schema(cursor) -> None:
         """Add nullable native-currency fields without rewriting USD history."""
+        # Literal SQL, not f-string assembly -- see the note on token_columns.
+        # This loop interpolated the *table* name too, which made the parity
+        # guard's parser see a whole phantom table.
         additions = {
             "equity_timeseries": (
-                "native_equity",
-                "native_cash",
-                "native_positions_value",
-                "fx_rate",
+                ("native_equity",
+                 "ALTER TABLE equity_timeseries ADD COLUMN native_equity REAL"),
+                ("native_cash",
+                 "ALTER TABLE equity_timeseries ADD COLUMN native_cash REAL"),
+                ("native_positions_value",
+                 "ALTER TABLE equity_timeseries ADD COLUMN native_positions_value REAL"),
+                ("fx_rate",
+                 "ALTER TABLE equity_timeseries ADD COLUMN fx_rate REAL"),
             ),
-            "trades": ("native_price", "native_value", "fx_rate"),
+            "trades": (
+                ("native_price", "ALTER TABLE trades ADD COLUMN native_price REAL"),
+                ("native_value", "ALTER TABLE trades ADD COLUMN native_value REAL"),
+                ("fx_rate", "ALTER TABLE trades ADD COLUMN fx_rate REAL"),
+            ),
         }
         for table, fields in additions.items():
             cursor.execute(f"PRAGMA table_info({table})")
             columns = {row[1] for row in cursor.fetchall()}
             if not columns:
                 continue
-            for field in fields:
+            for field, add_column_sql in fields:
                 if field not in columns:
-                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {field} REAL")
+                    cursor.execute(add_column_sql)
 
     def _ensure_decisions_table(self, cursor) -> None:
         cursor.execute("""
