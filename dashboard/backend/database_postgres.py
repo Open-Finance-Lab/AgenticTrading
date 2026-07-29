@@ -294,3 +294,310 @@ class PostgresBacktestDatabase:
 
     def put_idempotency(self, run_id: str, step_index: int, idem_key: str, ack: Dict[str, Any]) -> None:
         self._sqlite.put_idempotency(run_id, step_index, idem_key, ack)
+
+    # ------------------------------------------------------------------
+    # Writers
+    # ------------------------------------------------------------------
+
+    def insert_run(self, run_id: str, session_id: str, agent_name: str, mode: str,
+                   start_date: str, end_date: str,
+                   initial_equity: float,
+                   final_equity: Optional[float] = None,
+                   total_return: Optional[float] = None,
+                   sharpe_ratio: Optional[float] = None,
+                   max_drawdown: Optional[float] = None,
+                   num_trades: int = 0,
+                   llm_model: str = "rule-based",
+                   llm_calls: int = 0,
+                   input_tokens: int = 0,
+                   output_tokens: int = 0,
+                   est_cost_usd: float = 0.0,
+                   metadata: Optional[Dict[str, Any]] = None) -> None:
+        """Insert or refresh a backtest run.
+
+        ``created_at`` and ``updated_at`` diverge from SQLite's
+        ``INSERT OR REPLACE`` on purpose, in opposite directions:
+        SQLite's REPLACE is a DELETE+INSERT that names neither timestamp, so
+        it resets *both* on every re-insert -- nothing reads that reset as
+        meaningful. Here, ``created_at`` is left out of ``DO UPDATE SET`` so
+        it survives a re-insert (first-seen semantics), while ``updated_at``
+        is explicitly refreshed so a ``force_refresh`` still shows as
+        "just updated" -- omitting it would freeze updated_at at the
+        original insert, diverging from SQLite in the opposite direction.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO agent_runs
+                    (run_id, session_id, agent_name, mode, start_date, end_date,
+                     initial_equity, final_equity, total_return, sharpe_ratio,
+                     max_drawdown, num_trades, llm_model,
+                     llm_calls, input_tokens, output_tokens, est_cost_usd, metadata)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id) DO UPDATE SET
+                        session_id = EXCLUDED.session_id,
+                        agent_name = EXCLUDED.agent_name,
+                        mode = EXCLUDED.mode,
+                        start_date = EXCLUDED.start_date,
+                        end_date = EXCLUDED.end_date,
+                        initial_equity = EXCLUDED.initial_equity,
+                        final_equity = EXCLUDED.final_equity,
+                        total_return = EXCLUDED.total_return,
+                        sharpe_ratio = EXCLUDED.sharpe_ratio,
+                        max_drawdown = EXCLUDED.max_drawdown,
+                        num_trades = EXCLUDED.num_trades,
+                        llm_model = EXCLUDED.llm_model,
+                        llm_calls = EXCLUDED.llm_calls,
+                        input_tokens = EXCLUDED.input_tokens,
+                        output_tokens = EXCLUDED.output_tokens,
+                        est_cost_usd = EXCLUDED.est_cost_usd,
+                        metadata = EXCLUDED.metadata,
+                        updated_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
+                    """,
+                    (
+                        run_id, session_id, agent_name, mode, start_date, end_date,
+                        initial_equity, final_equity, total_return, sharpe_ratio,
+                        max_drawdown, num_trades, llm_model,
+                        llm_calls, input_tokens, output_tokens, est_cost_usd,
+                        json.dumps(metadata) if metadata is not None else None,
+                    ),
+                )
+
+    def update_run_baselines(
+        self,
+        run_id: str,
+        *,
+        djia_run_id: Optional[str] = None,
+        buyhold_run_id: Optional[str] = None,
+    ) -> None:
+        """Link an external backtest run to its paired baseline runs."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE agent_runs
+                    SET baseline_djia_run_id = COALESCE(%s, baseline_djia_run_id),
+                        baseline_buyhold_run_id = COALESCE(%s, baseline_buyhold_run_id),
+                        updated_at = to_char(now() AT TIME ZONE 'utc', 'YYYY-MM-DD HH24:MI:SS')
+                    WHERE run_id = %s
+                    """,
+                    (djia_run_id, buyhold_run_id, run_id),
+                )
+
+    def insert_equity_point(self, run_id: str, timestamp: str,
+                          equity: float, cash: float,
+                          positions_value: float,
+                          daily_return: Optional[float] = None,
+                          native_equity: Optional[float] = None,
+                          native_cash: Optional[float] = None,
+                          native_positions_value: Optional[float] = None,
+                          fx_rate: Optional[float] = None) -> None:
+        """Insert a single equity data point."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO equity_timeseries
+                    (run_id, timestamp, equity, cash, positions_value, daily_return,
+                     native_equity, native_cash, native_positions_value, fx_rate)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id, timestamp) DO UPDATE SET
+                        equity = EXCLUDED.equity,
+                        cash = EXCLUDED.cash,
+                        positions_value = EXCLUDED.positions_value,
+                        daily_return = EXCLUDED.daily_return,
+                        native_equity = EXCLUDED.native_equity,
+                        native_cash = EXCLUDED.native_cash,
+                        native_positions_value = EXCLUDED.native_positions_value,
+                        fx_rate = EXCLUDED.fx_rate
+                    """,
+                    (
+                        run_id, timestamp, equity, cash, positions_value, daily_return,
+                        native_equity, native_cash, native_positions_value, fx_rate,
+                    ),
+                )
+
+    def insert_equity_points(self, run_id: str,
+                           points: List[Dict[str, Any]],
+                           replace: bool = True) -> None:
+        """Replace this run's equity curve with ``points``, atomically.
+
+        Each point should have: timestamp, equity, cash, positions_value, [daily_return]
+
+        Every production caller hands over a *whole* curve, and a rerun can
+        legitimately produce a different set of timestamps (fewer bars, a
+        partial run, a changed symbol list). The (run_id, timestamp) unique key
+        only collapses timestamps that repeat, so without the delete the
+        leftovers of the previous curve stay spliced into the new one -- which
+        is exactly the force-refresh case. Pass ``replace=False`` to append to
+        an existing curve instead. An empty ``points`` list is a no-op rather
+        than a wipe: a failed rerun must not erase the curve on the board --
+        and, since it short-circuits before opening a connection, it never
+        pays a pool checkout either.
+        """
+        if not points:
+            return
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                if replace:
+                    cur.execute(
+                        "DELETE FROM equity_timeseries WHERE run_id = %s", (run_id,)
+                    )
+                cur.executemany(
+                    """
+                    INSERT INTO equity_timeseries
+                    (run_id, timestamp, equity, cash, positions_value, daily_return,
+                     native_equity, native_cash, native_positions_value, fx_rate)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (run_id, timestamp) DO UPDATE SET
+                        equity = EXCLUDED.equity,
+                        cash = EXCLUDED.cash,
+                        positions_value = EXCLUDED.positions_value,
+                        daily_return = EXCLUDED.daily_return,
+                        native_equity = EXCLUDED.native_equity,
+                        native_cash = EXCLUDED.native_cash,
+                        native_positions_value = EXCLUDED.native_positions_value,
+                        fx_rate = EXCLUDED.fx_rate
+                    """,
+                    [
+                        (
+                            run_id,
+                            point["timestamp"],
+                            point["equity"],
+                            point["cash"],
+                            point["positions_value"],
+                            point.get("daily_return"),
+                            point.get("native_equity"),
+                            point.get("native_cash"),
+                            point.get("native_positions_value"),
+                            point.get("fx_rate"),
+                        )
+                        for point in points
+                    ],
+                )
+
+    def insert_trades(self, run_id: str, trades: List[Dict[str, Any]]) -> None:
+        """Batch insert trade records for a backtest run.
+
+        Unlike the SQLite side, the Postgres ``trades`` table never carried
+        the legacy ``shares``/``action``/``total_value`` columns, so there is
+        no introspection branch here -- the modern column set is written
+        directly.
+        """
+        if not trades:
+            return
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                for trade in trades:
+                    ts = trade.get("timestamp")
+                    if hasattr(ts, "isoformat"):
+                        ts = ts.isoformat()
+                    side = str(trade.get("side", "")).upper()
+                    qty = int(trade.get("shares") or trade.get("quantity") or 0)
+                    price = float(trade.get("price") or 0)
+                    value = float(
+                        trade.get("cost") or trade.get("proceeds")
+                        or trade.get("value") or qty * price
+                    )
+                    cur.execute(
+                        """
+                        INSERT INTO trades
+                        (run_id, timestamp, symbol, quantity, side, price, value,
+                         reason, native_price, native_value, fx_rate)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            run_id,
+                            str(ts),
+                            trade.get("symbol"),
+                            qty,
+                            side,
+                            price,
+                            value,
+                            trade.get("reason"),
+                            trade.get("native_price"),
+                            trade.get("native_value"),
+                            trade.get("fx_rate"),
+                        ),
+                    )
+
+    def insert_decisions(self, run_id: str, decisions: List[Dict[str, Any]]) -> None:
+        """Batch insert hourly decision log entries."""
+        if not decisions:
+            return
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO backtest_decisions
+                    (run_id, step_index, timestamp, decision_source, actions_submitted,
+                     actions_executed, context_ref)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    [
+                        (
+                            run_id,
+                            entry.get("step_index", 0),
+                            entry.get("timestamp"),
+                            entry.get("decision_source"),
+                            json.dumps(entry.get("actions_submitted") or []),
+                            entry.get("actions_executed", 0),
+                            entry.get("context_ref"),
+                        )
+                        for entry in decisions
+                    ],
+                )
+
+    def insert_run_manifest(self, run_id: str, manifest: Dict[str, Any]) -> None:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO run_manifest (run_id, manifest_json)
+                    VALUES (%s, %s)
+                    ON CONFLICT (run_id) DO UPDATE SET
+                        manifest_json = EXCLUDED.manifest_json
+                    """,
+                    (run_id, json.dumps(manifest)),
+                )
+
+    def delete_run(self, run_id: str) -> None:
+        """Delete a run and all its data.
+
+        ``equity_timeseries``, ``trades`` and ``backtest_decisions`` carry
+        ``ON DELETE CASCADE`` back to ``agent_runs`` (see ``_init_schema``),
+        so only ``run_manifest`` -- which has no FK -- needs an explicit
+        delete alongside the ``agent_runs`` row itself.
+
+        Deliberately does NOT touch ``idempotency_keys``: SQLite's
+        ``delete_run`` leaves those rows orphaned too, and the mirror suite
+        (Task 9) asserts both backends behave identically. Fixing that
+        orphan here would be a divergence, not a parity port.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM run_manifest WHERE run_id = %s", (run_id,))
+                cur.execute("DELETE FROM agent_runs WHERE run_id = %s", (run_id,))
+
+    def clear_all(self) -> None:
+        """Clear all data (useful for testing).
+
+        Truncates all five Postgres tables and also delegates to the embedded
+        SQLite store's ``clear_all()`` so stale cold rows in the local seed
+        file don't outlive a wipe of the Postgres side.
+
+        Deliberately does NOT touch ``idempotency_keys``, matching SQLite's
+        ``clear_all`` (same parity reasoning as ``delete_run`` above).
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM equity_timeseries")
+                cur.execute("DELETE FROM trades")
+                cur.execute("DELETE FROM backtest_decisions")
+                cur.execute("DELETE FROM run_manifest")
+                cur.execute("DELETE FROM agent_runs")
+        self._sqlite.clear_all()
