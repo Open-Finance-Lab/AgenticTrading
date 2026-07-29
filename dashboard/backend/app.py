@@ -102,56 +102,9 @@ async def startup_event():
     """Initialize API server."""
     import os
     from pathlib import Path
-    import sqlite3
-    
+
     print("🚀 Starting API server...")
-    
-    # DEBUG: Database location
-    print("\n=== 📂 DATABASE DEBUG ===")
-    print(f"CWD: {os.getcwd()}")
-    print(f"Database path: {DB_PATH}")
-    print(f"Database exists: {DB_PATH.exists()}")
-    
-    # Check database content
-    if DB_PATH.exists():
-        try:
-            conn = sqlite3.connect(str(DB_PATH))
-            cursor = conn.cursor()
-            cursor.execute("SELECT COUNT(*) FROM agent_runs")
-            count = cursor.fetchone()[0]
-            print(f"✅ Database has {count} runs")
-            
-            if count > 0:
-                cursor.execute("SELECT run_id, agent_name FROM agent_runs LIMIT 3")
-                print("Sample runs:")
-                for row in cursor.fetchall():
-                    print(f"  • {row[0]}: {row[1]}")
-            conn.close()
-        except Exception as e:
-            print(f"❌ Database error: {e}")
-    else:
-        print("❌ Database NOT FOUND")
-    
-    print("=== END DATABASE DEBUG ===")
-    
-    # Also check database directly
-    print("\nDirect database check at startup:")
-    try:
-        import sqlite3
-        conn = sqlite3.connect(str(DB_PATH))
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM agent_runs")
-        count = cursor.fetchone()[0]
-        cursor.execute("SELECT run_id, session_id FROM agent_runs LIMIT 3")
-        rows = cursor.fetchall()
-        print(f"Total runs: {count}")
-        for run_id, session_id in rows:
-            print(f"  - {run_id}: session={session_id}")
-        conn.close()
-    except Exception as e:
-        print(f"Error: {e}")
-    print()
-    
+
     print("📊 Backtesting: LLM-powered agent via dashboard/scripts/backtest_hourly_agent.py")
     if os.getenv("ANTHROPIC_API_KEY"):
         print("✅ ANTHROPIC_API_KEY detected - LLM trading enabled")
