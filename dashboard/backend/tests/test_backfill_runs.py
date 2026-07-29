@@ -196,11 +196,34 @@ def pg_backtest_db():
     yield store
 
 
+# Distinctive, obviously-not-"now" values so a false pass (the test happening
+# to run at a matching wall-clock time) is not physically possible for either.
+BACKDATED_CREATED_AT = "2019-06-15 12:00:00"
+BACKDATED_UPDATED_AT = "2019-06-20 08:00:00"
+
+
 @pg_only
 def test_backfill_migrates_all_five_tables_and_is_idempotent_on_rerun(
     tmp_path, monkeypatch, capsys, pg_backtest_db
 ):
     source_path = _build_source_db(tmp_path)
+
+    # Back-date run-full's created_at/updated_at in the SOURCE (raw UPDATE,
+    # since insert_run has no timestamp params) to two distinct old values,
+    # before the backfill ever reads/copies this file. Proves two things at
+    # once: created_at survives the migration (restored from source), and
+    # updated_at deliberately does NOT (it must NOT come back as
+    # BACKDATED_UPDATED_AT -- see backfill_runs_to_postgres.py's module
+    # docstring for why only created_at is restored).
+    source_conn = sqlite3.connect(str(source_path))
+    try:
+        source_conn.execute(
+            "UPDATE agent_runs SET created_at = ?, updated_at = ? WHERE run_id = ?",
+            (BACKDATED_CREATED_AT, BACKDATED_UPDATED_AT, "run-full"),
+        )
+        source_conn.commit()
+    finally:
+        source_conn.close()
 
     from dashboard.scripts import backfill_runs_to_postgres
 
@@ -248,6 +271,10 @@ def test_backfill_migrates_all_five_tables_and_is_idempotent_on_rerun(
     assert run["final_equity"] == 1050.0
     assert run["baseline_djia_run_id"] == "run-baseline"
     assert run["metadata"] == {"llm_max_output_tokens": 4096}
+    # created_at restored from source; updated_at deliberately left as the
+    # twin's own backfill-time stamp, not copied from the source's value.
+    assert run["created_at"] == BACKDATED_CREATED_AT
+    assert run["updated_at"] != BACKDATED_UPDATED_AT
 
     curve = pg_backtest_db.get_equity_curve("run-full")
     assert [c["timestamp"] for c in curve] == ["2024-01-01T00:00:00", "2024-01-01T01:00:00"]
@@ -285,3 +312,10 @@ def test_backfill_migrates_all_five_tables_and_is_idempotent_on_rerun(
     assert len(trades_after) == 2  # not duplicated
     decisions_after = pg_backtest_db.get_decisions("run-full")
     assert len(decisions_after) == 2  # not duplicated
+
+    # The point of this test: created_at must still match after a second run
+    # -- proving the restore converges rather than drifting (it always writes
+    # the same source-captured value, never "now()").
+    run_after = pg_backtest_db.get_run("run-full")
+    assert run_after["created_at"] == BACKDATED_CREATED_AT
+    assert run_after["updated_at"] != BACKDATED_UPDATED_AT

@@ -33,6 +33,23 @@ is safe:
     mechanism, and does not attempt to reconcile a partially-written run one
     row at a time.
 
+``created_at`` is restored from the source after the copy (``_restore_created_at``);
+``updated_at`` deliberately is not. ``insert_run``'s own upsert has no
+``created_at`` column in its ``INSERT``, so a freshly-migrated run gets
+Postgres's insert-time default (i.e. backfill time) instead of when the run
+actually happened -- and ``created_at DESC`` genuinely drives run ordering in
+``database.py`` and "latest run for this agent" in
+``domain/agents/service.py``, so getting it wrong is user-visible, not
+cosmetic. ``updated_at`` is different: grep across the backend turns up no
+code that reads ``agent_runs.updated_at`` for anything (the API's
+``RunMetadata`` schema does not even expose it) -- and the twin's own upsert
+docstring already establishes what the column means, "last time this row was
+written here," refreshed on every ``insert_run`` call on purpose. The backfill
+genuinely does write the row at backfill time, so leaving ``updated_at`` at
+that value is the truthful choice; overwriting it with the SQLite source's
+historical value would misrepresent this database's own write history for a
+column nothing currently depends on.
+
 Two traps this script is built around
 --------------------------------------
 1. ``DATABASE_PATH`` (and, for the same reason, ``AGENT_RUNS_DATABASE_URL``)
@@ -275,6 +292,56 @@ def _migrate_agent_runs(target: "PostgresBacktestDatabase", runs: List[Dict[str,
     return len(runs)
 
 
+def _restore_created_at(target: "PostgresBacktestDatabase", runs: List[Dict[str, Any]]) -> int:
+    """Restore each run's original ``created_at`` from the source, after
+    ``_migrate_agent_runs`` has upserted the row.
+
+    Why this is needed: ``insert_run``'s ``INSERT`` (the first-ever write of a
+    run_id into this Postgres table) has no ``created_at`` in its column list,
+    so Postgres stamps it from the column ``DEFAULT`` -- i.e. the moment this
+    backfill ran, not when the run actually happened. `database.py` orders
+    run listings by ``created_at DESC`` in four places, and
+    ``domain/agents/service.py`` sorts by it in four more specifically to pick
+    the *latest* run for an agent; leaving every migrated run stamped with
+    the same backfill-time timestamp would make that ordering non-deterministic
+    among ties (all 17 production runs land within the same ~second).
+
+    Deliberately does not restore ``updated_at`` -- see the module docstring
+    for the reasoning. Deliberately not done as an extra ``insert_run``
+    parameter: that would change the twin's method signature, which
+    ``test_postgres_twin_signatures_match_sqlite`` compares against
+    ``BacktestDatabase`` and would redden CI. A raw ``UPDATE`` here is
+    acceptable -- the "write through public methods" rule was about the copy
+    itself (so idempotency comes free from the twin's own upserts), a
+    property this restoration pass does not touch: ``insert_run``'s own
+    ``ON CONFLICT`` deliberately never writes ``created_at`` on a re-insert
+    (first-seen semantics -- see its docstring), so this pass only needs to
+    fix the very first insert's wrong default, and is naturally idempotent
+    regardless -- every call sets the same source-captured value, never
+    "now()", so a rerun converges rather than drifts.
+
+    Skips a run (or just its ``created_at``) whose source value is missing --
+    the column is ``NOT NULL`` on both sides, and every real row has always
+    had a DEFAULT-populated value (the column existed with
+    ``DEFAULT CURRENT_TIMESTAMP`` since the very first schema version, so it
+    is never NULL in practice) -- but this must not become a NULL constraint
+    violation on some future source this script has never seen.
+    """
+    restored = 0
+    with target._get_connection() as conn:
+        with conn.cursor() as cur:
+            for run in runs:
+                created_at = run.get("created_at")
+                if created_at is None:
+                    continue
+                cur.execute(
+                    "UPDATE agent_runs SET created_at = %s WHERE run_id = %s",
+                    (created_at, run["run_id"]),
+                )
+                restored += 1
+    return restored
+
+
 def _migrate_equity(
     target: "PostgresBacktestDatabase", equity_by_run: Dict[str, List[Dict[str, Any]]]
 ) -> int:
@@ -401,6 +468,8 @@ def main() -> int:
     results: Dict[str, Dict[str, int]] = {}
 
     moved = _migrate_agent_runs(target, data.runs)
+    restored = _restore_created_at(target, data.runs)
+    print(f"  agent_runs.created_at restored from source for {restored}/{len(data.runs)} run(s)")
     results["agent_runs"] = {"migrated": moved}
 
     moved = _migrate_equity(target, data.equity_by_run)
