@@ -715,6 +715,7 @@ class HourlyBacktester:
             # Get portfolio state (uses real data for signals, forward-fill for valuation)
             state = manager.get_portfolio_state(market_data, price_cache, timestamp)
             state["timestamp"] = timestamp  # Add timestamp for LLM context
+            runtime_invoked = False
             
             # Keep the established pipeline execution path unchanged. Hosted
             # runtimes alone cross the runtime-dispatch boundary, then return
@@ -739,6 +740,7 @@ class HourlyBacktester:
                 else:
                     decision = manager.make_trading_decision(state)
             else:
+                runtime_calls_before = self.runtime_dispatcher.calls
                 runtime_context = AgentRuntimeContext(
                     timestamp=timestamp,
                     backtest_start_date=self.start_date,
@@ -760,9 +762,15 @@ class HourlyBacktester:
                     runtime_context,
                     pipeline_handler=lambda: manager.make_trading_decision(state),
                 )
+                runtime_invoked = self.runtime_dispatcher.calls > runtime_calls_before
             
             # Execute trades (only if real data available)
+            trades_before_execution = len(manager.trades)
             manager.execute_actions(decision["actions"], market_data, timestamp)
+            if runtime_invoked:
+                self.runtime_dispatcher.record_latest_execution(
+                    len(manager.trades) - trades_before_execution
+                )
             
             # Update equity (uses forward-filled prices for smooth valuation)
             manager.update_equity(market_data, price_cache, timestamp)
@@ -826,6 +834,8 @@ class HourlyBacktester:
 
         db.insert_equity_points(run_id, equity_curve)
         db.insert_trades(run_id, self._serialize_trades(manager.trades))
+        if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+            db.insert_decisions(run_id, self.runtime_dispatcher.decision_audit_rows)
         
         print(f"\n  ✅ Agent backtest complete")
         print(f"     • Run ID: {run_id}")

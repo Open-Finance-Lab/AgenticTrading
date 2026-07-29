@@ -1664,9 +1664,11 @@ function renderMarketplaceGrid() {
   templates.forEach((template) => {
     const card = document.createElement('div');
     card.className = 'section-card agent-card marketplace-card';
+    const isAiHedgeFundTemplate = template.runtime_type === 'ai_hedge_fund';
     const modeLabel = template.mode === 'runtime'
       ? 'Hosted runtime'
       : (template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction');
+    const cloneLabel = isAiHedgeFundTemplate ? 'Copy to My Agents' : 'Add to My Agents';
     const tags = (template.tags || [])
       .slice(0, 3)
       .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
@@ -1691,7 +1693,7 @@ function renderMarketplaceGrid() {
         ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
       </div>
       <div class="agent-card-actions agent-card-actions--status">
-        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Copy to My Agents</button>
+        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
       </div>`;
     grid.appendChild(card);
   });
@@ -5498,6 +5500,7 @@ async function runBacktest() {
         clearAgentBacktestRunning(activeAgent.agent_id);
         throw error;
     }
+
     try {
         // Call API with session ID, assets, and model
         const params = new URLSearchParams({

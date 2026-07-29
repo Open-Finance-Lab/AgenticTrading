@@ -22,7 +22,7 @@ services:
         value: 3.13.5
       - key: AI_HEDGE_FUND_PYTHON
         value: .ai-hedge-fund-venv/bin/python
-      - key: OPENAI_API_KEY
+      - key: OPENROUTER_API_KEY
         sync: false
       # Encrypts both broker OAuth tokens and per-agent hosted-runtime
       # credentials. Retains the established name for ciphertext compatibility.

@@ -151,6 +151,16 @@ class RuntimeDispatcher:
         value = getattr(self._runtime, "model_name", None)
         return str(value) if value else None
 
+    @property
+    def decision_audit_rows(self) -> List[Dict[str, Any]]:
+        rows = getattr(self._runtime, "decision_audit_rows", [])
+        return list(rows or [])
+
+    def record_latest_execution(self, executed_count: int) -> None:
+        recorder = getattr(self._runtime, "record_latest_execution", None)
+        if callable(recorder):
+            recorder(executed_count)
+
     def dispatch(
         self,
         context: AgentRuntimeContext,

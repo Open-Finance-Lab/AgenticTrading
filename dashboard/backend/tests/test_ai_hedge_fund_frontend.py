@@ -9,6 +9,7 @@ from pathlib import Path
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _APP_HTML = (_FRONTEND / "app.html").read_text(encoding="utf-8")
+_APP_JS = (_FRONTEND / "app.js").read_text(encoding="utf-8")
 _EDITOR_JS = (_FRONTEND / "js" / "agent-editor.js").read_text(encoding="utf-8")
 _STYLES_CSS = (_FRONTEND / "styles.css").read_text(encoding="utf-8")
 
@@ -22,7 +23,8 @@ def _slice(source: str, start: str, end: str) -> str:
 def test_hosted_editor_replaces_model_picker_with_managed_metadata():
     assert 'id="agentEditorModelField"' in _APP_HTML
     assert 'id="agentEditorManagedModelField"' in _APP_HTML
-    assert "OpenAI · GPT-4.1" in _APP_HTML
+    assert "OpenRouter · nvidia/nemotron-3-nano-30b-a3b" in _APP_HTML
+    assert "hosted OpenRouter model" in _APP_HTML
 
     configure = _slice(
         _EDITOR_JS,
@@ -60,3 +62,10 @@ def test_robinhood_editor_behavior_is_shared_by_both_runtimes():
     assert "agentEditorBrokerPanel" not in configure
     assert "refreshRobinhoodStatus();" in open_editor
     assert "live_trading_enabled: Boolean(liveToggle?.checked)" in editor_state
+
+
+def test_marketplace_copy_label_is_scoped_to_ai_hedge_fund():
+    assert (
+        "const cloneLabel = isAiHedgeFundTemplate "
+        "? 'Copy to My Agents' : 'Add to My Agents';"
+    ) in _APP_JS

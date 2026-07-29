@@ -493,7 +493,11 @@ def run_backtest_background(
         
         if result.returncode != 0:
             error_msg = result.stderr if result.stderr else result.stdout
-            summary = _sanitize_backtest_error(error_msg, 500)
+            summary = _sanitize_backtest_error(
+                error_msg,
+                500,
+                extra_secret=financial_datasets_api_key,
+            )
             backtest_status["error"] = (
                 f"Backtest failed with return code {result.returncode}. {summary}"
             )
@@ -506,7 +510,11 @@ def run_backtest_background(
                 print(f"   Latest run IDs: {[r['run_id'] for r in runs[:3]]}", flush=True)
             _maybe_writeback_adapted_pipeline(agent_id, live_run_id)
     except Exception as e:
-        summary = _sanitize_backtest_error(e, 500)
+        summary = _sanitize_backtest_error(
+            e,
+            500,
+            extra_secret=financial_datasets_api_key,
+        )
         backtest_status["error"] = summary
         print(f"❌ Backtest exception: {summary}", flush=True)
     finally:
@@ -563,9 +571,14 @@ def _redact_credentials(text: object, extra_secret: Optional[str] = None) -> str
     return message
 
 
-def _sanitize_backtest_error(error: object, max_chars: int = 500) -> str:
+def _sanitize_backtest_error(
+    error: object,
+    max_chars: int = 500,
+    *,
+    extra_secret: Optional[str] = None,
+) -> str:
     """Return a bounded background error summary without credentials."""
-    return _redact_credentials(error)[-max_chars:]
+    return _redact_credentials(error, extra_secret)[-max_chars:]
 
 
 def _maybe_writeback_adapted_pipeline(agent_id: Optional[str], run_id: Optional[str]) -> None:
@@ -839,10 +852,10 @@ def _resolve_ai_hedge_fund_credential(request: Request, agent_id: Optional[str])
     agent = _require_agent_access(agent_id, ctx)
     if (agent.get("runtime_type") or DEFAULT_RUNTIME_TYPE) != AI_HEDGE_FUND_RUNTIME_TYPE:
         raise HTTPException(status_code=422, detail="Agent runtime is not AI Hedge Fund")
-    if not (os.getenv("OPENAI_API_KEY") or "").strip():
+    if not (os.getenv("OPENROUTER_API_KEY") or "").strip():
         raise HTTPException(
             status_code=503,
-            detail="AI Hedge Fund's platform-managed OpenAI provider is not configured",
+            detail="AI Hedge Fund's platform-managed OpenRouter provider is not configured",
         )
     try:
         credential = agent_credential_store.get_secret(

@@ -9,6 +9,7 @@ schema and executable-action constraints. It never executes or mutates trades.
 from __future__ import annotations
 
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -17,6 +18,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping, Optional
 
 from dashboard.backend.domain.agents.runtime import (
+    AI_HEDGE_FUND_ANALYSTS,
     AI_HEDGE_FUND_RUNTIME_TYPE,
     AgentRuntimeContext,
     normalize_runtime_config,
@@ -26,14 +28,20 @@ from dashboard.backend.infrastructure.llm.validator import (
     actions_to_executable,
     parse_actions_payload,
 )
+from dashboard.backend.infrastructure.llm.providers import openrouter
 from dashboard.backend.paths import REPO_ROOT
 
-DEFAULT_MODEL_NAME = "gpt-4.1"
-DEFAULT_MODEL_PROVIDER = "OpenAI"
+DEFAULT_MODEL_NAME = openrouter.DEFAULT_MODEL
+DEFAULT_MODEL_PROVIDER = "OpenRouter"
 DEFAULT_LOOKBACK_DAYS = 90
 DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_DECISION_INTERVAL = "daily"
 _LOCAL_RUNTIME_DIR = REPO_ROOT / ".ai-hedge-fund-venv"
+_MIN_EXECUTABLE_CONFIDENCE = 0.3
+_MAX_DIAGNOSTIC_TEXT_LENGTH = 240
+_ANALYST_SIGNAL_IDS = frozenset(
+    f"{analyst}_agent" for analyst in AI_HEDGE_FUND_ANALYSTS
+)
 
 # The pinned upstream process only receives values needed for networking,
 # locale/runtime behavior, its market-data client, and its supported model
@@ -57,8 +65,7 @@ _SUBPROCESS_ENV_KEYS = frozenset(
         "https_proxy",
         "no_proxy",
         "FINANCIAL_DATASETS_API_KEY",
-        "OPENAI_API_KEY",
-        "OPENAI_API_BASE",
+        "OPENROUTER_API_KEY",
     }
 )
 
@@ -207,14 +214,10 @@ class AiHedgeFundRuntime:
         )
         self.runner = runner or AiHedgeFundSubprocessRunner()
         self.environment = dict(os.environ if environment is None else environment)
-        self.model_name = (
-            self.environment.get("AI_HEDGE_FUND_MODEL_NAME", "").strip()
-            or DEFAULT_MODEL_NAME
-        )
-        if len(self.model_name) > 100:
-            raise AiHedgeFundRuntimeError(
-                "AI_HEDGE_FUND_MODEL_NAME must be at most 100 characters"
-            )
+        # Hosted model/provider selection is platform-owned. Reuse ATL's
+        # registered OpenRouter model instead of accepting agent config or an
+        # AI-Hedge-Fund-specific model override.
+        self.model_name = DEFAULT_MODEL_NAME
         self.lookback_days = self._platform_int(
             "AI_HEDGE_FUND_LOOKBACK_DAYS", DEFAULT_LOOKBACK_DAYS, 1, 3650
         )
@@ -223,6 +226,27 @@ class AiHedgeFundRuntime:
         )
         self.calls = 0
         self._last_decision_day: Optional[str] = None
+        self._decision_audit_rows: list[Dict[str, Any]] = []
+
+    @property
+    def decision_audit_rows(self) -> list[Dict[str, Any]]:
+        """Return bounded successful-call traces ready for ATL persistence."""
+        return [
+            {
+                **row,
+                "actions_submitted": [
+                    dict(trace) for trace in row.get("actions_submitted", [])
+                ],
+            }
+            for row in self._decision_audit_rows
+        ]
+
+    def record_latest_execution(self, executed_count: int) -> None:
+        """Attach ATL's actual execution count to the latest runtime call."""
+        if self._decision_audit_rows:
+            self._decision_audit_rows[-1]["actions_executed"] = max(
+                0, int(executed_count)
+            )
 
     def _platform_int(
         self, name: str, default: int, minimum: int, maximum: int
@@ -288,7 +312,7 @@ class AiHedgeFundRuntime:
     @staticmethod
     def _common_decision_fields(
         symbol: str, decision: Any
-    ) -> tuple[str, int, float, str]:
+    ) -> tuple[str, Optional[int], float, str]:
         if not isinstance(decision, dict):
             raise AiHedgeFundOutputError(f"Decision for {symbol} must be an object")
         action = str(decision.get("action") or "").strip().lower()
@@ -302,9 +326,7 @@ class AiHedgeFundRuntime:
             or not isinstance(quantity, int)
             or not 0 <= quantity <= MAX_ORDER_SHARES
         ):
-            raise AiHedgeFundOutputError(
-                f"Decision for {symbol} has invalid quantity"
-            )
+            quantity = None
         confidence_raw = decision.get("confidence", 0)
         if isinstance(confidence_raw, bool) or not isinstance(
             confidence_raw, (int, float)
@@ -327,20 +349,238 @@ class AiHedgeFundRuntime:
             reasoning = f"AI Hedge Fund: {reasoning}"
         return action, quantity, confidence_pct / 100.0, reasoning[:500]
 
+    @staticmethod
+    def _trace(
+        *,
+        decision_date: str,
+        data_cutoff_date: str,
+        ticker: str,
+        upstream_action: str,
+        upstream_quantity: Optional[int],
+        confidence: float,
+        mapped_atl_action: Optional[str],
+        order_emitted: bool,
+        filter_reason: Optional[str],
+    ) -> Dict[str, Any]:
+        """Return the fixed, bounded audit representation of one decision."""
+        return {
+            "decision_date": decision_date,
+            "data_cutoff_date": data_cutoff_date,
+            "ticker": ticker,
+            "upstream_action": upstream_action,
+            "upstream_quantity": upstream_quantity,
+            "confidence": round(max(0.0, min(100.0, confidence * 100.0)), 4),
+            "mapped_atl_action": mapped_atl_action,
+            "order_emitted": bool(order_emitted),
+            "filter_reason": filter_reason,
+        }
+
+    @staticmethod
+    def _bounded_text(value: Any, *, limit: int = _MAX_DIAGNOSTIC_TEXT_LENGTH) -> str:
+        if not isinstance(value, str):
+            return ""
+        return " ".join(value.split())[:limit]
+
+    @staticmethod
+    def _bounded_number(
+        value: Any,
+        *,
+        minimum: Optional[float] = None,
+        maximum: Optional[float] = None,
+    ) -> Optional[float]:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        number = float(value)
+        if not math.isfinite(number):
+            return None
+        if minimum is not None:
+            number = max(minimum, number)
+        if maximum is not None:
+            number = min(maximum, number)
+        return round(number, 6)
+
+    @staticmethod
+    def _bounded_integer(value: Any) -> Optional[int]:
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return max(0, min(value, 1_000_000))
+
     @classmethod
-    def output_to_atl_actions(
+    def _sanitize_analyst_signals(
+        cls, analyst_signals: Any, symbol: str
+    ) -> Dict[str, Dict[str, Any]]:
+        """Keep only the pinned analysts' bounded signal/confidence summaries."""
+        if not isinstance(analyst_signals, dict):
+            return {}
+        summaries: Dict[str, Dict[str, Any]] = {}
+        for agent_id in sorted(_ANALYST_SIGNAL_IDS):
+            by_ticker = analyst_signals.get(agent_id)
+            payload = by_ticker.get(symbol) if isinstance(by_ticker, dict) else None
+            if not isinstance(payload, dict):
+                continue
+            signal = cls._bounded_text(payload.get("signal"), limit=64)
+            confidence = cls._bounded_number(
+                payload.get("confidence"), minimum=0.0, maximum=100.0
+            )
+            summaries[agent_id] = {
+                "signal": signal,
+                "confidence": confidence,
+            }
+        return summaries
+
+    @classmethod
+    def _sanitize_risk_output(
+        cls, analyst_signals: Any, symbol: str
+    ) -> Optional[Dict[str, Any]]:
+        """Allow-list the exact risk fields emitted by the pinned runtime."""
+        if not isinstance(analyst_signals, dict):
+            return None
+        by_ticker = analyst_signals.get("risk_management_agent")
+        risk = by_ticker.get(symbol) if isinstance(by_ticker, dict) else None
+        if not isinstance(risk, dict):
+            return None
+
+        sanitized: Dict[str, Any] = {}
+        for key in ("remaining_position_limit", "current_price"):
+            if key in risk:
+                sanitized[key] = cls._bounded_number(risk.get(key))
+
+        volatility = risk.get("volatility_metrics")
+        if isinstance(volatility, dict):
+            volatility_summary = {
+                key: cls._bounded_number(volatility.get(key))
+                for key in (
+                    "daily_volatility",
+                    "annualized_volatility",
+                    "volatility_percentile",
+                )
+                if key in volatility
+            }
+            if "data_points" in volatility:
+                volatility_summary["data_points"] = cls._bounded_integer(
+                    volatility.get("data_points")
+                )
+            sanitized["volatility_metrics"] = volatility_summary
+
+        correlation = risk.get("correlation_metrics")
+        if isinstance(correlation, dict):
+            correlation_summary: Dict[str, Any] = {}
+            for key in (
+                "avg_correlation_with_active",
+                "max_correlation_with_active",
+            ):
+                if key in correlation:
+                    value = correlation.get(key)
+                    correlation_summary[key] = (
+                        None if value is None else cls._bounded_number(value)
+                    )
+            top_correlated = correlation.get("top_correlated_tickers")
+            if isinstance(top_correlated, list):
+                bounded_correlations = []
+                for item in top_correlated[:3]:
+                    if not isinstance(item, dict):
+                        continue
+                    bounded_correlations.append(
+                        {
+                            "ticker": cls._bounded_text(item.get("ticker"), limit=16),
+                            "correlation": cls._bounded_number(item.get("correlation")),
+                        }
+                    )
+                correlation_summary["top_correlated_tickers"] = bounded_correlations
+            sanitized["correlation_metrics"] = correlation_summary
+
+        reasoning = risk.get("reasoning")
+        if isinstance(reasoning, dict):
+            reasoning_summary: Dict[str, Any] = {}
+            for key in (
+                "portfolio_value",
+                "current_position_value",
+                "base_position_limit_pct",
+                "correlation_multiplier",
+                "combined_position_limit_pct",
+                "position_limit",
+                "remaining_limit",
+                "available_cash",
+            ):
+                if key in reasoning:
+                    reasoning_summary[key] = cls._bounded_number(reasoning.get(key))
+            for key in ("risk_adjustment", "error"):
+                if key in reasoning:
+                    reasoning_summary[key] = cls._bounded_text(reasoning.get(key))
+            sanitized["reasoning"] = reasoning_summary
+        return sanitized
+
+    @classmethod
+    def _bounded_diagnostics(
+        cls,
+        *,
+        output: Dict[str, Any],
+        symbol: str,
+        decision: Dict[str, Any],
+        action: str,
+        quantity: Optional[int],
+        confidence: float,
+    ) -> Optional[Dict[str, Any]]:
+        analyst_signals = output.get("analyst_signals")
+        if not isinstance(analyst_signals, dict):
+            return None
+        return {
+            "analyst_signals": cls._sanitize_analyst_signals(analyst_signals, symbol),
+            "risk_management_agent": cls._sanitize_risk_output(analyst_signals, symbol),
+            "portfolio_manager": {
+                "action": action,
+                "quantity": quantity,
+                "confidence": round(max(0.0, min(100.0, confidence * 100.0)), 4),
+                "reasoning_summary": cls._bounded_text(decision.get("reasoning")),
+            },
+        }
+
+    @staticmethod
+    def _no_order_reason(
+        *,
+        action: str,
+        quantity: int,
+        confidence: float,
+        context: AgentRuntimeContext,
+        symbol: str,
+    ) -> str:
+        """Mirror ATL executable-action checks in their established order."""
+        if confidence < _MIN_EXECUTABLE_CONFIDENCE:
+            return "below_minimum_confidence"
+        price = float(context.current_prices.get(symbol, 0) or 0)
+        if not math.isfinite(price) or price <= 0:
+            return "missing_or_invalid_price"
+        if action == "buy":
+            if quantity <= 0:
+                return "zero_quantity"
+            if quantity * price > float(context.cash):
+                return "insufficient_cash"
+        elif action == "sell":
+            if int(context.positions.get(symbol, 0) or 0) <= 0:
+                return "sell_without_position"
+        raise AiHedgeFundOutputError(
+            f"AI Hedge Fund {action} decision for {symbol} was not emitted"
+        )
+
+    @classmethod
+    def output_to_atl_actions_with_trace(
         cls,
         output: Dict[str, Any],
         context: AgentRuntimeContext,
-    ) -> list[Dict[str, Any]]:
+    ) -> tuple[list[Dict[str, Any]], list[Dict[str, Any]]]:
+        """Map upstream output and return credential-free per-ticker traces."""
         decisions = output.get("decisions") if isinstance(output, dict) else None
         if not isinstance(decisions, dict):
             raise AiHedgeFundOutputError(
                 'AI Hedge Fund output must include a "decisions" object'
             )
 
+        decision_date = context.timestamp.date().isoformat()
+        cutoff = context.latest_market_date_before_decision
+        data_cutoff_date = cutoff.isoformat() if cutoff is not None else ""
         allowed = {str(symbol).strip().upper() for symbol in context.symbols}
         normalized = []
+        trace_by_symbol: Dict[str, Dict[str, Any]] = {}
         seen = set()
         for raw_symbol, raw_decision in decisions.items():
             symbol = str(raw_symbol or "").strip().upper()
@@ -352,10 +592,41 @@ class AiHedgeFundRuntime:
             action, quantity, confidence, reasoning = cls._common_decision_fields(
                 symbol, raw_decision
             )
-            # ATL's MVP is long-only. These valid upstream recommendations are
-            # explicit holds here, so no short-side order reaches validation or
-            # execution.
-            if action in {"hold", "short", "cover"}:
+            trace = cls._trace(
+                decision_date=decision_date,
+                data_cutoff_date=data_cutoff_date,
+                ticker=symbol,
+                upstream_action=action,
+                upstream_quantity=quantity,
+                confidence=confidence,
+                mapped_atl_action=action if action in {"buy", "sell"} else "hold",
+                order_emitted=False,
+                filter_reason=None,
+            )
+            diagnostics = cls._bounded_diagnostics(
+                output=output,
+                symbol=symbol,
+                decision=raw_decision,
+                action=action,
+                quantity=quantity,
+                confidence=confidence,
+            )
+            if diagnostics is not None:
+                trace["diagnostics"] = diagnostics
+            trace_by_symbol[symbol] = trace
+
+            if quantity is None:
+                trace["mapped_atl_action"] = None
+                trace["filter_reason"] = "invalid_quantity"
+                continue
+            if action == "hold":
+                trace["filter_reason"] = "upstream_hold"
+                continue
+            if action == "short":
+                trace["filter_reason"] = "short_unsupported_long_only"
+                continue
+            if action == "cover":
+                trace["filter_reason"] = "cover_unsupported_long_only"
                 continue
             normalized.append(
                 {
@@ -380,11 +651,33 @@ class AiHedgeFundRuntime:
                 key: float(value) for key, value in context.current_prices.items()
             },
         )
+        emitted_symbols = {str(action.get("symbol") or "") for action in actions}
+        for decision in parsed:
+            trace = trace_by_symbol[decision.symbol]
+            if decision.symbol in emitted_symbols:
+                trace["order_emitted"] = True
+            else:
+                trace["filter_reason"] = cls._no_order_reason(
+                    action=str(getattr(decision.action, "value", decision.action)),
+                    quantity=int(decision.position_size),
+                    confidence=float(decision.confidence),
+                    context=context,
+                    symbol=decision.symbol,
+                )
         for action in actions:
             reason = str(action.get("reason") or "")
             action["reason"] = reason.replace(
                 "[External]", "[AI Hedge Fund]", 1
             )
+        return actions, list(trace_by_symbol.values())
+
+    @classmethod
+    def output_to_atl_actions(
+        cls,
+        output: Dict[str, Any],
+        context: AgentRuntimeContext,
+    ) -> list[Dict[str, Any]]:
+        actions, _traces = cls.output_to_atl_actions_with_trace(output, context)
         return actions
 
     def decide(self, context: AgentRuntimeContext) -> Dict[str, list[Dict[str, Any]]]:
@@ -402,6 +695,17 @@ class AiHedgeFundRuntime:
             timeout_seconds=self.timeout_seconds,
         )
         self.calls += 1
-        actions = self.output_to_atl_actions(output, context)
+        actions, traces = self.output_to_atl_actions_with_trace(output, context)
+        cutoff = context.latest_market_date_before_decision
+        self._decision_audit_rows.append(
+            {
+                "step_index": self.calls - 1,
+                "timestamp": context.timestamp.isoformat(),
+                "decision_source": AI_HEDGE_FUND_RUNTIME_TYPE,
+                "actions_submitted": traces,
+                "actions_executed": 0,
+                "context_ref": cutoff.isoformat() if cutoff is not None else None,
+            }
+        )
         self._last_decision_day = decision_day
         return {"actions": actions}

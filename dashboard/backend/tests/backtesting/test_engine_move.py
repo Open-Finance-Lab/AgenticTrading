@@ -23,6 +23,11 @@ from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
     calculate_sharpe,
 )
+from dashboard.backend.domain.agents.runtime import (
+    AI_HEDGE_FUND_RUNTIME_TYPE,
+    RuntimeDispatcher,
+)
+from dashboard.backend.infrastructure.ai_hedge_fund.adapter import AiHedgeFundRuntime
 from dashboard.scripts import backtest_hourly_agent as bha
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -51,6 +56,7 @@ class _FakeDB:
         self.runs = []
         self.equity_points = []
         self.trades = []
+        self.decisions = []
 
     def insert_run(self, **kwargs):
         self.runs.append(kwargs)
@@ -60,6 +66,9 @@ class _FakeDB:
 
     def insert_trades(self, run_id, trades):
         self.trades.append((run_id, list(trades)))
+
+    def insert_decisions(self, run_id, decisions):
+        self.decisions.append((run_id, list(decisions)))
 
 
 def _fake_provider_factory(data_source="alpaca", universe=None):
@@ -239,6 +248,118 @@ def test_run_agent_backtest_smoke(patched_engine):
     assert run["sharpe_ratio"] == HourlyBacktester._calc_sharpe(equity_curve)
     assert run["max_drawdown"] == HourlyBacktester._calc_max_dd(equity_curve)
     assert patched_engine.equity_points[0][0] == run_id
+
+
+def test_ai_hedge_fund_run_persists_bounded_decision_audit(patched_engine):
+    class HoldRunner:
+        def run(self, payload, *, timeout_seconds):
+            return {
+                "decisions": {
+                    "AAPL": {
+                        "action": "hold",
+                        "quantity": 0,
+                        "confidence": 61.23456,
+                        "reasoning": "Bounded summary " + "x" * 500,
+                    }
+                },
+                "analyst_signals": {
+                    "technical_analyst_agent": {
+                        "AAPL": {
+                            "signal": "neutral",
+                            "confidence": 67,
+                            "reasoning": "Unbounded analyst reasoning " + "x" * 500,
+                        }
+                    },
+                    "risk_management_agent": {
+                        "AAPL": {
+                            "remaining_position_limit": 200,
+                            "current_price": 100,
+                            "reasoning": {
+                                "portfolio_value": 1000,
+                                "remaining_limit": 200,
+                                "available_cash": 1000,
+                            },
+                        }
+                    },
+                },
+            }
+
+    bt = HourlyBacktester(
+        "2026-03-01",
+        "2026-04-01",
+        "aihf-audit",
+        runtime_type=AI_HEDGE_FUND_RUNTIME_TYPE,
+        runtime_config={"analysts": ["technical_analyst"]},
+        symbols=["AAPL", "MSFT", "JPM"],
+        decision_source="llm",
+    )
+    runtime = AiHedgeFundRuntime(
+        {"analysts": ["technical_analyst"]},
+        runner=HoldRunner(),
+        environment={},
+    )
+    bt.runtime_dispatcher = RuntimeDispatcher(
+        AI_HEDGE_FUND_RUNTIME_TYPE,
+        {"analysts": ["technical_analyst"]},
+        runtime=runtime,
+    )
+    bt.load_data()
+    bt.calculate_indicators()
+
+    run_id, _curve = bt.run_agent_backtest()
+
+    assert len(patched_engine.decisions) == 1
+    persisted_run_id, rows = patched_engine.decisions[0]
+    assert persisted_run_id == run_id
+    assert len(rows) == runtime.calls
+    assert rows[0]["decision_source"] == AI_HEDGE_FUND_RUNTIME_TYPE
+    assert rows[0]["context_ref"] == "2026-03-02"
+    assert rows[0]["actions_executed"] == 0
+    assert rows[0]["actions_submitted"] == [
+        {
+            "decision_date": "2026-03-03",
+            "data_cutoff_date": "2026-03-02",
+            "ticker": "AAPL",
+            "upstream_action": "hold",
+            "upstream_quantity": 0,
+            "confidence": 61.2346,
+            "mapped_atl_action": "hold",
+            "order_emitted": False,
+            "filter_reason": "upstream_hold",
+            "diagnostics": {
+                "analyst_signals": {
+                    "technical_analyst_agent": {
+                        "signal": "neutral",
+                        "confidence": 67.0,
+                    }
+                },
+                "risk_management_agent": {
+                    "remaining_position_limit": 200.0,
+                    "current_price": 100.0,
+                    "reasoning": {
+                        "portfolio_value": 1000.0,
+                        "remaining_limit": 200.0,
+                        "available_cash": 1000.0,
+                    },
+                },
+                "portfolio_manager": {
+                    "action": "hold",
+                    "quantity": 0,
+                    "confidence": 61.2346,
+                    "reasoning_summary": ("Bounded summary " + "x" * 500)[:240],
+                },
+            },
+        }
+    ]
+    submitted = rows[0]["actions_submitted"][0]
+    assert "reasoning" not in submitted
+    assert (
+        "reasoning"
+        not in submitted["diagnostics"]["analyst_signals"]["technical_analyst_agent"]
+    )
+    assert (
+        len(submitted["diagnostics"]["portfolio_manager"]["reasoning_summary"]) == 240
+    )
 
 
 def test_run_agent_backtest_deterministic(monkeypatch):

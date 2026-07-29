@@ -260,7 +260,7 @@ def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
 def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
     spy = _Spy()
     monkeypatch.setattr(bt, "run_backtest_background", spy)
-    monkeypatch.setenv("OPENAI_API_KEY", "platform-openai-test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
     monkeypatch.setattr(
         bt.agent_credential_store,
         "get_secret",
@@ -304,7 +304,7 @@ def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
 
 
 def test_ai_hedge_fund_backtest_requires_owned_agent_credential(client, monkeypatch):
-    monkeypatch.setenv("OPENAI_API_KEY", "platform-openai-test-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
     owner = str(uuid.uuid4())
     headers = {"X-Session-Id": owner}
     agent = client.post(
@@ -340,6 +340,31 @@ def test_ai_hedge_fund_backtest_requires_owned_agent_credential(client, monkeypa
         headers={"X-Session-Id": str(uuid.uuid4())},
     )
     assert unauthorized.status_code == 403
+
+
+def test_ai_hedge_fund_requires_openrouter_not_direct_openai(client, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-authorize-hosted-runtime")
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+    assert "platform-managed OpenRouter provider" in response.text
 
 
 def test_backtest_run_forwards_selected_assets(client, monkeypatch):
@@ -700,6 +725,17 @@ def test_subprocess_log_redacts_user_financial_datasets_credential():
 
     assert credential not in redacted
     assert "[REDACTED]" in redacted
+
+
+def test_background_error_redacts_user_financial_datasets_credential():
+    credential = "user-financial-datasets-test-key"
+    summary = bt._sanitize_backtest_error(
+        f"runtime rejected credential={credential}",
+        extra_secret=credential,
+    )
+
+    assert credential not in summary
+    assert "[REDACTED]" in summary
 
 
 def test_error_summary_stays_bounded(monkeypatch):

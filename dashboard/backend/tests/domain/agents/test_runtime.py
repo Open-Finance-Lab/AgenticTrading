@@ -1,5 +1,8 @@
 """Hosted agent runtime dispatch and AI Hedge Fund adapter tests."""
 
+import json
+import sys
+import types
 from datetime import date, datetime, timezone
 from pathlib import Path
 
@@ -13,6 +16,8 @@ from dashboard.backend.domain.agents.runtime import (
     normalize_runtime_config,
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+    DEFAULT_MODEL_NAME,
+    DEFAULT_MODEL_PROVIDER,
     AiHedgeFundOutputError,
     AiHedgeFundRuntime,
     AiHedgeFundRuntimeError,
@@ -20,22 +25,34 @@ from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
 )
 from dashboard.backend.infrastructure.ai_hedge_fund.bridge import (
     _disable_dotenv_loading,
+    _managed_model_from_payload,
 )
+from dashboard.backend.infrastructure.ai_hedge_fund import bridge
 from dashboard.backend.domain.backtesting.engine import (
     _prior_market_date_by_decision_date,
 )
+from dashboard.backend.infrastructure.llm.providers import openrouter
 
 
-def _context(*, timestamp=None, latest_market_date_before_decision=date(2026, 4, 30)):
+def _context(
+    *,
+    timestamp=None,
+    latest_market_date_before_decision=date(2026, 4, 30),
+    cash=1_000.0,
+    positions=None,
+    current_prices=None,
+):
     return AgentRuntimeContext(
         timestamp=timestamp or datetime(2026, 5, 1, 14, tzinfo=timezone.utc),
         backtest_start_date="2026-05-01",
         symbols=["AAPL", "MSFT", "IBM", "JPM", "DIS"],
-        cash=1_000.0,
+        cash=cash,
         total_equity=1_100.0,
-        positions={"MSFT": 5},
+        positions={"MSFT": 5} if positions is None else positions,
         entry_prices={"MSFT": 18.0},
-        current_prices={
+        current_prices=current_prices
+        if current_prices is not None
+        else {
             "AAPL": 10.0,
             "MSFT": 20.0,
             "IBM": 30.0,
@@ -118,13 +135,299 @@ def test_ai_hedge_fund_maps_buy_sell_and_long_only_holds_through_atl():
         }
     }
 
-    actions = AiHedgeFundRuntime.output_to_atl_actions(output, _context())
+    actions, traces = AiHedgeFundRuntime.output_to_atl_actions_with_trace(
+        output, _context()
+    )
 
     assert [(item["symbol"], item["action"], item["shares"]) for item in actions] == [
         ("AAPL", "buy", 10),
         ("MSFT", "sell", 3),
     ]
     assert all(item["reason"].startswith("[AI Hedge Fund]") for item in actions)
+    by_ticker = {trace["ticker"]: trace for trace in traces}
+    assert by_ticker["AAPL"]["order_emitted"] is True
+    assert by_ticker["AAPL"]["mapped_atl_action"] == "buy"
+    assert by_ticker["MSFT"]["order_emitted"] is True
+    assert by_ticker["MSFT"]["mapped_atl_action"] == "sell"
+    assert by_ticker["IBM"]["filter_reason"] == "upstream_hold"
+    assert by_ticker["JPM"]["filter_reason"] == "short_unsupported_long_only"
+    assert by_ticker["DIS"]["filter_reason"] == "cover_unsupported_long_only"
+    assert all("reasoning" not in trace for trace in traces)
+
+
+@pytest.mark.parametrize(
+    ("symbol", "decision", "context", "mapped_action", "filter_reason"),
+    [
+        (
+            "AAPL",
+            {"action": "hold", "quantity": 0, "confidence": 60, "reasoning": "No edge"},
+            _context(),
+            "hold",
+            "upstream_hold",
+        ),
+        (
+            "JPM",
+            {
+                "action": "short",
+                "quantity": 2,
+                "confidence": 90,
+                "reasoning": "Bearish signal",
+            },
+            _context(),
+            "hold",
+            "short_unsupported_long_only",
+        ),
+        (
+            "DIS",
+            {
+                "action": "cover",
+                "quantity": 1,
+                "confidence": 90,
+                "reasoning": "Cover signal",
+            },
+            _context(),
+            "hold",
+            "cover_unsupported_long_only",
+        ),
+        (
+            "AAPL",
+            {
+                "action": "buy",
+                "quantity": 0,
+                "confidence": 80,
+                "reasoning": "Zero sized buy",
+            },
+            _context(),
+            "buy",
+            "zero_quantity",
+        ),
+        (
+            "AAPL",
+            {
+                "action": "buy",
+                "quantity": "10",
+                "confidence": 80,
+                "reasoning": "Malformed size",
+            },
+            _context(),
+            None,
+            "invalid_quantity",
+        ),
+        (
+            "AAPL",
+            {
+                "action": "buy",
+                "quantity": 2,
+                "confidence": 80,
+                "reasoning": "Too expensive",
+            },
+            _context(cash=10.0),
+            "buy",
+            "insufficient_cash",
+        ),
+        (
+            "IBM",
+            {
+                "action": "buy",
+                "quantity": 1,
+                "confidence": 80,
+                "reasoning": "No current price",
+            },
+            _context(current_prices={"AAPL": 10.0, "MSFT": 20.0}),
+            "buy",
+            "missing_or_invalid_price",
+        ),
+        (
+            "AAPL",
+            {
+                "action": "sell",
+                "quantity": 1,
+                "confidence": 80,
+                "reasoning": "Nothing held",
+            },
+            _context(positions={}),
+            "sell",
+            "sell_without_position",
+        ),
+    ],
+)
+def test_ai_hedge_fund_traces_every_required_no_order_reason(
+    symbol, decision, context, mapped_action, filter_reason
+):
+    actions, traces = AiHedgeFundRuntime.output_to_atl_actions_with_trace(
+        {"decisions": {symbol: decision}}, context
+    )
+
+    assert actions == []
+    assert traces == [
+        {
+            "decision_date": "2026-05-01",
+            "data_cutoff_date": "2026-04-30",
+            "ticker": symbol,
+            "upstream_action": decision["action"],
+            "upstream_quantity": (
+                decision["quantity"] if isinstance(decision["quantity"], int) else None
+            ),
+            "confidence": float(decision["confidence"]),
+            "mapped_atl_action": mapped_action,
+            "order_emitted": False,
+            "filter_reason": filter_reason,
+        }
+    ]
+
+
+def test_ai_hedge_fund_trace_covers_existing_low_confidence_filter():
+    actions, traces = AiHedgeFundRuntime.output_to_atl_actions_with_trace(
+        {
+            "decisions": {
+                "AAPL": {
+                    "action": "buy",
+                    "quantity": 1,
+                    "confidence": 29,
+                    "reasoning": "Below the ATL threshold",
+                }
+            }
+        },
+        _context(),
+    )
+
+    assert actions == []
+    assert traces[0]["filter_reason"] == "below_minimum_confidence"
+
+
+def test_ai_hedge_fund_persists_only_bounded_upstream_diagnostics():
+    omitted_reasoning = "must-not-be-persisted " * 100
+    output = {
+        "decisions": {
+            "AAPL": {
+                "action": "hold",
+                "quantity": 0,
+                "confidence": 88,
+                "reasoning": "  Portfolio Manager chose HOLD.  " + "x" * 400,
+            }
+        },
+        "analyst_signals": {
+            "technical_analyst_agent": {
+                "AAPL": {
+                    "signal": "bullish",
+                    "confidence": 71.25,
+                    "reasoning": omitted_reasoning,
+                }
+            },
+            "fundamentals_analyst_agent": {
+                "AAPL": {
+                    "signal": "neutral",
+                    "confidence": 62,
+                    "reasoning": omitted_reasoning,
+                }
+            },
+            "sentiment_analyst_agent": {
+                "AAPL": {
+                    "signal": "bearish",
+                    "confidence": 55,
+                    "reasoning": omitted_reasoning,
+                }
+            },
+            "valuation_analyst_agent": {
+                "AAPL": {
+                    "signal": "bullish",
+                    "confidence": 80,
+                    "reasoning": omitted_reasoning,
+                }
+            },
+            "risk_management_agent": {
+                "AAPL": {
+                    "remaining_position_limit": 187.5,
+                    "current_price": 202.25,
+                    "volatility_metrics": {
+                        "daily_volatility": 0.0123456789,
+                        "annualized_volatility": 0.1959,
+                        "volatility_percentile": 44.5,
+                        "data_points": 60,
+                    },
+                    "correlation_metrics": {
+                        "avg_correlation_with_active": None,
+                        "max_correlation_with_active": None,
+                        "top_correlated_tickers": [],
+                    },
+                    "reasoning": {
+                        "portfolio_value": 1000,
+                        "current_position_value": 0,
+                        "base_position_limit_pct": 0.1875,
+                        "correlation_multiplier": 1,
+                        "combined_position_limit_pct": 0.1875,
+                        "position_limit": 187.5,
+                        "remaining_limit": 187.5,
+                        "available_cash": 1000,
+                        "risk_adjustment": "Volatility x Correlation adjusted: 18.8%",
+                        "unbounded_detail": omitted_reasoning,
+                    },
+                    "credential": "must-not-be-persisted",
+                }
+            },
+            "unknown_agent": {"AAPL": {"signal": "bullish", "confidence": 100}},
+        },
+    }
+
+    actions, traces = AiHedgeFundRuntime.output_to_atl_actions_with_trace(
+        output, _context()
+    )
+
+    assert actions == []
+    diagnostics = traces[0]["diagnostics"]
+    assert diagnostics["analyst_signals"] == {
+        "fundamentals_analyst_agent": {
+            "signal": "neutral",
+            "confidence": 62.0,
+        },
+        "sentiment_analyst_agent": {
+            "signal": "bearish",
+            "confidence": 55.0,
+        },
+        "technical_analyst_agent": {
+            "signal": "bullish",
+            "confidence": 71.25,
+        },
+        "valuation_analyst_agent": {
+            "signal": "bullish",
+            "confidence": 80.0,
+        },
+    }
+    assert diagnostics["risk_management_agent"] == {
+        "remaining_position_limit": 187.5,
+        "current_price": 202.25,
+        "volatility_metrics": {
+            "daily_volatility": 0.012346,
+            "annualized_volatility": 0.1959,
+            "volatility_percentile": 44.5,
+            "data_points": 60,
+        },
+        "correlation_metrics": {
+            "avg_correlation_with_active": None,
+            "max_correlation_with_active": None,
+            "top_correlated_tickers": [],
+        },
+        "reasoning": {
+            "portfolio_value": 1000.0,
+            "current_position_value": 0.0,
+            "base_position_limit_pct": 0.1875,
+            "correlation_multiplier": 1.0,
+            "combined_position_limit_pct": 0.1875,
+            "position_limit": 187.5,
+            "remaining_limit": 187.5,
+            "available_cash": 1000.0,
+            "risk_adjustment": "Volatility x Correlation adjusted: 18.8%",
+        },
+    }
+    assert diagnostics["portfolio_manager"] == {
+        "action": "hold",
+        "quantity": 0,
+        "confidence": 88.0,
+        "reasoning_summary": ("Portfolio Manager chose HOLD. " + "x" * 400)[:240],
+    }
+    serialized = json.dumps(diagnostics)
+    assert "must-not-be-persisted" not in serialized
+    assert len(diagnostics["portfolio_manager"]["reasoning_summary"]) == 240
 
 
 @pytest.mark.parametrize(
@@ -132,9 +435,26 @@ def test_ai_hedge_fund_maps_buy_sell_and_long_only_holds_through_atl():
     [
         {},
         {"decisions": []},
-        {"decisions": {"TSLA": {"action": "hold", "quantity": 0, "confidence": 50, "reasoning": "Outside universe"}}},
-        {"decisions": {"AAPL": {"action": "explode", "quantity": 1, "confidence": 50, "reasoning": "Invalid action"}}},
-        {"decisions": {"AAPL": {"action": "buy", "quantity": "10", "confidence": 50, "reasoning": "Invalid quantity"}}},
+        {
+            "decisions": {
+                "TSLA": {
+                    "action": "hold",
+                    "quantity": 0,
+                    "confidence": 50,
+                    "reasoning": "Outside universe",
+                }
+            }
+        },
+        {
+            "decisions": {
+                "AAPL": {
+                    "action": "explode",
+                    "quantity": 1,
+                    "confidence": 50,
+                    "reasoning": "Invalid action",
+                }
+            }
+        },
     ],
 )
 def test_ai_hedge_fund_rejects_invalid_output(output):
@@ -158,7 +478,7 @@ def test_ai_hedge_fund_builds_upstream_portfolio_and_runs_once_daily():
         environment={
             "AI_HEDGE_FUND_LOOKBACK_DAYS": "30",
             "AI_HEDGE_FUND_TIMEOUT_SECONDS": "45",
-            "AI_HEDGE_FUND_MODEL_NAME": "gpt-platform-model",
+            "AI_HEDGE_FUND_MODEL_NAME": "must-be-ignored",
         },
     )
 
@@ -176,13 +496,22 @@ def test_ai_hedge_fund_builds_upstream_portfolio_and_runs_once_daily():
     assert first == same_day == next_day == {"actions": []}
     assert runtime.calls == 2
     assert len(runner.payloads) == 2
+    assert len(runtime.decision_audit_rows) == 2
+    assert runtime.decision_audit_rows[0] == {
+        "step_index": 0,
+        "timestamp": "2026-05-01T14:00:00+00:00",
+        "decision_source": "ai_hedge_fund",
+        "actions_submitted": [],
+        "actions_executed": 0,
+        "context_ref": "2026-04-30",
+    }
     payload, timeout = runner.payloads[0]
     assert timeout == 45
     assert payload["start_date"] == "2026-03-31"
     assert payload["end_date"] == "2026-04-30"
     assert payload["selected_analysts"] == ["technical_analyst"]
-    assert payload["model_name"] == "gpt-platform-model"
-    assert payload["model_provider"] == "OpenAI"
+    assert payload["model_name"] == openrouter.DEFAULT_MODEL
+    assert payload["model_provider"] == "OpenRouter"
     assert payload["portfolio"]["positions"]["MSFT"]["long"] == 5
     assert payload["portfolio"]["positions"]["MSFT"]["short"] == 0
 
@@ -259,9 +588,15 @@ def test_isolated_runtime_does_not_inherit_unrelated_atl_secrets():
     runner = AiHedgeFundSubprocessRunner(
         {
             "PATH": "/usr/bin",
-            "OPENAI_API_KEY": "allowed-model-key",
+            "OPENROUTER_API_KEY": "allowed-model-key",
+            "OPENROUTER_BASE_URL": "must-not-cross-boundary",
             "FINANCIAL_DATASETS_API_KEY": "allowed-data-key",
+            "OPENAI_API_KEY": "must-not-cross-boundary",
+            "OPENAI_API_BASE": "must-not-cross-boundary",
             "ANTHROPIC_API_KEY": "must-not-cross-boundary",
+            "ALPACA_API_KEY": "must-not-cross-boundary",
+            "ALPACA_SECRET_KEY": "must-not-cross-boundary",
+            "BROKER_TOKEN_ENCRYPTION_KEY": "must-not-cross-boundary",
             "CONTENT_DATABASE_URL": "must-not-cross-boundary",
             "DISCORD_CLIENT_SECRET": "must-not-cross-boundary",
         }
@@ -269,12 +604,43 @@ def test_isolated_runtime_does_not_inherit_unrelated_atl_secrets():
 
     environment = runner._subprocess_environment()
 
-    assert environment["OPENAI_API_KEY"] == "allowed-model-key"
+    assert environment["OPENROUTER_API_KEY"] == "allowed-model-key"
+    assert "OPENROUTER_BASE_URL" not in environment
     assert environment["FINANCIAL_DATASETS_API_KEY"] == "allowed-data-key"
+    assert "OPENAI_API_KEY" not in environment
+    assert "OPENAI_API_BASE" not in environment
     assert "CONTENT_DATABASE_URL" not in environment
     assert "DISCORD_CLIENT_SECRET" not in environment
     assert "ANTHROPIC_API_KEY" not in environment
+    assert "ALPACA_API_KEY" not in environment
+    assert "ALPACA_SECRET_KEY" not in environment
+    assert "BROKER_TOKEN_ENCRYPTION_KEY" not in environment
     assert environment["PYTHON_DOTENV_DISABLED"] == "1"
+
+
+def test_ai_hedge_fund_reuses_atl_managed_openrouter_model():
+    runtime = AiHedgeFundRuntime(
+        {"analysts": ["technical_analyst"]},
+        runner=object(),
+        environment={"AI_HEDGE_FUND_MODEL_NAME": "user-override"},
+    )
+
+    assert DEFAULT_MODEL_NAME == openrouter.DEFAULT_MODEL
+    assert DEFAULT_MODEL_PROVIDER == "OpenRouter"
+    assert runtime.model_name == openrouter.DEFAULT_MODEL
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"model_name": DEFAULT_MODEL_NAME, "model_provider": "OpenAI"},
+        {"model_name": "another/model", "model_provider": "OpenRouter"},
+    ],
+)
+def test_bridge_cannot_fall_back_from_managed_openrouter(payload):
+    with pytest.raises(ValueError, match="platform-managed OpenRouter"):
+        _managed_model_from_payload(payload)
 
 
 def test_bridge_blocks_dotenv_for_the_pinned_legacy_dependency():
@@ -291,6 +657,72 @@ def test_bridge_blocks_dotenv_for_the_pinned_legacy_dependency():
     finally:
         dotenv.load_dotenv = public_loader
         dotenv_main.load_dotenv = module_loader
+
+
+def test_bridge_returns_upstream_analyst_signals(monkeypatch, tmp_path):
+    fake_src = types.ModuleType("src")
+    fake_main = types.ModuleType("src.main")
+    captured = {}
+    analyst_signals = {
+        "technical_analyst_agent": {"AAPL": {"signal": "bullish", "confidence": 75}}
+    }
+
+    def fake_run_hedge_fund(**kwargs):
+        captured.update(kwargs)
+        return {
+            "decisions": {
+                "AAPL": {
+                    "action": "hold",
+                    "quantity": 0,
+                    "confidence": 75,
+                    "reasoning": "No trade",
+                }
+            },
+            "analyst_signals": analyst_signals,
+        }
+
+    fake_main.run_hedge_fund = fake_run_hedge_fund
+    fake_src.main = fake_main
+    monkeypatch.setitem(sys.modules, "src", fake_src)
+    monkeypatch.setitem(sys.modules, "src.main", fake_main)
+    monkeypatch.setattr(bridge, "_disable_dotenv_loading", lambda: None)
+
+    input_path = tmp_path / "input.json"
+    output_path = tmp_path / "output.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "tickers": ["AAPL"],
+                "start_date": "2026-02-03",
+                "end_date": "2026-05-04",
+                "portfolio": {"cash": 1000},
+                "selected_analysts": ["technical_analyst"],
+                "model_name": DEFAULT_MODEL_NAME,
+                "model_provider": DEFAULT_MODEL_PROVIDER,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "bridge.py",
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+        ],
+    )
+
+    bridge.main()
+
+    assert captured["model_name"] == DEFAULT_MODEL_NAME
+    assert captured["model_provider"] == DEFAULT_MODEL_PROVIDER
+    assert (
+        json.loads(output_path.read_text(encoding="utf-8"))["analyst_signals"]
+        == analyst_signals
+    )
 
 
 def test_ai_hedge_fund_config_allows_analyst_composition_only():

@@ -594,6 +594,7 @@ def test_marketplace_listing_and_clone(client):
     assert hedge_fund_card["name"] == "AI Hedge Fund"
     assert hedge_fund_card["runtime_type"] == "ai_hedge_fund"
     assert hedge_fund_card["mode"] == "runtime"
+    assert hedge_fund_card["model_name"] == "nvidia/nemotron-3-nano-30b-a3b"
 
     browser_session = str(uuid.uuid4())
     headers = {"X-Session-Id": browser_session}
@@ -624,6 +625,7 @@ def test_marketplace_listing_and_clone(client):
     ai_agent = ai_clone.json()["agent"]
     assert ai_agent["name"] == "AI Hedge Fund"
     assert ai_agent["agent_type"] == "builtin"
+    assert ai_agent["model_name"] == "nvidia/nemotron-3-nano-30b-a3b"
     assert ai_agent["runtime_type"] == "ai_hedge_fund"
     assert ai_agent["runtime_config"] == {
         "analysts": [

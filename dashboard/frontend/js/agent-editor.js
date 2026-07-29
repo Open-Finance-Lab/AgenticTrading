@@ -1038,7 +1038,7 @@
       return;
     }
 
-    let agentSaved = false;
+    let credentialSavePending = false;
     try {
       const updated = await patchAgent(
         currentAgent,
@@ -1054,11 +1054,12 @@
       currentAgent = state.sendPipeline
         ? { ...currentAgent, ...updated, pipeline: subAgents }
         : { ...currentAgent, ...updated };
-      agentSaved = true;
       if (state.financial_datasets_api_key) {
+        credentialSavePending = true;
         await credentialRequest(currentAgent, 'PUT', {
           api_key: state.financial_datasets_api_key,
         });
+        credentialSavePending = false;
         const keyInput = document.getElementById('agentEditorFinancialDatasetsKey');
         if (keyInput) keyInput.value = '';
         setFinancialDatasetsStatus(true);
@@ -1082,7 +1083,7 @@
         new CustomEvent('agent-editor-saved', { detail: { agent: currentAgent } })
       );
     } catch (error) {
-      if (agentSaved) {
+      if (credentialSavePending) {
         fillHeader(currentAgent);
         setDirty(true);
         showSaveStatus(

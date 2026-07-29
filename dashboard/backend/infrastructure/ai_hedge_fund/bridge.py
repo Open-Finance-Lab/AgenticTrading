@@ -6,6 +6,23 @@ import argparse
 import json
 from pathlib import Path
 
+MANAGED_MODEL_NAME = "nvidia/nemotron-3-nano-30b-a3b"
+MANAGED_MODEL_PROVIDER = "OpenRouter"
+
+
+def _managed_model_from_payload(payload: dict) -> tuple[str, str]:
+    """Fail closed instead of falling back to upstream's direct OpenAI default."""
+    model_name = str(payload.get("model_name") or "").strip()
+    model_provider = str(payload.get("model_provider") or "").strip()
+    if (
+        model_name != MANAGED_MODEL_NAME
+        or model_provider != MANAGED_MODEL_PROVIDER
+    ):
+        raise ValueError(
+            "AI Hedge Fund bridge requires the platform-managed OpenRouter model"
+        )
+    return model_name, model_provider
+
 
 def _disable_dotenv_loading() -> None:
     """Prevent the pinned upstream package from discovering checkout secrets.
@@ -38,6 +55,7 @@ def main() -> None:
     from src.main import run_hedge_fund
 
     payload = json.loads(Path(args.input).read_text(encoding="utf-8"))
+    model_name, model_provider = _managed_model_from_payload(payload)
     result = run_hedge_fund(
         tickers=payload["tickers"],
         start_date=payload["start_date"],
@@ -45,11 +63,16 @@ def main() -> None:
         portfolio=payload["portfolio"],
         show_reasoning=bool(payload.get("show_reasoning", False)),
         selected_analysts=list(payload.get("selected_analysts") or []),
-        model_name=str(payload.get("model_name") or "gpt-4.1"),
-        model_provider=str(payload.get("model_provider") or "OpenAI"),
+        model_name=model_name,
+        model_provider=model_provider,
     )
     Path(args.output).write_text(
-        json.dumps({"decisions": result.get("decisions")}),
+        json.dumps(
+            {
+                "decisions": result.get("decisions"),
+                "analyst_signals": result.get("analyst_signals"),
+            }
+        ),
         encoding="utf-8",
     )
 

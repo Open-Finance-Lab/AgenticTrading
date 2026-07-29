@@ -71,7 +71,7 @@
     {
       "template_id": "ai-hedge-fund",
       "name": "AI Hedge Fund",
-      "model_name": "openai/gpt-4.1",
+      "model_name": "nvidia/nemotron-3-nano-30b-a3b",
       "description": "A hosted multi-analyst investment committee powered by virattt/ai-hedge-fund and executed through Agentic Trading Lab's long-only backtest engine.",
       "category": "Hosted",
       "tags": ["multi-agent", "fundamentals", "first-party"],
