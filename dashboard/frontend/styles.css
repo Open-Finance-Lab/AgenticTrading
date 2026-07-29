@@ -7826,12 +7826,6 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     color: var(--text-secondary);
 }
 
-.agent-card-latest-note {
-    margin: 0;
-    font-size: 12.5px;
-    color: var(--text-muted);
-}
-
 .agent-card-latest .agent-card-runs-link {
     padding-top: 4px;
     padding-bottom: 0;

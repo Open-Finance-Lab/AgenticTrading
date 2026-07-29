@@ -86,6 +86,27 @@ def test_card_backtest_capital_falls_back_to_the_sleeve():
     assert out.count("$2,000") == 2
 
 
+def test_zero_paper_sleeve_displays_as_zero_but_backtest_capital_does_not():
+    """The two capitals deliberately diverge at $0 -- this is not a bug.
+
+    `cash_allocation` is `ge=0` server-side: a $0 paper sleeve is a real,
+    legal state and must be shown honestly, not padded to a default. But
+    `backtest_allocation` is `ge=1` server-side -- a backtest cannot run on
+    $0 -- so `resolveBacktestCapital` treats a non-positive value as absent
+    and falls through to the $1,000 default. Rendering these two the same
+    way would either lie about a user's real (zero) money or hand a $0 into
+    an API call that would 422.
+    """
+    out = _run_node(
+        _harness(
+            "console.log(renderAgentAllocatedCapitalHero("
+            "{cash_allocation: 0, backtest_allocation: null}));"
+        )
+    )
+    assert "$0" in out
+    assert "$1,000" in out
+
+
 def test_run_paper_trading_button_is_disabled_and_explained():
     actions = _extract_function(_APP_JS, "renderAgentCardActions")
     assert "Run Paper Trading" in actions
