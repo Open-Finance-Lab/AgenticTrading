@@ -7774,6 +7774,20 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     color: var(--text-muted);
 }
 
+.agent-card-capitals {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.agent-card-capital {
+    min-width: 0;
+}
+
+.agent-card-capital .agent-card-metric-value {
+    font-size: 22px;
+}
+
 .agent-card-latest {
     display: flex;
     flex-direction: column;
@@ -8022,6 +8036,15 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 .agent-card-cta--outline:hover {
     filter: none;
     background: rgba(34, 211, 238, 0.1);
+}
+
+.agent-card-cta--disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.agent-card-cta--disabled:hover {
+    background: inherit;
 }
 
 .agent-card-menu {

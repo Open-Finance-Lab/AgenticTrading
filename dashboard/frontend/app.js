@@ -750,18 +750,24 @@ function resolveBacktestCapital(agent) {
   return DEFAULT_AGENT_CASH_ALLOCATION;
 }
 
-/** Shared top block: portfolio sleeve always leads (draft + backtested cards). */
+/** Shared top block: both capital figures, equal weight (draft + backtested). */
 function renderAgentAllocatedCapitalHero(agent) {
-  const capital =
+  const paper =
     agent.cash_allocation != null
       ? formatAgentCashAllocation(agent.cash_allocation)
       : '$1,000';
+  const backtest = formatAgentCashAllocation(resolveBacktestCapital(agent));
   return `
-    <div class="agent-card-hero agent-card-hero--draft">
-      <div class="agent-card-hero-text">
-        <span class="agent-card-metric-label">Paper Trading Allocated Capital</span>
-        <p class="agent-card-metric-value">${escapeHtml(capital)}</p>
+    <div class="agent-card-capitals">
+      <div class="agent-card-capital">
+        <span class="agent-card-metric-label">Paper Trading</span>
+        <p class="agent-card-metric-value">${escapeHtml(paper)}</p>
         <p class="agent-card-capital-note">From My Portfolio</p>
+      </div>
+      <div class="agent-card-capital">
+        <span class="agent-card-metric-label">Backtesting</span>
+        <p class="agent-card-metric-value">${escapeHtml(backtest)}</p>
+        <p class="agent-card-capital-note">Simulated</p>
       </div>
     </div>`;
 }
@@ -842,7 +848,6 @@ function renderAgentCardBody(agent, statusKey) {
           ${renderAgentSparkline(agent, m.positive, m)}
         </div>
         <p class="agent-card-latest-meta">${escapeHtml(metaParts.join(' · '))}</p>
-        <p class="agent-card-latest-note">Simulated — separate from Paper Trading Allocated Capital.</p>
         ${renderAgentRunsLink(agent)}
       </div>`;
   }
@@ -864,7 +869,13 @@ function renderAgentCardActions(agent, statusKey) {
   if (statusKey === 'paper') {
     primary = `<button class="agent-card-cta agent-open-btn" type="button" data-agent-id="${id}">Open Agent</button>`;
   } else {
-    primary = `<button class="agent-card-cta agent-run-backtest-btn" type="button" data-agent-id="${id}">Run Backtest</button>`;
+    // Paper trading is Phase B (execution/paper_backend.py is a stub). Ship the
+    // affordance disabled *with a reason* -- an unexplained grey button reads as
+    // a bug, and its absence hides that the two capital figures above map onto
+    // two different things you can eventually run.
+    primary = `
+      <button class="agent-card-cta agent-run-backtest-btn" type="button" data-agent-id="${id}">Run Backtest</button>
+      <button class="agent-card-cta agent-card-cta--disabled" type="button" disabled aria-disabled="true" title="Paper trading is coming soon" aria-label="Run Paper Trading — Paper trading is coming soon">Run Paper Trading</button>`;
   }
   const configure = `<button class="agent-card-cta agent-card-cta--configure agent-configure-btn" type="button" data-agent-id="${id}">Configure</button>`;
   const rotate =
