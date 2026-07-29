@@ -3358,7 +3358,7 @@ function refreshRunningAgentCards() {
     const key = Object.keys(running).sort().join(',');
     if (key !== lastRenderedRunningKey) {
         lastRenderedRunningKey = key;
-        renderAgentCategories(allAgents);
+        applyAgentFilters(false);
         return;
     }
     Object.keys(running).forEach((agentId) => {
@@ -4809,7 +4809,7 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
 function showBacktestLaunchFailure(message, launchConfig) {
     if (launchConfig?.agentId) {
         clearAgentBacktestRunning(launchConfig.agentId);
-        renderAgentCategories(allAgents);
+        applyAgentFilters(false);
     }
     liveBacktestChartActive = false;
     liveBacktestRunId = null;
@@ -4820,6 +4820,14 @@ function showBacktestLaunchFailure(message, launchConfig) {
     clearTradingLog('Backtest did not start.');
     showBacktestRunProgress(true, { isError: true });
     updateBacktestRunProgress({ elapsedSeconds: 0, message });
+    // The panel painted above lives under the Backtest tab, which is hidden
+    // when the user is standing on My Agents -- the landing page after a
+    // launch. Surface the failure where they actually are, using this
+    // file's existing alert() convention for launch-time refusals (see
+    // openRunBacktestModal / runBacktest) rather than inventing a new one.
+    if (playgroundTab === 'agents' && currentPage === 'playground') {
+        alert(message);
+    }
 }
 
 function stopBacktestPolling() {
@@ -5453,7 +5461,7 @@ async function runBacktest() {
     try {
         navigateToPage('playground', { playgroundTab: 'agents' });
         currentMode = 'backtest';
-        renderAgentCategories(allAgents);
+        applyAgentFilters(false);
         updateBacktestRunProgress({
             elapsedSeconds: 0,
             message: pipeline?.length
@@ -5908,6 +5916,12 @@ function showPlaygroundPanel(tab) {
             window.repaintPortfolioFromCache(allAgents.map(decorateAgent));
         }
         loadAgents();
+        // A refresh mid-run restores the sessionStorage running marks but
+        // drops the poller that would ever clear them -- reattach it here so
+        // the card doesn't strand at "Backtesting…" for up to
+        // BACKTEST_POLL_MAX_SECONDS. ensureBacktestPolling() is a no-op if a
+        // poller is already attached.
+        if (Object.keys(readRunningBacktests()).length) ensureBacktestPolling();
     }
 
     persistNavigation();

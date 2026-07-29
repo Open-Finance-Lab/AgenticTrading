@@ -8106,7 +8106,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 }
 
 .agent-card-cta--disabled:hover {
-    background: inherit;
+    filter: none;
 }
 
 .agent-card-menu {
