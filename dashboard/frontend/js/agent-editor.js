@@ -431,6 +431,26 @@
     } else {
       cash_allocation = 1000;
     }
+    const backtestInput = document.getElementById('agentEditorBacktestAllocation');
+    let backtest_allocation = null;
+    if (backtestInput && backtestInput.value !== '') {
+      const value = Number(backtestInput.value);
+      if (!Number.isFinite(value) || value < 1) {
+        throw new Error('Backtest Allocated Capital must be at least $1.');
+      }
+      if (value > 10000) {
+        throw new Error('Backtest Allocated Capital cannot exceed $10,000.');
+      }
+      backtest_allocation = Math.round(value);
+    } else {
+      // Non-positive counts as absent: cash_allocation is legally 0 (a $0 paper
+      // sleeve), but backtest capital is >= 1 server-side, so 0 must fall
+      // through to the default rather than becoming an unsaveable value.
+      backtest_allocation =
+        Number.isFinite(Number(cash_allocation)) && Number(cash_allocation) > 0
+          ? Math.min(Math.round(Number(cash_allocation)), 10000)
+          : 1000;
+    }
     const modelSelect = document.getElementById('agentEditorModelSelect');
     const instruction = (
       document.getElementById('agentEditorSimpleInstruction')?.value || ''
@@ -465,6 +485,7 @@
       name: nameInput ? nameInput.value.trim() : '',
       description: descInput ? descInput.value.trim() : '',
       cash_allocation,
+      backtest_allocation,
       model_name: modelSelect ? modelSelect.value : '',
       live_trading_enabled: Boolean(liveToggle?.checked),
       subAgents: subAgentsOut,
@@ -521,6 +542,19 @@
     if (cashInput) {
       cashInput.value = agent.cash_allocation != null ? String(agent.cash_allocation) : '';
     }
+    const backtestInput = document.getElementById('agentEditorBacktestAllocation');
+    if (backtestInput) {
+      // Non-positive counts as absent: cash_allocation is legally 0 (a $0 paper
+      // sleeve), but backtest capital is >= 1 server-side, so 0 must fall
+      // through to the default rather than becoming an unsaveable value.
+      const candidates = [agent.backtest_allocation, agent.cash_allocation];
+      let resolved = 1000;
+      for (const raw of candidates) {
+        const value = Number(raw);
+        if (Number.isFinite(value) && value > 0) { resolved = value; break; }
+      }
+      backtestInput.value = String(Math.min(Math.round(resolved), 10000));
+    }
     if (meta) {
       meta.textContent = agent.agent_type === 'builtin' ? 'Built-in agent' : 'External agent';
     }
@@ -564,11 +598,12 @@
     }));
   }
 
-  async function patchAgent(agent, name, description, pipeline, cash_allocation, model_name, live_trading_enabled) {
+  async function patchAgent(agent, name, description, pipeline, cash_allocation, backtest_allocation, model_name, live_trading_enabled) {
     const payload = {
       name,
       description: description || null,
       cash_allocation,
+      backtest_allocation,
       live_trading_enabled: Boolean(live_trading_enabled),
     };
     if (pipeline) payload.pipeline = serializePipeline(pipeline);
@@ -846,6 +881,7 @@
         state.description,
         state.sendPipeline ? subAgents : null,
         state.cash_allocation,
+        state.backtest_allocation,
         state.model_name,
         state.live_trading_enabled
       );

@@ -18,8 +18,10 @@ Capital scale (product):
   backtests must not read or write this field.
 - Backtest / protocol simulation capital: default ``INITIAL_CAPITAL`` ($1,000),
   max ``MAX_BACKTEST_INITIAL_CAPITAL`` ($10,000). Chosen per run via
-  ``config.initial_cash`` / ``--initial-capital`` and is independent of the
-  account ledger and agent sleeves.
+  ``config.initial_cash`` / ``--initial-capital``, or persisted per agent via
+  the ``backtest_allocation`` field (set from the Configure screen's
+  Allocated Capital card) when a run does not specify one explicitly. Either
+  way it is independent of the account ledger and agent sleeves.
 """
 
 from __future__ import annotations

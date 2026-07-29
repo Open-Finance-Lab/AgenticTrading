@@ -8430,37 +8430,63 @@ body.agent-editor-open {
     border-color: rgba(34, 211, 238, 0.4);
 }
 
-.agent-editor-cash-field {
+.agent-capital-card {
+    margin-bottom: 12px;
+}
+
+.agent-capital-title {
+    margin: 0 0 12px;
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.agent-capital-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 18px;
+}
+
+.agent-capital-field {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-top: 10px;
-    max-width: 220px;
+    min-width: 0;
 }
 
-.agent-editor-cash-label {
-    font-size: 12.5px;
+.agent-capital-label {
+    font-size: 15px;
     font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    color: var(--text-primary);
 }
 
-.agent-editor-cash-input {
+.agent-capital-max {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-left: 6px;
+}
+
+.agent-capital-input {
     width: 100%;
     box-sizing: border-box;
-    padding: 8px 12px;
+    padding: 9px 12px;
     border: 1px solid var(--border-color);
     border-radius: 6px;
     background: var(--bg-input);
     color: var(--text-primary);
-    font-size: 14px;
+    font-size: 15px;
     font-family: var(--font-mono);
 }
 
-.agent-editor-cash-input:focus {
+.agent-capital-input:focus {
     outline: none;
     border-color: rgba(34, 211, 238, 0.4);
+}
+
+.agent-capital-note {
+    font-size: 13px;
+    color: var(--text-secondary);
 }
 
 .agent-editor-broker {
