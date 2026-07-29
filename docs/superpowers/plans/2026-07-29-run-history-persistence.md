@@ -1,4 +1,4 @@
-# Durable run history (`RUNS_DATABASE_URL`) Implementation Plan
+# Durable run history (`AGENT_RUNS_DATABASE_URL`) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: use `superpowers:subagent-driven-development`
 > (recommended) or `superpowers:executing-plans`. Execute tasks in order; do not skip the
@@ -7,10 +7,10 @@
 
 **Goal:** Make backtest run history survive a Render deploy. Five "cold" tables — `agent_runs`,
 `equity_timeseries`, `trades`, `backtest_decisions`, `run_manifest` — move to a dedicated Neon
-Postgres project selected by `RUNS_DATABASE_URL`, behind a new `PostgresBacktestDatabase` twin
-that is signature-identical to `BacktestDatabase`. The hot per-step table (`idempotency_keys`)
-stays on local SQLite via delegation, so no agent request gains a network round-trip. Unset
-`RUNS_DATABASE_URL` ⇒ today's behavior, byte for byte.
+Postgres project selected by `AGENT_RUNS_DATABASE_URL`, behind a new `PostgresBacktestDatabase`
+twin that is signature-identical to `BacktestDatabase`. The hot per-step table
+(`idempotency_keys`) stays on local SQLite via delegation, so no agent request gains a network
+round-trip. Unset `AGENT_RUNS_DATABASE_URL` ⇒ today's behavior, byte for byte.
 
 **Architecture:** The established twin pattern, sixth instance. `database.py` keeps
 `BacktestDatabase` unchanged as the SQLite default; a `_build_backtest_db()` factory (cloned
@@ -32,7 +32,8 @@ around, and three "follow-up" defects that are already fixed on `main` (do not r
 ## Global Constraints
 
 - **Task order 1 → 3 is non-negotiable.** Task 1 (conftest strip) must land before any factory
-  exists, or a developer's exported `RUNS_DATABASE_URL` points the whole suite at prod Neon.
+  exists, or a developer's exported `AGENT_RUNS_DATABASE_URL` points the whole suite at prod
+  Neon.
   Task 2 (SQLite-side symmetric changes) must land before Task 3, because the twin's DDL is
   written to match the *post-Task-2* SQLite shape and the column-parity guard compares the two.
 - **Test command:** `pytest dashboard/backend/tests/ -q` (full suite must stay green at every
@@ -48,18 +49,25 @@ around, and three "follow-up" defects that are already fixed on `main` (do not r
   against `DATABASE_PATH`, which defaults to that file.
 - **`print()`, never `logger.info()`** for anything meant to be visible in prod — backend
   loggers emit nothing under the deployed uvicorn config. Assert on `capsys`, never `caplog`.
-- **Credentials never enter the repo.** `RUNS_DATABASE_URL` lives only in the Render dashboard.
-  `describe_database_url()` (host/db only) is the *only* thing that may be printed.
+- **Credentials never enter the repo.** `AGENT_RUNS_DATABASE_URL` lives only in the Render
+  dashboard. `describe_database_url()` (host/db only) is the *only* thing that may be printed.
 - **Commit style:** `feat(runs): …` / `test(runs): …` / `docs: …`, one commit per task.
-- **This PR opens as a DRAFT** with `DO NOT MERGE until RUNS_DATABASE_URL is set in the Render
-  dashboard` as the **first line of the body** — an unset var silently selects ephemeral
-  SQLite, and `main` auto-deploys prod on merge. A comment is not a gate.
+- **`AGENT_RUNS_DATABASE_URL` is already set in Render** (2026-07-29, web service only —
+  see Task 12 Step 3), so the deploy-gate that would normally hold this PR is discharged
+  *before* the code exists. The PR still opens as a **DRAFT** while in flight, but the
+  first-line gate is now about the backfill, not the var. Re-check the var is present
+  immediately before merging: `main` auto-deploys prod, an unset var silently selects
+  ephemeral SQLite, and a comment is not a gate.
+- **Local dev now inherits the var too** — it lives in `dashboard/.env` of the main checkout
+  (renamed alongside this plan). Nothing reads it until Task 6, but from that commit onward a
+  local `uvicorn` writes run history straight to **prod Neon**. Comment it out locally, or
+  accept that local runs share prod's history. Tests are unaffected (Task 1 strips it).
 
 ## File Structure
 
 | File | Action | Task |
 |---|---|---|
-| `dashboard/backend/tests/conftest.py` + `test_env_isolation.py` | Modify — strip `RUNS_DATABASE_URL` | 1 |
+| `dashboard/backend/tests/conftest.py` + `test_env_isolation.py` | Modify — strip `AGENT_RUNS_DATABASE_URL` | 1 |
 | `dashboard/backend/database.py` | Modify — `actions_trace_ref`, `run_manifest` cleanup, factory | 2, 6 |
 | `dashboard/backend/tests/test_database_cold_half.py` | **Create** — SQLite-side coverage | 2 |
 | `dashboard/backend/database_postgres.py` | **Create** — the twin | 3, 4, 5 |
@@ -82,7 +90,7 @@ different suffix silently ships with **zero** parity coverage.
 
 ---
 
-### Task 1: Strip `RUNS_DATABASE_URL` in the test suite
+### Task 1: Strip `AGENT_RUNS_DATABASE_URL` in the test suite
 
 **Files:**
 - Modify: `dashboard/backend/tests/conftest.py`
@@ -100,13 +108,13 @@ In `conftest.py`, immediately after the `CONTENT_DATABASE_URL` pop (currently ~l
 that group, **not** in the later "scale knobs" block:
 
 ```python
-# Same guarantee for RUNS_DATABASE_URL: it selects the Postgres backend for
+# Same guarantee for AGENT_RUNS_DATABASE_URL: it selects the Postgres backend for
 # backtest run history (agent_runs, equity_timeseries, trades,
 # backtest_decisions, run_manifest). A value inherited from the developer's
 # environment would point the whole suite at the live runs database -- whose
 # @pg_only-style destructive helpers would then run against prod. Strip it
 # before any backend module is imported.
-os.environ.pop("RUNS_DATABASE_URL", None)
+os.environ.pop("AGENT_RUNS_DATABASE_URL", None)
 ```
 
 - [ ] **Step 2: Prove it strips at import time, not fixture time**
@@ -116,7 +124,7 @@ case there, mirroring how `USERS_DATABASE_URL`/`CONTENT_DATABASE_URL` are assert
 
 ```python
 def test_runs_database_url_is_stripped():
-    assert "RUNS_DATABASE_URL" not in os.environ
+    assert "AGENT_RUNS_DATABASE_URL" not in os.environ
 ```
 
 - [ ] **Step 3: Run** `pytest dashboard/backend/tests/ -q`. Expected: green, no change in count
@@ -127,7 +135,7 @@ def test_runs_database_url_is_stripped():
 ```bash
 git status --short dashboard/storage/data/backtest.db   # must print nothing
 git add dashboard/backend/tests/conftest.py dashboard/backend/tests/test_env_isolation.py
-git commit -m "test(runs): strip RUNS_DATABASE_URL before backend import"
+git commit -m "test(runs): strip AGENT_RUNS_DATABASE_URL before backend import"
 ```
 
 ---
@@ -266,7 +274,7 @@ Follow the canonical twin shape (`domain/agents/repository_postgres.py`) exactly
 ```python
 """Postgres-backed BacktestDatabase implementation (run history, the "cold half").
 
-Selected instead of the default SQLite BacktestDatabase when RUNS_DATABASE_URL is
+Selected instead of the default SQLite BacktestDatabase when AGENT_RUNS_DATABASE_URL is
 set (see database.py's _build_backtest_db). Exists because the SQLite store lives
 in DATABASE_PATH, which resets to the committed seed database on every deploy of
 the disk-less Render free-tier host -- silently deleting every backtest run,
@@ -578,11 +586,11 @@ git commit -m "feat(runs): port BacktestDatabase readers to Postgres"
 
 ```python
 def _build_backtest_db():
-    # RUNS_DATABASE_URL only, deliberately: CONTENT_DATABASE_URL is scoped to
+    # AGENT_RUNS_DATABASE_URL only, deliberately: CONTENT_DATABASE_URL is scoped to
     # agents/versions/strategies and USERS_DATABASE_URL to accounts; neither may
     # select the run-history database (spec, Decision 3). Do not "simplify" this
     # into a fallback chain.
-    database_url = os.getenv("RUNS_DATABASE_URL")
+    database_url = os.getenv("AGENT_RUNS_DATABASE_URL")
     if database_url:
         from dashboard.backend.database_postgres import PostgresBacktestDatabase
 
@@ -600,9 +608,10 @@ db = _build_backtest_db()
 Import `describe_database_url` from `dashboard.backend.db_url` at module top (it has no psycopg
 dependency); import `PostgresBacktestDatabase` **inside** the function only.
 
-- [ ] **Step 2: `.env.example`** — add a `RUNS_DATABASE_URL` block after `CONTENT_DATABASE_URL`,
-      in the same commented style. Say what it covers (run history: runs, equity, trades,
-      decisions, manifests), that it does not fall back to or from the other two, that a fully
+- [ ] **Step 2: `.env.example`** — add an `AGENT_RUNS_DATABASE_URL` block after
+      `CONTENT_DATABASE_URL`, in the same commented style. Say what it covers (run history:
+      runs, equity, trades, decisions, manifests), that it does not fall back to or from the
+      other two, that a fully
       durable deploy sets all three, that it is deliberately not `DATABASE_URL`, and that it
       should be the pooled (`-pooler`) host.
 
@@ -615,7 +624,7 @@ dependency); import `PostgresBacktestDatabase` **inside** the function only.
     # separate: USERS_DATABASE_URL / CONTENT_DATABASE_URL. Set in the Render
     # dashboard BEFORE merging -- this yaml is documentation, not the mechanism
     # (prod does not sync from it; see CLAUDE.md "Prod deploy reality").
-    - key: RUNS_DATABASE_URL
+    - key: AGENT_RUNS_DATABASE_URL
       sync: false
 ```
 
@@ -627,7 +636,7 @@ dependency); import `PostgresBacktestDatabase` **inside** the function only.
 ```bash
 git status --short dashboard/storage/data/backtest.db   # must print nothing
 git add dashboard/backend/database.py .env.example render.yaml
-git commit -m "feat(runs): select the run-history backend from RUNS_DATABASE_URL"
+git commit -m "feat(runs): select the run-history backend from AGENT_RUNS_DATABASE_URL"
 ```
 
 ---
@@ -868,7 +877,7 @@ git commit -m "refactor: drop raw-sqlite3 startup debug blocks"
 - Create: `dashboard/backend/tests/test_backfill_runs.py`
 
 **Interfaces:**
-- Consumes: a source SQLite file + `RUNS_DATABASE_URL`. Produces: an idempotent one-time
+- Consumes: a source SQLite file + `AGENT_RUNS_DATABASE_URL`. Produces: an idempotent one-time
   migration, re-runnable safely.
 
 Until this runs, prod's `/runs` listing is **empty** — run it immediately after the first green
@@ -922,20 +931,28 @@ git commit -m "feat(runs): idempotent backfill script for run history"
 - Consumes: everything above. Produces: a merge-ready PR and a correct issue trail.
 
 - [ ] **Step 1: `CLAUDE.md`** — three edits:
-      (a) add a `RUNS_DATABASE_URL` bullet beside its two siblings, same level of detail;
+      (a) add a `AGENT_RUNS_DATABASE_URL` bullet beside its two siblings, same level of detail;
       (b) fix the now-ambiguous "Persisted stores (protocol runs, strategies) live in this DB"
       line — protocol runs still do, backtest run history no longer does;
       (c) update the "Prod deploy reality" gotcha: run history no longer evaporates once this
       ships (accounts, content, and now runs are all durable; the ephemeral seed still backs
       protocol/idempotency state).
 
-- [ ] **Step 2: Open the PR as a DRAFT.** First line of the body:
-      `DO NOT MERGE until RUNS_DATABASE_URL is set in the Render dashboard.` Keep the title
-      short (`feat: durable run history`); details go in the body, briefly.
+- [ ] **Step 2: Open the PR as a DRAFT** while the branch is in flight. First line of the body:
+      `DO NOT MERGE until the backfill script (Task 11) is in the diff and has been dry-run.`
+      Keep the title short (`feat: durable run history`); details go in the body, briefly.
 
-- [ ] **Step 3: Set `RUNS_DATABASE_URL` in the Render dashboard** — the pooled (`-pooler`)
-      connection string for the `ATL-runs-main` project. Unset silently selects ephemeral
-      SQLite; the startup line is the only tripwire. Then mark the PR ready.
+- [x] **Step 3: Set `AGENT_RUNS_DATABASE_URL` in the Render dashboard** — **done 2026-07-29,
+      ahead of the code**, so the usual "unset silently selects ephemeral SQLite" merge gate is
+      already discharged. Set via the Render API on the web service `srv-d7lbmpjbc2fs73bcr6t0`
+      (*AgenticTrading*) only — the Discord-bot worker carries neither `CONTENT_DATABASE_URL`
+      nor `USERS_DATABASE_URL` and reaches the backend over HTTP, so it does not get this one
+      either. Value is the pooled (`-pooler`) `ATL-runs-main` string, verified byte-identical by
+      SHA-256 round-trip. **Setting it did not trigger a deploy** (native autoDeploy is off; the
+      CI hook drives every deploy), so the running instance has not yet seen it — it lands with
+      the merge deploy, which is the ordering we want. Re-verify it is still present before
+      merging (`GET /v1/services/<id>/env-vars`); a rotation or a teammate's edit re-opens the
+      gate silently.
 
 - [ ] **Step 4: Merge → auto-deploy → verify the log line** reads
       `run history backend: postgres (ep-…-pooler…/neondb)`. A typo'd or staging URL shows up
@@ -963,7 +980,7 @@ git commit -m "feat(runs): idempotent backfill script for run history"
 ```bash
 git status --short dashboard/storage/data/backtest.db   # must print nothing
 git add CLAUDE.md
-git commit -m "docs: document RUNS_DATABASE_URL"
+git commit -m "docs: document AGENT_RUNS_DATABASE_URL"
 ```
 
 ---

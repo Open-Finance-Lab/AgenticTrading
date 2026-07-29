@@ -1,6 +1,6 @@
-# Durable run history (`RUNS_DATABASE_URL` Postgres backend)
+# Durable run history (`AGENT_RUNS_DATABASE_URL` Postgres backend)
 
-**Date:** 2026-07-20 · **Amended:** 2026-07-29 (two passes — see *Amendments* at the end)
+**Date:** 2026-07-20 · **Amended:** 2026-07-29 (three passes — see *Amendments* at the end)
 **Issue:** #140 (Agent run history still evaporates on every deploy)
 **Status:** Approved design — phase 1 of the run-history migration (the "cold half")
 **Predecessor:** `2026-07-15-agent-strategy-persistence-design.md` (Decision 1 there deferred
@@ -19,6 +19,10 @@ run history to "a later phase"; this spec is that phase's first slice)
 > the T2/T4 scale work that changed both the connection recipe and finalize's failure profile.
 > The recurring cause is the same each time: passages that restate code facts (line numbers,
 > method lists, connection recipes) decay; the *decisions* have not moved once.
+>
+> **Pass 3** is a rename, applied before any code shipped: the env var is
+> `AGENT_RUNS_DATABASE_URL`, never the bare `RUNS_DATABASE_URL` this spec originally proposed
+> (rationale in Decision 3). It is already set in Render — see Rollout step 2.
 
 ## Problem
 
@@ -61,10 +65,15 @@ gates #145 and the paper-trading track. This spec executes that promotion.
    same-database JOIN capability buys nothing today. Connection string lives only in Render's
    env config (and CI secrets if ever needed) — never in the repo.
 
-3. **Env var: `RUNS_DATABASE_URL`.** Scoped name per the established convention (states what
-   it backs; never `DATABASE_URL`, which ambient Heroku-convention values could poison). No
-   fallback chain to/from `CONTENT_DATABASE_URL` or `USERS_DATABASE_URL` — unset means
-   ephemeral SQLite, and the startup line makes the choice visible.
+3. **Env var: `AGENT_RUNS_DATABASE_URL`.** Scoped name per the established convention (states
+   what it backs; never `DATABASE_URL`, which ambient Heroku-convention values could poison).
+   The `AGENT_` prefix is deliberate and was chosen over a bare `RUNS_DATABASE_URL`
+   (renamed 2026-07-29, before any code shipped): "runs" alone is one of the most overloaded
+   words in a CI-adjacent repo — workflow runs, test runs, backtest runs — whereas the tables
+   this actually backs are `agent_runs` and its children, so the var now names its primary
+   table. It also groups visually with the agent-facing surface it serves. No fallback chain
+   to/from `CONTENT_DATABASE_URL` or `USERS_DATABASE_URL` — unset means ephemeral SQLite, and
+   the startup line makes the choice visible.
 
 4. **R2/object-storage offload: deferred, seam reserved.** The only sizable blob in scope is
    `backtest_decisions.actions_submitted` (~880 KB per 252-step protocol run; zero such rows
@@ -110,7 +119,7 @@ from `users.py::_build_user_store()` replaces the bare singleton assignment:
 
 ```python
 def _build_backtest_db():
-    database_url = os.getenv("RUNS_DATABASE_URL")   # RUNS_DATABASE_URL only, deliberately.
+    database_url = os.getenv("AGENT_RUNS_DATABASE_URL")   # this var only, deliberately.
     if database_url:
         from dashboard.backend.database_postgres import PostgresBacktestDatabase
         print(f"run history backend: postgres ({describe_database_url(database_url)})")
@@ -395,35 +404,39 @@ Order matters; each step is verifiable before the next:
    allowlist covers the new database with no change. The corollary is that the Postgres tier
    cannot be exercised against this URL locally: CI's `postgres:18-alpine` remains the only
    place the tier actually runs.
-2. **Set `RUNS_DATABASE_URL` in the Render dashboard *before* merging** (same discipline as
-   `CONTENT_DATABASE_URL`): unset silently selects ephemeral SQLite, and the only tripwire is
-   the startup line. Use the pooled (`-pooler`) connection string.
+2. ~~**Set `AGENT_RUNS_DATABASE_URL` in the Render dashboard *before* merging**~~ — **done
+   2026-07-29**, ahead of the implementation, on the web service only (the Discord-bot worker
+   has neither of the sibling URLs and talks HTTP). Pooled (`-pooler`) `ATL-runs-main` string,
+   round-trip verified; the write did not trigger a deploy, so it takes effect with the merge
+   deploy. The discipline still applies in reverse: **re-verify it is present immediately
+   before merging** — unset silently selects ephemeral SQLite, and the startup line is the only
+   tripwire.
 3. **Merge → auto-deploy → verify** the log line: `run history backend: postgres
    (ep-…-pooler…/neondb)`. Wrong/typo'd URL shows up here (host/db named, credentials never).
 4. **Backfill** — one-time idempotent script `dashboard/scripts/backfill_runs_to_postgres.py`:
    reads a SQLite file (default: the committed seed DB), upserts `agent_runs` (17 rows) and
    `equity_timeseries` (**2,102** rows — re-counted 2026-07-29; the 2,585 originally recorded
    here pre-dates the seed scrub) plus any rows in the other three tables (`trades`,
-   `backtest_decisions`, `run_manifest` — all still zero) into `RUNS_DATABASE_URL`. Treat
-   these as expected-order-of-magnitude, not assertions: re-count at implementation time and
-   have the script report what it moved. Idempotent by construction (same upserts as the
-   twin), safe to re-run. Until it runs, prod's `/runs` listing is empty — run it immediately after the
-   first green deploy. The 3 `defaults.json` demo run IDs ride along (they're vestigial to
-   the frontend but remain in the public listing).
+   `backtest_decisions`, `run_manifest` — all still zero) into the new database. Treat these
+   as expected-order-of-magnitude, not assertions: re-count at implementation time and have
+   the script report what it moved. Idempotent by construction (same upserts as the twin),
+   safe to re-run. Until it runs, prod's `/runs` listing is empty — run it immediately after
+   the first green deploy. The 3 `defaults.json` demo run IDs ride along (they're vestigial
+   to the frontend but remain in the public listing).
 5. **#145 unlock (the payoff):** an off-instance scheduler (GitHub Actions cron per fleet
-   plan D4) can now run `refresh_daily_leaderboard.py` with `RUNS_DATABASE_URL` pointed at
-   the same Neon project, and prod serves what it writes. Wiring that cron is issue #145's
+   plan D4) can now run `refresh_daily_leaderboard.py` with `AGENT_RUNS_DATABASE_URL` pointed
+   at the same Neon project, and prod serves what it writes. Wiring that cron is issue #145's
    own PR, not this one.
 
-Local dev and the test suite are untouched: `RUNS_DATABASE_URL` unset → SQLite exactly as
-today; `tests/conftest.py` strips the new var at import time alongside the other two.
+Local dev and the test suite are untouched: `AGENT_RUNS_DATABASE_URL` unset → SQLite exactly
+as today; `tests/conftest.py` strips the new var at import time alongside the other two.
 
 ## Testing
 
 Same three-tier structure as the #134/#136/#137 net:
 
 1. **Ordinary CI (SQLite)** — existing suite must stay green untouched; plus `capsys` tests
-   for both startup lines (never `caplog`), and a factory test that `RUNS_DATABASE_URL`
+   for both startup lines (never `caplog`), and a factory test that `AGENT_RUNS_DATABASE_URL`
    selection + stripping behaves like its two siblings.
 2. **`@pg_only` tier (live Postgres, runs in CI via the existing `postgres:18-alpine`
    service + `TEST_POSTGRES_URL`)** — mirror parity suite running the same behavioral
@@ -450,8 +463,8 @@ spot-checked parity + re-run idempotency.
 
 ## Config & docs surface
 
-- `.env.example`: add `RUNS_DATABASE_URL` with a one-line comment.
-- `render.yaml`: add `RUNS_DATABASE_URL` (`sync: false`) beside `USERS_DATABASE_URL` /
+- `.env.example`: add `AGENT_RUNS_DATABASE_URL` with a one-line comment.
+- `render.yaml`: add `AGENT_RUNS_DATABASE_URL` (`sync: false`) beside `USERS_DATABASE_URL` /
   `CONTENT_DATABASE_URL`.
 - `CLAUDE.md`: extend the env-var bullet list; fix the now-ambiguous "Persisted stores
   (protocol runs, strategies) live in this DB" line; update the "Prod deploy reality" bullet
@@ -511,8 +524,9 @@ Net: **two** issues to file at merge (items 1 and 2), not five.
 ## Amendments — pass 1 (2026-07-29, drift sweep)
 
 The design was approved 2026-07-20 but no implementation plan was written and no code was
-ever produced — `RUNS_DATABASE_URL` appears nowhere in the repo, and `database.py:998` is
-still the bare `db = BacktestDatabase()`. In the intervening nine days the SQLite side moved.
+ever produced — `AGENT_RUNS_DATABASE_URL` appears nowhere in the repo, and `database.py:998`
+is still the bare `db = BacktestDatabase()`. In the intervening nine days the SQLite side
+moved.
 Each item below was verified at source before the correction was made in place:
 
 | # | Drift | Resolution |
