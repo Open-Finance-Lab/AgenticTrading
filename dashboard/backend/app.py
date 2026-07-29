@@ -101,7 +101,6 @@ app.add_middleware(CSPHeaderMiddleware)
 async def startup_event():
     """Initialize API server."""
     import os
-    from pathlib import Path
 
     print("🚀 Starting API server...")
 
