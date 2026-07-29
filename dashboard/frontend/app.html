@@ -329,19 +329,12 @@
                 </div>
 
                 <div class="control-group">
-                    <label for="backtestInitialCapital">Backtest Allocated Capital</label>
-                    <p class="control-helper">Simulated starting cash for this run only (max $10,000). Defaults to this agent's Paper Trading Allocated Capital, and spends no real portfolio cash.</p>
-                    <input
-                        class="control-select"
-                        id="backtestInitialCapital"
-                        type="number"
-                        min="1"
-                        max="10000"
-                        step="1"
-                        value="1000"
-                        aria-label="Backtest allocated capital"
-                    >
-                    <p id="runBacktestCapitalHint" class="control-helper">Does not change Paper Trading Allocated Capital.</p>
+                    <label>Allocated Capital</label>
+                    <div class="run-backtest-capital-row">
+                        <p id="runBacktestCapitalValue" class="run-backtest-readonly">—</p>
+                        <button id="runBacktestEditCapitalBtn" class="run-backtest-edit-link" type="button">Edit in Configure</button>
+                    </div>
+                    <p id="runBacktestCapitalHint" class="control-helper">Simulated starting cash. Does not change Paper Trading Allocated Capital.</p>
                 </div>
 
                 <div class="control-group">

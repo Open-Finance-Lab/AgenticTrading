@@ -4455,6 +4455,27 @@ a.header-brand:hover .title-section h1 {
     color: var(--text-primary);
 }
 
+.run-backtest-capital-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.run-backtest-edit-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent-cyan, #22d3ee);
+    cursor: pointer;
+}
+
+.run-backtest-edit-link:hover {
+    text-decoration: underline;
+}
+
 .run-backtest-prompt-preview {
     margin: 0;
     max-height: 120px;

@@ -44,3 +44,22 @@ def test_capital_limits_are_stated_next_to_each_field():
 
 def test_editor_state_carries_backtest_allocation():
     assert "backtest_allocation" in _EDITOR_JS
+
+
+_APP_JS = (_FRONTEND / "app.js").read_text(encoding="utf-8")
+
+
+def test_run_backtest_modal_has_no_editable_capital_input():
+    """Capital is set in Configure now; the modal only reports it."""
+    modal = _slice(_APP_HTML, 'id="runBacktestModal"', 'id="runBacktestModalSubmit"')
+    assert 'id="backtestInitialCapital"' not in modal
+
+
+def test_run_backtest_modal_links_to_configure():
+    modal = _slice(_APP_HTML, 'id="runBacktestModal"', 'id="runBacktestModalSubmit"')
+    assert 'id="runBacktestEditCapitalBtn"' in modal
+    assert "Edit in Configure" in modal
+
+
+def test_backtest_capital_resolution_helper_exists():
+    assert "function resolveBacktestCapital(" in _APP_JS

@@ -246,7 +246,6 @@ const CASH_STEP_INPUT_IDS = [
   'externalAgentCashAllocation',
   'builtinAgentCashAllocation',
   'agentEditorCashAllocation',
-  'backtestInitialCapital',
 ];
 
 function cashStepMeta(input) {
@@ -729,6 +728,24 @@ function formatSignedReturnPct(frac) {
   if (pct > 0) return `+${body}`;
   if (pct < 0) return `−${body}`;
   return body;
+}
+
+/**
+ * Saved simulated capital for an agent's backtests.
+ *
+ * Mirrors the backend fallback chain exactly: an agent created before
+ * `backtest_allocation` existed has a NULL column and must keep behaving as it
+ * did, i.e. starting from its paper sleeve.
+ */
+function resolveBacktestCapital(agent) {
+  const candidates = [agent?.backtest_allocation, agent?.cash_allocation];
+  for (const raw of candidates) {
+    const value = Number(raw);
+    if (Number.isFinite(value) && value > 0) {
+      return Math.min(Math.round(value), MAX_BACKTEST_ALLOCATED_CAPITAL);
+    }
+  }
+  return DEFAULT_AGENT_CASH_ALLOCATION;
 }
 
 /** Shared top block: portfolio sleeve always leads (draft + backtested cards). */
@@ -3340,6 +3357,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('runBacktestModalSubmit')?.addEventListener('click', () => {
         runBacktest();
     });
+    document.getElementById('runBacktestEditCapitalBtn')?.addEventListener('click', () => {
+        const agent = runBacktestModalAgent;
+        closeRunBacktestModal();
+        if (agent && window.AgentEditor?.open) window.AgentEditor.open(agent);
+    });
     document.addEventListener('keydown', (event) => {
         if (event.key !== 'Escape') return;
         const modal = document.getElementById('runBacktestModal');
@@ -5120,15 +5142,9 @@ function openRunBacktestModal(agent) {
             : 'Does not change Paper Trading Allocated Capital.';
     }
 
-    // Reseed on every open. The field is per-run, so leaving the previous
-    // agent's number in place silently backtests this one at the wrong size.
-    const capitalInput = document.getElementById('backtestInitialCapital');
-    if (capitalInput) {
-        capitalInput.value = String(
-            Number.isFinite(sleeve) && sleeve > 0
-                ? Math.min(Math.round(sleeve), MAX_BACKTEST_ALLOCATED_CAPITAL)
-                : DEFAULT_AGENT_CASH_ALLOCATION,
-        );
+    const capitalValue = document.getElementById('runBacktestCapitalValue');
+    if (capitalValue) {
+        capitalValue.textContent = `$${resolveBacktestCapital(agent).toLocaleString()}`;
     }
 
     syncModelSelectFromAgent(agent);
@@ -5224,21 +5240,7 @@ async function runBacktest() {
         ? null
         : resolveBacktestModelRequest(modelSelect, activeAgent);
 
-    const capitalInput = document.getElementById('backtestInitialCapital');
-    let initialCapital = DEFAULT_AGENT_CASH_ALLOCATION;
-    if (capitalInput && capitalInput.value !== '') {
-        const parsed = Number(capitalInput.value);
-        if (!Number.isFinite(parsed) || parsed <= 0) {
-            alert('Backtest Allocated Capital must be greater than 0.');
-            return;
-        }
-        if (parsed > MAX_BACKTEST_ALLOCATED_CAPITAL) {
-            alert(`Backtest Allocated Capital cannot exceed $${MAX_BACKTEST_ALLOCATED_CAPITAL.toLocaleString()}.`);
-            return;
-        }
-        initialCapital = Math.round(parsed);
-        capitalInput.value = String(initialCapital);
-    }
+    const initialCapital = resolveBacktestCapital(activeAgent);
 
     const promptSummary = formatPromptFromPipeline(pipeline);
     const universeLabel = isIFind
