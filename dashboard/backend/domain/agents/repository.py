@@ -65,6 +65,7 @@ def _public_agent(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         "description": data.get("description"),
         "pipeline": _parse_pipeline(data.get("pipeline_config")),
         "cash_allocation": data.get("cash_allocation"),
+        "backtest_allocation": data.get("backtest_allocation"),
         "live_trading_enabled": bool(data.get("live_trading_enabled")),
         "api_key_prefix": data.get("api_key_prefix") or "",
         "owner_user_id": data.get("owner_user_id"),
@@ -142,6 +143,10 @@ class AgentStore:
             cursor.execute(
                 "ALTER TABLE external_agents ADD COLUMN cash_allocation REAL"
             )
+        if "backtest_allocation" not in existing_columns:
+            cursor.execute(
+                "ALTER TABLE external_agents ADD COLUMN backtest_allocation REAL"
+            )
         if "live_trading_enabled" not in existing_columns:
             cursor.execute(
                 "ALTER TABLE external_agents ADD COLUMN live_trading_enabled INTEGER NOT NULL DEFAULT 0"
@@ -172,6 +177,7 @@ class AgentStore:
         agent_type: str = "external",
         description: Optional[str] = None,
         cash_allocation: Optional[float] = None,
+        backtest_allocation: Optional[float] = None,
     ) -> Dict[str, Any]:
         agent_id = f"agent_{uuid.uuid4().hex[:12]}"
         session_id = session_id or str(uuid.uuid4())
@@ -187,8 +193,9 @@ class AgentStore:
             INSERT INTO external_agents (
                 agent_id, name, session_id, api_key_hash, api_key_prefix,
                 model_name, agent_type, description, cash_allocation,
+                backtest_allocation,
                 owner_user_id, owner_browser_session, created_at, last_used_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent_id,
@@ -200,6 +207,7 @@ class AgentStore:
                 (agent_type or "external").strip() or "external",
                 (description or None),
                 cash_allocation,
+                backtest_allocation,
                 owner_user_id,
                 owner_browser_session,
                 now,
@@ -486,6 +494,7 @@ class AgentStore:
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
         cash_allocation: Any = _UNSET,
+        backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
     ) -> Optional[Dict[str, Any]]:
         """Update display fields for an agent. Returns the updated record or None.
@@ -511,6 +520,9 @@ class AgentStore:
         if cash_allocation is not _UNSET:
             sets.append("cash_allocation = ?")
             params.append(cash_allocation)
+        if backtest_allocation is not _UNSET:
+            sets.append("backtest_allocation = ?")
+            params.append(backtest_allocation)
         if live_trading_enabled is not _UNSET:
             sets.append("live_trading_enabled = ?")
             params.append(1 if live_trading_enabled else 0)

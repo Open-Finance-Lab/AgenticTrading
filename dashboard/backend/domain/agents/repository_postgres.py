@@ -81,6 +81,7 @@ class PostgresAgentStore:
                         description TEXT,
                         pipeline_config TEXT,
                         cash_allocation DOUBLE PRECISION,
+                        backtest_allocation DOUBLE PRECISION,
                         live_trading_enabled BOOLEAN NOT NULL DEFAULT FALSE
                     )
                     """
@@ -103,6 +104,10 @@ class PostgresAgentStore:
                 cur.execute(
                     "ALTER TABLE external_agents "
                     "ADD COLUMN IF NOT EXISTS cash_allocation DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE external_agents "
+                    "ADD COLUMN IF NOT EXISTS backtest_allocation DOUBLE PRECISION"
                 )
                 cur.execute(
                     "ALTER TABLE external_agents "
@@ -142,6 +147,7 @@ class PostgresAgentStore:
         agent_type: str = "external",
         description: Optional[str] = None,
         cash_allocation: Optional[float] = None,
+        backtest_allocation: Optional[float] = None,
     ) -> Dict[str, Any]:
         agent_id = f"agent_{uuid.uuid4().hex[:12]}"
         session_id = session_id or str(uuid.uuid4())
@@ -157,8 +163,9 @@ class PostgresAgentStore:
                     INSERT INTO external_agents (
                         agent_id, name, session_id, api_key_hash, api_key_prefix,
                         model_name, agent_type, description, cash_allocation,
+                        backtest_allocation,
                         owner_user_id, owner_browser_session, created_at, last_used_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
@@ -171,6 +178,7 @@ class PostgresAgentStore:
                         (agent_type or "external").strip() or "external",
                         (description or None),
                         cash_allocation,
+                        backtest_allocation,
                         owner_user_id,
                         owner_browser_session,
                         now,
@@ -441,6 +449,7 @@ class PostgresAgentStore:
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
         cash_allocation: Any = _UNSET,
+        backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
     ) -> Optional[Dict[str, Any]]:
         """Update display fields for an agent. Returns the updated record or None.
@@ -466,6 +475,9 @@ class PostgresAgentStore:
         if cash_allocation is not _UNSET:
             sets.append("cash_allocation = %s")
             params.append(cash_allocation)
+        if backtest_allocation is not _UNSET:
+            sets.append("backtest_allocation = %s")
+            params.append(backtest_allocation)
         if live_trading_enabled is not _UNSET:
             sets.append("live_trading_enabled = %s")
             params.append(bool(live_trading_enabled))
