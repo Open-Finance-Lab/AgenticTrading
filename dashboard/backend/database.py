@@ -165,6 +165,7 @@ class BacktestDatabase:
                 actions_submitted TEXT,
                 actions_executed INTEGER DEFAULT 0,
                 context_ref TEXT,
+                actions_trace_ref TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
             )
@@ -289,6 +290,12 @@ class BacktestDatabase:
                 cursor.execute("ALTER TABLE backtest_decisions ADD COLUMN context_ref TEXT")
                 conn.commit()
                 print("✅ Added context_ref to backtest_decisions")
+
+            if dec_cols and "actions_trace_ref" not in dec_cols:
+                print("🔄 Migrating: Adding actions_trace_ref to backtest_decisions...")
+                cursor.execute("ALTER TABLE backtest_decisions ADD COLUMN actions_trace_ref TEXT")
+                conn.commit()
+                print("✅ Added actions_trace_ref to backtest_decisions")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS idempotency_keys (
@@ -975,21 +982,23 @@ class BacktestDatabase:
         cursor.execute("DELETE FROM equity_timeseries WHERE run_id = ?", (run_id,))
         cursor.execute("DELETE FROM trades WHERE run_id = ?", (run_id,))
         cursor.execute("DELETE FROM backtest_decisions WHERE run_id = ?", (run_id,))
+        cursor.execute("DELETE FROM run_manifest WHERE run_id = ?", (run_id,))
         cursor.execute("DELETE FROM agent_runs WHERE run_id = ?", (run_id,))
-        
+
         conn.commit()
         conn.close()
-    
+
     def clear_all(self) -> None:
         """Clear all data (useful for testing)."""
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("DELETE FROM equity_timeseries")
         cursor.execute("DELETE FROM trades")
         cursor.execute("DELETE FROM backtest_decisions")
+        cursor.execute("DELETE FROM run_manifest")
         cursor.execute("DELETE FROM agent_runs")
-        
+
         conn.commit()
         conn.close()
 
