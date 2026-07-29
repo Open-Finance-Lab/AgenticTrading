@@ -367,9 +367,9 @@ def test_builtin_listing_and_delete_postgres(pg_agent_store):
 def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
     """#135: the twin must ADD COLUMN IF NOT EXISTS for post-ship columns.
 
-    Simulate a deployment created before the six lazy-migration columns
-    (agent_type, description, pipeline_config, cash_allocation, scopes,
-    live_trading_enabled) existed:
+    Simulate a deployment created before the seven lazy-migration columns
+    (agent_type, description, pipeline_config, cash_allocation,
+    backtest_allocation, scopes, live_trading_enabled) existed:
     a table with only the original base schema, already holding a real agent row
     that predates those columns. Re-running _init_schema() -- what every redeploy
     does -- must bring it up to the current shape. CREATE TABLE IF NOT EXISTS
@@ -448,6 +448,7 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
         "description",
         "pipeline_config",
         "cash_allocation",
+        "backtest_allocation",
         "scopes",
         "live_trading_enabled",
     } <= columns
@@ -457,8 +458,11 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
 
     # The store is actually usable after the migration: a real registration
     # writes every migrated column, and the scopes column default applies.
-    created = pg_agent_store.create_agent(name="Post-migration", cash_allocation=123.0)
+    created = pg_agent_store.create_agent(
+        name="Post-migration", cash_allocation=123.0, backtest_allocation=123.0
+    )
     assert created["cash_allocation"] == 123.0
+    assert created["backtest_allocation"] == 123.0
 
 
 @pg_only

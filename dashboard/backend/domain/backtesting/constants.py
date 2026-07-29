@@ -29,6 +29,9 @@ from typing import Any, Optional
 # Default starting capital for a backtest when none is requested.
 INITIAL_CAPITAL = 1000
 
+# Hard floor on simulation capital for a single backtest / protocol run.
+MIN_BACKTEST_INITIAL_CAPITAL = 1
+
 # Hard cap on simulation capital for a single backtest / protocol run.
 MAX_BACKTEST_INITIAL_CAPITAL = 10_000
 

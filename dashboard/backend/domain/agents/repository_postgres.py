@@ -49,9 +49,9 @@ class PostgresAgentStore:
         # in tests, and CI's Postgres service container is empty on every run,
         # so the @pg_only tier only ever exercises the CREATE path -- except
         # test_agent_schema_lazily_migrates_an_old_table_postgres, which recreates
-        # the pre-migration table to force the migrate path. The six ALTER ...
-        # ADD COLUMN IF NOT EXISTS statements below re-add the columns the SQLite
-        # store accreted as lazy migrations, so a deployment whose table predates
+        # the pre-migration table to force the migrate path. Every ALTER ...
+        # ADD COLUMN IF NOT EXISTS statement below re-adds a column the SQLite
+        # store accreted as a lazy migration, so a deployment whose table predates
         # them is brought up to shape on the next boot; on a fresh or current
         # table they no-op. Add the next column the same way (Postgres supports
         # ADD COLUMN IF NOT EXISTS natively; users_postgres.py has the pattern).
@@ -81,14 +81,16 @@ class PostgresAgentStore:
                         description TEXT,
                         pipeline_config TEXT,
                         cash_allocation DOUBLE PRECISION,
+                        backtest_allocation DOUBLE PRECISION,
                         live_trading_enabled BOOLEAN NOT NULL DEFAULT FALSE
                     )
                     """
                 )
                 # Lazy migrations for a table created before these columns
-                # existed (mirrors the SQLite store's five post-ship ALTERs).
-                # Each no-ops on a fresh or already-current table. Must run
-                # before idx_external_agents_type, which indexes agent_type.
+                # existed (mirrors every one of the SQLite store's post-ship
+                # ALTERs). Each no-ops on a fresh or already-current table.
+                # Must run before idx_external_agents_type, which indexes
+                # agent_type.
                 cur.execute(
                     "ALTER TABLE external_agents "
                     "ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'external'"
@@ -103,6 +105,10 @@ class PostgresAgentStore:
                 cur.execute(
                     "ALTER TABLE external_agents "
                     "ADD COLUMN IF NOT EXISTS cash_allocation DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE external_agents "
+                    "ADD COLUMN IF NOT EXISTS backtest_allocation DOUBLE PRECISION"
                 )
                 cur.execute(
                     "ALTER TABLE external_agents "
@@ -142,6 +148,7 @@ class PostgresAgentStore:
         agent_type: str = "external",
         description: Optional[str] = None,
         cash_allocation: Optional[float] = None,
+        backtest_allocation: Optional[float] = None,
     ) -> Dict[str, Any]:
         agent_id = f"agent_{uuid.uuid4().hex[:12]}"
         session_id = session_id or str(uuid.uuid4())
@@ -157,8 +164,9 @@ class PostgresAgentStore:
                     INSERT INTO external_agents (
                         agent_id, name, session_id, api_key_hash, api_key_prefix,
                         model_name, agent_type, description, cash_allocation,
+                        backtest_allocation,
                         owner_user_id, owner_browser_session, created_at, last_used_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
@@ -171,6 +179,7 @@ class PostgresAgentStore:
                         (agent_type or "external").strip() or "external",
                         (description or None),
                         cash_allocation,
+                        backtest_allocation,
                         owner_user_id,
                         owner_browser_session,
                         now,
@@ -441,6 +450,7 @@ class PostgresAgentStore:
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
         cash_allocation: Any = _UNSET,
+        backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
     ) -> Optional[Dict[str, Any]]:
         """Update display fields for an agent. Returns the updated record or None.
@@ -466,6 +476,9 @@ class PostgresAgentStore:
         if cash_allocation is not _UNSET:
             sets.append("cash_allocation = %s")
             params.append(cash_allocation)
+        if backtest_allocation is not _UNSET:
+            sets.append("backtest_allocation = %s")
+            params.append(backtest_allocation)
         if live_trading_enabled is not _UNSET:
             sets.append("live_trading_enabled = %s")
             params.append(bool(live_trading_enabled))

@@ -254,6 +254,7 @@ class AgentService:
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
         cash_allocation: Any = _UNSET,
+        backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
     ) -> Dict[str, Any]:
         agent = self.agents.update_agent(
@@ -263,6 +264,7 @@ class AgentService:
             description=description,
             pipeline=pipeline,
             cash_allocation=cash_allocation,
+            backtest_allocation=backtest_allocation,
             live_trading_enabled=live_trading_enabled,
         )
         if not agent:
@@ -279,6 +281,7 @@ class AgentService:
         agent_type: str = "external",
         description: Optional[str] = None,
         cash_allocation: Optional[float] = None,
+        backtest_allocation: Optional[float] = None,
         seed_default_pipeline: bool = True,
     ) -> Dict[str, Any]:
         """Register an agent.
@@ -304,6 +307,7 @@ class AgentService:
             agent_type=agent_type,
             description=description,
             cash_allocation=cash_allocation,
+            backtest_allocation=backtest_allocation,
         )
         if seed_default_pipeline and agent_type == "builtin":
             # Merge rather than reassign: create_agent's dict carries the
