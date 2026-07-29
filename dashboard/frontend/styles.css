@@ -8896,6 +8896,10 @@ body.agent-editor-open {
     max-width: 360px;
 }
 
+.account-password-form > .auth-btn {
+    width: 100%;
+}
+
 .password-policy-hints {
     margin: 4px 0 0;
     padding-left: 18px;
@@ -8915,9 +8919,13 @@ body.agent-editor-open {
 }
 
 .account-email-actions {
-    display: flex;
+    display: grid;
     gap: 8px;
-    align-items: center;
+    width: 100%;
+}
+
+.account-email-actions .auth-btn {
+    width: 100%;
 }
 
 .auth-avatar--large {

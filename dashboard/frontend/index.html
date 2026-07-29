@@ -158,7 +158,7 @@
           window.location.replace(APP_URL);
         }
 
-        // Account menu "Visit Landing Page" uses ?stay=1 so logged-in users can view marketing.
+        // Optional ?stay=1 keeps signed-in users on the marketing page.
         var stayOnLanding = false;
         try {
           stayOnLanding = new URLSearchParams(window.location.search).get('stay') === '1';

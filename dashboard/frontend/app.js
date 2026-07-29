@@ -1623,7 +1623,7 @@ function renderMarketplaceGrid() {
         ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
       </div>
       <div class="agent-card-actions agent-card-actions--status">
-        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Copy to My Agents</button>
+        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Select to My Agents</button>
       </div>`;
     grid.appendChild(card);
   });
@@ -1636,11 +1636,11 @@ function renderMarketplaceGrid() {
       marketplaceCloneInFlight = true;
       btn.disabled = true;
       const prevLabel = btn.textContent;
-      btn.textContent = 'Copying…';
+      btn.textContent = 'Selecting…';
       try {
         await cloneMarketplaceTemplate(template);
       } catch (error) {
-        alert(error.message || 'Failed to copy template');
+        alert(error.message || 'Failed to select template');
       } finally {
         marketplaceCloneInFlight = false;
         btn.disabled = false;
@@ -1678,7 +1678,7 @@ async function cloneMarketplaceTemplate(template) {
   );
   const agent = data?.agent;
   if (!agent?.agent_id) {
-    throw new Error('Copy failed — no agent returned');
+    throw new Error('Select failed — no agent returned');
   }
   applyActiveAgent(agent);
   await loadAgents();
@@ -3064,9 +3064,6 @@ function initAuthUI(options = {}) {
   document.getElementById('accountMenuAccountBtn')?.addEventListener('click', () => {
     closeAccountMenu();
     navigateToPage('account');
-  });
-  document.getElementById('accountMenuLandingLink')?.addEventListener('click', () => {
-    closeAccountMenu();
   });
   document.getElementById('accountMenuLogoutBtn')?.addEventListener('click', () => {
     closeAccountMenu();
@@ -5439,7 +5436,6 @@ function viewParamForNavState(state) {
     if (state.page === 'playground') {
         if (state.playgroundTab === 'backtest') return 'backtest';
         if (state.playgroundTab === 'paper') return 'paper';
-        if (state.playgroundTab === 'marketplace') return 'marketplace';
         return 'agents';
     }
     if (state.page === 'competition') {
@@ -5525,6 +5521,10 @@ function resolveInitialNavigation() {
         const saved = JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null');
         const validPages = ['home', 'playground', 'competition', 'community', 'account'];
         if (saved && validPages.includes(saved.page)) {
+            // Marketplace moved from Playground → Community.
+            if (saved.page === 'playground' && saved.playgroundTab === 'marketplace') {
+                return { page: 'community' };
+            }
             return saved;
         }
     } catch (error) {
@@ -5678,17 +5678,21 @@ function updateCompetitionSubtabs() {
 }
 
 function showPlaygroundPanel(tab) {
+    // Legacy: marketplace used to be a Playground subtab.
+    if (tab === 'marketplace') {
+        navigateToPage('community');
+        return;
+    }
+
     playgroundTab = tab;
     updatePlaygroundSubtabs();
 
     const agents = document.getElementById('playgroundAgentsPanel');
-    const marketplace = document.getElementById('playgroundMarketplacePanel');
     const backtest = document.querySelector('.playground-backtest-panel')
       || document.querySelector('.main-container');
     const paper = document.getElementById('paperTradingView');
 
     if (agents) agents.style.display = tab === 'agents' ? 'block' : 'none';
-    if (marketplace) marketplace.style.display = tab === 'marketplace' ? 'block' : 'none';
     if (backtest) backtest.style.display = tab === 'backtest' ? 'grid' : 'none';
     if (paper) paper.style.display = tab === 'paper' ? 'block' : 'none';
 
@@ -5701,9 +5705,6 @@ function showPlaygroundPanel(tab) {
     } else if (tab === 'paper') {
         currentMode = 'paper';
         loadPaperTradingData();
-    } else if (tab === 'marketplace') {
-        currentMode = 'marketplace';
-        loadMarketplace();
     } else {
         currentMode = 'agents';
         // Cache-only repaint so the panel is not blank while agents load;
@@ -5748,6 +5749,11 @@ function navigateToPage(page, options = {}) {
         page = 'playground';
         options = { ...options, playgroundTab: options.playgroundTab || 'agents' };
     }
+    // Marketplace moved from Playground → Community.
+    if (page === 'playground' && options.playgroundTab === 'marketplace') {
+        page = 'community';
+        options = { ...options, playgroundTab: undefined };
+    }
 
     const historyMode = options.history || 'push';
     const prevState = getNavigationState();
@@ -5791,7 +5797,6 @@ function navigateToPage(page, options = {}) {
     hide(myAlgoView);
     hide(leaderboardView);
     hide(document.getElementById('playgroundAgentsPanel'));
-    hide(document.getElementById('playgroundMarketplacePanel'));
     hide(document.getElementById('competitionParticipantsPanel'));
     hide(document.getElementById('competitionAboutPanel'));
 
@@ -5808,7 +5813,9 @@ function navigateToPage(page, options = {}) {
             if (competitionView) competitionView.style.display = 'block';
             showCompetitionPanel(competitionTab);
         } else if (page === 'community') {
+            currentMode = 'community';
             if (communityView) communityView.style.display = 'block';
+            loadMarketplace();
         } else if (page === 'account') {
             currentMode = 'account';
             if (accountView) accountView.style.display = 'block';
