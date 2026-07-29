@@ -35,6 +35,13 @@ services:
       # durable deploy sets BOTH, pointed at the same Neon DB.
       - key: USERS_DATABASE_URL
         sync: false
+      # Durable Postgres for backtest run history (agent_runs, equity_timeseries,
+      # trades, backtest_decisions, run_manifest). Accounts and content are
+      # separate: USERS_DATABASE_URL / CONTENT_DATABASE_URL. Set in the Render
+      # dashboard BEFORE merging -- this yaml is documentation, not the mechanism
+      # (prod does not sync from it; see CLAUDE.md "Prod deploy reality").
+      - key: AGENT_RUNS_DATABASE_URL
+        sync: false
       - key: DISCORD_BOT_API_SECRET
         sync: false
       - key: DISCORD_CLIENT_ID

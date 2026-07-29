@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Any
 
 from dashboard.backend.paths import DEFAULT_DB_PATH
+from dashboard.backend.db_url import describe_database_url
 
 # Use persistent disk path if set (Render), otherwise local dashboard storage path
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(DEFAULT_DB_PATH)))
@@ -1003,5 +1004,22 @@ class BacktestDatabase:
         conn.close()
 
 
+def _build_backtest_db():
+    # AGENT_RUNS_DATABASE_URL only, deliberately: CONTENT_DATABASE_URL is scoped to
+    # agents/versions/strategies and USERS_DATABASE_URL to accounts; neither may
+    # select the run-history database (spec, Decision 3). Do not "simplify" this
+    # into a fallback chain.
+    database_url = os.getenv("AGENT_RUNS_DATABASE_URL")
+    if database_url:
+        from dashboard.backend.database_postgres import PostgresBacktestDatabase
+
+        # print(), not logger.info() -- info is invisible under the prod logging
+        # config. See users.py's _build_user_store for the full rationale.
+        print(f"run history backend: postgres ({describe_database_url(database_url)})")
+        return PostgresBacktestDatabase(database_url)
+    print("run history backend: sqlite (ephemeral on Render)")
+    return BacktestDatabase()
+
+
 # Singleton instance
-db = BacktestDatabase()
+db = _build_backtest_db()
