@@ -179,8 +179,9 @@ const SIMPLE_INSTRUCTION_OUTPUT_FORMAT =
 window.SIMPLE_INSTRUCTION_PRESET_KEY = SIMPLE_INSTRUCTION_PRESET_KEY;
 window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT = SIMPLE_INSTRUCTION_OUTPUT_FORMAT;
 // Mirrors DEFAULT_STARTER_INSTRUCTION in dashboard/backend/domain/agents/defaults.py,
-// which is what actually seeds new agents. The copy here is the editor's backfill
-// for agents created before server-side seeding existed (their pipeline is empty).
+// which is what actually seeds new agents. The copy here populates the
+// "See the default instruction" disclosure in Configure's empty-instruction
+// state, so the editor can show what an agent falls back to without a pipeline.
 // tests/test_agent_starter_defaults.py pins the two copies together.
 const DEFAULT_STARTER_INSTRUCTION =
   'Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.';

@@ -7,8 +7,10 @@
  * still EXECUTE server-side (infrastructure/llm/pipeline_runner.py) and the
  * marketplace still ships a 3-step template, so an agent may legitimately hold a
  * pipeline this screen cannot author. Such a pipeline is carried opaquely in
- * `subAgents` and re-sent untouched unless the user types an instruction — see
- * `sendPipeline` in getEditorState().
+ * `subAgents` and re-sent when the user has an instruction; an EMPTY
+ * instruction deliberately clears it instead, so the backend falls back to
+ * its platform default -- save() guards that with a confirm when the
+ * existing pipeline is multi-step. See `sendPipeline` in getEditorState().
  */
 (function () {
   'use strict';
