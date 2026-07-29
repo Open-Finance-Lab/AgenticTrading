@@ -119,13 +119,12 @@ def test_ifind_mode_applies_one_month_dates_without_changing_capital(html, js):
     assert re.search(r"startDateInput\.value\s*=\s*previousStartDate", js)
     assert re.search(r"endDateInput\.value\s*=\s*previousEndDate", js)
 
-    capital_input = re.search(
-        r'<input\b(?=[^>]*id="backtestInitialCapital")[^>]*>',
-        html,
-        re.S,
-    )
-    assert capital_input
-    assert _attr(capital_input.group(0), "value", "1000")
+    # Capital is no longer a per-run input the mode switch could touch (Task 4,
+    # 2026-07-29) — the modal reads it read-only from the agent's saved value.
+    # The invariant this test guards ("switching to iFind mode doesn't perturb
+    # capital") now holds structurally: there is no capital-related identifier
+    # anywhere in the mode-switch path.
+    assert 'id="runBacktestCapitalValue"' in html
     assert "IFIND_ASHARE_INITIAL_CAPITAL" not in js
 
 
@@ -207,19 +206,16 @@ def test_ifind_universe_change_preserves_decision_source(js):
     )
 
 
-def test_backtest_default_capital_is_natively_valid(html):
-    capital_input = re.search(
-        r'<input\b(?=[^>]*id="backtestInitialCapital")[^>]*>',
-        html,
-        re.S,
-    )
+def test_backtest_capital_input_stays_removed_default_unchanged(html, js):
+    """Historically pinned native <input min/max/step/value> attributes.
 
-    assert capital_input
-    tag = capital_input.group(0)
-    assert _attr(tag, "min", "1")
-    assert _attr(tag, "step", "1")
-    assert _attr(tag, "max", "10000")
-    assert _attr(tag, "value", "1000")
+    The input was removed in Task 4 (2026-07-29): capital is now set in
+    Configure and the modal only reports it via ``resolveBacktestCapital``,
+    so there is nothing left to natively validate. This guards that the old
+    input stays gone and the fallback default is still $1,000.
+    """
+    assert 'id="backtestInitialCapital"' not in html
+    assert re.search(r"DEFAULT_AGENT_CASH_ALLOCATION\s*=\s*1000", js)
 
 
 def test_ifind_model_dropdown_keeps_all_nine_models_available(html):

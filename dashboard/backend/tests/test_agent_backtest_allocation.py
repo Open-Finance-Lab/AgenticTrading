@@ -229,3 +229,25 @@ def test_signed_in_combined_patch_moves_only_the_real_sleeve(authed_client):
 
     after = authed_client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
     assert after["cash_available"] == before["cash_available"] - 1500
+
+
+def test_patch_with_an_empty_pipeline_clears_the_instruction(client):
+    """Empty instruction -> no pipeline -> the backend's default hourly prompt.
+
+    portfolio_manager takes the ``create_prompt`` branch when an agent has no
+    pipeline, so clearing is what "use the default" means end to end.
+    """
+    headers = _headers()
+    created = client.post(
+        "/api/v1/agents", json={"name": "alpha", "agent_type": "builtin"}, headers=headers
+    ).json()["agent"]
+    assert created["pipeline"], "builtin agents are seeded with a starter pipeline"
+
+    resp = client.patch(
+        f"/api/v1/agents/{created['agent_id']}", json={"pipeline": []}, headers=headers
+    )
+    assert resp.status_code == 200, resp.text
+    assert not resp.json()["agent"]["pipeline"]
+
+    reread = client.get(f"/api/v1/agents/{created['agent_id']}", headers=headers)
+    assert not reread.json()["agent"]["pipeline"]

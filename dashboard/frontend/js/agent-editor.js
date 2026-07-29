@@ -7,8 +7,10 @@
  * still EXECUTE server-side (infrastructure/llm/pipeline_runner.py) and the
  * marketplace still ships a 3-step template, so an agent may legitimately hold a
  * pipeline this screen cannot author. Such a pipeline is carried opaquely in
- * `subAgents` and re-sent untouched unless the user types an instruction — see
- * `sendPipeline` in getEditorState().
+ * `subAgents` and re-sent when the user has an instruction; an EMPTY
+ * instruction deliberately clears it instead, so the backend falls back to
+ * its platform default -- save() guards that with a confirm when the
+ * existing pipeline is multi-step. See `sendPipeline` in getEditorState().
  */
 (function () {
   'use strict';
@@ -95,8 +97,8 @@
   }
 
   // The pipeline the agent ACTUALLY has (backend row, then local cache). Returns
-  // [] when it has none, which is what triggers the starter-instruction backfill
-  // in open() for agents created before server-side seeding existed.
+  // [] when it has none -- an empty pipeline is a supported state (the platform
+  // default), not something open() backfills any more.
   function loadStoredPipeline(agent) {
     if (Array.isArray(agent.pipeline) && agent.pipeline.length) {
       return agent.pipeline.map(normalizeLoadedSubAgent);
@@ -431,6 +433,26 @@
     } else {
       cash_allocation = 1000;
     }
+    const backtestInput = document.getElementById('agentEditorBacktestAllocation');
+    let backtest_allocation = null;
+    if (backtestInput && backtestInput.value !== '') {
+      const value = Number(backtestInput.value);
+      if (!Number.isFinite(value) || value < 1) {
+        throw new Error('Backtest Allocated Capital must be at least $1.');
+      }
+      if (value > 10000) {
+        throw new Error('Backtest Allocated Capital cannot exceed $10,000.');
+      }
+      backtest_allocation = Math.round(value);
+    } else {
+      // Non-positive counts as absent: cash_allocation is legally 0 (a $0 paper
+      // sleeve), but backtest capital is >= 1 server-side, so 0 must fall
+      // through to the default rather than becoming an unsaveable value.
+      backtest_allocation =
+        Number.isFinite(Number(cash_allocation)) && Number(cash_allocation) > 0
+          ? Math.min(Math.round(Number(cash_allocation)), 10000)
+          : 1000;
+    }
     const modelSelect = document.getElementById('agentEditorModelSelect');
     const instruction = (
       document.getElementById('agentEditorSimpleInstruction')?.value || ''
@@ -453,18 +475,20 @@
       ];
       sendPipeline = true;
     } else {
-      // Empty instruction never touches the stored pipeline: not sent to the
-      // server, not cached locally, not folded into currentAgent. This is what
-      // stops a rename-only save from destroying a multi-step pipeline this
-      // screen cannot display.
-      subAgentsOut = subAgents;
-      sendPipeline = false;
+      // Empty means "use the platform default": clear the pipeline so the
+      // backend takes its create_prompt branch. The multi-step pipeline this
+      // screen cannot author is protected by a confirm in save(), not by
+      // silently refusing to send -- which used to make an empty save a no-op
+      // that still reported success.
+      subAgentsOut = [];
+      sendPipeline = true;
     }
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
     return {
       name: nameInput ? nameInput.value.trim() : '',
       description: descInput ? descInput.value.trim() : '',
       cash_allocation,
+      backtest_allocation,
       model_name: modelSelect ? modelSelect.value : '',
       live_trading_enabled: Boolean(liveToggle?.checked),
       subAgents: subAgentsOut,
@@ -521,6 +545,19 @@
     if (cashInput) {
       cashInput.value = agent.cash_allocation != null ? String(agent.cash_allocation) : '';
     }
+    const backtestInput = document.getElementById('agentEditorBacktestAllocation');
+    if (backtestInput) {
+      // Non-positive counts as absent: cash_allocation is legally 0 (a $0 paper
+      // sleeve), but backtest capital is >= 1 server-side, so 0 must fall
+      // through to the default rather than becoming an unsaveable value.
+      const candidates = [agent.backtest_allocation, agent.cash_allocation];
+      let resolved = 1000;
+      for (const raw of candidates) {
+        const value = Number(raw);
+        if (Number.isFinite(value) && value > 0) { resolved = value; break; }
+      }
+      backtestInput.value = String(Math.min(Math.round(resolved), 10000));
+    }
     if (meta) {
       meta.textContent = agent.agent_type === 'builtin' ? 'Built-in agent' : 'External agent';
     }
@@ -564,11 +601,12 @@
     }));
   }
 
-  async function patchAgent(agent, name, description, pipeline, cash_allocation, model_name, live_trading_enabled) {
+  async function patchAgent(agent, name, description, pipeline, cash_allocation, backtest_allocation, model_name, live_trading_enabled) {
     const payload = {
       name,
       description: description || null,
       cash_allocation,
+      backtest_allocation,
       live_trading_enabled: Boolean(live_trading_enabled),
     };
     if (pipeline) payload.pipeline = serializePipeline(pipeline);
@@ -728,6 +766,8 @@
     populateModelSelect(agent);
 
     const instructionEl = document.getElementById('agentEditorSimpleInstruction');
+    const defaultText = document.getElementById('agentEditorDefaultInstructionText');
+    if (defaultText) defaultText.textContent = defaultStarterInstruction();
     const simpleStep =
       subAgents.length === 1 && subAgents[0].presetKey === simplePresetKey()
         ? subAgents[0]
@@ -746,17 +786,8 @@
     const playgroundView = document.getElementById('playgroundView');
     if (playgroundView) playgroundView.setAttribute('aria-hidden', 'true');
 
-    // Baseline the STORED state first, then backfill — capturing the snapshot
-    // after the injection would re-baseline it and the default would never be
-    // recognised as an unsaved change.
+    // Baseline the stored state so the dirty badge only fires on real edits.
     captureSavedSnapshot();
-    if (!subAgents.length && instructionEl && defaultStarterInstruction()) {
-      // Agent predates server-side seeding (its pipeline is empty). Offer the
-      // starter instruction so Configure is never a blank box, and mark it dirty
-      // so a Save persists it.
-      instructionEl.value = defaultStarterInstruction();
-      markDirtyFromInput();
-    }
 
     document.getElementById('agentEditorNameInput')?.focus();
   }
@@ -792,6 +823,15 @@
       showSaveStatus('Agent name is required', true);
       document.getElementById('agentEditorNameInput')?.focus();
       return;
+    }
+
+    const clearingToDefault = state.sendPipeline && state.subAgents.length === 0;
+    if (clearingToDefault && !isSimplePipeline(subAgents) && subAgents.length) {
+      const ok = window.confirm(
+        'This agent uses a custom multi-step pipeline. Saving an empty '
+        + 'instruction replaces it with the platform default. Continue?',
+      );
+      if (!ok) return;
     }
 
     subAgents = state.subAgents;
@@ -846,6 +886,7 @@
         state.description,
         state.sendPipeline ? subAgents : null,
         state.cash_allocation,
+        state.backtest_allocation,
         state.model_name,
         state.live_trading_enabled
       );
@@ -861,7 +902,11 @@
 
       fillHeader(currentAgent);
       captureSavedSnapshot();
-      showSaveStatus('Saved successfully');
+      showSaveStatus(
+        clearingToDefault
+          ? 'Saved — using the default trading instruction.'
+          : 'Saved successfully',
+      );
       window.dispatchEvent(
         new CustomEvent('agent-editor-saved', { detail: { agent: currentAgent } })
       );

@@ -179,8 +179,9 @@ const SIMPLE_INSTRUCTION_OUTPUT_FORMAT =
 window.SIMPLE_INSTRUCTION_PRESET_KEY = SIMPLE_INSTRUCTION_PRESET_KEY;
 window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT = SIMPLE_INSTRUCTION_OUTPUT_FORMAT;
 // Mirrors DEFAULT_STARTER_INSTRUCTION in dashboard/backend/domain/agents/defaults.py,
-// which is what actually seeds new agents. The copy here is the editor's backfill
-// for agents created before server-side seeding existed (their pipeline is empty).
+// which is what actually seeds new agents. The copy here populates the
+// "See the default instruction" disclosure in Configure's empty-instruction
+// state, so the editor can show what an agent falls back to without a pipeline.
 // tests/test_agent_starter_defaults.py pins the two copies together.
 const DEFAULT_STARTER_INSTRUCTION =
   'Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.';
@@ -246,7 +247,7 @@ const CASH_STEP_INPUT_IDS = [
   'externalAgentCashAllocation',
   'builtinAgentCashAllocation',
   'agentEditorCashAllocation',
-  'backtestInitialCapital',
+  'agentEditorBacktestAllocation',
 ];
 
 function cashStepMeta(input) {
@@ -731,20 +732,66 @@ function formatSignedReturnPct(frac) {
   return body;
 }
 
-/** Shared top block: portfolio sleeve always leads (draft + backtested cards). */
+/**
+ * Saved simulated capital for an agent's backtests.
+ *
+ * Mirrors the backend fallback chain exactly: an agent created before
+ * `backtest_allocation` existed has a NULL column and must keep behaving as it
+ * did, i.e. starting from its paper sleeve.
+ */
+function resolveBacktestCapital(agent) {
+  const candidates = [agent?.backtest_allocation, agent?.cash_allocation];
+  for (const raw of candidates) {
+    const value = Number(raw);
+    if (Number.isFinite(value) && value > 0) {
+      return Math.min(Math.round(value), MAX_BACKTEST_ALLOCATED_CAPITAL);
+    }
+  }
+  return DEFAULT_AGENT_CASH_ALLOCATION;
+}
+
+/** Shared top block: both capital figures, equal weight (draft + backtested). */
 function renderAgentAllocatedCapitalHero(agent) {
-  const capital =
+  const paper =
     agent.cash_allocation != null
       ? formatAgentCashAllocation(agent.cash_allocation)
       : '$1,000';
+  const backtest = formatAgentCashAllocation(resolveBacktestCapital(agent));
   return `
-    <div class="agent-card-hero agent-card-hero--draft">
-      <div class="agent-card-hero-text">
-        <span class="agent-card-metric-label">Paper Trading Allocated Capital</span>
-        <p class="agent-card-metric-value">${escapeHtml(capital)}</p>
+    <div class="agent-card-capitals">
+      <div class="agent-card-capital">
+        <span class="agent-card-metric-label">Paper Trading</span>
+        <p class="agent-card-metric-value">${escapeHtml(paper)}</p>
         <p class="agent-card-capital-note">From My Portfolio</p>
       </div>
+      <div class="agent-card-capital">
+        <span class="agent-card-metric-label">Backtesting</span>
+        <p class="agent-card-metric-value">${escapeHtml(backtest)}</p>
+        <p class="agent-card-capital-note">Simulated</p>
+      </div>
     </div>`;
+}
+
+/**
+ * Card body for an agent with a backtest in flight.
+ *
+ * The bar is deliberately indeterminate rather than a percentage: the launch
+ * path has no honest completion estimate, and a fake percentage that stalls is
+ * worse than an animation that only claims "still working".
+ */
+function renderAgentRunningBody(agent, running) {
+  return `
+    <div class="agent-card-running">
+      <div class="agent-card-running-head">
+        <span class="agent-card-running-dot" aria-hidden="true"></span>
+        <span class="agent-card-running-label">Backtesting…</span>
+        <span class="agent-card-running-elapsed" data-running-elapsed="${escapeHtml(agent.agent_id)}">${escapeHtml(formatBacktestElapsed(running.elapsedSeconds))}</span>
+      </div>
+      <div class="agent-card-running-track" role="progressbar" aria-label="Backtest in progress">
+        <div class="agent-card-running-bar"></div>
+      </div>
+    </div>
+    ${renderAgentAllocatedCapitalHero(agent)}`;
 }
 
 function renderAgentCardBody(agent, statusKey) {
@@ -823,7 +870,6 @@ function renderAgentCardBody(agent, statusKey) {
           ${renderAgentSparkline(agent, m.positive, m)}
         </div>
         <p class="agent-card-latest-meta">${escapeHtml(metaParts.join(' · '))}</p>
-        <p class="agent-card-latest-note">Simulated — separate from Paper Trading Allocated Capital.</p>
         ${renderAgentRunsLink(agent)}
       </div>`;
   }
@@ -845,7 +891,13 @@ function renderAgentCardActions(agent, statusKey) {
   if (statusKey === 'paper') {
     primary = `<button class="agent-card-cta agent-open-btn" type="button" data-agent-id="${id}">Open Agent</button>`;
   } else {
-    primary = `<button class="agent-card-cta agent-run-backtest-btn" type="button" data-agent-id="${id}">Run Backtest</button>`;
+    // Paper trading is Phase B (execution/paper_backend.py is a stub). Ship the
+    // affordance disabled *with a reason* -- an unexplained grey button reads as
+    // a bug, and its absence hides that the two capital figures above map onto
+    // two different things you can eventually run.
+    primary = `
+      <button class="agent-card-cta agent-run-backtest-btn" type="button" data-agent-id="${id}">Run Backtest</button>
+      <button class="agent-card-cta agent-card-cta--disabled" type="button" disabled aria-disabled="true" title="Paper trading is coming soon" aria-label="Run Paper Trading — Paper trading is coming soon">Run Paper Trading</button>`;
   }
   const configure = `<button class="agent-card-cta agent-card-cta--configure agent-configure-btn" type="button" data-agent-id="${id}">Configure</button>`;
   const rotate =
@@ -866,6 +918,15 @@ function renderAgentCardActions(agent, statusKey) {
           <button class="agent-menu-item agent-menu-item--danger agent-delete-btn" type="button" data-agent-id="${id}">Delete</button>
         </div>
       </div>
+    </div>`;
+}
+
+function renderAgentRunningActions(agent) {
+  const id = escapeHtml(agent.agent_id);
+  return `
+    <div class="agent-card-actions agent-card-actions--status">
+      <button class="agent-card-cta agent-card-cta--configure agent-card-cta--disabled" type="button" disabled aria-disabled="true" data-agent-id="${id}">Configure</button>
+      <button class="agent-card-cta agent-card-cta--disabled" type="button" disabled aria-disabled="true">Running…</button>
     </div>`;
 }
 
@@ -1063,6 +1124,8 @@ function renderAgentCards(grid, agents, categoryKey) {
     card.className = `section-card agent-card agent-card--status agent-card--${statusBadge.key}${isBuiltin ? ' agent-card-builtin' : ''}`;
     const model = escapeHtml(formatAgentModelLabel(agent.model_name));
     const type = escapeHtml(agentTypeLabel(agent));
+    const running = getAgentBacktestRunning(agent.agent_id);
+    if (running) card.classList.add('agent-card--running');
 
     card.innerHTML = `
       <div class="agent-card-top">
@@ -1075,8 +1138,8 @@ function renderAgentCards(grid, agents, categoryKey) {
         </div>
         <span class="status-badge ${statusBadge.className}"><span class="status-badge-dot" aria-hidden="true"></span>${statusBadge.label}</span>
       </div>
-      ${renderAgentCardBody(agent, statusBadge.key)}
-      ${renderAgentCardActions(agent, statusBadge.key)}
+      ${running ? renderAgentRunningBody(agent, running) : renderAgentCardBody(agent, statusBadge.key)}
+      ${running ? renderAgentRunningActions(agent) : renderAgentCardActions(agent, statusBadge.key)}
     `;
     grid.appendChild(card);
   });
@@ -3223,6 +3286,94 @@ let liveBacktestLaunchPending = false;
 let liveBacktestLaunchError = false;
 /** Active status-poll timer id (so dropdown can re-attach to a running job). */
 let backtestPollTimer = null;
+
+// Which agents have a backtest in flight, so My Agents can show it. Mirrored to
+// sessionStorage: a refresh mid-run must not silently drop the indicator and
+// make a running backtest look like it never started.
+const RUNNING_BACKTESTS_KEY = 'running-backtests';
+
+function readRunningBacktests() {
+    try {
+        const raw = sessionStorage.getItem(RUNNING_BACKTESTS_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+        return {};
+    }
+}
+
+function writeRunningBacktests(map) {
+    try {
+        sessionStorage.setItem(RUNNING_BACKTESTS_KEY, JSON.stringify(map));
+    } catch (error) {
+        /* sessionStorage unavailable — the in-page indicator still works */
+    }
+}
+
+function markAgentBacktestRunning(agentId, runId) {
+    if (!agentId) return;
+    const map = readRunningBacktests();
+    map[agentId] = { runId: runId || null, startedAt: Date.now() };
+    writeRunningBacktests(map);
+}
+
+function clearAgentBacktestRunning(agentId) {
+    if (!agentId) return;
+    const map = readRunningBacktests();
+    if (!(agentId in map)) return;
+    delete map[agentId];
+    writeRunningBacktests(map);
+}
+
+/**
+ * Running entry for an agent, or null.
+ *
+ * Entries older than the poll ceiling are discarded: a run that died without a
+ * terminal status would otherwise pin a card to "Backtesting…" forever.
+ */
+function getAgentBacktestRunning(agentId) {
+    const entry = readRunningBacktests()[agentId];
+    if (!entry) return null;
+    const elapsed = (Date.now() - Number(entry.startedAt || 0)) / 1000;
+    if (!Number.isFinite(elapsed) || elapsed > BACKTEST_POLL_MAX_SECONDS) {
+        clearAgentBacktestRunning(agentId);
+        return null;
+    }
+    return { ...entry, elapsedSeconds: Math.floor(elapsed) };
+}
+
+let lastRenderedRunningKey = null;
+
+/**
+ * Per-second refresh for running cards.
+ *
+ * Patches the elapsed timer in place rather than re-rendering the grid:
+ * renderAgentCards() starts with `grid.innerHTML = ''`, so doing that once a
+ * second would destroy focus, scroll position and any open card menu for the
+ * whole duration of a run. A full re-render happens only when the set of
+ * running agents changes.
+ */
+function refreshRunningAgentCards() {
+    const running = readRunningBacktests();
+    const key = Object.keys(running).sort().join(',');
+    if (key !== lastRenderedRunningKey) {
+        lastRenderedRunningKey = key;
+        applyAgentFilters(false);
+        return;
+    }
+    // Query by attribute presence and compare values in JS rather than
+    // interpolating an agent id into a selector string: no escaping, no
+    // CSS.escape feature detection, and nothing to get wrong later.
+    const elapsedNodes = document.querySelectorAll('[data-running-elapsed]');
+    Object.keys(running).forEach((agentId) => {
+        const entry = getAgentBacktestRunning(agentId);
+        if (!entry) return;
+        elapsedNodes.forEach((el) => {
+            if (el.getAttribute('data-running-elapsed') !== agentId) return;
+            el.textContent = formatBacktestElapsed(entry.elapsedSeconds);
+        });
+    });
+}
 let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
 let tradingLogFilter = 'all';
@@ -3339,6 +3490,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('runBacktestModalBackdrop')?.addEventListener('click', closeRunBacktestModal);
     document.getElementById('runBacktestModalSubmit')?.addEventListener('click', () => {
         runBacktest();
+    });
+    document.getElementById('runBacktestEditCapitalBtn')?.addEventListener('click', () => {
+        const agent = runBacktestModalAgent;
+        closeRunBacktestModal();
+        if (agent && window.AgentEditor?.open) window.AgentEditor.open(agent);
     });
     document.addEventListener('keydown', (event) => {
         if (event.key !== 'Escape') return;
@@ -4653,6 +4809,10 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
 }
 
 function showBacktestLaunchFailure(message, launchConfig) {
+    if (launchConfig?.agentId) {
+        clearAgentBacktestRunning(launchConfig.agentId);
+        applyAgentFilters(false);
+    }
     liveBacktestChartActive = false;
     liveBacktestRunId = null;
     liveBacktestLaunchPending = false;
@@ -4662,6 +4822,14 @@ function showBacktestLaunchFailure(message, launchConfig) {
     clearTradingLog('Backtest did not start.');
     showBacktestRunProgress(true, { isError: true });
     updateBacktestRunProgress({ elapsedSeconds: 0, message });
+    // The panel painted above lives under the Backtest tab, which is hidden
+    // when the user is standing on My Agents -- the landing page after a
+    // launch. Surface the failure where they actually are, using this
+    // file's existing alert() convention for launch-time refusals (see
+    // openRunBacktestModal / runBacktest) rather than inventing a new one.
+    if (playgroundTab === 'agents' && currentPage === 'playground') {
+        alert(message);
+    }
 }
 
 function stopBacktestPolling() {
@@ -4694,6 +4862,13 @@ function ensureBacktestPolling() {
 
             if (status.running) {
                 if (liveId) liveBacktestRunId = liveId;
+                // Repaint the My Agents card even when the user is not on the
+                // Backtest tab — that page is now the landing page after launch.
+                // refreshRunningAgentCards() patches the elapsed timer in place
+                // instead of tearing down the whole grid every second.
+                if (playgroundTab === 'agents' && currentPage === 'playground') {
+                    refreshRunningAgentCards();
+                }
                 const step = Number(status.progress?.step);
                 const total = Number(status.progress?.total_steps);
                 const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
@@ -4722,6 +4897,10 @@ function ensureBacktestPolling() {
                 liveBacktestChartActive = false;
                 const finishedId = liveBacktestRunId;
                 liveBacktestRunId = null;
+                Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);
+                if (playgroundTab === 'agents' && currentPage === 'playground') {
+                    loadAgents();
+                }
 
                 if (status.error) {
                     if (viewingLive) {
@@ -5120,15 +5299,9 @@ function openRunBacktestModal(agent) {
             : 'Does not change Paper Trading Allocated Capital.';
     }
 
-    // Reseed on every open. The field is per-run, so leaving the previous
-    // agent's number in place silently backtests this one at the wrong size.
-    const capitalInput = document.getElementById('backtestInitialCapital');
-    if (capitalInput) {
-        capitalInput.value = String(
-            Number.isFinite(sleeve) && sleeve > 0
-                ? Math.min(Math.round(sleeve), MAX_BACKTEST_ALLOCATED_CAPITAL)
-                : DEFAULT_AGENT_CASH_ALLOCATION,
-        );
+    const capitalValue = document.getElementById('runBacktestCapitalValue');
+    if (capitalValue) {
+        capitalValue.textContent = `$${resolveBacktestCapital(agent).toLocaleString()}`;
     }
 
     syncModelSelectFromAgent(agent);
@@ -5224,21 +5397,7 @@ async function runBacktest() {
         ? null
         : resolveBacktestModelRequest(modelSelect, activeAgent);
 
-    const capitalInput = document.getElementById('backtestInitialCapital');
-    let initialCapital = DEFAULT_AGENT_CASH_ALLOCATION;
-    if (capitalInput && capitalInput.value !== '') {
-        const parsed = Number(capitalInput.value);
-        if (!Number.isFinite(parsed) || parsed <= 0) {
-            alert('Backtest Allocated Capital must be greater than 0.');
-            return;
-        }
-        if (parsed > MAX_BACKTEST_ALLOCATED_CAPITAL) {
-            alert(`Backtest Allocated Capital cannot exceed $${MAX_BACKTEST_ALLOCATED_CAPITAL.toLocaleString()}.`);
-            return;
-        }
-        initialCapital = Math.round(parsed);
-        capitalInput.value = String(initialCapital);
-    }
+    const initialCapital = resolveBacktestCapital(activeAgent);
 
     const promptSummary = formatPromptFromPipeline(pipeline);
     const universeLabel = isIFind
@@ -5296,15 +5455,26 @@ async function runBacktest() {
     // otherwise the async history load paints the previous run over the chart.
     closeRunBacktestModal();
     prepareLiveBacktestView(launchConfigBase);
-    navigateToPage('playground', { playgroundTab: 'backtest' });
-    currentMode = 'backtest';
-    updateBacktestRunProgress({
-        elapsedSeconds: 0,
-        message: pipeline?.length
-            ? `Running ${pipeline.length}-step agent pipeline…`
-            : 'Starting backtest…',
-    });
-    
+    markAgentBacktestRunning(activeAgent.agent_id, null);
+    // A synchronous throw anywhere in here would otherwise leave the agent
+    // marked running with no poller ever attached to clear it — narrow
+    // try/catch (not the outer one below, which governs the API call) so we
+    // can clear the mark and rethrow rather than swallow the failure.
+    try {
+        navigateToPage('playground', { playgroundTab: 'agents' });
+        currentMode = 'backtest';
+        applyAgentFilters(false);
+        updateBacktestRunProgress({
+            elapsedSeconds: 0,
+            message: pipeline?.length
+                ? `Running ${pipeline.length}-step agent pipeline…`
+                : 'Starting backtest…',
+        });
+    } catch (error) {
+        clearAgentBacktestRunning(activeAgent.agent_id);
+        throw error;
+    }
+
     try {
         // Call API with session ID, assets, and model
         const params = new URLSearchParams({
@@ -5351,6 +5521,7 @@ async function runBacktest() {
         const liveRunId = data.live_run_id || data.run_id;
         if (liveRunId) {
             stashBacktestLaunchConfig(liveRunId, launchConfigBase);
+            markAgentBacktestRunning(activeAgent.agent_id, liveRunId);
             attachToLiveBacktest(liveRunId, null, launchConfigBase);
         }
         
@@ -5747,6 +5918,12 @@ function showPlaygroundPanel(tab) {
             window.repaintPortfolioFromCache(allAgents.map(decorateAgent));
         }
         loadAgents();
+        // A refresh mid-run restores the sessionStorage running marks but
+        // drops the poller that would ever clear them -- reattach it here so
+        // the card doesn't strand at "Backtesting…" for up to
+        // BACKTEST_POLL_MAX_SECONDS. ensureBacktestPolling() is a no-op if a
+        // poller is already attached.
+        if (Object.keys(readRunningBacktests()).length) ensureBacktestPolling();
     }
 
     persistNavigation();
