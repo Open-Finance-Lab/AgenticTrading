@@ -134,5 +134,5 @@ def test_cache_bust_versions_were_bumped():
     styles_version = int(re.search(r"styles\.css\?v=(\d+)", html).group(1))
     app_version = int(re.search(r"app\.js\?v=(\d+)", html).group(1))
 
-    assert styles_version >= 65
-    assert app_version >= 48
+    assert styles_version >= 68
+    assert app_version >= 51

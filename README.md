@@ -53,7 +53,7 @@ Start with a market question or trading idea, then turn it into an agent you can
 - **Create trading agents your way**  
 Choose a model, data source, and trading prompt, or connect your own agent through our API.
 - **Start from a template**  
-Copy a ready-made agent out of the Agent Marketplace, then customize its prompts and backtest it.
+Add a ready-made agent from the Agent Marketplace, then customize its prompts and backtest it.
 - **Build an agent-powered portfolio**  
 Give multiple agents simulated capital and manage them as your own virtual trading team.
 - **Test before using real capital**  

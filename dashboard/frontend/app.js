@@ -1556,6 +1556,7 @@ async function loadAgents() {
 
 let marketplaceTemplates = [];
 let marketplaceCloneInFlight = false;
+let marketplaceLoadInFlight = null;
 
 function getFilteredMarketplaceTemplates() {
   const query = (document.getElementById('marketplaceSearchInput')?.value || '').trim().toLowerCase();
@@ -1623,7 +1624,7 @@ function renderMarketplaceGrid() {
         ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
       </div>
       <div class="agent-card-actions agent-card-actions--status">
-        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Copy to My Agents</button>
+        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Add to My Agents</button>
       </div>`;
     grid.appendChild(card);
   });
@@ -1636,11 +1637,11 @@ function renderMarketplaceGrid() {
       marketplaceCloneInFlight = true;
       btn.disabled = true;
       const prevLabel = btn.textContent;
-      btn.textContent = 'Copying…';
+      btn.textContent = 'Adding…';
       try {
         await cloneMarketplaceTemplate(template);
       } catch (error) {
-        alert(error.message || 'Failed to copy template');
+        alert(error.message || 'Failed to add template');
       } finally {
         marketplaceCloneInFlight = false;
         btn.disabled = false;
@@ -1659,16 +1660,37 @@ function renderMarketplaceError() {
   if (errorEl) errorEl.hidden = false;
 }
 
+/**
+ * Fetch the template catalog, at most once per page load.
+ *
+ * Community is a top-level page now, so this runs on every nav click, every
+ * Back/Forward and the initial boot -- where it used to run once, when the
+ * Playground marketplace subtab was opened. The catalog is static config the
+ * server already caches in-process, so repeat visits repaint from memory and
+ * skip the network entirely. A failure clears the cache, so the next visit
+ * retries rather than showing the error forever.
+ */
 async function loadMarketplace() {
-  try {
-    const data = await API.get(`${API_BASE}/api/v1/agents/marketplace`);
-    marketplaceTemplates = data.templates || [];
+  if (marketplaceTemplates.length) {
     renderMarketplaceGrid();
-  } catch (error) {
-    console.warn('Failed to load marketplace:', error.message);
-    marketplaceTemplates = [];
-    renderMarketplaceError();
+    return;
   }
+  // Concurrent callers share one request (boot + a fast nav click can overlap).
+  if (marketplaceLoadInFlight) return marketplaceLoadInFlight;
+  marketplaceLoadInFlight = (async () => {
+    try {
+      const data = await API.get(`${API_BASE}/api/v1/agents/marketplace`);
+      marketplaceTemplates = data.templates || [];
+      renderMarketplaceGrid();
+    } catch (error) {
+      console.warn('Failed to load marketplace:', error.message);
+      marketplaceTemplates = [];
+      renderMarketplaceError();
+    } finally {
+      marketplaceLoadInFlight = null;
+    }
+  })();
+  return marketplaceLoadInFlight;
 }
 
 async function cloneMarketplaceTemplate(template) {
@@ -1678,7 +1700,7 @@ async function cloneMarketplaceTemplate(template) {
   );
   const agent = data?.agent;
   if (!agent?.agent_id) {
-    throw new Error('Copy failed — no agent returned');
+    throw new Error('Add failed — no agent returned');
   }
   applyActiveAgent(agent);
   await loadAgents();
@@ -3064,9 +3086,6 @@ function initAuthUI(options = {}) {
   document.getElementById('accountMenuAccountBtn')?.addEventListener('click', () => {
     closeAccountMenu();
     navigateToPage('account');
-  });
-  document.getElementById('accountMenuLandingLink')?.addEventListener('click', () => {
-    closeAccountMenu();
   });
   document.getElementById('accountMenuLogoutBtn')?.addEventListener('click', () => {
     closeAccountMenu();
@@ -5391,6 +5410,9 @@ function getSelectedSymbols() {
 // A divergence would paint one page and render another — a flash bug no test
 // in this repo can catch, so there is deliberately only ever one object.
 const NAV_VIEW_MAP = window.NAV_VIEW_MAP;
+// Same deal, same reason: both files restore the same saved nav blob, so the
+// rule that rewrites a pre-move one lives in exactly one place.
+const migrateSavedNavState = window.migrateSavedNavState;
 
 // Persist the current tab so a page refresh restores it instead of going home.
 function persistNavigation() {
@@ -5429,8 +5451,10 @@ function navigationStatesEqual(a, b) {
  * hand-maintained inverses — change one, check the other.
  *
  * Several NAV_VIEW_MAP keys are read-only aliases that this never emits
- * ('contest', 'competition', 'playground', 'my-algo'); old links keep working,
- * new URLs get the canonical slug.
+ * ('contest', 'competition', 'playground', 'my-algo', 'marketplace'); old links
+ * keep working, new URLs get the canonical slug. 'marketplace' joined that list
+ * when the catalog moved to Community: ?view=marketplace still opens it, but a
+ * URL written from that page now says ?view=community.
  */
 function viewParamForNavState(state) {
     if (state.page === 'home') return 'home';
@@ -5439,7 +5463,6 @@ function viewParamForNavState(state) {
     if (state.page === 'playground') {
         if (state.playgroundTab === 'backtest') return 'backtest';
         if (state.playgroundTab === 'paper') return 'paper';
-        if (state.playgroundTab === 'marketplace') return 'marketplace';
         return 'agents';
     }
     if (state.page === 'competition') {
@@ -5522,7 +5545,14 @@ function resolveInitialNavigation() {
 
     // Otherwise restore the last visited tab across refreshes.
     try {
-        const saved = JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null');
+        // Migrated here as well as in navigateToPage's redirect: this function
+        // is documented to return a *current* nav state, and popstate reads it
+        // directly. Returning a page/subtab pair that no longer exists would be
+        // a live trap for the next caller that does not route through
+        // navigateToPage.
+        const saved = migrateSavedNavState(
+            JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null'),
+        );
         const validPages = ['home', 'playground', 'competition', 'community', 'account'];
         if (saved && validPages.includes(saved.page)) {
             return saved;
@@ -5678,17 +5708,25 @@ function updateCompetitionSubtabs() {
 }
 
 function showPlaygroundPanel(tab) {
+    // Belt and braces: navigateToPage already redirects the retired subtab, so
+    // nothing in-tree reaches this. It stays because this function is also the
+    // direct target of the subtab click handler, where a stray
+    // data-playground-tab="marketplace" would otherwise blank the page -- every
+    // panel hidden and none shown.
+    if (tab === 'marketplace') {
+        navigateToPage('community');
+        return;
+    }
+
     playgroundTab = tab;
     updatePlaygroundSubtabs();
 
     const agents = document.getElementById('playgroundAgentsPanel');
-    const marketplace = document.getElementById('playgroundMarketplacePanel');
     const backtest = document.querySelector('.playground-backtest-panel')
       || document.querySelector('.main-container');
     const paper = document.getElementById('paperTradingView');
 
     if (agents) agents.style.display = tab === 'agents' ? 'block' : 'none';
-    if (marketplace) marketplace.style.display = tab === 'marketplace' ? 'block' : 'none';
     if (backtest) backtest.style.display = tab === 'backtest' ? 'grid' : 'none';
     if (paper) paper.style.display = tab === 'paper' ? 'block' : 'none';
 
@@ -5701,9 +5739,6 @@ function showPlaygroundPanel(tab) {
     } else if (tab === 'paper') {
         currentMode = 'paper';
         loadPaperTradingData();
-    } else if (tab === 'marketplace') {
-        currentMode = 'marketplace';
-        loadMarketplace();
     } else {
         currentMode = 'agents';
         // Cache-only repaint so the panel is not blank while agents load;
@@ -5748,6 +5783,16 @@ function navigateToPage(page, options = {}) {
         page = 'playground';
         options = { ...options, playgroundTab: options.playgroundTab || 'agents' };
     }
+    // Marketplace moved from Playground → Community. This is the choke point
+    // every navigation funnels through, so the redirect belongs here rather than
+    // at each call site. Reads the module-level playgroundTab too, so a session
+    // that entered this page load holding the retired subtab cannot land back on
+    // it, and rewrites the tab to 'agents' rather than clearing it -- leaving it
+    // set to 'marketplace' would bounce the *next* Playground visit as well.
+    if (page === 'playground' && (options.playgroundTab || playgroundTab) === 'marketplace') {
+        page = 'community';
+        options = { ...options, playgroundTab: 'agents' };
+    }
 
     const historyMode = options.history || 'push';
     const prevState = getNavigationState();
@@ -5791,7 +5836,6 @@ function navigateToPage(page, options = {}) {
     hide(myAlgoView);
     hide(leaderboardView);
     hide(document.getElementById('playgroundAgentsPanel'));
-    hide(document.getElementById('playgroundMarketplacePanel'));
     hide(document.getElementById('competitionParticipantsPanel'));
     hide(document.getElementById('competitionAboutPanel'));
 
@@ -5808,7 +5852,9 @@ function navigateToPage(page, options = {}) {
             if (competitionView) competitionView.style.display = 'block';
             showCompetitionPanel(competitionTab);
         } else if (page === 'community') {
+            currentMode = 'community';
             if (communityView) communityView.style.display = 'block';
+            loadMarketplace();
         } else if (page === 'account') {
             currentMode = 'account';
             if (accountView) accountView.style.display = 'block';

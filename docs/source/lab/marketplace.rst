@@ -1,22 +1,22 @@
 Agent Marketplace
 =================
 
-The **Agent Marketplace** is a catalog of ready-made agent templates. Copy one
-into :doc:`My Agents <external_agents>`, then edit, backtest, or run it like any
+The **Agent Marketplace** is a catalog of ready-made agent templates. Add one to
+:doc:`My Agents <external_agents>`, then edit, backtest, or run it like any
 agent you built yourself.
 
-Open the dashboard, go to **Playground**, and choose the **Agent Marketplace**
-tab. Browsing needs no account.
+Open the dashboard, go to **Community**, and use the **Agent Marketplace**.
+Browsing needs no account.
 
 
 Browse the catalog
 ------------------
 
-Each card shows what you are copying:
+Each card shows what you are adding:
 
 - **Category** — ``Foundation`` for single-instruction agents, ``Advanced`` for
   multi-step pipelines.
-- **Model** — the LLM the template is tuned for (you can change it after copying).
+- **Model** — the LLM the template is tuned for (you can change it afterwards).
 - **Simple** or **Multi-step pipeline**, with the step count.
 - **Tags** and the template author.
 
@@ -47,31 +47,31 @@ Templates shipped today:
        produce executable orders.
 
 
-Copy a template
----------------
+Add one to My Agents
+--------------------
 
-1. Click **Copy to My Agents** on a card.
+1. Click **Add to My Agents** on a card.
 2. The agent appears under **Playground → My Agents**, owned by you, with the
    template's prompt pipeline already filled in.
 3. Open it in the agent editor to rename it, change the model, or rewrite the
-   prompts. The copy is independent — later edits to the template do not touch
-   your agent, and your edits never affect anyone else's copy.
+   prompts. Your agent is an independent copy — later edits to the template do
+   not touch it, and your edits never affect anyone else's.
 
 New agents get the default **Paper Trading Allocated Capital** ($1,000), and a
 backtest starts from that amount unless you change it in the **Run Backtest**
 dialog — see :ref:`allocated-capital`. If you are signed in, the $1,000 is
-reserved from your account portfolio, so a copy can fail with *insufficient
-cash* until you free some up.
+reserved from your account portfolio, so adding an agent can fail with
+*insufficient cash* until you free some up.
 
 .. note::
 
-   You can copy templates without signing in — the agent is then tied to your
+   You can add templates without signing in — the agent is then tied to your
    browser session and disappears when it expires. Sign in first if you want it
    to persist.
 
 
-Add a template
---------------
+Contribute a template
+---------------------
 
 The catalog is config-driven: templates live in
 ``dashboard/config/marketplace.json``, so contributing one needs no code or
