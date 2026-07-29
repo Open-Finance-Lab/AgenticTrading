@@ -3361,15 +3361,17 @@ function refreshRunningAgentCards() {
         applyAgentFilters(false);
         return;
     }
+    // Query by attribute presence and compare values in JS rather than
+    // interpolating an agent id into a selector string: no escaping, no
+    // CSS.escape feature detection, and nothing to get wrong later.
+    const elapsedNodes = document.querySelectorAll('[data-running-elapsed]');
     Object.keys(running).forEach((agentId) => {
         const entry = getAgentBacktestRunning(agentId);
         if (!entry) return;
-        const escaped = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(agentId) : agentId.replace(/"/g, '\\"');
-        document
-            .querySelectorAll(`[data-running-elapsed="${escaped}"]`)
-            .forEach((el) => {
-                el.textContent = formatBacktestElapsed(entry.elapsedSeconds);
-            });
+        elapsedNodes.forEach((el) => {
+            if (el.getAttribute('data-running-elapsed') !== agentId) return;
+            el.textContent = formatBacktestElapsed(entry.elapsedSeconds);
+        });
     });
 }
 let liveBacktestChartMeta = { timestamps: [] };
