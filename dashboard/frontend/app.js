@@ -785,7 +785,7 @@ function renderAgentRunningBody(agent, running) {
       <div class="agent-card-running-head">
         <span class="agent-card-running-dot" aria-hidden="true"></span>
         <span class="agent-card-running-label">Backtesting…</span>
-        <span class="agent-card-running-elapsed">${escapeHtml(formatBacktestElapsed(running.elapsedSeconds))}</span>
+        <span class="agent-card-running-elapsed" data-running-elapsed="${escapeHtml(agent.agent_id)}">${escapeHtml(formatBacktestElapsed(running.elapsedSeconds))}</span>
       </div>
       <div class="agent-card-running-track" role="progressbar" aria-label="Backtest in progress">
         <div class="agent-card-running-bar"></div>
@@ -3341,6 +3341,37 @@ function getAgentBacktestRunning(agentId) {
     }
     return { ...entry, elapsedSeconds: Math.floor(elapsed) };
 }
+
+let lastRenderedRunningKey = null;
+
+/**
+ * Per-second refresh for running cards.
+ *
+ * Patches the elapsed timer in place rather than re-rendering the grid:
+ * renderAgentCards() starts with `grid.innerHTML = ''`, so doing that once a
+ * second would destroy focus, scroll position and any open card menu for the
+ * whole duration of a run. A full re-render happens only when the set of
+ * running agents changes.
+ */
+function refreshRunningAgentCards() {
+    const running = readRunningBacktests();
+    const key = Object.keys(running).sort().join(',');
+    if (key !== lastRenderedRunningKey) {
+        lastRenderedRunningKey = key;
+        renderAgentCategories(allAgents);
+        return;
+    }
+    Object.keys(running).forEach((agentId) => {
+        const entry = getAgentBacktestRunning(agentId);
+        if (!entry) return;
+        const escaped = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(agentId) : agentId.replace(/"/g, '\\"');
+        document
+            .querySelectorAll(`[data-running-elapsed="${escaped}"]`)
+            .forEach((el) => {
+                el.textContent = formatBacktestElapsed(entry.elapsedSeconds);
+            });
+    });
+}
 let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
 let tradingLogFilter = 'all';
@@ -4823,8 +4854,10 @@ function ensureBacktestPolling() {
                 if (liveId) liveBacktestRunId = liveId;
                 // Repaint the My Agents card even when the user is not on the
                 // Backtest tab — that page is now the landing page after launch.
+                // refreshRunningAgentCards() patches the elapsed timer in place
+                // instead of tearing down the whole grid every second.
                 if (playgroundTab === 'agents' && currentPage === 'playground') {
-                    renderAgentCategories(allAgents);
+                    refreshRunningAgentCards();
                 }
                 const step = Number(status.progress?.step);
                 const total = Number(status.progress?.total_steps);
@@ -5413,16 +5446,25 @@ async function runBacktest() {
     closeRunBacktestModal();
     prepareLiveBacktestView(launchConfigBase);
     markAgentBacktestRunning(activeAgent.agent_id, null);
-    navigateToPage('playground', { playgroundTab: 'agents' });
-    currentMode = 'backtest';
-    renderAgentCategories(allAgents);
-    updateBacktestRunProgress({
-        elapsedSeconds: 0,
-        message: pipeline?.length
-            ? `Running ${pipeline.length}-step agent pipeline…`
-            : 'Starting backtest…',
-    });
-    
+    // A synchronous throw anywhere in here would otherwise leave the agent
+    // marked running with no poller ever attached to clear it — narrow
+    // try/catch (not the outer one below, which governs the API call) so we
+    // can clear the mark and rethrow rather than swallow the failure.
+    try {
+        navigateToPage('playground', { playgroundTab: 'agents' });
+        currentMode = 'backtest';
+        renderAgentCategories(allAgents);
+        updateBacktestRunProgress({
+            elapsedSeconds: 0,
+            message: pipeline?.length
+                ? `Running ${pipeline.length}-step agent pipeline…`
+                : 'Starting backtest…',
+        });
+    } catch (error) {
+        clearAgentBacktestRunning(activeAgent.agent_id);
+        throw error;
+    }
+
     try {
         // Call API with session ID, assets, and model
         const params = new URLSearchParams({
