@@ -9183,3 +9183,22 @@ body.agent-editor-open {
     font-size: 13px;
     color: #fbbf24;
 }
+
+.agent-editor-default-details {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.agent-editor-default-details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.agent-editor-default-text {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    border-left: 2px solid var(--border-color);
+    color: var(--text-secondary);
+}

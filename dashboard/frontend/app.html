@@ -966,6 +966,11 @@
                         <h3 class="agent-editor-intro-title">Trading instruction</h3>
                         <p class="agent-editor-intro-text">Tell the agent how to trade in plain language. Each market hour it sees prices and its portfolio, follows your instruction, and decides what to buy or sell.</p>
                         <textarea id="agentEditorSimpleInstruction" rows="6" maxlength="8000" placeholder="e.g. Spread the money across a few of the strongest available stocks. Buy on meaningful dips and take profits after strong run-ups." aria-label="Trading instruction"></textarea>
+                        <p class="agent-editor-simple-note">Leave this empty and the agent uses the platform's default trading strategy.</p>
+                        <details class="agent-editor-default-details">
+                            <summary>See the default instruction</summary>
+                            <p id="agentEditorDefaultInstructionText" class="agent-editor-default-text"></p>
+                        </details>
                         <p id="agentEditorSimpleReplaceNote" class="agent-editor-simple-note" hidden>This agent currently uses a custom multi-step pipeline. Saving this instruction replaces it.</p>
                     </div>
                     <p id="agentEditorSaveStatus" class="agent-editor-save-status" hidden></p>

@@ -196,7 +196,12 @@ def test_starter_instruction_matches_the_frontend():
 
 
 def test_the_editor_can_read_the_starter_instruction():
-    """agent-editor.js backfills from window, so app.js must publish the value."""
+    """The editor shows the default in its disclosure, so app.js must publish it.
+
+    (This used to back a *backfill* that injected the text into the textarea;
+    that was removed when an empty instruction became a supported state --
+    see tests/test_my_agents_instruction_ui.py.)
+    """
     assert "window.DEFAULT_STARTER_INSTRUCTION = DEFAULT_STARTER_INSTRUCTION" in _APP_JS
     assert "window.DEFAULT_STARTER_INSTRUCTION" in _EDITOR_JS
 
