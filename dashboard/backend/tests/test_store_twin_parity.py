@@ -83,6 +83,12 @@ _TWINS = [
         "dashboard.backend.users_postgres",
         "PostgresUserStore",
     ),
+    (
+        "dashboard.backend.database",
+        "BacktestDatabase",
+        "dashboard.backend.database_postgres",
+        "PostgresBacktestDatabase",
+    ),
 ]
 
 _TWIN_IDS = [pg_cls for _, _, _, pg_cls in _TWINS]
@@ -234,6 +240,23 @@ _ADD_COLUMN = re.compile(
     r"(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
+# Tables a Postgres twin deliberately never creates, keyed by twin class name.
+# The default is that both twins declare the same tables -- a divergence is
+# normally the #227 bug -- so every entry needs its reason recorded here, and
+# the guard below checks each exempted table really exists on the SQLite side
+# so a stale or misspelled name cannot quietly widen the exemption.
+_DELIBERATELY_POSTGRES_ABSENT_TABLES: dict[str, set[str]] = {
+    # idempotency_keys is the *hot* v2 table: every decision submission reads
+    # and writes it. PostgresBacktestDatabase keeps that half local, delegating
+    # get_idempotency/put_idempotency to an embedded SQLite BacktestDatabase so
+    # a per-step agent request never gains a network round-trip. The table is
+    # therefore never created in Postgres, by design -- see the module
+    # docstring of dashboard/backend/database_postgres.py. Adding a CREATE the
+    # twin never executes, purely to satisfy this assertion, would be worse:
+    # the guard would then be reading a claim rather than the schema.
+    "PostgresBacktestDatabase": {"idempotency_keys"},
+}
+
 # Definitions opening with one of these describe a table constraint, not a column.
 _CONSTRAINT_KEYWORDS = {
     "primary",
@@ -357,7 +380,12 @@ def _split_definitions(body: str) -> list[str]:
 def _column_names(body: str) -> set[str]:
     columns = set()
     for definition in _split_definitions(body):
-        first = definition.split()[0]
+        # Split on whitespace *or* an opening paren. A constraint written with
+        # no space before its paren -- ``UNIQUE(run_id, timestamp)``, which
+        # database.py writes -- would otherwise yield the first token
+        # "UNIQUE(run_id," and be recorded as a column, so the same constraint
+        # spelled with and without a space would read as schema drift.
+        first = re.split(r"[\s(]", definition, maxsplit=1)[0]
         if first.lower() in _CONSTRAINT_KEYWORDS:
             continue
         columns.add(first.strip('"').lower())
@@ -407,7 +435,12 @@ def _init_schema(self):
             owner_id INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
             label TEXT,
             PRIMARY KEY (widget_id, label),
-            FOREIGN KEY (owner_id) REFERENCES people(id)
+            FOREIGN KEY (owner_id) REFERENCES people(id),
+            -- no space before the paren: database.py spells its natural key
+            -- this way while the Postgres twin spells it with a space, and
+            -- reading either as a column invents drift out of formatting
+            UNIQUE(widget_id, tags),
+            CHECK(owner_id > 0)
         )
         """
     )
@@ -467,16 +500,32 @@ def test_postgres_twin_schema_columns_match_sqlite(
     assert sqlite_schema, f"no CREATE TABLE parsed from {sqlite_path}"
     assert postgres_schema, f"no CREATE TABLE parsed from {postgres_path}"
     for table, columns in (*sqlite_schema.items(), *postgres_schema.items()):
-        assert len(columns) >= 2, f"suspiciously empty parse of {table}: {columns}"
+        assert len(columns) >= 2, (
+            f"suspiciously empty parse of {table}: {columns}. A table or "
+            f"column named {_EXPR.lower()} means DDL was assembled with an "
+            f"f-string, which this source-text parser cannot see through -- "
+            f"write the ALTER/CREATE as a literal string instead."
+        )
 
-    assert set(sqlite_schema) == set(postgres_schema), (
+    # Deliberate divergences are narrowed here, never by deleting the assert.
+    exempt = _DELIBERATELY_POSTGRES_ABSENT_TABLES.get(postgres_cls, set())
+    stale_exemptions = sorted(exempt - set(sqlite_schema))
+    assert not stale_exemptions, (
+        f"_DELIBERATELY_POSTGRES_ABSENT_TABLES exempts table(s) that "
+        f"{sqlite_cls} does not declare, so the exemption is obsolete or "
+        f"misspelled and is silently widening this guard: {stale_exemptions}"
+    )
+    expected_tables = set(sqlite_schema) - exempt
+
+    assert expected_tables == set(postgres_schema), (
         f"{postgres_cls} and {sqlite_cls} declare different tables -- "
-        f"sqlite-only={sorted(set(sqlite_schema) - set(postgres_schema))} "
-        f"postgres-only={sorted(set(postgres_schema) - set(sqlite_schema))}"
+        f"sqlite-only={sorted(expected_tables - set(postgres_schema))} "
+        f"postgres-only={sorted(set(postgres_schema) - expected_tables)}"
+        + (f" (exempted by design: {sorted(exempt)})" if exempt else "")
     )
 
     drift = []
-    for table in sorted(sqlite_schema):
+    for table in sorted(expected_tables):
         sqlite_columns = sqlite_schema[table]
         postgres_columns = postgres_schema[table]
         if sqlite_columns != postgres_columns:
