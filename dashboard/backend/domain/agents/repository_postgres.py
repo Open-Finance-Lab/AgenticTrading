@@ -49,9 +49,9 @@ class PostgresAgentStore:
         # in tests, and CI's Postgres service container is empty on every run,
         # so the @pg_only tier only ever exercises the CREATE path -- except
         # test_agent_schema_lazily_migrates_an_old_table_postgres, which recreates
-        # the pre-migration table to force the migrate path. The six ALTER ...
-        # ADD COLUMN IF NOT EXISTS statements below re-add the columns the SQLite
-        # store accreted as lazy migrations, so a deployment whose table predates
+        # the pre-migration table to force the migrate path. Every ALTER ...
+        # ADD COLUMN IF NOT EXISTS statement below re-adds a column the SQLite
+        # store accreted as a lazy migration, so a deployment whose table predates
         # them is brought up to shape on the next boot; on a fresh or current
         # table they no-op. Add the next column the same way (Postgres supports
         # ADD COLUMN IF NOT EXISTS natively; users_postgres.py has the pattern).
@@ -87,9 +87,10 @@ class PostgresAgentStore:
                     """
                 )
                 # Lazy migrations for a table created before these columns
-                # existed (mirrors the SQLite store's five post-ship ALTERs).
-                # Each no-ops on a fresh or already-current table. Must run
-                # before idx_external_agents_type, which indexes agent_type.
+                # existed (mirrors every one of the SQLite store's post-ship
+                # ALTERs). Each no-ops on a fresh or already-current table.
+                # Must run before idx_external_agents_type, which indexes
+                # agent_type.
                 cur.execute(
                     "ALTER TABLE external_agents "
                     "ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'external'"

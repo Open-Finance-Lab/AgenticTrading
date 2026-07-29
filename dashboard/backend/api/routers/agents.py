@@ -16,6 +16,7 @@ from dashboard.backend.domain.backtesting.constants import (
     DEFAULT_AGENT_CASH_ALLOCATION,
     MAX_AGENT_CASH_ALLOCATION,
     MAX_BACKTEST_INITIAL_CAPITAL,
+    MIN_BACKTEST_INITIAL_CAPITAL,
 )
 from dashboard.backend.domain.agents.repository import _UNSET
 from dashboard.backend.domain.agents.service import (
@@ -47,7 +48,7 @@ class CreateAgentBody(BaseModel):
     )
     backtest_allocation: Optional[float] = Field(
         default=None,
-        ge=1,
+        ge=MIN_BACKTEST_INITIAL_CAPITAL,
         le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
 
@@ -76,7 +77,7 @@ class UpdateAgentBody(BaseModel):
     )
     backtest_allocation: Optional[float] = Field(
         default=None,
-        ge=1,
+        ge=MIN_BACKTEST_INITIAL_CAPITAL,
         le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
     live_trading_enabled: Optional[bool] = None
