@@ -16,12 +16,17 @@ Capital scale (product):
   ``DEFAULT_AGENT_CASH_ALLOCATION`` ($1,000), max ``MAX_AGENT_CASH_ALLOCATION``
   ($3,000) — also capped by remaining unallocated cash. **Paper trading only**;
   backtests must not read or write this field.
-- Backtest / protocol simulation capital: default ``INITIAL_CAPITAL`` ($1,000),
-  max ``MAX_BACKTEST_INITIAL_CAPITAL`` ($10,000). Chosen per run via
-  ``config.initial_cash`` / ``--initial-capital``, or persisted per agent via
-  the ``backtest_allocation`` field (set from the Configure screen's
-  Allocated Capital card) when a run does not specify one explicitly. Either
-  way it is independent of the account ledger and agent sleeves.
+- Backtest / protocol simulation capital: floor ``MIN_BACKTEST_INITIAL_CAPITAL``
+  ($1), default ``INITIAL_CAPITAL`` ($1,000), max
+  ``MAX_BACKTEST_INITIAL_CAPITAL`` ($10,000). Chosen per run via
+  ``config.initial_cash`` / ``--initial-capital``, resolved by
+  ``resolve_initial_capital()`` below, which only ever looks at the value
+  passed in for *that* run — it does not read the agent row. The per-agent
+  ``backtest_allocation`` field (set from the Configure screen's Allocated
+  Capital card) is stored on the agent and supplied by the dashboard as that
+  requested value when it launches a backtest for the agent; it is not a
+  backend fallback. Either way, backtest capital is independent of the
+  account ledger and agent sleeves.
 """
 
 from __future__ import annotations
