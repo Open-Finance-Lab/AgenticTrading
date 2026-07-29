@@ -185,7 +185,11 @@ def pg_backtest_db():
     store = PostgresBacktestDatabase(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
-            # children first, then parents -- the FKs are enforced here
+            # equity_timeseries/trades/backtest_decisions carry a real FK to
+            # agent_runs (ON DELETE CASCADE) and must go first; run_manifest
+            # has no FK at all (see database_postgres.py) so its position
+            # here doesn't matter for integrity, it's just grouped with the
+            # other per-run tables before the agent_runs parent row
             cur.execute("DELETE FROM equity_timeseries")
             cur.execute("DELETE FROM trades")
             cur.execute("DELETE FROM backtest_decisions")
@@ -625,7 +629,10 @@ def test_insert_trades_and_get_trades_round_trip_postgres(pg_backtest_db):
             {
                 # legacy aliases: shares -> quantity, cost -> value; no
                 # native_* fields -> audit fields must be stripped on read.
+                # symbol has no alias (unlike shares/cost) and is NOT NULL
+                # on both backends, so it must still be supplied here.
                 "timestamp": "2024-01-01T11:00:00",
+                "symbol": "MSFT",
                 "shares": 5,
                 "side": "sell",
                 "price": 152.0,
@@ -643,6 +650,7 @@ def test_insert_trades_and_get_trades_round_trip_postgres(pg_backtest_db):
     assert first["quantity"] == 10
     assert first["fx_rate"] == 7.2
 
+    assert second["symbol"] == "MSFT"
     assert second["quantity"] == 5
     assert second["side"] == "SELL"
     assert second["value"] == 760.0
