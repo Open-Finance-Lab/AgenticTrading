@@ -6,32 +6,42 @@ Run a backtest in the dashboard
 
 1. Open `agentic-trading-lab.vercel.app <https://agentic-trading-lab.vercel.app/>`_ or `http://localhost:8000/ <http://localhost:8000/>`_ when running locally, then go to the **My Agents** tab.
 2. On an agent's card click **Run Backtest**. Use one of the **Foundation Agents**, or click **Add Agent +** to create your own.
-3. In the dialog set the **Period**, **Asset Universe**, and **Backtest Allocated Capital**, then click **Run Backtest**.
-4. Wait for completion—the UI polls ``/backtest/status`` and reloads equity charts when done.
+3. In the dialog set the **Period** and **Asset Universe**, then click **Run Backtest**. **Allocated Capital** is shown read-only — it is a saved setting on the agent; **Edit in Configure** opens the editor to change it.
+4. You stay on **My Agents**. The agent's card switches to a live ``Backtesting…`` state with an elapsed timer, and flips to the finished result when the run ends.
 
-Results appear in **Trading Performance** (agent vs. buy-and-hold vs. DJIA).
+Open the **Backtest** tab for the full run — **Trading Performance** charts the
+agent against buy-and-hold and DJIA, next to the trades and the hour-by-hour
+decision log.
 
-The backtest always runs the model saved on the agent; change it from the
-agent's **Configure** screen rather than at run time. If you have edited the
-agent, save first — **Run Backtest** refuses to start on unsaved changes so a
-run never uses an instruction you can no longer see.
+The backtest always runs the model and the capital saved on the agent; change
+either from the agent's **Configure** screen rather than at run time. If you
+have edited the agent, save first — **Run Backtest** refuses to start on unsaved
+changes so a run never uses an instruction you can no longer see.
+
+Leaving **Trading instruction** empty in **Configure** is a supported state, not
+an error: the agent then trades on the platform's built-in default strategy.
+Expand **See the default instruction** in the editor to read exactly what that
+is. Clearing the box on an agent that uses a custom multi-step pipeline asks for
+confirmation first, because saving replaces that pipeline.
 
 .. _allocated-capital:
 
 Two kinds of allocated capital
 ------------------------------
 
-The dashboard keeps these separate, and they have their own limits:
+Both live in the **Allocated Capital** card on an agent's **Configure** screen,
+but they are different kinds of money and have their own limits:
 
-**Paper Trading Allocated Capital**
-   Cash reserved from **My Portfolio** for one agent's paper trading, set when
-   you create the agent and editable in **Configure**. Maximum **$3,000**.
+**Paper Trading Allocated Capital** (the card's *Paper Trading* field)
+   Real cash reserved from **My Portfolio** for that one agent's paper trading,
+   set when you create the agent and editable afterwards. Maximum **$3,000**.
 
-**Backtest Allocated Capital**
-   Simulated starting cash for a single backtest, set in the **Run Backtest**
-   dialog. It defaults to that agent's Paper Trading Allocated Capital, but a
-   backtest never spends real portfolio cash and never changes it. Maximum
-   **$10,000**.
+**Backtest Allocated Capital** (the card's *Backtesting* field)
+   Simulated starting cash for that agent's backtests. It is a saved per-agent
+   setting rather than a per-run choice, so the **Run Backtest** dialog shows it
+   read-only. Leave the field blank and it follows the agent's Paper Trading
+   Allocated Capital. A backtest never spends real portfolio cash and never
+   changes it. Minimum **$1**, maximum **$10,000**.
 
 Start from a template
 ---------------------

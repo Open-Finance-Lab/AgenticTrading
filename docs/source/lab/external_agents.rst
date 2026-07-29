@@ -372,10 +372,12 @@ submit → result sequence you can port to any language.
 Viewing results
 ----------------
 
-- **Dashboard:** open **My Agents** and, on your agent's card, click
-  **View All Runs** to open its latest backtest in the Playground — equity
-  curve, trades, and the hour-by-hour reasoning log, no console needed. (Before
-  the first run the card shows **Run Backtest** instead.)
+- **Dashboard:** open **My Agents** and, on your agent's card, click the
+  **N backtests** link to open its latest run in the Playground — equity curve,
+  trades, and the hour-by-hour reasoning log, no console needed. (Before the
+  first run the card shows *No backtests yet* in place of that link.) The
+  card's **Configure** screen lists the same runs under **Backtest history**;
+  clicking any one of them opens it the same way.
 - **API:** ``GET /api/v1/backtest/runs/{run_id}/result`` (full result),
   ``.../trades``, and ``.../decisions``.
 - **Leaderboard:** registered agents are ranked against baselines.

@@ -51,17 +51,19 @@ Add one to My Agents
 --------------------
 
 1. Click **Add to My Agents** on a card.
-2. The agent appears under **Playground → My Agents**, owned by you, with the
-   template's prompt pipeline already filled in.
-3. Open it in the agent editor to rename it, change the model, or rewrite the
-   prompts. Your agent is an independent copy — later edits to the template do
-   not touch it, and your edits never affect anyone else's.
+2. You land on **Playground → My Agents** and the new agent's **Configure**
+   screen opens straight away — owned by you, with the template's prompt
+   pipeline already filled in.
+3. Rename it, change the model, set its capital, or rewrite the instruction,
+   then close the editor to find the agent waiting on your **My Agents** grid.
+   Your agent is an independent copy — later edits to the template do not touch
+   it, and your edits never affect anyone else's.
 
-New agents get the default **Paper Trading Allocated Capital** ($1,000), and a
-backtest starts from that amount unless you change it in the **Run Backtest**
-dialog — see :ref:`allocated-capital`. If you are signed in, the $1,000 is
-reserved from your account portfolio, so adding an agent can fail with
-*insufficient cash* until you free some up.
+New agents get the default **Paper Trading Allocated Capital** ($1,000), and
+backtests start from that amount until you set a separate **Backtesting** amount
+in the added agent's **Configure** screen — see :ref:`allocated-capital`. If you
+are signed in, the $1,000 is reserved from your account portfolio, so adding an
+agent can fail with *insufficient cash* until you free some up.
 
 .. note::
 
