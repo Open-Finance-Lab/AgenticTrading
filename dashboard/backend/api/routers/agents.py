@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from dashboard.backend.domain.backtesting.constants import (
     DEFAULT_AGENT_CASH_ALLOCATION,
     MAX_AGENT_CASH_ALLOCATION,
+    MAX_BACKTEST_INITIAL_CAPITAL,
 )
 from dashboard.backend.domain.agents.repository import _UNSET
 from dashboard.backend.domain.agents.service import (
@@ -44,6 +45,11 @@ class CreateAgentBody(BaseModel):
         ge=0,
         le=MAX_AGENT_CASH_ALLOCATION,
     )
+    backtest_allocation: Optional[float] = Field(
+        default=None,
+        ge=1,
+        le=MAX_BACKTEST_INITIAL_CAPITAL,
+    )
 
 
 class PipelineStep(BaseModel):
@@ -67,6 +73,11 @@ class UpdateAgentBody(BaseModel):
         default=None,
         ge=0,
         le=MAX_AGENT_CASH_ALLOCATION,
+    )
+    backtest_allocation: Optional[float] = Field(
+        default=None,
+        ge=1,
+        le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
     live_trading_enabled: Optional[bool] = None
 
@@ -120,6 +131,7 @@ async def create_agent(
         agent_type=agent_type,
         description=(body.description.strip() if body.description else None),
         cash_allocation=cash,
+        backtest_allocation=body.backtest_allocation,
     )
     if ctx["user_id"]:
         portfolio_service.get_or_create_portfolio(ctx["user_id"])
@@ -320,6 +332,7 @@ async def update_agent(
     fields_set = body.model_fields_set
     pipeline_provided = "pipeline" in fields_set
     cash_allocation_provided = "cash_allocation" in fields_set
+    backtest_allocation_provided = "backtest_allocation" in fields_set
     live_trading_provided = "live_trading_enabled" in fields_set
     if (
         body.name is None
@@ -327,6 +340,7 @@ async def update_agent(
         and body.description is None
         and not pipeline_provided
         and not cash_allocation_provided
+        and not backtest_allocation_provided
         and not live_trading_provided
     ):
         raise HTTPException(status_code=400, detail="No fields to update")
@@ -341,6 +355,9 @@ async def update_agent(
         pipeline_arg = _UNSET
 
     cash_allocation_arg = body.cash_allocation if cash_allocation_provided else _UNSET
+    backtest_allocation_arg = (
+        body.backtest_allocation if backtest_allocation_provided else _UNSET
+    )
     live_trading_arg = body.live_trading_enabled if live_trading_provided else _UNSET
 
     # When a signed-in owner changes cash_allocation, the portfolio ledger has
@@ -373,6 +390,7 @@ async def update_agent(
             description=body.description,
             pipeline=pipeline_arg,
             cash_allocation=cash_allocation_arg,
+            backtest_allocation=backtest_allocation_arg,
             live_trading_enabled=live_trading_arg,
         )
     except AgentNotFoundError:

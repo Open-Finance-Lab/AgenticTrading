@@ -54,3 +54,92 @@ def test_update_agent_leaves_backtest_allocation_alone_when_omitted(store):
     updated = store.update_agent(agent["agent_id"], name="renamed")
     assert updated["backtest_allocation"] == 2500
     assert updated["name"] == "renamed"
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    import dashboard.backend.api.routers.agents as agents_api
+
+    db_path = tmp_path / "test.db"
+    test_agents = AgentStore(db_path=db_path)
+    test_db = db_module.BacktestDatabase(db_path=db_path)
+    monkeypatch.setattr(agent_store_module, "agent_store", test_agents)
+    monkeypatch.setattr(agents_api.agent_service, "agents", test_agents)
+    monkeypatch.setattr(agents_api.agent_service, "db", test_db)
+    monkeypatch.setattr(db_module, "db", test_db)
+    return TestClient(app)
+
+
+def _headers():
+    return {"X-Session-Id": str(uuid.uuid4())}
+
+
+def test_create_accepts_backtest_allocation(client):
+    headers = _headers()
+    resp = client.post(
+        "/api/v1/agents",
+        json={"name": "alpha", "agent_type": "builtin", "backtest_allocation": 5000},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["agent"]["backtest_allocation"] == 5000
+
+
+def test_patch_updates_backtest_allocation(client):
+    headers = _headers()
+    created = client.post(
+        "/api/v1/agents", json={"name": "alpha", "agent_type": "builtin"}, headers=headers
+    ).json()["agent"]
+
+    resp = client.patch(
+        f"/api/v1/agents/{created['agent_id']}",
+        json={"backtest_allocation": 7500},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["agent"]["backtest_allocation"] == 7500
+
+
+def test_patch_backtest_allocation_alone_is_not_no_fields_to_update(client):
+    """It must satisfy the 'at least one field' guard on its own."""
+    headers = _headers()
+    created = client.post(
+        "/api/v1/agents", json={"name": "alpha", "agent_type": "builtin"}, headers=headers
+    ).json()["agent"]
+
+    resp = client.patch(
+        f"/api/v1/agents/{created['agent_id']}",
+        json={"backtest_allocation": 2000},
+        headers=headers,
+    )
+    assert resp.status_code != 400
+
+
+@pytest.mark.parametrize("bad", [0, -100, 10001])
+def test_backtest_allocation_out_of_range_is_rejected(client, bad):
+    headers = _headers()
+    resp = client.post(
+        "/api/v1/agents",
+        json={"name": "alpha", "agent_type": "builtin", "backtest_allocation": bad},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
+def test_backtest_allocation_does_not_change_the_paper_sleeve(client):
+    """Simulated money must never move the real sleeve."""
+    headers = _headers()
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "alpha", "agent_type": "builtin", "cash_allocation": 1000},
+        headers=headers,
+    ).json()["agent"]
+
+    updated = client.patch(
+        f"/api/v1/agents/{created['agent_id']}",
+        json={"backtest_allocation": 9000},
+        headers=headers,
+    ).json()["agent"]
+
+    assert updated["cash_allocation"] == 1000
+    assert updated["backtest_allocation"] == 9000
