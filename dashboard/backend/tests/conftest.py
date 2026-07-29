@@ -53,6 +53,14 @@ os.environ.pop("USERS_DATABASE_URL", None)
 # imported.
 os.environ.pop("CONTENT_DATABASE_URL", None)
 
+# Same guarantee for AGENT_RUNS_DATABASE_URL: it selects the Postgres backend for
+# backtest run history (agent_runs, equity_timeseries, trades,
+# backtest_decisions, run_manifest). A value inherited from the developer's
+# environment would point the whole suite at the live runs database -- whose
+# @pg_only-style destructive helpers would then run against prod. Strip it
+# before any backend module is imported.
+os.environ.pop("AGENT_RUNS_DATABASE_URL", None)
+
 # T1+ scale knobs are read once at import (like MAX_ACTIVE_RUNS_PER_AGENT); a
 # stray shell value would silently skew the whole run. Same rationale as the
 # DB-URL strips above. Later tiers append their vars here.

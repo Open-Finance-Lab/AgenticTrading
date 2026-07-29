@@ -42,6 +42,10 @@ def test_content_database_url_is_stripped_for_the_suite():
     assert "CONTENT_DATABASE_URL" not in os.environ
 
 
+def test_agent_runs_database_url_is_stripped_for_the_suite():
+    assert "AGENT_RUNS_DATABASE_URL" not in os.environ
+
+
 def test_the_pop_survives_a_hostile_ambient_environment():
     """Prove the strip *works*, which the two tests above cannot.
 
