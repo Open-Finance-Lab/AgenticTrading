@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from dashboard.backend.db_url import require_postgres_url
 from dashboard.backend.domain.agents.repository import (
     DEFAULT_SCOPES,
+    DEFAULT_RUNTIME_TYPE,
     _UNSET,
     _hash_api_key,
     _new_api_key,
@@ -82,7 +83,9 @@ class PostgresAgentStore:
                         pipeline_config TEXT,
                         cash_allocation DOUBLE PRECISION,
                         backtest_allocation DOUBLE PRECISION,
-                        live_trading_enabled BOOLEAN NOT NULL DEFAULT FALSE
+                        live_trading_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                        runtime_type TEXT NOT NULL DEFAULT 'pipeline',
+                        runtime_config TEXT NOT NULL DEFAULT '{{}}'
                     )
                     """
                 )
@@ -119,6 +122,14 @@ class PostgresAgentStore:
                     "ADD COLUMN IF NOT EXISTS live_trading_enabled BOOLEAN NOT NULL DEFAULT FALSE"
                 )
                 cur.execute(
+                    "ALTER TABLE external_agents "
+                    "ADD COLUMN IF NOT EXISTS runtime_type TEXT NOT NULL DEFAULT 'pipeline'"
+                )
+                cur.execute(
+                    "ALTER TABLE external_agents "
+                    "ADD COLUMN IF NOT EXISTS runtime_config TEXT NOT NULL DEFAULT '{}'"
+                )
+                cur.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_external_agents_owner_user
                     ON external_agents(owner_user_id)
@@ -147,6 +158,8 @@ class PostgresAgentStore:
         session_id: Optional[str] = None,
         agent_type: str = "external",
         description: Optional[str] = None,
+        runtime_type: str = DEFAULT_RUNTIME_TYPE,
+        runtime_config: Optional[Dict[str, Any]] = None,
         cash_allocation: Optional[float] = None,
         backtest_allocation: Optional[float] = None,
     ) -> Dict[str, Any]:
@@ -164,9 +177,9 @@ class PostgresAgentStore:
                     INSERT INTO external_agents (
                         agent_id, name, session_id, api_key_hash, api_key_prefix,
                         model_name, agent_type, description, cash_allocation,
-                        backtest_allocation,
+                        backtest_allocation, runtime_type, runtime_config,
                         owner_user_id, owner_browser_session, created_at, last_used_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
@@ -180,6 +193,8 @@ class PostgresAgentStore:
                         (description or None),
                         cash_allocation,
                         backtest_allocation,
+                        (runtime_type or DEFAULT_RUNTIME_TYPE).strip() or DEFAULT_RUNTIME_TYPE,
+                        json.dumps(runtime_config or {}),
                         owner_user_id,
                         owner_browser_session,
                         now,
@@ -449,6 +464,8 @@ class PostgresAgentStore:
         model_name: Optional[str] = None,
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
+        runtime_type: Any = _UNSET,
+        runtime_config: Any = _UNSET,
         cash_allocation: Any = _UNSET,
         backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
@@ -473,6 +490,14 @@ class PostgresAgentStore:
         if pipeline is not _UNSET:
             sets.append("pipeline_config = %s")
             params.append(json.dumps(pipeline) if pipeline else None)
+        if runtime_type is not _UNSET:
+            sets.append("runtime_type = %s")
+            params.append(
+                (runtime_type or DEFAULT_RUNTIME_TYPE).strip() or DEFAULT_RUNTIME_TYPE
+            )
+        if runtime_config is not _UNSET:
+            sets.append("runtime_config = %s")
+            params.append(json.dumps(runtime_config or {}))
         if cash_allocation is not _UNSET:
             sets.append("cash_allocation = %s")
             params.append(cash_allocation)

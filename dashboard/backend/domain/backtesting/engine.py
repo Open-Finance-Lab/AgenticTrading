@@ -16,7 +16,7 @@ be extracted in a later phase.
 
 import json
 import uuid
-from datetime import datetime, time
+from datetime import date, datetime, time
 from typing import Dict, List, Optional, Tuple
 
 from dashboard.backend.database import db
@@ -34,6 +34,15 @@ from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
 )
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
+from dashboard.backend.domain.agents.runtime import (
+    AI_HEDGE_FUND_RUNTIME_TYPE,
+    DEFAULT_RUNTIME_TYPE,
+    PIPELINE_RUNTIME_TYPE,
+    AgentRuntimeContext,
+    RuntimeDispatcher,
+    normalize_runtime_config,
+    normalize_runtime_type,
+)
 from dashboard.backend.infrastructure.market_data.alpaca_bars import MarketDataUnavailableError
 from dashboard.backend.infrastructure.market_data.ifind_client import IFindClientError
 from dashboard.backend.infrastructure.market_data.ifind_fx import (
@@ -67,6 +76,17 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
 )
 
 
+def _prior_market_date_by_decision_date(
+    timestamps,
+) -> Dict[date, Optional[date]]:
+    """Map each ATL trading date to its latest strictly earlier trading date."""
+    market_dates = sorted({timestamp.date() for timestamp in timestamps})
+    return {
+        decision_date: market_dates[index - 1] if index else None
+        for index, decision_date in enumerate(market_dates)
+    }
+
+
 class HourlyBacktester:
     """Runs hourly backtest with agent and baselines."""
     
@@ -87,6 +107,8 @@ class HourlyBacktester:
         symbols: Optional[List[str]] = None,
         universe: Optional[str] = None,
         decision_source: Optional[str] = None,
+        runtime_type: str = DEFAULT_RUNTIME_TYPE,
+        runtime_config: Optional[Dict] = None,
     ):
         # Validate and swap dates if they're in the wrong order
         from datetime import datetime as dt_parser
@@ -118,6 +140,15 @@ class HourlyBacktester:
         self.live_run_id = (live_run_id or "").strip() or None
         self.progress_file = (progress_file or "").strip() or None
         self.data_source = data_source
+        self.runtime_type = normalize_runtime_type(runtime_type)
+        self.runtime_config = normalize_runtime_config(
+            self.runtime_type, runtime_config or {}
+        )
+        self.runtime_dispatcher = (
+            RuntimeDispatcher(self.runtime_type, self.runtime_config)
+            if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
+            else None
+        )
         self.profile = get_market_profile(data_source, universe)
         self.currency_context: CurrencyContext | None = None
         self.native_initial_capital = self.initial_capital
@@ -140,6 +171,8 @@ class HourlyBacktester:
             and data_source == IFIND_ASHARE
             and self.decision_source == LLM_DECISION_SOURCE
         )
+        if self.runtime_type != PIPELINE_RUNTIME_TYPE:
+            self.strict_llm = False
         # iFinD is backend-owned; US providers can use the selected run assets.
         if data_source == IFIND_ASHARE:
             self.symbols = self.profile.symbols
@@ -158,9 +191,15 @@ class HourlyBacktester:
         self.all_data = {}
         wants_llm = self.decision_source == LLM_DECISION_SOURCE
         self.use_llm = wants_llm and HAS_ANTHROPIC
+        if self.runtime_type != PIPELINE_RUNTIME_TYPE:
+            self.use_llm = False
         self.llm_client = None
 
-        if wants_llm and not HAS_ANTHROPIC:
+        if (
+            self.runtime_type == PIPELINE_RUNTIME_TYPE
+            and wants_llm
+            and not HAS_ANTHROPIC
+        ):
             if self.strict_llm:
                 raise llm_harness.LLMConfigurationError(
                     "LLM client is unavailable because the required SDK is not installed"
@@ -466,6 +505,11 @@ class HourlyBacktester:
             meta["initial_pipeline"] = self.initial_pipeline
         if self.pipeline is not None:
             meta["final_pipeline"] = self.pipeline
+        runtime_type = getattr(self, "runtime_type", PIPELINE_RUNTIME_TYPE)
+        if runtime_type != PIPELINE_RUNTIME_TYPE:
+            meta["runtime_type"] = runtime_type
+            meta["runtime_config"] = dict(getattr(self, "runtime_config", {}) or {})
+            meta["runtime_calls"] = self.runtime_dispatcher.calls
         return meta
 
     def _llm_market_context(self) -> Dict:
@@ -570,6 +614,8 @@ class HourlyBacktester:
         # Track LLM usage for results metadata
         llm_calls_count = 0
         llm_model = "rule-based"  # Default
+        if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+            llm_model = str(self.runtime_dispatcher.model_name or "gpt-4.1")
         
         manager = PortfolioManager(
             initial_capital=self.native_initial_capital,
@@ -599,6 +645,11 @@ class HourlyBacktester:
         all_timestamps = filtered if filtered else all_timestamps
         
         all_timestamps = self._market_hours_only(all_timestamps)
+        prior_market_dates = (
+            _prior_market_date_by_decision_date(all_timestamps)
+            if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
+            else {}
+        )
 
         print(
             f"   Trading {len(all_timestamps)} bars during "
@@ -665,25 +716,50 @@ class HourlyBacktester:
             state = manager.get_portfolio_state(market_data, price_cache, timestamp)
             state["timestamp"] = timestamp  # Add timestamp for LLM context
             
-            # Make decision (LLM if available, else rule-based)
-            if self.use_llm and self.llm_client:
-                decision = manager.make_trading_decision_with_llm(
-                    state,
-                    self.llm_client,
-                    mode=self.mode,
-                    model=self.model,
-                    strategy_prompt=self.strategy_prompt,
-                    pipeline=self.pipeline,
-                    market_context=self._llm_market_context(),
-                    strict_llm=self.strict_llm,
-                )
-                llm_calls_count += 1  # Track that LLM was used
-                if llm_calls_count == 1:  # Set on first call
-                    llm_model = self.model
-                if manager.last_pipeline_step_outputs:
-                    day_episode["latest_step_outputs"] = manager.last_pipeline_step_outputs
+            # Keep the established pipeline execution path unchanged. Hosted
+            # runtimes alone cross the runtime-dispatch boundary, then return
+            # the same ATL action envelope for PortfolioManager to execute.
+            if self.runtime_type == PIPELINE_RUNTIME_TYPE:
+                if self.use_llm and self.llm_client:
+                    decision = manager.make_trading_decision_with_llm(
+                        state,
+                        self.llm_client,
+                        mode=self.mode,
+                        model=self.model,
+                        strategy_prompt=self.strategy_prompt,
+                        pipeline=self.pipeline,
+                        market_context=self._llm_market_context(),
+                        strict_llm=self.strict_llm,
+                    )
+                    llm_calls_count += 1  # Track that LLM was used
+                    if llm_calls_count == 1:  # Set on first call
+                        llm_model = self.model
+                    if manager.last_pipeline_step_outputs:
+                        day_episode["latest_step_outputs"] = manager.last_pipeline_step_outputs
+                else:
+                    decision = manager.make_trading_decision(state)
             else:
-                decision = manager.make_trading_decision(state)
+                runtime_context = AgentRuntimeContext(
+                    timestamp=timestamp,
+                    backtest_start_date=self.start_date,
+                    symbols=list(self.symbols),
+                    cash=float(manager.cash),
+                    total_equity=float(state["total_equity"]),
+                    positions=dict(manager.positions),
+                    entry_prices=dict(manager.entry_prices),
+                    current_prices={
+                        symbol: float(row["close"])
+                        for symbol, row in market_data.items()
+                    },
+                    latest_market_date_before_decision=prior_market_dates.get(
+                        timestamp.date()
+                    ),
+                    market=self._llm_market_context(),
+                )
+                decision = self.runtime_dispatcher.dispatch(
+                    runtime_context,
+                    pipeline_handler=lambda: manager.make_trading_decision(state),
+                )
             
             # Execute trades (only if real data available)
             manager.execute_actions(decision["actions"], market_data, timestamp)
@@ -753,9 +829,15 @@ class HourlyBacktester:
         
         print(f"\n  ✅ Agent backtest complete")
         print(f"     • Run ID: {run_id}")
-        model_display = self.model if llm_calls_count > 0 else "rule-based"
-        print(f"     • Model: {model_display} (✅ LLM enabled)" if llm_calls_count > 0 else f"     • Model: {model_display} (❌ fallback)")
-        print(f"     • LLM Calls: {llm_calls_count}")
+        if self.runtime_type == PIPELINE_RUNTIME_TYPE:
+            model_display = self.model if llm_calls_count > 0 else "rule-based"
+            print(f"     • Model: {model_display} (✅ LLM enabled)" if llm_calls_count > 0 else f"     • Model: {model_display} (❌ fallback)")
+            print(f"     • LLM Calls: {llm_calls_count}")
+        else:
+            runtime_calls = self.runtime_dispatcher.calls
+            model_display = llm_model if runtime_calls else "rule-based"
+            print(f"     • Model: {model_display} (✅ agent runtime)" if runtime_calls else f"     • Model: {model_display} (❌ fallback)")
+            print(f"     • Runtime calls: {runtime_calls}")
         print(f"     • Tokens: {manager.input_tokens:,} in / {manager.output_tokens:,} out (est. cost ${est_cost:.4f})")
         print(f"     • Trades: {len(manager.trades)}")
         if self.prompt_adaptations:

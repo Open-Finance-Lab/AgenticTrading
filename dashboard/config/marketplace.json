@@ -67,6 +67,24 @@
           "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
         }
       ]
+    },
+    {
+      "template_id": "ai-hedge-fund",
+      "name": "AI Hedge Fund",
+      "model_name": "openai/gpt-4.1",
+      "description": "A hosted multi-analyst investment committee powered by virattt/ai-hedge-fund and executed through Agentic Trading Lab's long-only backtest engine.",
+      "category": "Hosted",
+      "tags": ["multi-agent", "fundamentals", "first-party"],
+      "author": "virattt / Agentic Trading Lab",
+      "runtime_type": "ai_hedge_fund",
+      "runtime_config": {
+        "analysts": [
+          "fundamentals_analyst",
+          "technical_analyst",
+          "sentiment_analyst",
+          "valuation_analyst"
+        ]
+      }
     }
   ]
 }

@@ -138,6 +138,7 @@ celerybeat.pid
 # Environments
 .env
 .venv
+.ai-hedge-fund-venv/
 env/
 venv/
 ENV/

@@ -3,10 +3,12 @@
 import uuid
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
 from dashboard.backend.domain.agents.repository import AgentStore
+from dashboard.backend.domain.agents.credential_store import AgentCredentialStore
 
 
 @pytest.fixture
@@ -14,13 +16,20 @@ def client(tmp_path, monkeypatch):
     import dashboard.backend.domain.agents.repository as agent_store_module
     import dashboard.backend.api.routers.agents as agents_api
     import dashboard.backend.database as db_module
+    import dashboard.backend.domain.brokers.repository as broker_repository
 
     db_path = tmp_path / "test.db"
     test_agents = AgentStore(db_path=db_path)
+    test_credentials = AgentCredentialStore(db_path=db_path)
     test_db = db_module.BacktestDatabase(db_path=db_path)
+    monkeypatch.setenv(
+        broker_repository._KEY_ENV_VAR, Fernet.generate_key().decode()
+    )
+    monkeypatch.setattr(broker_repository, "_fernet_instance", None)
     monkeypatch.setattr(agent_store_module, "agent_store", test_agents)
     monkeypatch.setattr(agents_api.agent_service, "agents", test_agents)
     monkeypatch.setattr(agents_api.agent_service, "db", test_db)
+    monkeypatch.setattr(agents_api, "agent_credential_store", test_credentials)
     monkeypatch.setattr(db_module, "db", test_db)
     return TestClient(app)
 
@@ -579,6 +588,12 @@ def test_marketplace_listing_and_clone(client):
     templates = listing.json()["templates"]
     assert templates
     assert any(t["template_id"] == "balanced-starter" for t in templates)
+    hedge_fund_card = next(
+        t for t in templates if t["template_id"] == "ai-hedge-fund"
+    )
+    assert hedge_fund_card["name"] == "AI Hedge Fund"
+    assert hedge_fund_card["runtime_type"] == "ai_hedge_fund"
+    assert hedge_fund_card["mode"] == "runtime"
 
     browser_session = str(uuid.uuid4())
     headers = {"X-Session-Id": browser_session}
@@ -593,10 +608,107 @@ def test_marketplace_listing_and_clone(client):
     assert agent["agent_type"] == "builtin"
     assert agent.get("pipeline")
     assert agent["pipeline"][0]["presetKey"] == "simple_instruction"
+    assert agent["runtime_type"] == "pipeline"
+    assert agent["runtime_config"] == {}
 
     listed = client.get("/api/v1/agents", headers=headers)
     assert listed.status_code == 200
     assert any(a["agent_id"] == agent["agent_id"] for a in listed.json()["agents"])
+
+    ai_clone = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    )
+    assert ai_clone.status_code == 200
+    ai_agent = ai_clone.json()["agent"]
+    assert ai_agent["name"] == "AI Hedge Fund"
+    assert ai_agent["agent_type"] == "builtin"
+    assert ai_agent["runtime_type"] == "ai_hedge_fund"
+    assert ai_agent["runtime_config"] == {
+        "analysts": [
+            "fundamentals_analyst",
+            "technical_analyst",
+            "sentiment_analyst",
+            "valuation_analyst",
+        ]
+    }
+    assert ai_agent["pipeline"] is None
+
+
+def test_ai_hedge_fund_analysts_are_editable_but_infrastructure_is_not(client):
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    endpoint = f"/api/v1/agents/{agent['agent_id']}"
+
+    updated = client.patch(
+        endpoint,
+        json={"runtime_config": {"analysts": ["warren_buffett", "technical_analyst"]}},
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["agent"]["runtime_config"]["analysts"] == [
+        "warren_buffett",
+        "technical_analyst",
+    ]
+
+    protected = client.patch(
+        endpoint,
+        json={
+            "runtime_config": {
+                "analysts": ["technical_analyst"],
+                "model_name": "user-controlled-model",
+            }
+        },
+        headers=headers,
+    )
+    assert protected.status_code == 422
+
+
+def test_financial_datasets_credential_is_encrypted_and_never_returned(client):
+    import dashboard.backend.api.routers.agents as agents_api
+
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    endpoint = (
+        f"/api/v1/agents/{agent['agent_id']}/credentials/financial-datasets"
+    )
+
+    empty = client.get(endpoint, headers=headers)
+    assert empty.status_code == 200
+    assert empty.json()["configured"] is False
+
+    plaintext = "fd-test-plaintext-canary"
+    saved = client.put(endpoint, json={"api_key": plaintext}, headers=headers)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["configured"] is True
+    assert plaintext not in saved.text
+
+    conn = agents_api.agent_credential_store._get_connection()
+    row = conn.execute(
+        "SELECT value_enc FROM agent_credentials WHERE agent_id = ?",
+        (agent["agent_id"],),
+    ).fetchone()
+    conn.close()
+    assert row["value_enc"] != plaintext
+    assert plaintext not in row["value_enc"]
+
+    status = client.get(endpoint, headers=headers)
+    assert status.json()["configured"] is True
+    assert plaintext not in status.text
+
+    denied = client.get(endpoint, headers={"X-Session-Id": str(uuid.uuid4())})
+    assert denied.status_code == 403
 
 
 def test_marketplace_clone_unknown_template(client):

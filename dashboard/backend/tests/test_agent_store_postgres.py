@@ -369,7 +369,8 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
 
     Simulate a deployment created before the seven lazy-migration columns
     (agent_type, description, pipeline_config, cash_allocation,
-    backtest_allocation, scopes, live_trading_enabled) existed:
+    backtest_allocation, scopes, live_trading_enabled, runtime_type,
+    runtime_config) existed:
     a table with only the original base schema, already holding a real agent row
     that predates those columns. Re-running _init_schema() -- what every redeploy
     does -- must bring it up to the current shape. CREATE TABLE IF NOT EXISTS
@@ -451,10 +452,16 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
         "backtest_allocation",
         "scopes",
         "live_trading_enabled",
+        "runtime_type",
+        "runtime_config",
     } <= columns
     # The pre-existing row was backfilled with the column defaults, not NULL.
     assert legacy["agent_type"] == "external"
     assert legacy["scopes"] == DEFAULT_SCOPES
+
+    migrated = pg_agent_store.get_agent("agent_legacy")
+    assert migrated["runtime_type"] == "pipeline"
+    assert migrated["runtime_config"] == {}
 
     # The store is actually usable after the migration: a real registration
     # writes every migrated column, and the scopes column default applies.

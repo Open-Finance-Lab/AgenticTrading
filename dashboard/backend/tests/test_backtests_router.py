@@ -253,6 +253,93 @@ def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
     assert resp.json()["session_id"] == agent_session
     assert spy.calls == 1
     assert spy.last_kwargs["session_id"] == agent_session
+    assert spy.last_kwargs["runtime_type"] == "pipeline"
+    assert spy.last_kwargs["runtime_config"] == {}
+
+
+def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setenv("OPENAI_API_KEY", "platform-openai-test-key")
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: "user-financial-datasets-test-key",
+    )
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    cloned = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    )
+    assert cloned.status_code == 200
+    agent = cloned.json()["agent"]
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "model": "claude-haiku-4.5",
+            "pipeline": [{"label": "must be ignored"}],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["runtime_type"] == "ai_hedge_fund"
+    assert set(response.json()["ignored_fields"]) == {"model", "pipeline"}
+    assert spy.calls == 1
+    assert spy.last_kwargs["runtime_type"] == "ai_hedge_fund"
+    assert spy.last_kwargs["runtime_config"]["analysts"]
+    assert (
+        spy.last_kwargs["financial_datasets_api_key"]
+        == "user-financial-datasets-test-key"
+    )
+    assert spy.last_kwargs["model"] is None
+    assert spy.last_kwargs["pipeline"] is None
+
+
+def test_ai_hedge_fund_backtest_requires_owned_agent_credential(client, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "platform-openai-test-key")
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: None,
+    )
+
+    missing = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+    assert missing.status_code == 422
+    assert "Financial Datasets API key" in missing.text
+
+    unauthorized = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert unauthorized.status_code == 403
 
 
 def test_backtest_run_forwards_selected_assets(client, monkeypatch):
@@ -601,6 +688,17 @@ def test_subprocess_log_dump_is_redacted_but_not_truncated(monkeypatch):
     assert head in redacted
     assert len(redacted) > 8000
     assert "super-secret-token" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_subprocess_log_redacts_user_financial_datasets_credential():
+    credential = "user-financial-datasets-plaintext-canary"
+
+    redacted = bt._redact_credentials(
+        f"upstream failed with key={credential}", credential
+    )
+
+    assert credential not in redacted
     assert "[REDACTED]" in redacted
 
 

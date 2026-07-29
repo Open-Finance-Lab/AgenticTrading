@@ -19,6 +19,12 @@ from typing import Any, Dict, List, Optional, Tuple
 from dashboard.backend.domain.agents.repository import agent_store, _UNSET
 from dashboard.backend.domain.agents import auth_cache
 from dashboard.backend.domain.agents.defaults import default_starter_pipeline
+from dashboard.backend.domain.agents.runtime import (
+    DEFAULT_RUNTIME_TYPE,
+    PIPELINE_RUNTIME_TYPE,
+    normalize_runtime_config,
+    normalize_runtime_type,
+)
 from dashboard.backend.domain.agents.version_repository import (
     VALID_EXECUTION_MODES,
     VALID_VERIFICATION_LEVELS,
@@ -253,16 +259,43 @@ class AgentService:
         model_name: Optional[str] = None,
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
+        runtime_type: Any = _UNSET,
+        runtime_config: Any = _UNSET,
         cash_allocation: Any = _UNSET,
         backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
     ) -> Dict[str, Any]:
+        current = self.agents.get_agent(agent_id)
+        if not current:
+            raise AgentNotFoundError()
+        resolved_runtime_type = (
+            normalize_runtime_type(runtime_type)
+            if runtime_type is not _UNSET
+            else current.get("runtime_type") or DEFAULT_RUNTIME_TYPE
+        )
+        if runtime_config is not _UNSET:
+            resolved_runtime_config = normalize_runtime_config(
+                resolved_runtime_type, runtime_config
+            )
+        elif runtime_type is not _UNSET:
+            # A runtime switch starts from that runtime's defaults. Carrying
+            # implementation-specific config across the boundary can leave an
+            # agent persisted in a combination the dispatcher cannot run.
+            resolved_runtime_config = normalize_runtime_config(
+                resolved_runtime_type, {}
+            )
+        else:
+            resolved_runtime_config = _UNSET
         agent = self.agents.update_agent(
             agent_id,
             name=name,
             model_name=model_name,
             description=description,
             pipeline=pipeline,
+            runtime_type=(
+                resolved_runtime_type if runtime_type is not _UNSET else _UNSET
+            ),
+            runtime_config=resolved_runtime_config,
             cash_allocation=cash_allocation,
             backtest_allocation=backtest_allocation,
             live_trading_enabled=live_trading_enabled,
@@ -280,6 +313,8 @@ class AgentService:
         owner_browser_session: Optional[str],
         agent_type: str = "external",
         description: Optional[str] = None,
+        runtime_type: str = DEFAULT_RUNTIME_TYPE,
+        runtime_config: Optional[Dict[str, Any]] = None,
         cash_allocation: Optional[float] = None,
         backtest_allocation: Optional[float] = None,
         seed_default_pipeline: bool = True,
@@ -297,6 +332,8 @@ class AgentService:
             DEFAULT_AGENT_CASH_ALLOCATION,
         )
 
+        runtime_type = normalize_runtime_type(runtime_type)
+        runtime_config = normalize_runtime_config(runtime_type, runtime_config or {})
         if cash_allocation is None:
             cash_allocation = float(DEFAULT_AGENT_CASH_ALLOCATION)
         agent = self.agents.create_agent(
@@ -306,10 +343,16 @@ class AgentService:
             owner_browser_session=owner_browser_session,
             agent_type=agent_type,
             description=description,
+            runtime_type=runtime_type,
+            runtime_config=runtime_config,
             cash_allocation=cash_allocation,
             backtest_allocation=backtest_allocation,
         )
-        if seed_default_pipeline and agent_type == "builtin":
+        if (
+            seed_default_pipeline
+            and agent_type == "builtin"
+            and runtime_type == PIPELINE_RUNTIME_TYPE
+        ):
             # Merge rather than reassign: create_agent's dict carries the
             # one-time plaintext ``api_key`` that the route pops and shows once,
             # and update_agent re-reads the row (which only stores the hash).
@@ -336,6 +379,10 @@ class AgentService:
         resolved_name = (name or template.get("name") or "Marketplace Agent").strip()
         pipeline = template.get("pipeline")
         has_own_pipeline = isinstance(pipeline, list) and bool(pipeline)
+        runtime_type = normalize_runtime_type(template.get("runtime_type"))
+        runtime_config = normalize_runtime_config(
+            runtime_type, template.get("runtime_config") or {}
+        )
         agent = self.create_agent(
             name=resolved_name,
             model_name=str(template.get("model_name") or "local-model").strip() or "local-model",
@@ -343,10 +390,14 @@ class AgentService:
             owner_browser_session=owner_browser_session,
             agent_type="builtin",
             description=template.get("description"),
+            runtime_type=runtime_type,
+            runtime_config=runtime_config,
             # A template carrying its own pipeline overwrites the seed below, so
             # skip that write. A template WITHOUT one still needs the starter
             # instruction, or the clone lands with an empty Configure screen.
-            seed_default_pipeline=not has_own_pipeline,
+            seed_default_pipeline=(
+                runtime_type == PIPELINE_RUNTIME_TYPE and not has_own_pipeline
+            ),
         )
         if has_own_pipeline:
             agent = self.agents.update_agent(agent["agent_id"], pipeline=pipeline) or agent

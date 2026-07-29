@@ -7,10 +7,10 @@ exception messages, ownership/auth behavior, and ``AgentService`` calls are
 unchanged; only the module location moved.
 """
 
-from typing import List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 from dashboard.backend.domain.backtesting.constants import (
     DEFAULT_AGENT_CASH_ALLOCATION,
@@ -19,6 +19,10 @@ from dashboard.backend.domain.backtesting.constants import (
     MIN_BACKTEST_INITIAL_CAPITAL,
 )
 from dashboard.backend.domain.agents.repository import _UNSET
+from dashboard.backend.domain.agents.credential_store import (
+    FINANCIAL_DATASETS_CREDENTIAL,
+    agent_credential_store,
+)
 from dashboard.backend.domain.agents.service import (
     AgentNotFoundError,
     MarketplaceTemplateNotFoundError,
@@ -26,6 +30,10 @@ from dashboard.backend.domain.agents.service import (
     agent_service,
 )
 from dashboard.backend.domain.agents import marketplace as marketplace_catalog
+from dashboard.backend.domain.agents.runtime import (
+    AI_HEDGE_FUND_RUNTIME_TYPE,
+    normalize_runtime_config,
+)
 from dashboard.backend.api.dependencies import (
     _owner_context,
     _require_agent_access,
@@ -41,6 +49,8 @@ class CreateAgentBody(BaseModel):
     model_name: str = Field(default="local-model", max_length=100)
     agent_type: str = Field(default="external", max_length=20)
     description: Optional[str] = Field(default=None, max_length=280)
+    runtime_type: Literal["pipeline", "ai_hedge_fund"] = "pipeline"
+    runtime_config: Dict[str, Any] = Field(default_factory=dict)
     cash_allocation: Optional[float] = Field(
         default=DEFAULT_AGENT_CASH_ALLOCATION,
         ge=0,
@@ -70,6 +80,8 @@ class UpdateAgentBody(BaseModel):
     model_name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     description: Optional[str] = Field(default=None, max_length=280)
     pipeline: Optional[List[PipelineStep]] = Field(default=None, max_length=50)
+    runtime_type: Optional[Literal["pipeline", "ai_hedge_fund"]] = None
+    runtime_config: Optional[Dict[str, Any]] = None
     cash_allocation: Optional[float] = Field(
         default=None,
         ge=0,
@@ -93,6 +105,20 @@ class UpdateAgentBody(BaseModel):
         if value is not None and not value.strip():
             raise ValueError("must not be blank")
         return value
+
+
+class FinancialDatasetsCredentialBody(BaseModel):
+    api_key: SecretStr
+
+    @field_validator("api_key")
+    @classmethod
+    def _validate_api_key(cls, value: SecretStr) -> SecretStr:
+        raw = value.get_secret_value().strip()
+        if not raw:
+            raise ValueError("api_key must not be blank")
+        if len(raw) > 4096:
+            raise ValueError("api_key is too long")
+        return SecretStr(raw)
 
 
 @router.post("")
@@ -124,6 +150,12 @@ async def create_agent(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    try:
+        runtime_config = normalize_runtime_config(
+            body.runtime_type, body.runtime_config
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     agent = agent_service.create_agent(
         name=body.name.strip(),
         model_name=body.model_name.strip() or "local-model",
@@ -131,6 +163,8 @@ async def create_agent(
         owner_browser_session=ctx["browser_session"],
         agent_type=agent_type,
         description=(body.description.strip() if body.description else None),
+        runtime_type=body.runtime_type,
+        runtime_config=runtime_config,
         cash_allocation=cash,
         backtest_allocation=body.backtest_allocation,
     )
@@ -335,6 +369,8 @@ async def update_agent(
     cash_allocation_provided = "cash_allocation" in fields_set
     backtest_allocation_provided = "backtest_allocation" in fields_set
     live_trading_provided = "live_trading_enabled" in fields_set
+    runtime_type_provided = "runtime_type" in fields_set
+    runtime_config_provided = "runtime_config" in fields_set
     if (
         body.name is None
         and body.model_name is None
@@ -343,6 +379,8 @@ async def update_agent(
         and not cash_allocation_provided
         and not backtest_allocation_provided
         and not live_trading_provided
+        and not runtime_type_provided
+        and not runtime_config_provided
     ):
         raise HTTPException(status_code=400, detail="No fields to update")
 
@@ -360,6 +398,8 @@ async def update_agent(
         body.backtest_allocation if backtest_allocation_provided else _UNSET
     )
     live_trading_arg = body.live_trading_enabled if live_trading_provided else _UNSET
+    runtime_type_arg = body.runtime_type if runtime_type_provided else _UNSET
+    runtime_config_arg = body.runtime_config if runtime_config_provided else _UNSET
 
     # When a signed-in owner changes cash_allocation, the portfolio ledger has
     # to follow (#175). Validate it *first* -- writing nothing -- so a rejected
@@ -390,12 +430,16 @@ async def update_agent(
             model_name=body.model_name.strip() if body.model_name is not None else None,
             description=body.description,
             pipeline=pipeline_arg,
+            runtime_type=runtime_type_arg,
+            runtime_config=runtime_config_arg,
             cash_allocation=cash_allocation_arg,
             backtest_allocation=backtest_allocation_arg,
             live_trading_enabled=live_trading_arg,
         )
     except AgentNotFoundError:
         raise HTTPException(status_code=404, detail="Agent not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     if ledger_new_amount is not None:
         agent = portfolio_service.set_agent_allocation(
@@ -404,6 +448,78 @@ async def update_agent(
             new_amount=ledger_new_amount,
         )["agent"]
     return {"agent": agent}
+
+
+def _require_ai_hedge_fund_agent(agent: Dict[str, Any]) -> None:
+    if (agent.get("runtime_type") or "pipeline") != AI_HEDGE_FUND_RUNTIME_TYPE:
+        raise HTTPException(
+            status_code=422,
+            detail="Financial Datasets credentials apply only to AI Hedge Fund agents",
+        )
+
+
+@router.get("/{agent_id}/credentials/financial-datasets")
+async def get_financial_datasets_credential_status(
+    agent_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+):
+    """Return configured status without ever returning credential plaintext."""
+    ctx = _owner_context(request, authorization)
+    agent = _require_agent_access(agent_id, ctx, api_key=x_api_key)
+    _require_ai_hedge_fund_agent(agent)
+    status = agent_credential_store.get_public(
+        agent_id, FINANCIAL_DATASETS_CREDENTIAL
+    )
+    return status or {
+        "credential": FINANCIAL_DATASETS_CREDENTIAL,
+        "configured": False,
+        "updated_at": None,
+    }
+
+
+@router.put("/{agent_id}/credentials/financial-datasets")
+async def set_financial_datasets_credential(
+    agent_id: str,
+    body: FinancialDatasetsCredentialBody,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+):
+    """Encrypt and store the user's Financial Datasets API key."""
+    ctx = _owner_context(request, authorization)
+    agent = _require_agent_access(agent_id, ctx, api_key=x_api_key)
+    _require_ai_hedge_fund_agent(agent)
+    try:
+        return agent_credential_store.upsert(
+            agent_id,
+            FINANCIAL_DATASETS_CREDENTIAL,
+            body.api_key.get_secret_value(),
+        )
+    except RuntimeError as exc:
+        # The encryption helper names a missing/malformed setting but never its
+        # value, so this remains actionable without exposing the submitted key.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.delete("/{agent_id}/credentials/financial-datasets")
+async def delete_financial_datasets_credential(
+    agent_id: str,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
+):
+    ctx = _owner_context(request, authorization)
+    agent = _require_agent_access(agent_id, ctx, api_key=x_api_key)
+    _require_ai_hedge_fund_agent(agent)
+    return {
+        "credential": FINANCIAL_DATASETS_CREDENTIAL,
+        "configured": False,
+        "deleted": agent_credential_store.delete(
+            agent_id, FINANCIAL_DATASETS_CREDENTIAL
+        ),
+    }
 
 
 @router.delete("/{agent_id}")
@@ -417,6 +533,10 @@ async def delete_agent(
     agent = _require_agent_access(agent_id, ctx, api_key=x_api_key)
     sleeve = float(agent.get("cash_allocation") or 0)
     owner_user_id = agent.get("owner_user_id")
+    if (agent.get("runtime_type") or "pipeline") == AI_HEDGE_FUND_RUNTIME_TYPE:
+        # Hosted credentials are runtime-owned. Clean them before deleting the
+        # agent; ordinary pipeline deletion keeps its established code path.
+        agent_credential_store.delete_all(agent_id)
     agent_service.delete_agent(agent_id)
     # Refresh the account ledger now the sleeve is gone from the sum (#175).
     # Reconciling cannot fail here -- unlike crediting the sleeve back, which
