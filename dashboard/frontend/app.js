@@ -246,6 +246,7 @@ const CASH_STEP_INPUT_IDS = [
   'externalAgentCashAllocation',
   'builtinAgentCashAllocation',
   'agentEditorCashAllocation',
+  'agentEditorBacktestAllocation',
 ];
 
 function cashStepMeta(input) {

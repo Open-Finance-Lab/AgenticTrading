@@ -206,7 +206,7 @@ def test_ifind_universe_change_preserves_decision_source(js):
     )
 
 
-def test_backtest_default_capital_is_natively_valid(html, js):
+def test_backtest_capital_input_stays_removed_default_unchanged(html, js):
     """Historically pinned native <input min/max/step/value> attributes.
 
     The input was removed in Task 4 (2026-07-29): capital is now set in
