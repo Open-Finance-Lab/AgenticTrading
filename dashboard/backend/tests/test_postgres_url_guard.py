@@ -17,6 +17,9 @@ from dashboard.backend.tests.test_agent_store_postgres import (  # noqa: F401
     pg_agent_store,
     pg_version_store,
 )
+from dashboard.backend.tests.test_backtest_db_postgres import (  # noqa: F401
+    pg_backtest_db,
+)
 from dashboard.backend.tests.test_strategy_store_postgres import (  # noqa: F401
     pg_strategy_store,
 )
@@ -68,6 +71,7 @@ _REMOTE_URL = "postgresql://user:pw@remote.invalid:5432/db"
         ("pg_version_store", "dashboard.backend.tests.test_agent_store_postgres"),
         ("pg_strategy_store", "dashboard.backend.tests.test_strategy_store_postgres"),
         ("temp_postgres_store", "dashboard.backend.tests.test_users_postgres"),
+        ("pg_backtest_db", "dashboard.backend.tests.test_backtest_db_postgres"),
     ],
 )
 def test_destructive_fixture_refuses_remote_url(
