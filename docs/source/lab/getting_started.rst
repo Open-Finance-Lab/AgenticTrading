@@ -36,8 +36,8 @@ The dashboard keeps these separate, and they have their own limits:
 Start from a template
 ---------------------
 
-Rather than writing an agent from scratch, open **Playground → Agent
-Marketplace** and copy a ready-made template into **My Agents**, then edit its
+Rather than writing an agent from scratch, open **Community → Agent
+Marketplace** and add a ready-made template to **My Agents**, then edit its
 prompts and backtest it. See :doc:`marketplace`.
 
 Accounts (optional)

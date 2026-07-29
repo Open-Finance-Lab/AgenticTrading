@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=67">
+    <link rel="stylesheet" href="styles.css?v=68">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
     (function () {
@@ -36,6 +36,17 @@
             about: { page: 'competition', competitionTab: 'about' },
         };
         window.NAV_VIEW_MAP = NAV_VIEW_MAP;
+        // Saved nav state written before the marketplace moved out of Playground.
+        // Exported for the same reason NAV_VIEW_MAP is: the boot below and app.js
+        // read the SAME localStorage blob, so a second hand-written copy of this
+        // rule could paint Playground while app.js renders Community.
+        function migrateSavedNavState(saved) {
+            if (saved && saved.page === 'playground' && saved.playgroundTab === 'marketplace') {
+                return { page: 'community' };
+            }
+            return saved;
+        }
+        window.migrateSavedNavState = migrateSavedNavState;
         function resolveBootNavigation() {
             var params = new URLSearchParams(window.location.search);
             var view = params.get('view') || params.get('mode');
@@ -55,13 +66,11 @@
                 };
             }
             try {
-                var saved = JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null');
+                var saved = migrateSavedNavState(
+                    JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null'),
+                );
                 var valid = ['home', 'playground', 'competition', 'community', 'account'];
                 if (saved && valid.indexOf(saved.page) !== -1) {
-                    // Marketplace moved from Playground → Community.
-                    if (saved.page === 'playground' && saved.playgroundTab === 'marketplace') {
-                        return { page: 'community' };
-                    }
                     return saved;
                 }
             } catch (e) { /* ignore */ }
@@ -1476,13 +1485,20 @@
         </div>
     </div>
 
-    <!-- Community (Agent Marketplace) -->
+    <!-- Community -- Agent Marketplace is its first section, not the whole page:
+         the nav button says "Community", so the page has to say it too. -->
     <div id="communityView" class="page-view community-view" style="display: none;">
+        <div class="page-header">
+            <div>
+                <h2 class="page-title">Community</h2>
+                <p class="page-description">Agent templates shared by the Agentic Trading Lab community.</p>
+            </div>
+        </div>
         <div class="marketplace-section">
             <div class="marketplace-section-head">
                 <div>
-                    <h2 class="page-title">Agent Marketplace</h2>
-                    <p class="marketplace-section-sub">Browse open agent templates and select them into My Agents to customize and backtest.</p>
+                    <h3 class="marketplace-section-title">Agent Marketplace</h3>
+                    <p class="marketplace-section-sub">Browse open agent templates and add them to My Agents to customize and backtest.</p>
                 </div>
                 <div class="agent-toolbar-search marketplace-search">
                     <svg class="agent-toolbar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
@@ -1602,7 +1618,7 @@
     <script src="market-events/MarketEventFeed.js"></script>
     <script src="js/portfolio.js?v=15"></script>
     <script src="js/agent-editor.js?v=14"></script>
-    <script src="app.js?v=50"></script>
+    <script src="app.js?v=51"></script>
     <script src="js/leaderboard.js?v=16"></script>
     <script src="home-page.js?v=36"></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

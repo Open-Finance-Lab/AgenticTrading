@@ -8896,6 +8896,11 @@ body.agent-editor-open {
     max-width: 360px;
 }
 
+/* The class is on all three account forms, but `>` is deliberate and narrows
+   this to two buttons: Save name and Update password, the only submits that are
+   direct children of a form. The email form's pair is nested in
+   .account-email-actions and sized by that rule instead -- the child combinator
+   is what keeps the two from fighting over the same buttons. */
 .account-password-form > .auth-btn {
     width: 100%;
 }
@@ -8918,8 +8923,13 @@ body.agent-editor-open {
     color: var(--text-secondary);
 }
 
+/* `1fr auto`, not a single column: Cancel is hidden in the idle state and so
+   generates no grid item, leaving "Send code" spanning the full first track.
+   Once the code step un-hides Cancel it takes the auto track beside it, instead
+   of stacking full-width underneath and reading as an equal-weight action. */
 .account-email-actions {
     display: grid;
+    grid-template-columns: 1fr auto;
     gap: 8px;
     width: 100%;
 }
@@ -9004,6 +9014,15 @@ body.agent-editor-open {
     align-items: flex-end;
     justify-content: space-between;
     gap: 16px;
+}
+
+/* One step down from .page-title (22px): the Community page owns the h2, the
+   marketplace is a section within it. */
+.marketplace-section-title {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text-primary);
 }
 
 .marketplace-section-sub {
