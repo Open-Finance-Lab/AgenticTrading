@@ -196,16 +196,13 @@ def _auth_headers(token, browser="browser-backtest-alloc-1"):
 
 
 def test_signed_in_combined_patch_moves_only_the_real_sleeve(authed_client):
-    """The one path where a real-money write (cash_allocation) and a
-    simulated-money write (backtest_allocation) interleave: a signed-in owner
-    PATCHing both fields together in one request.
+    """Signed-in round trip: both fields survive a combined PATCH without
+    backtest_allocation being lost to the route's ``_UNSET`` substitution.
 
-    The route writes backtest_allocation via ``agent_service.update_agent``
-    first (with cash_allocation left ``_UNSET``), then re-reads the row
-    through the ledger write (``portfolio_service.set_agent_allocation`` ->
-    ``_write_sleeve``, which re-reads via ``agent_store.update_agent``) for
-    cash_allocation. Pins that the merged response still carries both values,
-    and that cash_available moves by exactly the sleeve delta.
+    Does NOT prove the ledger branch (api/routers/agents.py:369-384) executed:
+    _reconcile derives cash_available from the sum of agent allocations on
+    every read, so the cash_available assertion would pass even if that code
+    were deleted.
     """
     token, _ = _signup(authed_client)
     headers = _auth_headers(token)
