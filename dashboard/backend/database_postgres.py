@@ -601,3 +601,211 @@ class PostgresBacktestDatabase:
                 cur.execute("DELETE FROM run_manifest")
                 cur.execute("DELETE FROM agent_runs")
         self._sqlite.clear_all()
+
+    # ------------------------------------------------------------------
+    # Readers
+    # ------------------------------------------------------------------
+
+    def get_all_runs(self) -> List[Dict]:
+        """Get metadata for all runs."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM agent_runs ORDER BY created_at DESC")
+                rows = cur.fetchall()
+        return [BacktestDatabase._parse_run_row(row) for row in rows]
+
+    def get_runs_by_session(self, session_id: str) -> List[Dict]:
+        """Get all runs for a specific session."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM agent_runs
+                    WHERE session_id = %s
+                    ORDER BY created_at DESC
+                    """,
+                    (session_id,),
+                )
+                rows = cur.fetchall()
+        return [BacktestDatabase._parse_run_row(row) for row in rows]
+
+    def get_runs_by_sessions(self, session_ids: List[str]) -> Dict[str, List[Dict]]:
+        """Get all runs for several sessions in one query, grouped by session.
+
+        Batch companion to ``get_runs_by_session`` so listings that enrich many
+        agents don't issue one query per agent. Every requested session id is
+        present in the result (empty list when it has no runs); per-session
+        ordering matches ``get_runs_by_session`` (created_at DESC).
+        """
+        grouped: Dict[str, List[Dict]] = {sid: [] for sid in session_ids if sid}
+        if not grouped:
+            return grouped
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM agent_runs
+                    WHERE session_id = ANY(%s)
+                    ORDER BY created_at DESC
+                    """,
+                    (list(grouped),),
+                )
+                rows = cur.fetchall()
+        for row in rows:
+            run = BacktestDatabase._parse_run_row(row)
+            grouped[run["session_id"]].append(run)
+        return grouped
+
+    def get_run(self, run_id: str) -> Optional[Dict]:
+        """Get metadata for a specific run (no session check)."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM agent_runs WHERE run_id = %s", (run_id,))
+                row = cur.fetchone()
+        return BacktestDatabase._parse_run_row(row) if row else None
+
+    def get_run_with_session(self, run_id: str, session_id: str) -> Optional[Dict]:
+        """Get a run, verifying it belongs to the session."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM agent_runs
+                    WHERE run_id = %s AND session_id = %s
+                    """,
+                    (run_id, session_id),
+                )
+                row = cur.fetchone()
+        return BacktestDatabase._parse_run_row(row) if row else None
+
+    def get_equity_curve(self, run_id: str) -> List[Dict]:
+        """Get full equity curve for a run."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT timestamp, equity, cash, positions_value, daily_return,
+                           native_equity, native_cash, native_positions_value, fx_rate
+                    FROM equity_timeseries
+                    WHERE run_id = %s
+                    ORDER BY timestamp ASC
+                    """,
+                    (run_id,),
+                )
+                rows = cur.fetchall()
+        audit_fields = (
+            "native_equity",
+            "native_cash",
+            "native_positions_value",
+            "fx_rate",
+        )
+        for row in rows:
+            for field in audit_fields:
+                if row.get(field) is None:
+                    row.pop(field, None)
+        return rows
+
+    def get_equity_curves(self, run_ids: List[str]) -> Dict[str, List[Dict]]:
+        """Batched: one query for all runs (the SQLite twin loops; over the
+        network that would be one round-trip per agent on the My Agents page).
+        """
+        result: Dict[str, List[Dict]] = {run_id: [] for run_id in run_ids}
+        if not run_ids:
+            return result
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT run_id, timestamp, equity, cash, positions_value, daily_return,
+                           native_equity, native_cash, native_positions_value, fx_rate
+                    FROM equity_timeseries
+                    WHERE run_id = ANY(%s)
+                    ORDER BY run_id, timestamp ASC
+                    """,
+                    (list(run_ids),),
+                )
+                rows = cur.fetchall()
+        audit_fields = (
+            "native_equity",
+            "native_cash",
+            "native_positions_value",
+            "fx_rate",
+        )
+        for row in rows:
+            run_id = row.pop("run_id")
+            for field in audit_fields:
+                if row.get(field) is None:
+                    row.pop(field, None)
+            result[run_id].append(row)
+        return result
+
+    def get_runs_by_mode(self, mode: str) -> List[Dict]:
+        """Get all runs for a specific mode ('backtest' or 'paper')."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM agent_runs
+                    WHERE mode = %s
+                    ORDER BY created_at DESC
+                    """,
+                    (mode,),
+                )
+                rows = cur.fetchall()
+        return [BacktestDatabase._parse_run_row(row) for row in rows]
+
+    def get_trades(self, run_id: str) -> List[Dict]:
+        """Get all trades for a run.
+
+        Unlike the SQLite side, the Postgres ``trades`` table never carried the
+        legacy ``shares``/``action``/``total_value`` columns (see
+        ``insert_trades``), so there is no column-introspection branch here --
+        the modern column set is selected directly.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT timestamp, symbol, quantity, side, price, value, reason,
+                           native_price, native_value, fx_rate
+                    FROM trades WHERE run_id = %s
+                    ORDER BY timestamp ASC, id ASC
+                    """,
+                    (run_id,),
+                )
+                rows = cur.fetchall()
+        for row in rows:
+            for field in ("native_price", "native_value", "fx_rate"):
+                if row.get(field) is None:
+                    row.pop(field, None)
+        return rows
+
+    def get_decisions(self, run_id: str) -> List[Dict]:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT step_index, timestamp, decision_source, actions_submitted,
+                           actions_executed, context_ref
+                    FROM backtest_decisions WHERE run_id = %s
+                    ORDER BY step_index ASC
+                    """,
+                    (run_id,),
+                )
+                rows = cur.fetchall()
+        for row in rows:
+            try:
+                row["actions_submitted"] = json.loads(row.get("actions_submitted") or "[]")
+            except json.JSONDecodeError:
+                row["actions_submitted"] = []
+        return rows
+
+    def get_run_manifest(self, run_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT manifest_json FROM run_manifest WHERE run_id = %s",
+                    (run_id,),
+                )
+                row = cur.fetchone()
+        return json.loads(row["manifest_json"]) if row else None
