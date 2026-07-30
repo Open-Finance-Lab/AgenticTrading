@@ -767,9 +767,10 @@ def test_credential_survives_no_runtime_switch_and_stays_removable(client):
     endpoint = f"/api/v1/agents/{agent_id}/credentials/financial-datasets"
 
     plaintext = "fd-orphan-canary"
-    assert client.put(
-        endpoint, json={"api_key": plaintext}, headers=headers
-    ).status_code == 200
+    # Kept out of the assert: ``python -O`` strips asserts, and with them any
+    # call written inside one -- here the store write the test depends on.
+    stored = client.put(endpoint, json={"api_key": plaintext}, headers=headers)
+    assert stored.status_code == 200
 
     switched = client.patch(
         f"/api/v1/agents/{agent_id}",
@@ -834,9 +835,8 @@ def test_deleting_agent_removes_credentials_for_any_runtime(client):
     agents_api.agent_credential_store.upsert(
         agent_id, "financial_datasets_api_key", "fd-delete-canary"
     )
-    assert client.delete(
-        f"/api/v1/agents/{agent_id}", headers=headers
-    ).status_code == 200
+    deleted_agent = client.delete(f"/api/v1/agents/{agent_id}", headers=headers)
+    assert deleted_agent.status_code == 200
     assert (
         agents_api.agent_credential_store.get_secret(
             agent_id, "financial_datasets_api_key"
@@ -864,9 +864,8 @@ def test_credential_writes_are_rate_limited(client, monkeypatch):
         f"/api/v1/agents/{agent['agent_id']}/credentials/financial-datasets"
     )
 
-    assert client.put(
-        endpoint, json={"api_key": "first"}, headers=headers
-    ).status_code == 200
+    first = client.put(endpoint, json={"api_key": "first"}, headers=headers)
+    assert first.status_code == 200
     throttled = client.put(endpoint, json={"api_key": "second"}, headers=headers)
     assert throttled.status_code == 429
 

@@ -164,6 +164,14 @@ def _redact_runtime_error(value: Any, environment: Mapping[str, str]) -> str:
         ):
             continue
         message = message.replace(secret, "[REDACTED]")
+    # Collapse newlines and control characters. This text is upstream-controlled
+    # and reaches both print() -- the only log channel that survives in the
+    # deployed config -- and the persisted run metadata, so a crafted traceback
+    # could otherwise forge log lines.
+    message = "".join(
+        " " if character in "\r\n" or ord(character) < 0x20 else character
+        for character in message
+    )
     return message[-1000:]
 
 

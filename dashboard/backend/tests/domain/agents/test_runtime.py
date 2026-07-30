@@ -901,3 +901,23 @@ def test_step_timeout_is_read_once_and_shared():
     for bad in ("abc", "0", str(MAX_TIMEOUT_SECONDS + 1)):
         with pytest.raises(AiHedgeFundConfigurationError):
             resolve_step_timeout_seconds({"AI_HEDGE_FUND_TIMEOUT_SECONDS": bad})
+
+
+def test_upstream_error_text_cannot_forge_log_lines():
+    """Upstream-controlled text reaches print() and persisted run metadata."""
+    from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+        _redact_runtime_error,
+    )
+
+    forged = "boom\n2026-07-30 ERROR   fake log line\r\ndone"
+    cleaned = _redact_runtime_error(forged, {})
+    assert "\n" not in cleaned
+    assert "\r" not in cleaned
+    assert "fake log line" in cleaned  # content kept, framing removed
+
+    redacted = _redact_runtime_error(
+        "failed with key sk-secret-value",
+        {"FINANCIAL_DATASETS_API_KEY": "sk-secret-value"},
+    )
+    assert "sk-secret-value" not in redacted
+    assert "[REDACTED]" in redacted
