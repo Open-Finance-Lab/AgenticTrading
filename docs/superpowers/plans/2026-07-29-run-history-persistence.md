@@ -1030,9 +1030,14 @@ plan's declared file list.
    divergence that then inverts when Python removes the adapter, so both sides now convert.
 4. **The backfill gained per-run failure isolation and an advisory lock.** "Idempotent" was true;
    "re-runnable to completion" was not — one bad legacy row aborted `main()`, and every rerun
-   re-failed on it, so runs ordered after it never migrated. Separately, the trades/decisions
-   skip-logic is a read-then-write across two pooled checkouts, so two concurrent invocations
-   would double every row in the two tables that have no unique key to collapse them.
+   re-failed on it, so runs ordered after it never migrated. `_restore_created_at` needed more
+   than a `try`/`except` because it shares one connection: on Postgres a failed statement aborts
+   the whole transaction, so each UPDATE now runs in its own `conn.transaction()` block (which,
+   on a pooled connection with nothing yet executed, is an independent `BEGIN`/`COMMIT` rather
+   than a `SAVEPOINT` — verified against psycopg 3.3.4; either gives the needed isolation).
+   Separately, the trades/decisions skip-logic is a read-then-write across two pooled checkouts,
+   so two concurrent invocations would double every row in the two tables that have no unique
+   key to collapse them.
 5. **A pre-existing schema divergence surfaced and is now pinned, not fixed.**
    `trades.quantity`/`side`/`value` are `NOT NULL` under `CREATE TABLE` but nullable on the
    lazy-ALTER path, because SQLite rejects `ADD COLUMN ... NOT NULL` without a default and these

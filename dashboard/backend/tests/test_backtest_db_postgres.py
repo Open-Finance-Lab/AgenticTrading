@@ -667,14 +667,30 @@ def test_clear_all_leaves_the_embedded_sqlite_cold_tables_alone_postgres(pg_back
         run_id="lb_local_only", session_id="seed", agent_name="Seeded", mode="backtest",
         start_date="2024-01-01", end_date="2024-01-02", initial_equity=1000.0,
     )
+    # A Postgres row too, so the control assertion below is not vacuous: the
+    # fixture already empties agent_runs at setup, so asserting "Postgres is
+    # empty" without writing to it first would hold before clear_all() is even
+    # called -- and would still hold if clear_all() were `pass`.
+    pg_backtest_db.insert_run(
+        run_id="run-pg-side", session_id="s1", agent_name="Agent", mode="backtest",
+        start_date="2024-01-01", end_date="2024-01-02", initial_equity=1000.0,
+    )
     assert pg_backtest_db._sqlite.get_run("lb_local_only") is not None
+    assert [r["run_id"] for r in pg_backtest_db.get_all_runs()] == ["run-pg-side"]
 
     pg_backtest_db.clear_all()
 
     assert pg_backtest_db._sqlite.get_run("lb_local_only") is not None
-    # And the Postgres side really was wiped -- otherwise this test would pass
-    # on a clear_all() that did nothing at all.
+    # The wipe really happened -- this is what makes the assertion above mean
+    # "clear_all spared the local store", not "clear_all did nothing".
     assert pg_backtest_db.get_all_runs() == []
+
+    # Housekeeping: the embedded store is the session-shared temp DB from
+    # conftest, and clear_all deliberately no longer touches it, so this row
+    # would otherwise outlive the test. No test asserts an exact global list
+    # today, but leaving it behind is the sort of cross-test coupling that
+    # conftest's DATABASE_PATH redirect exists to prevent.
+    pg_backtest_db._sqlite.delete_run("lb_local_only")
 
 
 @pg_only

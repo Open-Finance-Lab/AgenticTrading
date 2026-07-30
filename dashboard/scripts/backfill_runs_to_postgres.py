@@ -223,14 +223,26 @@ def _exclusive_backfill_lock(target: "PostgresBacktestDatabase") -> Iterator[Non
                 "SELECT pg_try_advisory_lock(%s) AS acquired",
                 (BACKFILL_ADVISORY_LOCK_KEY,),
             )
-            if not cur.fetchone()["acquired"]:
-                raise BackfillLockUnavailable(
-                    "another backfill_runs_to_postgres.py run holds the advisory "
-                    f"lock ({BACKFILL_ADVISORY_LOCK_KEY}) on this database. "
-                    "Two concurrent runs would double every trade and decision "
-                    "row -- neither table has a unique key to collapse them. "
-                    "Wait for the other run to finish, then re-run this one."
-                )
+            acquired = cur.fetchone()["acquired"]
+        # Close the implicit transaction the SELECT opened. Without this the
+        # lock connection sits `idle in transaction` for the whole write phase,
+        # and managed providers (Neon included) commonly enforce
+        # idle_in_transaction_session_timeout -- which would kill the session,
+        # silently release the lock mid-phase, and then make the unlock raise.
+        # Safe because pg_try_advisory_lock takes a *session*-scoped lock:
+        # committing does not release it (only pg_advisory_xact_lock is
+        # transaction-scoped).
+        conn.commit()
+        if not acquired:
+            # Raised before the try/finally on purpose: no lock was taken, so
+            # there is nothing to unlock.
+            raise BackfillLockUnavailable(
+                "another backfill_runs_to_postgres.py run holds the advisory "
+                f"lock ({BACKFILL_ADVISORY_LOCK_KEY}) on this database. "
+                "Two concurrent runs would double every trade and decision "
+                "row -- neither table has a unique key to collapse them. "
+                "Wait for the other run to finish, then re-run this one."
+            )
         try:
             yield
         finally:
@@ -238,6 +250,7 @@ def _exclusive_backfill_lock(target: "PostgresBacktestDatabase") -> Iterator[Non
                 cur.execute(
                     "SELECT pg_advisory_unlock(%s)", (BACKFILL_ADVISORY_LOCK_KEY,)
                 )
+            conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -335,9 +348,24 @@ class SourceData:
         self.equity_by_run = {rid: source_db.get_equity_curve(rid) for rid in self.run_ids}
         self.trades_by_run = {rid: source_db.get_trades(rid) for rid in self.run_ids}
         self.decisions_by_run = {rid: source_db.get_decisions(rid) for rid in self.run_ids}
+        # Per-run guard on the manifest read specifically. Every other reader
+        # tolerates junk already -- _parse_run_row catches TypeError/ValueError,
+        # get_decisions catches JSONDecodeError -- but get_run_manifest
+        # (database.py) does a bare json.loads, so one corrupt manifest_json
+        # would raise here, in the READ phase, before _Failures exists and
+        # before a single row is written. That would make the module docstring's
+        # "re-runnable to completion" false in the one place no rerun can help.
+        # Only reachable from a hand-edited or legacy source (api/v2/runs.py is
+        # the sole writer and always passes a model_dump()), which is exactly
+        # what --source accepts.
         self.manifests_by_run: Dict[str, Dict[str, Any]] = {}
+        self.unreadable_manifests: List[Tuple[str, str]] = []
         for rid in self.run_ids:
-            manifest = source_db.get_run_manifest(rid)
+            try:
+                manifest = source_db.get_run_manifest(rid)
+            except Exception as exc:
+                self.unreadable_manifests.append((rid, f"{type(exc).__name__}: {exc}"))
+                continue
             if manifest is not None:
                 self.manifests_by_run[rid] = manifest
 
@@ -372,8 +400,8 @@ def _migrate_agent_runs(
     rather than the whole pass. Safe as a plain handler here because every
     writer method opens its own ``with self._get_connection()`` block, i.e. its
     own transaction, which the pool rolls back before handing the connection to
-    the next call -- unlike ``_restore_created_at``, which shares one
-    connection and therefore needs a savepoint instead.
+    the next call -- unlike ``_restore_created_at``, which shares one connection
+    and therefore needs an explicit per-run ``conn.transaction()`` block.
 
     A run that fails here is also excluded from every child table below: its
     ``agent_runs`` parent may not exist, and the FK would reject the children
@@ -471,8 +499,25 @@ def _restore_created_at(
     subsequent UPDATE on that connection would then raise
     ``InFailedSqlTransaction`` -- turning one bad row into a total loss while
     looking, in the report, like every row was individually bad. Each UPDATE
-    therefore runs inside ``conn.transaction()``, which is a real savepoint:
-    rolling back one run leaves the connection usable for the rest.
+    therefore runs inside its own ``conn.transaction()`` block.
+
+    What that block actually emits, since the name is easy to guess wrong
+    (checked against psycopg 3.3.4's ``transaction.py``, not assumed): it
+    branches on ``pgconn.transaction_status == IDLE``. A pooled checkout does
+    not ``BEGIN`` until something executes, and each block here COMMITs and
+    returns the connection to IDLE -- so every iteration is an *independent
+    transaction* (``BEGIN``/``COMMIT``, rolled back with plain ``ROLLBACK``),
+    not a savepoint. ``SAVEPOINT``/``ROLLBACK TO`` would only appear if a
+    transaction were already open on this connection when the block was
+    entered. Either form gives the per-run isolation this needs; the
+    distinction matters only if someone later executes something on ``conn``
+    before the loop, which silently switches the mechanism (and is fine).
+
+    A consequence worth naming: because each run commits separately, a run that
+    fails leaves the successful restores durable rather than discarding them.
+    That is the intent -- this pass is idempotent and converges on a rerun (it
+    always writes the same source-captured value, never ``now()``), so partial
+    progress is strictly better than all-or-nothing here.
     """
     restored = 0
     # A run whose insert failed has no row to update. The UPDATE would match
@@ -767,6 +812,10 @@ def main() -> int:
 
     for table in TABLES_IN_FK_ORDER:
         results[table]["skipped_orphan"] = data.orphan_counts.get(table, 0)
+    # Its own bucket, so an unreadable manifest reads as a *named* reason rather
+    # than an unexplained shortfall -- which is the only thing the accounting
+    # check should ever fail on.
+    results["run_manifest"]["skipped_unreadable"] = len(data.unreadable_manifests)
 
     print("\nPer-table results (source vs. migrated):")
     accounting_ok = True
@@ -781,6 +830,7 @@ def main() -> int:
             + r.get("skipped_orphan", 0)
             + r.get("skipped_already_present", 0)
             + r.get("skipped_parent_failed", 0)
+            + r.get("skipped_unreadable", 0)
             + r.get("failed", 0)
         )
         line = f"  {table}: source={source_count} migrated={r['migrated']}"
@@ -790,6 +840,8 @@ def main() -> int:
             line += f" skipped_already_present={r['skipped_already_present']}"
         if r.get("skipped_parent_failed"):
             line += f" skipped_parent_failed={r['skipped_parent_failed']}"
+        if r.get("skipped_unreadable"):
+            line += f" skipped_unreadable={r['skipped_unreadable']}"
         if r.get("failed"):
             line += f" FAILED={r['failed']}"
         print(line)
@@ -802,20 +854,35 @@ def main() -> int:
             )
 
     if failures:
+        # Deliberately not "these rows are NOT in the target": _insert_one_run
+        # writes agent_runs and then update_run_baselines in two separate
+        # transactions, so a run listed under agent_runs may in fact have its
+        # row present with its baseline links missing. Every other run was
+        # migrated, and a rerun converges either way -- but the report should
+        # not assert something stronger than it can know.
         print(
-            f"\n{len(failures)} per-run failure(s) -- these rows are NOT in the "
-            "target. Every other run was migrated; re-run this script after "
-            "fixing them and only the missing rows will be written:",
+            f"\n{len(failures)} per-run failure(s) -- these runs did not migrate "
+            "cleanly and are incomplete or absent in the target. Every other run "
+            "was migrated; re-run this script after fixing them:",
             file=sys.stderr,
         )
         for table, run_id, error in failures.entries:
             print(f"  {table} / {run_id}: {error}", file=sys.stderr)
 
+    if data.unreadable_manifests:
+        print(
+            f"\n{len(data.unreadable_manifests)} manifest(s) could not be read "
+            "from the source and were skipped (see SourceData):",
+            file=sys.stderr,
+        )
+        for run_id, error in data.unreadable_manifests:
+            print(f"  run_manifest / {run_id}: {error}", file=sys.stderr)
+
     if not accounting_ok:
         print("\nBackfill finished with accounting mismatches -- see warnings above.", file=sys.stderr)
         return 1
 
-    if failures:
+    if failures or data.unreadable_manifests:
         print("\nBackfill finished with failures -- see the list above.", file=sys.stderr)
         return 1
 

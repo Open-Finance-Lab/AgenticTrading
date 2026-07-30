@@ -370,17 +370,26 @@ class PostgresBacktestDatabase:
         ``created_at`` is deliberately left out of ``DO UPDATE SET``, so a
         re-insert preserves it (first-seen semantics) where SQLite resets it to
         the moment of the rerun. **This one is user-visible, not cosmetic.**
-        All four listing queries below (``get_all_runs``,
-        ``get_runs_by_session``, ``get_runs_by_sessions``, ``get_runs_by_mode``)
-        order by ``created_at DESC``, and ``domain/agents/service.py`` uses the
-        same column to pick "the latest run for this agent" -- so re-running a
-        run bubbles it to the top of every listing on SQLite and leaves it in
-        place here. First-seen is kept because it is what the column *name*
-        means and what the backfill's ``_restore_created_at`` relies on to stay
-        idempotent; a rerun recomputes an old run, it does not create a new
-        one. (An earlier revision of this docstring asserted "nothing reads
-        that reset as meaningful", which was simply wrong -- eight call sites
-        do.)
+        Eight backend call sites read it for ordering: the four listing queries
+        below (``get_all_runs``, ``get_runs_by_session``,
+        ``get_runs_by_sessions``, ``get_runs_by_mode``) order by
+        ``created_at DESC``, and ``domain/agents/service.py`` sorts by it in
+        four more to pick "the latest run for this agent".
+
+        The frontend depends on it *more strongly than ordering*, which is the
+        real reason first-seen is the right choice here rather than a matter of
+        taste: ``dashboard/frontend/app.js`` pairs an external run with its
+        baseline runs by a ``created_at`` **range** --
+        ``r.created_at >= extRun.created_at && r.created_at < nextExtCreated``.
+        Resetting the column therefore does not merely reorder a list, it can
+        move a run across that boundary and mis-associate whole baseline
+        curves. First-seen is also what the column *name* means, and what the
+        backfill's ``_restore_created_at`` relies on to stay idempotent; a
+        rerun recomputes an old run, it does not create a new one.
+
+        (An earlier revision of this docstring asserted "nothing reads that
+        reset as meaningful". That was simply wrong in both directions -- eight
+        backend sites order by it and the frontend range-matches on it.)
 
         ``updated_at`` is the opposite case: it *is* named in
         ``DO UPDATE SET``, so a ``force_refresh`` still shows as "just
@@ -673,11 +682,13 @@ class PostgresBacktestDatabase:
         issued landed on cold tables this object never reads. What it *could*
         reach, since ``self._sqlite`` defaults to ``DATABASE_PATH`` and that
         defaults to the committed seed, is the seed's own ``agent_runs`` --
-        including the seven ``lb_*`` rows the leaderboard's ``auto_compute:
-        false`` entries exist only because of (see
+        **all 17 rows**, i.e. every run prod has. That is the 12 ``lb_*`` rows
+        behind the leaderboard's 7 ``auto_compute: false`` entries, which
+        nothing regenerates, *and* the 3 runs ``config/defaults.json`` names as
+        the dashboard's default comparison (see
         ``tests/test_seed_database_integrity.py``). A local
         ``backtest_hourly_agent.py --clear`` with ``AGENT_RUNS_DATABASE_URL``
-        set would have silently blanked the board.
+        set would have silently blanked the board and the default view both.
 
         Deliberately does NOT touch ``idempotency_keys``, matching SQLite's
         ``clear_all`` (same parity reasoning as ``delete_run`` above).

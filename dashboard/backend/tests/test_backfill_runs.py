@@ -22,9 +22,9 @@ the @pg_only tier would mean they were never executed outside CI. ``_FakeTarget`
 below stands in for ``PostgresBacktestDatabase`` -- ``main()`` imports that class
 *inside* the function, so patching the attribute on its source module is enough
 to drive the entire script, failure paths included, with no server anywhere.
-That is a supplement to tier 2, not a replacement: a fake cannot prove the
-savepoint actually isolates a Postgres transaction, only that the code asks for
-one per run.
+That is a supplement to tier 2, not a replacement: a fake cannot prove a
+transaction block really isolates a failed statement on Postgres, only that the
+code opens one per run.
 """
 
 import os
@@ -301,13 +301,30 @@ class _FakeConnection:
     def cursor(self):
         return _FakeCursor(self._target)
 
+    def commit(self):
+        """Counted so the lock's commits are assertable.
+
+        The advisory-lock helper commits right after acquiring, specifically so
+        the lock connection does not sit ``idle in transaction`` for the whole
+        write phase (managed providers enforce
+        idle_in_transaction_session_timeout, which would kill the session and
+        silently drop the lock). That commit is load-bearing, so it is recorded
+        rather than swallowed by a no-op stub.
+        """
+        self._target.commits += 1
+
     def transaction(self):
-        """Stand-in for psycopg's savepoint block.
+        """Stand-in for psycopg's ``conn.transaction()`` block.
 
         Counted, not simulated: on a real connection this is what keeps one
         failed UPDATE from poisoning the rest of the batch, which no fake can
         demonstrate. What it *can* pin is that the script opens one per run
         rather than one for the whole loop -- the actual shape of the fix.
+
+        (On a real pooled connection each of these is an independent
+        ``BEGIN``/``COMMIT``, not a ``SAVEPOINT`` -- psycopg branches on whether
+        a transaction is already open, and here none is. See
+        ``_restore_created_at``'s docstring.)
         """
         # Bound before the class so its methods can keep the conventional
         # ``self`` name (CodeQL py/not-named-self) without shadowing the
@@ -348,6 +365,7 @@ class _FakeTarget:
         self.lock_acquire_calls = []
         self.lock_release_calls = []
         self.transaction_entries = 0
+        self.commits = 0
 
     def _get_connection(self):
         return _FakeConnection(self)
@@ -479,7 +497,7 @@ def test_children_of_a_failed_parent_are_skipped_and_accounted_not_attempted(
     assert exit_code == 1
 
 
-def test_restore_created_at_uses_one_savepoint_per_run_and_isolates_a_failure(
+def test_restore_created_at_uses_one_transaction_per_run_and_isolates_a_failure(
     tmp_path, monkeypatch, capsys
 ):
     """``_restore_created_at`` shares one connection across every run, so a bare
@@ -487,7 +505,7 @@ def test_restore_created_at_uses_one_savepoint_per_run_and_isolates_a_failure(
     statement aborts the transaction and every later UPDATE raises
     ``InFailedSqlTransaction``. One bad row would look like every row being bad.
 
-    Two assertions, because they fail for different reasons: the savepoint count
+    Two assertions, because they fail for different reasons: the block count
     catches someone hoisting ``conn.transaction()`` out of the loop, and the
     surviving restore catches the isolation being lost some other way.
     """
@@ -496,7 +514,7 @@ def test_restore_created_at_uses_one_savepoint_per_run_and_isolates_a_failure(
 
     exit_code = _run_main_against(monkeypatch, source_path, target)
 
-    assert target.transaction_entries == 2, "one savepoint per run, not one per batch"
+    assert target.transaction_entries == 2, "one transaction block per run, not one per batch"
     # run-baseline's restore failed; run-full's still happened.
     assert "created_at" in target.runs["run-full"]
 
@@ -544,6 +562,53 @@ def test_advisory_lock_is_released_even_when_runs_fail(tmp_path, monkeypatch, ca
     key = backfill_runs_to_postgres.BACKFILL_ADVISORY_LOCK_KEY
     assert target.lock_acquire_calls == [key]
     assert target.lock_release_calls == [key], "the lock must be released on the failure path"
+    # Acquire and release are each followed by a commit, so the lock connection
+    # never sits `idle in transaction` across the write phase.
+    assert target.commits >= 2
+
+
+def test_corrupt_manifest_json_is_reported_not_fatal(tmp_path, monkeypatch, capsys):
+    """A read-phase failure, which ``_Failures`` cannot reach.
+
+    ``SourceData.__init__`` reads everything up front, before any write and
+    before the failure collector exists. Every other reader tolerates junk
+    already (``_parse_run_row`` catches TypeError/ValueError, ``get_decisions``
+    catches JSONDecodeError) but ``BacktestDatabase.get_run_manifest`` does a
+    bare ``json.loads``, so one corrupt row aborted the entire backfill before
+    a single write -- the one place where "re-runnable to completion" could not
+    possibly be true, since no rerun gets past it either.
+
+    The corruption is written with raw sqlite3 because no public method can
+    produce it (``insert_run_manifest`` always ``json.dumps``), which is also
+    why this only happens with a hand-edited or legacy ``--source``.
+    """
+    source_path = _build_source_db(tmp_path)
+    conn = sqlite3.connect(str(source_path))
+    try:
+        conn.execute(
+            "UPDATE run_manifest SET manifest_json = ? WHERE run_id = ?",
+            ("{not valid json", "run-full"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    target = _FakeTarget()
+    exit_code = _run_main_against(monkeypatch, source_path, target)
+
+    captured = capsys.readouterr()
+    # Everything else still migrated -- the read did not abort the run.
+    assert "run-full" in target.runs
+    assert len(target.trades["run-full"]) == 2
+    assert target.manifests == {}, "the unreadable manifest was skipped, not guessed at"
+
+    assert "manifest(s) could not be read" in captured.err
+    assert "run_manifest / run-full" in captured.err
+    # Counted in its own bucket, so it is a named reason rather than an
+    # unexplained shortfall.
+    assert "skipped_unreadable=1" in captured.out
+    assert "accounting mismatch" not in captured.err
+    assert exit_code == 1
 
 
 def test_clean_run_reports_success_and_balances_the_accounting(
