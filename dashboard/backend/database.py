@@ -41,6 +41,39 @@ def enable_wal(db_path) -> None:
         pass
 
 
+def as_timestamp_text(value: Any) -> Any:
+    """Normalise a timestamp argument to the text both stores keep.
+
+    Every ``timestamp`` column in this schema is TEXT, and the two stores used
+    to react very differently to a caller handing over a ``datetime`` instead
+    of a string:
+
+    * SQLite accepted it silently, through ``sqlite3``'s *default datetime
+      adapter* -- which stores ``isoformat(" ")``, a **space** separator, and
+      which Python deprecated in 3.12 and intends to remove.
+    * Postgres refused it: psycopg sends the parameter typed as
+      ``timestamp``/``timestamptz``, and Postgres has had no implicit
+      assignment cast to ``text`` since 8.3, so the INSERT raised and the
+      request 500'd.
+
+    Converting at the boundary fixes both halves at once: the same call now
+    works on either backend *and* lands byte-identical text, and the stored
+    format no longer depends on a deprecated stdlib adapter that would
+    otherwise flip the divergence around when it is removed (SQLite starting
+    to raise while Postgres kept working).
+
+    ``isoformat()`` -- a ``T`` separator -- is the format the rest of the
+    backend already writes: ``insert_trades`` on both stores does exactly this,
+    and ``external_run_service`` applies it to every decision timestamp before
+    ``insert_decisions`` ever sees it.
+
+    Non-datetime values pass through untouched, ``None`` included, so a missing
+    NOT NULL timestamp still surfaces as an integrity error instead of being
+    quietly stored as the string ``"None"``.
+    """
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
 class BacktestDatabase:
     """Minimal SQLite wrapper for equity curve storage."""
 
@@ -597,10 +630,11 @@ class BacktestDatabase:
              native_equity, native_cash, native_positions_value, fx_rate)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            run_id, timestamp, equity, cash, positions_value, daily_return,
+            run_id, as_timestamp_text(timestamp), equity, cash, positions_value,
+            daily_return,
             native_equity, native_cash, native_positions_value, fx_rate,
         ))
-        
+
         conn.commit()
         conn.close()
     
@@ -639,7 +673,7 @@ class BacktestDatabase:
                 """, [
                     (
                         run_id,
-                        point['timestamp'],
+                        as_timestamp_text(point['timestamp']),
                         point['equity'],
                         point['cash'],
                         point['positions_value'],
@@ -873,7 +907,7 @@ class BacktestDatabase:
             """, (
                 run_id,
                 entry.get("step_index", 0),
-                entry.get("timestamp"),
+                as_timestamp_text(entry.get("timestamp")),
                 entry.get("decision_source"),
                 json.dumps(entry.get("actions_submitted") or []),
                 entry.get("actions_executed", 0),

@@ -14,6 +14,17 @@ prod never exercises those code paths at all. The synthetic source built by
 ``_build_source_db`` below is therefore the only thing that ever does --
 it deliberately puts rows in all five tables, not just the two prod happens
 to have.
+
+Tier 1 is bigger than "the CLI errors", because the branches that matter most
+are the ones that only fire when something goes *wrong*: a row that will not
+migrate, a second invocation racing the first, an empty source. Leaving those to
+the @pg_only tier would mean they were never executed outside CI. ``_FakeTarget``
+below stands in for ``PostgresBacktestDatabase`` -- ``main()`` imports that class
+*inside* the function, so patching the attribute on its source module is enough
+to drive the entire script, failure paths included, with no server anywhere.
+That is a supplement to tier 2, not a replacement: a fake cannot prove the
+savepoint actually isolates a Postgres transaction, only that the code asks for
+one per run.
 """
 
 import os
@@ -175,6 +186,382 @@ def test_missing_source_file_fails_loudly(tmp_path, monkeypatch, capsys):
     exit_code = backfill_runs_to_postgres.main()
     assert exit_code == 1
     assert "source database not found" in capsys.readouterr().err
+
+
+# --- empty-but-valid source: the case the existence check cannot catch --------
+
+def test_empty_source_warns_loudly_instead_of_reporting_plain_success(
+    tmp_path, monkeypatch, capsys
+):
+    """A --source that exists, opens cleanly, and holds nothing.
+
+    Before this warning, the run was byte-identical to a legitimate no-op:
+    five ``: 0`` lines, "Backfill complete", exit 0. That is the repo's
+    fail-closed-is-not-fail-visible trap -- a mistyped path that happens to land
+    on some other SQLite file reports success. The existence check above cannot
+    help; the file is right there.
+
+    Asserted on stderr, and on the *completion* line changing too: a warning
+    that scrolls past above an unchanged "Backfill complete." is still a
+    misleading final answer.
+    """
+    empty_source = tmp_path / "empty.db"
+    BacktestDatabase(db_path=empty_source)  # creates the schema, inserts nothing
+
+    from dashboard.scripts import backfill_runs_to_postgres
+
+    monkeypatch.delenv("AGENT_RUNS_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["backfill_runs_to_postgres.py", "--source", str(empty_source), "--dry-run"],
+    )
+
+    assert backfill_runs_to_postgres.main() == 0
+
+    captured = capsys.readouterr()
+    assert "WARNING: every source table is empty" in captured.err
+    assert str(empty_source.resolve()) in captured.err
+    # Not the default seed path, so the likely-typo hint must appear as well.
+    assert "not the default seed path" in captured.err
+    assert "nothing to write" in captured.out
+
+
+def test_non_empty_source_does_not_warn(tmp_path, monkeypatch, capsys):
+    """The other half of the pair: the warning must not cry wolf on a real
+    source, or operators will learn to ignore it."""
+    source_path = _build_source_db(tmp_path)
+
+    from dashboard.scripts import backfill_runs_to_postgres
+
+    monkeypatch.delenv("AGENT_RUNS_DATABASE_URL", raising=False)
+    monkeypatch.setattr(
+        sys, "argv",
+        ["backfill_runs_to_postgres.py", "--source", str(source_path), "--dry-run"],
+    )
+
+    assert backfill_runs_to_postgres.main() == 0
+
+    captured = capsys.readouterr()
+    assert "every source table is empty" not in captured.err
+    assert "Dry run: no writes performed." in captured.out
+
+
+# --- a fake target: drives the whole script, failure paths included -----------
+
+class _FakeCursor:
+    """Routes the handful of raw statements the script issues itself.
+
+    Everything else reaches the target through its public writer methods, so
+    this only needs the advisory-lock calls and _restore_created_at's UPDATE.
+    Unknown SQL raises rather than silently succeeding -- otherwise a future
+    statement added to the script would be "covered" by a fake that ignored it.
+    """
+
+    def __init__(self, target):
+        self._target = target
+        self._row = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def execute(self, sql, params=()):
+        statement = " ".join(sql.split())
+        if statement.startswith("SELECT pg_try_advisory_lock"):
+            self._target.lock_acquire_calls.append(params[0])
+            self._row = {"acquired": self._target.lock_available}
+        elif statement.startswith("SELECT pg_advisory_unlock"):
+            self._target.lock_release_calls.append(params[0])
+            self._row = {"pg_advisory_unlock": True}
+        elif statement.startswith("UPDATE agent_runs SET created_at"):
+            created_at, run_id = params
+            if run_id in self._target.raise_on_created_at:
+                raise RuntimeError(f"simulated created_at failure for {run_id}")
+            self._target.runs[run_id]["created_at"] = created_at
+            self._row = None
+        else:
+            raise AssertionError(f"_FakeCursor got unexpected SQL: {statement}")
+
+    def fetchone(self):
+        return self._row
+
+
+class _FakeConnection:
+    def __init__(self, target):
+        self._target = target
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def cursor(self):
+        return _FakeCursor(self._target)
+
+    def transaction(self):
+        """Stand-in for psycopg's savepoint block.
+
+        Counted, not simulated: on a real connection this is what keeps one
+        failed UPDATE from poisoning the rest of the batch, which no fake can
+        demonstrate. What it *can* pin is that the script opens one per run
+        rather than one for the whole loop -- the actual shape of the fix.
+        """
+        target = self._target
+
+        class _Txn:
+            def __enter__(self_inner):
+                target.transaction_entries += 1
+                return self_inner
+
+            def __exit__(self_inner, *exc_info):
+                return False
+
+        return _Txn()
+
+
+class _FakeTarget:
+    """In-memory stand-in for PostgresBacktestDatabase.
+
+    Deliberately not a MagicMock: the accounting assertions need real row
+    counts, and the whole point of these tests is what the script reports about
+    rows that did and did not land.
+    """
+
+    def __init__(self, *, fail_runs=(), lock_available=True, raise_on_created_at=()):
+        self.fail_runs = set(fail_runs)
+        self.lock_available = lock_available
+        self.raise_on_created_at = set(raise_on_created_at)
+
+        self.runs = {}
+        self.equity = {}
+        self.trades = {}
+        self.decisions = {}
+        self.manifests = {}
+        self.baselines = {}
+
+        self.lock_acquire_calls = []
+        self.lock_release_calls = []
+        self.transaction_entries = 0
+
+    def _get_connection(self):
+        return _FakeConnection(self)
+
+    def insert_run(self, *, run_id, **kwargs):
+        if run_id in self.fail_runs:
+            raise RuntimeError(f"simulated insert_run failure for {run_id}")
+        self.runs[run_id] = {"run_id": run_id, **kwargs}
+
+    def update_run_baselines(self, run_id, *, djia_run_id=None, buyhold_run_id=None):
+        self.baselines[run_id] = (djia_run_id, buyhold_run_id)
+
+    def insert_equity_points(self, run_id, points, replace=True):
+        self.equity[run_id] = list(points)
+
+    def insert_trades(self, run_id, trades):
+        self.trades.setdefault(run_id, []).extend(trades)
+
+    def insert_decisions(self, run_id, decisions):
+        self.decisions.setdefault(run_id, []).extend(decisions)
+
+    def insert_run_manifest(self, run_id, manifest):
+        self.manifests[run_id] = manifest
+
+    def get_trades(self, run_id):
+        return list(self.trades.get(run_id, []))
+
+    def get_decisions(self, run_id):
+        return list(self.decisions.get(run_id, []))
+
+
+def _run_main_against(monkeypatch, source_path, target):
+    """Point ``main()`` at ``target`` and run it, with no Postgres involved.
+
+    ``main()`` does its ``from dashboard.backend.database_postgres import
+    PostgresBacktestDatabase`` *inside* the function body, so the name is looked
+    up on that module at call time -- patching it there is what makes this work
+    (patching the script's own namespace would be a no-op, since the name is
+    never bound there).
+    """
+    import dashboard.backend.database_postgres as database_pg_module
+    from dashboard.scripts import backfill_runs_to_postgres
+
+    monkeypatch.setattr(
+        database_pg_module, "PostgresBacktestDatabase", lambda url: target
+    )
+    monkeypatch.setenv(
+        "AGENT_RUNS_DATABASE_URL", "postgresql://u:p@example.invalid/atl"
+    )
+    monkeypatch.setattr(
+        sys, "argv",
+        ["backfill_runs_to_postgres.py", "--source", str(source_path)],
+    )
+    return backfill_runs_to_postgres.main()
+
+
+def test_one_poison_row_does_not_stall_the_whole_backfill(tmp_path, monkeypatch, capsys):
+    """The finding this exists for: before per-run isolation, one bad legacy row
+    propagated out of ``main()``, so every run *after* it in source order never
+    migrated -- and because the order is fixed, every rerun re-failed on the
+    same row. "Idempotent" held; "re-runnable to completion" did not.
+
+    ``run-baseline`` sorts first (older created_at), so failing it also proves
+    the loop continues past a failure rather than merely tolerating one at the
+    end.
+    """
+    source_path = _build_source_db(tmp_path)
+    target = _FakeTarget(fail_runs={"run-baseline"})
+
+    exit_code = _run_main_against(monkeypatch, source_path, target)
+
+    # The healthy run migrated in full, despite the failure ahead of it.
+    assert "run-full" in target.runs
+    assert len(target.equity["run-full"]) == 2
+    assert len(target.trades["run-full"]) == 2
+    assert len(target.decisions["run-full"]) == 2
+    assert target.manifests["run-full"] == {"symbols": ["AAPL"], "version": 1}
+
+    # The poison row landed nowhere.
+    assert "run-baseline" not in target.runs
+
+    captured = capsys.readouterr()
+    # created_at is not "restored" for a run that has no row to update. The
+    # UPDATE would match zero rows and raise nothing, so an un-skipped loop
+    # would report 2/2 restored while only one run exists in the target.
+    assert target.transaction_entries == 1
+    assert "restored from source for 1/2 run(s)" in captured.out
+
+    err = captured.err
+    assert "per-run failure(s)" in err
+    assert "agent_runs / run-baseline" in err
+    assert "simulated insert_run failure" in err
+    # Non-zero, so a wrapper script or CI step cannot mistake this for success.
+    assert exit_code == 1
+
+
+def test_children_of_a_failed_parent_are_skipped_and_accounted_not_attempted(
+    tmp_path, monkeypatch, capsys
+):
+    """A failed parent must not produce a second, misleading failure per child.
+
+    The FK would reject the children anyway, so attempting them would fill the
+    report with consequences instead of the cause. They are counted in
+    ``skipped_parent_failed`` rather than dropped, so the per-table accounting
+    still balances -- an unexplained shortfall is the one thing that check is
+    for, and burying real ones under expected ones would blind it.
+    """
+    source_path = _build_source_db(tmp_path)
+    target = _FakeTarget(fail_runs={"run-full"})  # the run that owns children
+
+    exit_code = _run_main_against(monkeypatch, source_path, target)
+
+    assert "run-full" not in target.runs
+    assert "run-full" not in target.equity
+    assert "run-full" not in target.trades
+    assert "run-full" not in target.decisions
+    assert "run-full" not in target.manifests
+
+    captured = capsys.readouterr()
+    # Exactly one failure -- the cause -- not one per child table.
+    assert captured.err.count("per-run failure(s)") == 1
+    assert "agent_runs / run-full" in captured.err
+    assert "trades / run-full" not in captured.err
+    assert "backtest_decisions / run-full" not in captured.err
+
+    assert "skipped_parent_failed" in captured.out
+    # Accounting must still balance: no unexplained-shortfall warning.
+    assert "accounting mismatch" not in captured.err
+    assert exit_code == 1
+
+
+def test_restore_created_at_uses_one_savepoint_per_run_and_isolates_a_failure(
+    tmp_path, monkeypatch, capsys
+):
+    """``_restore_created_at`` shares one connection across every run, so a bare
+    try/except would not isolate anything: on Postgres the first failed
+    statement aborts the transaction and every later UPDATE raises
+    ``InFailedSqlTransaction``. One bad row would look like every row being bad.
+
+    Two assertions, because they fail for different reasons: the savepoint count
+    catches someone hoisting ``conn.transaction()`` out of the loop, and the
+    surviving restore catches the isolation being lost some other way.
+    """
+    source_path = _build_source_db(tmp_path)
+    target = _FakeTarget(raise_on_created_at={"run-baseline"})
+
+    exit_code = _run_main_against(monkeypatch, source_path, target)
+
+    assert target.transaction_entries == 2, "one savepoint per run, not one per batch"
+    # run-baseline's restore failed; run-full's still happened.
+    assert "created_at" in target.runs["run-full"]
+
+    err = capsys.readouterr().err
+    assert "agent_runs.created_at / run-baseline" in err
+    assert exit_code == 1
+
+
+def test_second_concurrent_invocation_refuses_instead_of_doubling_rows(
+    tmp_path, monkeypatch, capsys
+):
+    """The trades/decisions skip-logic is a read-then-write across two separate
+    pooled checkouts, so two concurrent runs both see "nothing there yet" and
+    both append -- and neither table has a unique key to collapse the result.
+
+    Asserting nothing was written matters as much as the exit code: refusing
+    *after* a partial write would be worse than not refusing at all.
+    """
+    source_path = _build_source_db(tmp_path)
+    target = _FakeTarget(lock_available=False)
+
+    exit_code = _run_main_against(monkeypatch, source_path, target)
+
+    assert exit_code == 1
+    assert target.runs == {}
+    assert target.trades == {}
+    assert "another backfill_runs_to_postgres.py run holds the advisory lock" in (
+        capsys.readouterr().err
+    )
+
+
+def test_advisory_lock_is_released_even_when_runs_fail(tmp_path, monkeypatch, capsys):
+    """Pooled connections are reused, so a lock left behind travels into
+    whatever checks that connection out next -- and would then block every
+    later backfill on a database that is not actually busy. The release has to
+    survive the failure path, not just the happy one.
+    """
+    source_path = _build_source_db(tmp_path)
+    target = _FakeTarget(fail_runs={"run-full", "run-baseline"})
+
+    _run_main_against(monkeypatch, source_path, target)
+
+    from dashboard.scripts import backfill_runs_to_postgres
+
+    key = backfill_runs_to_postgres.BACKFILL_ADVISORY_LOCK_KEY
+    assert target.lock_acquire_calls == [key]
+    assert target.lock_release_calls == [key], "the lock must be released on the failure path"
+
+
+def test_clean_run_reports_success_and_balances_the_accounting(
+    tmp_path, monkeypatch, capsys
+):
+    """The control case for every test above: with nothing wrong, none of the
+    new failure machinery may fire. Without this, a bug that reported failures
+    unconditionally would still pass all of them.
+    """
+    source_path = _build_source_db(tmp_path)
+    target = _FakeTarget()
+
+    exit_code = _run_main_against(monkeypatch, source_path, target)
+
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "Backfill complete." in captured.out
+    assert "accounting mismatch" not in captured.err
+    assert "per-run failure(s)" not in captured.err
+    assert "FAILED=" not in captured.out
+    assert target.baselines["run-full"] == ("run-baseline", None)
 
 
 # --- live-Postgres backfill + idempotency -------------------------------------

@@ -33,6 +33,25 @@ is safe:
     mechanism, and does not attempt to reconcile a partially-written run one
     row at a time.
 
+Re-runnable *to completion*, which is a separate property from idempotency and
+was not true of the first cut. Every per-run write is now wrapped individually
+(``_Failures``), so a legacy row this script cannot migrate is reported and
+skipped instead of aborting the pass. Before that, one bad row stalled the
+backfill permanently: it propagated out of ``main()``, and because the source is
+read in a fixed order every rerun re-failed on the same row, so every run
+ordered after it never migrated at all -- while the summary the operator saw was
+a traceback rather than "these 3 runs need attention".
+
+Only one copy may run at a time, enforced rather than assumed
+(``_exclusive_backfill_lock``). The trades/decisions skip-logic described above
+is a read-then-write spanning two *separate* pooled checkouts, so two concurrent
+invocations both observe "nothing there yet" and both append -- doubling every
+row, with no natural unique key on either table to collapse the duplicates
+afterwards. A Postgres advisory lock is held for the whole write phase, and a
+second invocation refuses to start rather than queueing behind the first (a
+queued run would be pointless: by the time it acquired the lock the work would
+already be done).
+
 ``created_at`` is restored from the source after the copy (``_restore_created_at``);
 ``updated_at`` deliberately is not. ``insert_run``'s own upsert has no
 ``created_at`` column in its ``INSERT``, so a freshly-migrated run gets
@@ -78,13 +97,14 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import contextlib
 import os
 import shutil
 import sqlite3
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, Iterator, List, Tuple
 
 # --- Trap 1a: DATABASE_PATH, forced before any dashboard.backend import ----
 # A throwaway per-process path: nothing durable is ever written here. It only
@@ -136,6 +156,88 @@ TABLES_IN_FK_ORDER = (
     "backtest_decisions",
     "run_manifest",
 )
+
+# Arbitrary but fixed: pg_advisory_lock takes a bigint, and any two invocations
+# of this script must pick the *same* number or the lock protects nothing.
+# Never derive it from anything environmental (pid, url, timestamp).
+BACKFILL_ADVISORY_LOCK_KEY = 4_020_260_729
+
+
+class BackfillLockUnavailable(RuntimeError):
+    """Another invocation holds the advisory lock; this one must not proceed.
+
+    Its own class rather than a bare RuntimeError so ``main()`` can catch
+    exactly this around the whole write phase without also swallowing a genuine
+    RuntimeError from somewhere inside it.
+    """
+
+
+class _Failures:
+    """Per-run migration failures, collected instead of raised.
+
+    The unit of failure is one ``(table, run_id)`` pair, because that is the
+    unit this script can actually skip and re-attempt later. Recording the
+    exception as text rather than keeping the object is deliberate: the report
+    is printed after every connection involved has been returned to the pool,
+    and a psycopg error's ``__str__`` is already the useful part.
+    """
+
+    def __init__(self) -> None:
+        # Named "entries", not "items": a plain list attribute called ``items``
+        # reads like the dict method and invites ``failures.items()``.
+        self.entries: List[Tuple[str, str, str]] = []
+
+    def record(self, table: str, run_id: str, exc: BaseException) -> None:
+        self.entries.append((table, run_id, f"{type(exc).__name__}: {exc}"))
+
+    def run_ids_for(self, table: str) -> set:
+        return {run_id for tbl, run_id, _ in self.entries if tbl == table}
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def __bool__(self) -> bool:
+        return bool(self.entries)
+
+
+@contextlib.contextmanager
+def _exclusive_backfill_lock(target: "PostgresBacktestDatabase") -> Iterator[None]:
+    """Hold a Postgres advisory lock for the whole write phase.
+
+    ``pg_try_advisory_lock`` rather than ``pg_advisory_lock``: blocking would
+    make a second invocation sit indefinitely and then do nothing useful (the
+    first one will have finished the work), so failing immediately with a clear
+    message is strictly more informative than a hang.
+
+    The lock is *session*-scoped, i.e. bound to the connection that took it, so
+    this deliberately holds one pooled checkout open across the entire phase
+    instead of taking and returning one per table. The explicit unlock in
+    ``finally`` matters for the same reason: pooled connections are reused, and
+    a lock left behind would travel into whatever checked that connection out
+    next. (Process exit would release it too, but only eventually, and only if
+    the process actually dies.)
+    """
+    with target._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT pg_try_advisory_lock(%s) AS acquired",
+                (BACKFILL_ADVISORY_LOCK_KEY,),
+            )
+            if not cur.fetchone()["acquired"]:
+                raise BackfillLockUnavailable(
+                    "another backfill_runs_to_postgres.py run holds the advisory "
+                    f"lock ({BACKFILL_ADVISORY_LOCK_KEY}) on this database. "
+                    "Two concurrent runs would double every trade and decision "
+                    "row -- neither table has a unique key to collapse them. "
+                    "Wait for the other run to finish, then re-run this one."
+                )
+        try:
+            yield
+        finally:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_unlock(%s)", (BACKFILL_ADVISORY_LOCK_KEY,)
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -258,41 +360,77 @@ class SourceData:
 # Target: write through public methods only
 # ---------------------------------------------------------------------------
 
-def _migrate_agent_runs(target: "PostgresBacktestDatabase", runs: List[Dict[str, Any]]) -> int:
+def _migrate_agent_runs(
+    target: "PostgresBacktestDatabase",
+    runs: List[Dict[str, Any]],
+    failures: _Failures,
+) -> Dict[str, int]:
     """Naturally idempotent: insert_run upserts on (run_id), and
     update_run_baselines COALESCEs -- a rerun just re-writes the same values.
+
+    Per-run ``try``/``except`` so one unmigratable legacy row costs that row
+    rather than the whole pass. Safe as a plain handler here because every
+    writer method opens its own ``with self._get_connection()`` block, i.e. its
+    own transaction, which the pool rolls back before handing the connection to
+    the next call -- unlike ``_restore_created_at``, which shares one
+    connection and therefore needs a savepoint instead.
+
+    A run that fails here is also excluded from every child table below: its
+    ``agent_runs`` parent may not exist, and the FK would reject the children
+    anyway (with the failure attributed to the child rather than the cause).
     """
+    migrated = 0
+    failed = 0
     for run in runs:
-        target.insert_run(
-            run_id=run["run_id"],
-            session_id=run["session_id"],
-            agent_name=run["agent_name"],
-            mode=run["mode"],
-            start_date=run["start_date"],
-            end_date=run["end_date"],
-            initial_equity=run["initial_equity"],
-            final_equity=run.get("final_equity"),
-            total_return=run.get("total_return"),
-            sharpe_ratio=run.get("sharpe_ratio"),
-            max_drawdown=run.get("max_drawdown"),
-            num_trades=_coalesce(run, "num_trades", 0),
-            llm_model=_coalesce(run, "llm_model", "rule-based"),
-            llm_calls=_coalesce(run, "llm_calls", 0),
-            input_tokens=_coalesce(run, "input_tokens", 0),
-            output_tokens=_coalesce(run, "output_tokens", 0),
-            est_cost_usd=_coalesce(run, "est_cost_usd", 0.0),
-            metadata=run.get("metadata"),
-        )
-        djia = run.get("baseline_djia_run_id")
-        buyhold = run.get("baseline_buyhold_run_id")
-        if djia or buyhold:
-            # insert_run has no baseline-link params -- those are set via this
-            # separate call, same as every other production writer of them.
-            target.update_run_baselines(run["run_id"], djia_run_id=djia, buyhold_run_id=buyhold)
-    return len(runs)
+        try:
+            _insert_one_run(target, run)
+        except Exception as exc:
+            failures.record("agent_runs", run.get("run_id", "<unknown>"), exc)
+            failed += 1
+            continue
+        migrated += 1
+    return {"migrated": migrated, "failed": failed}
 
 
-def _restore_created_at(target: "PostgresBacktestDatabase", runs: List[Dict[str, Any]]) -> int:
+def _insert_one_run(target: "PostgresBacktestDatabase", run: Dict[str, Any]) -> None:
+    """One run's ``agent_runs`` row plus its baseline links.
+
+    Split out of the loop above purely so the loop's ``try`` wraps a single
+    call and cannot accidentally grow to cover the bookkeeping around it.
+    """
+    target.insert_run(
+        run_id=run["run_id"],
+        session_id=run["session_id"],
+        agent_name=run["agent_name"],
+        mode=run["mode"],
+        start_date=run["start_date"],
+        end_date=run["end_date"],
+        initial_equity=run["initial_equity"],
+        final_equity=run.get("final_equity"),
+        total_return=run.get("total_return"),
+        sharpe_ratio=run.get("sharpe_ratio"),
+        max_drawdown=run.get("max_drawdown"),
+        num_trades=_coalesce(run, "num_trades", 0),
+        llm_model=_coalesce(run, "llm_model", "rule-based"),
+        llm_calls=_coalesce(run, "llm_calls", 0),
+        input_tokens=_coalesce(run, "input_tokens", 0),
+        output_tokens=_coalesce(run, "output_tokens", 0),
+        est_cost_usd=_coalesce(run, "est_cost_usd", 0.0),
+        metadata=run.get("metadata"),
+    )
+    djia = run.get("baseline_djia_run_id")
+    buyhold = run.get("baseline_buyhold_run_id")
+    if djia or buyhold:
+        # insert_run has no baseline-link params -- those are set via this
+        # separate call, same as every other production writer of them.
+        target.update_run_baselines(run["run_id"], djia_run_id=djia, buyhold_run_id=buyhold)
+
+
+def _restore_created_at(
+    target: "PostgresBacktestDatabase",
+    runs: List[Dict[str, Any]],
+    failures: _Failures,
+) -> int:
     """Restore each run's original ``created_at`` from the source, after
     ``_migrate_agent_runs`` has upserted the row.
 
@@ -326,81 +464,187 @@ def _restore_created_at(target: "PostgresBacktestDatabase", runs: List[Dict[str,
     ``DEFAULT CURRENT_TIMESTAMP`` since the very first schema version, so it
     is never NULL in practice) -- but this must not become a NULL constraint
     violation on some future source this script has never seen.
+
+    Unlike the ``_migrate_*`` loops, this one shares a single connection across
+    every run, so a bare ``try``/``except`` would *not* isolate a failure: on
+    Postgres a failed statement aborts the whole transaction, and every
+    subsequent UPDATE on that connection would then raise
+    ``InFailedSqlTransaction`` -- turning one bad row into a total loss while
+    looking, in the report, like every row was individually bad. Each UPDATE
+    therefore runs inside ``conn.transaction()``, which is a real savepoint:
+    rolling back one run leaves the connection usable for the rest.
     """
     restored = 0
+    # A run whose insert failed has no row to update. The UPDATE would match
+    # zero rows and raise nothing, so without this the reported "restored for
+    # N/M" count would silently include runs that are not in the target at all.
+    blocked = failures.run_ids_for("agent_runs")
     with target._get_connection() as conn:
-        with conn.cursor() as cur:
-            for run in runs:
-                created_at = run.get("created_at")
-                if created_at is None:
-                    continue
-                cur.execute(
-                    "UPDATE agent_runs SET created_at = %s WHERE run_id = %s",
-                    (created_at, run["run_id"]),
-                )
-                restored += 1
+        for run in runs:
+            created_at = run.get("created_at")
+            if created_at is None or run["run_id"] in blocked:
+                continue
+            try:
+                with conn.transaction():
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE agent_runs SET created_at = %s WHERE run_id = %s",
+                            (created_at, run["run_id"]),
+                        )
+            except Exception as exc:
+                failures.record("agent_runs.created_at", run["run_id"], exc)
+                continue
+            restored += 1
     return restored
 
 
 def _migrate_equity(
-    target: "PostgresBacktestDatabase", equity_by_run: Dict[str, List[Dict[str, Any]]]
-) -> int:
+    target: "PostgresBacktestDatabase",
+    equity_by_run: Dict[str, List[Dict[str, Any]]],
+    failures: _Failures,
+) -> Dict[str, int]:
     """Naturally idempotent: insert_equity_points(replace=True) deletes then
     re-inserts this run's curve every call, landing on the same final rows.
+
+    The ``skipped_parent_failed`` and ``failed`` buckets exist so ``main()``'s
+    accounting check still balances when something went wrong above: those rows
+    were neither migrated nor orphaned in the source, and without their own
+    buckets they would show up as an *unexplained* shortfall -- which is the one
+    signal that check exists to raise.
     """
     moved = 0
+    failed = 0
+    skipped_parent_failed = 0
+    blocked = failures.run_ids_for("agent_runs")
     for run_id, points in equity_by_run.items():
         if not points:
             continue
-        target.insert_equity_points(run_id, points)
+        if run_id in blocked:
+            skipped_parent_failed += len(points)
+            continue
+        try:
+            target.insert_equity_points(run_id, points)
+        except Exception as exc:
+            failures.record("equity_timeseries", run_id, exc)
+            failed += len(points)
+            continue
         moved += len(points)
-    return moved
+    return {
+        "migrated": moved,
+        "failed": failed,
+        "skipped_parent_failed": skipped_parent_failed,
+    }
 
 
 def _migrate_trades(
-    target: "PostgresBacktestDatabase", trades_by_run: Dict[str, List[Dict[str, Any]]]
-) -> Tuple[int, int]:
+    target: "PostgresBacktestDatabase",
+    trades_by_run: Dict[str, List[Dict[str, Any]]],
+    failures: _Failures,
+) -> Dict[str, int]:
     """insert_trades is a plain append on the twin (no natural unique key for
     a trade row), so this script supplies its own idempotency: skip a run
     entirely if the target already has any trades for it.
+
+    The read-back that provides that idempotency is also why the whole write
+    phase runs under an advisory lock -- see ``_exclusive_backfill_lock``.
     """
     moved = 0
+    failed = 0
     skipped_present = 0
+    skipped_parent_failed = 0
+    blocked = failures.run_ids_for("agent_runs")
     for run_id, trades in trades_by_run.items():
         if not trades:
             continue
-        if target.get_trades(run_id):
-            skipped_present += len(trades)
+        if run_id in blocked:
+            skipped_parent_failed += len(trades)
             continue
-        target.insert_trades(run_id, trades)
+        try:
+            if target.get_trades(run_id):
+                skipped_present += len(trades)
+                continue
+            target.insert_trades(run_id, trades)
+        except Exception as exc:
+            failures.record("trades", run_id, exc)
+            failed += len(trades)
+            continue
         moved += len(trades)
-    return moved, skipped_present
+    return {
+        "migrated": moved,
+        "failed": failed,
+        "skipped_already_present": skipped_present,
+        "skipped_parent_failed": skipped_parent_failed,
+    }
 
 
 def _migrate_decisions(
-    target: "PostgresBacktestDatabase", decisions_by_run: Dict[str, List[Dict[str, Any]]]
-) -> Tuple[int, int]:
+    target: "PostgresBacktestDatabase",
+    decisions_by_run: Dict[str, List[Dict[str, Any]]],
+    failures: _Failures,
+) -> Dict[str, int]:
     """Same append-only shape as trades -- see _migrate_trades."""
     moved = 0
+    failed = 0
     skipped_present = 0
+    skipped_parent_failed = 0
+    blocked = failures.run_ids_for("agent_runs")
     for run_id, decisions in decisions_by_run.items():
         if not decisions:
             continue
-        if target.get_decisions(run_id):
-            skipped_present += len(decisions)
+        if run_id in blocked:
+            skipped_parent_failed += len(decisions)
             continue
-        target.insert_decisions(run_id, decisions)
+        try:
+            if target.get_decisions(run_id):
+                skipped_present += len(decisions)
+                continue
+            target.insert_decisions(run_id, decisions)
+        except Exception as exc:
+            failures.record("backtest_decisions", run_id, exc)
+            failed += len(decisions)
+            continue
         moved += len(decisions)
-    return moved, skipped_present
+    return {
+        "migrated": moved,
+        "failed": failed,
+        "skipped_already_present": skipped_present,
+        "skipped_parent_failed": skipped_parent_failed,
+    }
 
 
 def _migrate_manifests(
-    target: "PostgresBacktestDatabase", manifests_by_run: Dict[str, Dict[str, Any]]
-) -> int:
-    """Naturally idempotent: insert_run_manifest upserts on (run_id)."""
+    target: "PostgresBacktestDatabase",
+    manifests_by_run: Dict[str, Dict[str, Any]],
+    failures: _Failures,
+) -> Dict[str, int]:
+    """Naturally idempotent: insert_run_manifest upserts on (run_id).
+
+    ``run_manifest`` has no FK to ``agent_runs`` (deliberately -- see
+    database_postgres.py's ``_init_schema``), so a manifest *could* be written
+    for a run whose parent failed. It is still skipped: a manifest with no run
+    to describe is not useful, and writing it would leave the target holding
+    rows the operator was told had failed.
+    """
+    migrated = 0
+    failed = 0
+    skipped_parent_failed = 0
+    blocked = failures.run_ids_for("agent_runs")
     for run_id, manifest in manifests_by_run.items():
-        target.insert_run_manifest(run_id, manifest)
-    return len(manifests_by_run)
+        if run_id in blocked:
+            skipped_parent_failed += 1
+            continue
+        try:
+            target.insert_run_manifest(run_id, manifest)
+        except Exception as exc:
+            failures.record("run_manifest", run_id, exc)
+            failed += 1
+            continue
+        migrated += 1
+    return {
+        "migrated": migrated,
+        "failed": failed,
+        "skipped_parent_failed": skipped_parent_failed,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -442,13 +686,41 @@ def main() -> int:
     for table in TABLES_IN_FK_ORDER:
         print(f"  {table}: {data.raw_counts[table]}")
 
+    source_is_empty = not any(data.raw_counts.values())
+    if source_is_empty:
+        # Fail-visible: an existing-but-wrong --source (a typo that happens to
+        # land on some other SQLite file, a fresh scratch DB, a path pointing
+        # into a container that never had the seed) otherwise produces exactly
+        # the same output as a legitimate no-op, down to the exit code. The
+        # existence check above cannot tell them apart -- the file *is* there.
+        print(
+            "\n"
+            "WARNING: every source table is empty -- 0 runs, 0 equity points,\n"
+            f"         0 trades, 0 decisions, 0 manifests, read from:\n"
+            f"           {source_path.resolve()}\n"
+            "         Either there is genuinely nothing to migrate, or this is\n"
+            "         the wrong file. It exists and opened cleanly, so nothing\n"
+            "         else in this run will flag it.",
+            file=sys.stderr,
+        )
+        if source_path != DEFAULT_DB_PATH:
+            print(
+                "         This is not the default seed path, which makes a\n"
+                f"         mistyped --source the more likely of the two.\n"
+                f"         The default would have been: {DEFAULT_DB_PATH}",
+                file=sys.stderr,
+            )
+
     if args.dry_run:
         preview_url = os.environ.get("AGENT_RUNS_DATABASE_URL")
         if preview_url:
             print(f"Target (not connected -- dry run): postgres ({describe_database_url(preview_url)})")
         else:
             print("Target: AGENT_RUNS_DATABASE_URL is not set (fine for a dry run).")
-        print("\nDry run: no writes performed.")
+        if source_is_empty:
+            print("\nDry run: no writes performed (and nothing to write -- see warning above).")
+        else:
+            print("\nDry run: no writes performed.")
         return 0
 
     database_url = os.environ.get("AGENT_RUNS_DATABASE_URL")
@@ -466,43 +738,60 @@ def main() -> int:
     target = PostgresBacktestDatabase(database_url)
 
     results: Dict[str, Dict[str, int]] = {}
+    failures = _Failures()
 
-    moved = _migrate_agent_runs(target, data.runs)
-    restored = _restore_created_at(target, data.runs)
-    print(f"  agent_runs.created_at restored from source for {restored}/{len(data.runs)} run(s)")
-    results["agent_runs"] = {"migrated": moved}
+    try:
+        with _exclusive_backfill_lock(target):
+            results["agent_runs"] = _migrate_agent_runs(target, data.runs, failures)
+            restored = _restore_created_at(target, data.runs, failures)
+            print(
+                f"  agent_runs.created_at restored from source for "
+                f"{restored}/{len(data.runs)} run(s)"
+            )
 
-    moved = _migrate_equity(target, data.equity_by_run)
-    results["equity_timeseries"] = {"migrated": moved, "skipped_orphan": data.orphan_counts["equity_timeseries"]}
+            results["equity_timeseries"] = _migrate_equity(
+                target, data.equity_by_run, failures
+            )
+            results["trades"] = _migrate_trades(target, data.trades_by_run, failures)
+            results["backtest_decisions"] = _migrate_decisions(
+                target, data.decisions_by_run, failures
+            )
+            results["run_manifest"] = _migrate_manifests(
+                target, data.manifests_by_run, failures
+            )
+    except BackfillLockUnavailable as exc:
+        # Distinct from a per-run failure: nothing was attempted, so there is no
+        # partial state and no per-table report worth printing.
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
 
-    moved, skipped_present = _migrate_trades(target, data.trades_by_run)
-    results["trades"] = {
-        "migrated": moved,
-        "skipped_orphan": data.orphan_counts["trades"],
-        "skipped_already_present": skipped_present,
-    }
-
-    moved, skipped_present = _migrate_decisions(target, data.decisions_by_run)
-    results["backtest_decisions"] = {
-        "migrated": moved,
-        "skipped_orphan": data.orphan_counts["backtest_decisions"],
-        "skipped_already_present": skipped_present,
-    }
-
-    moved = _migrate_manifests(target, data.manifests_by_run)
-    results["run_manifest"] = {"migrated": moved, "skipped_orphan": data.orphan_counts["run_manifest"]}
+    for table in TABLES_IN_FK_ORDER:
+        results[table]["skipped_orphan"] = data.orphan_counts.get(table, 0)
 
     print("\nPer-table results (source vs. migrated):")
     accounting_ok = True
     for table in TABLES_IN_FK_ORDER:
         source_count = data.raw_counts[table]
         r = results[table]
-        accounted = r["migrated"] + r.get("skipped_orphan", 0) + r.get("skipped_already_present", 0)
+        # Every bucket except "migrated" is a *reason* a source row is not in
+        # the target. They must sum to the source count, or something happened
+        # this script cannot explain -- which is the only thing worth failing on.
+        accounted = (
+            r["migrated"]
+            + r.get("skipped_orphan", 0)
+            + r.get("skipped_already_present", 0)
+            + r.get("skipped_parent_failed", 0)
+            + r.get("failed", 0)
+        )
         line = f"  {table}: source={source_count} migrated={r['migrated']}"
         if r.get("skipped_orphan"):
             line += f" skipped_orphan(no matching agent_runs)={r['skipped_orphan']}"
         if "skipped_already_present" in r:
             line += f" skipped_already_present={r['skipped_already_present']}"
+        if r.get("skipped_parent_failed"):
+            line += f" skipped_parent_failed={r['skipped_parent_failed']}"
+        if r.get("failed"):
+            line += f" FAILED={r['failed']}"
         print(line)
         if accounted != source_count:
             accounting_ok = False
@@ -512,9 +801,27 @@ def main() -> int:
                 file=sys.stderr,
             )
 
+    if failures:
+        print(
+            f"\n{len(failures)} per-run failure(s) -- these rows are NOT in the "
+            "target. Every other run was migrated; re-run this script after "
+            "fixing them and only the missing rows will be written:",
+            file=sys.stderr,
+        )
+        for table, run_id, error in failures.entries:
+            print(f"  {table} / {run_id}: {error}", file=sys.stderr)
+
     if not accounting_ok:
         print("\nBackfill finished with accounting mismatches -- see warnings above.", file=sys.stderr)
         return 1
+
+    if failures:
+        print("\nBackfill finished with failures -- see the list above.", file=sys.stderr)
+        return 1
+
+    if source_is_empty:
+        print("\nBackfill complete: nothing to migrate (see warning above).")
+        return 0
 
     print("\nBackfill complete.")
     return 0

@@ -307,6 +307,46 @@ def test_insert_run_upsert_preserves_created_at_advances_updated_at_postgres(pg_
 
 
 @pg_only
+def test_insert_run_upsert_preserves_baseline_links_postgres(pg_backtest_db):
+    """Divergence 3 (module docstring): a re-insert must NOT drop the baseline
+    links, where SQLite's INSERT OR REPLACE nulls them.
+
+    Same root cause as created_at above -- ON CONFLICT DO UPDATE only touches
+    the columns it names, and these two appear in neither the INSERT list nor
+    DO UPDATE SET -- but the consequence is the opposite sign, so it gets its
+    own case rather than an extra assert on that one.
+
+    Pinned rather than left implicit because "make the twin behave exactly like
+    SQLite" is a plausible-sounding future change that would silently break the
+    failure path this preserves: baseline_worker catches its own exceptions, so
+    on SQLite a rerun whose baseline regeneration fails leaves the run's
+    comparison chart permanently unlinked. Here the previous links survive.
+    """
+    pg_backtest_db.insert_run(
+        run_id="run-bl", session_id="s1", agent_name="Agent", mode="backtest",
+        start_date="2024-01-01", end_date="2024-01-02", initial_equity=1000.0,
+    )
+    pg_backtest_db.update_run_baselines(
+        "run-bl", djia_run_id="djia-1", buyhold_run_id="bah-1"
+    )
+    assert pg_backtest_db.get_run("run-bl")["baseline_djia_run_id"] == "djia-1"
+
+    # The rerun: same run_id, no baseline params (insert_run has none), and
+    # crucially no update_run_baselines call afterwards -- i.e. the case where
+    # baseline regeneration failed.
+    pg_backtest_db.insert_run(
+        run_id="run-bl", session_id="s1", agent_name="Agent", mode="backtest",
+        start_date="2024-01-01", end_date="2024-01-02", initial_equity=1000.0,
+        final_equity=1111.0,
+    )
+
+    after = pg_backtest_db.get_run("run-bl")
+    assert after["final_equity"] == 1111.0, "the re-insert really did take effect"
+    assert after["baseline_djia_run_id"] == "djia-1"
+    assert after["baseline_buyhold_run_id"] == "bah-1"
+
+
+@pg_only
 def test_insert_run_reinsert_does_not_cascade_delete_equity_children_postgres(pg_backtest_db):
     """The FK-sensitive upsert case the brief calls mandatory: an external
     run's finalize step (and the leaderboard refresh path) can call
@@ -550,6 +590,88 @@ def test_clear_all_empties_all_five_tables_postgres(pg_backtest_db):
         assert pg_backtest_db.get_trades(run_id) == []
         assert pg_backtest_db.get_decisions(run_id) == []
         assert pg_backtest_db.get_run_manifest(run_id) is None
+
+
+@pg_only
+def test_datetime_timestamps_are_converted_before_reaching_postgres(pg_backtest_db):
+    """The half of ``as_timestamp_text`` only a live server can prove.
+
+    Every ``timestamp`` column here is TEXT, and psycopg types a ``datetime``
+    parameter as ``timestamp``/``timestamptz`` -- for which Postgres has had no
+    implicit assignment cast to ``text`` since 8.3. So before the conversion
+    these three writers raised where SQLite silently stored a value, i.e. the
+    same call 500'd on Postgres and worked on SQLite. Converting at the
+    boundary makes both accept it *and* store identical text; the SQLite half
+    is pinned in test_database_cold_half.py.
+
+    ``insert_trades`` already did this on its own and is included to keep all
+    four timestamp writers asserted in one place.
+    """
+    import datetime
+
+    ts = datetime.datetime(2026, 1, 2, 9, 30, 15)
+    expected = "2026-01-02T09:30:15"
+
+    pg_backtest_db.insert_run(
+        run_id="run-dt", session_id="s1", agent_name="Agent", mode="backtest",
+        start_date="2026-01-01", end_date="2026-01-03", initial_equity=1000.0,
+    )
+    pg_backtest_db.insert_equity_point(
+        "run-dt", ts, equity=1000.0, cash=1000.0, positions_value=0.0
+    )
+    pg_backtest_db.insert_decisions(
+        "run-dt", [{"step_index": 0, "timestamp": ts, "decision_source": "llm"}]
+    )
+    pg_backtest_db.insert_trades(
+        "run-dt",
+        [{"timestamp": ts, "symbol": "AAPL", "quantity": 1, "side": "buy",
+          "price": 100.0, "value": 100.0}],
+    )
+
+    assert [p["timestamp"] for p in pg_backtest_db.get_equity_curve("run-dt")] == [expected]
+    assert [d["timestamp"] for d in pg_backtest_db.get_decisions("run-dt")] == [expected]
+    assert [t["timestamp"] for t in pg_backtest_db.get_trades("run-dt")] == [expected]
+
+    # insert_equity_points takes the batch path, and replace=True means it
+    # cannot share the row above -- assert it separately rather than assuming
+    # the two writers share a code path they don't.
+    pg_backtest_db.insert_equity_points(
+        "run-ts",
+        [{"timestamp": ts, "equity": 2000.0, "cash": 2000.0, "positions_value": 0.0}],
+    )
+    assert [p["timestamp"] for p in pg_backtest_db.get_equity_curve("run-ts")] == [expected]
+
+
+@pg_only
+def test_clear_all_leaves_the_embedded_sqlite_cold_tables_alone_postgres(pg_backtest_db):
+    """``clear_all`` must confine itself to Postgres.
+
+    An earlier cut delegated to ``self._sqlite.clear_all()`` as well. That
+    embedded store exists for the ``idempotency_keys`` hot half *only*, and
+    ``clear_all`` deliberately never touches that table -- so the delegation's
+    DELETEs could only hit cold tables this object never reads, while reaching
+    a file that defaults to ``DATABASE_PATH`` i.e. the committed seed. In prod
+    terms: ``backtest_hourly_agent.py --clear`` with AGENT_RUNS_DATABASE_URL
+    set would have blanked the seed's ``lb_*`` rows, and with them the seven
+    ``auto_compute: false`` leaderboard entries that exist nowhere else (see
+    tests/test_seed_database_integrity.py).
+
+    Asserting on the embedded store rather than on the absence of a call is
+    deliberate: a mock-the-call test would still pass if someone reached the
+    same file by another route.
+    """
+    pg_backtest_db._sqlite.insert_run(
+        run_id="lb_local_only", session_id="seed", agent_name="Seeded", mode="backtest",
+        start_date="2024-01-01", end_date="2024-01-02", initial_equity=1000.0,
+    )
+    assert pg_backtest_db._sqlite.get_run("lb_local_only") is not None
+
+    pg_backtest_db.clear_all()
+
+    assert pg_backtest_db._sqlite.get_run("lb_local_only") is not None
+    # And the Postgres side really was wiped -- otherwise this test would pass
+    # on a clear_all() that did nothing at all.
+    assert pg_backtest_db.get_all_runs() == []
 
 
 @pg_only

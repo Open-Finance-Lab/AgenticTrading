@@ -1001,3 +1001,42 @@ visible rather than silently absorbed.
 3. **`get_equity_curves` is batched, not ported line-for-line** (Task 5 Step 3) — the SQLite
    loop is one network round-trip per agent over Neon. Signature and return shape are identical.
    This is now recorded in the spec's Performance section too.
+
+## Changes made after the plan, from code review
+
+Work this plan did not anticipate. Recorded here because two of them change things outside the
+plan's declared file list.
+
+1. **`DELETE /admin/clear` was removed** (`api/routers/admin.py`). Neither this plan nor the spec
+   mentions the endpoint, but making run history durable is exactly what changes its blast
+   radius: it calls `db.clear_all()` behind no authentication — the session middleware only
+   checks that `X-Session-Id` parses as a UUID, which any caller can mint — and pre-change it
+   wiped an ephemeral file that the next redeploy restored. Post-change a single anonymous
+   request destroys the only durable copy, with nothing to recover from. Nothing called it, and
+   there is no admin tier in this codebase to gate it with, so it is gone rather than
+   authenticated. **This is a route-contract change**: both golden sets in
+   `test_app_composition.py` (`EXPECTED_ADMIN_ROUTES` and `EXPECTED_FULL_CONTRACT`) were updated.
+   `db.clear_all()` itself stays — tests and `backtest_hourly_agent.py --clear` use it.
+2. **The twin's `clear_all` no longer delegates to the embedded SQLite store.** That delegation
+   could only do harm: the embedded `BacktestDatabase` exists solely for the `idempotency_keys`
+   hot half, which `clear_all` deliberately skips, so its DELETEs only ever reached cold tables
+   the twin never reads — in a file defaulting to `DATABASE_PATH`, i.e. the committed seed and
+   its `lb_*` leaderboard rows.
+3. **Timestamp normalisation was added to `BacktestDatabase` as well as the twin**
+   (`as_timestamp_text`). Task 4 ported `insert_trades`'s `isoformat()` but not the three other
+   timestamp writers, which passed a `datetime` straight through: SQLite absorbed it via
+   `sqlite3`'s *deprecated* default adapter (storing a space separator), Postgres rejected it
+   outright. Fixing only the twin would have replaced a 500 with a silent cross-store text
+   divergence that then inverts when Python removes the adapter, so both sides now convert.
+4. **The backfill gained per-run failure isolation and an advisory lock.** "Idempotent" was true;
+   "re-runnable to completion" was not — one bad legacy row aborted `main()`, and every rerun
+   re-failed on it, so runs ordered after it never migrated. Separately, the trades/decisions
+   skip-logic is a read-then-write across two pooled checkouts, so two concurrent invocations
+   would double every row in the two tables that have no unique key to collapse them.
+5. **A pre-existing schema divergence surfaced and is now pinned, not fixed.**
+   `trades.quantity`/`side`/`value` are `NOT NULL` under `CREATE TABLE` but nullable on the
+   lazy-ALTER path, because SQLite rejects `ADD COLUMN ... NOT NULL` without a default and these
+   are backfilled from the legacy columns afterwards. Latent (every writer coerces before the
+   value reaches SQLite) and older than this work; only a full table rebuild would close it.
+   `test_database_lazy_migrations.py` now lists it explicitly and fails if a *fourth* divergence
+   appears — or if this one is ever resolved and the list goes stale.

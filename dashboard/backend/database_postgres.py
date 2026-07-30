@@ -5,9 +5,34 @@ set (see database.py's _build_backtest_db). Exists because the SQLite store live
 in DATABASE_PATH, which resets to the committed seed database on every deploy of
 the disk-less Render free-tier host -- silently deleting every backtest run,
 equity curve, trade log and decision log, which is why issue #145 (the leaderboard
-refresh cron) is blocked. Method surface, return schemas and behavior are
-identical to BacktestDatabase; only the SQL dialect differs, plus two named
-timestamp divergences on upsert (see insert_run) and a batched get_equity_curves.
+refresh cron) is blocked. Method surface and return schemas are identical to
+BacktestDatabase, and for the overwhelming majority of calls only the SQL
+dialect differs.
+
+Behavioral divergences, in full
+-------------------------------
+Every known way this store behaves differently from the SQLite one. Keep this
+list exhaustive: a divergence that is real but undocumented is how a twin
+quietly stops being a twin, and an earlier revision of this docstring claimed
+"exactly two" while three more existed.
+
+1. ``insert_run`` does not reset ``created_at`` on re-insert (first-seen
+   semantics), where SQLite's ``INSERT OR REPLACE`` does. This is
+   *user-visible* -- see ``insert_run``.
+2. ``insert_run`` explicitly refreshes ``updated_at`` on re-insert, which
+   SQLite's REPLACE also does, but for the opposite reason -- see
+   ``insert_run``.
+3. ``insert_run`` leaves ``baseline_djia_run_id``/``baseline_buyhold_run_id``
+   intact on re-insert, where SQLite's REPLACE nulls them -- see ``insert_run``.
+4. ``equity_timeseries``/``trades``/``backtest_decisions`` carry a *live* FK to
+   ``agent_runs`` here. The SQLite schema declares the same FKs but never
+   issues ``PRAGMA foreign_keys=ON``, so they are inert there -- see
+   ``_init_schema``.
+5. ``get_equity_curves`` is a single batched query; the SQLite twin loops.
+   Same return shape either way.
+6. ``trades`` never carried the legacy ``shares``/``action``/``total_value``
+   columns, so ``insert_trades``/``get_trades`` have no introspection branch --
+   see those methods.
 
 The hot half stays local: get_idempotency/put_idempotency are delegated to an
 embedded plain BacktestDatabase so the per-step agent request never gains a
@@ -19,7 +44,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from dashboard.backend.database import BacktestDatabase
+from dashboard.backend.database import BacktestDatabase, as_timestamp_text
 from dashboard.backend.db_url import require_postgres_url
 
 
@@ -37,6 +62,27 @@ class PostgresBacktestDatabase:
         return get_pool(self.database_url).connection()
 
     def _init_schema(self) -> None:
+        # DIVERGENCE 4 (module docstring): the ``REFERENCES agent_runs(run_id)
+        # ON DELETE CASCADE`` clauses below are *live*. database.py declares the
+        # same three FKs but never issues ``PRAGMA foreign_keys=ON`` -- SQLite
+        # defaults that off per connection, and no connection there turns it on
+        # -- so on SQLite they are decorative and enforce nothing.
+        #
+        # Two consequences worth knowing before touching either schema:
+        #   * Deleting an ``agent_runs`` row cascades here. SQLite relies on
+        #     delete_run/clear_all issuing the child DELETEs by hand, which is
+        #     why both still do (and must keep doing -- it is the only thing
+        #     removing those rows there).
+        #   * A child insert for a run_id that does not exist *fails* here and
+        #     succeeds on SQLite. That is what makes the backfill's
+        #     "skipped_orphan" accounting load-bearing rather than cosmetic: an
+        #     orphaned equity/trade/decision row in the source, which SQLite
+        #     was happy to hold, cannot be written here at all.
+        #
+        # The parity guard cannot see any of this: test_store_twin_parity
+        # compares column *names*, so constraints and enforcement mode are
+        # invisible to it. Only the @pg_only mirror suite exercises it.
+        #
         # created_at/updated_at are TEXT with a Postgres DEFAULT that produces
         # SQLite's exact CURRENT_TIMESTAMP string ("YYYY-MM-DD HH:MM:SS", UTC),
         # so read shapes are identical across both stores and the *database*
@@ -315,15 +361,46 @@ class PostgresBacktestDatabase:
                    metadata: Optional[Dict[str, Any]] = None) -> None:
         """Insert or refresh a backtest run.
 
-        ``created_at`` and ``updated_at`` diverge from SQLite's
-        ``INSERT OR REPLACE`` on purpose, in opposite directions:
-        SQLite's REPLACE is a DELETE+INSERT that names neither timestamp, so
-        it resets *both* on every re-insert -- nothing reads that reset as
-        meaningful. Here, ``created_at`` is left out of ``DO UPDATE SET`` so
-        it survives a re-insert (first-seen semantics), while ``updated_at``
-        is explicitly refreshed so a ``force_refresh`` still shows as
-        "just updated" -- omitting it would freeze updated_at at the
-        original insert, diverging from SQLite in the opposite direction.
+        Carries divergences 1-3 from the module docstring, all of them
+        consequences of the same thing: SQLite's ``INSERT OR REPLACE`` is a
+        DELETE+INSERT, so every column its VALUES list omits goes back to its
+        default, while ``ON CONFLICT DO UPDATE`` only touches the columns named
+        in ``DO UPDATE SET``. Three columns fall in that gap.
+
+        ``created_at`` is deliberately left out of ``DO UPDATE SET``, so a
+        re-insert preserves it (first-seen semantics) where SQLite resets it to
+        the moment of the rerun. **This one is user-visible, not cosmetic.**
+        All four listing queries below (``get_all_runs``,
+        ``get_runs_by_session``, ``get_runs_by_sessions``, ``get_runs_by_mode``)
+        order by ``created_at DESC``, and ``domain/agents/service.py`` uses the
+        same column to pick "the latest run for this agent" -- so re-running a
+        run bubbles it to the top of every listing on SQLite and leaves it in
+        place here. First-seen is kept because it is what the column *name*
+        means and what the backfill's ``_restore_created_at`` relies on to stay
+        idempotent; a rerun recomputes an old run, it does not create a new
+        one. (An earlier revision of this docstring asserted "nothing reads
+        that reset as meaningful", which was simply wrong -- eight call sites
+        do.)
+
+        ``updated_at`` is the opposite case: it *is* named in
+        ``DO UPDATE SET``, so a ``force_refresh`` still shows as "just
+        updated", matching what SQLite's REPLACE incidentally achieves.
+        Omitting it would freeze ``updated_at`` at the original insert --
+        diverging in the other direction, and lying about this row's write
+        history.
+
+        ``baseline_djia_run_id``/``baseline_buyhold_run_id`` appear in neither
+        the ``INSERT`` column list nor ``DO UPDATE SET``, so a re-insert leaves
+        the existing links intact where SQLite's REPLACE nulls them. Kept
+        deliberately rather than "fixed" to match: the only production writers
+        (``domain/backtesting/baseline_worker.py`` and
+        ``scripts/backtest_hourly_agent.py``) call ``update_run_baselines``
+        immediately after ``insert_run``, so in the happy path both stores end
+        up identical. They differ only when baseline regeneration *fails* --
+        and ``baseline_worker`` swallows its own exception ("⚠️ Baseline
+        generation failed (run saved)"), so on SQLite that permanently orphans
+        the run's comparison chart while here the previous links survive.
+        Nulling them here would be importing a defect into the durable store.
         """
         with self._get_connection() as conn:
             with conn.cursor() as cur:
@@ -413,7 +490,8 @@ class PostgresBacktestDatabase:
                         fx_rate = EXCLUDED.fx_rate
                     """,
                     (
-                        run_id, timestamp, equity, cash, positions_value, daily_return,
+                        run_id, as_timestamp_text(timestamp), equity, cash,
+                        positions_value, daily_return,
                         native_equity, native_cash, native_positions_value, fx_rate,
                     ),
                 )
@@ -464,7 +542,7 @@ class PostgresBacktestDatabase:
                     [
                         (
                             run_id,
-                            point["timestamp"],
+                            as_timestamp_text(point["timestamp"]),
                             point["equity"],
                             point["cash"],
                             point["positions_value"],
@@ -542,7 +620,7 @@ class PostgresBacktestDatabase:
                         (
                             run_id,
                             entry.get("step_index", 0),
-                            entry.get("timestamp"),
+                            as_timestamp_text(entry.get("timestamp")),
                             entry.get("decision_source"),
                             json.dumps(entry.get("actions_submitted") or []),
                             entry.get("actions_executed", 0),
@@ -586,9 +664,20 @@ class PostgresBacktestDatabase:
     def clear_all(self) -> None:
         """Clear all data (useful for testing).
 
-        Truncates all five Postgres tables and also delegates to the embedded
-        SQLite store's ``clear_all()`` so stale cold rows in the local seed
-        file don't outlive a wipe of the Postgres side.
+        Truncates all five Postgres tables and nothing else. In particular it
+        does **not** delegate to ``self._sqlite.clear_all()``, which an earlier
+        cut of this file did: that call could only ever do harm. The embedded
+        ``BacktestDatabase`` exists for exactly one purpose -- the
+        ``idempotency_keys`` "hot half" -- and ``clear_all`` deliberately
+        leaves that table alone (see below), so every DELETE the delegation
+        issued landed on cold tables this object never reads. What it *could*
+        reach, since ``self._sqlite`` defaults to ``DATABASE_PATH`` and that
+        defaults to the committed seed, is the seed's own ``agent_runs`` --
+        including the seven ``lb_*`` rows the leaderboard's ``auto_compute:
+        false`` entries exist only because of (see
+        ``tests/test_seed_database_integrity.py``). A local
+        ``backtest_hourly_agent.py --clear`` with ``AGENT_RUNS_DATABASE_URL``
+        set would have silently blanked the board.
 
         Deliberately does NOT touch ``idempotency_keys``, matching SQLite's
         ``clear_all`` (same parity reasoning as ``delete_run`` above).
@@ -600,7 +689,6 @@ class PostgresBacktestDatabase:
                 cur.execute("DELETE FROM backtest_decisions")
                 cur.execute("DELETE FROM run_manifest")
                 cur.execute("DELETE FROM agent_runs")
-        self._sqlite.clear_all()
 
     # ------------------------------------------------------------------
     # Readers
