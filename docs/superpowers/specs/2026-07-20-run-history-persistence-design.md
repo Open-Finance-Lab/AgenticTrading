@@ -395,10 +395,13 @@ Order matters; each step is verifiable before the next:
 
 1. **Provision** — done 2026-07-20: Neon project `ATL-runs-main` (Postgres 18.4, empty).
    Credential verified working; lives in Render env config only.
-   *Re-verified 2026-07-29:* endpoint `ep-orange-sound-au2efkk0-pooler…/neondb`, server
+   *Re-verified 2026-07-29:* endpoint `ep-orange-sound-…-pooler…/neondb`, server
    PostgreSQL **18.4**, **zero public tables** (no `_init_schema` has ever run against it), so
    there is no half-migrated state to reconcile. Distinct from the users/content endpoint
-   (`ep-cool-wave-ai917qe3-pooler`), confirming Decision 2's dedicated-project topology.
+   (`ep-cool-wave-…-pooler`), confirming Decision 2's dedicated-project topology. (Endpoint
+   IDs are truncated deliberately: this repo is **public**, and the full ID is the resolvable
+   hostname of a production database. The distinctness claim rests on the differing slugs, so
+   nothing is lost. Read the live values from the Render env config, never from this doc.)
    Confirmed also that `_postgres_testing.require_local_postgres_url` **rejects this host**,
    so the `@pg_only` destructive fixtures cannot wipe it — the #136/PR #144 localhost
    allowlist covers the new database with no change. The corollary is that the Postgres tier
