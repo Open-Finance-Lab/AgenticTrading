@@ -632,14 +632,17 @@ def test_datetime_timestamps_are_converted_before_reaching_postgres(pg_backtest_
     assert [d["timestamp"] for d in pg_backtest_db.get_decisions("run-dt")] == [expected]
     assert [t["timestamp"] for t in pg_backtest_db.get_trades("run-dt")] == [expected]
 
-    # insert_equity_points takes the batch path, and replace=True means it
-    # cannot share the row above -- assert it separately rather than assuming
-    # the two writers share a code path they don't.
+    # insert_equity_points takes the batch path (executemany), so it is asserted
+    # separately rather than assumed to share insert_equity_point's code path.
+    # replace=True wipes the row written above first, which is why the curve is
+    # still one point -- and the equity value proves it is the NEW row.
     pg_backtest_db.insert_equity_points(
-        "run-ts",
+        "run-dt",
         [{"timestamp": ts, "equity": 2000.0, "cash": 2000.0, "positions_value": 0.0}],
     )
-    assert [p["timestamp"] for p in pg_backtest_db.get_equity_curve("run-ts")] == [expected]
+    batch_curve = pg_backtest_db.get_equity_curve("run-dt")
+    assert [p["timestamp"] for p in batch_curve] == [expected]
+    assert [p["equity"] for p in batch_curve] == [2000.0]
 
 
 @pg_only
