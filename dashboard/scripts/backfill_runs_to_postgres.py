@@ -919,5 +919,29 @@ def main() -> int:
     return 0
 
 
+def _close_pools() -> None:
+    """Return pooled sockets before the interpreter tears itself down.
+
+    psycopg_pool's own exit path cannot stop its background workers in time
+    and prints ``couldn't stop thread 'pool-1-worker-N' within 5.0 seconds``
+    once per worker -- *after* this script's own "Backfill complete.", so a
+    fully successful run ends looking like a partial failure.
+
+    Keyed off ``sys.modules`` rather than importing: ``--dry-run`` returns
+    before the Postgres stack is ever imported, and it has to keep working on
+    a machine with no psycopg installed at all. Nothing was pooled in that
+    case, so there is nothing to close.
+    """
+    pool_module = sys.modules.get("dashboard.backend.db_pool")
+    if pool_module is not None:
+        pool_module.close_all_pools()
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    # finally, not "after main()": a crash mid-backfill should still hand the
+    # sockets back rather than bury the traceback under teardown warnings.
+    try:
+        _exit_code = main()
+    finally:
+        _close_pools()
+    raise SystemExit(_exit_code)

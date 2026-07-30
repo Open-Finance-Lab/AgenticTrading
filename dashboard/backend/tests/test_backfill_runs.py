@@ -174,6 +174,40 @@ def test_dry_run_with_target_set_previews_but_does_not_connect(tmp_path, monkeyp
     assert "Dry run: no writes performed." in out
 
 
+def test_close_pools_returns_pooled_sockets(monkeypatch):
+    """The entry point hands the pooled sockets back, so psycopg_pool's own
+    teardown does not print "couldn't stop thread 'pool-1-worker-N'" *after*
+    "Backfill complete." and make a clean run read as a partial failure.
+
+    Covers the helper, not the ``__main__`` block that calls it: every test
+    here drives ``main()`` in-process, so that wiring is only exercised by
+    actually running the script.
+    """
+    from dashboard.backend import db_pool
+    from dashboard.scripts import backfill_runs_to_postgres
+
+    calls = []
+    monkeypatch.setattr(db_pool, "close_all_pools", lambda: calls.append(1))
+
+    backfill_runs_to_postgres._close_pools()
+
+    assert calls == [1]
+
+
+def test_close_pools_is_a_noop_when_postgres_was_never_imported(monkeypatch):
+    """``--dry-run`` returns before the Postgres stack is imported and has to
+    keep working where psycopg is not installed at all. Nothing was pooled, so
+    the helper must not reach for the module -- importing it there would both
+    risk an ImportError and build a *second* pool registry."""
+    from dashboard.scripts import backfill_runs_to_postgres
+
+    monkeypatch.delitem(sys.modules, "dashboard.backend.db_pool", raising=False)
+
+    backfill_runs_to_postgres._close_pools()
+
+    assert "dashboard.backend.db_pool" not in sys.modules
+
+
 def test_missing_source_file_fails_loudly(tmp_path, monkeypatch, capsys):
     from dashboard.scripts import backfill_runs_to_postgres
 
