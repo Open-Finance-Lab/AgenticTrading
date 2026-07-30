@@ -146,10 +146,16 @@ def test_unreachable_postgres_raises_instead_of_falling_back():
     """
     import psycopg
 
-    from dashboard.backend.database_postgres import PostgresBacktestDatabase
+    # Module-alias form, not `from ... import PostgresBacktestDatabase`, in every
+    # test below: the dispatch tests above *must* have the module object to
+    # monkeypatch the attribute, and importing one module both ways in a single
+    # file trips CodeQL's py/import-and-import-from. Keep this file uniform.
+    import dashboard.backend.database_postgres as database_pg_module
 
     with pytest.raises(psycopg.OperationalError):
-        PostgresBacktestDatabase("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
+        database_pg_module.PostgresBacktestDatabase(
+            "postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2"
+        )
 
 
 def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
@@ -161,10 +167,12 @@ def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
     failure and it lands in Render's log. require_postgres_url must therefore
     run before psycopg ever sees the value.
     """
-    from dashboard.backend.database_postgres import PostgresBacktestDatabase
+    import dashboard.backend.database_postgres as database_pg_module
 
     with pytest.raises(ValueError) as excinfo:
-        PostgresBacktestDatabase('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
+        database_pg_module.PostgresBacktestDatabase(
+            '"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"'
+        )
     assert "sup3r-s3cret" not in str(excinfo.value)
 
 
@@ -180,9 +188,9 @@ def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
 @pytest.fixture
 def pg_backtest_db():
     require_local_postgres_url(TEST_POSTGRES_URL)
-    from dashboard.backend.database_postgres import PostgresBacktestDatabase
+    import dashboard.backend.database_postgres as database_pg_module
 
-    store = PostgresBacktestDatabase(TEST_POSTGRES_URL)
+    store = database_pg_module.PostgresBacktestDatabase(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
             # equity_timeseries/trades/backtest_decisions carry a real FK to
