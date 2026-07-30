@@ -157,7 +157,8 @@ class AgentRuntimeContext:
 class AgentRuntime(Protocol):
     calls: int
 
-    def decide(self, context: AgentRuntimeContext) -> Dict[str, List[Dict[str, Any]]]: ...
+    def decide(self, context: AgentRuntimeContext) -> Dict[str, List[Dict[str, Any]]]:
+        """Return one step's ATL action envelope for ``context``."""
 
 
 class RuntimeDispatcher:

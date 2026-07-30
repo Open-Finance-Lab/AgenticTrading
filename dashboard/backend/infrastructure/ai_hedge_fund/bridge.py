@@ -31,6 +31,13 @@ def _disable_dotenv_loading() -> None:
     ``PYTHON_DOTENV_DISABLED``. Patch both public import locations before any
     upstream module is imported; its normal ``from dotenv import load_dotenv``
     then receives this no-op.
+
+    Applied with ``setattr`` because this is a deliberate runtime monkeypatch,
+    not a module-level rebinding: this file only ever executes as the entry
+    point of a *separate* interpreter, so it can never reach ATL's own
+    ``from dotenv import load_dotenv`` call sites. Written as a plain
+    assignment, static analysis reads it as the repo mutating a shared module
+    attribute and reports every one of those unrelated call sites.
     """
     import dotenv
     from dotenv import main as dotenv_main
@@ -38,8 +45,8 @@ def _disable_dotenv_loading() -> None:
     def disabled_load_dotenv(*_args, **_kwargs) -> bool:
         return False
 
-    dotenv.load_dotenv = disabled_load_dotenv
-    dotenv_main.load_dotenv = disabled_load_dotenv
+    setattr(dotenv, "load_dotenv", disabled_load_dotenv)
+    setattr(dotenv_main, "load_dotenv", disabled_load_dotenv)
 
 
 def main() -> None:

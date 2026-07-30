@@ -478,7 +478,9 @@ async def get_financial_datasets_credential_status(
 ):
     """Return configured status without ever returning credential plaintext."""
     ctx = _owner_context(request, authorization)
-    agent = _require_agent_access(agent_id, ctx, api_key=x_api_key)
+    # Called for its authorization side effect; the row itself is not needed
+    # here, since status is deliberately not gated on the current runtime.
+    _require_agent_access(agent_id, ctx, api_key=x_api_key)
     status = agent_credential_store.get_public(
         agent_id, FINANCIAL_DATASETS_CREDENTIAL
     )
