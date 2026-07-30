@@ -380,6 +380,23 @@ class SourceData:
                 for table in TABLES_IN_FK_ORDER
                 if table != "agent_runs"
             }
+            # The second way a manifest row can fail to migrate, and the reason
+            # the try/except above is not sufficient on its own: a
+            # ``manifest_json`` holding the JSON literal ``null`` decodes to
+            # Python ``None`` *without raising*, so ``get_run_manifest`` returns
+            # None exactly as it does for "no row at all" and the public API
+            # cannot tell the two apart. Left unaccounted, such a row is counted
+            # in raw_counts but lands in no bucket -- i.e. it reports as an
+            # *unexplained* shortfall, which is the one signal the accounting
+            # check exists to raise. Resolved with the row set from the raw
+            # connection, the only place that distinction is visible.
+            manifest_row_ids = set(_child_counts_by_run(raw_conn, "run_manifest"))
+            accounted_ids = set(self.manifests_by_run) | {
+                rid for rid, _ in self.unreadable_manifests
+            }
+            self.null_manifests = sorted(
+                (manifest_row_ids & self.run_ids) - accounted_ids
+            )
         finally:
             raw_conn.close()
 
@@ -815,7 +832,9 @@ def main() -> int:
     # Its own bucket, so an unreadable manifest reads as a *named* reason rather
     # than an unexplained shortfall -- which is the only thing the accounting
     # check should ever fail on.
-    results["run_manifest"]["skipped_unreadable"] = len(data.unreadable_manifests)
+    results["run_manifest"]["skipped_unreadable"] = (
+        len(data.unreadable_manifests) + len(data.null_manifests)
+    )
 
     print("\nPer-table results (source vs. migrated):")
     accounting_ok = True
@@ -869,20 +888,26 @@ def main() -> int:
         for table, run_id, error in failures.entries:
             print(f"  {table} / {run_id}: {error}", file=sys.stderr)
 
-    if data.unreadable_manifests:
+    if data.unreadable_manifests or data.null_manifests:
+        total = len(data.unreadable_manifests) + len(data.null_manifests)
         print(
-            f"\n{len(data.unreadable_manifests)} manifest(s) could not be read "
-            "from the source and were skipped (see SourceData):",
+            f"\n{total} manifest(s) could not be read from the source and were "
+            "skipped (see SourceData):",
             file=sys.stderr,
         )
         for run_id, error in data.unreadable_manifests:
             print(f"  run_manifest / {run_id}: {error}", file=sys.stderr)
+        for run_id in data.null_manifests:
+            print(
+                f"  run_manifest / {run_id}: manifest_json decodes to null",
+                file=sys.stderr,
+            )
 
     if not accounting_ok:
         print("\nBackfill finished with accounting mismatches -- see warnings above.", file=sys.stderr)
         return 1
 
-    if failures or data.unreadable_manifests:
+    if failures or data.unreadable_manifests or data.null_manifests:
         print("\nBackfill finished with failures -- see the list above.", file=sys.stderr)
         return 1
 

@@ -611,6 +611,44 @@ def test_corrupt_manifest_json_is_reported_not_fatal(tmp_path, monkeypatch, caps
     assert exit_code == 1
 
 
+def test_null_manifest_json_is_accounted_not_an_unexplained_shortfall(
+    tmp_path, monkeypatch, capsys
+):
+    """The sibling of the corrupt-manifest case, and a genuinely separate branch.
+
+    ``manifest_json`` holding the JSON literal ``null`` decodes to Python
+    ``None`` *without raising*, so it never reaches the try/except above --
+    ``get_run_manifest`` returns None exactly as it does for "no row at all",
+    and the public API cannot distinguish them. Left unhandled, the row is
+    counted in ``raw_counts``, lands in no bucket, and reports as an
+    *unexplained* accounting mismatch, which is the single signal that check
+    exists to raise. Asserting the absence of "accounting mismatch" is therefore
+    the real assertion here, not the presence of the message.
+    """
+    source_path = _build_source_db(tmp_path)
+    conn = sqlite3.connect(str(source_path))
+    try:
+        conn.execute(
+            "UPDATE run_manifest SET manifest_json = ? WHERE run_id = ?",
+            ("null", "run-full"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    target = _FakeTarget()
+    exit_code = _run_main_against(monkeypatch, source_path, target)
+
+    captured = capsys.readouterr()
+    assert "run-full" in target.runs, "everything else still migrated"
+    assert target.manifests == {}
+
+    assert "decodes to null" in captured.err
+    assert "skipped_unreadable=1" in captured.out
+    assert "accounting mismatch" not in captured.err
+    assert exit_code == 1
+
+
 def test_clean_run_reports_success_and_balances_the_accounting(
     tmp_path, monkeypatch, capsys
 ):
