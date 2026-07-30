@@ -69,3 +69,25 @@ def test_marketplace_copy_label_is_scoped_to_ai_hedge_fund():
         "const cloneLabel = isAiHedgeFundTemplate "
         "? 'Copy to My Agents' : 'Add to My Agents';"
     ) in _APP_JS
+
+
+def test_stored_credential_can_be_removed_from_the_editor():
+    """The DELETE credential route needs a UI path.
+
+    Without one a user can store a third-party API key and has no way to take
+    it back out -- the endpoint exists but nothing ever calls it.
+    """
+    assert 'id="agentEditorFinancialDatasetsRemove"' in _APP_HTML
+    assert "removeFinancialDatasetsCredential" in _EDITOR_JS
+    assert "credentialRequest(agent, 'DELETE')" in _EDITOR_JS
+    assert (
+        "getElementById('agentEditorFinancialDatasetsRemove')?.addEventListener"
+        in _EDITOR_JS
+    )
+    assert ".agent-editor-credential-remove" in _STYLES_CSS
+
+
+def test_editor_asset_cache_bust_advances_with_its_source():
+    """A stale ?v= serves the old editor to every returning browser."""
+    assert "js/agent-editor.js?v=17" in _APP_HTML
+    assert "styles.css?v=71" in _APP_HTML

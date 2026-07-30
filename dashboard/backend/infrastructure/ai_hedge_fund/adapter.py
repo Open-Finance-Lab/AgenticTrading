@@ -20,7 +20,9 @@ from typing import Any, Dict, Mapping, Optional
 from dashboard.backend.domain.agents.runtime import (
     AI_HEDGE_FUND_ANALYSTS,
     AI_HEDGE_FUND_RUNTIME_TYPE,
+    AgentRuntimeConfigurationError,
     AgentRuntimeContext,
+    AgentRuntimeError,
     normalize_runtime_config,
 )
 from dashboard.backend.infrastructure.llm.validator import (
@@ -35,6 +37,8 @@ DEFAULT_MODEL_NAME = openrouter.DEFAULT_MODEL
 DEFAULT_MODEL_PROVIDER = "OpenRouter"
 DEFAULT_LOOKBACK_DAYS = 90
 DEFAULT_TIMEOUT_SECONDS = 300
+MIN_TIMEOUT_SECONDS = 1
+MAX_TIMEOUT_SECONDS = 900
 DEFAULT_DECISION_INTERVAL = "daily"
 _LOCAL_RUNTIME_DIR = REPO_ROOT / ".ai-hedge-fund-venv"
 _MIN_EXECUTABLE_CONFIDENCE = 0.3
@@ -70,8 +74,25 @@ _SUBPROCESS_ENV_KEYS = frozenset(
 )
 
 
-class AiHedgeFundRuntimeError(RuntimeError):
-    """Base exception for runtime configuration or execution failures."""
+class AiHedgeFundRuntimeError(AgentRuntimeError):
+    """Base exception for runtime execution failures.
+
+    Deliberately *transient* by default: the backtest engine holds the step and
+    keeps the run alive for these, because a timeout or a bad upstream response
+    on one day says nothing about the next.
+    """
+
+
+class AiHedgeFundConfigurationError(
+    AiHedgeFundRuntimeError, AgentRuntimeConfigurationError
+):
+    """Raised when the deployment itself cannot host the runtime.
+
+    Distinct from the transient base so the engine can abort immediately. A
+    missing interpreter or a malformed platform setting fails identically on
+    every step, and retrying it once per trading day only converts one clear
+    error into a long, silent, all-holds run.
+    """
 
 
 class AiHedgeFundOutputError(AiHedgeFundRuntimeError):
@@ -81,6 +102,55 @@ class AiHedgeFundOutputError(AiHedgeFundRuntimeError):
 def _resolve_path(value: str) -> Path:
     path = Path(value).expanduser()
     return path if path.is_absolute() else REPO_ROOT / path
+
+
+def resolve_step_timeout_seconds(
+    environment: Optional[Mapping[str, str]] = None,
+) -> int:
+    """Return the per-decision subprocess budget.
+
+    Shared with the API layer so the caller that sizes the *outer* backtest
+    subprocess timeout and the runtime that sizes each *inner* upstream call
+    read the same number. Two independent readings of
+    ``AI_HEDGE_FUND_TIMEOUT_SECONDS`` is how the parent ends up killing the
+    child mid-run.
+    """
+    source = os.environ if environment is None else environment
+    raw = str(source.get("AI_HEDGE_FUND_TIMEOUT_SECONDS", "") or "").strip()
+    if not raw:
+        return DEFAULT_TIMEOUT_SECONDS
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise AiHedgeFundConfigurationError(
+            "AI_HEDGE_FUND_TIMEOUT_SECONDS must be an integer"
+        ) from exc
+    if not MIN_TIMEOUT_SECONDS <= value <= MAX_TIMEOUT_SECONDS:
+        raise AiHedgeFundConfigurationError(
+            "AI_HEDGE_FUND_TIMEOUT_SECONDS must be between "
+            f"{MIN_TIMEOUT_SECONDS} and {MAX_TIMEOUT_SECONDS}"
+        )
+    return value
+
+
+def runtime_unavailable_reason(
+    environment: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """Return why the hosted runtime cannot run here, or ``None`` if it can.
+
+    Lets the API reject a hosted backtest at request time with an actionable
+    503 instead of accepting it and failing inside a background subprocess
+    minutes later. ``render.yaml`` is documentation rather than the deploy
+    mechanism for this service, so "the isolated venv was never built" is a
+    live production possibility, not a hypothetical.
+    """
+    try:
+        AiHedgeFundSubprocessRunner(environment)._python_executable()
+    except AiHedgeFundRuntimeError as exc:
+        return str(exc)
+    if not Path(__file__).with_name("bridge.py").is_file():
+        return "AI Hedge Fund bridge script is missing from this deployment"
+    return None
 
 
 def _redact_runtime_error(value: Any, environment: Mapping[str, str]) -> str:
@@ -111,7 +181,7 @@ class AiHedgeFundSubprocessRunner:
             else _LOCAL_RUNTIME_DIR / "bin" / "python"
         )
         if not candidate.is_file() or not os.access(candidate, os.X_OK):
-            raise AiHedgeFundRuntimeError(
+            raise AiHedgeFundConfigurationError(
                 "AI Hedge Fund runtime is not installed; configure "
                 "AI_HEDGE_FUND_PYTHON with its isolated interpreter"
             )
@@ -138,7 +208,7 @@ class AiHedgeFundSubprocessRunner:
         project_root_raw = self.environment.get("AI_HEDGE_FUND_ROOT", "").strip()
         project_root = _resolve_path(project_root_raw) if project_root_raw else None
         if project_root is not None and not project_root.is_dir():
-            raise AiHedgeFundRuntimeError(
+            raise AiHedgeFundConfigurationError(
                 "AI_HEDGE_FUND_ROOT does not point to an upstream checkout"
             )
 
@@ -221,9 +291,7 @@ class AiHedgeFundRuntime:
         self.lookback_days = self._platform_int(
             "AI_HEDGE_FUND_LOOKBACK_DAYS", DEFAULT_LOOKBACK_DAYS, 1, 3650
         )
-        self.timeout_seconds = self._platform_int(
-            "AI_HEDGE_FUND_TIMEOUT_SECONDS", DEFAULT_TIMEOUT_SECONDS, 1, 900
-        )
+        self.timeout_seconds = resolve_step_timeout_seconds(self.environment)
         self.calls = 0
         self._last_decision_day: Optional[str] = None
         self._decision_audit_rows: list[Dict[str, Any]] = []
@@ -257,9 +325,11 @@ class AiHedgeFundRuntime:
         try:
             value = int(raw)
         except ValueError as exc:
-            raise AiHedgeFundRuntimeError(f"{name} must be an integer") from exc
+            raise AiHedgeFundConfigurationError(
+                f"{name} must be an integer"
+            ) from exc
         if not minimum <= value <= maximum:
-            raise AiHedgeFundRuntimeError(
+            raise AiHedgeFundConfigurationError(
                 f"{name} must be between {minimum} and {maximum}"
             )
         return value
@@ -544,7 +614,14 @@ class AiHedgeFundRuntime:
         context: AgentRuntimeContext,
         symbol: str,
     ) -> str:
-        """Mirror ATL executable-action checks in their established order."""
+        """Mirror ATL executable-action checks in their established order.
+
+        Falls back to ``"unknown"`` rather than raising. This is an audit-trail
+        label, and the enumeration hand-mirrors ``actions_to_executable``: the
+        day a filter is added there, raising here would abort a whole backtest
+        over a missing string. An unlabelled trace is a far cheaper defect than
+        a lost run.
+        """
         if confidence < _MIN_EXECUTABLE_CONFIDENCE:
             return "below_minimum_confidence"
         price = float(context.current_prices.get(symbol, 0) or 0)
@@ -558,9 +635,7 @@ class AiHedgeFundRuntime:
         elif action == "sell":
             if int(context.positions.get(symbol, 0) or 0) <= 0:
                 return "sell_without_position"
-        raise AiHedgeFundOutputError(
-            f"AI Hedge Fund {action} decision for {symbol} was not emitted"
-        )
+        return "unknown"
 
     @classmethod
     def output_to_atl_actions_with_trace(
@@ -690,10 +765,13 @@ class AiHedgeFundRuntime:
             self._last_decision_day = decision_day
             return {"actions": []}
 
-        output = self.runner.run(
-            self._upstream_payload(context),
-            timeout_seconds=self.timeout_seconds,
-        )
+        payload = self._upstream_payload(context)
+        # Consume the day *before* the call, not after it. Left until the
+        # success path, a failed decision leaves the day unmarked and the next
+        # hourly bar retries upstream -- so one bad day costs bars-per-day full
+        # timeouts and API spend for no new information.
+        self._last_decision_day = decision_day
+        output = self.runner.run(payload, timeout_seconds=self.timeout_seconds)
         self.calls += 1
         actions, traces = self.output_to_atl_actions_with_trace(output, context)
         cutoff = context.latest_market_date_before_decision
@@ -707,5 +785,4 @@ class AiHedgeFundRuntime:
                 "context_ref": cutoff.isoformat() if cutoff is not None else None,
             }
         )
-        self._last_decision_day = decision_day
         return {"actions": actions}

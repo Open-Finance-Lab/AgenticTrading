@@ -9334,3 +9334,25 @@ body.agent-editor-open {
 .agent-editor-credential-field {
     margin-top: 6px;
 }
+
+.agent-editor-credential-remove {
+    align-self: flex-start;
+    margin-top: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--border, #d0d5dd);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary, #667085);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.agent-editor-credential-remove:hover:not(:disabled) {
+    border-color: #d92d20;
+    color: #d92d20;
+}
+
+.agent-editor-credential-remove:disabled {
+    opacity: 0.6;
+    cursor: default;
+}

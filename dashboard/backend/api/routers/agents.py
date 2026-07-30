@@ -39,6 +39,7 @@ from dashboard.backend.api.dependencies import (
     _require_agent_access,
     _require_owner_context,
 )
+from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.portfolios.service import portfolio_service
 
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
@@ -107,18 +108,21 @@ class UpdateAgentBody(BaseModel):
         return value
 
 
-class FinancialDatasetsCredentialBody(BaseModel):
-    api_key: SecretStr
+MAX_CREDENTIAL_LENGTH = 4096
 
-    @field_validator("api_key")
-    @classmethod
-    def _validate_api_key(cls, value: SecretStr) -> SecretStr:
-        raw = value.get_secret_value().strip()
-        if not raw:
-            raise ValueError("api_key must not be blank")
-        if len(raw) > 4096:
-            raise ValueError("api_key is too long")
-        return SecretStr(raw)
+
+class FinancialDatasetsCredentialBody(BaseModel):
+    """Carries the submitted key.
+
+    Deliberately *no* ``field_validator``: ``SecretStr`` masks the value in
+    reprs and logs, but it does not reach Pydantic's error envelope, and
+    FastAPI serializes ``input`` into every 422 body. A validator that rejects
+    a key therefore echoes that key back in plaintext. The blank/length checks
+    live in the route handler instead, where they raise ``HTTPException`` and
+    the response carries only the message.
+    """
+
+    api_key: SecretStr
 
 
 @router.post("")
@@ -450,12 +454,19 @@ async def update_agent(
     return {"agent": agent}
 
 
+# Storing a hosted credential is gated on the hosted runtime; reading its
+# status and deleting it deliberately are NOT. Gating all three strands any key
+# whose agent later switches to ``pipeline``: the owner could no longer see it,
+# replace it, or delete it, and the row outlived the agent itself.
 def _require_ai_hedge_fund_agent(agent: Dict[str, Any]) -> None:
     if (agent.get("runtime_type") or "pipeline") != AI_HEDGE_FUND_RUNTIME_TYPE:
         raise HTTPException(
             status_code=422,
             detail="Financial Datasets credentials apply only to AI Hedge Fund agents",
         )
+
+
+_credential_rate_limiter = FixedWindowRateLimiter(max_events=20, window_seconds=3600)
 
 
 @router.get("/{agent_id}/credentials/financial-datasets")
@@ -468,7 +479,6 @@ async def get_financial_datasets_credential_status(
     """Return configured status without ever returning credential plaintext."""
     ctx = _owner_context(request, authorization)
     agent = _require_agent_access(agent_id, ctx, api_key=x_api_key)
-    _require_ai_hedge_fund_agent(agent)
     status = agent_credential_store.get_public(
         agent_id, FINANCIAL_DATASETS_CREDENTIAL
     )
@@ -488,14 +498,29 @@ async def set_financial_datasets_credential(
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ):
     """Encrypt and store the user's Financial Datasets API key."""
+    if not _credential_rate_limiter.allow(client_key(request)):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many credential updates recently; please try again later.",
+        )
     ctx = _owner_context(request, authorization)
     agent = _require_agent_access(agent_id, ctx, api_key=x_api_key)
     _require_ai_hedge_fund_agent(agent)
+    # Validated here rather than in the model so a rejection never echoes the
+    # submitted key back through Pydantic's ``input`` field. See the body class.
+    raw_key = body.api_key.get_secret_value().strip()
+    if not raw_key:
+        raise HTTPException(status_code=422, detail="api_key must not be blank")
+    if len(raw_key) > MAX_CREDENTIAL_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"api_key must be at most {MAX_CREDENTIAL_LENGTH} characters",
+        )
     try:
         return agent_credential_store.upsert(
             agent_id,
             FINANCIAL_DATASETS_CREDENTIAL,
-            body.api_key.get_secret_value(),
+            raw_key,
         )
     except RuntimeError as exc:
         # The encryption helper names a missing/malformed setting but never its
@@ -511,8 +536,7 @@ async def delete_financial_datasets_credential(
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ):
     ctx = _owner_context(request, authorization)
-    agent = _require_agent_access(agent_id, ctx, api_key=x_api_key)
-    _require_ai_hedge_fund_agent(agent)
+    _require_agent_access(agent_id, ctx, api_key=x_api_key)
     return {
         "credential": FINANCIAL_DATASETS_CREDENTIAL,
         "configured": False,
@@ -533,10 +557,11 @@ async def delete_agent(
     agent = _require_agent_access(agent_id, ctx, api_key=x_api_key)
     sleeve = float(agent.get("cash_allocation") or 0)
     owner_user_id = agent.get("owner_user_id")
-    if (agent.get("runtime_type") or "pipeline") == AI_HEDGE_FUND_RUNTIME_TYPE:
-        # Hosted credentials are runtime-owned. Clean them before deleting the
-        # agent; ordinary pipeline deletion keeps its established code path.
-        agent_credential_store.delete_all(agent_id)
+    # Unconditional on purpose. Gating this on the *current* runtime_type let a
+    # credential stored while the agent was hosted survive the agent forever
+    # once it was switched to pipeline -- decryptable, ownerless, unreachable.
+    # The delete is one cheap statement and is a no-op for pipeline agents.
+    agent_credential_store.delete_all(agent_id)
     agent_service.delete_agent(agent_id)
     # Refresh the account ledger now the sleeve is gone from the sum (#175).
     # Reconciling cannot fail here -- unlike crediting the sleeve back, which

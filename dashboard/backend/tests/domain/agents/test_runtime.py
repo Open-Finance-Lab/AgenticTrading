@@ -754,3 +754,150 @@ def test_ai_hedge_fund_rejects_invalid_analyst_composition(analysts):
         normalize_runtime_config(
             AI_HEDGE_FUND_RUNTIME_TYPE, {"analysts": analysts}
         )
+
+
+def test_pipeline_runtime_config_is_size_bounded():
+    """Permissive about *which* keys must not mean unbounded in size.
+
+    The column is plain TEXT, so without a ceiling any authenticated caller can
+    PATCH megabytes onto every agent they own. The sibling ``pipeline`` field is
+    capped at 50 steps for exactly this reason.
+    """
+    from dashboard.backend.domain.agents.runtime import MAX_RUNTIME_CONFIG_BYTES
+
+    # A realistic pipeline knob still passes.
+    assert normalize_runtime_config(
+        PIPELINE_RUNTIME_TYPE, {"some_future_knob": "value"}
+    ) == {"some_future_knob": "value"}
+
+    oversized = {"junk": "A" * (MAX_RUNTIME_CONFIG_BYTES + 1)}
+    with pytest.raises(ValueError, match="bytes of JSON"):
+        normalize_runtime_config(PIPELINE_RUNTIME_TYPE, oversized)
+
+
+def test_runtime_config_must_be_json_serializable():
+    with pytest.raises(ValueError, match="JSON-serializable"):
+        normalize_runtime_config(PIPELINE_RUNTIME_TYPE, {"bad": {1, 2, 3}})
+
+
+def test_no_order_reason_falls_back_to_unknown_instead_of_raising():
+    """An unlabelled audit trace must not be able to abort a whole backtest.
+
+    ``_no_order_reason`` hand-mirrors ``actions_to_executable``'s filters. The
+    day a filter is added there, raising here would discard the run over a
+    missing string.
+    """
+    context = AgentRuntimeContext(
+        timestamp=datetime(2026, 5, 4, 15, 0, tzinfo=timezone.utc),
+        backtest_start_date="2026-05-01",
+        symbols=["AAPL"],
+        cash=1_000_000.0,
+        total_equity=1_000_000.0,
+        positions={"AAPL": 100},
+        entry_prices={"AAPL": 10.0},
+        current_prices={"AAPL": 10.0},
+        latest_market_date_before_decision=date(2026, 5, 1),
+    )
+    # Every mirrored filter passes, so no known reason applies.
+    assert (
+        AiHedgeFundRuntime._no_order_reason(
+            action="buy",
+            quantity=1,
+            confidence=0.9,
+            context=context,
+            symbol="AAPL",
+        )
+        == "unknown"
+    )
+
+
+def test_failed_decision_consumes_its_trading_day():
+    """A failure must not be retried on every remaining hour of the same day.
+
+    Marking the day only on the success path meant one bad day cost
+    bars-per-day full timeouts and API spend for no new information.
+    """
+
+    class _AlwaysFails:
+        calls = 0
+
+        def run(self, payload, *, timeout_seconds):
+            _AlwaysFails.calls += 1
+            raise AiHedgeFundRuntimeError("upstream exploded")
+
+    runtime = AiHedgeFundRuntime(
+        {"analysts": ["technical_analyst"]},
+        runner=_AlwaysFails(),
+        environment={},
+    )
+    base = datetime(2026, 5, 4, 14, 30, tzinfo=timezone.utc)
+    contexts = [
+        AgentRuntimeContext(
+            timestamp=base.replace(hour=hour),
+            backtest_start_date="2026-05-01",
+            symbols=["AAPL"],
+            cash=10_000.0,
+            total_equity=10_000.0,
+            positions={},
+            entry_prices={},
+            current_prices={"AAPL": 10.0},
+            latest_market_date_before_decision=date(2026, 5, 1),
+        )
+        for hour in (14, 15, 16, 17)
+    ]
+
+    with pytest.raises(AiHedgeFundRuntimeError):
+        runtime.decide(contexts[0])
+    # Remaining bars of the same day hold without re-invoking upstream.
+    for context in contexts[1:]:
+        assert runtime.decide(context) == {"actions": []}
+    assert _AlwaysFails.calls == 1
+
+
+def test_missing_interpreter_is_a_configuration_error(tmp_path):
+    """Deployment-level failures are distinguishable from transient ones."""
+    from dashboard.backend.domain.agents.runtime import (
+        AgentRuntimeConfigurationError,
+    )
+    from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+        AiHedgeFundConfigurationError,
+        runtime_unavailable_reason,
+    )
+
+    environment = {"AI_HEDGE_FUND_PYTHON": str(tmp_path / "nope" / "python")}
+    runner = AiHedgeFundSubprocessRunner(environment)
+    with pytest.raises(AiHedgeFundConfigurationError):
+        runner._python_executable()
+    # The engine catches the runtime-agnostic base, so the hierarchy matters.
+    assert issubclass(AiHedgeFundConfigurationError, AgentRuntimeConfigurationError)
+
+    reason = runtime_unavailable_reason(environment)
+    assert reason and "AI_HEDGE_FUND_PYTHON" in reason
+
+
+def test_step_timeout_is_read_once_and_shared():
+    """One reading of the env var, shared by the parent and the child.
+
+    Two independent readings is how the outer backtest timeout ends up smaller
+    than the inner per-step budget and kills the run mid-flight.
+    """
+    from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+        AiHedgeFundConfigurationError,
+        DEFAULT_TIMEOUT_SECONDS,
+        MAX_TIMEOUT_SECONDS,
+        resolve_step_timeout_seconds,
+    )
+
+    assert resolve_step_timeout_seconds({}) == DEFAULT_TIMEOUT_SECONDS
+    assert resolve_step_timeout_seconds({"AI_HEDGE_FUND_TIMEOUT_SECONDS": "45"}) == 45
+
+    runtime = AiHedgeFundRuntime(
+        {"analysts": ["technical_analyst"]},
+        runner=object(),
+        environment={"AI_HEDGE_FUND_TIMEOUT_SECONDS": "45"},
+    )
+    assert runtime.timeout_seconds == 45
+
+    for bad in ("abc", "0", str(MAX_TIMEOUT_SECONDS + 1)):
+        with pytest.raises(AiHedgeFundConfigurationError):
+            resolve_step_timeout_seconds({"AI_HEDGE_FUND_TIMEOUT_SECONDS": bad})

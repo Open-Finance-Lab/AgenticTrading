@@ -72,6 +72,11 @@ from dashboard.backend.domain.agents.runtime import (
     normalize_runtime_config,
     normalize_runtime_type,
 )
+from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+    AiHedgeFundConfigurationError,
+    resolve_step_timeout_seconds,
+    runtime_unavailable_reason,
+)
 from dashboard.backend.domain.backtesting.constants import (
     MAX_BACKTEST_INITIAL_CAPITAL,
     resolve_initial_capital,
@@ -463,13 +468,18 @@ def run_backtest_background(
             print(f"   Assets: {', '.join(assets)}", flush=True)
 
         print(f"📋 Running: {' '.join(cmd)}", flush=True)
-        
+
+        subprocess_timeout = _backtest_subprocess_timeout(
+            runtime_type, start_date, end_date
+        )
+        print(f"⏱️  Subprocess timeout: {subprocess_timeout}s", flush=True)
+
         result = subprocess.run(
             cmd,
             cwd=str(DASHBOARD_DIR),
             capture_output=True,
             text=True,
-            timeout=1800,  # 30 minutes for LLM backtest (longer than rule-based)
+            timeout=subprocess_timeout,
             env=env
         )
         
@@ -543,6 +553,68 @@ def run_backtest_background(
             except OSError:
                 pass
         print("✋ Backtest background thread finished", flush=True)
+
+
+# The backtest subprocess budget. 30 minutes is right for a pipeline run, whose
+# per-step LLM call is seconds long. A hosted run instead spends one *upstream
+# subprocess* per trading day, each allowed AI_HEDGE_FUND_TIMEOUT_SECONDS -- so
+# a fixed parent cap silently becomes the binding constraint (1800s over ~21
+# decision days is ~85s per step, not the 300s configured) and kills the child
+# mid-run with no partial results. Size the parent from the same per-step number
+# the runtime reads, so the inner timeout is what fires.
+PIPELINE_SUBPROCESS_TIMEOUT_SECONDS = 1800
+# Data load, baseline generation and persistence sit outside the decision loop.
+SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS = 600
+# Ceiling, so a long date range cannot pin a worker thread indefinitely.
+MAX_SUBPROCESS_TIMEOUT_SECONDS = 14400
+
+
+def _estimated_decision_days(start_date: str, end_date: str) -> int:
+    """Upper-bound the trading days in an inclusive date range.
+
+    Weekday count, not a market calendar: holidays only make the real number
+    smaller, and over-provisioning the parent timeout is the safe direction.
+    """
+    try:
+        start = datetime.strptime(str(start_date)[:10], "%Y-%m-%d").date()
+        end = datetime.strptime(str(end_date)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return 0
+    if end < start:
+        return 0
+    total_days = (end - start).days + 1
+    whole_weeks, remainder = divmod(total_days, 7)
+    weekdays = whole_weeks * 5
+    start_weekday = start.weekday()
+    for offset in range(remainder):
+        if (start_weekday + offset) % 7 < 5:
+            weekdays += 1
+    return weekdays
+
+
+def _backtest_subprocess_timeout(
+    runtime_type: str, start_date: str, end_date: str
+) -> int:
+    """Return the parent subprocess timeout for this run's runtime."""
+    if runtime_type == PIPELINE_RUNTIME_TYPE:
+        return PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+    step_seconds = resolve_step_timeout_seconds()
+    required = (
+        step_seconds * _estimated_decision_days(start_date, end_date)
+        + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    )
+    budget = max(PIPELINE_SUBPROCESS_TIMEOUT_SECONDS, required)
+    if budget > MAX_SUBPROCESS_TIMEOUT_SECONDS:
+        # Say so rather than truncating quietly: past this point the parent is
+        # the binding constraint again, and the run can be killed mid-flight.
+        print(
+            f"⚠️  Hosted backtest needs ~{budget}s but is capped at "
+            f"{MAX_SUBPROCESS_TIMEOUT_SECONDS}s; shorten the date range or "
+            f"lower AI_HEDGE_FUND_TIMEOUT_SECONDS (currently {step_seconds}s)",
+            flush=True,
+        )
+        return MAX_SUBPROCESS_TIMEOUT_SECONDS
+    return budget
 
 
 def _redact_credentials(text: object, extra_secret: Optional[str] = None) -> str:
@@ -857,6 +929,20 @@ def _resolve_ai_hedge_fund_credential(request: Request, agent_id: Optional[str])
             status_code=503,
             detail="AI Hedge Fund's platform-managed OpenRouter provider is not configured",
         )
+    # The isolated venv is created by the deploy build, and render.yaml is
+    # documentation rather than the deploy mechanism for this service -- so a
+    # deployment without it is a live possibility. Reject the run here instead
+    # of accepting it and failing inside a background subprocess minutes later.
+    try:
+        unavailable = runtime_unavailable_reason()
+    except AiHedgeFundConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if unavailable:
+        raise HTTPException(status_code=503, detail=unavailable)
+    try:
+        resolve_step_timeout_seconds()
+    except AiHedgeFundConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     try:
         credential = agent_credential_store.get_secret(
             agent_id, FINANCIAL_DATASETS_CREDENTIAL

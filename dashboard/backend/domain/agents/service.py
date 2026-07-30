@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.domain.agents.repository import agent_store, _UNSET
 from dashboard.backend.domain.agents import auth_cache
+from dashboard.backend.domain.agents.credential_store import agent_credential_store
 from dashboard.backend.domain.agents.defaults import default_starter_pipeline
 from dashboard.backend.domain.agents.runtime import (
     DEFAULT_RUNTIME_TYPE,
@@ -286,6 +287,7 @@ class AgentService:
             )
         else:
             resolved_runtime_config = _UNSET
+        previous_runtime_type = current.get("runtime_type") or DEFAULT_RUNTIME_TYPE
         agent = self.agents.update_agent(
             agent_id,
             name=name,
@@ -302,6 +304,13 @@ class AgentService:
         )
         if not agent:
             raise AgentNotFoundError()
+        if resolved_runtime_type != previous_runtime_type:
+            # Runtime-owned credentials follow runtime_config: a switch retires
+            # them rather than leaving them addressed to a runtime this agent no
+            # longer has. Skipping this is how a key becomes unreachable -- the
+            # credential routes gate on the *current* runtime, so the value
+            # would survive with no way for its owner to see or remove it.
+            agent_credential_store.delete_all(agent_id)
         return self.attach_equity_sparklines([self.agent_with_stats(agent)])[0]
 
     def create_agent(

@@ -15,6 +15,7 @@ from dashboard.backend.domain.agents.credential_store import AgentCredentialStor
 def client(tmp_path, monkeypatch):
     import dashboard.backend.domain.agents.repository as agent_store_module
     import dashboard.backend.api.routers.agents as agents_api
+    import dashboard.backend.domain.agents.service as agent_service_module
     import dashboard.backend.database as db_module
     import dashboard.backend.domain.brokers.repository as broker_repository
 
@@ -30,7 +31,13 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(agents_api.agent_service, "agents", test_agents)
     monkeypatch.setattr(agents_api.agent_service, "db", test_db)
     monkeypatch.setattr(agents_api, "agent_credential_store", test_credentials)
+    # The service retires runtime-owned credentials on a runtime switch, so it
+    # needs the same store the router writes through.
+    monkeypatch.setattr(
+        agent_service_module, "agent_credential_store", test_credentials
+    )
     monkeypatch.setattr(db_module, "db", test_db)
+    agents_api._credential_rate_limiter.reset()
     return TestClient(app)
 
 
@@ -711,6 +718,157 @@ def test_financial_datasets_credential_is_encrypted_and_never_returned(client):
 
     denied = client.get(endpoint, headers={"X-Session-Id": str(uuid.uuid4())})
     assert denied.status_code == 403
+
+
+def test_rejected_credential_is_never_echoed_back(client):
+    """A 422 must not carry the submitted key.
+
+    ``SecretStr`` masks reprs but does not reach Pydantic's error envelope, and
+    FastAPI serializes ``input`` into every validation error body — so a
+    model-level validator rejecting a key returns that key in plaintext.
+    """
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    endpoint = (
+        f"/api/v1/agents/{agent['agent_id']}/credentials/financial-datasets"
+    )
+
+    too_long = "SECRET-CANARY-" + ("x" * 5000)
+    rejected = client.put(endpoint, json={"api_key": too_long}, headers=headers)
+    assert rejected.status_code == 422
+    assert "SECRET-CANARY" not in rejected.text
+    assert too_long not in rejected.text
+
+    blank = client.put(endpoint, json={"api_key": "   "}, headers=headers)
+    assert blank.status_code == 422
+    assert "must not be blank" in blank.text
+
+
+def test_credential_survives_no_runtime_switch_and_stays_removable(client):
+    """Switching runtime must never strand a key its owner cannot reach.
+
+    The credential routes gate on the *current* runtime_type, so a key stored
+    while the agent was hosted became invisible, unreplaceable and undeletable
+    the moment the agent moved to ``pipeline``.
+    """
+    import dashboard.backend.api.routers.agents as agents_api
+
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    agent_id = agent["agent_id"]
+    endpoint = f"/api/v1/agents/{agent_id}/credentials/financial-datasets"
+
+    plaintext = "fd-orphan-canary"
+    assert client.put(
+        endpoint, json={"api_key": plaintext}, headers=headers
+    ).status_code == 200
+
+    switched = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"runtime_type": "pipeline"},
+        headers=headers,
+    )
+    assert switched.status_code == 200
+    assert switched.json()["agent"]["runtime_type"] == "pipeline"
+
+    # The switch itself retires the runtime-owned credential.
+    assert (
+        agents_api.agent_credential_store.get_secret(
+            agent_id, "financial_datasets_api_key"
+        )
+        is None
+    )
+    # ...and the owner can still *see* the status rather than being 422'd out
+    # of their own credential.
+    status = client.get(endpoint, headers=headers)
+    assert status.status_code == 200
+    assert status.json()["configured"] is False
+
+
+def test_deleting_agent_removes_credentials_for_any_runtime(client):
+    """Cleanup must not be gated on the runtime the agent happens to hold now.
+
+    Gated, a key stored while hosted outlived the agent itself: decryptable,
+    ownerless, and with no API path left to remove it.
+    """
+    import dashboard.backend.api.routers.agents as agents_api
+
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    agent_id = agent["agent_id"]
+    endpoint = f"/api/v1/agents/{agent_id}/credentials/financial-datasets"
+    client.put(endpoint, json={"api_key": "fd-delete-canary"}, headers=headers)
+
+    # Write the row back directly to model the pre-existing stranded state: an
+    # agent already switched to pipeline while still holding a credential.
+    agents_api.agent_credential_store.upsert(
+        agent_id, "financial_datasets_api_key", "fd-delete-canary"
+    )
+    client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"runtime_type": "pipeline"},
+        headers=headers,
+    )
+    agents_api.agent_credential_store.upsert(
+        agent_id, "financial_datasets_api_key", "fd-delete-canary"
+    )
+
+    # An explicit DELETE reaches it regardless of runtime...
+    removed = client.delete(endpoint, headers=headers)
+    assert removed.status_code == 200
+    assert removed.json()["deleted"] is True
+
+    # ...and so does deleting the agent.
+    agents_api.agent_credential_store.upsert(
+        agent_id, "financial_datasets_api_key", "fd-delete-canary"
+    )
+    assert client.delete(
+        f"/api/v1/agents/{agent_id}", headers=headers
+    ).status_code == 200
+    assert (
+        agents_api.agent_credential_store.get_secret(
+            agent_id, "financial_datasets_api_key"
+        )
+        is None
+    )
+
+
+def test_credential_writes_are_rate_limited(client, monkeypatch):
+    import dashboard.backend.api.routers.agents as agents_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    monkeypatch.setattr(
+        agents_api,
+        "_credential_rate_limiter",
+        FixedWindowRateLimiter(max_events=1, window_seconds=3600),
+    )
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    endpoint = (
+        f"/api/v1/agents/{agent['agent_id']}/credentials/financial-datasets"
+    )
+
+    assert client.put(
+        endpoint, json={"api_key": "first"}, headers=headers
+    ).status_code == 200
+    throttled = client.put(endpoint, json={"api_key": "second"}, headers=headers)
+    assert throttled.status_code == 429
 
 
 def test_marketplace_clone_unknown_template(client):

@@ -186,6 +186,32 @@
           : 'Credential not configured — required before Run Backtest.'
       );
     }
+    // Without this the DELETE route has no UI path at all: a user could store a
+    // third-party key and never remove it.
+    const removeBtn = document.getElementById('agentEditorFinancialDatasetsRemove');
+    if (removeBtn) removeBtn.hidden = !financialDatasetsConfigured;
+  }
+
+  async function removeFinancialDatasetsCredential() {
+    const agent = currentAgent;
+    if (!agent || !financialDatasetsConfigured) return;
+    const removeBtn = document.getElementById('agentEditorFinancialDatasetsRemove');
+    if (removeBtn) removeBtn.disabled = true;
+    try {
+      await credentialRequest(agent, 'DELETE');
+      if (currentAgent?.agent_id !== agent.agent_id) return;
+      const keyInput = document.getElementById('agentEditorFinancialDatasetsKey');
+      if (keyInput) keyInput.value = '';
+      setFinancialDatasetsStatus(false, 'Stored key removed.');
+    } catch (error) {
+      if (currentAgent?.agent_id !== agent.agent_id) return;
+      setFinancialDatasetsStatus(
+        financialDatasetsConfigured,
+        `Could not remove the stored key: ${error.message}`,
+      );
+    } finally {
+      if (removeBtn) removeBtn.disabled = false;
+    }
   }
 
   async function credentialRequest(agent, method, body) {
@@ -1123,6 +1149,7 @@
     document.getElementById('agentEditorSaveBtn')?.addEventListener('click', () => save());
     document.getElementById('agentEditorConnectRobinhoodBtn')?.addEventListener('click', connectRobinhood);
     document.getElementById('agentEditorDisconnectRobinhoodBtn')?.addEventListener('click', disconnectRobinhood);
+    document.getElementById('agentEditorFinancialDatasetsRemove')?.addEventListener('click', removeFinancialDatasetsCredential);
     document.getElementById('agentEditorRunLiveBtn')?.addEventListener('click', runLive);
     document.getElementById('agentEditorRunBacktestBtn')?.addEventListener('click', () => {
       if (!currentAgent) return;

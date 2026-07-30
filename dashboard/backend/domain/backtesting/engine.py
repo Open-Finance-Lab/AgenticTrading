@@ -38,7 +38,9 @@ from dashboard.backend.domain.agents.runtime import (
     AI_HEDGE_FUND_RUNTIME_TYPE,
     DEFAULT_RUNTIME_TYPE,
     PIPELINE_RUNTIME_TYPE,
+    AgentRuntimeConfigurationError,
     AgentRuntimeContext,
+    AgentRuntimeError,
     RuntimeDispatcher,
     normalize_runtime_config,
     normalize_runtime_type,
@@ -74,6 +76,14 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
     split_pipeline,
     trading_day_key,
 )
+
+# Hosted-runtime failure tolerance. A hosted decision crosses a subprocess
+# boundary and a third-party API, so one timeout must not discard a run's worth
+# of completed steps -- but a run where most steps failed is not the run the
+# agent describes, and persisting it as one is the "fail-closed is not
+# fail-visible" trap. Absorb a minority as holds, abort past that.
+HOSTED_RUNTIME_MAX_FAILURE_RATIO = 0.2
+HOSTED_RUNTIME_MIN_FAILURE_BUDGET = 2
 
 
 def _prior_market_date_by_decision_date(
@@ -149,6 +159,9 @@ class HourlyBacktester:
             if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
             else None
         )
+        # Transient hosted-runtime failures absorbed by this run, kept for the
+        # run metadata so a partially-degraded run is legible after the fact.
+        self.runtime_step_failures: List[str] = []
         self.profile = get_market_profile(data_source, universe)
         self.currency_context: CurrencyContext | None = None
         self.native_initial_capital = self.initial_capital
@@ -510,6 +523,14 @@ class HourlyBacktester:
             meta["runtime_type"] = runtime_type
             meta["runtime_config"] = dict(getattr(self, "runtime_config", {}) or {})
             meta["runtime_calls"] = self.runtime_dispatcher.calls
+            # Absorbing failures as holds keeps a run alive, but a run that
+            # held its way through half the period must not read as a clean
+            # one. Record the count (and a bounded sample) on the run itself.
+            if self.runtime_step_failures:
+                meta["runtime_step_failures"] = len(self.runtime_step_failures)
+                meta["runtime_step_failure_samples"] = [
+                    text[:300] for text in self.runtime_step_failures[:5]
+                ]
         return meta
 
     def _llm_market_context(self) -> Dict:
@@ -613,10 +634,9 @@ class HourlyBacktester:
         
         # Track LLM usage for results metadata
         llm_calls_count = 0
-        llm_model = "rule-based"  # Default
-        if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
-            llm_model = str(self.runtime_dispatcher.model_name or "gpt-4.1")
-        
+        llm_model = "rule-based"  # Default; hosted runs are attributed below,
+        # after the loop, from the calls that actually succeeded.
+
         manager = PortfolioManager(
             initial_capital=self.native_initial_capital,
             allowed_symbols=self.symbols,
@@ -650,6 +670,17 @@ class HourlyBacktester:
             if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
             else {}
         )
+        # Hosted runtimes decide once per trading day, so the budget is a share
+        # of decision days rather than of hourly bars.
+        runtime_failure_budget = max(
+            HOSTED_RUNTIME_MIN_FAILURE_BUDGET,
+            int(len(prior_market_dates) * HOSTED_RUNTIME_MAX_FAILURE_RATIO),
+        )
+        if self.runtime_type != PIPELINE_RUNTIME_TYPE:
+            print(
+                f"   Hosted runtime: holding on up to {runtime_failure_budget} "
+                f"failed step(s) before aborting\n"
+            )
 
         print(
             f"   Trading {len(all_timestamps)} bars during "
@@ -758,10 +789,34 @@ class HourlyBacktester:
                     ),
                     market=self._llm_market_context(),
                 )
-                decision = self.runtime_dispatcher.dispatch(
-                    runtime_context,
-                    pipeline_handler=lambda: manager.make_trading_decision(state),
-                )
+                try:
+                    decision = self.runtime_dispatcher.dispatch(
+                        runtime_context,
+                        pipeline_handler=lambda: manager.make_trading_decision(state),
+                    )
+                except AgentRuntimeConfigurationError:
+                    # Deployment-level and identical on every step. Surface it
+                    # on the first one instead of holding through the run.
+                    raise
+                except AgentRuntimeError as exc:
+                    self.runtime_step_failures.append(
+                        f"{timestamp.isoformat()}: {exc}"
+                    )
+                    failures = len(self.runtime_step_failures)
+                    print(
+                        f"   ⚠️  Runtime step failed ({failures}/"
+                        f"{runtime_failure_budget} tolerated): {exc}",
+                        flush=True,
+                    )
+                    if failures > runtime_failure_budget:
+                        raise AgentRuntimeError(
+                            f"{self.runtime_type} runtime failed {failures} step(s), "
+                            f"over the {runtime_failure_budget} tolerated for this "
+                            f"run; last error: {exc}"
+                        ) from exc
+                    # Hold this step. Trading on a stale view would be worse
+                    # than not trading, and the run keeps its completed steps.
+                    decision = {"actions": []}
                 runtime_invoked = self.runtime_dispatcher.calls > runtime_calls_before
             
             # Execute trades (only if real data available)
@@ -807,6 +862,26 @@ class HourlyBacktester:
         final_eq = equity_curve[-1]["equity"] if equity_curve else self.initial_capital
         total_return = (final_eq - self.initial_capital) / self.initial_capital
 
+        # Attribute a hosted run to its model only if the model actually drove
+        # steps. A row naming a model beside ``llm_calls=0`` is precisely the
+        # shape the H6 integrity guard reads as a rule-based curve wearing an
+        # LLM's name, so persist the honest label when every step held.
+        runtime_calls = (
+            self.runtime_dispatcher.calls
+            if self.runtime_type != PIPELINE_RUNTIME_TYPE
+            else 0
+        )
+        if self.runtime_type != PIPELINE_RUNTIME_TYPE:
+            llm_model = (
+                str(self.runtime_dispatcher.model_name or "unknown")
+                if runtime_calls
+                else "rule-based"
+            )
+        # Upstream does not report token usage back across the bridge, so a
+        # hosted run's tokens and cost stay 0. The call count is what makes the
+        # row self-consistent rather than silently understating the run.
+        llm_calls_total = manager.llm_calls + runtime_calls
+
         est_cost = token_cost.estimate_cost_usd(
             llm_model, manager.input_tokens, manager.output_tokens
         )
@@ -825,7 +900,7 @@ class HourlyBacktester:
             max_drawdown=self._calc_max_dd(equity_curve),
             num_trades=len(manager.trades),
             llm_model=llm_model,  # Track which model was used
-            llm_calls=manager.llm_calls,
+            llm_calls=llm_calls_total,
             input_tokens=manager.input_tokens,
             output_tokens=manager.output_tokens,
             est_cost_usd=est_cost,
@@ -844,10 +919,13 @@ class HourlyBacktester:
             print(f"     • Model: {model_display} (✅ LLM enabled)" if llm_calls_count > 0 else f"     • Model: {model_display} (❌ fallback)")
             print(f"     • LLM Calls: {llm_calls_count}")
         else:
-            runtime_calls = self.runtime_dispatcher.calls
-            model_display = llm_model if runtime_calls else "rule-based"
-            print(f"     • Model: {model_display} (✅ agent runtime)" if runtime_calls else f"     • Model: {model_display} (❌ fallback)")
+            print(f"     • Model: {llm_model} (✅ agent runtime)" if runtime_calls else f"     • Model: {llm_model} (❌ fallback)")
             print(f"     • Runtime calls: {runtime_calls}")
+            if self.runtime_step_failures:
+                print(
+                    f"     • Runtime steps held after failure: "
+                    f"{len(self.runtime_step_failures)}"
+                )
         print(f"     • Tokens: {manager.input_tokens:,} in / {manager.output_tokens:,} out (est. cost ${est_cost:.4f})")
         print(f"     • Trades: {len(manager.trades)}")
         if self.prompt_adaptations:

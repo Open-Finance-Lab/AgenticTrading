@@ -8,6 +8,7 @@ still hand their actions to ATL's portfolio manager for execution.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Any, Callable, Dict, List, Mapping, Optional, Protocol
@@ -45,9 +46,35 @@ AI_HEDGE_FUND_ANALYSTS = (
 )
 _AI_HEDGE_FUND_ANALYST_SET = frozenset(AI_HEDGE_FUND_ANALYSTS)
 
+# ``pipeline`` has no defined knobs yet, so its config stays permissive about
+# *which* keys appear -- but permissive must not mean unbounded. Without a size
+# ceiling any authenticated caller can PATCH megabytes of arbitrary JSON onto
+# every agent they own, since the column is plain TEXT. The sibling ``pipeline``
+# field is capped at 50 steps for the same reason; this is that cap's analogue.
+# Generous next to real payloads: all 19 analysts serialize to ~400 bytes.
+MAX_RUNTIME_CONFIG_BYTES = 8192
+
 
 class UnsupportedAgentRuntime(ValueError):
     """Raised when an agent names a runtime ATL does not host."""
+
+
+class AgentRuntimeError(RuntimeError):
+    """A hosted runtime failed to produce a decision for one step.
+
+    Runtime-agnostic on purpose: the dispatcher is the boundary the backtest
+    engine handles failures at, so the engine never has to import (or know
+    about) any particular runtime's adapter to keep a run alive.
+    """
+
+
+class AgentRuntimeConfigurationError(AgentRuntimeError):
+    """The deployment cannot host this runtime at all.
+
+    Separated from the transient base because it fails identically on every
+    step. Callers should abort rather than spend the run's failure budget
+    rediscovering the same missing interpreter once per trading day.
+    """
 
 
 def normalize_runtime_type(value: Any) -> str:
@@ -55,6 +82,19 @@ def normalize_runtime_type(value: Any) -> str:
     if runtime_type not in SUPPORTED_RUNTIME_TYPES:
         raise UnsupportedAgentRuntime(f"Unsupported agent runtime: {runtime_type}")
     return runtime_type
+
+
+def _bounded_runtime_config(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Reject configs that cannot be persisted safely as JSON text."""
+    try:
+        encoded = json.dumps(config, separators=(",", ":"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("runtime_config must be JSON-serializable") from exc
+    if len(encoded.encode("utf-8")) > MAX_RUNTIME_CONFIG_BYTES:
+        raise ValueError(
+            f"runtime_config must be at most {MAX_RUNTIME_CONFIG_BYTES} bytes of JSON"
+        )
+    return config
 
 
 def normalize_runtime_config(runtime_type: str, config: Any) -> Dict[str, Any]:
@@ -70,7 +110,7 @@ def normalize_runtime_config(runtime_type: str, config: Any) -> Dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("runtime_config must be a JSON object")
     if runtime_type == PIPELINE_RUNTIME_TYPE:
-        return dict(config)
+        return _bounded_runtime_config(dict(config))
 
     allowed = {"analysts"}
     unknown = sorted(set(config) - allowed)
@@ -95,7 +135,7 @@ def normalize_runtime_config(runtime_type: str, config: Any) -> Dict[str, Any]:
                 f"runtime_config.analysts contains unsupported analysts: {unsupported}"
             )
         normalized["analysts"] = names
-    return normalized
+    return _bounded_runtime_config(normalized)
 
 
 @dataclass(frozen=True)
