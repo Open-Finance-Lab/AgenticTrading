@@ -309,14 +309,17 @@ class _FakeConnection:
         demonstrate. What it *can* pin is that the script opens one per run
         rather than one for the whole loop -- the actual shape of the fix.
         """
+        # Bound before the class so its methods can keep the conventional
+        # ``self`` name (CodeQL py/not-named-self) without shadowing the
+        # connection's own ``self``.
         target = self._target
 
         class _Txn:
-            def __enter__(self_inner):
+            def __enter__(self):
                 target.transaction_entries += 1
-                return self_inner
+                return self
 
-            def __exit__(self_inner, *exc_info):
+            def __exit__(self, *exc_info):
                 return False
 
         return _Txn()
@@ -569,9 +572,12 @@ def test_clean_run_reports_success_and_balances_the_accounting(
 @pytest.fixture
 def pg_backtest_db():
     require_local_postgres_url(TEST_POSTGRES_URL)
-    from dashboard.backend.database_postgres import PostgresBacktestDatabase
+    # ``import ... as`` + attribute access, not ``from ... import``: the
+    # monkeypatch seam in _run_main_against needs the module object, and mixing
+    # both forms for one module trips CodeQL py/import-and-import-from.
+    import dashboard.backend.database_postgres as database_pg_module
 
-    store = PostgresBacktestDatabase(TEST_POSTGRES_URL)
+    store = database_pg_module.PostgresBacktestDatabase(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
             # children first, then parents -- the FKs are enforced here
