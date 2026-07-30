@@ -25,8 +25,16 @@ from dashboard.backend.tests.test_users_postgres import (  # noqa: F401
 )
 
 
+# Sample hosts here are placeholders, never a real endpoint id. The guard only
+# asks "is this host local?", so `ep-x` satisfies every case a real one would --
+# and the rest of the suite already standardises on it (test_db_url.py,
+# test_agent_store_postgres.py, ...). This repo is public: naming a live Neon
+# endpoint in a fixture publishes the exact database an attacker would target,
+# and unlike a password it cannot be rotated away afterwards.
+
+
 def test_rejects_remote_neon_host():
-    remote = "postgresql://user:pw@ep-cool-wave-ai917qe3-pooler.neon.tech/neondb"
+    remote = "postgresql://user:pw@ep-x-pooler.neon.tech/neondb"
     with pytest.raises(RuntimeError, match="non-local"):
         require_local_postgres_url(remote)
 
@@ -34,7 +42,7 @@ def test_rejects_remote_neon_host():
 def test_rejects_remote_host_even_with_localhost_in_credentials():
     # Naive substring matching on "localhost" would wrongly allow this; the
     # real host is neon.tech. urlsplit() extracts the host, ignoring userinfo.
-    sneaky = "postgresql://localhost:localhost@ep-cool.neon.tech/db"
+    sneaky = "postgresql://localhost:localhost@ep-x.neon.tech/db"
     with pytest.raises(RuntimeError):
         require_local_postgres_url(sneaky)
 
