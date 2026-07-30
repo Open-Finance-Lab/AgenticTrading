@@ -45,6 +45,7 @@ from dashboard.backend.domain.agents.runtime import (
     normalize_runtime_config,
     normalize_runtime_type,
 )
+from dashboard.backend.infrastructure.ai_hedge_fund.adapter import AiHedgeFundRuntime
 from dashboard.backend.infrastructure.market_data.alpaca_bars import MarketDataUnavailableError
 from dashboard.backend.infrastructure.market_data.ifind_client import IFindClientError
 from dashboard.backend.infrastructure.market_data.ifind_fx import (
@@ -154,8 +155,16 @@ class HourlyBacktester:
         self.runtime_config = normalize_runtime_config(
             self.runtime_type, runtime_config or {}
         )
+        # The concrete runtime is constructed here, the single production caller,
+        # rather than inside RuntimeDispatcher: domain/agents/runtime.py must not
+        # import an infrastructure adapter, and this file already depends on
+        # infrastructure for market data and LLM access.
         self.runtime_dispatcher = (
-            RuntimeDispatcher(self.runtime_type, self.runtime_config)
+            RuntimeDispatcher(
+                self.runtime_type,
+                self.runtime_config,
+                runtime=AiHedgeFundRuntime(self.runtime_config),
+            )
             if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
             else None
         )

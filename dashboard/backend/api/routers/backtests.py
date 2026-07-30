@@ -551,6 +551,9 @@ def run_backtest_background(
             try:
                 os.remove(runtime_config_path)
             except OSError:
+                # Best-effort cleanup of a temp file the run no longer needs;
+                # the OS reclaims it regardless, and failing here would mask
+                # the backtest's own outcome.
                 pass
         print("✋ Backtest background thread finished", flush=True)
 

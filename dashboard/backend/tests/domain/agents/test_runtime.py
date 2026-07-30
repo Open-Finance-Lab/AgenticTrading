@@ -921,3 +921,31 @@ def test_upstream_error_text_cannot_forge_log_lines():
     )
     assert "sk-secret-value" not in redacted
     assert "[REDACTED]" in redacted
+
+
+def test_domain_runtime_module_does_not_import_any_adapter():
+    """Keep the domain -> infrastructure arrow one-way.
+
+    A lazy import inside __init__ defers an import cycle rather than removing
+    it. Callers supply the concrete runtime instead.
+    """
+    import ast
+    import pathlib
+
+    import dashboard.backend.domain.agents.runtime as runtime_module
+
+    source = pathlib.Path(runtime_module.__file__)
+    tree = ast.parse(source.read_text(encoding="utf-8"))
+    # Check import *statements*, not the word: the explanatory comments in that
+    # module legitimately mention infrastructure.
+    targets = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            targets.append(node.module)
+        elif isinstance(node, ast.Import):
+            targets.extend(alias.name for alias in node.names)
+    assert not [t for t in targets if "infrastructure" in t], targets
+
+    with pytest.raises(Exception) as excinfo:
+        RuntimeDispatcher(AI_HEDGE_FUND_RUNTIME_TYPE, {"analysts": ["ben_graham"]})
+    assert "requires its runtime instance" in str(excinfo.value)

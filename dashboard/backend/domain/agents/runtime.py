@@ -176,12 +176,15 @@ class RuntimeDispatcher:
             self.runtime_type, runtime_config or {}
         )
         self._runtime = runtime
-        if self.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE and self._runtime is None:
-            from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
-                AiHedgeFundRuntime,
+        if self.runtime_type != PIPELINE_RUNTIME_TYPE and self._runtime is None:
+            # Hosted runtimes are supplied by the caller rather than imported
+            # here. This module is domain code; importing a concrete adapter to
+            # self-construct made domain and infrastructure import each other,
+            # and doing it lazily inside __init__ only deferred that cycle
+            # instead of removing it.
+            raise UnsupportedAgentRuntime(
+                f"A {self.runtime_type} dispatcher requires its runtime instance"
             )
-
-            self._runtime = AiHedgeFundRuntime(self.runtime_config)
 
     @property
     def calls(self) -> int:
