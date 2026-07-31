@@ -131,9 +131,8 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
     """The engine's agent run records the EFFECTIVE cap (whatever the env
     parse produced), while every run records data provenance."""
     import dashboard.backend.domain.backtesting.engine as engine_mod
-    from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 
-    backtester = HourlyBacktester.__new__(HourlyBacktester)  # skip creds init
+    backtester = engine_mod.HourlyBacktester.__new__(engine_mod.HourlyBacktester)  # skip creds init
     # _agent_run_metadata() also reads the post-trade/pipeline attrs (added in the
     # post-trade-analysis work); __init__ sets them, but __new__ skips it, so set
     # the no-pipeline defaults here to keep this a pure llm_max_output_tokens test.
@@ -170,9 +169,8 @@ def test_baseline_metadata_is_provenance_only(monkeypatch):
     a shared metadata builder silently stamps the agent's LLM config and a copy
     of its pipeline onto Buy & Hold and DJIA rows."""
     import dashboard.backend.domain.backtesting.engine as engine_mod
-    from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 
-    backtester = HourlyBacktester.__new__(HourlyBacktester)  # skip creds init
+    backtester = engine_mod.HourlyBacktester.__new__(engine_mod.HourlyBacktester)  # skip creds init
     backtester.data_source = "vnpy_simulation"
     backtester.symbols = ["AAPL"]
     monkeypatch.setattr(engine_mod.llm_harness, "DEFAULT_MAX_OUTPUT_TOKENS", 777)
