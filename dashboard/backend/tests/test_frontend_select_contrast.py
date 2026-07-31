@@ -39,16 +39,21 @@ _SELECT_SELECTORS = (
 # them. `.auth-field select` is a descendant rule and so has no class of its own.
 _COVERED_CLASSES = {"control-select", "filter-select", "agent-editor-model-select"}
 
-# Visible <select>s covered by a descendant rule rather than their own class.
+# <select>s covered by a descendant rule rather than their own class.
 _DESCENDANT_COVERED_IDS = {
     "builtinAgentModel",  # inside <label class="auth-field"> -> `.auth-field select`
 }
 
+# The only <select> that is never rendered: no code path clears its `hidden`
+# attribute, so it is pure JS-side state. Do NOT extend this set just because an
+# element ships `hidden` in the markup -- `#modelSelect` (app.js: `modelSelect
+# .hidden = !isIFind`) and `#backtestRunSelect` both start hidden and are later
+# revealed, which is precisely the case this guard has to keep covering.
+_NEVER_RENDERED_IDS = {"backtestAgentSelect"}
+
 _RULE_RE = re.compile(r"(?P<sel>[^{}]+)\{(?P<body>[^{}]*)\}", re.S)
 _COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
 _SELECT_TAG_RE = re.compile(r"<select\b[^>]*>", re.S)
-# `hidden` as a standalone attribute -- the lookbehind keeps aria-hidden out.
-_HIDDEN_ATTR_RE = re.compile(r"(?<![-\w])hidden(?=[\s>=])")
 
 
 def _rule_bodies(selector: str) -> list[str]:
@@ -106,26 +111,27 @@ def test_calendar_picker_indicator_is_not_inverted():
         )
 
 
-def test_no_visible_select_ships_without_dark_coverage():
+def test_no_select_ships_without_dark_coverage():
     """A new <select> that nobody styled is exactly how #265's bug got in.
 
-    Hidden ones are exempt: `#modelSelect` and `#backtestAgentSelect` are
-    JS-side state holders that are never painted.
+    Every <select> is checked, including the ones that ship `hidden`. Exempting
+    those would be the tempting shortcut and it is wrong: `#modelSelect` and
+    `#backtestRunSelect` are both hidden in the markup and both revealed by
+    app.js later, so a hidden-skip would wave through the exact elements whose
+    popup a user does eventually open.
     """
     html = _APP_HTML.read_text(encoding="utf-8")
 
     uncovered = []
     for tag in _SELECT_TAG_RE.findall(html):
-        if _HIDDEN_ATTR_RE.search(tag):
-            continue
         element_id = (re.search(r'id="([^"]*)"', tag) or [None, ""])[1]
-        if element_id in _DESCENDANT_COVERED_IDS:
+        if element_id in _DESCENDANT_COVERED_IDS or element_id in _NEVER_RENDERED_IDS:
             continue
         classes = set((re.search(r'class="([^"]*)"', tag) or [None, ""])[1].split())
         if not classes & _COVERED_CLASSES:
             uncovered.append(element_id or tag)
 
     assert not uncovered, (
-        f"visible <select>s with no dark-scheme rule: {uncovered}. Give each a "
-        f"class from {sorted(_COVERED_CLASSES)}, or add a rule and list it here."
+        f"<select>s with no dark-scheme rule: {uncovered}. Give each a class "
+        f"from {sorted(_COVERED_CLASSES)}, or add a rule and list it here."
     )
