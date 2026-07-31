@@ -1067,7 +1067,7 @@ def test_repeat_poll_does_not_rewrite_step_row(client, monkeypatch):
     """steps/next is polled in a loop; re-awaiting an unchanged step must not
     pay a synchronous SQLite write per poll."""
     import dashboard.backend.domain.runs.service as run_service
-    from dashboard.backend.domain.runs.repository import run_store
+    import dashboard.backend.domain.runs.repository as run_store_module
 
     agent_id, key, _ = _new_agent(client)
     version_id = _new_version(client, agent_id, key)
@@ -1075,6 +1075,7 @@ def test_repeat_poll_does_not_rewrite_step_row(client, monkeypatch):
     _wait_for_step(client, run_id, key)
 
     calls = []
+    run_store = run_store_module.run_store
     real = run_store.save_step
     monkeypatch.setattr(
         run_store, "save_step",
