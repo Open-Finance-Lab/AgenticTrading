@@ -487,6 +487,16 @@ a.header-brand:hover .title-section h1 {
     border-radius: 4px;
     background: var(--bg-primary);
     color: var(--text-primary);
+    /* Native <select> menus are painted from the UA's color scheme, not ours;
+       without this the inherited light text lands on a light OS panel.
+       Intentionally on the shared rule: the text inputs want dark autofill,
+       spinners and scrollbars for the same reason. */
+    color-scheme: dark;
+}
+
+.auth-field select option {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
 }
 
 .auth-error {
@@ -931,6 +941,16 @@ a.header-brand:hover .title-section h1 {
     font-family: var(--font-mono);
     height: 24px;
     line-height: 1;
+    /* Native <select> menus and date pickers are painted from the UA's color
+       scheme, not ours; without this the inherited light text lands on a light
+       OS panel. Applies to .date-input too -- see the picker-indicator rule
+       below, which must not re-invert the now-light glyph. */
+    color-scheme: dark;
+}
+
+.control-select option {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
 }
 
 .date-input {
@@ -943,7 +963,10 @@ a.header-brand:hover .title-section h1 {
     width: 16px;
     height: 16px;
     margin-right: 5px;
-    filter: invert(0.8);
+    /* Deliberately no invert() filter. The UA draws this glyph from the
+       element's color-scheme, so under `color-scheme: dark` above it is
+       already light; inverting would turn it near-black on --bg-input and
+       make the picker button invisible. */
 }
 
 .date-input::-webkit-calendar-picker-indicator:hover {
@@ -1743,6 +1766,12 @@ a.header-brand:hover .title-section h1 {
     color: var(--text-primary);
     font-size: 12px;
     cursor: pointer;
+    color-scheme: dark;
+}
+
+.filter-select option {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
 }
 
 .filter-btn {
@@ -9244,12 +9273,19 @@ body.agent-editor-open {
     color: var(--text-secondary);
 }
 .agent-editor-model-select {
-    background: transparent;
+    background: var(--bg-input);
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
     font-size: 0.85rem;
     padding: 4px 8px;
+    /* Native <select> menus often paint a light OS panel; without this the
+       inherited light text becomes unreadable on white. */
+    color-scheme: dark;
+}
+.agent-editor-model-select option {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
 }
 .agent-editor-simple textarea {
     width: 100%;
