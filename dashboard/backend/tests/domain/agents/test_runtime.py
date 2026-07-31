@@ -932,9 +932,9 @@ def test_domain_runtime_module_does_not_import_any_adapter():
     import ast
     import pathlib
 
-    import dashboard.backend.domain.agents.runtime as runtime_module
-
-    source = pathlib.Path(runtime_module.__file__)
+    # Resolved through a name this module already imports, rather than
+    # importing the module a second time under another form.
+    source = pathlib.Path(sys.modules[RuntimeDispatcher.__module__].__file__)
     tree = ast.parse(source.read_text(encoding="utf-8"))
     # Check import *statements*, not the word: the explanatory comments in that
     # module legitimately mention infrastructure.
