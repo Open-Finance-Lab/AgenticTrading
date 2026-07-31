@@ -107,10 +107,10 @@ def test_unreachable_postgres_agent_store_raises_instead_of_falling_back():
     """
     import psycopg
 
-    from dashboard.backend.domain.agents.repository_postgres import PostgresAgentStore
+    import dashboard.backend.domain.agents.repository_postgres as repo_pg
 
     with pytest.raises(psycopg.OperationalError):
-        PostgresAgentStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
+        repo_pg.PostgresAgentStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
 
 
 def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
@@ -123,10 +123,10 @@ def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
     into __init__ -- testing the helper alone would not catch it being dropped
     from the constructor.
     """
-    from dashboard.backend.domain.agents.repository_postgres import PostgresAgentStore
+    import dashboard.backend.domain.agents.repository_postgres as repo_pg
 
     with pytest.raises(ValueError) as excinfo:
-        PostgresAgentStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
+        repo_pg.PostgresAgentStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
     assert "sup3r-s3cret" not in str(excinfo.value)
 
 
@@ -135,9 +135,9 @@ def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
 @pytest.fixture
 def pg_agent_store():
     require_local_postgres_url(TEST_POSTGRES_URL)
-    from dashboard.backend.domain.agents.repository_postgres import PostgresAgentStore
+    import dashboard.backend.domain.agents.repository_postgres as repo_pg
 
-    store = PostgresAgentStore(TEST_POSTGRES_URL)
+    store = repo_pg.PostgresAgentStore(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM external_agents")
@@ -393,8 +393,8 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
     written today; the ADDING A COLUMN LATER? comment in repository_postgres.py is
     what guards that, and it is the thing to keep alive.
     """
-    from dashboard.backend.domain.agents.repository import DEFAULT_SCOPES
-    from dashboard.backend.domain.agents.repository_postgres import PostgresAgentStore
+    import dashboard.backend.domain.agents.repository as repo_module
+    import dashboard.backend.domain.agents.repository_postgres as repo_pg
 
     with pg_agent_store._get_connection() as conn:
         with conn.cursor() as cur:
@@ -426,7 +426,7 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
             )
 
     # A redeploy re-runs _init_schema() against the existing "old" table.
-    PostgresAgentStore(TEST_POSTGRES_URL)
+    repo_pg.PostgresAgentStore(TEST_POSTGRES_URL)
 
     with pg_agent_store._get_connection() as conn:
         with conn.cursor() as cur:
@@ -457,7 +457,7 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
     } <= columns
     # The pre-existing row was backfilled with the column defaults, not NULL.
     assert legacy["agent_type"] == "external"
-    assert legacy["scopes"] == DEFAULT_SCOPES
+    assert legacy["scopes"] == repo_module.DEFAULT_SCOPES
 
     migrated = pg_agent_store.get_agent("agent_legacy")
     assert migrated["runtime_type"] == "pipeline"
@@ -507,7 +507,7 @@ def test_create_agent_stores_default_scopes_verbatim_postgres(pg_agent_store):
     masked back to DEFAULT_SCOPES in the public view -- only the stored value
     proves the column default itself is right.
     """
-    from dashboard.backend.domain.agents.repository import DEFAULT_SCOPES
+    import dashboard.backend.domain.agents.repository as repo_module
 
     created = pg_agent_store.create_agent(name="Scoped")  # no scopes passed
     with pg_agent_store._get_connection() as conn:
@@ -517,7 +517,7 @@ def test_create_agent_stores_default_scopes_verbatim_postgres(pg_agent_store):
                 (created["agent_id"],),
             )
             raw = cur.fetchone()["scopes"]
-    assert raw == DEFAULT_SCOPES
+    assert raw == repo_module.DEFAULT_SCOPES
 
 
 @pg_only
@@ -637,22 +637,18 @@ def test_unreachable_postgres_version_store_raises_instead_of_falling_back():
     """Fail loud — see the agent-store twin of this test above."""
     import psycopg
 
-    from dashboard.backend.domain.agents.version_repository_postgres import (
-        PostgresAgentVersionStore,
-    )
+    import dashboard.backend.domain.agents.version_repository_postgres as vrepo_pg
 
     with pytest.raises(psycopg.OperationalError):
-        PostgresAgentVersionStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
+        vrepo_pg.PostgresAgentVersionStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
 
 
 def test_malformed_url_is_rejected_before_psycopg_can_echo_it_version_store():
     """See the agent-store twin of this test above."""
-    from dashboard.backend.domain.agents.version_repository_postgres import (
-        PostgresAgentVersionStore,
-    )
+    import dashboard.backend.domain.agents.version_repository_postgres as vrepo_pg
 
     with pytest.raises(ValueError) as excinfo:
-        PostgresAgentVersionStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
+        vrepo_pg.PostgresAgentVersionStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
     assert "sup3r-s3cret" not in str(excinfo.value)
 
 
@@ -661,11 +657,9 @@ def test_malformed_url_is_rejected_before_psycopg_can_echo_it_version_store():
 @pytest.fixture
 def pg_version_store():
     require_local_postgres_url(TEST_POSTGRES_URL)
-    from dashboard.backend.domain.agents.version_repository_postgres import (
-        PostgresAgentVersionStore,
-    )
+    import dashboard.backend.domain.agents.version_repository_postgres as vrepo_pg
 
-    store = PostgresAgentVersionStore(TEST_POSTGRES_URL)
+    store = vrepo_pg.PostgresAgentVersionStore(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM agent_versions")

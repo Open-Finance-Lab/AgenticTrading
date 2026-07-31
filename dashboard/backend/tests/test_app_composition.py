@@ -29,8 +29,10 @@ EXPECTED_CONFIG_ROUTES = {
     ("GET", "/config/defaults", "get_defaults"),
     ("GET", "/config/features", "get_features"),
 }
+# ``/admin/clear`` is absent on purpose: an unauthenticated DELETE that called
+# db.clear_all() became unrecoverable once AGENT_RUNS_DATABASE_URL made run
+# history durable, and nothing called it. See api/routers/admin.py's docstring.
 EXPECTED_ADMIN_ROUTES = {
-    ("DELETE", "/admin/clear", "admin_clear_all"),
     ("DELETE", "/admin/runs/{run_id}", "admin_delete_run"),
 }
 EXPECTED_BACKTESTS_ROUTES = {
@@ -57,7 +59,6 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/app"),
     ("GET", "/app/"),
     ("GET", "/assets/{file_name}"),
-    ("DELETE", "/admin/clear"),
     ("DELETE", "/admin/runs/{run_id}"),
     ("POST", "/api/algo/chat"),
     ("GET", "/api/algo/defaults"),

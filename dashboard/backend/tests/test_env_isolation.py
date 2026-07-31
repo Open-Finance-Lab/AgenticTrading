@@ -4,12 +4,12 @@ conftest.py pops them at import time -- before any backend module is imported,
 which is the only moment that works, since the store singletons are built during
 that import.
 
-Scope, honestly: the two `is_stripped` tests below assert the vars are absent
+Scope, honestly: the three `is_stripped` tests below assert the vars are absent
 *while the suite runs*. On their own that is close to vacuous -- in CI the vars
 are never set, so they pass whether or not conftest pops anything (this file
-passes with no conftest at all). Deleting both pops would keep the whole suite
-green while silently unguarding it. So the third test re-runs one of them in a
-subprocess with a hostile ambient value, where only a real strip is green.
+passes with no conftest at all). Deleting all three pops would keep the whole suite
+green while silently unguarding it. So the fourth test re-runs all three in a
+subprocess with hostile ambient values, where only real strips are green.
 
 They still cannot prove the pop happens at conftest *import* time rather than in
 a fixture; that placement is guarded by the comment at the pop itself.
@@ -42,22 +42,27 @@ def test_content_database_url_is_stripped_for_the_suite():
     assert "CONTENT_DATABASE_URL" not in os.environ
 
 
+def test_agent_runs_database_url_is_stripped_for_the_suite():
+    assert "AGENT_RUNS_DATABASE_URL" not in os.environ
+
+
 def test_the_pop_survives_a_hostile_ambient_environment():
-    """Prove the strip *works*, which the two tests above cannot.
+    """Prove the strips *work*, which the three tests above cannot.
 
     They only assert absence, and the vars are already absent on every runner --
-    so they stay green with the pops deleted. This one sets both vars to a
-    poisoned value and re-runs one of them in a subprocess: green only if
+    so they stay green with the pops deleted. This one sets all three vars to a
+    poisoned value and re-runs all three in a subprocess: green only if
     conftest really strips them.
 
-    A subprocess, not monkeypatch: the pop must land at conftest import time,
+    A subprocess, not monkeypatch: the pops must land at conftest import time,
     because the store singletons are built during backend import. Anything
     in-process is already too late by definition, so only a fresh interpreter
-    can test it. It re-runs a *named* sibling test rather than this file, which
+    can test it. It re-runs *named* sibling tests rather than this file, which
     would recurse.
     """
     env = {
         **os.environ,
+        "AGENT_RUNS_DATABASE_URL": _HOSTILE_URL,
         "CONTENT_DATABASE_URL": _HOSTILE_URL,
         "USERS_DATABASE_URL": _HOSTILE_URL,
     }
@@ -67,7 +72,11 @@ def test_the_pop_survives_a_hostile_ambient_environment():
             "-m",
             "pytest",
             "dashboard/backend/tests/test_env_isolation.py::"
+            + "test_users_database_url_is_stripped_for_the_suite",
+            "dashboard/backend/tests/test_env_isolation.py::"
             + "test_content_database_url_is_stripped_for_the_suite",
+            "dashboard/backend/tests/test_env_isolation.py::"
+            + "test_agent_runs_database_url_is_stripped_for_the_suite",
             "-q",
             "-p",
             "no:cacheprovider",
@@ -79,6 +88,7 @@ def test_the_pop_survives_a_hostile_ambient_environment():
         timeout=180,
     )
     assert result.returncode == 0, (
-        "conftest did not strip an ambient CONTENT_DATABASE_URL:\n"
+        "conftest did not strip ambient AGENT_RUNS_DATABASE_URL, "
+        "CONTENT_DATABASE_URL, or USERS_DATABASE_URL:\n"
         f"{result.stdout}\n{result.stderr}"
     )

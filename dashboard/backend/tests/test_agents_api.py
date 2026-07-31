@@ -7,7 +7,6 @@ from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
-from dashboard.backend.domain.agents.repository import AgentStore
 from dashboard.backend.domain.agents.credential_store import AgentCredentialStore
 
 
@@ -20,7 +19,7 @@ def client(tmp_path, monkeypatch):
     import dashboard.backend.domain.brokers.repository as broker_repository
 
     db_path = tmp_path / "test.db"
-    test_agents = AgentStore(db_path=db_path)
+    test_agents = agent_store_module.AgentStore(db_path=db_path)
     test_credentials = AgentCredentialStore(db_path=db_path)
     test_db = db_module.BacktestDatabase(db_path=db_path)
     monkeypatch.setenv(

@@ -162,7 +162,7 @@ Source: 91-agent adversarial review, 2026-07-03. PR by Allan-Feng, 292 files, +3
 
 ## Pre-existing (NOT this PR — verified out of scope, but worth a separate ticket)
 
-- `DELETE /admin/clear` wipes the whole DB with no auth (`api/routers/admin.py:15`) — moved verbatim, pre-existing.
+- ~~`DELETE /admin/clear` wipes the whole DB with no auth (`api/routers/admin.py:15`) — moved verbatim, pre-existing.~~ — ✅ **RESOLVED** by the durable-run-history work (`AGENT_RUNS_DATABASE_URL`): the route is **removed**, not authenticated. Once run history stopped being an ephemeral file a redeploy restored, one anonymous `curl` became an irreversible wipe of the only durable copy. Nothing called it and there is no admin tier to gate it with. `db.clear_all()` remains for tests and `backtest_hourly_agent.py --clear`. See `docs/superpowers/plans/2026-07-29-run-history-persistence.md` § "Changes made after the plan".
 - `/paper/*` exposes the Alpaca paper account unauthenticated — pre-existing.
 - ~~6 known baseline test failures~~ — the 5 that still failed (4× `test_backtest_isolation`, `test_prompt_contains_constraints`) were retired on 2026-07-05 (stale expectations; see the second-pass closure section). Suite is fully green.
 
