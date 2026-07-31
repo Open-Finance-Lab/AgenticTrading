@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Any
 
 from dashboard.backend.paths import DEFAULT_DB_PATH
+from dashboard.backend.db_url import describe_database_url
 
 # Use persistent disk path if set (Render), otherwise local dashboard storage path
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(DEFAULT_DB_PATH)))
@@ -38,6 +39,39 @@ def enable_wal(db_path) -> None:
             conn.close()
     except sqlite3.Error:
         pass
+
+
+def as_timestamp_text(value: Any) -> Any:
+    """Normalise a timestamp argument to the text both stores keep.
+
+    Every ``timestamp`` column in this schema is TEXT, and the two stores used
+    to react very differently to a caller handing over a ``datetime`` instead
+    of a string:
+
+    * SQLite accepted it silently, through ``sqlite3``'s *default datetime
+      adapter* -- which stores ``isoformat(" ")``, a **space** separator, and
+      which Python deprecated in 3.12 and intends to remove.
+    * Postgres refused it: psycopg sends the parameter typed as
+      ``timestamp``/``timestamptz``, and Postgres has had no implicit
+      assignment cast to ``text`` since 8.3, so the INSERT raised and the
+      request 500'd.
+
+    Converting at the boundary fixes both halves at once: the same call now
+    works on either backend *and* lands byte-identical text, and the stored
+    format no longer depends on a deprecated stdlib adapter that would
+    otherwise flip the divergence around when it is removed (SQLite starting
+    to raise while Postgres kept working).
+
+    ``isoformat()`` -- a ``T`` separator -- is the format the rest of the
+    backend already writes: ``insert_trades`` on both stores does exactly this,
+    and ``external_run_service`` applies it to every decision timestamp before
+    ``insert_decisions`` ever sees it.
+
+    Non-datetime values pass through untouched, ``None`` included, so a missing
+    NOT NULL timestamp still surfaces as an integrity error instead of being
+    quietly stored as the string ``"None"``.
+    """
+    return value.isoformat() if hasattr(value, "isoformat") else value
 
 
 class BacktestDatabase:
@@ -165,6 +199,7 @@ class BacktestDatabase:
                 actions_submitted TEXT,
                 actions_executed INTEGER DEFAULT 0,
                 context_ref TEXT,
+                actions_trace_ref TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
             )
@@ -263,19 +298,27 @@ class BacktestDatabase:
             # Token usage / cost tracking columns + the JSON config snapshot
             # (metadata records env-dependent knobs like the effective
             # LLM_MAX_OUTPUT_TOKENS that shaped the run).
+            # Each ALTER is spelled out in full rather than assembled from the
+            # column name and type: the Postgres-twin parity guard
+            # (tests/test_store_twin_parity.py) reads this module's DDL out of
+            # its *source text*, and an f-string collapses to a placeholder it
+            # cannot see a column name through. Literal SQL is also greppable.
             token_columns = [
-                ("llm_calls", "INTEGER DEFAULT 0"),
-                ("input_tokens", "INTEGER DEFAULT 0"),
-                ("output_tokens", "INTEGER DEFAULT 0"),
-                ("est_cost_usd", "REAL DEFAULT 0"),
-                ("metadata", "TEXT"),
+                ("llm_calls",
+                 "ALTER TABLE agent_runs ADD COLUMN llm_calls INTEGER DEFAULT 0"),
+                ("input_tokens",
+                 "ALTER TABLE agent_runs ADD COLUMN input_tokens INTEGER DEFAULT 0"),
+                ("output_tokens",
+                 "ALTER TABLE agent_runs ADD COLUMN output_tokens INTEGER DEFAULT 0"),
+                ("est_cost_usd",
+                 "ALTER TABLE agent_runs ADD COLUMN est_cost_usd REAL DEFAULT 0"),
+                ("metadata",
+                 "ALTER TABLE agent_runs ADD COLUMN metadata TEXT"),
             ]
-            for col_name, col_def in token_columns:
+            for col_name, add_column_sql in token_columns:
                 if col_name not in columns:
                     print(f"🔄 Migrating: Adding {col_name} to agent_runs...")
-                    cursor.execute(
-                        f"ALTER TABLE agent_runs ADD COLUMN {col_name} {col_def}"
-                    )
+                    cursor.execute(add_column_sql)
                     conn.commit()
                     print(f"✅ Added {col_name} to agent_runs")
             
@@ -289,6 +332,12 @@ class BacktestDatabase:
                 cursor.execute("ALTER TABLE backtest_decisions ADD COLUMN context_ref TEXT")
                 conn.commit()
                 print("✅ Added context_ref to backtest_decisions")
+
+            if dec_cols and "actions_trace_ref" not in dec_cols:
+                print("🔄 Migrating: Adding actions_trace_ref to backtest_decisions...")
+                cursor.execute("ALTER TABLE backtest_decisions ADD COLUMN actions_trace_ref TEXT")
+                conn.commit()
+                print("✅ Added actions_trace_ref to backtest_decisions")
 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS idempotency_keys (
@@ -427,15 +476,16 @@ class BacktestDatabase:
             return
 
         print("🔄 Migrating: upgrading trades table schema...")
+        # Literal SQL, not f-string assembly -- see the note on token_columns.
         additions = [
-            ("quantity", "INTEGER"),
-            ("side", "TEXT"),
-            ("value", "REAL"),
-            ("reason", "TEXT"),
+            ("quantity", "ALTER TABLE trades ADD COLUMN quantity INTEGER"),
+            ("side", "ALTER TABLE trades ADD COLUMN side TEXT"),
+            ("value", "ALTER TABLE trades ADD COLUMN value REAL"),
+            ("reason", "ALTER TABLE trades ADD COLUMN reason TEXT"),
         ]
-        for name, col_type in additions:
+        for name, add_column_sql in additions:
             if name not in columns:
-                cursor.execute(f"ALTER TABLE trades ADD COLUMN {name} {col_type}")
+                cursor.execute(add_column_sql)
 
         if "shares" in columns:
             cursor.execute("UPDATE trades SET quantity = shares WHERE quantity IS NULL")
@@ -449,23 +499,34 @@ class BacktestDatabase:
     @staticmethod
     def _migrate_currency_audit_schema(cursor) -> None:
         """Add nullable native-currency fields without rewriting USD history."""
+        # Literal SQL, not f-string assembly -- see the note on token_columns.
+        # This loop interpolated the *table* name too, which made the parity
+        # guard's parser see a whole phantom table.
         additions = {
             "equity_timeseries": (
-                "native_equity",
-                "native_cash",
-                "native_positions_value",
-                "fx_rate",
+                ("native_equity",
+                 "ALTER TABLE equity_timeseries ADD COLUMN native_equity REAL"),
+                ("native_cash",
+                 "ALTER TABLE equity_timeseries ADD COLUMN native_cash REAL"),
+                ("native_positions_value",
+                 "ALTER TABLE equity_timeseries ADD COLUMN native_positions_value REAL"),
+                ("fx_rate",
+                 "ALTER TABLE equity_timeseries ADD COLUMN fx_rate REAL"),
             ),
-            "trades": ("native_price", "native_value", "fx_rate"),
+            "trades": (
+                ("native_price", "ALTER TABLE trades ADD COLUMN native_price REAL"),
+                ("native_value", "ALTER TABLE trades ADD COLUMN native_value REAL"),
+                ("fx_rate", "ALTER TABLE trades ADD COLUMN fx_rate REAL"),
+            ),
         }
         for table, fields in additions.items():
             cursor.execute(f"PRAGMA table_info({table})")
             columns = {row[1] for row in cursor.fetchall()}
             if not columns:
                 continue
-            for field in fields:
+            for field, add_column_sql in fields:
                 if field not in columns:
-                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {field} REAL")
+                    cursor.execute(add_column_sql)
 
     def _ensure_decisions_table(self, cursor) -> None:
         cursor.execute("""
@@ -569,10 +630,11 @@ class BacktestDatabase:
              native_equity, native_cash, native_positions_value, fx_rate)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            run_id, timestamp, equity, cash, positions_value, daily_return,
+            run_id, as_timestamp_text(timestamp), equity, cash, positions_value,
+            daily_return,
             native_equity, native_cash, native_positions_value, fx_rate,
         ))
-        
+
         conn.commit()
         conn.close()
     
@@ -611,7 +673,7 @@ class BacktestDatabase:
                 """, [
                     (
                         run_id,
-                        point['timestamp'],
+                        as_timestamp_text(point['timestamp']),
                         point['equity'],
                         point['cash'],
                         point['positions_value'],
@@ -845,7 +907,7 @@ class BacktestDatabase:
             """, (
                 run_id,
                 entry.get("step_index", 0),
-                entry.get("timestamp"),
+                as_timestamp_text(entry.get("timestamp")),
                 entry.get("decision_source"),
                 json.dumps(entry.get("actions_submitted") or []),
                 entry.get("actions_executed", 0),
@@ -975,24 +1037,43 @@ class BacktestDatabase:
         cursor.execute("DELETE FROM equity_timeseries WHERE run_id = ?", (run_id,))
         cursor.execute("DELETE FROM trades WHERE run_id = ?", (run_id,))
         cursor.execute("DELETE FROM backtest_decisions WHERE run_id = ?", (run_id,))
+        cursor.execute("DELETE FROM run_manifest WHERE run_id = ?", (run_id,))
         cursor.execute("DELETE FROM agent_runs WHERE run_id = ?", (run_id,))
-        
+
         conn.commit()
         conn.close()
-    
+
     def clear_all(self) -> None:
         """Clear all data (useful for testing)."""
         conn = self._get_connection()
         cursor = conn.cursor()
-        
+
         cursor.execute("DELETE FROM equity_timeseries")
         cursor.execute("DELETE FROM trades")
         cursor.execute("DELETE FROM backtest_decisions")
+        cursor.execute("DELETE FROM run_manifest")
         cursor.execute("DELETE FROM agent_runs")
-        
+
         conn.commit()
         conn.close()
 
 
+def _build_backtest_db():
+    # AGENT_RUNS_DATABASE_URL only, deliberately: CONTENT_DATABASE_URL is scoped to
+    # agents/versions/strategies and USERS_DATABASE_URL to accounts; neither may
+    # select the run-history database (spec, Decision 3). Do not "simplify" this
+    # into a fallback chain.
+    database_url = os.getenv("AGENT_RUNS_DATABASE_URL")
+    if database_url:
+        from dashboard.backend.database_postgres import PostgresBacktestDatabase
+
+        # print(), not logger.info() -- info is invisible under the prod logging
+        # config. See users.py's _build_user_store for the full rationale.
+        print(f"run history backend: postgres ({describe_database_url(database_url)})")
+        return PostgresBacktestDatabase(database_url)
+    print("run history backend: sqlite (ephemeral on Render)")
+    return BacktestDatabase()
+
+
 # Singleton instance
-db = BacktestDatabase()
+db = _build_backtest_db()

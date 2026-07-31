@@ -49,7 +49,21 @@ def get_pool(database_url: str) -> ConnectionPool:
     return pool
 
 
-def _reset_for_tests() -> None:
+def close_all_pools() -> None:
+    """Close every cached pool and forget it.
+
+    Long-running processes never need this -- the pools are the point. It
+    exists for the two places that *end*: the test teardown below, and
+    short-lived CLI scripts. Without it a script that touched Postgres exits
+    through psycopg_pool's own teardown, which emits
+    ``couldn't stop thread 'pool-1-worker-N' within 5.0 seconds`` once per
+    worker *after* the script's own success message -- so a clean run reads
+    like a partial failure.
+
+    Pools are dropped from the cache, not just closed, because a closed pool
+    left in ``_pools`` would be handed to the next ``get_pool()`` caller and
+    raise on use.
+    """
     with _lock:
         for pool in _pools.values():
             try:
@@ -57,3 +71,7 @@ def _reset_for_tests() -> None:
             except Exception:
                 pass  # best-effort teardown: a pool that won't close must not break test reset
         _pools.clear()
+
+
+def _reset_for_tests() -> None:
+    close_all_pools()
