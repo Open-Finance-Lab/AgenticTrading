@@ -9,22 +9,22 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+# Import modules (not ``from … import Store``) so monkeypatches on
+# ``module.store`` are visible at call time, and CodeQL's
+# py/import-and-import-from stays quiet.
 import dashboard.backend.domain.agents.repository as agent_repo
 import dashboard.backend.domain.portfolios.repository as portfolio_repo
 import dashboard.backend.users as users_module
 from dashboard.backend.app import app
-from dashboard.backend.domain.agents.repository import AgentStore
-from dashboard.backend.domain.portfolios.repository import PortfolioStore
-from dashboard.backend.users import UserStore
 
 
 @pytest.fixture
 def client(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         root = Path(tmpdir)
-        user_store = UserStore(db_path=root / "users.db")
-        agent_store = AgentStore(db_path=root / "content.db")
-        portfolio_store = PortfolioStore(db_path=root / "content.db")
+        user_store = users_module.UserStore(db_path=root / "users.db")
+        agent_store = agent_repo.AgentStore(db_path=root / "content.db")
+        portfolio_store = portfolio_repo.PortfolioStore(db_path=root / "content.db")
         monkeypatch.setattr(users_module, "user_store", user_store)
         monkeypatch.setattr(agent_repo, "agent_store", agent_store)
         monkeypatch.setattr(portfolio_repo, "portfolio_store", portfolio_store)
@@ -65,29 +65,27 @@ def test_signed_in_user_cannot_mutate_another_users_agent(client):
     assert created.status_code == 200, created.text
     agent_id = created.json()["agent"]["agent_id"]
 
-    assert (
-        client.patch(
-            f"/api/v1/agents/{agent_id}",
-            headers=bob,
-            json={"name": "Hijacked"},
-        ).status_code
-        == 403
+    patched = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        headers=bob,
+        json={"name": "Hijacked"},
     )
-    assert client.delete(f"/api/v1/agents/{agent_id}", headers=bob).status_code == 403
-    assert (
-        client.post(
-            f"/api/v1/agents/{agent_id}/rotate-api-key", headers=bob
-        ).status_code
-        == 403
+    assert patched.status_code == 403
+
+    deleted = client.delete(f"/api/v1/agents/{agent_id}", headers=bob)
+    assert deleted.status_code == 403
+
+    rotated = client.post(
+        f"/api/v1/agents/{agent_id}/rotate-api-key", headers=bob
     )
-    assert (
-        client.put(
-            f"/api/v1/agents/{agent_id}/credentials/financial-datasets",
-            headers=bob,
-            json={"api_key": "fd-should-not-store"},
-        ).status_code
-        == 403
+    assert rotated.status_code == 403
+
+    credentialed = client.put(
+        f"/api/v1/agents/{agent_id}/credentials/financial-datasets",
+        headers=bob,
+        json={"api_key": "fd-should-not-store"},
     )
+    assert credentialed.status_code == 403
 
     # Alice still owns it.
     listed = client.get("/api/v1/agents", headers=alice)

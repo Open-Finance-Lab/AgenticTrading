@@ -51,11 +51,10 @@ def test_paper_start_session_error_body_hides_exception_detail(monkeypatch):
     from pathlib import Path
 
     import dashboard.backend.users as users_module
-    from dashboard.backend.users import UserStore
 
     monkeypatch.setattr(paper_mod, "AlpacaPaperTradingClient", _ExplodingClient)
     with tempfile.TemporaryDirectory() as tmpdir:
-        store = UserStore(db_path=Path(tmpdir) / "users.db")
+        store = users_module.UserStore(db_path=Path(tmpdir) / "users.db")
         monkeypatch.setattr(users_module, "user_store", store)
         local = TestClient(app)
         token = local.post(

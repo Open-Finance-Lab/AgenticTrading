@@ -16,7 +16,6 @@ import dashboard.backend.users as users_module
 from dashboard.backend.app import app
 from dashboard.backend.api.routers import paper_trading as paper_mod
 from dashboard.backend.database import db
-from dashboard.backend.users import UserStore
 
 
 class _FakeAlpacaClient:
@@ -27,7 +26,7 @@ class _FakeAlpacaClient:
 def test_start_session_succeeds_and_records_run(monkeypatch):
     monkeypatch.setattr(paper_mod, "AlpacaPaperTradingClient", _FakeAlpacaClient)
     with tempfile.TemporaryDirectory() as tmpdir:
-        store = UserStore(db_path=Path(tmpdir) / "users.db")
+        store = users_module.UserStore(db_path=Path(tmpdir) / "users.db")
         monkeypatch.setattr(users_module, "user_store", store)
         client = TestClient(app)
         signup = client.post(
