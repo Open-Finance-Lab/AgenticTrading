@@ -4794,8 +4794,13 @@ function updateBacktestRunProgress({
         elapsedEl.textContent = formatBacktestElapsed(elapsed);
     }
     if (messageEl && message) {
-        // Same two derived facts the card shows, from the same helpers, so the
-        // two surfaces can never disagree about one run.
+        // Same two derived facts the card shows, from the same helpers. Not
+        // byte-identical output: the card's elapsed is client-side (startedAt),
+        // this one is the server's elapsed_seconds, so they differ by launch
+        // latency and clock skew. Both round to whole minutes, which absorbs
+        // that everywhere except a bucket boundary -- close enough that one
+        // shared source of elapsed is not worth breaking the card's
+        // between-poll ticking for.
         const eta = formatBacktestEta(elapsedSeconds, step, totalSteps);
         const stale = updatedAt
             ? formatProgressStaleness((Date.now() - Number(updatedAt)) / 1000)
