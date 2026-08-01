@@ -61,14 +61,36 @@ def fn_body(signature: str) -> str:
     return APP_JS[start : _match_brace(APP_JS, open_brace) + 1]
 
 
-def at_rule_blocks(prelude: str) -> list[str]:
-    """Every styles.css at-rule block with this prelude, brace-matched.
+def js_const(name: str) -> str:
+    """The named top-level `const` declaration, verbatim including the `;`.
+
+    For guards that execute app.js source under node: a harness that restates a
+    threshold instead of lifting it tests the code against the harness's own
+    value, so changing the shipped constant silently stops being covered while
+    every case stays green.
+    """
+    match = re.search(rf"^const {re.escape(name)} = [^;]+;", APP_JS, re.MULTILINE)
+    assert match, f"{name} not found in app.js"
+    return match.group(0)
+
+
+def css_blocks(prelude: str) -> list[str]:
+    """Every styles.css block introduced by this prelude, brace-matched.
 
     styles.css carries eight separate reduced-motion blocks. Slicing from a
     class name to end-of-file would sweep in all the later ones, so any test
     asking "does *this* rule have a fallback" has to isolate the real block.
+
+    Returns every match rather than the first: a selector commonly appears both
+    as a plain rule and again inside a media query, and a test that silently
+    took whichever came first would depend on authoring order.
     """
     return [
         STYLES[match.start() : _match_brace(STYLES, STYLES.index("{", match.start())) + 1]
         for match in re.finditer(re.escape(prelude) + r"\s*\{", STYLES)
     ]
+
+
+def at_rule_blocks(prelude: str) -> list[str]:
+    """`css_blocks` under its original name, kept for the Phase A guards."""
+    return css_blocks(prelude)

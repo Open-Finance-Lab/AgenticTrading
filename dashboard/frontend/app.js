@@ -811,21 +811,50 @@ function renderAgentAllocatedCapitalHero(agent) {
 /**
  * Card body for an agent with a backtest in flight.
  *
- * The bar is deliberately indeterminate rather than a percentage: the launch
- * path has no honest completion estimate, and a fake percentage that stalls is
- * worse than an animation that only claims "still working".
+ * The bar is determinate whenever the engine has published a step: engine.py's
+ * `_publish_live_progress` writes step/total_steps every step and the status
+ * endpoint surfaces them. (The 2026-07-29 spec specified an indeterminate bar
+ * "since no honest completion estimate exists" -- that was already untrue; see
+ * the 2026-08-01 spec.) It falls back to indeterminate before the first step,
+ * which is a normal state on every run, not an error.
  */
 function renderAgentRunningBody(agent, running) {
+  const step = Number(running.step);
+  const total = Number(running.totalSteps);
+  const determinate =
+    Number.isFinite(step) && Number.isFinite(total) && total > 0 && step > 0;
+  const pct = determinate ? Math.min(99, Math.round((100 * step) / total)) : null;
+  const eta = determinate
+    ? formatBacktestEta(running.elapsedSeconds, step, total)
+    : null;
+  const stale = running.updatedAt
+    ? formatProgressStaleness((Date.now() - Number(running.updatedAt)) / 1000)
+    : null;
+
+  const stepLabel = determinate ? `${step}/${total}` : '';
+  // Built from raw values and escaped once at the interpolation site below --
+  // escaping here as well would double-encode.
+  const detail = [
+    determinate ? `${pct}%` : null,
+    eta,
+    `${formatBacktestElapsed(running.elapsedSeconds)} elapsed`,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return `
     <div class="agent-card-running">
       <div class="agent-card-running-head">
         <span class="agent-card-running-dot" aria-hidden="true"></span>
         <span class="agent-card-running-label">Backtesting…</span>
+        <span class="agent-card-running-step" data-running-step="${escapeHtml(agent.agent_id)}">${escapeHtml(stepLabel)}</span>
         <span class="agent-card-running-elapsed" data-running-elapsed="${escapeHtml(agent.agent_id)}">${escapeHtml(formatBacktestElapsed(running.elapsedSeconds))}</span>
       </div>
-      <div class="agent-card-running-track" role="progressbar" aria-label="Backtest in progress">
-        <div class="agent-card-running-bar"></div>
+      <div class="agent-card-running-track" role="progressbar" aria-label="Backtest in progress"${determinate ? ` aria-valuenow="${pct}" aria-valuemin="0" aria-valuemax="100"` : ''}>
+        <div class="agent-card-running-bar${determinate ? ' is-determinate' : ''}"${determinate ? ` style="width: ${pct}%"` : ''}></div>
       </div>
+      <p class="agent-card-running-detail" data-running-detail="${escapeHtml(agent.agent_id)}">${escapeHtml(detail)}</p>
+      ${stale ? `<p class="agent-card-running-stale">${escapeHtml(stale)}</p>` : ''}
     </div>
     ${renderAgentAllocatedCapitalHero(agent)}`;
 }
@@ -3413,8 +3442,13 @@ function getAgentBacktestRunning(agentId) {
         clearAgentBacktestRunning(agentId);
         return null;
     }
-    return { ...entry, elapsedSeconds: Math.floor(elapsed) };
+    return { ...entry, ...(liveBacktestProgress || {}), elapsedSeconds: Math.floor(elapsed) };
 }
+
+/** Latest polled progress for the single in-flight run.
+ *  backtest_status is one process-global dict on the server, so at most one
+ *  backtest runs at a time and a single shared object is correct. */
+let liveBacktestProgress = null;
 
 let lastRenderedRunningKey = null;
 
@@ -3439,12 +3473,30 @@ function refreshRunningAgentCards() {
     // interpolating an agent id into a selector string: no escaping, no
     // CSS.escape feature detection, and nothing to get wrong later.
     const elapsedNodes = document.querySelectorAll('[data-running-elapsed]');
+    const stepNodes = document.querySelectorAll('[data-running-step]');
+    const detailNodes = document.querySelectorAll('[data-running-detail]');
     Object.keys(running).forEach((agentId) => {
         const entry = getAgentBacktestRunning(agentId);
         if (!entry) return;
         elapsedNodes.forEach((el) => {
             if (el.getAttribute('data-running-elapsed') !== agentId) return;
             el.textContent = formatBacktestElapsed(entry.elapsedSeconds);
+        });
+        const step = Number(entry.step);
+        const total = Number(entry.totalSteps);
+        const determinate = Number.isFinite(step) && Number.isFinite(total) && total > 0 && step > 0;
+        if (!determinate) return;
+        const pct = Math.min(99, Math.round((100 * step) / total));
+        stepNodes.forEach((el) => {
+            if (el.getAttribute('data-running-step') !== agentId) return;
+            el.textContent = `${step}/${total}`;
+        });
+        detailNodes.forEach((el) => {
+            if (el.getAttribute('data-running-detail') !== agentId) return;
+            const eta = formatBacktestEta(entry.elapsedSeconds, step, total);
+            el.textContent = [`${pct}%`, eta, `${formatBacktestElapsed(entry.elapsedSeconds)} elapsed`]
+                .filter(Boolean)
+                .join(' · ');
         });
     });
 }
@@ -5006,6 +5058,9 @@ function ensureBacktestPolling() {
                 const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
                     ? (100 * step / total)
                     : null;
+                liveBacktestProgress = Number.isFinite(step) && step > 0
+                    ? { step, totalSteps: total, updatedAt: Number(status.progress?.progress_updated_at) * 1000 || Date.now() }
+                    : null;
 
                 if (viewingLive) {
                     liveBacktestChartActive = true;
@@ -5029,6 +5084,7 @@ function ensureBacktestPolling() {
                 liveBacktestChartActive = false;
                 const finishedId = liveBacktestRunId;
                 liveBacktestRunId = null;
+                liveBacktestProgress = null;
                 Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);
                 if (playgroundTab === 'agents' && currentPage === 'playground') {
                     loadAgents();
@@ -5076,6 +5132,13 @@ function ensureBacktestPolling() {
                 }
                 liveBacktestChartActive = false;
                 liveBacktestRunId = null;
+                // The finished branch above clears the running map; this one
+                // never did. Harmless while an orphaned entry only showed a
+                // wrong elapsed timer, but liveBacktestProgress is a single
+                // global spread into *every* entry, so a stale entry would
+                // render the NEXT run's step, percent and ETA until it aged out.
+                Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);
+                liveBacktestProgress = null;
             }
         } catch (error) {
             console.error('Error polling backtest status:', error);

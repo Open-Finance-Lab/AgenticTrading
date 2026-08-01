@@ -9464,3 +9464,34 @@ body.agent-editor-open {
 @media (prefers-reduced-motion: reduce) {
     .agent-card.is-just-created { animation: none; box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.55); }
 }
+
+.agent-card-running-step {
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+    opacity: 0.75;
+}
+
+.agent-card-running-detail {
+    margin: 6px 0 0;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+    opacity: 0.7;
+}
+
+.agent-card-running-stale {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: #fbbf24;
+}
+
+/* Determinate: width is data, so the indeterminate sweep must not also run. */
+.agent-card-running-bar.is-determinate {
+    animation: none;
+    transition: width 400ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-card-running-bar.is-determinate { transition: none; }
+}

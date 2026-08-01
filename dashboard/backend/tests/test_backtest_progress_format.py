@@ -10,58 +10,24 @@ Both are honesty-constrained rather than precision-constrained:
 """
 
 import json
-import re
 import shutil
 import subprocess
-from pathlib import Path
 
 import pytest
 
-_FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
-_APP_JS = (_FRONTEND / "app.js").read_text(encoding="utf-8")
+from dashboard.backend.tests._frontend_source import fn_body, js_const
 
 pytestmark = pytest.mark.skipif(
     shutil.which("node") is None, reason="node is not installed"
 )
 
 
-def _extract_function(src: str, name: str) -> str:
-    for marker in (f"async function {name}(", f"function {name}("):
-        start = src.find(marker)
-        if start != -1:
-            break
-    else:
-        raise AssertionError(f"{name} not found in app.js")
-    depth = 0
-    i = src.index("{", start)
-    while True:
-        if src[i] == "{":
-            depth += 1
-        elif src[i] == "}":
-            depth -= 1
-            if depth == 0:
-                return src[start : i + 1]
-        i += 1
-
-
-def _extract_const(src: str, name: str) -> str:
-    """Lift the real declaration out of app.js rather than restating its value.
-
-    A harness that hardcodes `const BACKTEST_STALE_SECONDS = 120` tests the
-    formatter against the harness's own threshold, so raising the shipped
-    constant would silently stop being covered while every case stayed green.
-    """
-    match = re.search(rf"^const {re.escape(name)} = [^;]+;", src, re.MULTILINE)
-    assert match, f"{name} not found in app.js"
-    return match.group(0)
-
-
 def _eval(expr: str) -> object:
     script = "\n".join(
         [
-            _extract_const(_APP_JS, "BACKTEST_STALE_SECONDS"),
-            _extract_function(_APP_JS, "formatBacktestEta"),
-            _extract_function(_APP_JS, "formatProgressStaleness"),
+            js_const("BACKTEST_STALE_SECONDS"),
+            fn_body("function formatBacktestEta("),
+            fn_body("function formatProgressStaleness("),
             f"console.log(JSON.stringify({expr}));",
         ]
     )
@@ -75,9 +41,7 @@ def _eval(expr: str) -> object:
 def test_staleness_threshold_is_two_minutes():
     """Pins the shipped constant, since every staleness case below is scaled to
     it. Lowering it would make the UI cry wolf on ordinary model latency."""
-    assert _extract_const(_APP_JS, "BACKTEST_STALE_SECONDS") == (
-        "const BACKTEST_STALE_SECONDS = 120;"
-    )
+    assert js_const("BACKTEST_STALE_SECONDS") == "const BACKTEST_STALE_SECONDS = 120;"
 
 
 def test_eta_is_suppressed_for_the_first_two_steps():
