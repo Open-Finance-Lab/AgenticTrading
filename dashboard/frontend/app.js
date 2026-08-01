@@ -134,6 +134,42 @@ function formatTokenCount(value) {
   return String(num);
 }
 
+let appToastTimer = null;
+
+const APP_TOAST_VISIBLE_MS = 4000;
+const APP_TOAST_FADE_MS = 240;
+
+/**
+ * Non-blocking confirmation channel for /app.
+ *
+ * The pre-existing convention here is alert(), which is modal: acceptable for a
+ * launch-time refusal the user must acknowledge, wrong for a success they only
+ * need to notice. Text (not innerHTML) -- callers pass agent names.
+ *
+ * The container is never `hidden`, and this function must never set it. `hidden`
+ * is display:none, which takes the node out of the render tree, and a live
+ * region is only monitored for mutations while it is rendered -- so writing the
+ * message first and unhiding after (the obvious order) announces nothing on the
+ * screen readers this role="status" exists for. .app-toast hides itself with
+ * opacity + pointer-events, so `hidden` was buying no visual behaviour either.
+ * Emptying the text on the way out is what replaces it: the region stays
+ * registered from page load, and no stale message is left for a browsing user.
+ */
+function showAppToast(message) {
+  const el = document.getElementById('appToast');
+  if (!el) return;
+  el.classList.remove('is-visible');
+  // Force a reflow so re-showing an already-visible toast replays the transition.
+  void el.offsetWidth;
+  el.textContent = String(message);
+  el.classList.add('is-visible');
+  if (appToastTimer) clearTimeout(appToastTimer);
+  appToastTimer = setTimeout(() => {
+    el.classList.remove('is-visible');
+    appToastTimer = setTimeout(() => { el.textContent = ''; }, APP_TOAST_FADE_MS);
+  }, APP_TOAST_VISIBLE_MS);
+}
+
 // ============================================================================
 // Local mock agents — fallback used when the backend returns no agents (or is
 // unavailable). Lets the redesigned My Agents page render without a backend.
@@ -1122,6 +1158,7 @@ function renderAgentCards(grid, agents, categoryKey) {
     const statusBadge = resolveAgentStatusBadge(agent);
     const card = document.createElement('div');
     card.className = `section-card agent-card agent-card--status agent-card--${statusBadge.key}${isBuiltin ? ' agent-card-builtin' : ''}`;
+    card.setAttribute('data-agent-id', agent.agent_id);
     const model = escapeHtml(formatAgentModelLabel(agent.model_name));
     const type = escapeHtml(agentTypeLabel(agent));
     const running = getAgentBacktestRunning(agent.agent_id);
@@ -1794,6 +1831,29 @@ function closeCreateExternalAgentModal() {
   if (modal) modal.hidden = true;
 }
 
+/**
+ * Lock a submit button and say what it is doing.
+ *
+ * disabled alone is nearly invisible in this theme, which is why a create that
+ * already set it still read as a dead click.
+ */
+function setButtonPending(btn, label) {
+  if (!btn) return;
+  if (btn.dataset.idleLabel === undefined) btn.dataset.idleLabel = btn.textContent;
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  btn.classList.add('is-pending');
+  btn.textContent = label;
+}
+
+function restoreButton(btn) {
+  if (!btn) return;
+  btn.disabled = false;
+  btn.removeAttribute('aria-busy');
+  btn.classList.remove('is-pending');
+  if (btn.dataset.idleLabel !== undefined) btn.textContent = btn.dataset.idleLabel;
+}
+
 function openCreateBuiltinAgentModal() {
   closeAddAgentModal();
   const modal = document.getElementById('createBuiltinAgentModal');
@@ -1835,7 +1895,7 @@ async function submitCreateBuiltinAgent(event) {
   }
 
   if (errorEl) errorEl.hidden = true;
-  if (submitBtn) submitBtn.disabled = true;
+  setButtonPending(submitBtn, 'Creating…');
 
   try {
     const data = await API.post(`${API_BASE}/api/v1/agents`, {
@@ -1845,16 +1905,20 @@ async function submitCreateBuiltinAgent(event) {
       description,
       cash_allocation,
     });
+    // Confirm on the POST result, not after loadAgents(): that is a second
+    // round trip, and gating the toast on it reinstates most of the delay.
     closeCreateBuiltinAgentModal();
+    showAppToast(`"${name}" created`);
     if (data.agent) applyActiveAgent(data.agent);
     await loadAgents();
+    if (data.agent) highlightAgentCard(data.agent.agent_id);
   } catch (error) {
     if (errorEl) {
       errorEl.textContent = error.message;
       errorEl.hidden = false;
     }
   } finally {
-    if (submitBtn) submitBtn.disabled = false;
+    restoreButton(submitBtn);
   }
 }
 
@@ -1939,21 +2003,25 @@ async function submitCreateExternalAgent(event) {
   }
 
   if (errorEl) errorEl.hidden = true;
-  if (submitBtn) submitBtn.disabled = true;
+  setButtonPending(submitBtn, 'Creating…');
 
   try {
     const data = await API.post(`${API_BASE}/api/v1/agents`, { name, model_name, cash_allocation });
+    // Same POST, same round trip as the built-in flow, so the same rule: confirm
+    // on the response. The API key is shown once and exists only in this
+    // response, so gating it on loadAgents() delays the one thing the user has
+    // to copy before it is unrecoverable.
     closeCreateExternalAgentModal();
+    showAgentCredentials(data.api_key);
     applyActiveAgent(data.agent);
     await loadAgents();
-    showAgentCredentials(data.api_key);
   } catch (error) {
     if (errorEl) {
       errorEl.textContent = error.message;
       errorEl.hidden = false;
     }
   } finally {
-    if (submitBtn) submitBtn.disabled = false;
+    restoreButton(submitBtn);
   }
 }
 
@@ -3379,6 +3447,25 @@ function refreshRunningAgentCards() {
             el.textContent = formatBacktestElapsed(entry.elapsedSeconds);
         });
     });
+}
+
+/**
+ * Scroll the named agent's card into view and flash it.
+ *
+ * Attribute lookup then compare in JS -- no escaping, no CSS.escape feature
+ * detection -- matching refreshRunningAgentCards() above.
+ *
+ * Scoped to .agent-card: every card also contains 5-8 buttons carrying the same
+ * data-agent-id, and the unscoped selector would scroll to each of them in turn.
+ */
+function highlightAgentCard(agentId) {
+  if (!agentId) return;
+  document.querySelectorAll('.agent-card[data-agent-id]').forEach((card) => {
+    if (card.getAttribute('data-agent-id') !== agentId) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('is-just-created');
+    setTimeout(() => card.classList.remove('is-just-created'), 2400);
+  });
 }
 let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
