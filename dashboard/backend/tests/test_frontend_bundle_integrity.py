@@ -131,7 +131,7 @@ def test_hand_written_auth_layer_survives_a_bundle_refresh():
     ``dashboard/landing/index.html`` (the Vite template) is 26 lines and contains
     none of this; the shipped file is ~400. Copying ``dist/index.html`` wholesale
     over the shipped one — the obvious way to refresh a bundle — deletes the
-    signup modal outright and turns all seven ``data-landing-auth`` CTAs into
+    signup modal outright and turns all ``data-landing-auth`` CTAs into
     buttons that do nothing when clicked, with no console error to notice.
     """
     html = _index_html()
@@ -184,7 +184,7 @@ def test_shipped_bundle_carries_the_current_cta_label():
     """Catches CTA *copy* drift, which the count check above cannot see.
 
     Renaming the shared label in ``lib/cta.ts`` without rebuilding leaves the count
-    at seven while prod still shows the old wording — a silent regression precisely
+    matched while prod still shows the old wording — a silent regression precisely
     because the page keeps working.
     """
     assert _CTA_TS.is_file(), (

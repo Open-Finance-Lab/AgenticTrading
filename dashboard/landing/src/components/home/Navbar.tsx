@@ -1,6 +1,6 @@
 import { Link } from "wouter";
 import atlLogo from "@assets/atltransparent.png";
-import { PRIMARY_LANDING_CTA } from "@/lib/cta";
+import { LANDING_SIGN_IN_CTA, PRIMARY_LANDING_CTA } from "@/lib/cta";
 
 const NAV_LINKS = [
   { href: "#why", label: "Why" },
@@ -26,7 +26,14 @@ export function Navbar() {
         </div>
         <span className="brand-title">Agentic Trading Lab</span>
       </Link>
-      <div className="flex items-center justify-end min-w-0">
+      <div className="flex items-center justify-end gap-4 min-w-0">
+        <button
+          type="button"
+          data-landing-auth={LANDING_SIGN_IN_CTA.authMode}
+          className="text-[15px] font-semibold text-foreground hover:text-foreground/80 transition-colors whitespace-nowrap"
+        >
+          {LANDING_SIGN_IN_CTA.label}
+        </button>
         <button
           type="button"
           data-landing-auth={PRIMARY_LANDING_CTA.authMode}
