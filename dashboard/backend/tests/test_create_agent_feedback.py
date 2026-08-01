@@ -61,3 +61,16 @@ def test_button_is_restored_on_every_path():
 
 def test_aria_busy_is_toggled():
     assert re.search(r"aria-busy", _APP_JS)
+
+
+def test_new_agent_card_is_located_after_creation():
+    assert "function highlightAgentCard(" in _APP_JS
+    assert "highlightAgentCard(" in _submit_fn()
+
+
+def test_highlight_uses_attribute_lookup_not_selector_interpolation():
+    """Same rule refreshRunningAgentCards() follows (app.js:3370): agent ids are
+    server-supplied, so never interpolate one into a selector string."""
+    start = _APP_JS.index("function highlightAgentCard(")
+    body = _APP_JS[start : start + 900]
+    assert "querySelectorAll('.agent-card[data-agent-id]')" in body

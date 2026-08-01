@@ -1147,6 +1147,7 @@ function renderAgentCards(grid, agents, categoryKey) {
     const statusBadge = resolveAgentStatusBadge(agent);
     const card = document.createElement('div');
     card.className = `section-card agent-card agent-card--status agent-card--${statusBadge.key}${isBuiltin ? ' agent-card-builtin' : ''}`;
+    card.setAttribute('data-agent-id', agent.agent_id);
     const model = escapeHtml(formatAgentModelLabel(agent.model_name));
     const type = escapeHtml(agentTypeLabel(agent));
     const running = getAgentBacktestRunning(agent.agent_id);
@@ -3431,6 +3432,25 @@ function refreshRunningAgentCards() {
             el.textContent = formatBacktestElapsed(entry.elapsedSeconds);
         });
     });
+}
+
+/**
+ * Scroll the named agent's card into view and flash it.
+ *
+ * Attribute lookup then compare in JS -- no escaping, no CSS.escape feature
+ * detection -- matching refreshRunningAgentCards() above.
+ *
+ * Scoped to .agent-card: every card also contains 5-8 buttons carrying the same
+ * data-agent-id, and the unscoped selector would scroll to each of them in turn.
+ */
+function highlightAgentCard(agentId) {
+  if (!agentId) return;
+  document.querySelectorAll('.agent-card[data-agent-id]').forEach((card) => {
+    if (card.getAttribute('data-agent-id') !== agentId) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('is-just-created');
+    setTimeout(() => card.classList.remove('is-just-created'), 2400);
+  });
 }
 let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
