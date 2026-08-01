@@ -28,8 +28,18 @@ def test_band_is_rendered_between_hero_and_talk():
 
 
 def test_band_states_the_problem_before_the_features():
+    """Ordering, not merely presence -- stating the problem first is the band's
+    whole job, and a presence check would stay green if it were moved below the
+    feature grid.
+
+    Compared inside the component body: ACTS/EXTRAS are declared above the JSX,
+    so a whole-file index comparison would measure declaration order rather
+    than render order and could never fail.
+    """
     body = _BAND.read_text(encoding="utf-8")
-    assert "Testing it properly is the expensive part" in body
+    jsx = body[body.index("export function WhyCare()") :]
+    assert "Testing it properly is the expensive part" in jsx
+    assert jsx.index("Testing it properly is the expensive part") < jsx.index("ACTS.map(")
 
 
 def test_band_covers_the_three_acts():
