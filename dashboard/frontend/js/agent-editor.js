@@ -151,8 +151,23 @@
     );
   }
 
+  function readCsrfToken() {
+    try {
+      const raw = document.cookie || '';
+      for (const name of ['atl_csrf', '__Host-atl_csrf']) {
+        const match = raw.match(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'));
+        if (match) return decodeURIComponent(match[1]);
+      }
+    } catch (_) { /* ignore */ }
+    return null;
+  }
+
   function authHeaders() {
-    return { 'x-session-id': window.SESSION_ID };
+    const headers = { 'x-session-id': window.SESSION_ID };
+    const csrf = (typeof window.csrfHeaders === 'function')
+      ? window.csrfHeaders()
+      : (readCsrfToken() ? { 'X-CSRF-Token': readCsrfToken() } : {});
+    return { ...headers, ...csrf };
   }
 
   function withCredentials(options = {}) {

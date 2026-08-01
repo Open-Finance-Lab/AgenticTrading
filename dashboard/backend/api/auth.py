@@ -178,8 +178,11 @@ def get_current_user(
 
 
 def _auth_json(user: dict, raw_token: str) -> JSONResponse:
+    from dashboard.backend.csrf import set_csrf_cookie
+
     response = JSONResponse({"user": user})
     set_session_cookie(response, raw_token)
+    set_csrf_cookie(response)
     return response
 
 
@@ -237,6 +240,9 @@ async def logout(
         users_module.user_store.delete_session(token)
     response = JSONResponse({"status": "ok"})
     clear_session_cookie(response)
+    from dashboard.backend.csrf import clear_csrf_cookie
+
+    clear_csrf_cookie(response)
     return response
 
 
@@ -245,6 +251,9 @@ async def logout_all(request: Request, current_user: dict = Depends(get_current_
     users_module.user_store.delete_other_sessions(current_user["id"], keep_token=None)
     response = JSONResponse({"status": "ok"})
     clear_session_cookie(response)
+    from dashboard.backend.csrf import clear_csrf_cookie
+
+    clear_csrf_cookie(response)
     return response
 
 

@@ -49,6 +49,11 @@ os.environ.pop("USERS_DATABASE_URL", None)
 # Hermetic HMAC key for session-token digests (see session_tokens.py).
 os.environ["SESSION_HASH_SECRET"] = "test-session-hash-secret"
 
+# Cookie CSRF is on by default in production; the broad TestClient suite does
+# not yet attach X-CSRF-Token on every mutating call. Dedicated CSRF tests
+# re-enable enforcement via monkeypatch (see test_csrf.py).
+os.environ["ATL_CSRF"] = "0"
+
 # Same guarantee for CONTENT_DATABASE_URL: it selects Postgres backends for the
 # agent / agent-version / strategy stores, so a value inherited from the
 # developer's environment (a sourced prod .env, a deploy shell) would point the

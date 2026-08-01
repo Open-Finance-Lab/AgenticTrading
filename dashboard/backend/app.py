@@ -17,6 +17,7 @@ import os
 import dashboard.backend.database as _database
 from dashboard.backend.paths import FRONTEND_DIR
 from dashboard.backend.middleware import SessionMiddleware, CSPHeaderMiddleware
+from dashboard.backend.csrf import CsrfMiddleware
 from dashboard.backend.api.router import api_router
 from dashboard.backend.api.routers.paper_trading import router as paper_trading_router
 from dashboard.backend.api.routers.health import router as health_router
@@ -100,7 +101,7 @@ app.add_middleware(
     # the browser fails at preflight even though the route exists
     # (test_cors_preflight_allows_every_routed_method).
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["content-type", "authorization", "x-session-id", "x-browser-id", "x-api-key", "accept"],
+    allow_headers=["content-type", "authorization", "x-session-id", "x-browser-id", "x-api-key", "x-csrf-token", "accept"],
     # x-ratelimit-*/retry-after: the v2 spec promises these to agent clients;
     # browsers strip headers absent from Access-Control-Expose-Headers.
     expose_headers=["content-type", "cache-control", "etag", "x-session-id",
@@ -111,6 +112,9 @@ app.add_middleware(
 
 # Add session middleware (selective: backtest routes only)
 app.add_middleware(SessionMiddleware)
+
+# Cookie-session CSRF (session cookie ⇒ double-submit; API-key-only skips)
+app.add_middleware(CsrfMiddleware)
 
 # Versioned REST API (auth, future teams/contest/config)
 app.include_router(api_router)
