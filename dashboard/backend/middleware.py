@@ -117,8 +117,10 @@ class CSPHeaderMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
         # Allow Chart.js and scripts from same origin, plus unsafe-inline for development
+        # Dropped 'unsafe-eval' (PR7). Chart.js 4 from jsDelivr does not need
+        # eval; keep 'unsafe-inline' until scripts are nonced/externalized.
         response.headers["Content-Security-Policy"] = (
-            "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
             "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
             "font-src 'self' https://fonts.gstatic.com data:; "
             "connect-src *; img-src * data:;"

@@ -325,6 +325,16 @@ def test_csp_middleware_lives_in_middleware_module():
     assert app_csp is middleware_mod.CSPHeaderMiddleware
 
 
+def test_csp_header_omits_unsafe_eval():
+    from fastapi.testclient import TestClient
+    from dashboard.backend.app import app
+
+    response = TestClient(app).get("/api/health")
+    csp = response.headers.get("content-security-policy", "")
+    assert "script-src" in csp
+    assert "unsafe-eval" not in csp
+
+
 def test_middleware_order_preserved():
     names = [m.cls.__name__ for m in app.user_middleware]
     assert names == ["CSPHeaderMiddleware", "SessionMiddleware", "CORSMiddleware"]
