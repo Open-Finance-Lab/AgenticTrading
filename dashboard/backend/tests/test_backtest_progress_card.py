@@ -301,8 +301,8 @@ def _patch(progress_js: str, then_progress_js: str | None = None, elapsed_ms: in
             _DOM_SHIM,
             "const launchHtml = renderAgentRunningBody({agent_id: 'a1'}, getAgentBacktestRunning('a1'));",
             "const NODES = parseNodes(launchHtml);",
-            "const document = { querySelectorAll: (sel) =>"
-            " NODES.filter((node) => node.has(sel.slice(1, -1))) };",
+            "const document = { querySelectorAll: (sel) => "
+            + "NODES.filter((node) => node.has(sel.slice(1, -1))) };",
             # The set of running agents is unchanged, which is what forces the
             # patch path instead of a full re-render -- the steady state for all
             # but two ticks of a run.
@@ -314,7 +314,7 @@ def _patch(progress_js: str, then_progress_js: str | None = None, elapsed_ms: in
             "  launch: snapshotOf(parseNodes(launchHtml)),",
             "  patched: snapshotOf(NODES),",
             "  rendered: snapshotOf(parseNodes("
-            "    renderAgentRunningBody({agent_id: 'a1'}, getAgentBacktestRunning('a1')))),",
+            + "renderAgentRunningBody({agent_id: 'a1'}, getAgentBacktestRunning('a1')))),",
             "  applyCalls,",
             "}));",
         ]
