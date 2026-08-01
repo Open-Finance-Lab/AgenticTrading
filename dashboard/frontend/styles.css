@@ -9472,6 +9472,13 @@ body.agent-editor-open {
     opacity: 0.75;
 }
 
+/* Empty before the first step. The head is a flex row with an 8px gap, so an
+   empty span is not free -- it opens a visible hole between the label and the
+   elapsed timer. */
+.agent-card-running-step:empty {
+    display: none;
+}
+
 .agent-card-running-detail {
     margin: 6px 0 0;
     font-size: 12px;
@@ -9491,6 +9498,13 @@ body.agent-editor-open {
     margin: 4px 0 0;
     font-size: 12px;
     color: #fbbf24;
+}
+
+/* Rendered on every running card and empty while progress is fresh -- same
+   reason as the detail node: the per-second patch fills this in by attribute,
+   and a node that only exists once it has content can never be filled in. */
+.agent-card-running-stale:empty {
+    display: none;
 }
 
 /* Determinate: width is data, so the indeterminate sweep must not also run. */
