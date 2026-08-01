@@ -45,7 +45,13 @@ from dashboard.backend.infrastructure.llm.providers import (
 # Optional: LLM integration. Mirrors the original optional-dependency behavior
 # (no API key required at import time; only the SDK presence is detected).
 try:
-    from anthropic import Anthropic
+    # Reached by attribute rather than `from anthropic import Anthropic`: the
+    # name exists here only to be re-exported (backtest_hourly_agent and the
+    # engines read it through this module), which `py/unused-import` cannot see
+    # because the rule is intra-file.
+    import anthropic
+
+    Anthropic = anthropic.Anthropic
     HAS_ANTHROPIC = True
 except ImportError:
     # Bind ``Anthropic`` to None (instead of leaving it undefined) so the legacy
