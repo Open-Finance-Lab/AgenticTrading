@@ -9480,6 +9480,13 @@ body.agent-editor-open {
     opacity: 0.7;
 }
 
+/* Empty before the first step. The node must still exist -- the per-second
+   patch targets it by attribute and only a change to the *set* of running
+   agents triggers a full re-render -- so hide it rather than omit it. */
+.agent-card-running-detail:empty {
+    display: none;
+}
+
 .agent-card-running-stale {
     margin: 4px 0 0;
     font-size: 12px;

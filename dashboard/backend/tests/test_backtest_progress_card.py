@@ -71,6 +71,31 @@ def test_card_shows_eta():
     assert "left" in html
 
 
+def test_card_does_not_print_elapsed_twice():
+    """The head already carries the timer; repeating it in the detail line one
+    row below is the noise this change exists to remove.
+
+    Scoped to the detail node's text: a whole-document search for "elapsed"
+    also matches the head's own class name and data attribute, which must both
+    stay -- so the obvious assertion would fail against correct output.
+    """
+    html = _render("{elapsedSeconds: 185, step: 84, totalSteps: 240, updatedAt: Date.now()}")
+    detail = html.split('data-running-detail="a1">')[1].split("</p>")[0]
+    assert "elapsed" not in detail, detail
+    assert detail == "35% · ~6m left"
+    # The head keeps its timer -- this removes a duplicate, not the value.
+    assert "data-running-elapsed" in html
+
+
+def test_card_detail_is_empty_before_the_first_step():
+    """Empty rather than absent: the per-second patch targets this node by
+    attribute, and only a change to the *set* of running agents re-renders."""
+    html = _render("{elapsedSeconds: 2}")
+    assert 'data-running-detail="a1"></p>' in html
+    blocks = css_blocks(".agent-card-running-detail:empty")
+    assert any("display: none" in block for block in blocks), blocks
+
+
 def test_card_warns_when_progress_is_stale():
     html = _render(
         "{elapsedSeconds: 600, step: 84, totalSteps: 240, updatedAt: Date.now() - 300000}"

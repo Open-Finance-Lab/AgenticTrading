@@ -832,15 +832,12 @@ function renderAgentRunningBody(agent, running) {
     : null;
 
   const stepLabel = determinate ? `${step}/${total}` : '';
+  // Deliberately excludes elapsed: the head already renders it one line above,
+  // and printing "3:05" beside "3:05 elapsed" is the kind of noise this change
+  // exists to remove. Empty before the first step, hidden by :empty in CSS.
   // Built from raw values and escaped once at the interpolation site below --
   // escaping here as well would double-encode.
-  const detail = [
-    determinate ? `${pct}%` : null,
-    eta,
-    `${formatBacktestElapsed(running.elapsedSeconds)} elapsed`,
-  ]
-    .filter(Boolean)
-    .join(' · ');
+  const detail = [determinate ? `${pct}%` : null, eta].filter(Boolean).join(' · ');
 
   return `
     <div class="agent-card-running">
@@ -3494,9 +3491,7 @@ function refreshRunningAgentCards() {
         detailNodes.forEach((el) => {
             if (el.getAttribute('data-running-detail') !== agentId) return;
             const eta = formatBacktestEta(entry.elapsedSeconds, step, total);
-            el.textContent = [`${pct}%`, eta, `${formatBacktestElapsed(entry.elapsedSeconds)} elapsed`]
-                .filter(Boolean)
-                .join(' · ');
+            el.textContent = [`${pct}%`, eta].filter(Boolean).join(' · ');
         });
     });
 }
