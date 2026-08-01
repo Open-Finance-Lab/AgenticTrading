@@ -683,10 +683,13 @@ def test_backtest_status_includes_live_progress(tmp_path):
     assert body["progress"]["step"] == 5
     assert body["progress"]["total_steps"] == 100
     assert len(body["progress"]["equity_curve"]) == 1
-    assert len(body["progress"]["equity_curve"]) == 1
     assert len(body["progress"]["trades"]) == 1
     assert body["progress"]["trades"][0]["symbol"] == "AAPL"
     assert "step 5/100" in body["message"]
+    # Pinned at the wire, not just at _read_backtest_progress: the payload is
+    # assigned wholesale today, so a later whitelist would drop this field with
+    # a green helper test and a UI that silently stops reporting staleness.
+    assert body["progress"]["progress_updated_at"] == progress_file.stat().st_mtime
 
 
 def test_get_run_trades_endpoint(client, monkeypatch):
