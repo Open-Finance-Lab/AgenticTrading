@@ -134,6 +134,31 @@ function formatTokenCount(value) {
   return String(num);
 }
 
+let appToastTimer = null;
+
+/**
+ * Non-blocking confirmation channel for /app.
+ *
+ * The pre-existing convention here is alert(), which is modal: acceptable for a
+ * launch-time refusal the user must acknowledge, wrong for a success they only
+ * need to notice. Text (not innerHTML) -- callers pass agent names.
+ */
+function showAppToast(message, { variant = 'success', timeoutMs = 4000 } = {}) {
+  const el = document.getElementById('appToast');
+  if (!el) return;
+  el.textContent = String(message);
+  el.className = `app-toast app-toast--${variant}`;
+  el.hidden = false;
+  // Force a reflow so re-showing an already-visible toast replays the transition.
+  void el.offsetWidth;
+  el.classList.add('is-visible');
+  if (appToastTimer) clearTimeout(appToastTimer);
+  appToastTimer = setTimeout(() => {
+    el.classList.remove('is-visible');
+    appToastTimer = setTimeout(() => { el.hidden = true; }, 240);
+  }, timeoutMs);
+}
+
 // ============================================================================
 // Local mock agents — fallback used when the backend returns no agents (or is
 // unavailable). Lets the redesigned My Agents page render without a backend.
