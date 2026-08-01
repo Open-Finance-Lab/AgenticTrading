@@ -6,29 +6,26 @@ import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 export function Talk() {
   return (
     <section id="talk" className="py-24 bg-muted/20 border-y border-border scroll-mt-40">
-      {/* Hero scroll target — do not remove; Hero.tsx still anchors here */}
-      <div id="landing-stats" className="h-0 w-0 overflow-hidden" aria-hidden="true" />
-
       <div className="container mx-auto px-6">
         <div className="grid lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.25fr)] gap-10 xl:gap-14 items-center">
           <div>
             <p className="text-base md:text-lg font-mono tracking-wide text-primary mb-3">01 — Talk</p>
-            <h2 className="text-3xl md:text-4xl font-bold mb-3">Talk to agents on Discord</h2>
+            <h2 className="text-3xl md:text-4xl font-bold mb-3">Describe your idea, in a sentence</h2>
             <p className="text-foreground/80 mb-8 text-lg">
-              Describe your trading idea. The agent runs it.
+              Write how you want to trade. The agent follows it, hour by hour.
             </p>
             <ol className="space-y-3 mb-8 text-sm text-foreground/80">
               <li className="flex items-start gap-3">
-                <Hash className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-                <span><span className="text-foreground font-medium">1.</span> Join the server</span>
-              </li>
-              <li className="flex items-start gap-3">
                 <MessageSquare className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-                <span><span className="text-foreground font-medium">2.</span> Talk to the agent</span>
+                <span><span className="text-foreground font-medium">1.</span> Write your trading instruction in plain language</span>
               </li>
               <li className="flex items-start gap-3">
                 <Bot className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-                <span><span className="text-foreground font-medium">3.</span> Get your backtest result</span>
+                <span><span className="text-foreground font-medium">2.</span> Pick a model and how much simulated cash it gets</span>
+              </li>
+              <li className="flex items-start gap-3">
+                <Hash className="w-4 h-4 text-primary mt-0.5 shrink-0" />
+                <span><span className="text-foreground font-medium">3.</span> Prefer chat? The same agent answers on Discord</span>
               </li>
             </ol>
             <Button
