@@ -3439,7 +3439,21 @@ function getAgentBacktestRunning(agentId) {
         clearAgentBacktestRunning(agentId);
         return null;
     }
-    return { ...entry, ...(liveBacktestProgress || {}), elapsedSeconds: Math.floor(elapsed) };
+    // Progress belongs to the run the poller is following, and ONLY to it.
+    // The map can transiently hold two entries: runBacktest() marks an agent
+    // running before its POST resolves (:5689, runId still null) and the
+    // backend rejects a second concurrent run, so clicking Run on an idle
+    // agent while another is genuinely in flight briefly leaves both marked.
+    // An unconditional spread would paint the running agent's step/percent/ETA
+    // onto a card whose launch is about to be refused. An entry with no runId
+    // yet is pre-confirmation and correctly renders indeterminate -- there is
+    // no progress to show that early anyway.
+    const ownsProgress = Boolean(liveBacktestRunId) && entry.runId === liveBacktestRunId;
+    return {
+        ...entry,
+        ...(ownsProgress && liveBacktestProgress ? liveBacktestProgress : {}),
+        elapsedSeconds: Math.floor(elapsed),
+    };
 }
 
 /** Latest polled progress for the single in-flight run.
@@ -5062,6 +5076,19 @@ function ensureBacktestPolling() {
 
             if (status.running) {
                 if (liveId) liveBacktestRunId = liveId;
+                const step = Number(status.progress?.step);
+                const total = Number(status.progress?.total_steps);
+                const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
+                    ? (100 * step / total)
+                    : null;
+                // Assigned BEFORE refreshRunningAgentCards() below, which reads
+                // it through getAgentBacktestRunning(). Painting first would
+                // show the previous tick's step on the card while the Backtest
+                // panel — fed the fresh step/total directly a few lines down —
+                // showed this tick's: two surfaces disagreeing by one poll.
+                liveBacktestProgress = Number.isFinite(step) && step > 0
+                    ? { step, totalSteps: total, updatedAt: Number(status.progress?.progress_updated_at) * 1000 || Date.now() }
+                    : null;
                 // Repaint the My Agents card even when the user is not on the
                 // Backtest tab — that page is now the landing page after launch.
                 // refreshRunningAgentCards() patches the elapsed timer in place
@@ -5069,14 +5096,6 @@ function ensureBacktestPolling() {
                 if (playgroundTab === 'agents' && currentPage === 'playground') {
                     refreshRunningAgentCards();
                 }
-                const step = Number(status.progress?.step);
-                const total = Number(status.progress?.total_steps);
-                const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
-                    ? (100 * step / total)
-                    : null;
-                liveBacktestProgress = Number.isFinite(step) && step > 0
-                    ? { step, totalSteps: total, updatedAt: Number(status.progress?.progress_updated_at) * 1000 || Date.now() }
-                    : null;
 
                 if (viewingLive) {
                     liveBacktestChartActive = true;

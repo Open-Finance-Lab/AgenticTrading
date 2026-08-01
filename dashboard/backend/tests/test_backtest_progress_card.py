@@ -221,6 +221,82 @@ def test_run_panel_falls_back_to_the_elapsed_guess():
     assert panel["width"] == "10%"  # 60 / 600
 
 
+def _resolve_entry(map_js: str, live_run_id: str, progress_js: str, agent: str) -> dict:
+    """Run the real getAgentBacktestRunning against a stubbed running map."""
+    script = "\n".join(
+        [
+            js_const("BACKTEST_POLL_MAX_SECONDS"),
+            f"const MAP = {map_js};",
+            "function readRunningBacktests() { return MAP; }",
+            "function clearAgentBacktestRunning(id) { delete MAP[id]; }",
+            f"let liveBacktestRunId = {live_run_id};",
+            f"let liveBacktestProgress = {progress_js};",
+            fn_body("function getAgentBacktestRunning("),
+            f"console.log(JSON.stringify(getAgentBacktestRunning('{agent}')));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+_TWO_AGENTS = (
+    "{'agent-A': {runId: 'run-1', startedAt: Date.now() - 185000},"
+    " 'agent-B': {runId: null, startedAt: Date.now() - 500}}"
+)
+_PROGRESS = "{step: 45, totalSteps: 50, updatedAt: Date.now()}"
+
+
+def test_progress_reaches_the_agent_whose_run_is_live():
+    entry = _resolve_entry(_TWO_AGENTS, "'run-1'", _PROGRESS, "agent-A")
+    assert entry["step"] == 45
+    assert entry["totalSteps"] == 50
+
+
+def test_progress_does_not_bleed_onto_an_unconfirmed_launch():
+    """runBacktest() marks an agent running BEFORE its POST resolves, and the
+    backend refuses a second concurrent run. So clicking Run on an idle agent
+    while another is genuinely in flight leaves both in the map for one
+    round-trip. An unconditional spread painted the live agent's 45/50 (90%,
+    "<1m left") onto a card whose launch was about to be rejected.
+    """
+    entry = _resolve_entry(_TWO_AGENTS, "'run-1'", _PROGRESS, "agent-B")
+    assert entry.get("step") is None
+    assert entry.get("totalSteps") is None
+    assert entry["runId"] is None
+    # It is still "running" -- just indeterminate, which is honest here.
+    assert entry["elapsedSeconds"] >= 0
+
+
+def test_progress_is_withheld_when_no_run_is_identified():
+    """Without a live run id nothing can be attributed, so attribute nothing
+    rather than guessing -- an indeterminate bar beats a wrong percentage."""
+    entry = _resolve_entry(_TWO_AGENTS, "null", _PROGRESS, "agent-A")
+    assert entry.get("step") is None
+
+
+def test_progress_store_is_written_before_the_card_repaints():
+    """Same poll response, two surfaces. refreshRunningAgentCards() reads
+    liveBacktestProgress via getAgentBacktestRunning; the Backtest panel is
+    handed the fresh step/total directly. Repainting before the assignment made
+    the card show the previous tick's numbers while the panel showed this
+    tick's -- deterministic every tick, not a race.
+    """
+    poller = fn_body("function ensureBacktestPolling(")
+    running_branch = poller[poller.index("if (status.running) {") :]
+    # Comments stripped first: the explanatory comment above the assignment
+    # names refreshRunningAgentCards(), so a raw text search finds the *comment*
+    # earlier than the assignment and reports correct code as broken.
+    code = "\n".join(
+        line for line in running_branch.splitlines() if not line.lstrip().startswith("//")
+    )
+    assert code.index("liveBacktestProgress =") < code.index(
+        "refreshRunningAgentCards()"
+    ), "liveBacktestProgress must be assigned before the card repaints"
+
+
 def test_timeout_branch_clears_the_running_map_and_the_progress_store():
     """The leak that makes one run render another run's numbers.
 
