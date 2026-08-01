@@ -4676,6 +4676,44 @@ function formatBacktestElapsed(seconds) {
     return `${minutes}:${String(secs).padStart(2, '0')}`;
 }
 
+/** A progress file older than this is reported as stale (seconds). */
+const BACKTEST_STALE_SECONDS = 120;
+
+/**
+ * Coarse remaining-time estimate, or null when no honest one exists.
+ *
+ * Suppressed below step 3: the first estimates swing wildly, and a number that
+ * visibly jumps reads as broken. Coarse buckets thereafter -- a precise-looking
+ * ETA that drifts is worse than an obviously approximate one.
+ */
+function formatBacktestEta(elapsedSeconds, step, totalSteps) {
+    const elapsed = Number(elapsedSeconds);
+    const done = Number(step);
+    const total = Number(totalSteps);
+    if (!Number.isFinite(elapsed) || elapsed <= 0) return null;
+    if (!Number.isFinite(done) || !Number.isFinite(total)) return null;
+    if (total <= 0 || done < 3 || done >= total) return null;
+    const remaining = (elapsed / done) * (total - done);
+    if (!Number.isFinite(remaining) || remaining <= 0) return null;
+    if (remaining < 60) return '<1m left';
+    return `~${Math.round(remaining / 60)}m left`;
+}
+
+/**
+ * Staleness notice, or null while progress is fresh.
+ *
+ * Reports the *actual* gap, never the threshold: a message frozen at "2m" while
+ * the real gap grows to ten actively misinforms. Deliberately does not say
+ * "stuck" -- we know the file is old, not that the run died, and a long model
+ * step looks exactly like this.
+ */
+function formatProgressStaleness(secondsSinceUpdate) {
+    const gap = Number(secondsSinceUpdate);
+    if (!Number.isFinite(gap) || gap < BACKTEST_STALE_SECONDS) return null;
+    const minutes = Math.floor(gap / 60);
+    return `No progress for ${minutes}m — long model steps can do this.`;
+}
+
 function showBacktestRunProgress(show, { isError = false } = {}) {
     const panel = document.getElementById('backtestRunProgress');
     if (!panel) return;
