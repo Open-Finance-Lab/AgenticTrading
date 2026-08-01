@@ -1819,6 +1819,29 @@ function closeCreateExternalAgentModal() {
   if (modal) modal.hidden = true;
 }
 
+/**
+ * Lock a submit button and say what it is doing.
+ *
+ * disabled alone is nearly invisible in this theme, which is why a create that
+ * already set it still read as a dead click.
+ */
+function setButtonPending(btn, label) {
+  if (!btn) return;
+  if (btn.dataset.idleLabel === undefined) btn.dataset.idleLabel = btn.textContent;
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  btn.classList.add('is-pending');
+  btn.textContent = label;
+}
+
+function restoreButton(btn) {
+  if (!btn) return;
+  btn.disabled = false;
+  btn.removeAttribute('aria-busy');
+  btn.classList.remove('is-pending');
+  if (btn.dataset.idleLabel !== undefined) btn.textContent = btn.dataset.idleLabel;
+}
+
 function openCreateBuiltinAgentModal() {
   closeAddAgentModal();
   const modal = document.getElementById('createBuiltinAgentModal');
@@ -1860,7 +1883,7 @@ async function submitCreateBuiltinAgent(event) {
   }
 
   if (errorEl) errorEl.hidden = true;
-  if (submitBtn) submitBtn.disabled = true;
+  setButtonPending(submitBtn, 'Creating…');
 
   try {
     const data = await API.post(`${API_BASE}/api/v1/agents`, {
@@ -1870,16 +1893,20 @@ async function submitCreateBuiltinAgent(event) {
       description,
       cash_allocation,
     });
+    // Confirm on the POST result, not after loadAgents(): that is a second
+    // round trip, and gating the toast on it reinstates most of the delay.
     closeCreateBuiltinAgentModal();
+    showAppToast(`"${name}" created`);
     if (data.agent) applyActiveAgent(data.agent);
     await loadAgents();
+    if (data.agent) highlightAgentCard(data.agent.agent_id);
   } catch (error) {
     if (errorEl) {
       errorEl.textContent = error.message;
       errorEl.hidden = false;
     }
   } finally {
-    if (submitBtn) submitBtn.disabled = false;
+    restoreButton(submitBtn);
   }
 }
 

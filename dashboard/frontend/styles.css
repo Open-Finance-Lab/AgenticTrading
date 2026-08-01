@@ -9426,3 +9426,28 @@ body.agent-editor-open {
 @media (prefers-reduced-motion: reduce) {
     .app-toast { transition: none; transform: translate(-50%, 0); }
 }
+
+/* Pending submit buttons — disabled alone is nearly invisible in this theme. */
+.auth-submit-btn.is-pending {
+    opacity: 0.75;
+    cursor: progress;
+}
+
+.auth-submit-btn.is-pending::before {
+    content: '';
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 8px;
+    vertical-align: -1px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: app-btn-spin 640ms linear infinite;
+}
+
+@keyframes app-btn-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+    .auth-submit-btn.is-pending::before { animation: none; }
+}
