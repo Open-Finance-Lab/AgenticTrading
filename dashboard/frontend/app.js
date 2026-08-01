@@ -136,27 +136,38 @@ function formatTokenCount(value) {
 
 let appToastTimer = null;
 
+const APP_TOAST_VISIBLE_MS = 4000;
+const APP_TOAST_FADE_MS = 240;
+
 /**
  * Non-blocking confirmation channel for /app.
  *
  * The pre-existing convention here is alert(), which is modal: acceptable for a
  * launch-time refusal the user must acknowledge, wrong for a success they only
  * need to notice. Text (not innerHTML) -- callers pass agent names.
+ *
+ * The container is never `hidden`, and this function must never set it. `hidden`
+ * is display:none, which takes the node out of the render tree, and a live
+ * region is only monitored for mutations while it is rendered -- so writing the
+ * message first and unhiding after (the obvious order) announces nothing on the
+ * screen readers this role="status" exists for. .app-toast hides itself with
+ * opacity + pointer-events, so `hidden` was buying no visual behaviour either.
+ * Emptying the text on the way out is what replaces it: the region stays
+ * registered from page load, and no stale message is left for a browsing user.
  */
-function showAppToast(message, { variant = 'success', timeoutMs = 4000 } = {}) {
+function showAppToast(message) {
   const el = document.getElementById('appToast');
   if (!el) return;
-  el.textContent = String(message);
-  el.className = `app-toast app-toast--${variant}`;
-  el.hidden = false;
+  el.classList.remove('is-visible');
   // Force a reflow so re-showing an already-visible toast replays the transition.
   void el.offsetWidth;
+  el.textContent = String(message);
   el.classList.add('is-visible');
   if (appToastTimer) clearTimeout(appToastTimer);
   appToastTimer = setTimeout(() => {
     el.classList.remove('is-visible');
-    appToastTimer = setTimeout(() => { el.hidden = true; }, 240);
-  }, timeoutMs);
+    appToastTimer = setTimeout(() => { el.textContent = ''; }, APP_TOAST_FADE_MS);
+  }, APP_TOAST_VISIBLE_MS);
 }
 
 // ============================================================================
@@ -1992,21 +2003,25 @@ async function submitCreateExternalAgent(event) {
   }
 
   if (errorEl) errorEl.hidden = true;
-  if (submitBtn) submitBtn.disabled = true;
+  setButtonPending(submitBtn, 'Creating…');
 
   try {
     const data = await API.post(`${API_BASE}/api/v1/agents`, { name, model_name, cash_allocation });
+    // Same POST, same round trip as the built-in flow, so the same rule: confirm
+    // on the response. The API key is shown once and exists only in this
+    // response, so gating it on loadAgents() delays the one thing the user has
+    // to copy before it is unrecoverable.
     closeCreateExternalAgentModal();
+    showAgentCredentials(data.api_key);
     applyActiveAgent(data.agent);
     await loadAgents();
-    showAgentCredentials(data.api_key);
   } catch (error) {
     if (errorEl) {
       errorEl.textContent = error.message;
       errorEl.hidden = false;
     }
   } finally {
-    if (submitBtn) submitBtn.disabled = false;
+    restoreButton(submitBtn);
   }
 }
 
