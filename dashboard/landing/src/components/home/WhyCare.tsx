@@ -1,0 +1,100 @@
+import { MessageSquare, LineChart, Trophy, Cpu, Code2, Hash } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { PRIMARY_LANDING_CTA } from "@/lib/cta";
+
+const ACTS = [
+  {
+    label: "01",
+    icon: MessageSquare,
+    title: "Describe it in plain English",
+    body: "No code, no formulas. Write how you want to trade the way you would explain it to a person.",
+  },
+  {
+    label: "02",
+    icon: LineChart,
+    title: "Prove it on real market data",
+    body: "Real prices, real market hours, measured against buy-and-hold and the index — so you learn whether the idea was good, not whether it felt good.",
+  },
+  {
+    label: "03",
+    icon: Trophy,
+    title: "See how it ranks",
+    body: "Same window, same rules as everyone else's agents.",
+  },
+] as const;
+
+const EXTRAS = [
+  {
+    icon: Cpu,
+    title: "Pick the model",
+    body: "Same idea, different brains: Claude, GPT, Gemini, DeepSeek, Qwen.",
+  },
+  {
+    icon: Code2,
+    title: "Bring your own agent",
+    body: "A Python SDK and an API, if you would rather write the code.",
+  },
+  {
+    icon: Hash,
+    title: "Talk to it on Discord",
+    body: "If you would rather just chat.",
+  },
+] as const;
+
+export function WhyCare() {
+  return (
+    <section id="why" className="py-24 scroll-mt-40">
+      {/* Hero's scroll target — moved here from Talk so the first scroll lands
+          on the value proposition rather than past it. Hero.tsx still anchors
+          to #landing-stats; do not rename without updating it. */}
+      <div id="landing-stats" className="h-0 w-0 overflow-hidden" aria-hidden="true" />
+
+      <div className="container mx-auto px-6">
+        <div className="max-w-3xl mb-14">
+          <h2 className="text-3xl md:text-4xl font-bold mb-4 tracking-tight">
+            You have an idea about the market.
+            <span className="block text-[#22d3ee]">Testing it properly is the expensive part.</span>
+          </h2>
+          <p className="text-foreground/80 text-lg">
+            Normally that means writing code, buying data, and waiting months to find out you
+            were wrong. Here it costs one sentence and a few minutes.
+          </p>
+        </div>
+
+        <div className="grid md:grid-cols-3 gap-8 mb-16">
+          {ACTS.map(({ label, icon: Icon, title, body }) => (
+            <div key={label}>
+              <p className="text-sm font-mono tracking-wide text-primary mb-3">{label}</p>
+              <Icon className="w-6 h-6 text-primary mb-3" aria-hidden="true" />
+              <h3 className="text-lg font-bold mb-2">{title}</h3>
+              <p className="text-sm text-foreground/70 leading-relaxed">{body}</p>
+            </div>
+          ))}
+        </div>
+
+        <div className="grid sm:grid-cols-3 gap-6 pt-10 border-t border-border">
+          {EXTRAS.map(({ icon: Icon, title, body }) => (
+            <div key={title} className="flex gap-3">
+              <Icon className="w-5 h-5 text-primary shrink-0 mt-0.5" aria-hidden="true" />
+              <div>
+                <h4 className="text-sm font-semibold text-foreground mb-1">{title}</h4>
+                <p className="text-sm text-foreground/60 leading-relaxed">{body}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mt-14">
+          <Button
+            size="lg"
+            type="button"
+            data-landing-auth={PRIMARY_LANDING_CTA.authMode}
+            className="bg-primary text-primary-foreground hover:bg-primary/90 text-base h-12 px-8"
+          >
+            {PRIMARY_LANDING_CTA.label}
+          </Button>
+        </div>
+      </div>
+    </section>
+  );
+}

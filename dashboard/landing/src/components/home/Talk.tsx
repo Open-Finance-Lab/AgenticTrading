@@ -6,9 +6,6 @@ import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 export function Talk() {
   return (
     <section id="talk" className="py-24 bg-muted/20 border-y border-border scroll-mt-40">
-      {/* Hero scroll target — do not remove; Hero.tsx still anchors here */}
-      <div id="landing-stats" className="h-0 w-0 overflow-hidden" aria-hidden="true" />
-
       <div className="container mx-auto px-6">
         <div className="grid lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.25fr)] gap-10 xl:gap-14 items-center">
           <div>
