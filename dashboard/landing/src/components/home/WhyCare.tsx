@@ -2,21 +2,20 @@ import { MessageSquare, LineChart, Trophy, Cpu, Code2, Hash } from "lucide-react
 import { Button } from "@/components/ui/button";
 import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 
+/** Unnumbered on purpose: Talk/Test/Race below run the 01/02/03 sequence, and a
+ *  second one here made the summary compete with the narrative it introduces. */
 const ACTS = [
   {
-    label: "01",
     icon: MessageSquare,
     title: "Describe it in plain English",
     body: "No code, no formulas. Write how you want to trade the way you would explain it to a person.",
   },
   {
-    label: "02",
     icon: LineChart,
     title: "Prove it on real market data",
     body: "Real prices, real market hours, measured against buy-and-hold and the index — so you learn whether the idea was good, not whether it felt good.",
   },
   {
-    label: "03",
     icon: Trophy,
     title: "See how it ranks",
     body: "Same window, same rules as everyone else's agents.",
@@ -46,8 +45,13 @@ export function WhyCare() {
     <section id="why" className="py-24 scroll-mt-40">
       {/* Hero's scroll target — moved here from Talk so the first scroll lands
           on the value proposition rather than past it. Hero.tsx still anchors
-          to #landing-stats; do not rename without updating it. */}
-      <div id="landing-stats" className="h-0 w-0 overflow-hidden" aria-hidden="true" />
+          to #landing-stats; do not rename without updating it.
+
+          scroll-mt-40 is NOT redundant with the section's: scroll-margin is
+          read off the element scrollIntoView() targets and is not inherited,
+          so without it here the headline parks under the fixed .landing-chrome
+          (120px). Deleting it as a duplicate reintroduces that. */}
+      <div id="landing-stats" className="h-0 w-0 overflow-hidden scroll-mt-40" aria-hidden="true" />
 
       <div className="container mx-auto px-6">
         <div className="max-w-3xl mb-14">
@@ -62,9 +66,8 @@ export function WhyCare() {
         </div>
 
         <div className="grid md:grid-cols-3 gap-8 mb-16">
-          {ACTS.map(({ label, icon: Icon, title, body }) => (
-            <div key={label}>
-              <p className="text-sm font-mono tracking-wide text-primary mb-3">{label}</p>
+          {ACTS.map(({ icon: Icon, title, body }) => (
+            <div key={title}>
               <Icon className="w-6 h-6 text-primary mb-3" aria-hidden="true" />
               <h3 className="text-lg font-bold mb-2">{title}</h3>
               <p className="text-sm text-foreground/70 leading-relaxed">{body}</p>

@@ -10,11 +10,17 @@ false. docs/source/lab/operating_modes.rst says the same. Copy that promises
 either would be the fabricated-Performance-Drivers failure again.
 """
 
+import re
 from pathlib import Path
 
 _LANDING_SRC = Path(__file__).resolve().parents[2] / "landing" / "src"
 _BAND = _LANDING_SRC / "components" / "home" / "WhyCare.tsx"
 _PAGE = _LANDING_SRC / "pages" / "landing-page.tsx"
+_INDEX_CSS = _LANDING_SRC / "index.css"
+_NAVBAR = _LANDING_SRC / "components" / "home" / "Navbar.tsx"
+
+#: Tailwind's spacing scale is 0.25rem per unit, so `scroll-mt-40` == 160px.
+_TAILWIND_UNIT_PX = 4
 
 
 def test_band_component_exists():
@@ -56,15 +62,24 @@ def test_band_names_the_uncovered_capabilities():
 
 
 def test_band_makes_no_paper_trading_claim():
+    """Matched as a pattern, not a literal list.
+
+    The first cut pinned "paper trading" and "paper-trade", which let the most
+    natural singular -- "paper trade" -- straight through. A guard whose only
+    job is intercepting one phrase has to cover the phrase's whole inflection,
+    or it reads as coverage it does not have.
+    """
     body = _BAND.read_text(encoding="utf-8").lower()
-    assert "paper trading" not in body
-    assert "paper-trade" not in body
+    hit = re.search(r"paper[\s\-]?trad", body)
+    assert hit is None, f"band claims paper trading: {hit.group(0)!r}"
 
 
 def test_band_makes_no_real_capital_claim():
+    """Same reasoning as the paper-trading guard: shapes, not a phrase list."""
     body = _BAND.read_text(encoding="utf-8").lower()
-    for phrase in ("real capital", "real money", "go live", "trade live"):
-        assert phrase not in body
+    for pattern in (r"real (capital|money|cash|funds|dollars)", r"go live", r"trade live", r"live trading"):
+        hit = re.search(pattern, body)
+        assert hit is None, f"band claims real capital: {hit.group(0)!r}"
 
 
 def test_hero_scroll_anchor_still_resolves():
@@ -74,6 +89,52 @@ def test_hero_scroll_anchor_still_resolves():
     total = sum(s.count('id="landing-stats"') for s in sources)
     assert total == 1, f"expected exactly one #landing-stats anchor, found {total}"
     assert 'id="landing-stats"' in _BAND.read_text(encoding="utf-8")
+
+
+def test_hero_scroll_anchor_clears_the_fixed_chrome():
+    """Resolving to one element is not the same as landing somewhere readable.
+
+    `scroll-margin` applies to the element `scrollIntoView()` targets, not to
+    its ancestors -- it is not inherited. The section's own `scroll-mt-40` does
+    nothing for Hero's gesture, which targets the zero-height #landing-stats
+    div *inside* it; a bare div's scroll-margin-top is 0, so the band parks at
+    viewport y=0, under the fixed `.landing-chrome`. Measured before the fix:
+    80 of 80 headline px hidden at 1440x900, 123 of 144 at 390x844.
+
+    Strictly greater, not >=: --landing-chrome-height is a rounded proxy (its
+    own comment says the real stack is ~118px) and the chrome measures 122.5px
+    with its border, so a scroll margin equal to the declared value still
+    clips.
+
+    Anchored on the id rather than pinned as a whole tag, so reordering classes
+    or attributes cannot silently pass this.
+    """
+    body = _BAND.read_text(encoding="utf-8")
+    tag = body[body.index('<div id="landing-stats"') :].split(">")[0]
+    scroll_mt = re.search(r"scroll-mt-(\d+)", tag)
+    assert scroll_mt, f"#landing-stats needs a scroll-mt-* class or Hero's scroll hides the band: {tag}"
+
+    declared = re.search(r"--landing-chrome-height:\s*(\d+)px", _INDEX_CSS.read_text(encoding="utf-8"))
+    assert declared, "--landing-chrome-height moved; this guard no longer measures anything"
+    margin_px = int(scroll_mt.group(1)) * _TAILWIND_UNIT_PX
+    chrome_px = int(declared.group(1))
+    assert margin_px > chrome_px, f"anchor clears only {margin_px}px of {chrome_px}px chrome"
+
+
+def test_band_is_reachable_from_the_navbar():
+    """An id nothing links to is decorative. Talk/Test/Race each have a nav
+    entry; the band that introduces them shipped without one."""
+    body = _NAVBAR.read_text(encoding="utf-8")
+    assert 'href: "#why"' in body, "the band's id has no referrer"
+    assert body.index('href: "#why"') < body.index('href: "#talk"'), "nav order should match page order"
+
+
+def test_band_runs_no_second_step_sequence():
+    """Talk/Test/Race own the 01/02/03 mono-labels. The band summarising them
+    shipped its own 01/02/03, so one page ran two numbered sequences -- the
+    summary competing with the narrative instead of leading into it."""
+    stray = re.findall(r'"0[1-9]"', _BAND.read_text(encoding="utf-8"))
+    assert not stray, f"band declares its own step numbers: {stray}"
 
 
 _TALK = _LANDING_SRC / "components" / "home" / "Talk.tsx"

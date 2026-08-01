@@ -3,6 +3,7 @@ import atlLogo from "@assets/atltransparent.png";
 import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 
 const NAV_LINKS = [
+  { href: "#why", label: "Why" },
   { href: "#talk", label: "Talk" },
   { href: "#test", label: "Test" },
   { href: "#race", label: "Race" },
