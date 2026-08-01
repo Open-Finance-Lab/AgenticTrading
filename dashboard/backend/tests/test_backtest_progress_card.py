@@ -221,6 +221,27 @@ def test_run_panel_falls_back_to_the_elapsed_guess():
     assert panel["width"] == "10%"  # 60 / 600
 
 
+def test_timeout_branch_clears_the_running_map_and_the_progress_store():
+    """The leak that makes one run render another run's numbers.
+
+    `liveBacktestProgress` is a single global spread into *every* entry of the
+    running map. The finished branch has always cleared that map; the 10-minute
+    timeout branch never did. Before this change an orphaned entry only showed a
+    stale elapsed timer -- now it would render the NEXT run's step, percent and
+    ETA until `getAgentBacktestRunning`'s 600s expiry caught it.
+
+    Guarded by source slice rather than execution: reaching the branch takes 600
+    poll ticks. Scoped to the branch itself, because both statements also appear
+    in the finished branch a few lines above -- a whole-function search would
+    pass with the timeout branch completely untouched.
+    """
+    poller = fn_body("function ensureBacktestPolling(")
+    start = poller.index("if (attempts >= maxAttempts) {")
+    branch = poller[start : poller.index("\n        } catch (error) {", start)]
+    assert "clearAgentBacktestRunning" in branch, branch
+    assert "liveBacktestProgress = null" in branch, branch
+
+
 def test_live_poll_passes_the_progress_fields_to_the_panel():
     """The helpers only matter if the live call site actually supplies step,
     totalSteps and updatedAt; every other call site correctly omits them."""
