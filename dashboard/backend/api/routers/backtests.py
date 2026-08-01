@@ -322,7 +322,14 @@ backtest_session_id = None  # Track which session owns the running backtest
 
 
 def _read_backtest_progress() -> Optional[Dict[str, Any]]:
-    """Load incremental equity snapshots written by the backtest subprocess."""
+    """Load incremental equity snapshots written by the backtest subprocess.
+
+    ``progress_updated_at`` is the file's mtime, not a field the writer emits:
+    it answers "are these numbers current?", which the payload alone cannot.
+    stat() and read_text() are separate syscalls, so a file rewritten between
+    them yields an mtime marginally older than the payload -- immaterial against
+    a 120s staleness threshold, and not worth a lock to avoid.
+    """
     progress_file = backtest_status.get("progress_file")
     if not progress_file:
         return None
@@ -330,10 +337,13 @@ def _read_backtest_progress() -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
     try:
+        updated_at = path.stat().st_mtime
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    return {**payload, "progress_updated_at": updated_at}
 
 def run_backtest_background(
     start_date: str,
