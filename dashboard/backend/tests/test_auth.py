@@ -24,8 +24,14 @@ def temp_user_store():
 @pytest.fixture
 def client(temp_user_store, monkeypatch):
     from dashboard.backend import users
+    from dashboard.backend.api import auth as auth_api
 
     monkeypatch.setattr(users, "user_store", temp_user_store)
+    # Module-level limiters retain state across tests in this process.
+    auth_api._LOGIN_IP_LIMITER.reset()
+    auth_api._LOGIN_EMAIL_LIMITER.reset()
+    auth_api._SIGNUP_IP_LIMITER.reset()
+    auth_api._SIGNUP_EMAIL_LIMITER.reset()
     return TestClient(app)
 
 
@@ -99,6 +105,33 @@ def test_login_invalid_password(client):
         json={"email": "bob@example.com", "password": "wrong-password"},
     )
     assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid email or password."
+
+
+def test_login_unknown_email_uses_same_generic_error(client):
+    """Do not reveal whether an address is registered."""
+    known = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "known@example.com",
+            "display_name": "Known",
+            "password": "securepass1",
+        },
+    )
+    assert known.status_code == 200
+    wrong_password = client.post(
+        "/api/auth/login",
+        json={"email": "known@example.com", "password": "not-the-password"},
+    )
+    unknown = client.post(
+        "/api/auth/login",
+        json={"email": "nobody@example.com", "password": "securepass1"},
+    )
+    assert wrong_password.status_code == 401
+    assert unknown.status_code == 401
+    assert wrong_password.json()["detail"] == unknown.json()["detail"] == (
+        "Invalid email or password."
+    )
 
 
 def test_signup_rejects_common_password(client):
@@ -1212,3 +1245,173 @@ def test_changing_the_password_cancels_a_pending_email_change(client, sent_email
     assert password_change.status_code == 200
 
     assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is False
+
+
+# --- Login / signup rate limits -------------------------------------------------
+
+
+@pytest.fixture
+def auth_rate_limit_clock(monkeypatch):
+    """Deterministic clock + tiny limits for auth rate-limit tests."""
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = [1000.0]
+
+    def clock() -> float:
+        return now[0]
+
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=5, window_seconds=60, clock=clock),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=3, window_seconds=60, clock=clock),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=2, window_seconds=60, clock=clock),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=2, window_seconds=60, clock=clock),
+    )
+    return now
+
+
+def test_login_ip_rate_limit_returns_429(client, auth_rate_limit_clock, monkeypatch):
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = auth_rate_limit_clock
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+    assert (
+        client.post(
+            "/api/auth/signup",
+            json={
+                "email": "rate-ip@example.com",
+                "display_name": "Rate",
+                "password": "securepass1",
+            },
+        ).status_code
+        == 200
+    )
+    for _ in range(5):
+        resp = client.post(
+            "/api/auth/login",
+            json={"email": "rate-ip@example.com", "password": "wrong"},
+        )
+        assert resp.status_code == 401, resp.text
+
+    blocked = client.post(
+        "/api/auth/login",
+        json={"email": "rate-ip@example.com", "password": "wrong"},
+    )
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+    assert int(blocked.headers["Retry-After"]) >= 1
+
+
+def test_login_email_rate_limit_after_failures(client, auth_rate_limit_clock, monkeypatch):
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = auth_rate_limit_clock
+    # Generous IP budget so only the per-email failure counter trips.
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "rate-email@example.com",
+            "display_name": "Rate",
+            "password": "securepass1",
+        },
+    )
+    for _ in range(3):
+        resp = client.post(
+            "/api/auth/login",
+            json={"email": "rate-email@example.com", "password": "wrong"},
+        )
+        assert resp.status_code == 401, resp.text
+
+    blocked = client.post(
+        "/api/auth/login",
+        json={"email": "rate-email@example.com", "password": "wrong"},
+    )
+    assert blocked.status_code == 429
+    assert int(blocked.headers["Retry-After"]) >= 1
+
+    # Correct password still works: the email counter only meters *failures*
+    # so an attacker cannot lock the account out of a legitimate login.
+    ok = client.post(
+        "/api/auth/login",
+        json={"email": "rate-email@example.com", "password": "securepass1"},
+    )
+    assert ok.status_code == 200, ok.text
+
+    now[0] += 61
+    # After the window, wrong passwords are accepted into the failure budget again.
+    again = client.post(
+        "/api/auth/login",
+        json={"email": "rate-email@example.com", "password": "wrong"},
+    )
+    assert again.status_code == 401
+
+
+def test_signup_ip_rate_limit_returns_429(client, auth_rate_limit_clock):
+    assert (
+        client.post(
+            "/api/auth/signup",
+            json={
+                "email": "su1@example.com",
+                "display_name": "One",
+                "password": "securepass1",
+            },
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/auth/signup",
+            json={
+                "email": "su2@example.com",
+                "display_name": "Two",
+                "password": "securepass1",
+            },
+        ).status_code
+        == 200
+    )
+    blocked = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "su3@example.com",
+            "display_name": "Three",
+            "password": "securepass1",
+        },
+    )
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers

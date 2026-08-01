@@ -8,11 +8,12 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from dashboard.backend.api import discord_oauth
+from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
 from dashboard.backend.infrastructure.email import sender as email_sender
@@ -29,6 +30,55 @@ from dashboard.backend.verification_codes import generate_code, hash_code
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Generic copy for failed logins — never reveal whether the email is registered.
+LOGIN_FAILURE_DETAIL = "Invalid email or password."
+
+# Best-effort in-process limits (see rate_limit.py). Tunable via env; defaults
+# bound naive password guessing without permanently locking an account.
+def _env_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 1 else default
+
+
+_LOGIN_IP_LIMITER = FixedWindowRateLimiter(
+    max_events=_env_int("AUTH_LOGIN_IP_MAX", 30),
+    window_seconds=float(_env_int("AUTH_LOGIN_IP_WINDOW_SECONDS", 900)),
+)
+_LOGIN_EMAIL_LIMITER = FixedWindowRateLimiter(
+    max_events=_env_int("AUTH_LOGIN_EMAIL_MAX", 10),
+    window_seconds=float(_env_int("AUTH_LOGIN_EMAIL_WINDOW_SECONDS", 900)),
+)
+_SIGNUP_IP_LIMITER = FixedWindowRateLimiter(
+    max_events=_env_int("AUTH_SIGNUP_IP_MAX", 10),
+    window_seconds=float(_env_int("AUTH_SIGNUP_IP_WINDOW_SECONDS", 3600)),
+)
+_SIGNUP_EMAIL_LIMITER = FixedWindowRateLimiter(
+    max_events=_env_int("AUTH_SIGNUP_EMAIL_MAX", 5),
+    window_seconds=float(_env_int("AUTH_SIGNUP_EMAIL_WINDOW_SECONDS", 3600)),
+)
+
+
+def _auth_rate_limited(limiter: FixedWindowRateLimiter, key: str, detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=429,
+        detail=detail,
+        headers={"Retry-After": str(limiter.retry_after_seconds(key))},
+    )
+
+
+def _login_ip_key(request: Request) -> str:
+    return f"login:{client_key(request)}"
+
+
+def _signup_ip_key(request: Request) -> str:
+    return f"signup:{client_key(request)}"
 
 
 def _app_redirect(query: dict[str, str]) -> RedirectResponse:
@@ -159,7 +209,22 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> dic
 
 
 @router.post("/signup", response_model=AuthResponse)
-async def signup(payload: SignupRequest):
+async def signup(payload: SignupRequest, request: Request):
+    ip_key = _signup_ip_key(request)
+    if not _SIGNUP_IP_LIMITER.allow(ip_key):
+        raise _auth_rate_limited(
+            _SIGNUP_IP_LIMITER,
+            ip_key,
+            "Too many signup attempts from this network; please try again later.",
+        )
+    email_key = f"signup:email:{payload.email}"
+    if not _SIGNUP_EMAIL_LIMITER.allow(email_key):
+        raise _auth_rate_limited(
+            _SIGNUP_EMAIL_LIMITER,
+            email_key,
+            "Too many signup attempts for this email; please try again later.",
+        )
+
     violations = validate_new_password(payload.password, payload.email)
     if violations:
         raise HTTPException(status_code=400, detail=" ".join(violations))
@@ -172,6 +237,11 @@ async def signup(payload: SignupRequest):
         )
     except ValueError as exc:
         if str(exc) == "email_already_registered":
+            # Keep 409 for product UX, but do not log the password / token.
+            logger.info(
+                "auth.signup_conflict",
+                extra={"email_domain": payload.email.rsplit("@", 1)[-1]},
+            )
             raise HTTPException(status_code=409, detail="Email is already registered") from exc
         raise
 
@@ -180,10 +250,40 @@ async def signup(payload: SignupRequest):
 
 
 @router.post("/login", response_model=AuthResponse)
-async def login(payload: LoginRequest):
+async def login(payload: LoginRequest, request: Request):
+    ip_key = _login_ip_key(request)
+    if not _LOGIN_IP_LIMITER.allow(ip_key):
+        logger.info("auth.login_rate_limited", extra={"scope": "ip"})
+        raise _auth_rate_limited(
+            _LOGIN_IP_LIMITER,
+            ip_key,
+            "Too many login attempts; please try again later.",
+        )
+
     user = users_module.user_store.authenticate(payload.email, payload.password)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        email_key = f"login:email:{payload.email}"
+        # Count only failures against the per-email budget so a successful
+        # login is not blocked by an attacker's prior guesses — but repeated
+        # failures still earn a temporary cooldown (not a permanent lockout).
+        if not _LOGIN_EMAIL_LIMITER.allow(email_key):
+            logger.info(
+                "auth.login_rate_limited",
+                extra={
+                    "scope": "email",
+                    "email_domain": payload.email.rsplit("@", 1)[-1],
+                },
+            )
+            raise _auth_rate_limited(
+                _LOGIN_EMAIL_LIMITER,
+                email_key,
+                "Too many login attempts; please try again later.",
+            )
+        logger.info(
+            "auth.login_failed",
+            extra={"email_domain": payload.email.rsplit("@", 1)[-1]},
+        )
+        raise HTTPException(status_code=401, detail=LOGIN_FAILURE_DETAIL)
 
     token = users_module.user_store.create_session(user["id"])
     return {"user": public_user(user), "token": token}

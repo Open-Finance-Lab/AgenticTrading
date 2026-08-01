@@ -15,6 +15,7 @@ auth. Endpoints that need real protection must add authentication.
 
 from __future__ import annotations
 
+import math
 import time
 from collections import deque
 from typing import Callable, Deque, Dict
@@ -83,6 +84,19 @@ class FixedWindowRateLimiter:
     def reset(self) -> None:
         """Clear all state (used by tests and between logical sessions)."""
         self._events.clear()
+
+    def retry_after_seconds(self, key: str) -> int:
+        """Seconds until ``key`` can pass ``allow`` again (at least 1).
+
+        Uses the oldest recorded event: once it ages out of the window the
+        client recovers one slot. Empty / unknown keys fall back to the full
+        window width.
+        """
+        q = self._events.get(key)
+        if not q:
+            return max(1, int(math.ceil(self.window_seconds)))
+        remaining = q[0] + self.window_seconds - self._clock()
+        return max(1, int(math.ceil(remaining)))
 
 
 def client_key(request: Request) -> str:
