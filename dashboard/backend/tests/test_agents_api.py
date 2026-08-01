@@ -6,6 +6,8 @@ import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
+
 from dashboard.backend.app import app
 from dashboard.backend.domain.agents.credential_store import AgentCredentialStore
 
@@ -214,7 +216,8 @@ def test_claim_account_links_browser_agents(client):
         },
     )
     assert signup.status_code == 200
-    token = signup.json()["token"]
+    assert "token" not in signup.json()
+    token = _cookie_session_token(client)
     auth_headers = {
         **anon_headers,
         "Authorization": f"Bearer {token}",
@@ -258,7 +261,8 @@ def test_signed_in_list_includes_unclaimed_browser_foundation_agent(client):
         },
     )
     assert signup.status_code == 200
-    token = signup.json()["token"]
+    assert "token" not in signup.json()
+    token = _cookie_session_token(client)
     auth_headers = {
         **anon_headers,
         "Authorization": f"Bearer {token}",

@@ -13,6 +13,14 @@ from fastapi.testclient import TestClient
 from dashboard.backend.app import app
 from dashboard.backend.users import UserStore
 
+def _session_token(client) -> str:
+    """Raw session token from the HttpOnly cookie set by login/signup."""
+    from dashboard.backend.auth_cookies import session_cookie_name
+    token = client.cookies.get(session_cookie_name())
+    assert token, f"missing session cookie {session_cookie_name()!r} in {dict(client.cookies)}"
+    return token
+
+
 
 @pytest.fixture
 def temp_user_store():
@@ -50,7 +58,8 @@ def test_signup_login_me_logout_flow(client):
     assert signup_data["user"]["display_name"] == "Alice"
     assert signup_data["user"]["role"] == "user"
     assert "password_hash" not in signup_data["user"]
-    assert signup_data["token"]
+    assert "token" not in signup_data
+    token = _session_token(client)
 
     duplicate = client.post(
         "/api/auth/signup",
@@ -67,7 +76,8 @@ def test_signup_login_me_logout_flow(client):
         json={"email": "alice@example.com", "password": "securepass1"},
     )
     assert login.status_code == 200
-    token = login.json()["token"]
+    assert "token" not in login.json()
+    token = _session_token(client)
 
     me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
@@ -83,6 +93,25 @@ def test_signup_login_me_logout_flow(client):
 def test_me_requires_auth(client):
     response = client.get("/api/auth/me")
     assert response.status_code == 401
+
+
+def test_me_accepts_session_cookie_without_bearer(client):
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "cookie@example.com",
+            "display_name": "Cookie",
+            "password": "securepass1",
+        },
+    )
+    assert signup.status_code == 200
+    assert "token" not in signup.json()
+    from dashboard.backend.auth_cookies import session_cookie_name
+
+    assert session_cookie_name() in client.cookies
+    me = client.get("/api/auth/me")  # cookie jar only — no Authorization
+    assert me.status_code == 200
+    assert me.json()["user"]["email"] == "cookie@example.com"
 
 
 def test_login_invalid_password(client):
@@ -146,7 +175,8 @@ def _signup_and_token(client, email="dave@example.com", password="orig-sturdy-pw
         json={"email": email, "display_name": "Dave", "password": password},
     )
     assert response.status_code == 200
-    return response.json()["token"]
+    assert "token" not in response.json()
+    return _session_token(client)
 
 
 def test_change_password_happy_path(client):
@@ -210,10 +240,11 @@ def test_change_password_rejects_weak_new_password(client):
 
 def test_change_password_invalidates_other_sessions_keeps_current(client):
     token_a = _signup_and_token(client, email="gina@example.com")
-    token_b = client.post(
+    client.post(
         "/api/auth/login",
         json={"email": "gina@example.com", "password": "orig-sturdy-pw-1"},
-    ).json()["token"]
+    )
+    token_b = _session_token(client)
 
     response = client.post(
         "/api/auth/change-password",
@@ -1169,10 +1200,11 @@ def test_email_change_commit_revokes_other_sessions_but_keeps_the_caller(
     client, sent_emails
 ):
     token_a = _signup_and_token(client, email="sessions@example.com")
-    token_b = client.post(
+    client.post(
         "/api/auth/login",
         json={"email": "sessions@example.com", "password": "orig-sturdy-pw-1"},
-    ).json()["token"]
+    )
+    token_b = _session_token(client)
     headers = {"Authorization": f"Bearer {token_a}"}
     _start_email_change(client, token_a)
 
@@ -1226,7 +1258,8 @@ def test_session_stores_hash_not_raw_token(client, temp_user_store):
         },
     )
     assert signup.status_code == 200
-    token = signup.json()["token"]
+    assert "token" not in signup.json()
+    token = _session_token(client)
     conn = temp_user_store._get_connection()
     rows = list(conn.execute("SELECT token_hash, user_agent FROM auth_sessions"))
     conn.close()
@@ -1244,7 +1277,8 @@ def test_revoked_session_is_rejected(client):
             "password": "securepass1",
         },
     )
-    token = signup.json()["token"]
+    assert "token" not in signup.json()
+    token = _session_token(client)
     assert client.post(
         "/api/auth/logout", headers={"Authorization": f"Bearer {token}"}
     ).status_code == 200
@@ -1264,7 +1298,8 @@ def test_idle_session_is_rejected(client, temp_user_store, monkeypatch):
             "password": "securepass1",
         },
     )
-    token = signup.json()["token"]
+    assert "token" not in signup.json()
+    token = _session_token(client)
     from datetime import timedelta
 
     from dashboard.backend.session_tokens import hash_session_token

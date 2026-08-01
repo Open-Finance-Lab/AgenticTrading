@@ -8,11 +8,16 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from dashboard.backend.api import discord_oauth
+from dashboard.backend.auth_cookies import (
+    clear_session_cookie,
+    read_session_token,
+    set_session_cookie,
+)
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
 from dashboard.backend.infrastructure.email import sender as email_sender
@@ -136,7 +141,6 @@ def _validate_avatar_data_uri(value: str) -> str:
 
 class AuthResponse(BaseModel):
     user: dict
-    token: str
 
 
 def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
@@ -148,8 +152,23 @@ def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
     return token.strip()
 
 
-def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
-    token = _extract_bearer_token(authorization)
+def _session_token(
+    request: Request,
+    authorization: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve the raw session token for this request.
+
+    Explicit ``Authorization: Bearer`` wins when present (scripts / TestClient);
+    browsers after the HttpOnly migration send only the cookie.
+    """
+    return _extract_bearer_token(authorization) or read_session_token(request)
+
+
+def get_current_user(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    token = _session_token(request, authorization)
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     user = users_module.user_store.get_user_for_token(token)
@@ -158,8 +177,14 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> dic
     return user
 
 
+def _auth_json(user: dict, raw_token: str) -> JSONResponse:
+    response = JSONResponse({"user": user})
+    set_session_cookie(response, raw_token)
+    return response
+
+
 @router.post("/signup", response_model=AuthResponse)
-async def signup(payload: SignupRequest):
+async def signup(payload: SignupRequest, request: Request):
     violations = validate_new_password(payload.password, payload.email)
     if violations:
         raise HTTPException(status_code=400, detail=" ".join(violations))
@@ -175,18 +200,26 @@ async def signup(payload: SignupRequest):
             raise HTTPException(status_code=409, detail="Email is already registered") from exc
         raise
 
-    token = users_module.user_store.create_session(user["id"])
-    return {"user": user, "token": token}
+    ua = request.headers.get("user-agent")
+    ip = request.client.host if request.client else None
+    token = users_module.user_store.create_session(
+        user["id"], user_agent=ua, ip_prefix=ip
+    )
+    return _auth_json(user, token)
 
 
 @router.post("/login", response_model=AuthResponse)
-async def login(payload: LoginRequest):
+async def login(payload: LoginRequest, request: Request):
     user = users_module.user_store.authenticate(payload.email, payload.password)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
 
-    token = users_module.user_store.create_session(user["id"])
-    return {"user": public_user(user), "token": token}
+    ua = request.headers.get("user-agent")
+    ip = request.client.host if request.client else None
+    token = users_module.user_store.create_session(
+        user["id"], user_agent=ua, ip_prefix=ip
+    )
+    return _auth_json(public_user(user), token)
 
 
 @router.get("/me")
@@ -195,16 +228,30 @@ async def me(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/logout")
-async def logout(authorization: Optional[str] = Header(default=None)):
-    token = _extract_bearer_token(authorization)
+async def logout(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    token = _session_token(request, authorization)
     if token:
         users_module.user_store.delete_session(token)
-    return {"status": "ok"}
+    response = JSONResponse({"status": "ok"})
+    clear_session_cookie(response)
+    return response
+
+
+@router.post("/logout-all")
+async def logout_all(request: Request, current_user: dict = Depends(get_current_user)):
+    users_module.user_store.delete_other_sessions(current_user["id"], keep_token=None)
+    response = JSONResponse({"status": "ok"})
+    clear_session_cookie(response)
+    return response
 
 
 @router.post("/change-password")
 async def change_password(
     payload: ChangePasswordRequest,
+    request: Request,
     current_user: dict = Depends(get_current_user),
     authorization: Optional[str] = Header(default=None),
 ):
@@ -224,7 +271,7 @@ async def change_password(
     # return ok. Revocation is defence-in-depth, not a hard guarantee.
     try:
         users_module.user_store.delete_other_sessions(
-            current_user["id"], keep_token=_extract_bearer_token(authorization)
+            current_user["id"], keep_token=_session_token(request, authorization)
         )
     except Exception as exc:  # noqa: BLE001 -- password change already committed
         print(
@@ -451,6 +498,7 @@ async def cancel_email_change(current_user: dict = Depends(get_current_user)):
 @router.post("/email-change/verify")
 async def verify_email_change(
     payload: EmailChangeVerifyRequest,
+    request: Request,
     current_user: dict = Depends(get_current_user),
     authorization: Optional[str] = Header(default=None),
 ):
@@ -520,7 +568,7 @@ async def verify_email_change(
     # failures above, where the user genuinely gets nothing.
     try:
         store.delete_other_sessions(
-            current_user["id"], keep_token=_extract_bearer_token(authorization)
+            current_user["id"], keep_token=_session_token(request, authorization)
         )
     except Exception as exc:  # noqa: BLE001 -- email change already committed
         print(

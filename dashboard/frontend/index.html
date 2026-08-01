@@ -164,16 +164,16 @@
           stayOnLanding = new URLSearchParams(window.location.search).get('stay') === '1';
         } catch (e) { stayOnLanding = false; }
 
-        var token = null;
-        try { token = localStorage.getItem(AUTH_TOKEN_KEY); } catch (e) { token = null; }
+        var cachedUser = null;
+        try { cachedUser = localStorage.getItem(AUTH_USER_KEY); } catch (e) { cachedUser = null; }
 
-        if (!token || stayOnLanding) {
+        if (!cachedUser || stayOnLanding) {
           showLanding();
           return;
         }
 
         fetch(API_BASE + '/api/auth/me', {
-          headers: { Authorization: 'Bearer ' + token },
+          credentials: 'include',
         }).then(function (res) {
           if (res.ok) {
             redirectToDashboard();
@@ -292,6 +292,7 @@
           var response = await fetch(API_BASE + path, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
+            credentials: 'include',
             body: JSON.stringify(body),
           });
           var data = null;
@@ -303,10 +304,10 @@
           return data;
         }
 
-        function goToDashboardLoggedIn(user, token, options) {
+        function goToDashboardLoggedIn(user, options) {
           options = options || {};
           try {
-            localStorage.setItem(AUTH_TOKEN_KEY, token);
+            try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch (e) { /* ignore */ }
             localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
             // New accounts should land on Home, not a leftover My Agents tab
             // from browsing the dashboard while logged out.
@@ -371,7 +372,7 @@
                     email: email,
                     password: password,
                   });
-              goToDashboardLoggedIn(data.user, data.token, {
+              goToDashboardLoggedIn(data.user, {
                 goHome: authMode === 'signup',
               });
             } catch (error) {

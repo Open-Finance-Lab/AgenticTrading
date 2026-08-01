@@ -84,11 +84,17 @@ def _cors_allow_origins() -> list[str]:
     return origins
 
 
+_CORS_ORIGINS = _cors_allow_origins()
+# Browsers refuse credentials with Access-Control-Allow-Origin: *. Only enable
+# credentialed CORS when ATL_FRONTEND_ORIGINS pins an explicit allowlist
+# (same-origin Vercel rewrites do not need CORS at all).
+_CORS_ALLOW_CREDENTIALS = _CORS_ORIGINS != ["*"]
+
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_allow_origins(),
-    allow_credentials=False,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=_CORS_ALLOW_CREDENTIALS,
     # PATCH backs the agent Configure screen's Save. Cross-origin callers
     # (and pre-proxy split-origin frontends) need the method listed here or
     # the browser fails at preflight even though the route exists

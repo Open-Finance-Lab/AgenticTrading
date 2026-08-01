@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
+
 # These are imported as *modules*, not `from ... import <name>`, because the
 # fixture below monkeypatches attributes on them and the tests must read those
 # attributes at call time to see the patched value. Importing the classes
@@ -60,7 +62,8 @@ def _signup(client: TestClient, email: str = "alloc@example.com") -> tuple[str, 
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    return data["token"], data["user"]
+    assert "token" not in data
+    return _cookie_session_token(client), data["user"]
 
 
 def _auth(token: str, browser: str = "browser-alloc-1") -> dict:
