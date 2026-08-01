@@ -115,3 +115,97 @@ def test_determinate_bar_suppresses_the_indeterminate_sweep():
     on top of it animates the bar away from the value it is reporting."""
     blocks = css_blocks(".agent-card-running-bar.is-determinate")
     assert any("animation: none" in block for block in blocks), blocks
+
+
+# --- Task 8: the Backtest tab panel, driven by the same two helpers -----------
+
+
+def _run_panel(options_js: str) -> dict:
+    """Execute updateBacktestRunProgress against three stub elements.
+
+    Executed rather than grepped: `"formatBacktestEta(" in source` passes even
+    if the returned value is dropped on the floor, which is precisely the bug
+    that would let the two surfaces disagree.
+    """
+    script = "\n".join(
+        [
+            js_const("BACKTEST_POLL_MAX_SECONDS"),
+            js_const("BACKTEST_STALE_SECONDS"),
+            "const els = {",
+            "  backtestRunElapsed: { textContent: '' },",
+            "  backtestRunProgressMessage: { textContent: '' },",
+            "  backtestRunProgressBar: { style: { width: '' } },",
+            "};",
+            "const document = { getElementById: (id) => els[id] || null };",
+            fn_body("function formatBacktestElapsed("),
+            fn_body("function formatBacktestEta("),
+            fn_body("function formatProgressStaleness("),
+            fn_body("function updateBacktestRunProgress("),
+            f"updateBacktestRunProgress({options_js});",
+            "console.log(JSON.stringify({",
+            "  elapsed: els.backtestRunElapsed.textContent,",
+            "  message: els.backtestRunProgressMessage.textContent,",
+            "  width: els.backtestRunProgressBar.style.width,",
+            "}));",
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_run_panel_shows_the_same_eta_the_card_does():
+    """One run, two surfaces. Divergent numbers are worse than one blank
+    surface, so both derive the ETA from formatBacktestEta."""
+    panel = _run_panel(
+        "{elapsedSeconds: 185, message: 'Backtest is running…',"
+        " stepPct: 35, step: 84, totalSteps: 240}"
+    )
+    assert "left" in panel["message"]
+    assert panel["message"].startswith("Backtest is running…")
+
+
+def test_run_panel_reports_staleness():
+    panel = _run_panel(
+        "{elapsedSeconds: 600, message: 'Backtest is running…', stepPct: 35,"
+        " step: 84, totalSteps: 240, updatedAt: Date.now() - 300000}"
+    )
+    assert "No progress for 5m" in panel["message"]
+
+
+def test_run_panel_stays_quiet_without_the_new_fields():
+    """The six unedited call sites pass none of step/totalSteps/updatedAt. They
+    must render exactly what they rendered before -- the message alone."""
+    panel = _run_panel("{elapsedSeconds: 42, message: 'Backtest is running…'}")
+    assert panel["message"] == "Backtest is running…"
+
+
+def test_run_panel_prefers_step_percent_over_the_elapsed_guess():
+    """The elapsed-based width is a fallback for runs with no step data; a real
+    percentage must win, otherwise the bar contradicts the number beside it."""
+    panel = _run_panel(
+        "{elapsedSeconds: 60, message: 'x', stepPct: 35, step: 84, totalSteps: 240}"
+    )
+    assert panel["width"] == "35%"
+
+
+def test_run_panel_falls_back_to_the_elapsed_guess():
+    panel = _run_panel("{elapsedSeconds: 60, message: 'x'}")
+    assert panel["width"] == "10%"  # 60 / 600
+
+
+def test_live_poll_passes_the_progress_fields_to_the_panel():
+    """The helpers only matter if the live call site actually supplies step,
+    totalSteps and updatedAt; every other call site correctly omits them."""
+    poller = fn_body("function ensureBacktestPolling(")
+    # Anchored to the running branch rather than "the first call in the
+    # function": the error, completion and timeout sites are all in here too,
+    # and they must NOT gain these fields.
+    running_branch = poller[poller.index("const stepPct") :]
+    call = running_branch[running_branch.index("updateBacktestRunProgress({") :]
+    call = call[: call.index("});") + 3]
+    assert "step," in call
+    assert "totalSteps: total," in call
+    assert "updatedAt: liveBacktestProgress?.updatedAt" in call

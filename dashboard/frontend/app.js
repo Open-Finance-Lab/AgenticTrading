@@ -4781,7 +4781,15 @@ function showBacktestRunProgress(show, { isError = false } = {}) {
     if (hint) hint.hidden = !!isError;
 }
 
-function updateBacktestRunProgress({ elapsedSeconds, message = '', maxSeconds = BACKTEST_POLL_MAX_SECONDS, stepPct = null } = {}) {
+function updateBacktestRunProgress({
+    elapsedSeconds,
+    message = '',
+    maxSeconds = BACKTEST_POLL_MAX_SECONDS,
+    stepPct = null,
+    step = null,
+    totalSteps = null,
+    updatedAt = null,
+} = {}) {
     const elapsedEl = document.getElementById('backtestRunElapsed');
     const messageEl = document.getElementById('backtestRunProgressMessage');
     const barEl = document.getElementById('backtestRunProgressBar');
@@ -4790,7 +4798,15 @@ function updateBacktestRunProgress({ elapsedSeconds, message = '', maxSeconds = 
         const elapsed = Math.max(0, Number(elapsedSeconds) || 0);
         elapsedEl.textContent = formatBacktestElapsed(elapsed);
     }
-    if (messageEl && message) messageEl.textContent = message;
+    if (messageEl && message) {
+        // Same two derived facts the card shows, from the same helpers, so the
+        // two surfaces can never disagree about one run.
+        const eta = formatBacktestEta(elapsedSeconds, step, totalSteps);
+        const stale = updatedAt
+            ? formatProgressStaleness((Date.now() - Number(updatedAt)) / 1000)
+            : null;
+        messageEl.textContent = [message, eta, stale].filter(Boolean).join(' · ');
+    }
     if (barEl) {
         const pct = Number.isFinite(stepPct)
             ? Math.min(99, Math.round(stepPct))
@@ -5072,6 +5088,9 @@ function ensureBacktestPolling() {
                         elapsedSeconds: displayElapsed,
                         message: status.message || 'Backtest is running…',
                         stepPct,
+                        step,
+                        totalSteps: total,
+                        updatedAt: liveBacktestProgress?.updatedAt || null,
                     });
                     showBacktestRunProgress(true);
                     renderBacktestRunConfig(
