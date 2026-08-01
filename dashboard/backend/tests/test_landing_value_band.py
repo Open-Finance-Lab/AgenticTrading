@@ -64,3 +64,32 @@ def test_hero_scroll_anchor_still_resolves():
     total = sum(s.count('id="landing-stats"') for s in sources)
     assert total == 1, f"expected exactly one #landing-stats anchor, found {total}"
     assert 'id="landing-stats"' in _BAND.read_text(encoding="utf-8")
+
+
+_TALK = _LANDING_SRC / "components" / "home" / "Talk.tsx"
+
+
+def test_talk_leads_with_the_on_site_path():
+    """The heading no longer sells Discord as the way in. On-site plain-English
+    authoring has existed since the agent editor shipped (app.html:972)."""
+    body = _TALK.read_text(encoding="utf-8")
+    assert "Talk to agents on Discord" not in body
+    assert "Describe your idea" in body
+
+
+def test_talk_keeps_discord_as_an_alternative():
+    """Reframed, not removed -- the Discord path works and some users prefer it."""
+    assert "Discord" in _TALK.read_text(encoding="utf-8")
+
+
+def test_talk_keeps_its_anchor_and_visual():
+    body = _TALK.read_text(encoding="utf-8")
+    assert 'id="talk"' in body
+    assert "<DiscordMock />" in body
+
+
+def test_talk_has_exactly_one_section_label():
+    """Step 3's replacement block *re-includes* the `01 — Talk` mono-label, so
+    pasting it below the existing one stacks two identical labels. Every other
+    assertion in this file is a substring check and would stay green."""
+    assert _TALK.read_text(encoding="utf-8").count("01 — Talk") == 1
