@@ -1212,3 +1212,73 @@ def test_changing_the_password_cancels_a_pending_email_change(client, sent_email
     assert password_change.status_code == 200
 
     assert client.get("/api/auth/email-change", headers=headers).json()["pending"] is False
+
+
+def test_session_stores_hash_not_raw_token(client, temp_user_store):
+    from dashboard.backend.session_tokens import hash_session_token
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "hashme@example.com",
+            "display_name": "Hash",
+            "password": "securepass1",
+        },
+    )
+    assert signup.status_code == 200
+    token = signup.json()["token"]
+    conn = temp_user_store._get_connection()
+    rows = list(conn.execute("SELECT token_hash, user_agent FROM auth_sessions"))
+    conn.close()
+    assert len(rows) == 1
+    assert rows[0][0] == hash_session_token(token)
+    assert token not in {rows[0][0]}
+
+
+def test_revoked_session_is_rejected(client):
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "revoke@example.com",
+            "display_name": "Revoke",
+            "password": "securepass1",
+        },
+    )
+    token = signup.json()["token"]
+    assert client.post(
+        "/api/auth/logout", headers={"Authorization": f"Bearer {token}"}
+    ).status_code == 200
+    assert (
+        client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code
+        == 401
+    )
+
+
+def test_idle_session_is_rejected(client, temp_user_store, monkeypatch):
+    monkeypatch.setenv("SESSION_IDLE_HOURS", "1")
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "idle@example.com",
+            "display_name": "Idle",
+            "password": "securepass1",
+        },
+    )
+    token = signup.json()["token"]
+    from datetime import timedelta
+
+    from dashboard.backend.session_tokens import hash_session_token
+    from dashboard.backend.users import _utcnow, format_stored_timestamp
+
+    stale = format_stored_timestamp(_utcnow() - timedelta(hours=2))
+    conn = temp_user_store._get_connection()
+    conn.execute(
+        "UPDATE auth_sessions SET last_seen_at = ?, created_at = ? WHERE token_hash = ?",
+        (stale, stale, hash_session_token(token)),
+    )
+    conn.commit()
+    conn.close()
+    assert (
+        client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code
+        == 401
+    )

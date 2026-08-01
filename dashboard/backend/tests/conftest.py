@@ -46,6 +46,9 @@ os.environ["DATABASE_PATH"] = _TEST_DB_PATH
 # time; tests must always fall back to the plain SQLite UserStore.
 os.environ.pop("USERS_DATABASE_URL", None)
 
+# Hermetic HMAC key for session-token digests (see session_tokens.py).
+os.environ["SESSION_HASH_SECRET"] = "test-session-hash-secret"
+
 # Same guarantee for CONTENT_DATABASE_URL: it selects Postgres backends for the
 # agent / agent-version / strategy stores, so a value inherited from the
 # developer's environment (a sourced prod .env, a deploy shell) would point the

@@ -23,8 +23,15 @@ import bcrypt
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
+from dashboard.backend.session_tokens import (
+    absolute_expiry,
+    hash_session_token,
+    idle_deadline,
+    new_session_token,
+    should_touch_last_seen,
+)
 
-SESSION_TTL_DAYS = 7
+SESSION_TTL_DAYS = 7  # legacy name; runtime policy lives in session_tokens.py
 BCRYPT_ROUNDS = 12
 LEGACY_PBKDF2_ITERATIONS = 100_000
 BCRYPT_MAX_BYTES = 72
@@ -196,14 +203,39 @@ class UserStore:
         cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS auth_sessions (
-                token TEXT PRIMARY KEY,
+                token_hash TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP NOT NULL,
+                last_seen_at TIMESTAMP NOT NULL,
                 expires_at TIMESTAMP NOT NULL,
+                revoked_at TIMESTAMP,
+                user_agent TEXT,
+                ip_prefix TEXT,
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
             """
         )
+        # Pre-hash plaintext-token schema: wipe and rebuild. Existing sessions
+        # cannot be re-hashed without the raw token; users must sign in again.
+        cursor.execute("PRAGMA table_info(auth_sessions)")
+        session_columns = {row[1] for row in cursor.fetchall()}
+        if session_columns and "token_hash" not in session_columns:
+            cursor.execute("DROP TABLE auth_sessions")
+            cursor.execute(
+                """
+                CREATE TABLE auth_sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    created_at TIMESTAMP NOT NULL,
+                    last_seen_at TIMESTAMP NOT NULL,
+                    expires_at TIMESTAMP NOT NULL,
+                    revoked_at TIMESTAMP,
+                    user_agent TEXT,
+                    ip_prefix TEXT,
+                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+                )
+                """
+            )
         cursor.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
@@ -311,62 +343,121 @@ class UserStore:
             return None
         return user
 
-    def create_session(self, user_id: int) -> str:
-        token = secrets.token_urlsafe(32)
-        expires_at = (_utcnow() + timedelta(days=SESSION_TTL_DAYS)).replace(microsecond=0).isoformat()
+    def create_session(
+        self,
+        user_id: int,
+        *,
+        user_agent: Optional[str] = None,
+        ip_prefix: Optional[str] = None,
+    ) -> str:
+        raw_token = new_session_token()
+        token_hash = hash_session_token(raw_token)
+        now = _utcnow().replace(microsecond=0)
+        created_at = format_stored_timestamp(now)
+        expires_at = format_stored_timestamp(absolute_expiry(now))
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO auth_sessions (token, user_id, expires_at)
-            VALUES (?, ?, ?)
+            INSERT INTO auth_sessions (
+                token_hash, user_id, created_at, last_seen_at, expires_at,
+                user_agent, ip_prefix
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (token, user_id, expires_at),
+            (
+                token_hash,
+                user_id,
+                created_at,
+                created_at,
+                expires_at,
+                (user_agent or None),
+                (ip_prefix or None),
+            ),
         )
         conn.commit()
         conn.close()
-        return token
+        return raw_token
 
     def get_user_for_token(self, token: str) -> Optional[Dict[str, Any]]:
+        if not token or not str(token).strip():
+            return None
+        token_hash = hash_session_token(token.strip())
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT users.*
+            SELECT
+                users.*,
+                auth_sessions.created_at AS session_created_at,
+                auth_sessions.last_seen_at AS session_last_seen_at,
+                auth_sessions.expires_at AS session_expires_at,
+                auth_sessions.revoked_at AS session_revoked_at
             FROM auth_sessions
             JOIN users ON users.id = auth_sessions.user_id
-            WHERE auth_sessions.token = ?
+            WHERE auth_sessions.token_hash = ?
             """,
-            (token,),
+            (token_hash,),
         )
         row = cursor.fetchone()
         if not row:
             conn.close()
             return None
 
-        cursor.execute(
-            "SELECT expires_at FROM auth_sessions WHERE token = ?",
-            (token,),
+        data = dict(row)
+        revoked_at = data.pop("session_revoked_at", None)
+        created_at = parse_stored_timestamp(data.pop("session_created_at"))
+        last_seen_at = parse_stored_timestamp(
+            data.pop("session_last_seen_at") or format_stored_timestamp(created_at)
         )
-        session_row = cursor.fetchone()
+        expires_at = parse_stored_timestamp(data.pop("session_expires_at"))
+        now = _utcnow()
+
+        if revoked_at:
+            conn.close()
+            return None
+        if expires_at < now:
+            cursor.execute(
+                "DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,)
+            )
+            conn.commit()
+            conn.close()
+            return None
+        if idle_deadline(last_seen_at) < now:
+            cursor.execute(
+                "DELETE FROM auth_sessions WHERE token_hash = ?", (token_hash,)
+            )
+            conn.commit()
+            conn.close()
+            return None
+
+        if should_touch_last_seen(last_seen_at, now):
+            cursor.execute(
+                """
+                UPDATE auth_sessions
+                SET last_seen_at = ?
+                WHERE token_hash = ?
+                """,
+                (format_stored_timestamp(now.replace(microsecond=0)), token_hash),
+            )
+            conn.commit()
         conn.close()
-
-        if not session_row:
-            return None
-
-        expires_at = datetime.fromisoformat(session_row["expires_at"])
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < _utcnow():
-            self.delete_session(token)
-            return None
-
-        return dict(row)
+        return data
 
     def delete_session(self, token: str) -> None:
+        if not token or not str(token).strip():
+            return
+        token_hash = hash_session_token(token.strip())
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+        cursor.execute(
+            """
+            UPDATE auth_sessions
+            SET revoked_at = ?
+            WHERE token_hash = ? AND revoked_at IS NULL
+            """,
+            (format_stored_timestamp(_utcnow().replace(microsecond=0)), token_hash),
+        )
         conn.commit()
         conn.close()
 
@@ -384,13 +475,26 @@ class UserStore:
         """Revoke every session for the user except keep_token (None = all)."""
         conn = self._get_connection()
         cursor = conn.cursor()
+        now = format_stored_timestamp(_utcnow().replace(microsecond=0))
         if keep_token:
+            keep_hash = hash_session_token(keep_token.strip())
             cursor.execute(
-                "DELETE FROM auth_sessions WHERE user_id = ? AND token != ?",
-                (user_id, keep_token),
+                """
+                UPDATE auth_sessions
+                SET revoked_at = ?
+                WHERE user_id = ? AND token_hash != ? AND revoked_at IS NULL
+                """,
+                (now, user_id, keep_hash),
             )
         else:
-            cursor.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+            cursor.execute(
+                """
+                UPDATE auth_sessions
+                SET revoked_at = ?
+                WHERE user_id = ? AND revoked_at IS NULL
+                """,
+                (now, user_id),
+            )
         conn.commit()
         conn.close()
 
