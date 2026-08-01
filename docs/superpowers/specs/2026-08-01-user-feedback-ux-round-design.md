@@ -121,6 +121,9 @@ Settled with the requester before design; recorded so the plan does not relitiga
   see Workstream A).
 - The C+D funnel pivot (on-site NL intake, lifecycle home). Separate workstream, needs
   sign-off.
+- **Any documentation update.** Docs are coordinated separately by the requester and are
+  never edited by the implementation PRs, even where this work makes them stale. Staleness is
+  recorded (C7, Open follow-ups) so it is visible rather than silent.
 
 ---
 
@@ -259,10 +262,10 @@ Mirror the same numbers into the Backtest-tab panel via `updateBacktestRunProgre
 
 ### B7. Deferred — cancel
 
-Draft the follow-up issue but **ask before filing**: filing on the shared repo implicitly
-assigns work to others. Content: `POST /backtest/cancel`, `subprocess.run` → `Popen` + stored
-handle + `terminate()`, `cancelled` as a status distinct from `error`, and preservation of
-the existing timeout path.
+**Filed as [issue #273](https://github.com/Open-Finance-Lab/AgenticTrading/issues/273).** Not
+in this round. Covers `POST /backtest/cancel`, `subprocess.run` → `Popen` + stored handle +
+`terminate()`, `cancelled` as a status distinct from `error`, preservation of the existing
+timeout path, and the PR #163 completion-detection race as the hazard to design around.
 
 ### B8. Tests
 
@@ -370,19 +373,34 @@ Procedure:
 5. any new CTA in the band needs its own `data-landing-auth` attribute, which moves the
    emitter count and must be reflected in the guard
 
-### C6. Docs to update in the same PR
+### C6. Footer links
 
-`docs/landing-narrative-copy.md` is the copy deck this work supersedes. Its "Hero — **Frozen
-— do not change**" note stays true; its stated tone (*"No feature dumps"*) and the
-Talk/Test/Race-only arc do not. Amend it to record the new band, the audience definition, and
-the reframed `01 — Talk`, so the deck and the shipped page do not drift.
+`FooterCTA.tsx` ships `Terms`, `Privacy` and `Documentation` as dead `#` anchors — flagged in
+the 2026-07-25 UI audit and still open. `Documentation` points at the real docs site.
+`Terms` and `Privacy` have no destination to point at, so they are **removed** rather than
+left dead: a link that goes nowhere is worse than an absent one, and inventing placeholder
+pages is out of scope.
 
-### C7. Tests
+Included here because C already pays the bundle-rebuild cost; on its own this would not
+justify a rebuild.
+
+### C7. Docs — followup, NOT part of the implementation
+
+`docs/landing-narrative-copy.md` is the copy deck this work supersedes: its "Hero — **Frozen
+— do not change**" note stays true, but its stated tone (*"No feature dumps"*) and the
+Talk/Test/Race-only arc do not survive Workstream C.
+
+**It is not updated by the implementation PR.** Doc updates are coordinated separately by the
+requester. Recorded here, and surfaced as an explicit session followup, so the deck and the
+shipped page do not drift silently.
+
+### C8. Tests
 
 1. bundle integrity guard passes (C5 step 4)
 2. source-guard: the band exists, carries the three step headings, and contains no
    paper-trading or real-capital claim — a string-absence assertion, cheap and durable
 3. source-guard: `#landing-stats` still resolves to an element that exists
+4. source-guard: no `href="#"` remains in `FooterCTA.tsx` (C6)
 
 ---
 
@@ -401,10 +419,11 @@ Order is not enforced; C is independent of both.
 
 ## Open follow-ups
 
-- **Cancel a running backtest** — issue drafted in B7, **ask before filing**.
-- **Dead footer links** — `Terms` / `Privacy` / `Documentation` in `FooterCTA.tsx` are all
-  `#`. Flagged in the 2026-07-25 UI audit and still open. Since C already pays the
-  bundle-rebuild cost, pointing `Documentation` at the real docs site is nearly free —
-  propose as an opt-in addition to C, not an assumed inclusion.
+- **Cancel a running backtest** — filed as
+  [issue #273](https://github.com/Open-Finance-Lab/AgenticTrading/issues/273). Out of scope
+  here; see B7.
+- **Dead footer links** — now **in scope** as C6, not a follow-up.
+- **`docs/landing-narrative-copy.md`** — superseded by Workstream C, but **deliberately not
+  updated by the implementation**. The requester coordinates doc updates separately. See C7.
 - **`docs/source/lab/*.rst`** — light scan found the paper-trading claims accurate. No action;
   recorded so the next reader does not re-scan.
