@@ -4,6 +4,7 @@ The dashboard ships as vanilla JavaScript, so these checks protect the UI
 contract without introducing a second frontend test toolchain.
 """
 
+import re
 from pathlib import Path
 
 
@@ -88,6 +89,19 @@ def test_stored_credential_can_be_removed_from_the_editor():
 
 
 def test_editor_asset_cache_bust_advances_with_its_source():
-    """A stale ?v= serves the old editor to every returning browser."""
-    assert "js/agent-editor.js?v=17" in _APP_HTML
-    assert "styles.css?v=71" in _APP_HTML
+    """A stale ?v= serves the old editor to every returning browser.
+
+    Parsed >= rather than literal pins, matching
+    test_frontend_account_page.py::test_cache_bust_versions_were_bumped and for
+    the reason that test already documents: styles.css is the single shared
+    stylesheet, so its counter is bumped by unrelated work too, and an equality
+    assert turns CI red on whichever PR happens to bump it next (the failure
+    mode that blocked #88-#91). The floors are the versions that shipped the
+    hosted editor -- going backwards would serve a stale editor, which is what
+    this guard is actually for.
+    """
+    editor_version = int(re.search(r"js/agent-editor\.js\?v=(\d+)", _APP_HTML).group(1))
+    styles_version = int(re.search(r"styles\.css\?v=(\d+)", _APP_HTML).group(1))
+
+    assert editor_version >= 17
+    assert styles_version >= 71
