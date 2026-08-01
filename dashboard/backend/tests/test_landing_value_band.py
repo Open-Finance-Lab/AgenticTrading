@@ -93,3 +93,24 @@ def test_talk_has_exactly_one_section_label():
     pasting it below the existing one stacks two identical labels. Every other
     assertion in this file is a substring check and would stay green."""
     assert _TALK.read_text(encoding="utf-8").count("01 — Talk") == 1
+
+
+_FOOTER = _LANDING_SRC / "components" / "home" / "FooterCTA.tsx"
+
+
+def test_footer_has_no_dead_links():
+    """Three href="#" anchors shipped since the 2026-07-25 audit. A link that
+    goes nowhere costs more trust than an absent one."""
+    assert 'href="#"' not in _FOOTER.read_text(encoding="utf-8")
+
+
+def test_footer_documentation_points_at_the_docs_site():
+    body = _FOOTER.read_text(encoding="utf-8")
+    assert "finagent-orchestration.readthedocs.io" in body
+
+
+def test_footer_external_link_is_safe():
+    """target=_blank without rel=noopener hands the opener window to the target."""
+    body = _FOOTER.read_text(encoding="utf-8")
+    if 'target="_blank"' in body:
+        assert "noopener" in body
