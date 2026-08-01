@@ -2,7 +2,8 @@
 
 **Date:** 2026-08-01
 **Source:** real tester feedback on the live product (three items, verbatim intent preserved below)
-**Status:** design approved; implementation plan to follow
+**Status:** design approved; implementation plan written and reviewed (2026-08-01) — no
+blockers, seven source-verified corrections folded back into this document and the plan
 
 ---
 
@@ -84,9 +85,17 @@ status path — in code that already carries a documented completion-detection r
 | No trading program to write | same path, no code required | real; absent from landing |
 | Choose different LLMs | `builtinAgentModel` select; 7 LLM entries on the board | real; absent from landing |
 | Historical backtests | core engine | real; landing covers (`02 — Test`) |
-| **Paper trading** | `/paper/*` is read-only. `AlpacaPaperTradingClient` has **no order-submission method**. `PaperTradingSession.add_trade` has **zero production callers**. `execution/paper_backend.py` raises `NotImplementedError`. | **not a shippable claim** |
+| **Paper trading** | **No order-submission route exists.** `AlpacaPaperTradingClient` has **no order-submission method**. `PaperTradingSession.add_trade` has **zero production callers**. `execution/paper_backend.py` raises `NotImplementedError`. | **not a shippable claim** |
 | Compare agent performance | leaderboard + baselines + H6 guard | real; landing covers (`03 — Race`) |
 | Connect External Agents | `/api/v1` protocol + PyPI SDK + `/api/v2` | real; **absent from landing** |
+
+**Say it as "no order-submission route exists", not as "`/paper/*` is read-only".** The
+conclusion is right; that particular shorthand is not. `POST /paper/start-session`
+(`api/routers/paper_trading.py:253`) *does* write — a run row via `db.insert_run(...)`. It
+places no order, reads only `client.get_account()`, and no frontend code calls it, so nothing
+about the verdict changes. But a PR body that says "read-only" hands a reviewer a
+thirty-second refutation of the one claim this workstream is built on. Use the wording that
+survives the grep.
 
 The published docs already say the same thing —
 `docs/source/lab/operating_modes.rst:8`: *"Monitoring only for now — an agent cannot yet
@@ -172,6 +181,11 @@ Message on success: agent name + that it was created, e.g. `"Momentum Alpha" cre
 After `loadAgents()` resolves, scroll the new agent's card into view and flash it briefly.
 Answers "did it work?" positionally, not just textually.
 
+The card element itself carries no `data-agent-id` today — all ten occurrences in `app.js` are
+*buttons inside* a card. Tag the card, and scope the lookup to `.agent-card[data-agent-id]`:
+the unscoped attribute selector matches every child button too and would scroll six to eight
+times per creation.
+
 ### A5. Latency — investigation only, not a deliverable
 
 `create_agent` (`agents.py:129`) calls `get_or_create_portfolio` at `:176` after
@@ -187,8 +201,12 @@ the error path too — that is what `finally` is for, and the test asserts it.
 
 ### A7. Tests
 
-Repo H8 source-guard style (`dashboard/backend/tests/integrations/test_frontend_*.py`, as
-established by PR #220):
+Repo H8 source-guard style, at the **tests root** — `dashboard/backend/tests/test_frontend_*.py`
+/ `test_my_agents_*_ui.py`. That is the dominant convention: thirteen frontend source-guards
+live at the root against two under `tests/integrations/`, and the two nearest analogues to
+this work (`test_my_agents_card_ui.py`, `test_frontend_bundle_integrity.py`) are both at the
+root. `tests/integrations/` holds cross-surface wiring checks (Discord, docs commands), not
+frontend markup guards.
 
 1. the submit handler sets a pending label before `await`
 2. a toast element exists in `app.html` with `role="status"` and `aria-live="polite"`
@@ -232,6 +250,17 @@ run, so the indeterminate state is a normal state, not an error state.
 re-rendering the grid. Extend the same mechanism to step, percentage and ETA. Do not
 introduce a second update path.
 
+**One consequence to close, not to accept.** The polled progress is a single module-level
+object (correct — `backtest_status` is one process-global, so one backtest runs server-wide)
+merged into *every* entry of the `sessionStorage` running map. Today a stranded entry costs
+only a wrong elapsed timer; once it carries step/percent/ETA, a stranded entry renders the
+*next* run's numbers. The finished branch of the poller already clears the map
+(`app.js:4907`); **the 10-minute timeout branch (`:4942`) does not**, and that is the leak —
+agent A times out, agent B starts, A's card shows B's progress until `getAgentBacktestRunning`
+expires it at 600s. Clear on timeout too, following the convention the finished branch set.
+The remaining window — a tab closed mid-run and reopened, no poller alive to clear — is
+bounded by the same 600s expiry and does not justify per-agent progress keying.
+
 ### B4. ETA
 
 `remaining = (elapsed / step) × (total − step)`.
@@ -257,8 +286,14 @@ error as the fabricated Performance Drivers card.
 ### B6. Surface consistency
 
 Mirror the same numbers into the Backtest-tab panel via `updateBacktestRunProgress`
-(`app.js:4607`) so the two surfaces never disagree. The panel keeps its existing
-`viewingLive` gate — this changes the numbers it shows, not when it shows them.
+(`app.js:4607`) so the two surfaces never disagree. This changes the numbers the panel shows,
+not when it shows them.
+
+The gate is on the call *site*, not the function: of the seven callers, four sit behind a
+`viewingLive` / `isViewingLiveBacktest(...)` check (`:4891`, `:4917`, `:4926`, `:4947`) and
+three do not (`:4806`, `:4831`, `:5491`). Only the live-poll site (`:4891`) gains the new
+fields; the rest are launch, error, completion and timeout paths where an ETA is noise, and
+they stay correct unedited because every added parameter defaults to `null`.
 
 ### B7. Deferred — cancel
 

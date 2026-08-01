@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **Docs are a non-goal.** No task edits any file under `docs/` except this plan's own checkboxes. Staleness is recorded in the spec, not fixed here.
-- **No paper-trading or real-capital claim** may appear in any user-visible string. `/paper/*` is read-only and `ROBINHOOD_EXECUTE` defaults to `false`.
+- **No paper-trading or real-capital claim** may appear in any user-visible string. The precise, defensible form of the claim: **no order-submission route exists.** `AlpacaPaperTradingClient` has no order method, `PaperTradingSession.add_trade` has zero production callers, `execution/paper_backend.py` raises `NotImplementedError`, and `ROBINHOOD_EXECUTE` defaults to `false`. Use *that* wording in PR bodies — **"`/paper/*` is read-only" is literally false**: `POST /paper/start-session` (`api/routers/paper_trading.py:253`) writes a run row via `db.insert_run(...)`. It places no order and no frontend calls it, so the conclusion holds; the shorthand does not, and a reviewer who greps will find the write.
 - **Run every command from the repo root.** The backend is the `dashboard.backend` package; never run a backend file by path.
 - **Tests:** `pytest dashboard/backend/tests/ -v`. Pytest is not in `requirements.txt` — install separately. The suite is green on `main`; a red test is a real regression.
 - **Never `git add -A`.** Importing a backend module runs lazy `CREATE TABLE`/`ALTER` against the committed `dashboard/storage/data/backtest.db`, which is the real prod seed database. Stage named paths only.
@@ -69,10 +69,17 @@ _STYLES = (_FRONTEND / "styles.css").read_text(encoding="utf-8")
 
 
 def test_toast_container_is_a_polite_live_region():
-    """A success message screen readers never announce is not a confirmation."""
-    assert 'id="appToast"' in _APP_HTML
-    assert 'role="status"' in _APP_HTML
-    assert 'aria-live="polite"' in _APP_HTML
+    """A success message screen readers never announce is not a confirmation.
+
+    Asserted as one whole tag, not three independent substrings: app.html:377
+    (the ticker) already carries role="status" and aria-live="polite", so
+    file-wide substring checks for those two would pass before the toast
+    exists -- two thirds of a vacuous test.
+    """
+    assert (
+        '<div id="appToast" class="app-toast" role="status" aria-live="polite" hidden>'
+        in _APP_HTML
+    )
 
 
 def test_toast_helper_exists():
@@ -93,11 +100,11 @@ def test_toast_animation_has_a_reduced_motion_fallback():
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `pytest dashboard/backend/tests/test_app_toast.py -v`
-Expected: FAIL — `assert 'id="appToast"' in _APP_HTML`
+Expected: FAIL — the container tag is absent from `_APP_HTML`
 
 - [ ] **Step 3: Add the container to `app.html`**
 
-Insert immediately before the closing `</body>` tag:
+Insert immediately before the closing `</body>` tag — **byte-for-byte as written**, since Step 1 pins the whole opening tag (attribute order included):
 
 ```html
 <div id="appToast" class="app-toast" role="status" aria-live="polite" hidden></div>
@@ -338,7 +345,7 @@ In `submitCreateBuiltinAgent`, replace the block from `if (submitBtn) submitBtn.
 }
 ```
 
-`highlightAgentCard` is defined in Task 3. Implement Task 3 before running the browser check in Step 6.
+`highlightAgentCard` is defined in **Task 3**, so this commit alone ships a live `ReferenceError` on the success path — after the toast fires, before `restoreButton`. The source-guard tests are string checks and stay green through it, so nothing will tell you. It is contained only because the PR opens at **phase exit**, never between these two commits: do not browser-test, push, or open a PR until Task 3 is committed.
 
 - [ ] **Step 5: Add the pending spinner style**
 
@@ -413,7 +420,7 @@ def test_highlight_uses_attribute_lookup_not_selector_interpolation():
     server-supplied, so never interpolate one into a selector string."""
     start = _APP_JS.index("function highlightAgentCard(")
     body = _APP_JS[start : start + 900]
-    assert "querySelectorAll('[data-agent-id]')" in body
+    assert "querySelectorAll('.agent-card[data-agent-id]')" in body
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -421,11 +428,20 @@ def test_highlight_uses_attribute_lookup_not_selector_interpolation():
 Run: `pytest dashboard/backend/tests/test_create_agent_feedback.py -v -k highlight`
 Expected: FAIL — `assert "function highlightAgentCard(" in _APP_JS`
 
-- [ ] **Step 3: Confirm the card carries `data-agent-id`**
+- [ ] **Step 3: Tag the card element — and scope the selector to it**
 
-Run: `command grep -n "data-agent-id" dashboard/frontend/app.js | head -5`
+Run: `command grep -n "data-agent-id" dashboard/frontend/app.js`
 
-If the attribute is absent from the card element built in `renderAgentCards` (`app.js:1121`), add `card.setAttribute('data-agent-id', agent.agent_id);` alongside the existing `card.className = ...` assignment. Do not interpolate the id into HTML.
+All ten existing occurrences are **`<button>` elements inside the card** (`:522`, `:892`, `:899`, `:902`, `:906`, `:912`, `:916`, `:918`, `:928`, `:1335` — Open Agent, Run Backtest, Configure, the menu items, the run links). **The outer card element carries no `data-agent-id`.**
+
+Two consequences, both load-bearing:
+
+1. Add it, alongside the existing `card.className = ...` at `app.js:1124` (which already includes the `agent-card` class):
+   ```js
+   card.setAttribute('data-agent-id', agent.agent_id);
+   ```
+   `setAttribute`, not HTML interpolation.
+2. **The selector must be `.agent-card[data-agent-id]`, never the bare `[data-agent-id]`.** The bare form matches the card *and* its 5–8 child buttons, firing `scrollIntoView` six-to-eight times per creation — the smooth-scroll target changes mid-flight and the page visibly jitters. The class narrows it to the one element; marketplace cards (`:1666`) share `.agent-card` but carry no `data-agent-id`, so the conjunction matches exactly one node.
 
 - [ ] **Step 4: Implement**
 
@@ -437,10 +453,13 @@ Add next to `refreshRunningAgentCards` in `app.js`:
  *
  * Attribute lookup then compare in JS -- no escaping, no CSS.escape feature
  * detection -- matching refreshRunningAgentCards() (app.js:3370).
+ *
+ * Scoped to .agent-card: every card also contains 5-8 buttons carrying the same
+ * data-agent-id, and the unscoped selector would scroll to each of them in turn.
  */
 function highlightAgentCard(agentId) {
   if (!agentId) return;
-  document.querySelectorAll('[data-agent-id]').forEach((card) => {
+  document.querySelectorAll('.agent-card[data-agent-id]').forEach((card) => {
     if (card.getAttribute('data-agent-id') !== agentId) return;
     card.scrollIntoView({ behavior: 'smooth', block: 'center' });
     card.classList.add('is-just-created');
@@ -838,6 +857,7 @@ This is the surface the tester was actually standing on. The existing running-st
 - Modify: `dashboard/frontend/app.js:782-795` (`renderAgentRunningBody`)
 - Modify: `dashboard/frontend/app.js:3362-3382` (`refreshRunningAgentCards`)
 - Modify: `dashboard/frontend/app.js:4870-4901` (the `status.running` branch of `ensureBacktestPolling`)
+- Modify: `dashboard/frontend/app.js:4942-4954` (the timeout branch — Step 4b)
 - Modify: `dashboard/frontend/styles.css`
 - Test: `dashboard/backend/tests/test_backtest_progress_card.py` (create)
 
@@ -1049,6 +1069,19 @@ And in the `else` branch (`:4902`, run finished), immediately after `stopBacktes
                 liveBacktestProgress = null;
 ```
 
+- [ ] **Step 4b: Close the timeout path — it is the one that leaks**
+
+The finished branch above already clears every running entry (`Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);`, `:4907`). **The 10-minute timeout branch does not.** In `if (attempts >= maxAttempts) {` (`app.js:4942`), after `liveBacktestRunId = null;` (`:4953`), add the same two lines:
+
+```js
+                Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);
+                liveBacktestProgress = null;
+```
+
+Why this is not optional once Step 5 lands. `liveBacktestProgress` is a single global merged into *every* entry in the running map. Today a timed-out entry only ever showed a wrong elapsed timer, and `getAgentBacktestRunning` self-expires it at `BACKTEST_POLL_MAX_SECONDS` (600s) anyway. After Step 5, that same orphaned entry renders **whatever the next run publishes**: agent A times out, agent B starts, and A's card shows B's step, percent and ETA until A's entry ages out. Clearing on timeout — the convention the finished branch already follows — closes it.
+
+The `catch` at `:4955` needs nothing: it only logs, the interval keeps ticking, and the next successful poll re-establishes state.
+
 - [ ] **Step 5: Merge progress into the running entry**
 
 In `getAgentBacktestRunning` (`app.js:3340`), change the return to fold in the polled progress:
@@ -1057,7 +1090,7 @@ In `getAgentBacktestRunning` (`app.js:3340`), change the return to fold in the p
     return { ...entry, ...(liveBacktestProgress || {}), elapsedSeconds: Math.floor(elapsed) };
 ```
 
-`backtest_status` is a single process-global on the server, so at most one backtest runs at a time and one shared progress object is correct.
+`backtest_status` is a single process-global on the server, so at most one backtest runs at a time and one shared progress object is correct **for the run that is actually live**. The spread is unconditional, though, so it also lands on any *stale* entry still in the map — which is exactly why Step 4b exists. With Step 4b in place the only remaining window is a tab that was closed mid-run and reopened, where the entry survives in `sessionStorage` with no poller to clear it; `getAgentBacktestRunning`'s 600s expiry bounds that, and it is not worth per-agent progress keying for a server that runs one backtest at a time.
 
 - [ ] **Step 6: Patch step and detail in place**
 
@@ -1239,7 +1272,19 @@ In `ensureBacktestPolling`, the `if (viewingLive) {` block (`app.js:4891`) curre
                     });
 ```
 
-Leave the other three call sites (`:4831`, `:4917`, `:4926`, `:4947`) unchanged — they are error, completion and timeout paths where an ETA is meaningless.
+Leave the other **six** call sites unchanged. Verify the inventory before editing — `command grep -n "updateBacktestRunProgress(" dashboard/frontend/app.js` should list the definition at `:4607` plus seven callers:
+
+| Site | Path | Why it stays |
+|---|---|---|
+| `:4806` | attach to an already-running backtest | no `step`/`total` in scope yet; the next poll tick paints them |
+| `:4831` | launch, elapsed 0 | nothing to estimate from |
+| **`:4891`** | **live poll — the one this step edits** | — |
+| `:4917` | error | an ETA on a failed run is noise |
+| `:4926` | completion | it is done |
+| `:4947` | 10-minute timeout | the estimate is what failed |
+| `:5491` | `runBacktest` re-entry | same as `:4831` |
+
+All six are safe unedited because every new parameter defaults to `null` and `formatBacktestEta` returns `null` on missing input — the omission is a behaviour-preserving default, not an oversight to fix later.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -1299,10 +1344,10 @@ A tester could not tell what the platform's core advantage was without clicking
 in and exploring. The narrative sections (Talk/Test/Race) each describe an act
 but never state the problem being solved or who it is for.
 
-Also pins the two claims that must never appear. Both contradict the code:
-`/paper/*` is read-only (no order-submission path exists) and ROBINHOOD_EXECUTE
-defaults to false. docs/source/lab/operating_modes.rst says the same. Copy that
-promises either would be the fabricated-Performance-Drivers failure again.
+Also pins the two claims that must never appear. Both contradict the code: no
+order-submission route exists on any surface, and ROBINHOOD_EXECUTE defaults to
+false. docs/source/lab/operating_modes.rst says the same. Copy that promises
+either would be the fabricated-Performance-Drivers failure again.
 """
 
 from pathlib import Path
@@ -1569,6 +1614,13 @@ def test_talk_keeps_its_anchor_and_visual():
     body = _TALK.read_text(encoding="utf-8")
     assert 'id="talk"' in body
     assert "<DiscordMock />" in body
+
+
+def test_talk_has_exactly_one_section_label():
+    """Step 3's replacement block *re-includes* the `01 — Talk` mono-label, so
+    pasting it below the existing one stacks two identical labels. Every other
+    assertion in this file is a substring check and would stay green."""
+    assert _TALK.read_text(encoding="utf-8").count("01 — Talk") == 1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1578,7 +1630,7 @@ Expected: FAIL — `assert "Talk to agents on Discord" not in body`
 
 - [ ] **Step 3: Implement**
 
-In `Talk.tsx`, replace the heading, body line and step list (the `<h2>`, the `<p>` and the `<ol>`) with:
+In `Talk.tsx`, replace the contiguous span **from the `01 — Talk` mono-label `<p>` at `:15` through the closing `</ol>` at `:33`** — that is *four* elements (mono-label `<p>`, `<h2>`, body `<p>`, `<ol>`), not three. The block below **reproduces the mono-label unchanged**; keeping the original as well ships two stacked `01 — Talk` lines, which is what `test_talk_has_exactly_one_section_label` exists to catch. Leave `:34-41` (the `<Button>`) alone.
 
 ```tsx
             <p className="text-base md:text-lg font-mono tracking-wide text-primary mb-3">01 — Talk</p>
@@ -1629,7 +1681,7 @@ git commit -m "feat(landing): lead Talk with the on-site path, Discord as altern
 - [ ] **Step 1: Verify the docs destination resolves**
 
 Run: `curl -sS -o /dev/null -w '%{http_code}\n' https://finagent-orchestration.readthedocs.io/en/latest/`
-Expected: `200`. If it is not 200, stop and report — replacing a dead link with another dead link is not a fix. The URL is the one `README.md:138` publishes as canonical.
+Expected: `200`. If it is not 200, stop and report — replacing a dead link with another dead link is not a fix. This exact URL is the one the README's docs **badge** publishes (`README.md:15`); the prose link at `README.md:138` gives the bare host, which redirects to the same place. Use the badge's `/en/latest/` form so the footer link does not depend on a redirect.
 
 - [ ] **Step 2: Write the failing test**
 
@@ -1739,9 +1791,13 @@ In `dashboard/frontend/index.html`, change the `<script src="/assets/index-XXXX.
 
 Run: `pytest dashboard/backend/tests/test_frontend_bundle_integrity.py -v`
 Expected: 6 passed. Specifically:
-- `test_shipped_bundle_has_one_cta_per_landing_source_emitter` must report **7** in both source and bundle (was 6; Task 9's band adds one)
+- `test_shipped_bundle_has_one_cta_per_landing_source_emitter` must report **7** in both source and bundle (was 6; Task 9's band adds one). The count is derived from the source at run time, not hardcoded, so no assertion needs editing.
 - `test_hand_written_auth_layer_survives_a_bundle_refresh` proves Step 4 was honoured
 - `test_no_orphaned_assets` proves Step 3's deletion happened
+
+- [ ] **Step 6b: Correct the guard's stale prose**
+
+Two docstrings in `test_frontend_bundle_integrity.py` (`:134` and `:187`) say **"six"** `data-landing-auth` CTAs. The assertions are dynamic and stay green, but the prose becomes wrong the moment Task 9 lands. Change both to **seven**. Comment-only edit; commit it with Step 10.
 
 - [ ] **Step 7: Verify the rebuild is reproducible**
 
@@ -1756,11 +1812,12 @@ Expected: identical hashes, and the emitted filename equals the committed one. A
 
 ```bash
 cd /mnt/d/github/agent-trading-lab
-DATABASE_PATH=/tmp/claude-1000/-mnt-d-github-agent-trading-lab/3d290e13-de95-4210-b7fe-64653f3540e8/scratchpad/landing-check.db \
-  python -m dashboard.backend.app
+CHECK_DB="$YOUR_SCRATCHPAD/landing-check.db"   # substitute your own session scratchpad
+mkdir -p "$(dirname "$CHECK_DB")"
+DATABASE_PATH="$CHECK_DB" python -m dashboard.backend.app
 ```
 
-`DATABASE_PATH` must point at a temp file — the default is the committed prod seed DB and importing the app mutates it. Then drive `http://localhost:8000/` with `~/.venvs/htmlpdf/bin/python` (Playwright + Chromium already installed) and confirm: the band renders between hero and Talk, the first scroll lands on it, and **clicking a CTA opens the signup modal**. A `/_vercel/insights/script.js` 404 is expected off Vercel — not a defect.
+`DATABASE_PATH` must point at a temp file **that you create the parent directory for** — the default is the committed prod seed DB, and merely importing the app runs lazy `CREATE TABLE`/`ALTER` against it. Do not paste a scratchpad path from this plan or any transcript: those belong to the session that wrote them and will not exist for you. Then drive `http://localhost:8000/` with `~/.venvs/htmlpdf/bin/python` (Playwright + Chromium already installed) and confirm: the band renders between hero and Talk, the first scroll lands on it, and **clicking a CTA opens the signup modal**. A `/_vercel/insights/script.js` 404 is expected off Vercel — not a defect.
 
 - [ ] **Step 9: Run the full suite**
 
@@ -1770,7 +1827,8 @@ Expected: green
 - [ ] **Step 10: Commit**
 
 ```bash
-git add dashboard/frontend/index.html dashboard/frontend/assets
+git add dashboard/frontend/index.html dashboard/frontend/assets \
+  dashboard/backend/tests/test_frontend_bundle_integrity.py
 git commit -m "chore(landing): rebuild bundle for the value band"
 ```
 
