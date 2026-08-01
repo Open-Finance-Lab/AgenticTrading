@@ -71,6 +71,7 @@ def test_create_agent_schema(store):
     agent = store.create_agent(name="My Agent", model_name="gpt-x", owner_user_id=7)
     assert set(agent.keys()) == {
         "agent_id", "name", "session_id", "model_name", "agent_type",
+        "runtime_type", "runtime_config",
         "description", "pipeline", "cash_allocation", "backtest_allocation",
         "api_key_prefix", "owner_user_id", "scopes",
         "created_at", "last_used_at", "api_key", "live_trading_enabled",
@@ -83,6 +84,45 @@ def test_create_agent_schema(store):
     assert agent["api_key_prefix"] == agent["api_key"][:12]
     # api_key_hash must never leak in the public dict.
     assert "api_key_hash" not in agent
+    assert agent["runtime_type"] == "pipeline"
+    assert agent["runtime_config"] == {}
+
+
+def test_legacy_agent_schema_migrates_runtime_defaults(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "legacy-agents.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE external_agents (
+            agent_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            session_id TEXT NOT NULL UNIQUE,
+            api_key_hash TEXT NOT NULL UNIQUE,
+            api_key_prefix TEXT NOT NULL,
+            model_name TEXT NOT NULL DEFAULT 'local-model',
+            owner_user_id INTEGER,
+            owner_browser_session TEXT,
+            created_at TEXT,
+            last_used_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO external_agents (
+            agent_id, name, session_id, api_key_hash, api_key_prefix
+        ) VALUES ('agent_legacy', 'Legacy', 'legacy-session', 'hash', 'ag_legacy')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = AgentStore(db_path=db_path).get_agent("agent_legacy")
+
+    assert migrated["runtime_type"] == "pipeline"
+    assert migrated["runtime_config"] == {}
 
 
 def test_get_agent_and_missing(store):

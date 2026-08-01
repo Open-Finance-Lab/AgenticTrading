@@ -1,7 +1,8 @@
 /**
  * agent-editor.js — Fullscreen agent Configure screen.
- * One mode only: capital + one plain-language instruction (stored as a 1-step
- * pipeline) + model. Agent fields: PATCH /api/v1/agents/{id}.
+ * Pipeline agents edit capital + one plain-language instruction + model.
+ * AI Hedge Fund agents edit capital + analyst composition and can place their
+ * Financial Datasets API key into server-side encrypted credential storage.
  *
  * The multi-step "Advanced" sub-agent editor was removed. Multi-step pipelines
  * still EXECUTE server-side (infrastructure/llm/pipeline_runner.py) and the
@@ -18,6 +19,28 @@
   const STORAGE_PREFIX = 'agent-pipeline-config:';
   const NAME_OVERRIDE_PREFIX = 'agent-name-override:';
   const CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
+  const AI_HEDGE_FUND_RUNTIME = 'ai_hedge_fund';
+  const AI_HEDGE_FUND_ANALYSTS = [
+    ['aswath_damodaran', 'Aswath Damodaran'],
+    ['ben_graham', 'Ben Graham'],
+    ['bill_ackman', 'Bill Ackman'],
+    ['cathie_wood', 'Cathie Wood'],
+    ['charlie_munger', 'Charlie Munger'],
+    ['michael_burry', 'Michael Burry'],
+    ['mohnish_pabrai', 'Mohnish Pabrai'],
+    ['nassim_taleb', 'Nassim Taleb'],
+    ['peter_lynch', 'Peter Lynch'],
+    ['phil_fisher', 'Phil Fisher'],
+    ['rakesh_jhunjhunwala', 'Rakesh Jhunjhunwala'],
+    ['stanley_druckenmiller', 'Stanley Druckenmiller'],
+    ['warren_buffett', 'Warren Buffett'],
+    ['technical_analyst', 'Technical'],
+    ['fundamentals_analyst', 'Fundamentals'],
+    ['growth_analyst', 'Growth'],
+    ['news_sentiment_analyst', 'News Sentiment'],
+    ['sentiment_analyst', 'Sentiment'],
+    ['valuation_analyst', 'Valuation'],
+  ];
   // Match app.js: same-origin locally, hosted backend everywhere else. In
   // production the static frontend (Vercel) and the API (Render) are different
   // origins, so a bare location.origin sends every /api call to the static host
@@ -59,6 +82,11 @@
   let saveStatusTimer = null;
   let isDirty = false;
   let savedSnapshot = '';
+  let financialDatasetsConfigured = false;
+
+  function isAiHedgeFundAgent(agent = currentAgent) {
+    return (agent?.runtime_type || 'pipeline') === AI_HEDGE_FUND_RUNTIME;
+  }
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -129,6 +157,109 @@
     const token = localStorage.getItem('auth-token');
     if (token) headers.Authorization = `Bearer ${token}`;
     return headers;
+  }
+
+  function renderAiHedgeFundAnalysts(agent) {
+    const grid = document.getElementById('agentEditorAiHedgeFundAnalysts');
+    if (!grid) return;
+    const selected = new Set(agent?.runtime_config?.analysts || []);
+    grid.innerHTML = AI_HEDGE_FUND_ANALYSTS.map(([id, label]) => `
+      <label class="agent-editor-analyst-option">
+        <input type="checkbox" name="agentEditorAiHedgeFundAnalyst" value="${escapeHtml(id)}" ${selected.has(id) ? 'checked' : ''}>
+        <span>${escapeHtml(label)}</span>
+      </label>`).join('');
+  }
+
+  function selectedAiHedgeFundAnalysts() {
+    return Array.from(
+      document.querySelectorAll('input[name="agentEditorAiHedgeFundAnalyst"]:checked')
+    ).map((input) => input.value);
+  }
+
+  function setFinancialDatasetsStatus(configured, message) {
+    financialDatasetsConfigured = Boolean(configured);
+    const status = document.getElementById('agentEditorFinancialDatasetsStatus');
+    if (status) {
+      status.textContent = message || (
+        financialDatasetsConfigured
+          ? 'Credential configured — enter a new key only to replace it.'
+          : 'Credential not configured — required before Run Backtest.'
+      );
+    }
+    // Without this the DELETE route has no UI path at all: a user could store a
+    // third-party key and never remove it.
+    const removeBtn = document.getElementById('agentEditorFinancialDatasetsRemove');
+    if (removeBtn) removeBtn.hidden = !financialDatasetsConfigured;
+  }
+
+  async function removeFinancialDatasetsCredential() {
+    const agent = currentAgent;
+    if (!agent || !financialDatasetsConfigured) return;
+    const removeBtn = document.getElementById('agentEditorFinancialDatasetsRemove');
+    if (removeBtn) removeBtn.disabled = true;
+    try {
+      await credentialRequest(agent, 'DELETE');
+      if (currentAgent?.agent_id !== agent.agent_id) return;
+      const keyInput = document.getElementById('agentEditorFinancialDatasetsKey');
+      if (keyInput) keyInput.value = '';
+      setFinancialDatasetsStatus(false, 'Stored key removed.');
+    } catch (error) {
+      if (currentAgent?.agent_id !== agent.agent_id) return;
+      setFinancialDatasetsStatus(
+        financialDatasetsConfigured,
+        `Could not remove the stored key: ${error.message}`,
+      );
+    } finally {
+      if (removeBtn) removeBtn.disabled = false;
+    }
+  }
+
+  async function credentialRequest(agent, method, body) {
+    const endpoint = `${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}/credentials/financial-datasets`;
+
+    async function send(extraHeaders) {
+      const headers = {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+        ...extraHeaders,
+      };
+      const response = await fetch(endpoint, {
+        method,
+        headers,
+        body: body == null ? undefined : JSON.stringify(body),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = data.detail || data.message || `HTTP ${response.status}`;
+        const error = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    }
+
+    try {
+      return await send({
+        'x-browser-id': window.BROWSER_OWNER_ID,
+        'x-session-id': agent.session_id || window.SESSION_ID,
+      });
+    } catch (error) {
+      if (error.status !== 403 || !agent?.session_id) throw error;
+      return send({ 'x-session-id': agent.session_id, 'x-browser-id': '' });
+    }
+  }
+
+  async function refreshFinancialDatasetsStatus(agent) {
+    if (!isAiHedgeFundAgent(agent)) return;
+    setFinancialDatasetsStatus(false, 'Checking credential…');
+    try {
+      const status = await credentialRequest(agent, 'GET');
+      if (currentAgent?.agent_id !== agent.agent_id) return;
+      setFinancialDatasetsStatus(status.configured);
+    } catch (error) {
+      if (currentAgent?.agent_id !== agent.agent_id) return;
+      setFinancialDatasetsStatus(false, `Credential status unavailable: ${error.message}`);
+    }
   }
 
   function formatUsd(value) {
@@ -417,6 +548,7 @@
   }
 
   function getEditorState() {
+    const hostedAiHedgeFund = isAiHedgeFundAgent();
     const nameInput = document.getElementById('agentEditorNameInput');
     const descInput = document.getElementById('agentEditorDescription');
     const cashInput = document.getElementById('agentEditorCashAllocation');
@@ -454,12 +586,15 @@
           : 1000;
     }
     const modelSelect = document.getElementById('agentEditorModelSelect');
-    const instruction = (
+    const instruction = hostedAiHedgeFund ? '' : (
       document.getElementById('agentEditorSimpleInstruction')?.value || ''
     ).trim();
     let subAgentsOut;
-    let sendPipeline;
-    if (instruction) {
+    let sendPipeline = !hostedAiHedgeFund;
+    if (hostedAiHedgeFund) {
+      // Hosted runtimes do not consume or mutate the legacy prompt pipeline.
+      subAgentsOut = subAgents;
+    } else if (instruction) {
       const existing =
         subAgents.length === 1 && subAgents[0].presetKey === simplePresetKey()
           ? subAgents[0]
@@ -484,20 +619,33 @@
       sendPipeline = true;
     }
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
+    const credentialInput = document.getElementById('agentEditorFinancialDatasetsKey');
     return {
       name: nameInput ? nameInput.value.trim() : '',
       description: descInput ? descInput.value.trim() : '',
       cash_allocation,
       backtest_allocation,
-      model_name: modelSelect ? modelSelect.value : '',
+      model_name: hostedAiHedgeFund
+        ? ''
+        : (modelSelect ? modelSelect.value : ''),
       live_trading_enabled: Boolean(liveToggle?.checked),
+      runtime_config: hostedAiHedgeFund
+        ? { analysts: selectedAiHedgeFundAnalysts() }
+        : null,
+      financial_datasets_api_key: hostedAiHedgeFund
+        ? (credentialInput?.value || '').trim()
+        : '',
       subAgents: subAgentsOut,
       sendPipeline,
     };
   }
 
   function snapshotState() {
-    return JSON.stringify(getEditorState());
+    const state = getEditorState();
+    // Never copy credential plaintext into snapshots or browser storage. Its
+    // presence is enough to make the editor dirty until a successful save.
+    state.financial_datasets_api_key = Boolean(state.financial_datasets_api_key);
+    return JSON.stringify(state);
   }
 
   function setDirty(dirty) {
@@ -565,6 +713,24 @@
     if (liveToggle) liveToggle.checked = Boolean(agent.live_trading_enabled);
   }
 
+  function configureEditorMode(agent) {
+    const hostedAiHedgeFund = isAiHedgeFundAgent(agent);
+    const modelField = document.getElementById('agentEditorModelField');
+    const managedModelField = document.getElementById('agentEditorManagedModelField');
+    const simplePanel = document.getElementById('agentEditorSimplePanel');
+    const hedgeFundPanel = document.getElementById('agentEditorAiHedgeFundPanel');
+    if (modelField) modelField.hidden = hostedAiHedgeFund;
+    if (managedModelField) managedModelField.hidden = !hostedAiHedgeFund;
+    if (simplePanel) simplePanel.hidden = hostedAiHedgeFund;
+    if (hedgeFundPanel) hedgeFundPanel.hidden = !hostedAiHedgeFund;
+    if (hostedAiHedgeFund) {
+      renderAiHedgeFundAnalysts(agent);
+      const keyInput = document.getElementById('agentEditorFinancialDatasetsKey');
+      if (keyInput) keyInput.value = '';
+      setFinancialDatasetsStatus(false, 'Checking credential…');
+    }
+  }
+
   function populateModelSelect(agent) {
     const select = document.getElementById('agentEditorModelSelect');
     if (!select) return;
@@ -601,7 +767,17 @@
     }));
   }
 
-  async function patchAgent(agent, name, description, pipeline, cash_allocation, backtest_allocation, model_name, live_trading_enabled) {
+  async function patchAgent(
+    agent,
+    name,
+    description,
+    pipeline,
+    cash_allocation,
+    backtest_allocation,
+    model_name,
+    live_trading_enabled,
+    runtimeConfig,
+  ) {
     const payload = {
       name,
       description: description || null,
@@ -611,6 +787,7 @@
     };
     if (pipeline) payload.pipeline = serializePipeline(pipeline);
     if (model_name) payload.model_name = model_name;
+    if (runtimeConfig) payload.runtime_config = runtimeConfig;
     const endpoint = `${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}`;
 
     async function requestWithHeaders(extraHeaders) {
@@ -764,6 +941,7 @@
     subAgents = loadStoredPipeline(agent);
     fillHeader(agent);
     populateModelSelect(agent);
+    configureEditorMode(agent);
 
     const instructionEl = document.getElementById('agentEditorSimpleInstruction');
     const defaultText = document.getElementById('agentEditorDefaultInstructionText');
@@ -776,6 +954,9 @@
     updateSimpleReplaceNote();
     refreshRunHistory(currentAgent);
     refreshRobinhoodStatus();
+    if (isAiHedgeFundAgent(agent)) {
+      refreshFinancialDatasetsStatus(agent);
+    }
 
     const view = document.getElementById('agentEditorView');
     if (view) {
@@ -822,6 +1003,10 @@
     if (!state.name) {
       showSaveStatus('Agent name is required', true);
       document.getElementById('agentEditorNameInput')?.focus();
+      return;
+    }
+    if (isAiHedgeFundAgent() && !state.runtime_config.analysts.length) {
+      showSaveStatus('Select at least one AI Hedge Fund analyst', true);
       return;
     }
 
@@ -879,6 +1064,7 @@
       return;
     }
 
+    let credentialSavePending = false;
     try {
       const updated = await patchAgent(
         currentAgent,
@@ -888,11 +1074,23 @@
         state.cash_allocation,
         state.backtest_allocation,
         state.model_name,
-        state.live_trading_enabled
+        state.live_trading_enabled,
+        state.runtime_config,
       );
       currentAgent = state.sendPipeline
         ? { ...currentAgent, ...updated, pipeline: subAgents }
         : { ...currentAgent, ...updated };
+      if (state.financial_datasets_api_key) {
+        credentialSavePending = true;
+        await credentialRequest(currentAgent, 'PUT', {
+          api_key: state.financial_datasets_api_key,
+        });
+        credentialSavePending = false;
+        const keyInput = document.getElementById('agentEditorFinancialDatasetsKey');
+        if (keyInput) keyInput.value = '';
+        setFinancialDatasetsStatus(true);
+        state.financial_datasets_api_key = '';
+      }
       if (state.sendPipeline) savePipelineLocal(currentAgent.agent_id, subAgents);
       localStorage.removeItem(`${NAME_OVERRIDE_PREFIX}${currentAgent.agent_id}`);
 
@@ -911,6 +1109,18 @@
         new CustomEvent('agent-editor-saved', { detail: { agent: currentAgent } })
       );
     } catch (error) {
+      if (credentialSavePending) {
+        fillHeader(currentAgent);
+        setDirty(true);
+        showSaveStatus(
+          `Agent saved, but credential storage failed: ${error.message}`,
+          true
+        );
+        window.dispatchEvent(
+          new CustomEvent('agent-editor-saved', { detail: { agent: currentAgent } })
+        );
+        return;
+      }
       if (state.sendPipeline) savePipelineLocal(currentAgent.agent_id, subAgents);
       localStorage.setItem(
         `${NAME_OVERRIDE_PREFIX}${currentAgent.agent_id}`,
@@ -939,6 +1149,7 @@
     document.getElementById('agentEditorSaveBtn')?.addEventListener('click', () => save());
     document.getElementById('agentEditorConnectRobinhoodBtn')?.addEventListener('click', connectRobinhood);
     document.getElementById('agentEditorDisconnectRobinhoodBtn')?.addEventListener('click', disconnectRobinhood);
+    document.getElementById('agentEditorFinancialDatasetsRemove')?.addEventListener('click', removeFinancialDatasetsCredential);
     document.getElementById('agentEditorRunLiveBtn')?.addEventListener('click', runLive);
     document.getElementById('agentEditorRunBacktestBtn')?.addEventListener('click', () => {
       if (!currentAgent) return;

@@ -48,6 +48,12 @@ import pytest
 # (sqlite module, sqlite class, postgres module, postgres class)
 _TWINS = [
     (
+        "dashboard.backend.domain.agents.credential_store",
+        "AgentCredentialStore",
+        "dashboard.backend.domain.agents.credential_store_postgres",
+        "PostgresAgentCredentialStore",
+    ),
+    (
         "dashboard.backend.domain.agents.repository",
         "AgentStore",
         "dashboard.backend.domain.agents.repository_postgres",

@@ -1,0 +1,4 @@
+# Installed only into the dedicated AI Hedge Fund virtual environment.
+# Pin the reviewed upstream source; never install these dependencies into ATL's
+# main environment because its LangChain/Pydantic constraints are independent.
+ai-hedge-fund @ https://github.com/virattt/ai-hedge-fund/archive/9557e64273e212635a4a28cbd8128df22f166c07.tar.gz

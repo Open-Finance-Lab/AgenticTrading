@@ -9,7 +9,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=69">
+    <link rel="stylesheet" href="styles.css?v=71">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script>
     (function () {
@@ -914,10 +914,15 @@
             <div class="agent-editor-title-wrap">
                 <input id="agentEditorNameInput" class="agent-editor-name-input" type="text" maxlength="100" placeholder="Agent name" aria-label="Agent name" autocomplete="off">
                 <p id="agentEditorMeta" class="agent-editor-meta"></p>
-                <label class="agent-editor-model-field" for="agentEditorModelSelect">
+                <label id="agentEditorModelField" class="agent-editor-model-field" for="agentEditorModelSelect">
                     <span class="agent-editor-model-label">Model</span>
                     <select id="agentEditorModelSelect" class="agent-editor-model-select" aria-label="Agent model"></select>
                 </label>
+                <div id="agentEditorManagedModelField" class="agent-editor-managed-model-field" aria-label="Managed model provider" hidden>
+                    <span class="agent-editor-model-label">Managed provider / model</span>
+                    <strong id="agentEditorManagedModelValue" class="agent-editor-managed-model-value">OpenRouter · nvidia/nemotron-3-nano-30b-a3b</strong>
+                    <span class="agent-editor-managed-model-note">Managed by Agentic Trading Lab</span>
+                </div>
                 <textarea id="agentEditorDescription" class="agent-editor-description" rows="2" maxlength="280" placeholder="Optional description for this agent…" aria-label="Agent description"></textarea>
                 <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
                     <div class="agent-editor-broker-head">
@@ -972,6 +977,18 @@
                             <p id="agentEditorDefaultInstructionText" class="agent-editor-default-text"></p>
                         </details>
                         <p id="agentEditorSimpleReplaceNote" class="agent-editor-simple-note" hidden>This agent currently uses a custom multi-step pipeline. Saving this instruction replaces it.</p>
+                    </div>
+                    <div id="agentEditorAiHedgeFundPanel" class="agent-editor-simple section-card compact" hidden>
+                        <h3 class="agent-editor-intro-title">AI Hedge Fund analyst committee</h3>
+                        <p class="agent-editor-intro-text">Choose the upstream analysts that compose this agent's strategy. The hosted OpenRouter model and runtime controls are managed by Agentic Trading Lab.</p>
+                        <div id="agentEditorAiHedgeFundAnalysts" class="agent-editor-analyst-grid" role="group" aria-label="AI Hedge Fund analysts"></div>
+                        <label class="auth-field agent-editor-credential-field" for="agentEditorFinancialDatasetsKey">
+                            <span>Financial Datasets API key</span>
+                            <input id="agentEditorFinancialDatasetsKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep the stored key" aria-describedby="agentEditorFinancialDatasetsStatus">
+                        </label>
+                        <p id="agentEditorFinancialDatasetsStatus" class="agent-editor-simple-note">Checking credential…</p>
+                        <button id="agentEditorFinancialDatasetsRemove" class="agent-editor-credential-remove" type="button" hidden>Remove stored key</button>
+                        <p class="agent-editor-simple-note">Encrypted in credential storage. The value is never returned to this browser after saving.</p>
                     </div>
                     <p id="agentEditorSaveStatus" class="agent-editor-save-status" hidden></p>
                     <p class="agent-editor-hint">Tip: press <kbd>Ctrl</kbd>+<kbd>S</kbd> to save.</p>
@@ -1626,8 +1643,8 @@
     <script src="market-events/MarketEventCard.js"></script>
     <script src="market-events/MarketEventFeed.js"></script>
     <script src="js/portfolio.js?v=15"></script>
-    <script src="js/agent-editor.js?v=14"></script>
-    <script src="app.js?v=51"></script>
+    <script src="js/agent-editor.js?v=17"></script>
+    <script src="app.js?v=52"></script>
     <script src="js/leaderboard.js?v=16"></script>
     <script src="home-page.js?v=36"></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

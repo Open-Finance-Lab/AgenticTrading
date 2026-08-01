@@ -84,6 +84,10 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     resolve_decision_source,
 )
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
+from dashboard.backend.domain.agents.runtime import (
+    AI_HEDGE_FUND_RUNTIME_TYPE,
+    PIPELINE_RUNTIME_TYPE,
+)
 
 # DJIA_30 is imported from validator (the single source of truth, guarded by
 # tests/test_djia30_universe.py) rather than redefined here.
@@ -175,6 +179,17 @@ def main():
     parser.add_argument("--mode", default="safe_trading", choices=["safe_trading", "buy_and_hold"], help="Agent mode: 'safe_trading' (risk management) or 'buy_and_hold' (debug)")
     parser.add_argument("--strategy-prompt-file", default=None, help="Path to a UTF-8 file with a free-form strategy prompt that REPLACES the built-in agent prompt for this run")
     parser.add_argument("--pipeline-file", default=None, help="Path to a UTF-8 JSON file with the sub-agent pipeline steps for this run")
+    parser.add_argument(
+        "--runtime-type",
+        default=PIPELINE_RUNTIME_TYPE,
+        choices=[PIPELINE_RUNTIME_TYPE, AI_HEDGE_FUND_RUNTIME_TYPE],
+        help="Hosted agent runtime (default: pipeline)",
+    )
+    parser.add_argument(
+        "--runtime-config-file",
+        default=None,
+        help="Path to the hosted runtime's non-secret JSON configuration",
+    )
     parser.add_argument("--model", default=None, help="Override the LLM model id (e.g. anthropic/claude-haiku-4-5). Defaults to the gateway-appropriate slug.")
     parser.add_argument("--run-id", default=None, help="Preset run id (used for live progress + DB row)")
     parser.add_argument("--progress-file", default=None, help="Path to write incremental equity snapshots for live dashboard charting")
@@ -258,6 +273,19 @@ def main():
         except (OSError, json.JSONDecodeError) as exc:
             print(f"⚠️  Could not read --pipeline-file ({args.pipeline_file}): {exc}")
             pipeline = None
+
+    runtime_config = {}
+    if args.runtime_config_file:
+        try:
+            raw_runtime_config = json.loads(
+                Path(args.runtime_config_file).read_text(encoding="utf-8")
+            )
+            if isinstance(raw_runtime_config, dict):
+                runtime_config = raw_runtime_config
+            else:
+                parser.error("--runtime-config-file must contain a JSON object")
+        except (OSError, json.JSONDecodeError) as exc:
+            parser.error(f"Could not read --runtime-config-file: {exc}")
     
     # Validate and swap dates if backwards
     from datetime import datetime as dt_parser
@@ -300,7 +328,19 @@ def main():
     print(f"Capital: ${capital:,.0f}")
     
     # Show mode
-    mode_display = "Sub-agent Pipeline" if pipeline else ("Custom Prompt" if strategy_prompt else args.mode.replace("_", " ").title())
+    mode_display = (
+        "AI Hedge Fund"
+        if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
+        else (
+            "Sub-agent Pipeline"
+            if pipeline
+            else (
+                "Custom Prompt"
+                if strategy_prompt
+                else args.mode.replace("_", " ").title()
+            )
+        )
+    )
     print(f"Mode: {mode_display}")
     if pipeline:
         print(f"Sub-agent pipeline: {len(pipeline)} step(s)")
@@ -326,9 +366,13 @@ def main():
         symbols=symbols,
         universe=market_profile.universe,
         decision_source=decision_source,
+        runtime_type=args.runtime_type,
+        runtime_config=runtime_config,
     )
     
-    if backtester.use_llm:
+    if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+        print("🧠 Using hosted AI Hedge Fund runtime for trading decisions\n")
+    elif backtester.use_llm:
         print(f"🧠 Using {LLM_MODEL_NAME} for trading decisions (Mode: {mode_display})\n")
     else:
         print("⚙️  Using rule-based logic for trading decisions\n")

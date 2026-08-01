@@ -1423,9 +1423,11 @@ function syncBacktestModelFieldMode() {
   if (modelSelect) modelSelect.hidden = !isIFind;
   if (!readonly) return;
   readonly.hidden = isIFind;
-  readonly.textContent = source === 'vnpy_simulation'
-    ? 'Rule-based — vn.py simulation makes no LLM calls'
-    : formatAgentModelLabel(runBacktestModalAgent?.model_name);
+  readonly.textContent = (runBacktestModalAgent?.runtime_type || 'pipeline') !== 'pipeline'
+    ? 'AI Hedge Fund — hosted runtime'
+    : (source === 'vnpy_simulation'
+      ? 'Rule-based — vn.py simulation makes no LLM calls'
+      : formatAgentModelLabel(runBacktestModalAgent?.model_name));
 }
 
 function syncModelSelectFromAgent(agent) {
@@ -1662,7 +1664,11 @@ function renderMarketplaceGrid() {
   templates.forEach((template) => {
     const card = document.createElement('div');
     card.className = 'section-card agent-card marketplace-card';
-    const modeLabel = template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction';
+    const isAiHedgeFundTemplate = template.runtime_type === 'ai_hedge_fund';
+    const modeLabel = template.mode === 'runtime'
+      ? 'Hosted runtime'
+      : (template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction');
+    const cloneLabel = isAiHedgeFundTemplate ? 'Copy to My Agents' : 'Add to My Agents';
     const tags = (template.tags || [])
       .slice(0, 3)
       .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
@@ -1687,7 +1693,7 @@ function renderMarketplaceGrid() {
         ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
       </div>
       <div class="agent-card-actions agent-card-actions--status">
-        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Add to My Agents</button>
+        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
       </div>`;
     grid.appendChild(card);
   });
@@ -4536,6 +4542,7 @@ function formatBacktestError(error, dataSource = null) {
  */
 function loadAgentPipelineForBacktest(agent) {
     if (!agent) return null;
+    if ((agent.runtime_type || 'pipeline') !== 'pipeline') return null;
     if (Array.isArray(agent.pipeline) && agent.pipeline.length) {
         return agent.pipeline;
     }
@@ -5284,6 +5291,7 @@ function openRunBacktestModal(agent) {
     }
 
     runBacktestModalAgent = agent;
+    const isHostedRuntime = (agent.runtime_type || 'pipeline') !== 'pipeline';
     populateBacktestAgentSelect();
     const select = document.getElementById('backtestAgentSelect');
     if (select) select.value = agent.agent_id;
@@ -5305,6 +5313,17 @@ function openRunBacktestModal(agent) {
     }
 
     syncModelSelectFromAgent(agent);
+    const marketDataSourceSelect = document.getElementById('marketDataSourceSelect');
+    if (marketDataSourceSelect) {
+        // The hosted adapter consumes the upstream project's US-equity data
+        // contract. Keep the modal on the one ATL market profile it supports.
+        if (isHostedRuntime) marketDataSourceSelect.value = 'alpaca';
+        marketDataSourceSelect.disabled = isHostedRuntime;
+        marketDataSourceSelect.setAttribute(
+            'aria-disabled',
+            String(isHostedRuntime),
+        );
+    }
     selectPreset('djia');
     const builtinTabBtn = document.querySelector('#runBacktestModal .universe-tab[data-tab="builtin"]');
     if (builtinTabBtn) handleUniverseTabSwitch(builtinTabBtn);
@@ -5392,10 +5411,13 @@ async function runBacktest() {
     }
 
     await activateAgent(activeAgent);
-    const pipeline = isRuleBasedDecision ? null : loadAgentPipelineForBacktest(activeAgent);
+    const isHostedRuntime = (activeAgent.runtime_type || 'pipeline') !== 'pipeline';
+    const pipeline = isRuleBasedDecision
+        ? null
+        : (isHostedRuntime ? null : loadAgentPipelineForBacktest(activeAgent));
     const model = isRuleBasedDecision
         ? null
-        : resolveBacktestModelRequest(modelSelect, activeAgent);
+        : (isHostedRuntime ? null : resolveBacktestModelRequest(modelSelect, activeAgent));
 
     const initialCapital = resolveBacktestCapital(activeAgent);
 
@@ -5427,7 +5449,9 @@ async function runBacktest() {
     const launchConfigBase = {
         agentId: activeAgent.agent_id,
         agentName: activeAgent.name,
-        model: isRuleBasedDecision ? 'Rule-based' : (model || null),
+        model: isHostedRuntime
+            ? 'AI Hedge Fund (hosted)'
+            : (isRuleBasedDecision ? 'Rule-based' : (model || null)),
         prompt: promptSummary,
         initialCapital,
         startDate,
@@ -5466,9 +5490,11 @@ async function runBacktest() {
         applyAgentFilters(false);
         updateBacktestRunProgress({
             elapsedSeconds: 0,
-            message: pipeline?.length
-                ? `Running ${pipeline.length}-step agent pipeline…`
-                : 'Starting backtest…',
+            message: isHostedRuntime
+                ? 'Running hosted AI Hedge Fund…'
+                : (pipeline?.length
+                    ? `Running ${pipeline.length}-step agent pipeline…`
+                    : 'Starting backtest…'),
         });
     } catch (error) {
         clearAgentBacktestRunning(activeAgent.agent_id);

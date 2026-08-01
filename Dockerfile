@@ -3,10 +3,17 @@ FROM python:3.13-slim
 WORKDIR /app
 
 # Copy requirements
-COPY requirements.txt .
+COPY requirements.txt requirements-ai-hedge-fund.txt ./
 
 # Install dependencies
 RUN pip install --no-cache-dir -r requirements.txt
+
+# Keep virattt/ai-hedge-fund and its LangChain graph isolated from ATL's main
+# dependency set. The adapter invokes this interpreter over a JSON subprocess
+# boundary; marketplace users never clone or install the upstream project.
+RUN python -m venv /opt/ai-hedge-fund-venv \
+    && /opt/ai-hedge-fund-venv/bin/pip install --no-cache-dir \
+       -r requirements-ai-hedge-fund.txt
 
 # Copy dashboard application
 COPY dashboard ./dashboard
@@ -14,6 +21,7 @@ COPY dashboard ./dashboard
 # Set environment
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8000
+ENV AI_HEDGE_FUND_PYTHON=/opt/ai-hedge-fund-venv/bin/python
 
 # Health check (PORT-aware so it stays valid when PORT is overridden)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \

@@ -95,6 +95,22 @@ def test_create_agent_returns_full_schema(svc):
     assert agent["api_key"].startswith("ag_")
 
 
+def test_runtime_type_update_resets_runtime_specific_config(svc):
+    agent = svc.create_agent(
+        name="hosted",
+        model_name="gpt-4.1",
+        owner_user_id=None,
+        owner_browser_session="b1",
+        runtime_type="ai_hedge_fund",
+        runtime_config={"analysts": ["technical_analyst"]},
+    )
+
+    updated = svc.update_agent(agent["agent_id"], runtime_type="pipeline")
+
+    assert updated["runtime_type"] == "pipeline"
+    assert updated["runtime_config"] == {}
+
+
 def test_create_agent_with_stats_schema(svc):
     agent = svc.create_agent(
         name="A", model_name="m", owner_user_id=None, owner_browser_session="b1"

@@ -253,6 +253,212 @@ def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
     assert resp.json()["session_id"] == agent_session
     assert spy.calls == 1
     assert spy.last_kwargs["session_id"] == agent_session
+    assert spy.last_kwargs["runtime_type"] == "pipeline"
+    assert spy.last_kwargs["runtime_config"] == {}
+
+
+def _stub_hosted_runtime_installed(monkeypatch):
+    """Pretend the isolated upstream venv exists on this deployment.
+
+    CI installs core requirements only, so the real check always reports the
+    runtime as missing. Tests about *other* preconditions have to say which
+    deployment they are describing.
+    """
+    monkeypatch.setattr(bt, "runtime_unavailable_reason", lambda: None)
+
+
+def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_hosted_runtime_installed(monkeypatch)
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: "user-financial-datasets-test-key",
+    )
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    cloned = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    )
+    assert cloned.status_code == 200
+    agent = cloned.json()["agent"]
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "model": "claude-haiku-4.5",
+            "pipeline": [{"label": "must be ignored"}],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["runtime_type"] == "ai_hedge_fund"
+    assert set(response.json()["ignored_fields"]) == {"model", "pipeline"}
+    assert spy.calls == 1
+    assert spy.last_kwargs["runtime_type"] == "ai_hedge_fund"
+    assert spy.last_kwargs["runtime_config"]["analysts"]
+    assert (
+        spy.last_kwargs["financial_datasets_api_key"]
+        == "user-financial-datasets-test-key"
+    )
+    assert spy.last_kwargs["model"] is None
+    assert spy.last_kwargs["pipeline"] is None
+
+
+def test_ai_hedge_fund_backtest_requires_owned_agent_credential(client, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_hosted_runtime_installed(monkeypatch)
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: None,
+    )
+
+    missing = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+    assert missing.status_code == 422
+    assert "Financial Datasets API key" in missing.text
+
+    unauthorized = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert unauthorized.status_code == 403
+
+
+def test_ai_hedge_fund_backtest_rejects_run_when_runtime_not_installed(
+    client, monkeypatch
+):
+    """A missing isolated venv must fail at request time, not 30 minutes later.
+
+    render.yaml is documentation rather than the deploy mechanism here, so a
+    service without the venv is a live possibility. Without this the run is
+    accepted, backgrounded, and dies on its first decision step.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    monkeypatch.setattr(
+        bt,
+        "runtime_unavailable_reason",
+        lambda: "AI Hedge Fund runtime is not installed; configure AI_HEDGE_FUND_PYTHON",
+    )
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: "user-financial-datasets-test-key",
+    )
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 503, response.text
+    assert "AI_HEDGE_FUND_PYTHON" in response.text
+    assert spy.calls == 0
+
+
+def test_hosted_backtest_timeout_covers_every_decision_step():
+    """The parent timeout must not be the binding constraint on a hosted run.
+
+    A fixed 1800s cap over a month of trading days leaves ~85s per step while
+    the runtime is configured for 300s, so the parent kills the child mid-run
+    and discards every completed step.
+    """
+    step_seconds = bt.resolve_step_timeout_seconds()
+    decision_days = bt._estimated_decision_days("2026-01-01", "2026-01-31")
+    assert decision_days == 22
+
+    hosted = bt._backtest_subprocess_timeout(
+        "ai_hedge_fund", "2026-01-01", "2026-01-31"
+    )
+    assert hosted >= step_seconds * decision_days
+    assert hosted > bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+
+    # Pipeline runs keep their established budget exactly.
+    assert (
+        bt._backtest_subprocess_timeout("pipeline", "2026-01-01", "2026-01-31")
+        == bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+    )
+
+
+def test_hosted_backtest_timeout_is_capped_and_never_below_pipeline():
+    """A long range is capped rather than pinning a worker thread forever."""
+    capped = bt._backtest_subprocess_timeout(
+        "ai_hedge_fund", "2020-01-01", "2030-01-01"
+    )
+    assert capped == bt.MAX_SUBPROCESS_TIMEOUT_SECONDS
+
+    # Unparseable dates must not collapse the budget to the overhead constant.
+    assert (
+        bt._backtest_subprocess_timeout("ai_hedge_fund", "not-a-date", "also-bad")
+        == bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+    )
+
+
+def test_ai_hedge_fund_requires_openrouter_not_direct_openai(client, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-authorize-hosted-runtime")
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+    assert "platform-managed OpenRouter provider" in response.text
 
 
 def test_backtest_run_forwards_selected_assets(client, monkeypatch):
@@ -602,6 +808,28 @@ def test_subprocess_log_dump_is_redacted_but_not_truncated(monkeypatch):
     assert len(redacted) > 8000
     assert "super-secret-token" not in redacted
     assert "[REDACTED]" in redacted
+
+
+def test_subprocess_log_redacts_user_financial_datasets_credential():
+    credential = "user-financial-datasets-plaintext-canary"
+
+    redacted = bt._redact_credentials(
+        f"upstream failed with key={credential}", credential
+    )
+
+    assert credential not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_background_error_redacts_user_financial_datasets_credential():
+    credential = "user-financial-datasets-test-key"
+    summary = bt._sanitize_backtest_error(
+        f"runtime rejected credential={credential}",
+        extra_secret=credential,
+    )
+
+    assert credential not in summary
+    assert "[REDACTED]" in summary
 
 
 def test_error_summary_stays_bounded(monkeypatch):

@@ -3,24 +3,40 @@
 import uuid
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
+from dashboard.backend.domain.agents.credential_store import AgentCredentialStore
 
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     import dashboard.backend.domain.agents.repository as agent_store_module
     import dashboard.backend.api.routers.agents as agents_api
+    import dashboard.backend.domain.agents.service as agent_service_module
     import dashboard.backend.database as db_module
+    import dashboard.backend.domain.brokers.repository as broker_repository
 
     db_path = tmp_path / "test.db"
     test_agents = agent_store_module.AgentStore(db_path=db_path)
+    test_credentials = AgentCredentialStore(db_path=db_path)
     test_db = db_module.BacktestDatabase(db_path=db_path)
+    monkeypatch.setenv(
+        broker_repository._KEY_ENV_VAR, Fernet.generate_key().decode()
+    )
+    monkeypatch.setattr(broker_repository, "_fernet_instance", None)
     monkeypatch.setattr(agent_store_module, "agent_store", test_agents)
     monkeypatch.setattr(agents_api.agent_service, "agents", test_agents)
     monkeypatch.setattr(agents_api.agent_service, "db", test_db)
+    monkeypatch.setattr(agents_api, "agent_credential_store", test_credentials)
+    # The service retires runtime-owned credentials on a runtime switch, so it
+    # needs the same store the router writes through.
+    monkeypatch.setattr(
+        agent_service_module, "agent_credential_store", test_credentials
+    )
     monkeypatch.setattr(db_module, "db", test_db)
+    agents_api._credential_rate_limiter.reset()
     return TestClient(app)
 
 
@@ -578,6 +594,13 @@ def test_marketplace_listing_and_clone(client):
     templates = listing.json()["templates"]
     assert templates
     assert any(t["template_id"] == "balanced-starter" for t in templates)
+    hedge_fund_card = next(
+        t for t in templates if t["template_id"] == "ai-hedge-fund"
+    )
+    assert hedge_fund_card["name"] == "AI Hedge Fund"
+    assert hedge_fund_card["runtime_type"] == "ai_hedge_fund"
+    assert hedge_fund_card["mode"] == "runtime"
+    assert hedge_fund_card["model_name"] == "nvidia/nemotron-3-nano-30b-a3b"
 
     browser_session = str(uuid.uuid4())
     headers = {"X-Session-Id": browser_session}
@@ -592,10 +615,258 @@ def test_marketplace_listing_and_clone(client):
     assert agent["agent_type"] == "builtin"
     assert agent.get("pipeline")
     assert agent["pipeline"][0]["presetKey"] == "simple_instruction"
+    assert agent["runtime_type"] == "pipeline"
+    assert agent["runtime_config"] == {}
 
     listed = client.get("/api/v1/agents", headers=headers)
     assert listed.status_code == 200
     assert any(a["agent_id"] == agent["agent_id"] for a in listed.json()["agents"])
+
+    ai_clone = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    )
+    assert ai_clone.status_code == 200
+    ai_agent = ai_clone.json()["agent"]
+    assert ai_agent["name"] == "AI Hedge Fund"
+    assert ai_agent["agent_type"] == "builtin"
+    assert ai_agent["model_name"] == "nvidia/nemotron-3-nano-30b-a3b"
+    assert ai_agent["runtime_type"] == "ai_hedge_fund"
+    assert ai_agent["runtime_config"] == {
+        "analysts": [
+            "fundamentals_analyst",
+            "technical_analyst",
+            "sentiment_analyst",
+            "valuation_analyst",
+        ]
+    }
+    assert ai_agent["pipeline"] is None
+
+
+def test_ai_hedge_fund_analysts_are_editable_but_infrastructure_is_not(client):
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    endpoint = f"/api/v1/agents/{agent['agent_id']}"
+
+    updated = client.patch(
+        endpoint,
+        json={"runtime_config": {"analysts": ["warren_buffett", "technical_analyst"]}},
+        headers=headers,
+    )
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["agent"]["runtime_config"]["analysts"] == [
+        "warren_buffett",
+        "technical_analyst",
+    ]
+
+    protected = client.patch(
+        endpoint,
+        json={
+            "runtime_config": {
+                "analysts": ["technical_analyst"],
+                "model_name": "user-controlled-model",
+            }
+        },
+        headers=headers,
+    )
+    assert protected.status_code == 422
+
+
+def test_financial_datasets_credential_is_encrypted_and_never_returned(client):
+    import dashboard.backend.api.routers.agents as agents_api
+
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    endpoint = (
+        f"/api/v1/agents/{agent['agent_id']}/credentials/financial-datasets"
+    )
+
+    empty = client.get(endpoint, headers=headers)
+    assert empty.status_code == 200
+    assert empty.json()["configured"] is False
+
+    plaintext = "fd-test-plaintext-canary"
+    saved = client.put(endpoint, json={"api_key": plaintext}, headers=headers)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["configured"] is True
+    assert plaintext not in saved.text
+
+    conn = agents_api.agent_credential_store._get_connection()
+    row = conn.execute(
+        "SELECT value_enc FROM agent_credentials WHERE agent_id = ?",
+        (agent["agent_id"],),
+    ).fetchone()
+    conn.close()
+    assert row["value_enc"] != plaintext
+    assert plaintext not in row["value_enc"]
+
+    status = client.get(endpoint, headers=headers)
+    assert status.json()["configured"] is True
+    assert plaintext not in status.text
+
+    denied = client.get(endpoint, headers={"X-Session-Id": str(uuid.uuid4())})
+    assert denied.status_code == 403
+
+
+def test_rejected_credential_is_never_echoed_back(client):
+    """A 422 must not carry the submitted key.
+
+    ``SecretStr`` masks reprs but does not reach Pydantic's error envelope, and
+    FastAPI serializes ``input`` into every validation error body — so a
+    model-level validator rejecting a key returns that key in plaintext.
+    """
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    endpoint = (
+        f"/api/v1/agents/{agent['agent_id']}/credentials/financial-datasets"
+    )
+
+    too_long = "SECRET-CANARY-" + ("x" * 5000)
+    rejected = client.put(endpoint, json={"api_key": too_long}, headers=headers)
+    assert rejected.status_code == 422
+    assert "SECRET-CANARY" not in rejected.text
+    assert too_long not in rejected.text
+
+    blank = client.put(endpoint, json={"api_key": "   "}, headers=headers)
+    assert blank.status_code == 422
+    assert "must not be blank" in blank.text
+
+
+def test_credential_survives_no_runtime_switch_and_stays_removable(client):
+    """Switching runtime must never strand a key its owner cannot reach.
+
+    The credential routes gate on the *current* runtime_type, so a key stored
+    while the agent was hosted became invisible, unreplaceable and undeletable
+    the moment the agent moved to ``pipeline``.
+    """
+    import dashboard.backend.api.routers.agents as agents_api
+
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    agent_id = agent["agent_id"]
+    endpoint = f"/api/v1/agents/{agent_id}/credentials/financial-datasets"
+
+    plaintext = "fd-orphan-canary"
+    # Kept out of the assert: ``python -O`` strips asserts, and with them any
+    # call written inside one -- here the store write the test depends on.
+    stored = client.put(endpoint, json={"api_key": plaintext}, headers=headers)
+    assert stored.status_code == 200
+
+    switched = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"runtime_type": "pipeline"},
+        headers=headers,
+    )
+    assert switched.status_code == 200
+    assert switched.json()["agent"]["runtime_type"] == "pipeline"
+
+    # The switch itself retires the runtime-owned credential.
+    assert (
+        agents_api.agent_credential_store.get_secret(
+            agent_id, "financial_datasets_api_key"
+        )
+        is None
+    )
+    # ...and the owner can still *see* the status rather than being 422'd out
+    # of their own credential.
+    status = client.get(endpoint, headers=headers)
+    assert status.status_code == 200
+    assert status.json()["configured"] is False
+
+
+def test_deleting_agent_removes_credentials_for_any_runtime(client):
+    """Cleanup must not be gated on the runtime the agent happens to hold now.
+
+    Gated, a key stored while hosted outlived the agent itself: decryptable,
+    ownerless, and with no API path left to remove it.
+    """
+    import dashboard.backend.api.routers.agents as agents_api
+
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    agent_id = agent["agent_id"]
+    endpoint = f"/api/v1/agents/{agent_id}/credentials/financial-datasets"
+    client.put(endpoint, json={"api_key": "fd-delete-canary"}, headers=headers)
+
+    # Write the row back directly to model the pre-existing stranded state: an
+    # agent already switched to pipeline while still holding a credential.
+    agents_api.agent_credential_store.upsert(
+        agent_id, "financial_datasets_api_key", "fd-delete-canary"
+    )
+    client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"runtime_type": "pipeline"},
+        headers=headers,
+    )
+    agents_api.agent_credential_store.upsert(
+        agent_id, "financial_datasets_api_key", "fd-delete-canary"
+    )
+
+    # An explicit DELETE reaches it regardless of runtime...
+    removed = client.delete(endpoint, headers=headers)
+    assert removed.status_code == 200
+    assert removed.json()["deleted"] is True
+
+    # ...and so does deleting the agent.
+    agents_api.agent_credential_store.upsert(
+        agent_id, "financial_datasets_api_key", "fd-delete-canary"
+    )
+    deleted_agent = client.delete(f"/api/v1/agents/{agent_id}", headers=headers)
+    assert deleted_agent.status_code == 200
+    assert (
+        agents_api.agent_credential_store.get_secret(
+            agent_id, "financial_datasets_api_key"
+        )
+        is None
+    )
+
+
+def test_credential_writes_are_rate_limited(client, monkeypatch):
+    import dashboard.backend.api.routers.agents as agents_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    monkeypatch.setattr(
+        agents_api,
+        "_credential_rate_limiter",
+        FixedWindowRateLimiter(max_events=1, window_seconds=3600),
+    )
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    endpoint = (
+        f"/api/v1/agents/{agent['agent_id']}/credentials/financial-datasets"
+    )
+
+    first = client.put(endpoint, json={"api_key": "first"}, headers=headers)
+    assert first.status_code == 200
+    throttled = client.put(endpoint, json={"api_key": "second"}, headers=headers)
+    assert throttled.status_code == 429
 
 
 def test_marketplace_clone_unknown_template(client):

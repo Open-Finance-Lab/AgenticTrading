@@ -23,6 +23,11 @@ from dashboard.backend.domain.backtesting.metrics import (
     calculate_max_drawdown,
     calculate_sharpe,
 )
+from dashboard.backend.domain.agents.runtime import (
+    AI_HEDGE_FUND_RUNTIME_TYPE,
+    RuntimeDispatcher,
+)
+from dashboard.backend.infrastructure.ai_hedge_fund.adapter import AiHedgeFundRuntime
 from dashboard.scripts import backtest_hourly_agent as bha
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
@@ -51,6 +56,7 @@ class _FakeDB:
         self.runs = []
         self.equity_points = []
         self.trades = []
+        self.decisions = []
 
     def insert_run(self, **kwargs):
         self.runs.append(kwargs)
@@ -60,6 +66,9 @@ class _FakeDB:
 
     def insert_trades(self, run_id, trades):
         self.trades.append((run_id, list(trades)))
+
+    def insert_decisions(self, run_id, decisions):
+        self.decisions.append((run_id, list(decisions)))
 
 
 def _fake_provider_factory(data_source="alpaca", universe=None):
@@ -241,6 +250,118 @@ def test_run_agent_backtest_smoke(patched_engine):
     assert patched_engine.equity_points[0][0] == run_id
 
 
+def test_ai_hedge_fund_run_persists_bounded_decision_audit(patched_engine):
+    class HoldRunner:
+        def run(self, payload, *, timeout_seconds):
+            return {
+                "decisions": {
+                    "AAPL": {
+                        "action": "hold",
+                        "quantity": 0,
+                        "confidence": 61.23456,
+                        "reasoning": "Bounded summary " + "x" * 500,
+                    }
+                },
+                "analyst_signals": {
+                    "technical_analyst_agent": {
+                        "AAPL": {
+                            "signal": "neutral",
+                            "confidence": 67,
+                            "reasoning": "Unbounded analyst reasoning " + "x" * 500,
+                        }
+                    },
+                    "risk_management_agent": {
+                        "AAPL": {
+                            "remaining_position_limit": 200,
+                            "current_price": 100,
+                            "reasoning": {
+                                "portfolio_value": 1000,
+                                "remaining_limit": 200,
+                                "available_cash": 1000,
+                            },
+                        }
+                    },
+                },
+            }
+
+    bt = HourlyBacktester(
+        "2026-03-01",
+        "2026-04-01",
+        "aihf-audit",
+        runtime_type=AI_HEDGE_FUND_RUNTIME_TYPE,
+        runtime_config={"analysts": ["technical_analyst"]},
+        symbols=["AAPL", "MSFT", "JPM"],
+        decision_source="llm",
+    )
+    runtime = AiHedgeFundRuntime(
+        {"analysts": ["technical_analyst"]},
+        runner=HoldRunner(),
+        environment={},
+    )
+    bt.runtime_dispatcher = RuntimeDispatcher(
+        AI_HEDGE_FUND_RUNTIME_TYPE,
+        {"analysts": ["technical_analyst"]},
+        runtime=runtime,
+    )
+    bt.load_data()
+    bt.calculate_indicators()
+
+    run_id, _curve = bt.run_agent_backtest()
+
+    assert len(patched_engine.decisions) == 1
+    persisted_run_id, rows = patched_engine.decisions[0]
+    assert persisted_run_id == run_id
+    assert len(rows) == runtime.calls
+    assert rows[0]["decision_source"] == AI_HEDGE_FUND_RUNTIME_TYPE
+    assert rows[0]["context_ref"] == "2026-03-02"
+    assert rows[0]["actions_executed"] == 0
+    assert rows[0]["actions_submitted"] == [
+        {
+            "decision_date": "2026-03-03",
+            "data_cutoff_date": "2026-03-02",
+            "ticker": "AAPL",
+            "upstream_action": "hold",
+            "upstream_quantity": 0,
+            "confidence": 61.2346,
+            "mapped_atl_action": "hold",
+            "order_emitted": False,
+            "filter_reason": "upstream_hold",
+            "diagnostics": {
+                "analyst_signals": {
+                    "technical_analyst_agent": {
+                        "signal": "neutral",
+                        "confidence": 67.0,
+                    }
+                },
+                "risk_management_agent": {
+                    "remaining_position_limit": 200.0,
+                    "current_price": 100.0,
+                    "reasoning": {
+                        "portfolio_value": 1000.0,
+                        "remaining_limit": 200.0,
+                        "available_cash": 1000.0,
+                    },
+                },
+                "portfolio_manager": {
+                    "action": "hold",
+                    "quantity": 0,
+                    "confidence": 61.2346,
+                    "reasoning_summary": ("Bounded summary " + "x" * 500)[:240],
+                },
+            },
+        }
+    ]
+    submitted = rows[0]["actions_submitted"][0]
+    assert "reasoning" not in submitted
+    assert (
+        "reasoning"
+        not in submitted["diagnostics"]["analyst_signals"]["technical_analyst_agent"]
+    )
+    assert (
+        len(submitted["diagnostics"]["portfolio_manager"]["reasoning_summary"]) == 240
+    )
+
+
 def test_run_agent_backtest_deterministic(monkeypatch):
     bars = _make_bars(["AAPL", "MSFT", "JPM"], n_hours=70)
 
@@ -335,3 +456,142 @@ def test_custom_algo_subclasses_canonical_engine():
         )
     assert proc.returncode == 0, f"subprocess failed:\n{proc.stderr}"
     assert "OK" in proc.stdout
+
+
+def _hosted_backtester(runner, *, symbols=("AAPL", "MSFT", "JPM")):
+    bt = HourlyBacktester(
+        "2026-03-01",
+        "2026-04-01",
+        "aihf-resilience",
+        runtime_type=AI_HEDGE_FUND_RUNTIME_TYPE,
+        runtime_config={"analysts": ["technical_analyst"]},
+        symbols=list(symbols),
+        decision_source="llm",
+    )
+    bt.runtime_dispatcher = RuntimeDispatcher(
+        AI_HEDGE_FUND_RUNTIME_TYPE,
+        {"analysts": ["technical_analyst"]},
+        runtime=AiHedgeFundRuntime(
+            {"analysts": ["technical_analyst"]},
+            runner=runner,
+            environment={},
+        ),
+    )
+    bt.load_data()
+    bt.calculate_indicators()
+    return bt
+
+
+def test_hosted_runtime_holds_through_a_transient_step_failure(patched_engine):
+    """One bad day must not discard a run's worth of completed steps.
+
+    Every failure mode of a hosted decision -- step timeout, non-zero exit,
+    malformed JSON, an upstream rate limit on day 14 of 21 -- used to raise
+    straight out of run_agent_backtest with no partial results persisted.
+    """
+    from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+        AiHedgeFundRuntimeError,
+    )
+
+    class FlakyRunner:
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, payload, *, timeout_seconds):
+            self.calls += 1
+            if self.calls == 2:
+                raise AiHedgeFundRuntimeError("timed out after 300 seconds")
+            return {"decisions": {"AAPL": {"action": "hold", "quantity": 0,
+                                           "confidence": 55.0, "reasoning": "ok"}}}
+
+    bt = _hosted_backtester(FlakyRunner())
+    run_id, curve = bt.run_agent_backtest()
+
+    assert curve, "the run must still produce an equity curve"
+    assert len(bt.runtime_step_failures) == 1
+    assert "timed out" in bt.runtime_step_failures[0]
+
+    run_row = patched_engine.runs[0]
+    assert run_row["run_id"] == run_id
+    # Metadata makes the degradation legible rather than silently clean.
+    assert run_row["metadata"]["runtime_step_failures"] == 1
+    assert run_row["metadata"]["runtime_step_failure_samples"]
+
+
+def test_hosted_runtime_aborts_once_failures_exceed_the_budget(patched_engine):
+    """Absorbing *every* failure would persist a flat curve as a hosted run."""
+    from dashboard.backend.domain.agents.runtime import AgentRuntimeError
+    from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+        AiHedgeFundRuntimeError,
+    )
+
+    class DeadRunner:
+        def run(self, payload, *, timeout_seconds):
+            raise AiHedgeFundRuntimeError("upstream is down")
+
+    bt = _hosted_backtester(DeadRunner())
+    with pytest.raises(AgentRuntimeError, match="over the"):
+        bt.run_agent_backtest()
+    assert patched_engine.runs == []
+
+
+def test_hosted_runtime_configuration_error_aborts_on_the_first_step(patched_engine):
+    """A missing interpreter fails identically every step; do not spend the budget."""
+    from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+        AiHedgeFundConfigurationError,
+    )
+
+    class UninstalledRunner:
+        calls = 0
+
+        def run(self, payload, *, timeout_seconds):
+            UninstalledRunner.calls += 1
+            raise AiHedgeFundConfigurationError(
+                "AI Hedge Fund runtime is not installed"
+            )
+
+    bt = _hosted_backtester(UninstalledRunner())
+    with pytest.raises(AiHedgeFundConfigurationError):
+        bt.run_agent_backtest()
+    assert UninstalledRunner.calls == 1
+    assert bt.runtime_step_failures == []
+
+
+def test_hosted_run_row_reports_runtime_calls_not_zero(patched_engine):
+    """A model name beside llm_calls=0 is the shape H6 reads as rule-based."""
+
+    class HoldRunner:
+        def run(self, payload, *, timeout_seconds):
+            return {"decisions": {"AAPL": {"action": "hold", "quantity": 0,
+                                           "confidence": 55.0, "reasoning": "ok"}}}
+
+    bt = _hosted_backtester(HoldRunner())
+    bt.run_agent_backtest()
+
+    run_row = patched_engine.runs[0]
+    assert bt.runtime_dispatcher.calls > 0
+    assert run_row["llm_calls"] == bt.runtime_dispatcher.calls
+    assert run_row["llm_model"] == bt.runtime_dispatcher.model_name
+    assert "gpt-4.1" not in str(run_row["llm_model"])
+
+
+def test_hosted_run_that_never_reached_the_model_is_not_attributed_to_it(
+    patched_engine, monkeypatch
+):
+    """Zero successful calls must persist the honest label, not the model name."""
+
+    class NeverRuns:
+        def run(self, payload, *, timeout_seconds):  # pragma: no cover - unused
+            raise AssertionError("should not be invoked")
+
+    bt = _hosted_backtester(NeverRuns())
+    # With no prior market date for any bar, every step holds before it can
+    # dispatch -- the "first trading date of the run" case, generalized.
+    monkeypatch.setattr(
+        engine_mod, "_prior_market_date_by_decision_date", lambda timestamps: {}
+    )
+    bt.run_agent_backtest()
+
+    run_row = patched_engine.runs[0]
+    assert run_row["llm_calls"] == 0
+    assert run_row["llm_model"] == "rule-based"

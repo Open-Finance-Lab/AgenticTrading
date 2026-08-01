@@ -9268,6 +9268,25 @@ body.agent-editor-open {
     gap: 8px;
     margin-top: 6px;
 }
+.agent-editor-model-field[hidden],
+.agent-editor-managed-model-field[hidden] {
+    display: none;
+}
+.agent-editor-managed-model-field {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
+}
+.agent-editor-managed-model-value {
+    font-size: 13px;
+    color: var(--text-primary);
+}
+.agent-editor-managed-model-note {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
 .agent-editor-model-label {
     font-size: 13px;
     color: var(--text-secondary);
@@ -9322,4 +9341,54 @@ body.agent-editor-open {
     padding: 10px 12px;
     border-left: 2px solid var(--border-color);
     color: var(--text-secondary);
+}
+
+.agent-editor-analyst-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 8px;
+    margin: 16px 0 20px;
+}
+
+.agent-editor-analyst-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.agent-editor-analyst-option:has(input:checked) {
+    border-color: var(--info-color);
+    background: rgba(0, 191, 255, 0.08);
+}
+
+.agent-editor-credential-field {
+    margin-top: 6px;
+}
+
+.agent-editor-credential-remove {
+    align-self: flex-start;
+    margin-top: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--border, #d0d5dd);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary, #667085);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.agent-editor-credential-remove:hover:not(:disabled) {
+    border-color: #d92d20;
+    color: #d92d20;
+}
+
+.agent-editor-credential-remove:disabled {
+    opacity: 0.6;
+    cursor: default;
 }

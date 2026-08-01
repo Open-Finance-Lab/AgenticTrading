@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
+from dashboard.backend.domain.agents.runtime import DEFAULT_RUNTIME_TYPE
 
 DEFAULT_SCOPES = "agents:register,runs:write,context:read,decisions:write,runs:read"
 
@@ -53,6 +54,19 @@ def _parse_pipeline(raw: Any) -> Optional[List[Dict[str, Any]]]:
     return None
 
 
+def _parse_runtime_config(raw: Any) -> Dict[str, Any]:
+    """Decode runtime JSON, defaulting legacy/invalid rows to an empty config."""
+    if not raw:
+        return {}
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _public_agent(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
     data = dict(row)
     raw_scopes = data.get("scopes") or DEFAULT_SCOPES
@@ -62,6 +76,8 @@ def _public_agent(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         "session_id": data["session_id"],
         "model_name": data.get("model_name") or "local-model",
         "agent_type": data.get("agent_type") or "external",
+        "runtime_type": data.get("runtime_type") or DEFAULT_RUNTIME_TYPE,
+        "runtime_config": _parse_runtime_config(data.get("runtime_config")),
         "description": data.get("description"),
         "pipeline": _parse_pipeline(data.get("pipeline_config")),
         "cash_allocation": data.get("cash_allocation"),
@@ -105,6 +121,8 @@ class AgentStore:
                 owner_browser_session TEXT,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_used_at TIMESTAMP,
+                runtime_type TEXT NOT NULL DEFAULT 'pipeline',
+                runtime_config TEXT NOT NULL DEFAULT '{}',
                 FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE SET NULL
             )
             """
@@ -156,6 +174,16 @@ class AgentStore:
                 "ALTER TABLE external_agents ADD COLUMN scopes TEXT "
                 f"NOT NULL DEFAULT '{DEFAULT_SCOPES}'"
             )
+        if "runtime_type" not in existing_columns:
+            cursor.execute(
+                "ALTER TABLE external_agents "
+                "ADD COLUMN runtime_type TEXT NOT NULL DEFAULT 'pipeline'"
+            )
+        if "runtime_config" not in existing_columns:
+            cursor.execute(
+                "ALTER TABLE external_agents "
+                "ADD COLUMN runtime_config TEXT NOT NULL DEFAULT '{}'"
+            )
         cursor.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_external_agents_type
@@ -176,6 +204,8 @@ class AgentStore:
         session_id: Optional[str] = None,
         agent_type: str = "external",
         description: Optional[str] = None,
+        runtime_type: str = DEFAULT_RUNTIME_TYPE,
+        runtime_config: Optional[Dict[str, Any]] = None,
         cash_allocation: Optional[float] = None,
         backtest_allocation: Optional[float] = None,
     ) -> Dict[str, Any]:
@@ -193,9 +223,9 @@ class AgentStore:
             INSERT INTO external_agents (
                 agent_id, name, session_id, api_key_hash, api_key_prefix,
                 model_name, agent_type, description, cash_allocation,
-                backtest_allocation,
+                backtest_allocation, runtime_type, runtime_config,
                 owner_user_id, owner_browser_session, created_at, last_used_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent_id,
@@ -208,6 +238,8 @@ class AgentStore:
                 (description or None),
                 cash_allocation,
                 backtest_allocation,
+                (runtime_type or DEFAULT_RUNTIME_TYPE).strip() or DEFAULT_RUNTIME_TYPE,
+                json.dumps(runtime_config or {}),
                 owner_user_id,
                 owner_browser_session,
                 now,
@@ -493,6 +525,8 @@ class AgentStore:
         model_name: Optional[str] = None,
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
+        runtime_type: Any = _UNSET,
+        runtime_config: Any = _UNSET,
         cash_allocation: Any = _UNSET,
         backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
@@ -517,6 +551,14 @@ class AgentStore:
         if pipeline is not _UNSET:
             sets.append("pipeline_config = ?")
             params.append(json.dumps(pipeline) if pipeline else None)
+        if runtime_type is not _UNSET:
+            sets.append("runtime_type = ?")
+            params.append(
+                (runtime_type or DEFAULT_RUNTIME_TYPE).strip() or DEFAULT_RUNTIME_TYPE
+            )
+        if runtime_config is not _UNSET:
+            sets.append("runtime_config = ?")
+            params.append(json.dumps(runtime_config or {}))
         if cash_allocation is not _UNSET:
             sets.append("cash_allocation = ?")
             params.append(cash_allocation)

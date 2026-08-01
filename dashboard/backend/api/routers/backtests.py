@@ -60,6 +60,23 @@ from dashboard.backend.infrastructure.llm.providers import (
 )
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.agents.service import agent_service
+from dashboard.backend.domain.agents.credential_store import (
+    FINANCIAL_DATASETS_CREDENTIAL,
+    agent_credential_store,
+)
+from dashboard.backend.api.dependencies import _owner_context, _require_agent_access
+from dashboard.backend.domain.agents.runtime import (
+    AI_HEDGE_FUND_RUNTIME_TYPE,
+    DEFAULT_RUNTIME_TYPE,
+    PIPELINE_RUNTIME_TYPE,
+    normalize_runtime_config,
+    normalize_runtime_type,
+)
+from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+    AiHedgeFundConfigurationError,
+    resolve_step_timeout_seconds,
+    runtime_unavailable_reason,
+)
 from dashboard.backend.domain.backtesting.constants import (
     MAX_BACKTEST_INITIAL_CAPITAL,
     resolve_initial_capital,
@@ -333,12 +350,16 @@ def run_backtest_background(
     initial_capital: Optional[float] = None,
     assets: Optional[List[str]] = None,
     decision_source: Optional[str] = None,
+    runtime_type: str = DEFAULT_RUNTIME_TYPE,
+    runtime_config: Optional[Dict[str, Any]] = None,
+    financial_datasets_api_key: Optional[str] = None,
 ):
     """Run backtest in background thread."""
     global backtest_status, backtest_session_id
 
     strategy_prompt_path = None
     pipeline_path = None
+    runtime_config_path = None
     progress_file = None
     try:
         import subprocess
@@ -387,6 +408,13 @@ def run_backtest_background(
         print(f"📁 Can write to {db_path.parent}: {os.access(db_path.parent, os.W_OK)}", flush=True)
         
         env = os.environ.copy()
+        if runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+            # A Financial Datasets key is agent-owner material, never a platform
+            # fallback. Isolate it only for the hosted runtime; pipeline
+            # subprocesses retain their established environment unchanged.
+            env.pop("FINANCIAL_DATASETS_API_KEY", None)
+            if financial_datasets_api_key:
+                env["FINANCIAL_DATASETS_API_KEY"] = financial_datasets_api_key
         if uses_llm:
             print(f"{data_source} selected; LLM decision source enabled", flush=True)
         else:
@@ -401,6 +429,17 @@ def run_backtest_background(
             "--timeframe", timeframe,
             "--decision-source", decision_source,
         ]
+
+        if runtime_type != PIPELINE_RUNTIME_TYPE:
+            cmd += ["--runtime-type", runtime_type]
+
+        if runtime_config:
+            fd, runtime_config_path = tempfile.mkstemp(
+                prefix="agent_runtime_", suffix=".json"
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(runtime_config, f)
+            cmd += ["--runtime-config-file", runtime_config_path]
 
         # Optional free-form strategy prompt: written to a temp file (avoids
         # shell-escaping a long prompt) and passed via --strategy-prompt-file.
@@ -429,13 +468,18 @@ def run_backtest_background(
             print(f"   Assets: {', '.join(assets)}", flush=True)
 
         print(f"📋 Running: {' '.join(cmd)}", flush=True)
-        
+
+        subprocess_timeout = _backtest_subprocess_timeout(
+            runtime_type, start_date, end_date
+        )
+        print(f"⏱️  Subprocess timeout: {subprocess_timeout}s", flush=True)
+
         result = subprocess.run(
             cmd,
             cwd=str(DASHBOARD_DIR),
             capture_output=True,
             text=True,
-            timeout=1800,  # 30 minutes for LLM backtest (longer than rule-based)
+            timeout=subprocess_timeout,
             env=env
         )
         
@@ -445,15 +489,25 @@ def run_backtest_background(
         # survives in the deployed config, so trimming the dump would drop the
         # head of every run (universe, decision source, FX bootstrap).
         if result.stdout:
-            print(f"STDOUT:\n{_redact_credentials(result.stdout)}", flush=True)
+            print(
+                f"STDOUT:\n{_redact_credentials(result.stdout, financial_datasets_api_key)}",
+                flush=True,
+            )
         if result.stderr:
-            print(f"STDERR:\n{_redact_credentials(result.stderr)}", flush=True)
+            print(
+                f"STDERR:\n{_redact_credentials(result.stderr, financial_datasets_api_key)}",
+                flush=True,
+            )
         print(f"Return code: {result.returncode}", flush=True)
         print(f"=== END BACKTEST OUTPUT ===", flush=True)
         
         if result.returncode != 0:
             error_msg = result.stderr if result.stderr else result.stdout
-            summary = _sanitize_backtest_error(error_msg, 500)
+            summary = _sanitize_backtest_error(
+                error_msg,
+                500,
+                extra_secret=financial_datasets_api_key,
+            )
             backtest_status["error"] = (
                 f"Backtest failed with return code {result.returncode}. {summary}"
             )
@@ -466,7 +520,11 @@ def run_backtest_background(
                 print(f"   Latest run IDs: {[r['run_id'] for r in runs[:3]]}", flush=True)
             _maybe_writeback_adapted_pipeline(agent_id, live_run_id)
     except Exception as e:
-        summary = _sanitize_backtest_error(e, 500)
+        summary = _sanitize_backtest_error(
+            e,
+            500,
+            extra_secret=financial_datasets_api_key,
+        )
         backtest_status["error"] = summary
         print(f"❌ Backtest exception: {summary}", flush=True)
     finally:
@@ -489,10 +547,80 @@ def run_backtest_background(
                 os.remove(pipeline_path)
             except OSError:
                 pass
+        if runtime_config_path:
+            try:
+                os.remove(runtime_config_path)
+            except OSError:
+                # Best-effort cleanup of a temp file the run no longer needs;
+                # the OS reclaims it regardless, and failing here would mask
+                # the backtest's own outcome.
+                pass
         print("✋ Backtest background thread finished", flush=True)
 
 
-def _redact_credentials(text: object) -> str:
+# The backtest subprocess budget. 30 minutes is right for a pipeline run, whose
+# per-step LLM call is seconds long. A hosted run instead spends one *upstream
+# subprocess* per trading day, each allowed AI_HEDGE_FUND_TIMEOUT_SECONDS -- so
+# a fixed parent cap silently becomes the binding constraint (1800s over ~21
+# decision days is ~85s per step, not the 300s configured) and kills the child
+# mid-run with no partial results. Size the parent from the same per-step number
+# the runtime reads, so the inner timeout is what fires.
+PIPELINE_SUBPROCESS_TIMEOUT_SECONDS = 1800
+# Data load, baseline generation and persistence sit outside the decision loop.
+SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS = 600
+# Ceiling, so a long date range cannot pin a worker thread indefinitely.
+MAX_SUBPROCESS_TIMEOUT_SECONDS = 14400
+
+
+def _estimated_decision_days(start_date: str, end_date: str) -> int:
+    """Upper-bound the trading days in an inclusive date range.
+
+    Weekday count, not a market calendar: holidays only make the real number
+    smaller, and over-provisioning the parent timeout is the safe direction.
+    """
+    try:
+        start = datetime.strptime(str(start_date)[:10], "%Y-%m-%d").date()
+        end = datetime.strptime(str(end_date)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return 0
+    if end < start:
+        return 0
+    total_days = (end - start).days + 1
+    whole_weeks, remainder = divmod(total_days, 7)
+    weekdays = whole_weeks * 5
+    start_weekday = start.weekday()
+    for offset in range(remainder):
+        if (start_weekday + offset) % 7 < 5:
+            weekdays += 1
+    return weekdays
+
+
+def _backtest_subprocess_timeout(
+    runtime_type: str, start_date: str, end_date: str
+) -> int:
+    """Return the parent subprocess timeout for this run's runtime."""
+    if runtime_type == PIPELINE_RUNTIME_TYPE:
+        return PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+    step_seconds = resolve_step_timeout_seconds()
+    required = (
+        step_seconds * _estimated_decision_days(start_date, end_date)
+        + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    )
+    budget = max(PIPELINE_SUBPROCESS_TIMEOUT_SECONDS, required)
+    if budget > MAX_SUBPROCESS_TIMEOUT_SECONDS:
+        # Say so rather than truncating quietly: past this point the parent is
+        # the binding constraint again, and the run can be killed mid-flight.
+        print(
+            f"⚠️  Hosted backtest needs ~{budget}s but is capped at "
+            f"{MAX_SUBPROCESS_TIMEOUT_SECONDS}s; shorten the date range or "
+            f"lower AI_HEDGE_FUND_TIMEOUT_SECONDS (currently {step_seconds}s)",
+            flush=True,
+        )
+        return MAX_SUBPROCESS_TIMEOUT_SECONDS
+    return budget
+
+
+def _redact_credentials(text: object, extra_secret: Optional[str] = None) -> str:
     """Strip credentials from text without dropping any of it.
 
     Kept separate from truncation on purpose: the subprocess log dump needs
@@ -503,6 +631,8 @@ def _redact_credentials(text: object) -> str:
     token = os.getenv("IFIND_ACCESS_TOKEN", "").strip()
     if token:
         message = message.replace(token, "[REDACTED]")
+    if extra_secret:
+        message = message.replace(extra_secret, "[REDACTED]")
     message = re.sub(
         r"(?i)(access[_-]?token\s*[=:]\s*)[^\s,;]+",
         r"\1[REDACTED]",
@@ -516,9 +646,14 @@ def _redact_credentials(text: object) -> str:
     return message
 
 
-def _sanitize_backtest_error(error: object, max_chars: int = 500) -> str:
+def _sanitize_backtest_error(
+    error: object,
+    max_chars: int = 500,
+    *,
+    extra_secret: Optional[str] = None,
+) -> str:
     """Return a bounded background error summary without credentials."""
-    return _redact_credentials(error)[-max_chars:]
+    return _redact_credentials(error, extra_secret)[-max_chars:]
 
 
 def _maybe_writeback_adapted_pipeline(agent_id: Optional[str], run_id: Optional[str]) -> None:
@@ -764,6 +899,70 @@ def _resolve_backtest_pipeline(
     return None
 
 
+def _resolve_backtest_runtime(
+    agent_id: Optional[str],
+) -> tuple[str, Dict[str, Any]]:
+    """Return the persisted hosted runtime for an agent-backed run."""
+    if not agent_id:
+        return DEFAULT_RUNTIME_TYPE, {}
+    agent = agent_service.get_agent(agent_id)
+    if not agent:
+        # The session resolver owns the established 404 response.
+        return DEFAULT_RUNTIME_TYPE, {}
+    runtime_type = normalize_runtime_type(agent.get("runtime_type"))
+    runtime_config = normalize_runtime_config(
+        runtime_type, agent.get("runtime_config") or {}
+    )
+    return runtime_type, runtime_config
+
+
+def _resolve_ai_hedge_fund_credential(request: Request, agent_id: Optional[str]) -> str:
+    """Authorize and decrypt the per-agent market-data credential for one run."""
+    if not agent_id:
+        raise HTTPException(
+            status_code=422,
+            detail="AI Hedge Fund backtests must reference an owned agent",
+        )
+    ctx = _owner_context(request, request.headers.get("authorization"))
+    agent = _require_agent_access(agent_id, ctx)
+    if (agent.get("runtime_type") or DEFAULT_RUNTIME_TYPE) != AI_HEDGE_FUND_RUNTIME_TYPE:
+        raise HTTPException(status_code=422, detail="Agent runtime is not AI Hedge Fund")
+    if not (os.getenv("OPENROUTER_API_KEY") or "").strip():
+        raise HTTPException(
+            status_code=503,
+            detail="AI Hedge Fund's platform-managed OpenRouter provider is not configured",
+        )
+    # The isolated venv is created by the deploy build, and render.yaml is
+    # documentation rather than the deploy mechanism for this service -- so a
+    # deployment without it is a live possibility. Reject the run here instead
+    # of accepting it and failing inside a background subprocess minutes later.
+    try:
+        unavailable = runtime_unavailable_reason()
+    except AiHedgeFundConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if unavailable:
+        raise HTTPException(status_code=503, detail=unavailable)
+    try:
+        resolve_step_timeout_seconds()
+    except AiHedgeFundConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        credential = agent_credential_store.get_secret(
+            agent_id, FINANCIAL_DATASETS_CREDENTIAL
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not credential:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Configure a Financial Datasets API key on this AI Hedge Fund "
+                "agent before running a backtest"
+            ),
+        )
+    return credential
+
+
 def _resolve_backtest_session(request: Request, agent_id: Optional[str]) -> str:
     """Return the session that should own this backtest run.
 
@@ -830,6 +1029,11 @@ async def run_backtest_endpoint(
         if body.assets is not None:
             raw_assets = body.assets
 
+    try:
+        runtime_type, runtime_config = _resolve_backtest_runtime(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     decision_source_was_explicit = decision_source is not None
     profile, resolved_decision_source = _resolve_market_profile_request(
         data_source,
@@ -837,6 +1041,25 @@ async def run_backtest_endpoint(
         timeframe,
         decision_source,
     )
+    if runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+        if data_source != ALPACA:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "AI Hedge Fund currently supports the Alpaca US-equity "
+                    "profile only."
+                ),
+            )
+        if resolved_decision_source != LLM_DECISION_SOURCE:
+            raise HTTPException(
+                status_code=422,
+                detail="AI Hedge Fund requires decision_source='llm'.",
+            )
+        financial_datasets_api_key = _resolve_ai_hedge_fund_credential(
+            request, agent_id
+        )
+    else:
+        financial_datasets_api_key = None
     selected_assets = (
         list(profile.symbols)
         if data_source == IFIND_ASHARE
@@ -858,11 +1081,25 @@ async def run_backtest_endpoint(
 
     ignored_llm_fields: List[str] = []
     if resolved_decision_source == LLM_DECISION_SOURCE:
-        pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
-        if agent_id and not model:
-            agent = agent_service.get_agent(agent_id)
-            if agent and agent.get("model_name"):
-                model = agent["model_name"]
+        if runtime_type == PIPELINE_RUNTIME_TYPE:
+            pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
+            if agent_id and not model:
+                agent = agent_service.get_agent(agent_id)
+                if agent and agent.get("model_name"):
+                    model = agent["model_name"]
+        else:
+            ignored_llm_fields = [
+                name
+                for name, value in (
+                    ("strategy_prompt", strategy_prompt),
+                    ("model", model),
+                    ("pipeline", pipeline),
+                )
+                if value
+            ]
+            strategy_prompt = None
+            model = None
+            pipeline = None
     else:
         # A rule-based run drops the LLM-only fields — but validate them FIRST.
         # Dropping them before _validate_backtest_params meant a malformed model
@@ -888,6 +1125,7 @@ async def run_backtest_endpoint(
     if (
         decision_source_was_explicit
         and resolved_decision_source == LLM_DECISION_SOURCE
+        and runtime_type == PIPELINE_RUNTIME_TYPE
         and not (model or "").strip()
     ):
         raise HTTPException(
@@ -900,7 +1138,11 @@ async def run_backtest_endpoint(
     # the per-client run budget.
     _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipeline)
 
-    if decision_source_was_explicit and resolved_decision_source == LLM_DECISION_SOURCE:
+    if (
+        decision_source_was_explicit
+        and resolved_decision_source == LLM_DECISION_SOURCE
+        and runtime_type == PIPELINE_RUNTIME_TYPE
+    ):
         try:
             ensure_llm_client_available()
         except LLMProviderConfigurationError as exc:
@@ -917,6 +1159,7 @@ async def run_backtest_endpoint(
     print(f"   Session: {session_id[:8]}...", flush=True)
     print(f"   Market data: {data_source}", flush=True)
     print(f"   Decision source: {resolved_decision_source}", flush=True)
+    print(f"   Agent runtime: {runtime_type}", flush=True)
     if strategy_prompt and not pipeline:
         print(f"   Custom strategy prompt: {len(strategy_prompt)} chars", flush=True)
     if pipeline:
@@ -969,6 +1212,9 @@ async def run_backtest_endpoint(
             "strategy_prompt": strategy_prompt,
             "model": model,
             "pipeline": pipeline,
+            "runtime_type": runtime_type,
+            "runtime_config": runtime_config,
+            "financial_datasets_api_key": financial_datasets_api_key,
             "agent_id": agent_id,
             "data_source": data_source,
             "live_run_id": live_run_id,
@@ -998,6 +1244,8 @@ async def run_backtest_endpoint(
         "benchmark": profile.benchmark,
         "assets": selected_assets or list(DJIA_30),
     }
+    if runtime_type != PIPELINE_RUNTIME_TYPE:
+        response["runtime_type"] = runtime_type
     if ignored_llm_fields:
         # Say what a rule-based run threw away. Dropping LLM-only fields is
         # correct, doing it invisibly is not: the caller otherwise cannot tell
