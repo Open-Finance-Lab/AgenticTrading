@@ -1,17 +1,13 @@
-"""Split-origin API-base guard for the static frontend.
+"""Same-origin API-base guard for the static frontend.
 
-In production the frontend and the API live on **different origins** -- Vercel
-serves ``dashboard/frontend`` statically, Render serves the FastAPI app -- so a
-script that resolves its API base to ``window.location.origin`` addresses every
-``/api/...`` call to the static host.  ``vercel.json`` has no ``/api`` rewrite,
-so those requests come back as Vercel's *HTML* 404 page and surface as a JSON
-parse error (``Unexpected token 'T', "The page c"...``) rather than a clean
-404.  That is exactly how ``js/agent-editor.js`` shipped a Configure screen
-whose save silently could not reach the backend.
+Production serves ``dashboard/frontend`` on Vercel and proxies backend paths
+to Render via ``vercel.json`` rewrites. Scripts must therefore use an empty
+API base (root-relative URLs) off localhost — not a hardcoded Render origin,
+and not a bare ``window.location.origin`` assignment that would skip the
+localhost special-case.
 
-The contract is on every file that *defines* a base; the files that merely read
-the global ``API_BASE`` from ``app.js`` inherit a correct value.  ``API`` is
-matched too because ``strategy.html`` names its base that.
+Local uvicorn still uses ``window.location.origin`` so ``localhost:8000`` keeps
+working without the Vercel rewrite layer.
 """
 
 import re
@@ -34,11 +30,12 @@ _DEFINITION = re.compile(r"(?:const|let|var)\s+(?:API_BASE|API)\s*=\s*([^;]{0,30
 _BARE_ORIGIN = re.compile(r"(?:API_BASE|API)\s*=\s*window\.location\.origin\s*;")
 
 # Anchored to the exact quoted literal, not a bare substring: a check like
-# ``"onrender.com" in initializer`` would also pass for a typo'd host such as
-# ``'https://evil.example/onrender.com'`` (CodeQL: py/incomplete-url-substring
+# ``"localhost" in initializer`` would also pass for a typo'd host such as
+# ``'https://evil.example/localhost'`` (CodeQL: py/incomplete-url-substring
 # -sanitization). Quote-delimiting the literal makes the match exact.
 _LOCALHOST_LITERAL = re.compile(r"""['"]localhost['"]""")
-_ONRENDER_HOST_LITERAL = re.compile(r"""['"]https://agentictrading\.onrender\.com['"]""")
+_EMPTY_PROD_BASE = re.compile(r"""['"]{2}""")
+_LEGACY_ONRENDER = re.compile(r"""['"]https://agentictrading\.onrender\.com['"]""")
 
 
 def _definitions():
@@ -58,14 +55,17 @@ def test_the_known_api_base_definers_are_still_matched():
     assert {"app.js", "js/agent-editor.js", "index.html", "strategy.html"} <= definers
 
 
-def test_every_api_base_definition_targets_the_backend_off_localhost():
+def test_every_api_base_definition_uses_same_origin_off_localhost():
     for name, initializer in _definitions():
         assert _LOCALHOST_LITERAL.search(initializer), (
             f"{name}: the API base must special-case local development"
         )
-        assert _ONRENDER_HOST_LITERAL.search(initializer), (
-            f"{name}: the API base must point at the hosted backend when not on "
-            "localhost -- the Vercel origin serves no /api routes"
+        assert _EMPTY_PROD_BASE.search(initializer), (
+            f"{name}: off localhost the API base must be '' (Vercel rewrites "
+            "backend paths to Render; see vercel.json)"
+        )
+        assert not _LEGACY_ONRENDER.search(initializer), (
+            f"{name}: hardcoded Render origin regresses same-origin cookie auth"
         )
 
 
