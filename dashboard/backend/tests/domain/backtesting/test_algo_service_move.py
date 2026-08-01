@@ -179,3 +179,41 @@ def test_execute_algo_writes_config_and_forwards(monkeypatch, tmp_path):
     assert fwd[1] == "sess-1"  # session_id
     assert fwd[2] == "My Team"  # team_name
     assert Path(fwd[0]).parent == tmp_path / "data" / "algo_configs"
+
+
+# ---------------------------------------------------------------------------
+# Default date range: a corrupt settings file must not fail silently
+# ---------------------------------------------------------------------------
+
+
+def test_unreadable_defaults_file_is_reported(tmp_path, monkeypatch, capsys):
+    """A bare `except: pass` here made "the file is absent" and "the file is on
+    disk and unreadable" byte-identical: both fall through to the hardcoded
+    pair, silently running every backtest over the wrong window with no error,
+    no metric and a green suite -- the fail-closed-but-not-fail-visible shape
+    the news adapter already taught this repo.
+
+    Asserted on stdout, not caplog: `logger.info()` emits nothing under the
+    deployed uvicorn, so print() is the convention here.
+    """
+    broken = tmp_path / "defaults.json"
+    broken.write_text("{not json", encoding="utf-8")
+    monkeypatch.setattr(svc, "DEFAULTS_FILE", broken)
+
+    start, end = svc._default_backtest_dates()
+
+    assert (start, end) == ("2026-05-04", "2026-05-12")  # fallback unchanged
+    assert "unreadable" in capsys.readouterr().out
+
+
+def test_a_readable_defaults_file_says_nothing(tmp_path, monkeypatch, capsys):
+    """The notice must mark the anomaly, not narrate the happy path."""
+    good = tmp_path / "defaults.json"
+    good.write_text(
+        json.dumps({"defaultSettings": {"startDate": "2026-01-02", "endDate": "2026-01-09"}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(svc, "DEFAULTS_FILE", good)
+
+    assert svc._default_backtest_dates() == ("2026-01-02", "2026-01-09")
+    assert capsys.readouterr().out == ""

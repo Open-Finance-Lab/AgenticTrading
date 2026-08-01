@@ -97,8 +97,16 @@ def _default_backtest_dates() -> tuple[str, str]:
             end = settings.get("endDate")
             if start and end:
                 return start, end
-        except (json.JSONDecodeError, OSError):
-            pass
+        except (json.JSONDecodeError, OSError) as exc:
+            # A bare `pass` here made "the file is absent" and "the file is on
+            # disk and unreadable" produce byte-identical behaviour: both fall
+            # through to the hardcoded pair below, silently running every
+            # backtest over the wrong window. print(), not logging -- under the
+            # deployed uvicorn, logger calls emit nothing.
+            print(
+                f"[algo_service] {DEFAULTS_FILE} is unreadable ({exc}); "
+                "falling back to the built-in default date range"
+            )
     return "2026-05-04", "2026-05-12"
 
 
