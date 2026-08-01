@@ -146,6 +146,7 @@ class HourlyBacktester:
             json.loads(json.dumps(self.pipeline)) if self.pipeline else None
         )
         self.prompt_adaptations: List[Dict] = []
+        self.rejected_orders: List[Dict] = []
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
         self.live_run_id = (live_run_id or "").strip() or None
@@ -284,6 +285,25 @@ class HourlyBacktester:
             serialized.append(record)
         return serialized
 
+    @staticmethod
+    def _serialize_rejected_orders(rejected_orders: List[Dict]) -> List[Dict]:
+        serialized = []
+        for item in rejected_orders:
+            record = dict(item)
+            timestamp = record.get("timestamp")
+            if hasattr(timestamp, "isoformat"):
+                record["timestamp"] = timestamp.isoformat()
+            for field in (
+                "requested_shares",
+                "executed_shares",
+                "unfilled_shares",
+            ):
+                value = record.get(field)
+                if hasattr(value, "item"):
+                    record[field] = value.item()
+            serialized.append(record)
+        return serialized
+
     def _publish_live_progress(self, step: int, total_steps: int, manager) -> None:
         """Write incremental equity curve snapshots for live dashboard charting."""
         if not self.progress_file:
@@ -320,6 +340,9 @@ class HourlyBacktester:
             "total_steps": total_steps,
             "equity_curve": serialized,
             "trades": self._serialize_trades(manager.trades),
+            "rejected_orders": self._serialize_rejected_orders(
+                manager.rejected_orders
+            ),
         }
         try:
             Path(self.progress_file).write_text(json.dumps(payload), encoding="utf-8")
@@ -483,6 +506,7 @@ class HourlyBacktester:
                     # with the decision source they actually resolved.
                     "decision_source": RULE_BASED_DECISION_SOURCE,
                     "benchmark": profile.benchmark,
+                    "t_plus_one_enabled": profile.t_plus_one_enabled,
                 }
             )
             context = self._require_currency_context()
@@ -527,6 +551,10 @@ class HourlyBacktester:
             meta["initial_pipeline"] = self.initial_pipeline
         if self.pipeline is not None:
             meta["final_pipeline"] = self.pipeline
+        if self.data_source == IFIND_ASHARE:
+            meta["rejected_orders"] = list(
+                getattr(self, "rejected_orders", []) or []
+            )
         runtime_type = getattr(self, "runtime_type", PIPELINE_RUNTIME_TYPE)
         if runtime_type != PIPELINE_RUNTIME_TYPE:
             meta["runtime_type"] = runtime_type
@@ -649,6 +677,7 @@ class HourlyBacktester:
         manager = PortfolioManager(
             initial_capital=self.native_initial_capital,
             allowed_symbols=self.symbols,
+            t_plus_one_enabled=self.profile.t_plus_one_enabled,
         )
         _decision_steps, post_trade_steps = split_pipeline(self.pipeline)
         if post_trade_steps:
@@ -895,6 +924,9 @@ class HourlyBacktester:
             llm_model, manager.input_tokens, manager.output_tokens
         )
 
+        self.rejected_orders = self._serialize_rejected_orders(
+            manager.rejected_orders
+        )
         db.insert_run(
             run_id=run_id,
             session_id=self.session_id,

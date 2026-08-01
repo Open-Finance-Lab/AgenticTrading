@@ -1,10 +1,12 @@
-"""Characterization tests for extracted order execution (Phase 2B3).
+"""Characterization and A-share T+1 tests for order execution.
 
 Locks in the exact behavior of
 ``dashboard.backend.domain.trading.execution.execute_actions`` and the legacy
 ``PortfolioManager.execute_actions`` that delegates to it. Imports use the
 canonical package path; no external services are touched.
 """
+
+from datetime import datetime
 
 import pandas as pd
 
@@ -276,6 +278,146 @@ def test_multiple_symbols():
     ], md)
     assert st["positions"] == {"AAPL": 10, "MSFT": 5}
     assert st["cash"] == 100000 - 2000.0 - 2000.0
+
+
+# ---------------------------------------------------------------------------
+# Optional A-share T+1 execution
+# ---------------------------------------------------------------------------
+
+def _t1_manager(cash=100000):
+    return bha.PortfolioManager(cash, t_plus_one_enabled=True)
+
+
+def test_t1_same_day_buy_then_sell_records_rejection_without_zero_trade():
+    pm = _t1_manager()
+    md = {"600519.SH": _row(100.0)}
+    timestamp = datetime(2026, 4, 1, 10)
+
+    pm.execute_actions([
+        {"symbol": "600519.SH", "action": "buy", "shares": 10},
+        {"symbol": "600519.SH", "action": "sell", "shares": 10},
+    ], md, timestamp)
+
+    assert pm.cash == 99000.0
+    assert pm.positions == {"600519.SH": 10}
+    assert pm.available_positions == {}
+    assert pm.frozen_lots == {
+        "600519.SH": [{"quantity": 10, "buy_date": timestamp.date()}]
+    }
+    assert [(trade["side"], trade["shares"]) for trade in pm.trades] == [
+        ("BUY", 10)
+    ]
+    assert pm.rejected_orders == [{
+        "timestamp": timestamp,
+        "symbol": "600519.SH",
+        "action": "sell",
+        "requested_shares": 10,
+        "executed_shares": 0,
+        "unfilled_shares": 10,
+        "status": "rejected",
+        "reason": "t1_frozen",
+    }]
+
+
+def test_t1_prior_buy_unlocks_on_next_data_trading_date_across_weekend():
+    pm = _t1_manager()
+    md = {"600519.SH": _row(100.0)}
+
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 10}],
+        md,
+        datetime(2026, 4, 3, 14),
+    )
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "sell", "shares": 10}],
+        md,
+        datetime(2026, 4, 6, 10),
+    )
+
+    assert pm.cash == 100000
+    assert pm.positions == {}
+    assert pm.available_positions == {}
+    assert pm.frozen_lots == {}
+    assert [trade["side"] for trade in pm.trades] == ["BUY", "SELL"]
+    assert pm.rejected_orders == []
+
+
+def test_t1_sell_above_available_partially_fills_and_audits_frozen_remainder():
+    pm = _t1_manager()
+    pm.positions = {"600519.SH": 100}
+    pm.entry_prices = {"600519.SH": 90.0}
+    pm.available_positions = {"600519.SH": 40}
+    pm.frozen_lots = {
+        "600519.SH": [{"quantity": 60, "buy_date": datetime(2026, 4, 1).date()}]
+    }
+    timestamp = datetime(2026, 4, 1, 14)
+
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "sell", "shares": 100}],
+        {"600519.SH": _row(100.0)},
+        timestamp,
+    )
+
+    assert pm.cash == 104000.0
+    assert pm.positions == {"600519.SH": 60}
+    assert pm.available_positions == {}
+    assert pm.trades[-1]["shares"] == 40
+    assert pm.rejected_orders[-1] == {
+        "timestamp": timestamp,
+        "symbol": "600519.SH",
+        "action": "sell",
+        "requested_shares": 100,
+        "executed_shares": 40,
+        "unfilled_shares": 60,
+        "status": "partial",
+        "reason": "t1_frozen",
+    }
+
+
+def test_t1_multiple_buy_dates_release_only_prior_batches():
+    pm = _t1_manager()
+    md = {"600519.SH": _row(100.0)}
+
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 20}],
+        md,
+        datetime(2026, 4, 1, 10),
+    )
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 30}],
+        md,
+        datetime(2026, 4, 2, 10),
+    )
+
+    assert pm.positions == {"600519.SH": 50}
+    assert pm.available_positions == {"600519.SH": 20}
+    assert pm.frozen_lots == {
+        "600519.SH": [
+            {"quantity": 30, "buy_date": datetime(2026, 4, 2).date()}
+        ]
+    }
+
+
+def test_t1_request_above_total_splits_frozen_and_insufficient_reasons():
+    pm = _t1_manager()
+    pm.positions = {"600519.SH": 100}
+    pm.entry_prices = {"600519.SH": 90.0}
+    pm.available_positions = {"600519.SH": 40}
+    pm.frozen_lots = {
+        "600519.SH": [{"quantity": 60, "buy_date": datetime(2026, 4, 1).date()}]
+    }
+
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "sell", "shares": 150}],
+        {"600519.SH": _row(100.0)},
+        datetime(2026, 4, 1, 14),
+    )
+
+    assert [item["reason"] for item in pm.rejected_orders] == [
+        "t1_frozen",
+        "insufficient_position",
+    ]
+    assert [item["unfilled_shares"] for item in pm.rejected_orders] == [60, 50]
 
 
 # ---------------------------------------------------------------------------

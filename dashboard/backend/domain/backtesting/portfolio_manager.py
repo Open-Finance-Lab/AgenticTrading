@@ -78,12 +78,17 @@ class PortfolioManager:
         self,
         initial_capital: float = INITIAL_CAPITAL,
         allowed_symbols: Optional[List[str]] = None,
+        t_plus_one_enabled: bool = False,
     ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.positions = {}  # {symbol: num_shares}
         self.entry_prices = {}  # {symbol: entry_price}
         self.trades = []
+        self.t_plus_one_enabled = t_plus_one_enabled
+        self.available_positions = {}
+        self.frozen_lots = {}
+        self.rejected_orders = []
         self.equity_history = []
         # Real LLM token usage (server-side calls report actual counts)
         self.llm_calls = 0        # billed API calls (any response with usage)
@@ -622,6 +627,10 @@ class PortfolioManager:
             positions=self.positions,
             entry_prices=self.entry_prices,
             trades=self.trades,
+            t_plus_one_enabled=self.t_plus_one_enabled,
+            available_positions=self.available_positions,
+            frozen_lots=self.frozen_lots,
+            rejected_orders=self.rejected_orders,
         )
     
     def update_equity(self, market_data: Dict, price_cache: Dict = None, timestamp = None):

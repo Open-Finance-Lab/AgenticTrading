@@ -5,7 +5,8 @@ Extracted (Phase 2B3) from ``PortfolioManager.execute_actions`` in
 execution logic over explicit state (cash, positions, entry prices, trades). The
 legacy method now delegates here.
 
-Behavior is byte-for-byte identical to the original method. In particular:
+With ``t_plus_one_enabled=False`` (the default), behavior remains identical to
+the original method. In particular:
 
 * action fields are read with ``action.get("symbol")``, ``action.get("action")``,
   ``action.get("shares", 0)``, ``action.get("reason", "")``;
@@ -24,15 +25,77 @@ Behavior is byte-for-byte identical to the original method. In particular:
 * ``positions``, ``entry_prices`` and ``trades`` are mutated in place; ``cash`` is
   a scalar and is returned so the caller can reassign it.
 
-No "improvements", normalization, or new guards are added: any pre-existing edge
-behavior (e.g. zero/negative quantities) is preserved exactly.
+The optional T+1 path adds an available-position balance, date-stamped frozen
+buy lots, partial fills, and rejected-order audit records. It is enabled only by
+the iFinD A-share market profiles.
 
 This module is domain-only: it must not import FastAPI, Anthropic, Alpaca
 clients, the database singleton, API routers, or scripts.
 """
 
-from datetime import datetime
-from typing import Dict, List
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional
+
+
+def _trading_date(timestamp: Any) -> date:
+    """Return the market date carried by one backtest timestamp."""
+    if isinstance(timestamp, datetime):
+        return timestamp.date()
+    if isinstance(timestamp, date):
+        return timestamp
+    date_method = getattr(timestamp, "date", None)
+    if callable(date_method):
+        value = date_method()
+        if isinstance(value, date):
+            return value
+    raise TypeError("T+1 execution requires a date-like timestamp")
+
+
+def _release_frozen_lots(
+    *,
+    current_date: date,
+    available_positions: Dict,
+    frozen_lots: Dict,
+) -> None:
+    """Move every prior-date buy lot into the sellable balance."""
+    for symbol, lots in list(frozen_lots.items()):
+        remaining = []
+        released = 0
+        for lot in lots:
+            if lot["buy_date"] < current_date:
+                released += lot["quantity"]
+            else:
+                remaining.append(lot)
+        if released:
+            available_positions[symbol] = (
+                available_positions.get(symbol, 0) + released
+            )
+        if remaining:
+            frozen_lots[symbol] = remaining
+        else:
+            frozen_lots.pop(symbol, None)
+
+
+def _append_rejection(
+    rejected_orders: List[Dict],
+    *,
+    timestamp: Any,
+    symbol: str,
+    requested_shares: float,
+    executed_shares: float,
+    unfilled_shares: float,
+    reason: str,
+) -> None:
+    rejected_orders.append({
+        "timestamp": timestamp,
+        "symbol": symbol,
+        "action": "sell",
+        "requested_shares": requested_shares,
+        "executed_shares": executed_shares,
+        "unfilled_shares": unfilled_shares,
+        "status": "partial" if executed_shares > 0 else "rejected",
+        "reason": reason,
+    })
 
 
 def execute_actions(
@@ -44,6 +107,10 @@ def execute_actions(
     positions: Dict,
     entry_prices: Dict,
     trades: List[Dict],
+    t_plus_one_enabled: bool = False,
+    available_positions: Optional[Dict] = None,
+    frozen_lots: Optional[Dict] = None,
+    rejected_orders: Optional[List[Dict]] = None,
 ) -> float:
     """Apply ``actions`` to the given portfolio state in place.
 
@@ -52,6 +119,24 @@ def execute_actions(
     reassign it. The return value is the new cash balance, matching the original
     method's mutation of ``self.cash``.
     """
+    current_date = None
+    if t_plus_one_enabled:
+        if (
+            available_positions is None
+            or frozen_lots is None
+            or rejected_orders is None
+        ):
+            raise ValueError(
+                "T+1 execution requires available positions, frozen lots, "
+                "and rejected-order state"
+            )
+        current_date = _trading_date(timestamp)
+        _release_frozen_lots(
+            current_date=current_date,
+            available_positions=available_positions,
+            frozen_lots=frozen_lots,
+        )
+
     for action in actions:
         symbol = action.get("symbol")
         action_type = action.get("action")
@@ -69,6 +154,11 @@ def execute_actions(
                 cash -= cost
                 positions[symbol] = positions.get(symbol, 0) + shares
                 entry_prices[symbol] = price
+                if t_plus_one_enabled:
+                    frozen_lots.setdefault(symbol, []).append({
+                        "quantity": shares,
+                        "buy_date": current_date,
+                    })
                 trades.append({
                     "timestamp": timestamp,
                     "symbol": symbol,
@@ -78,6 +168,63 @@ def execute_actions(
                     "cost": cost,
                     "reason": reason
                 })
+
+        elif action_type == "sell" and t_plus_one_enabled:
+            if shares <= 0:
+                continue
+            held_shares = positions.get(symbol, 0)
+            sellable_shares = min(
+                available_positions.get(symbol, 0),
+                held_shares,
+            )
+            sell_shares = min(shares, sellable_shares)
+
+            if sell_shares > 0:
+                proceeds = sell_shares * price
+                cash += proceeds
+                positions[symbol] -= sell_shares
+                available_positions[symbol] -= sell_shares
+                if available_positions[symbol] == 0:
+                    available_positions.pop(symbol, None)
+                if positions[symbol] == 0:
+                    positions.pop(symbol, None)
+                    entry_prices.pop(symbol, None)
+                trades.append({
+                    "timestamp": timestamp,
+                    "symbol": symbol,
+                    "side": "SELL",
+                    "shares": sell_shares,
+                    "price": price,
+                    "proceeds": proceeds,
+                    "reason": reason,
+                })
+
+            unfilled_shares = shares - sell_shares
+            if unfilled_shares <= 0:
+                continue
+            frozen_shares = max(held_shares - sellable_shares, 0)
+            t1_unfilled = min(unfilled_shares, frozen_shares)
+            if t1_unfilled > 0:
+                _append_rejection(
+                    rejected_orders,
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    requested_shares=shares,
+                    executed_shares=sell_shares,
+                    unfilled_shares=t1_unfilled,
+                    reason="t1_frozen",
+                )
+            insufficient_shares = unfilled_shares - t1_unfilled
+            if insufficient_shares > 0:
+                _append_rejection(
+                    rejected_orders,
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    requested_shares=shares,
+                    executed_shares=sell_shares,
+                    unfilled_shares=insufficient_shares,
+                    reason="insufficient_position",
+                )
 
         elif action_type == "sell":
             if symbol in positions and positions[symbol] > 0:

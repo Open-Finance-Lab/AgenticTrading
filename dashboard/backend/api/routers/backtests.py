@@ -26,7 +26,7 @@ import pytz
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # matplotlib is imported and configured (headless Agg backend) once at module
 # import, not per request: the plot endpoint previously re-imported it and
@@ -247,6 +247,8 @@ class RunMetadata(BaseModel):
     fx_policy: Optional[str] = None
     fx_start_rate: Optional[float] = None
     fx_end_rate: Optional[float] = None
+    t_plus_one_enabled: Optional[bool] = None
+    rejected_orders: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class EquityCurve(BaseModel):
@@ -299,6 +301,8 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "fx_policy",
             "fx_start_rate",
             "fx_end_rate",
+            "t_plus_one_enabled",
+            "rejected_orders",
         ):
             if field in metadata:
                 payload[field] = metadata[field]

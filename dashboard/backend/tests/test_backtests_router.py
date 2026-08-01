@@ -153,6 +153,12 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
                 "fx_policy": "daily_implied_median_forward_fill",
                 "fx_start_rate": 7.0,
                 "fx_end_rate": 7.1,
+                "t_plus_one_enabled": True,
+                "rejected_orders": [{
+                    "symbol": "600519.SH",
+                    "reason": "t1_frozen",
+                    "status": "rejected",
+                }],
             }
         )
     )
@@ -172,6 +178,8 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
     assert response.fx_source == "ifind_history_currency_conversion"
     assert response.fx_start_rate == 7.0
     assert response.fx_end_rate == 7.1
+    assert response.t_plus_one_enabled is True
+    assert response.rejected_orders[0]["reason"] == "t1_frozen"
 
 
 def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
@@ -190,6 +198,8 @@ def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
     assert response.fx_pair is None
     assert response.fx_source is None
     assert response.fx_start_rate is None
+    assert response.t_plus_one_enabled is None
+    assert response.rejected_orders == []
 
 
 @pytest.fixture(autouse=True)
@@ -668,6 +678,11 @@ def test_backtest_status_includes_live_progress(tmp_path):
             "price": 150.25,
             "value": 1502.5,
         }],
+        "rejected_orders": [{
+            "symbol": "600519.SH",
+            "reason": "t1_frozen",
+            "status": "rejected",
+        }],
     }), encoding="utf-8")
     bt.backtest_status.update({
         "running": True,
@@ -686,6 +701,7 @@ def test_backtest_status_includes_live_progress(tmp_path):
     assert len(body["progress"]["equity_curve"]) == 1
     assert len(body["progress"]["trades"]) == 1
     assert body["progress"]["trades"][0]["symbol"] == "AAPL"
+    assert body["progress"]["rejected_orders"][0]["reason"] == "t1_frozen"
     assert "step 5/100" in body["message"]
 
 

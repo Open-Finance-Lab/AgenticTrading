@@ -95,6 +95,101 @@ def make_cn_bars(symbols=A_SHARE_DEMO_6_SYMBOLS, count=60):
     return bars
 
 
+def test_rejected_order_serializer_normalizes_timestamp_and_numpy_numbers():
+    serialized = HourlyBacktester._serialize_rejected_orders([{
+        "timestamp": pd.Timestamp("2026-04-01T10:00:00", tz=CN),
+        "requested_shares": pd.Series([100], dtype="int64").iloc[0],
+        "executed_shares": pd.Series([40], dtype="int64").iloc[0],
+        "unfilled_shares": pd.Series([60], dtype="int64").iloc[0],
+        "reason": "t1_frozen",
+    }])
+
+    assert serialized == [{
+        "timestamp": "2026-04-01T10:00:00+08:00",
+        "requested_shares": 100,
+        "executed_shares": 40,
+        "unfilled_shares": 60,
+        "reason": "t1_frozen",
+    }]
+
+
+@pytest.mark.parametrize(
+    ("decision_source", "wants_llm"),
+    [
+        (RULE_BASED_DECISION_SOURCE, False),
+        (LLM_DECISION_SOURCE, True),
+    ],
+)
+def test_ifind_rule_and_llm_paths_share_t1_execution(
+    monkeypatch,
+    decision_source,
+    wants_llm,
+):
+    provider = RecordingProvider(make_cn_bars())
+    monkeypatch.setattr(
+        engine_module,
+        "create_market_data_provider",
+        lambda _source, universe=None: provider,
+    )
+    monkeypatch.setattr(engine_module, "HAS_ANTHROPIC", True)
+    monkeypatch.setattr(engine_module, "make_llm_client", lambda: object())
+    recording_db = RecordingDB()
+    monkeypatch.setattr(engine_module, "db", recording_db)
+
+    created_managers = []
+    base_manager = engine_module.PortfolioManager
+
+    class ScriptedPortfolioManager(base_manager):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.script_step = 0
+            created_managers.append(self)
+
+        def _scripted_decision(self):
+            self.script_step += 1
+            if self.script_step == 1:
+                return {"actions": [{
+                    "symbol": A_SHARE_DEMO_6_SYMBOLS[0],
+                    "action": "buy",
+                    "shares": 10,
+                }]}
+            if self.script_step == 2:
+                return {"actions": [{
+                    "symbol": A_SHARE_DEMO_6_SYMBOLS[0],
+                    "action": "sell",
+                    "shares": 10,
+                }]}
+            return {"actions": []}
+
+        def make_trading_decision(self, _portfolio_state):
+            return self._scripted_decision()
+
+        def make_trading_decision_with_llm(self, *_args, **_kwargs):
+            return self._scripted_decision()
+
+    monkeypatch.setattr(engine_module, "PortfolioManager", ScriptedPortfolioManager)
+
+    backtester = HourlyBacktester(
+        START,
+        END,
+        session_id=f"ifind-t1-{decision_source}",
+        use_llm=wants_llm,
+        data_source=IFIND_ASHARE,
+        decision_source=decision_source,
+    )
+    backtester.load_data()
+    backtester.calculate_indicators()
+    backtester.run_agent_backtest()
+
+    manager = created_managers[0]
+    assert manager.t_plus_one_enabled is True
+    assert [trade["side"] for trade in manager.trades] == ["BUY"]
+    assert manager.rejected_orders[0]["reason"] == "t1_frozen"
+    assert recording_db.runs[0]["metadata"]["rejected_orders"][0][
+        "reason"
+    ] == "t1_frozen"
+
+
 def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
     provider = RecordingProvider(make_cn_bars())
     monkeypatch.setattr(engine_module, "create_market_data_provider", lambda _source, universe=None: provider)
@@ -145,6 +240,7 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "timezone": "Asia/Shanghai",
         "decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
+        "t_plus_one_enabled": True,
         "symbols": list(A_SHARE_DEMO_6_SYMBOLS),
         "native_currency": "CNY",
         "reporting_currency": "USD",
@@ -160,6 +256,7 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "fx_observation_start_date": "2026-03-31",
         "fx_observation_end_date": "2026-04-15",
         "native_initial_capital": 7_000.0,
+        "rejected_orders": [],
     }
     first_equity = recording_db.equity_points[0][1][0]
     assert first_equity["equity"] == pytest.approx(1_000)
@@ -206,6 +303,7 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "timezone": "Asia/Shanghai",
         "decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
+        "t_plus_one_enabled": True,
         "symbols": list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
         "native_currency": "CNY",
         "reporting_currency": "USD",
