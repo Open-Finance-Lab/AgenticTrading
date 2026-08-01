@@ -20,22 +20,35 @@ gate it with (``users.role`` exists but is read for authorization nowhere).
 against a database the operator chose on purpose.
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from dashboard.backend.api.auth import get_current_user
 from dashboard.backend.database import db
 
 router = APIRouter()
 
 
 @router.delete("/admin/runs/{run_id}")
-async def admin_delete_run(run_id: str, request: Request):
-    """⚠️ Delete a specific run (must be owned by session)."""
+async def admin_delete_run(
+    run_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a run owned by the caller's backtest session.
+
+    ``users.role`` is the gate: only ``admin`` may call this. Ordinary
+    accounts get 403 even with a valid session UUID — the previous check was
+    only ``X-Session-Id`` format, which any client can mint.
+    """
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
     session_id = request.state.session_id
-    
+
     # Verify ownership before deleting
     run = db.get_run_with_session(run_id, session_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found or not yours")
-    
+
     db.delete_run(run_id)
     return {"status": "deleted", "run_id": run_id}
