@@ -105,8 +105,16 @@ def test_footer_has_no_dead_links():
 
 
 def test_footer_documentation_points_at_the_docs_site():
+    """Pins the whole href, not the bare host.
+
+    A bare-host substring is both a weaker assertion -- it would accept any URL
+    merely containing the host, including a path this link must not use -- and
+    the shape CodeQL flags as py/incomplete-url-substring-sanitization. The
+    /en/latest/ form is deliberate: it is what the README's docs badge
+    publishes, so the link does not depend on a redirect.
+    """
     body = _FOOTER.read_text(encoding="utf-8")
-    assert "finagent-orchestration.readthedocs.io" in body
+    assert 'href="https://finagent-orchestration.readthedocs.io/en/latest/"' in body
 
 
 def test_footer_external_link_is_safe():
