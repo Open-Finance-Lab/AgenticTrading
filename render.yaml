@@ -5,8 +5,11 @@ services:
     region: oregon
     plan: standard
     
-    # Build and run from repository root (dashboard lives under dashboard/)
-    buildCommand: pip install -r requirements.txt && python -m venv .ai-hedge-fund-venv && .ai-hedge-fund-venv/bin/pip install -r requirements-ai-hedge-fund.txt
+    # Build and run from repository root (dashboard lives under dashboard/).
+    # Prod deploys via Dockerfile (ATL on 3.13, AI Hedge Fund venv on 3.12 via
+    # uv). This native buildCommand is documentation — upstream numpy^1.24 has
+    # no cp313 wheels, so the isolated venv must use 3.12.
+    buildCommand: pip install -r requirements.txt && pip install uv && uv python install 3.12 && uv venv --python 3.12 .ai-hedge-fund-venv && uv pip install --python .ai-hedge-fund-venv -r requirements-ai-hedge-fund.txt
     
     # Start command (canonical ASGI package target; runs via Render's shell,
     # which expands $PORT). No import-path workarounds needed.
