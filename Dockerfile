@@ -11,9 +11,20 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Keep virattt/ai-hedge-fund and its LangChain graph isolated from ATL's main
 # dependency set. The adapter invokes this interpreter over a JSON subprocess
 # boundary; marketplace users never clone or install the upstream project.
-RUN python -m venv /opt/ai-hedge-fund-venv \
-    && /opt/ai-hedge-fund-venv/bin/pip install --no-cache-dir \
-       -r requirements-ai-hedge-fund.txt
+#
+# Upstream pins numpy^1.24 (<2). numpy 1.26.x has no cp313 wheels, and
+# python:*-slim has no C compiler to build from source — so the isolated
+# venv must run on 3.12 even though ATL itself stays on 3.13. uv installs
+# a managed 3.12 under /opt/uv-python; the venv keeps an absolute reference
+# to it, so uninstalling the uv build tool afterwards is safe.
+ENV UV_PYTHON_INSTALL_DIR=/opt/uv-python
+RUN pip install --no-cache-dir uv \
+    && uv python install 3.12 \
+    && uv venv --python 3.12 /opt/ai-hedge-fund-venv \
+    && uv pip install --python /opt/ai-hedge-fund-venv \
+       -r requirements-ai-hedge-fund.txt \
+    && /opt/ai-hedge-fund-venv/bin/python -c "from src.main import run_hedge_fund" \
+    && pip uninstall -y uv
 
 # Copy dashboard application
 COPY dashboard ./dashboard
