@@ -6,25 +6,35 @@ never changed and nothing confirmed success. The POST itself is genuinely slow
 (see the round-trip note in the spec), so the fix is feedback, not latency.
 """
 
-import re
 from pathlib import Path
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _APP_JS = (_FRONTEND / "app.js").read_text(encoding="utf-8")
 
 
-def _submit_fn() -> str:
-    start = _APP_JS.index("async function submitCreateBuiltinAgent(")
+def _fn_body(signature: str) -> str:
+    """The named function's source, brace-matched to its real closing brace.
+
+    Brace-matching rather than a fixed-width slice: a `[start:start + 900]`
+    window over-reads into whatever unrelated top-level code happens to follow,
+    so an assertion can pass on a neighbour's source instead of the function
+    under test.
+    """
+    start = _APP_JS.index(signature)
+    index = _APP_JS.index("{", start)
     depth = 0
-    i = _APP_JS.index("{", start)
     while True:
-        if _APP_JS[i] == "{":
+        if _APP_JS[index] == "{":
             depth += 1
-        elif _APP_JS[i] == "}":
+        elif _APP_JS[index] == "}":
             depth -= 1
             if depth == 0:
-                return _APP_JS[start : i + 1]
-        i += 1
+                return _APP_JS[start : index + 1]
+        index += 1
+
+
+def _submit_fn() -> str:
+    return _fn_body("async function submitCreateBuiltinAgent(")
 
 
 def test_helpers_exist():
@@ -59,8 +69,16 @@ def test_button_is_restored_on_every_path():
     assert "restoreButton(" in finally_block
 
 
-def test_aria_busy_is_toggled():
-    assert re.search(r"aria-busy", _APP_JS)
+def test_aria_busy_is_toggled_in_both_directions():
+    """Set *and* removed, each checked inside the function that owns it.
+
+    A whole-file search for "aria-busy" passes on the set call alone, so a
+    restoreButton() that stopped removing the attribute -- leaving the button
+    announcing itself as busy to a screen reader for the rest of the session --
+    would not be caught.
+    """
+    assert "setAttribute('aria-busy', 'true')" in _fn_body("function setButtonPending(")
+    assert "removeAttribute('aria-busy')" in _fn_body("function restoreButton(")
 
 
 def test_new_agent_card_is_located_after_creation():
@@ -71,6 +89,5 @@ def test_new_agent_card_is_located_after_creation():
 def test_highlight_uses_attribute_lookup_not_selector_interpolation():
     """Same rule refreshRunningAgentCards() follows (app.js:3370): agent ids are
     server-supplied, so never interpolate one into a selector string."""
-    start = _APP_JS.index("function highlightAgentCard(")
-    body = _APP_JS[start : start + 900]
+    body = _fn_body("function highlightAgentCard(")
     assert "querySelectorAll('.agent-card[data-agent-id]')" in body
