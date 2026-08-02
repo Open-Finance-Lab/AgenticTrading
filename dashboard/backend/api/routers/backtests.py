@@ -322,7 +322,24 @@ backtest_session_id = None  # Track which session owns the running backtest
 
 
 def _read_backtest_progress() -> Optional[Dict[str, Any]]:
-    """Load incremental equity snapshots written by the backtest subprocess."""
+    """Load incremental equity snapshots written by the backtest subprocess.
+
+    ``progress_updated_at`` (the file's mtime) and ``progress_age_seconds`` (how
+    old that is) are not fields the writer emits. Together they answer "are these
+    numbers current?", which the payload alone cannot.
+
+    The *age* is what the UI reads, and it is computed here rather than in the
+    browser deliberately: differencing a server mtime against the client clock
+    makes any machine more than the staleness threshold out of step
+    indistinguishable from a wedged run -- a fast clock pins a permanent "No
+    progress for 47m" onto a healthy backtest, a slow one suppresses the warning
+    forever, and suspended laptops drift by minutes routinely. Both ends of this
+    subtraction are read in this process, so it carries no skew.
+
+    stat() and read_text() are separate syscalls, so a file rewritten between
+    them yields an mtime marginally older than the payload -- immaterial against
+    a 120s staleness threshold, and not worth a lock to avoid.
+    """
     progress_file = backtest_status.get("progress_file")
     if not progress_file:
         return None
@@ -330,10 +347,19 @@ def _read_backtest_progress() -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
     try:
+        updated_at = path.stat().st_mtime
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    return {
+        **payload,
+        "progress_updated_at": updated_at,
+        # Clamped at zero: a clock stepping backwards between the write and this
+        # read would otherwise report a negative age, and "-3s" reads as a bug.
+        "progress_age_seconds": max(0.0, time.time() - updated_at),
+    }
 
 def run_backtest_background(
     start_date: str,
