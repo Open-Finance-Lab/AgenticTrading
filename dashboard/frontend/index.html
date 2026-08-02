@@ -303,20 +303,27 @@
           return data;
         }
 
-        function goToDashboardLoggedIn(user, token, options) {
-          options = options || {};
+        function goToDashboardLoggedIn(user, token) {
           try {
             localStorage.setItem(AUTH_TOKEN_KEY, token);
             localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
-            // New accounts should land on Home, not a leftover My Agents tab
-            // from browsing the dashboard while logged out.
+            // Land authenticated users on My Agents, for both sign-up and
+            // sign-in. Sign-up used to go to '?view=home', which is a second
+            // marketing hero -- the same "Talk to Agents / Test Trading Ideas"
+            // pitch and a "Get Started" button the user had just clicked. Sign-in
+            // used to go to a bare '/app', which restores whatever tab was last
+            // visited while logged out, so a returning user could land on
+            // Competition. Neither put anyone near their agent.
             // 'nav-state' must match app.js's NAV_STATE_KEY -- this landing
             // page has no build step to share that constant across the split.
-            if (options.goHome) {
-              localStorage.setItem('nav-state', JSON.stringify({ page: 'home' }));
-            }
+            // The '?view=' below already wins over saved nav-state on boot; this
+            // write keeps a *later* bare '/app' visit off the stale tab too.
+            localStorage.setItem(
+              'nav-state',
+              JSON.stringify({ page: 'playground', playgroundTab: 'agents' })
+            );
           } catch (e) { /* ignore */ }
-          window.location.href = options.goHome ? (APP_URL + '?view=home') : APP_URL;
+          window.location.href = APP_URL + '?view=agents';
         }
 
         function initAuthModal() {
@@ -371,9 +378,7 @@
                     email: email,
                     password: password,
                   });
-              goToDashboardLoggedIn(data.user, data.token, {
-                goHome: authMode === 'signup',
-              });
+              goToDashboardLoggedIn(data.user, data.token);
             } catch (error) {
               if (errorEl) {
                 errorEl.textContent = error.message || 'Something went wrong.';
