@@ -273,3 +273,72 @@ def test_sellable_shares_does_not_disturb_valuation():
     frozen = build_portfolio_state(*args, available_positions={})
     assert plain["positions_value"] == frozen["positions_value"] == 2000.0
     assert plain["total_equity"] == frozen["total_equity"]
+
+
+# ---------------------------------------------------------------------------
+# sellable_shares must reach the model, not just the state dict
+# ---------------------------------------------------------------------------
+
+def _t1_manager_holding(shares, sellable):
+    from dashboard.backend.domain.backtesting.portfolio_manager import (
+        PortfolioManager,
+    )
+
+    manager = PortfolioManager(100000, t_plus_one_enabled=True)
+    manager.positions = {"AAPL": shares}
+    manager.entry_prices = {"AAPL": 200.0}
+    manager.available_positions = {"AAPL": sellable} if sellable else {}
+    return manager
+
+
+def _capture_llm_snapshot(monkeypatch, manager):
+    """Run one LLM decision and return the snapshot handed to create_prompt."""
+    from dashboard.backend.domain.backtesting import portfolio_manager as pm_module
+
+    captured = {}
+
+    def fake_create_prompt(market_snapshot, **_kwargs):
+        captured["snapshot"] = market_snapshot
+        return "prompt"
+
+    monkeypatch.setattr(pm_module, "create_prompt", fake_create_prompt)
+    monkeypatch.setattr(
+        pm_module, "_request_trading_decision",
+        lambda *a, **k: object(),
+    )
+    monkeypatch.setattr(pm_module, "_extract_response_text", lambda _r: "{}")
+    monkeypatch.setattr(pm_module, "_extract_token_usage", lambda _r: (0, 0))
+    monkeypatch.setattr(pm_module, "_parse_llm_response", lambda _t: {"decisions": []})
+
+    state = manager.get_portfolio_state({"AAPL": _row(210.0)})
+    manager.make_trading_decision_with_llm(state, llm_client=object())
+    return captured["snapshot"]
+
+
+def test_sellable_shares_is_forwarded_into_the_llm_holdings(monkeypatch):
+    """The state dict carrying the key is not enough — the prompt whitelists.
+
+    Without this the field is write-only: the order still gets capped
+    downstream, but the model reasons as though it can exit in full.
+    """
+    manager = _t1_manager_holding(shares=10, sellable=4)
+    snapshot = _capture_llm_snapshot(monkeypatch, manager)
+
+    holding = snapshot["current_holdings"]["AAPL"]
+    assert holding["shares"] == 10
+    assert holding["sellable_shares"] == 4
+
+
+def test_llm_holdings_are_unchanged_without_t_plus_one(monkeypatch):
+    from dashboard.backend.domain.backtesting.portfolio_manager import (
+        PortfolioManager,
+    )
+
+    manager = PortfolioManager(100000)
+    manager.positions = {"AAPL": 10}
+    manager.entry_prices = {"AAPL": 200.0}
+    snapshot = _capture_llm_snapshot(monkeypatch, manager)
+
+    assert set(snapshot["current_holdings"]["AAPL"]) == {
+        "shares", "entry_price", "current_price", "position_value", "pnl_pct",
+    }

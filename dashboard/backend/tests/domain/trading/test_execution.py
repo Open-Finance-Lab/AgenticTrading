@@ -573,3 +573,87 @@ def test_subclass_inherits_execute_actions():
     assert pm.custom_method() == "ok"
     # execute_actions resolves through the subclass MRO to the script-defined method
     assert MyPM.execute_actions is bha.PortfolioManager.execute_actions
+
+
+# ---------------------------------------------------------------------------
+# T+1 deferral ledger — the metric a capped order would otherwise erase
+# ---------------------------------------------------------------------------
+
+def test_t1_deferral_is_recorded_once_per_symbol_trading_day():
+    """Four bars of one day that all want out must not be four records."""
+    pm = _t1_manager()
+    day = datetime(2026, 4, 1).date()
+    pm.positions = {"600519.SH": 100}
+    pm.frozen_lots = {"600519.SH": [{"quantity": 100, "buy_date": day}]}
+
+    for _ in range(4):
+        pm.record_t1_deferral("600519.SH", 100, 0)
+
+    assert list(pm.t1_deferrals) == [("600519.SH", day)]
+    assert pm.t1_deferrals[("600519.SH", day)]["deferred_shares"] == 100
+
+
+def test_t1_deferral_keeps_the_worst_of_the_day():
+    pm = _t1_manager()
+    day = datetime(2026, 4, 1).date()
+    pm.frozen_lots = {"600519.SH": [{"quantity": 100, "buy_date": day}]}
+
+    pm.record_t1_deferral("600519.SH", 100, 60)   # 40 deferred
+    pm.record_t1_deferral("600519.SH", 100, 10)   # 90 deferred — worse
+    pm.record_t1_deferral("600519.SH", 100, 80)   # 20 deferred — not worse
+
+    assert pm.t1_deferrals[("600519.SH", day)]["deferred_shares"] == 90
+    assert pm.t1_deferrals[("600519.SH", day)]["sellable_shares"] == 10
+
+
+def test_t1_deferral_separates_symbols_and_days():
+    pm = _t1_manager()
+    d1, d2 = datetime(2026, 4, 1).date(), datetime(2026, 4, 2).date()
+    pm.frozen_lots = {
+        "600519.SH": [{"quantity": 10, "buy_date": d1}],
+        "601318.SH": [{"quantity": 10, "buy_date": d1}],
+    }
+    pm.record_t1_deferral("600519.SH", 10, 0)
+    pm.record_t1_deferral("601318.SH", 10, 0)
+    # Next day: the same symbol blocking again is a distinct event.
+    pm.frozen_lots["600519.SH"] = [{"quantity": 10, "buy_date": d2}]
+    pm.record_t1_deferral("600519.SH", 10, 0)
+
+    assert sorted(pm.t1_deferrals) == [
+        ("600519.SH", d1), ("600519.SH", d2), ("601318.SH", d1),
+    ]
+
+
+def test_t1_deferral_ignores_a_sell_that_was_not_actually_capped():
+    pm = _t1_manager()
+    pm.frozen_lots = {
+        "600519.SH": [{"quantity": 10, "buy_date": datetime(2026, 4, 1).date()}]
+    }
+    pm.record_t1_deferral("600519.SH", 10, 10)
+    assert pm.t1_deferrals == {}
+
+
+def test_t1_deferral_needs_a_frozen_lot_to_date_itself():
+    """No frozen lot means nothing was blocking, so there is no event."""
+    pm = _t1_manager()
+    pm.record_t1_deferral("600519.SH", 10, 0)
+    assert pm.t1_deferrals == {}
+
+
+def test_sellable_positions_is_a_read_only_view():
+    pm = _t1_manager()
+    pm.available_positions = {"600519.SH": 5}
+    view = pm.sellable_positions
+
+    assert view["600519.SH"] == 5
+    with pytest.raises(TypeError):
+        view["600519.SH"] = 999
+    # Still a live view, not a snapshot.
+    pm.available_positions["600519.SH"] = 7
+    assert view["600519.SH"] == 7
+
+
+def test_sellable_positions_is_none_without_t_plus_one():
+    pm = bha.PortfolioManager(100000)
+    pm.available_positions = {"AAPL": 0}
+    assert pm.sellable_positions is None

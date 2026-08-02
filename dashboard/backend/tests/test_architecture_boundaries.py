@@ -359,6 +359,13 @@ def test_portfolio_manager_construction_always_declares_settlement():
     registry means wiring a new data source carries its settlement rules along
     automatically. Hardcoding ``False`` satisfies this test but re-opens the
     hole, so keep the profile lookup.
+
+    Known limits, so nobody reads a green run as full coverage. The match is by
+    **name**, so a call through an aliased import (``PortfolioManager as PM``)
+    is never inspected; ``**kwargs`` splats pass, since the keyword set is
+    unknowable statically; and a purely positional third argument is *flagged*
+    even though it is correct. The check exists to catch the one form anyone
+    actually writes — the keyword call that simply omits the argument.
     """
     offenders = []
     for path in _production_py_files():

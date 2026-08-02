@@ -31,6 +31,12 @@ at all. Without that cap the agent re-proposes an unfillable full-holding sell
 on every bar of the buy date, and each one becomes a ``t1_frozen`` audit record
 for a constraint the agent was never shown.
 
+The cap alone would trade a too-loud audit for a silent one: a capped order
+fills exactly, so the executor sees nothing to record, and "how often did T+1
+stop this agent exiting?" becomes unanswerable. So a capped SELL also reports
+the discarded intent — as ``t1_deferrals`` on the return value (the caller
+dedupes it per trading day) and as ``requested_shares`` on the action itself.
+
 This module is domain-only: it must not import Anthropic, Alpaca, the database,
 FastAPI, API routers, or scripts.
 """
@@ -54,9 +60,11 @@ def make_rule_based_decision(
     current holdings and available cash. ``available_positions`` is the T+1
     sellable balance, or ``None`` when settlement is immediate. Inputs are read
     only, never mutated. Returns ``{"actions": [...]}`` with the same action
-    dictionaries the original method produced.
+    dictionaries the original method produced, plus a ``t1_deferrals`` key that
+    appears **only** when the T+1 cap actually shrank an intended exit.
     """
     actions: List[Dict] = []
+    deferrals: List[Dict] = []
 
     # Calculate total portfolio equity for consistent position sizing
     total_equity = portfolio_state["total_equity"]
@@ -95,12 +103,34 @@ def make_rule_based_decision(
                 if available_positions is None
                 else min(available_positions.get(symbol, 0), positions[symbol])
             )
+            reason = (
+                f"RSI overbought ({rsi:.0f})" if rsi > 70 else "Price above MA50"
+            )
+            if sellable < positions[symbol]:
+                # Report the intent the cap discarded. Capping alone would make
+                # "T+1 stopped this agent exiting" unobservable: the order fills
+                # exactly, so the executor has nothing to audit.
+                deferrals.append({
+                    "symbol": symbol,
+                    "requested_shares": positions[symbol],
+                    "sellable_shares": sellable,
+                })
             if sellable > 0:
-                actions.append({
+                action = {
                     "symbol": symbol,
                     "action": "sell",
                     "shares": sellable,
-                    "reason": f"RSI overbought ({rsi:.0f})" if rsi > 70 else "Price above MA50"
-                })
+                    "reason": reason,
+                }
+                if sellable < positions[symbol]:
+                    # Keep the untruncated intent on the action so the decision
+                    # log does not read as though the agent asked for `sellable`.
+                    action["requested_shares"] = positions[symbol]
+                actions.append(action)
 
-    return {"actions": actions}
+    result: Dict = {"actions": actions}
+    if deferrals:
+        # Only present when T+1 actually bound, so the returned shape is
+        # unchanged for every non-A-share caller.
+        result["t1_deferrals"] = deferrals
+    return result

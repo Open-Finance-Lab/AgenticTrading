@@ -297,7 +297,41 @@ def test_sell_is_capped_at_the_sellable_quantity():
     )
     assert out["actions"] == [
         {"symbol": "MSFT", "action": "sell", "shares": 4,
+         "reason": "RSI overbought (80)",
+         # The intent the cap discarded, so the decision log does not read as
+         # though the agent only ever wanted 4.
+         "requested_shares": 10},
+    ]
+    assert out["t1_deferrals"] == [
+        {"symbol": "MSFT", "requested_shares": 10, "sellable_shares": 4},
+    ]
+
+
+def test_uncapped_sell_carries_no_deferral_or_requested_shares():
+    """Nothing is reported when T+1 did not actually bind."""
+    out = make_rule_based_decision(
+        portfolio_state=_sell_state(),
+        positions={"MSFT": 10},
+        cash=100000,
+        available_positions={"MSFT": 10},
+    )
+    assert out == {"actions": [
+        {"symbol": "MSFT", "action": "sell", "shares": 10,
          "reason": "RSI overbought (80)"},
+    ]}
+
+
+def test_fully_frozen_holding_still_reports_the_deferral():
+    """The case that matters most: no action, so nothing else would record it."""
+    out = make_rule_based_decision(
+        portfolio_state=_sell_state(),
+        positions={"MSFT": 10},
+        cash=100000,
+        available_positions={"MSFT": 0},
+    )
+    assert out["actions"] == []
+    assert out["t1_deferrals"] == [
+        {"symbol": "MSFT", "requested_shares": 10, "sellable_shares": 0},
     ]
 
 
@@ -344,7 +378,7 @@ def test_sellable_cap_does_not_leak_into_buy_branch():
         cash=100000,
         available_positions={"MSFT": 0},
     )
-    assert out == {"actions": []}
+    assert out["actions"] == []
 
 
 def test_inputs_are_not_mutated_by_the_sellable_cap():

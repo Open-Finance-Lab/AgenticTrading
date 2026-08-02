@@ -257,6 +257,11 @@ class RunMetadata(BaseModel):
     # None (not 0) for runs that predate the feature, matching t_plus_one_enabled.
     rejected_orders_count: Optional[int] = None
     rejected_orders_truncated: Optional[int] = None
+    # How hard T+1 actually bound: symbol-days on which the agent wanted to exit
+    # more than it could, and the total shares that deferred. Scalars for the
+    # same reason as above — the records live on the detail endpoint.
+    t1_deferred_events: Optional[int] = None
+    t1_deferred_shares: Optional[float] = None
 
 
 class EquityCurve(BaseModel):
@@ -312,6 +317,8 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "t_plus_one_enabled",
             "rejected_orders_count",
             "rejected_orders_truncated",
+            "t1_deferred_events",
+            "t1_deferred_shares",
         ):
             if field in metadata:
                 payload[field] = metadata[field]
@@ -1561,6 +1568,12 @@ async def get_run_rejected_orders(run_id: str, request: Request):
     ``count`` is the run's true total; ``returned`` is how many this response
     carries. They differ when the engine capped the persisted sample, in which
     case ``truncated`` says by how much.
+
+    ``t1_deferrals`` answers the complementary question. A rejected order means
+    the agent *submitted* something unfillable; a deferral means it wanted to
+    exit and sized down because it could not. The built-in agents now do the
+    latter, so for them this list — not ``rejected_orders`` — is where T+1's
+    effect on strategy shows up.
     """
     session_id = request.state.session_id
     run = db.get_run_with_session(run_id, session_id)
@@ -1570,12 +1583,17 @@ async def get_run_rejected_orders(run_id: str, request: Request):
     if not isinstance(metadata, dict):
         metadata = {}
     records = metadata.get("rejected_orders") or []
+    deferrals = metadata.get("t1_deferrals") or []
     return {
         "run_id": run_id,
         "rejected_orders": records,
         "count": metadata.get("rejected_orders_count", len(records)),
         "returned": len(records),
         "truncated": metadata.get("rejected_orders_truncated", 0),
+        "t1_deferrals": deferrals,
+        "t1_deferred_events": metadata.get("t1_deferred_events", len(deferrals)),
+        "t1_deferred_shares": metadata.get("t1_deferred_shares", 0),
+        "t1_deferrals_truncated": metadata.get("t1_deferrals_truncated", 0),
     }
 
 

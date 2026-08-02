@@ -25,7 +25,8 @@ This module is domain-level orchestration: it must NOT import dashboard scripts,
 import json
 import os
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from types import MappingProxyType
+from typing import Dict, List, Mapping, Optional
 
 import pandas as pd
 
@@ -89,6 +90,10 @@ class PortfolioManager:
         self.available_positions = {}
         self.frozen_lots = {}
         self.rejected_orders = []
+        # {(symbol, trading_date): record} — one entry per symbol-day on which
+        # T+1 shrank an intended exit. Deduped by key rather than appended per
+        # bar, so it is bounded by symbols x trading days by construction.
+        self.t1_deferrals = {}
         self.equity_history = []
         # Real LLM token usage (server-side calls report actual counts)
         self.llm_calls = 0        # billed API calls (any response with usage)
@@ -108,14 +113,21 @@ class PortfolioManager:
         self.allowed_symbols = [str(s).strip().upper() for s in symbols if s]
         self._allowed_set = set(self.allowed_symbols)
     @property
-    def sellable_positions(self) -> Optional[Dict]:
+    def sellable_positions(self) -> Optional[Mapping]:
         """The T+1 sellable balance, or ``None`` when settlement is immediate.
 
         ``None`` rather than ``self.positions`` on purpose: it is the sentinel
         every downstream helper uses to keep the pre-T+1 schema and behavior
         byte-identical for non-A-share runs.
+
+        Returned as a read-only view. It reads like a query but would otherwise
+        hand out the live ledger, so a consumer could rebalance the portfolio
+        through it by accident. The view still tracks later mutations; execution
+        writes through ``self.available_positions`` directly.
         """
-        return self.available_positions if self.t_plus_one_enabled else None
+        if not self.t_plus_one_enabled:
+            return None
+        return MappingProxyType(self.available_positions)
 
     def sellable_shares(self, symbol: str) -> float:
         """Shares of ``symbol`` an order submitted right now could actually fill."""
@@ -123,6 +135,41 @@ class PortfolioManager:
         if not self.t_plus_one_enabled:
             return held
         return min(self.available_positions.get(symbol, 0), held)
+
+    def record_t1_deferral(
+        self,
+        symbol: str,
+        requested_shares: float,
+        sellable_shares: float,
+    ) -> None:
+        """Note that T+1 shrank an intended exit, once per symbol-trading-day.
+
+        The trading date is read off the symbol's own frozen lots rather than a
+        clock: a lot is only still frozen on the date it was bought (the release
+        sweep moves every earlier lot out), so ``max(buy_date)`` *is* today
+        whenever anything is blocking. That keeps this callable from the
+        rule-based path, which is handed no timestamp.
+
+        Keeping the largest deferral per symbol-day rather than the first means
+        the record reflects the worst the constraint bound that day.
+        """
+        deferred = requested_shares - sellable_shares
+        if deferred <= 0:
+            return
+        lots = self.frozen_lots.get(symbol) or []
+        trading_date = max((lot["buy_date"] for lot in lots), default=None)
+        if trading_date is None:
+            return
+        key = (symbol, trading_date)
+        prior = self.t1_deferrals.get(key)
+        if prior is None or deferred > prior["deferred_shares"]:
+            self.t1_deferrals[key] = {
+                "date": trading_date,
+                "symbol": symbol,
+                "requested_shares": requested_shares,
+                "sellable_shares": sellable_shares,
+                "deferred_shares": deferred,
+            }
 
     def get_portfolio_state(self, market_data: Dict[str, pd.Series], price_cache: Dict = None, timestamp = None) -> Dict:
         """Get current portfolio state with market indicators.
@@ -151,12 +198,21 @@ class PortfolioManager:
         Returns:
             {"actions": [{"symbol": "AAPL", "action": "buy", "shares": 10}, ...]}
         """
-        return _make_rule_based_decision(
+        decision = _make_rule_based_decision(
             portfolio_state=portfolio_state,
             positions=self.positions,
             cash=self.cash,
             available_positions=self.sellable_positions,
         )
+        # Drain into the run-level ledger and pop, so the returned shape stays
+        # exactly {"actions": [...]} for every existing caller.
+        for deferral in decision.pop("t1_deferrals", ()):
+            self.record_t1_deferral(
+                deferral["symbol"],
+                deferral["requested_shares"],
+                deferral["sellable_shares"],
+            )
+        return decision
     
     def make_trading_decision_with_llm(
         self,
@@ -208,13 +264,21 @@ class PortfolioManager:
             # Extract current holdings for LLM decision-making
             holdings = {}
             for position in portfolio_state["positions"]:
-                holdings[position["symbol"]] = {
+                holding = {
                     "shares": position["shares"],
                     "entry_price": round(position["entry_price"], 2),
                     "current_price": round(position["current_price"], 2),
                     "position_value": round(position["position_value"], 2),
                     "pnl_pct": round(position["pnl_pct"], 2)
                 }
+                # Present only on T+1 markets, so non-A-share prompts are
+                # byte-identical. Without forwarding it the model cannot see the
+                # settlement rule at all -- its order would still be capped
+                # downstream, but it would reason as though it could exit in
+                # full and never learn otherwise.
+                if "sellable_shares" in position:
+                    holding["sellable_shares"] = position["sellable_shares"]
+                holdings[position["symbol"]] = holding
             
             # Extract recent trade history (last 24 hours) for LLM memory
             # This prevents LLM from re-entering stocks too soon
@@ -565,15 +629,24 @@ class PortfolioManager:
                 elif action_type == "sell":
                     # Size at the sellable quantity, not the held one: under T+1
                     # they differ, and the difference is unfillable.
+                    held = self.positions.get(symbol, 0)
                     sellable = self.sellable_shares(symbol)
+                    if sellable < held:
+                        self.record_t1_deferral(symbol, held, sellable)
                     if sellable > 0:
-                        actions.append({
+                        action = {
                             "symbol": symbol,
                             "action": "sell",
                             "shares": sellable,
                             "reason": f"[LLM] {reasoning} (confidence: {confidence:.0%})",
                             "confidence": confidence
-                        })
+                        }
+                        if sellable < held:
+                            # The reason string still carries the model's own
+                            # words ("exit the full position"); without this the
+                            # log would read as though it asked for `sellable`.
+                            action["requested_shares"] = held
+                        actions.append(action)
                         print(f"      ✅ SELL {symbol}: {sellable} shares @ ${price:.2f} (conf: {confidence:.0%})")
                     elif symbol in self.positions and self.positions[symbol] > 0:
                         print(f"      ⚠️  SELL {symbol}: Skip (T+1 frozen, {self.positions[symbol]} shares settle next trading day)")

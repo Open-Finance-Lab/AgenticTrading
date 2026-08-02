@@ -942,3 +942,53 @@ def test_error_summary_stays_bounded(monkeypatch):
 
     assert len(summary) == 500
     assert "super-secret-token" not in summary
+
+
+def test_rejected_orders_endpoint_reports_t1_deferrals(client, monkeypatch):
+    """Built-in agents size down instead of over-asking, so deferrals -- not
+    rejections -- are where T+1's effect on strategy shows up."""
+    session_id = str(uuid.uuid4())
+    run_id = "agent_test_deferrals"
+    _rejected_orders_run(monkeypatch, run_id, session_id, {
+        "t1_deferrals": [{
+            "date": "2026-04-01", "symbol": "600519.SH",
+            "requested_shares": 100, "sellable_shares": 40,
+            "deferred_shares": 60,
+        }],
+        "t1_deferred_events": 12,
+        "t1_deferred_shares": 640,
+        "t1_deferrals_truncated": 11,
+    })
+
+    body = client.get(
+        f"/runs/{run_id}/rejected-orders", headers={"X-Session-Id": session_id}
+    ).json()
+    assert body["t1_deferred_events"] == 12
+    assert body["t1_deferred_shares"] == 640
+    assert body["t1_deferrals_truncated"] == 11
+    assert body["t1_deferrals"][0]["deferred_shares"] == 60
+    # A clean run on the rejection side must not read as missing data.
+    assert body["rejected_orders"] == []
+    assert body["count"] == 0
+
+
+def test_run_metadata_exposes_deferral_scalars(client, monkeypatch):
+    response = bt._run_metadata_response(
+        _run_record(metadata={
+            "data_source": "ifind_ashare",
+            "t_plus_one_enabled": True,
+            "t1_deferred_events": 12,
+            "t1_deferred_shares": 640,
+            "t1_deferrals": [{"symbol": "600519.SH"}] * 200,
+        })
+    )
+    assert response.t1_deferred_events == 12
+    assert response.t1_deferred_shares == 640
+    # Scalars only: the records stay off the list-route model.
+    assert "t1_deferrals" not in response.model_dump()
+
+
+def test_run_metadata_deferral_scalars_are_none_for_legacy_runs():
+    response = bt._run_metadata_response(_run_record())
+    assert response.t1_deferred_events is None
+    assert response.t1_deferred_shares is None

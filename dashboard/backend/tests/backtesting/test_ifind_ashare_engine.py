@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
+import json
 import os
 import subprocess
 import sys
@@ -401,6 +402,15 @@ def test_ifind_registered_universe_runs_explicit_llm_with_strict_market_context(
             "paper_backtest": True,
             "native_currency": "CNY",
             "reporting_currency": "USD",
+            # A_share profiles settle T+1, and the model is told so in words —
+            # a bare sellable_shares integer in each holding is not
+            # self-describing.
+            "settlement": "T+1",
+            "settlement_note": (
+                "Shares bought today cannot be sold until the next trading "
+                "day. Each holding reports sellable_shares; a sell above that "
+                "amount is truncated to it."
+            ),
             "fx_pair": "USD/CNY",
             "fx_source": "iFinD Historical Conversion Rate",
         }
@@ -672,11 +682,12 @@ def test_transport_failure_still_points_at_credentials(monkeypatch):
 # Rejected-order persistence is bounded, and says so
 # ---------------------------------------------------------------------------
 
-def _metadata_stub(rejected, monkeypatch, data_source=IFIND_ASHARE):
-    """Run _agent_run_metadata over just the rejected-order branch."""
+def _metadata_stub(rejected, monkeypatch, data_source=IFIND_ASHARE, deferrals=()):
+    """Run _agent_run_metadata over just the T+1 audit branches."""
     backtester = object.__new__(HourlyBacktester)
     backtester.data_source = data_source
     backtester.rejected_orders = rejected
+    backtester.t1_deferrals = list(deferrals)
     backtester.use_llm = False
     backtester.prompt_adaptations = None
     backtester.initial_pipeline = None
@@ -725,3 +736,68 @@ def test_agent_metadata_skips_rejected_orders_for_non_ashare_sources(monkeypatch
     )
     assert "rejected_orders" not in meta
     assert "rejected_orders_count" not in meta
+
+
+# ---------------------------------------------------------------------------
+# T+1 deferrals: the "did the rule actually bind?" metric
+# ---------------------------------------------------------------------------
+
+def _deferral(seq, deferred=10):
+    return {
+        "date": f"2026-04-{(seq % 28) + 1:02d}",
+        "symbol": f"60000{seq % 5}.SH",
+        "requested_shares": deferred + 5,
+        "sellable_shares": 5,
+        "deferred_shares": deferred,
+    }
+
+
+def test_agent_metadata_omits_deferrals_when_t1_never_bound(monkeypatch):
+    meta = _metadata_stub([], monkeypatch, deferrals=[])
+    assert "t1_deferrals" not in meta
+    assert "t1_deferred_events" not in meta
+    assert "t1_deferred_shares" not in meta
+
+
+def test_agent_metadata_totals_the_deferred_shares(monkeypatch):
+    records = [_deferral(i, deferred=10) for i in range(3)]
+    meta = _metadata_stub([], monkeypatch, deferrals=records)
+
+    assert meta["t1_deferred_events"] == 3
+    assert meta["t1_deferred_shares"] == 30
+    assert meta["t1_deferrals"] == records
+    assert "t1_deferrals_truncated" not in meta
+
+
+def test_agent_metadata_caps_the_deferral_sample_too(monkeypatch):
+    limit = engine_module.REJECTED_ORDER_SAMPLE_LIMIT
+    records = [_deferral(i) for i in range(limit + 7)]
+    meta = _metadata_stub([], monkeypatch, deferrals=records)
+
+    assert len(meta["t1_deferrals"]) == limit
+    assert meta["t1_deferred_events"] == limit + 7
+    assert meta["t1_deferrals_truncated"] == 7
+    # The total counts every event, not just the persisted sample.
+    assert meta["t1_deferred_shares"] == 10 * (limit + 7)
+
+
+def test_deferral_serializer_sorts_and_isoformats_dates():
+    from datetime import date as _date
+
+    serialized = HourlyBacktester._serialize_t1_deferrals({
+        ("601318.SH", _date(2026, 4, 2)): {
+            "date": _date(2026, 4, 2), "symbol": "601318.SH",
+            "requested_shares": 10, "sellable_shares": 0, "deferred_shares": 10,
+        },
+        ("600519.SH", _date(2026, 4, 1)): {
+            "date": _date(2026, 4, 1), "symbol": "600519.SH",
+            "requested_shares": pd.Series([7], dtype="int64").iloc[0],
+            "sellable_shares": 2, "deferred_shares": 5,
+        },
+    })
+
+    assert [item["date"] for item in serialized] == ["2026-04-01", "2026-04-02"]
+    # numpy scalar unwrapped to a plain int, or json.dumps would reject it.
+    assert serialized[0]["requested_shares"] == 7
+    assert type(serialized[0]["requested_shares"]) is int
+    json.dumps(serialized)

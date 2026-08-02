@@ -91,6 +91,9 @@ HOSTED_RUNTIME_MIN_FAILURE_BUDGET = 2
 # is a row in the free-tier ATL-runs-main project. A 20-symbol A-share run can
 # emit thousands. Persist a bounded head sample plus the true total, the same
 # shape runtime_step_failures already uses below, so the cap is never silent.
+# Head rather than tail, matching runtime_step_failure_samples: the T+1 pattern
+# repeats, so the earliest records characterise it and the count carries scale.
+# Also bounds the (already much smaller) t1_deferrals sample.
 REJECTED_ORDER_SAMPLE_LIMIT = 200
 # The live-progress file is rewritten in full on every step, so embedding the
 # whole growing list makes write volume quadratic in the run length. The live
@@ -158,6 +161,7 @@ class HourlyBacktester:
         )
         self.prompt_adaptations: List[Dict] = []
         self.rejected_orders: List[Dict] = []
+        self.t1_deferrals: List[Dict] = []
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
         self.live_run_id = (live_run_id or "").strip() or None
@@ -321,6 +325,34 @@ class HourlyBacktester:
                 if hasattr(value, "item"):
                     record[field] = value.item()
             serialized.append(record)
+        return serialized
+
+    @staticmethod
+    def _serialize_t1_deferrals(t1_deferrals: Dict) -> List[Dict]:
+        """JSON-safe T+1 deferral records, oldest symbol-day first.
+
+        Static for the same reason as ``_serialize_rejected_orders``: share
+        counts carry no currency. Sorted so the persisted sample is a stable
+        prefix of the run rather than dict-insertion order.
+        """
+        serialized = []
+        for record in sorted(
+            t1_deferrals.values(),
+            key=lambda item: (item["date"], item["symbol"]),
+        ):
+            item = dict(record)
+            date_value = item.get("date")
+            if hasattr(date_value, "isoformat"):
+                item["date"] = date_value.isoformat()
+            for field in (
+                "requested_shares",
+                "sellable_shares",
+                "deferred_shares",
+            ):
+                value = item.get(field)
+                if hasattr(value, "item"):
+                    item[field] = value.item()
+            serialized.append(item)
         return serialized
 
     def _publish_live_progress(self, step: int, total_steps: int, manager) -> None:
@@ -587,6 +619,19 @@ class HourlyBacktester:
                 truncated = len(rejected) - REJECTED_ORDER_SAMPLE_LIMIT
                 if truncated > 0:
                     meta["rejected_orders_truncated"] = truncated
+            deferrals = list(getattr(self, "t1_deferrals", []) or [])
+            if deferrals:
+                # "How often did T+1 stop this agent exiting?" — the question a
+                # capped order can no longer answer, because it fills exactly
+                # and leaves the executor nothing to audit.
+                meta["t1_deferred_events"] = len(deferrals)
+                meta["t1_deferred_shares"] = sum(
+                    item["deferred_shares"] for item in deferrals
+                )
+                meta["t1_deferrals"] = deferrals[:REJECTED_ORDER_SAMPLE_LIMIT]
+                deferrals_truncated = len(deferrals) - REJECTED_ORDER_SAMPLE_LIMIT
+                if deferrals_truncated > 0:
+                    meta["t1_deferrals_truncated"] = deferrals_truncated
         runtime_type = getattr(self, "runtime_type", PIPELINE_RUNTIME_TYPE)
         if runtime_type != PIPELINE_RUNTIME_TYPE:
             meta["runtime_type"] = runtime_type
@@ -614,6 +659,16 @@ class HourlyBacktester:
             "native_currency": self.profile.native_currency,
             "reporting_currency": self.profile.reporting_currency,
         }
+        if self.profile.t_plus_one_enabled:
+            # A bare `sellable_shares` number in each holding is not
+            # self-explanatory. Name the rule that produces it, or the model has
+            # to infer a settlement regime from an unlabelled integer.
+            result["settlement"] = "T+1"
+            result["settlement_note"] = (
+                "Shares bought today cannot be sold until the next trading day. "
+                "Each holding reports sellable_shares; a sell above that amount "
+                "is truncated to it."
+            )
         if context.requires_conversion:
             result["fx_pair"] = context.fx_pair
             result["fx_source"] = "iFinD Historical Conversion Rate"
@@ -956,6 +1011,7 @@ class HourlyBacktester:
             llm_model, manager.input_tokens, manager.output_tokens
         )
 
+        self.t1_deferrals = self._serialize_t1_deferrals(manager.t1_deferrals)
         self.rejected_orders = self._serialize_rejected_orders(
             manager.rejected_orders
         )
