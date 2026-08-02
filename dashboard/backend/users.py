@@ -150,6 +150,42 @@ def verify_password(password: str, password_hash: str) -> bool:
     return _verify_legacy_pbkdf2(password, password_hash)
 
 
+_DUMMY_PASSWORD_HASH: Optional[str] = None
+
+
+def _dummy_password_hash() -> str:
+    """A bcrypt hash of a value nobody can present, built on first use.
+
+    Lazily, because generating it costs a full bcrypt round (~190 ms at
+    ``BCRYPT_ROUNDS=12``) and every CLI script and test collection imports this
+    module. The cost of that is one skewed sample: the first unknown-email
+    login after a restart pays the hash *and* the compare. An attacker would
+    have to already be probing at that exact moment to see it.
+    """
+    global _DUMMY_PASSWORD_HASH
+    if _DUMMY_PASSWORD_HASH is None:
+        _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
+    return _DUMMY_PASSWORD_HASH
+
+
+def verify_password_for_account(password: str, password_hash: Optional[str]) -> bool:
+    """``verify_password`` that costs the same whether or not the account exists.
+
+    Returning early when the email matches no row makes a miss ~3000x faster
+    than a wrong password (measured: 0.06 ms vs 182 ms), so response *time*
+    answers "is this address registered?" no matter how carefully the response
+    *body* is made uniform. Hashing against a throwaway hash on that path puts
+    both branches through the same single bcrypt compare.
+
+    Callers must still discard the result for a missing account -- this only
+    equalises the clock, it never authenticates one.
+    """
+    if password_hash is None:
+        verify_password(password, _dummy_password_hash())
+        return False
+    return verify_password(password, password_hash)
+
+
 def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
     data = dict(row)
     discord_user_id = data.get("discord_user_id")
@@ -304,10 +340,11 @@ class UserStore:
         return dict(row) if row else None
 
     def authenticate(self, email: str, password: str) -> Optional[Dict[str, Any]]:
+        # One bcrypt compare on both branches -- see verify_password_for_account.
         user = self.get_user_by_email(email)
-        if not user:
-            return None
-        if not verify_password(password, user["password_hash"]):
+        if not verify_password_for_account(
+            password, user["password_hash"] if user else None
+        ):
             return None
         return user
 
