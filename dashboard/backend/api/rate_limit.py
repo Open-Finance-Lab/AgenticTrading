@@ -172,10 +172,12 @@ def client_ip(request: Request) -> str:
 
     uvicorn can do this itself, but only when the peer appears in
     ``--forwarded-allow-ips``, which ``uvicorn.Config`` resolves to
-    ``os.environ["FORWARDED_ALLOW_IPS"]`` or ``"127.0.0.1"``. Render's router is
-    neither, so ``request.client`` is left untouched there and enabling
-    ``--proxy-headers`` (already the default) changes nothing. Doing it here
-    keeps the behaviour independent of how the process happens to be launched.
+    ``os.environ["FORWARDED_ALLOW_IPS"]`` or ``"127.0.0.1"``. Prod sets that to
+    ``*`` so uvicorn now trusts Render's router too, but this module doesn't
+    rely on it: a launch-config var set in a dashboard nobody here can see is
+    not something to depend on, and dev/test never set it at all. Doing it
+    here keeps the behaviour independent of how the process happens to be
+    launched.
 
     The header is trivially spoofable, so this is a granularity fix, not a
     security control — see the module docstring.
