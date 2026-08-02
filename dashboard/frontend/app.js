@@ -1152,9 +1152,9 @@ function renderAgentGridFooter(categoryKey, total, page, pageCount) {
   const atStart = page <= 0;
   const atEnd = page >= pageCount - 1;
   footer.innerHTML = `
-    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="上一页" ${atStart ? 'disabled' : ''}>←</button>
-    <span class="agents-grid-footer-count">第 ${page + 1} / ${pageCount} 页 · 共 ${total} 个</span>
-    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="下一页" ${atEnd ? 'disabled' : ''}>→</button>`;
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="Previous page" ${atStart ? 'disabled' : ''}>←</button>
+    <span class="agents-grid-footer-count">Page ${page + 1} of ${pageCount} · ${total} total</span>
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="Next page" ${atEnd ? 'disabled' : ''}>→</button>`;
 }
 
 function renderAgentCards(grid, agents, categoryKey) {
