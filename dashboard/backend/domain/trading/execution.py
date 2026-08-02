@@ -46,6 +46,7 @@ This module is domain-only: it must not import FastAPI, Anthropic, Alpaca
 clients, the database singleton, API routers, or scripts.
 """
 
+import math
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
@@ -101,6 +102,7 @@ def _append_rejection(
     *,
     timestamp: Any,
     symbol: str,
+    action: str,
     requested_shares: float,
     executed_shares: float,
     unfilled_shares: float,
@@ -109,12 +111,61 @@ def _append_rejection(
     rejected_orders.append({
         "timestamp": timestamp,
         "symbol": symbol,
-        "action": "sell",
+        "action": action,
         "requested_shares": requested_shares,
         "executed_shares": executed_shares,
         "unfilled_shares": unfilled_shares,
         "status": "partial" if executed_shares > 0 else "rejected",
         "reason": reason,
+    })
+
+
+def _is_valid_lot_quantity(shares: Any, lot_size: int) -> bool:
+    """Return whether an A-share quantity is a positive whole lot."""
+    if isinstance(shares, bool):
+        return False
+    try:
+        numeric_shares = float(shares)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return (
+        math.isfinite(numeric_shares)
+        and numeric_shares > 0
+        and numeric_shares.is_integer()
+        and int(numeric_shares) % lot_size == 0
+    )
+
+
+def _append_order_event(
+    order_events: Optional[List[Dict]],
+    *,
+    timestamp: Any,
+    symbol: str,
+    side: str,
+    requested_shares: Any,
+    executed_shares: Any,
+    price: Any,
+    status: str,
+    reason: str,
+    strategy_reason: str,
+) -> None:
+    if order_events is None:
+        return
+    unfilled_shares = requested_shares - executed_shares
+    if abs(unfilled_shares) <= _SHARE_EPSILON:
+        unfilled_shares = 0
+    order_events.append({
+        "timestamp": timestamp,
+        "symbol": symbol,
+        "side": side,
+        "requested_shares": requested_shares,
+        "executed_shares": executed_shares,
+        "unfilled_shares": unfilled_shares,
+        "price": price,
+        "executed_value": executed_shares * price,
+        "status": status,
+        "reason": reason,
+        "strategy_reason": strategy_reason,
     })
 
 
@@ -132,6 +183,7 @@ def execute_actions(
     frozen_lots: Optional[Dict] = None,
     rejected_orders: Optional[List[Dict]] = None,
     lot_size: int = 1,
+    order_events: Optional[List[Dict]] = None,
 ) -> float:
     """Apply ``actions`` to the given portfolio state in place.
 
@@ -169,6 +221,36 @@ def execute_actions(
 
         price = market_data[symbol]["close"]
 
+        if (
+            lot_size > 1
+            and action_type in {"buy", "sell"}
+            and not _is_valid_lot_quantity(shares, lot_size)
+        ):
+            if rejected_orders is not None:
+                _append_rejection(
+                    rejected_orders,
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    action=action_type,
+                    requested_shares=shares,
+                    executed_shares=0,
+                    unfilled_shares=shares,
+                    reason="invalid_lot_size",
+                )
+            _append_order_event(
+                order_events,
+                timestamp=timestamp,
+                symbol=symbol,
+                side=action_type.upper(),
+                requested_shares=shares,
+                executed_shares=0,
+                price=price,
+                status="rejected",
+                reason="invalid_lot_size",
+                strategy_reason=reason,
+            )
+            continue
+
         if action_type == "buy":
             cost = shares * price
             if cost <= cash and shares > 0:
@@ -189,6 +271,42 @@ def execute_actions(
                     "cost": cost,
                     "reason": reason
                 })
+                _append_order_event(
+                    order_events,
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    side="BUY",
+                    requested_shares=shares,
+                    executed_shares=shares,
+                    price=price,
+                    status="filled",
+                    reason="",
+                    strategy_reason=reason,
+                )
+            elif lot_size > 1:
+                if rejected_orders is not None:
+                    _append_rejection(
+                        rejected_orders,
+                        timestamp=timestamp,
+                        symbol=symbol,
+                        action="buy",
+                        requested_shares=shares,
+                        executed_shares=0,
+                        unfilled_shares=shares,
+                        reason="insufficient_cash_for_lot",
+                    )
+                _append_order_event(
+                    order_events,
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    side="BUY",
+                    requested_shares=shares,
+                    executed_shares=0,
+                    price=price,
+                    status="rejected",
+                    reason="insufficient_cash_for_lot",
+                    strategy_reason=reason,
+                )
 
         elif action_type == "sell" and t_plus_one_enabled:
             if shares <= 0:
@@ -222,6 +340,18 @@ def execute_actions(
 
             unfilled_shares = shares - sell_shares
             if unfilled_shares <= _SHARE_EPSILON:
+                _append_order_event(
+                    order_events,
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    side="SELL",
+                    requested_shares=shares,
+                    executed_shares=sell_shares,
+                    price=price,
+                    status="filled",
+                    reason="",
+                    strategy_reason=reason,
+                )
                 continue
             frozen_shares = max(held_shares - sellable_shares, 0)
             t1_unfilled = min(unfilled_shares, frozen_shares)
@@ -230,6 +360,7 @@ def execute_actions(
                     rejected_orders,
                     timestamp=timestamp,
                     symbol=symbol,
+                    action="sell",
                     requested_shares=shares,
                     executed_shares=sell_shares,
                     unfilled_shares=t1_unfilled,
@@ -241,11 +372,29 @@ def execute_actions(
                     rejected_orders,
                     timestamp=timestamp,
                     symbol=symbol,
+                    action="sell",
                     requested_shares=shares,
                     executed_shares=sell_shares,
                     unfilled_shares=insufficient_shares,
                     reason="insufficient_position",
                 )
+            primary_reason = (
+                "t1_frozen"
+                if t1_unfilled > _SHARE_EPSILON
+                else "insufficient_position"
+            )
+            _append_order_event(
+                order_events,
+                timestamp=timestamp,
+                symbol=symbol,
+                side="SELL",
+                requested_shares=shares,
+                executed_shares=sell_shares,
+                price=price,
+                status="partial" if sell_shares > 0 else "rejected",
+                reason=primary_reason,
+                strategy_reason=reason,
+            )
 
         elif action_type == "sell":
             if symbol in positions and positions[symbol] > 0:
@@ -266,5 +415,50 @@ def execute_actions(
                     "proceeds": proceeds,
                     "reason": reason
                 })
+                unfilled_shares = shares - sell_shares
+                _append_order_event(
+                    order_events,
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    side="SELL",
+                    requested_shares=shares,
+                    executed_shares=sell_shares,
+                    price=price,
+                    status=(
+                        "filled"
+                        if unfilled_shares <= _SHARE_EPSILON
+                        else "partial"
+                    ),
+                    reason=(
+                        ""
+                        if unfilled_shares <= _SHARE_EPSILON
+                        else "insufficient_position"
+                    ),
+                    strategy_reason=reason,
+                )
+            elif lot_size > 1:
+                if rejected_orders is not None:
+                    _append_rejection(
+                        rejected_orders,
+                        timestamp=timestamp,
+                        symbol=symbol,
+                        action="sell",
+                        requested_shares=shares,
+                        executed_shares=0,
+                        unfilled_shares=shares,
+                        reason="insufficient_position",
+                    )
+                _append_order_event(
+                    order_events,
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    side="SELL",
+                    requested_shares=shares,
+                    executed_shares=0,
+                    price=price,
+                    status="rejected",
+                    reason="insufficient_position",
+                    strategy_reason=reason,
+                )
 
     return cash

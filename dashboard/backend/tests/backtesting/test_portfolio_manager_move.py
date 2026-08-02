@@ -68,6 +68,7 @@ def test_constructor_defaults():
     assert pm.positions == {}
     assert pm.entry_prices == {}
     assert pm.trades == []
+    assert pm.order_events == []
     assert pm.equity_history == []
     assert pm.llm_calls == 0
     assert pm.input_tokens == 0

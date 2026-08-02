@@ -88,6 +88,7 @@ class PortfolioManager:
         self.positions = {}  # {symbol: num_shares}
         self.entry_prices = {}  # {symbol: entry_price}
         self.trades = []
+        self.order_events = []
         self.t_plus_one_enabled = t_plus_one_enabled
         self.lot_size = lot_size
         self.available_positions = {}
@@ -750,6 +751,7 @@ class PortfolioManager:
             frozen_lots=self.frozen_lots,
             rejected_orders=self.rejected_orders,
             lot_size=self.lot_size,
+            order_events=self.order_events,
         )
     
     def update_equity(self, market_data: Dict, price_cache: Dict = None, timestamp = None):

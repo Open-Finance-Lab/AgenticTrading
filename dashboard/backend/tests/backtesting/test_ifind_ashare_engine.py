@@ -152,13 +152,13 @@ def test_ifind_rule_and_llm_paths_share_t1_execution(
                 return {"actions": [{
                     "symbol": A_SHARE_DEMO_6_SYMBOLS[0],
                     "action": "buy",
-                    "shares": 10,
+                    "shares": 100,
                 }]}
             if self.script_step == 2:
                 return {"actions": [{
                     "symbol": A_SHARE_DEMO_6_SYMBOLS[0],
                     "action": "sell",
-                    "shares": 10,
+                    "shares": 100,
                 }]}
             return {"actions": []}
 
@@ -176,6 +176,7 @@ def test_ifind_rule_and_llm_paths_share_t1_execution(
         session_id=f"ifind-t1-{decision_source}",
         use_llm=wants_llm,
         data_source=IFIND_ASHARE,
+        initial_capital=2000,
         decision_source=decision_source,
     )
     backtester.load_data()
