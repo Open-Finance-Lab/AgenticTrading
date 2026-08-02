@@ -1575,6 +1575,29 @@ def test_weak_password_signup_does_not_consume_the_signup_budget(
         )
 
 
+def test_login_logging_cannot_be_used_to_forge_log_lines(client, capsys):
+    """Log injection: the failure line is the record an operator reads while
+    deciding whether they are under attack, so an unauthenticated caller must
+    not be able to write entries into it.
+
+    ``_normalize_email`` only strips the ends of the address, so an interior
+    newline survives validation. CodeQL reported this as py/log-injection while
+    these were ``logger`` calls and goes quiet at a ``print`` sink it does not
+    model -- the alert going away is not what makes it safe, this is.
+    """
+    forged = "auth.login_failed domain=attacker.test"
+    resp = client.post(
+        "/api/auth/login",
+        json={"email": f"victim@example.com\n{forged}", "password": "whatever1"},
+    )
+    assert resp.status_code == 401
+
+    out = capsys.readouterr().out
+    assert "auth.login_failed domain=example.com" in out, "the real line is still logged"
+    assert forged not in out
+    assert "attacker.test" not in out
+
+
 def test_env_int_disables_on_zero_and_reports_bad_overrides(monkeypatch, capsys):
     """0 disables (the MAX_ACTIVE_RUNS_GLOBAL convention) and junk is loud.
 

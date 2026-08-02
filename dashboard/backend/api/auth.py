@@ -4,6 +4,7 @@ import hmac
 import logging
 import math
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlencode
@@ -90,9 +91,29 @@ _SIGNUP_IP_LIMITER = _build_limiter("AUTH_SIGNUP_IP", 60, 3600)
 _SIGNUP_EMAIL_LIMITER = _build_limiter("AUTH_SIGNUP_EMAIL", 5, 3600)
 
 
+# Leading run of characters a hostname may contain. Anchored and non-greedy
+# about nothing: it stops at the first byte a domain cannot hold, so injected
+# text is cut off rather than folded into the value.
+_DOMAIN_PREFIX = re.compile(r"[a-z0-9.\-]*")
+
+
 def _email_domain(email: str) -> str:
-    """Domain only: enough to spot a scripted sweep, never the address itself."""
-    return email.rsplit("@", 1)[-1]
+    """Domain only: enough to spot a scripted sweep, never the address itself.
+
+    Filtered, not just split. ``_normalize_email`` strips the *ends* of the
+    address, so ``"victim@example.com\\nauth.login_failed domain=attacker.test"``
+    validates -- it has an ``@`` and a dotted right-hand side -- and would let an
+    unauthenticated caller write whole forged lines into the log an operator
+    reads while deciding whether they are under attack. CodeQL caught this as
+    py/log-injection while these were ``logger`` calls and stops reporting it at
+    a ``print`` sink it does not model, so the guard has to be the code, not the
+    alert. Truncating at the first character a domain cannot hold, rather than
+    filtering them out: dropping them would splice the injected text onto the
+    real domain instead of discarding it, and nothing downstream needs to
+    reverse this.
+    """
+    domain = email.rsplit("@", 1)[-1].lower()
+    return _DOMAIN_PREFIX.match(domain).group()[:64] or "?"
 
 
 def _auth_rate_limited(limiter: FixedWindowRateLimiter, key: str, detail: str) -> HTTPException:
