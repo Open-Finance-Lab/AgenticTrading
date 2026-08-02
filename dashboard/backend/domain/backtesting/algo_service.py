@@ -88,6 +88,24 @@ def get_default_blocks() -> dict[str, str]:
     return deepcopy(DEFAULT_BLOCKS)
 
 
+def _report_unusable_defaults(reason: str) -> None:
+    """Announce that the settings file is present but yielded no date range.
+
+    A bare `pass` made "the file is absent" and "the file is on disk but
+    unusable" produce byte-identical behaviour: both fall through to the
+    hardcoded pair, silently running every backtest over the wrong window.
+    ``reason`` separates the ways that happens, so the notice says which fault
+    occurred rather than only that one did.
+
+    print(), not logging -- under the deployed uvicorn, logger calls emit
+    nothing.
+    """
+    print(
+        f"[algo_service] {DEFAULTS_FILE} {reason}; "
+        "falling back to the built-in default date range"
+    )
+
+
 def _default_backtest_dates() -> tuple[str, str]:
     if DEFAULTS_FILE.exists():
         try:
@@ -97,16 +115,19 @@ def _default_backtest_dates() -> tuple[str, str]:
             end = settings.get("endDate")
             if start and end:
                 return start, end
-        except (json.JSONDecodeError, OSError) as exc:
-            # A bare `pass` here made "the file is absent" and "the file is on
-            # disk and unreadable" produce byte-identical behaviour: both fall
-            # through to the hardcoded pair below, silently running every
-            # backtest over the wrong window. print(), not logging -- under the
-            # deployed uvicorn, logger calls emit nothing.
-            print(
-                f"[algo_service] {DEFAULTS_FILE} is unreadable ({exc}); "
-                "falling back to the built-in default date range"
+            # Parsed, right shape, no range: an upstream key rename or a
+            # blanked value. Likelier than a corrupt write, and a bare
+            # fall-through hid it just as completely.
+            _report_unusable_defaults(
+                "has no usable defaultSettings.startDate/endDate"
             )
+        except (json.JSONDecodeError, OSError, AttributeError) as exc:
+            # AttributeError included deliberately: valid JSON that is not an
+            # object (`[]`, a bare string) makes `.get` raise, which is neither
+            # a decode nor an OS error, so it used to escape this handler and
+            # 500 the caller. The try block is three lines wide, so this cannot
+            # swallow an unrelated attribute bug.
+            _report_unusable_defaults(f"could not be read as a settings object ({exc})")
     return "2026-05-04", "2026-05-12"
 
 
@@ -357,7 +378,10 @@ def execute_algo(
             "Set ALPACA_API_KEY / ALPACA_SECRET_KEY or create credentials/alpaca.json"
         )
 
-    start, end = start_date or _default_backtest_dates()[0], end_date or _default_backtest_dates()[1]
+    # Resolved once, not once per bound: the resolver now prints on a bad
+    # settings file, and calling it twice reported the same fault twice.
+    default_start, default_end = _default_backtest_dates()
+    start, end = start_date or default_start, end_date or default_end
     name = (team_name or _default_team_name(blocks)).strip() or "My Trading Algo"
     submission_id = f"{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 

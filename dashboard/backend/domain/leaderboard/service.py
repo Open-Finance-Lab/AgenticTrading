@@ -19,23 +19,24 @@ from typing import Any, Dict, List, Optional, Tuple
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.database import db
 import dashboard.backend.domain.leaderboard.baselines as _baselines
+from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
+from dashboard.backend.domain.leaderboard.strategies import get_strategy
+from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
+from dashboard.backend.paths import CONFIG_DIR, DATA_DIR
 
 # Bound by assignment from the module alias rather than a bare
 # `from ... import X`. Five of these are used below, but `downsample_daily` is a
 # pure re-export: test_service_move asserts `service.downsample_daily is
 # baselines.downsample_daily`, a cross-module contract `py/unused-import`
 # (intra-file only) cannot see. One import form for the module, so this does not
-# trade that alert for `py/import-and-import-from`.
+# trade that alert for `py/import-and-import-from`. Kept below the import block
+# rather than inside it so the imports stay one contiguous section.
 INITIAL_CAPITAL = _baselines.INITIAL_CAPITAL
 align_equity_curves = _baselines.align_equity_curves
 calc_metrics = _baselines.calc_metrics
 chart_equity_curve = _baselines.chart_equity_curve
 downsample_daily = _baselines.downsample_daily
 fetch_hourly_bars = _baselines.fetch_hourly_bars
-from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
-from dashboard.backend.domain.leaderboard.strategies import get_strategy
-from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
-from dashboard.backend.paths import CONFIG_DIR, DATA_DIR
 
 LEADERBOARD_MODE = "leaderboard"
 VALID_PERIODS = ("contest", "daily")

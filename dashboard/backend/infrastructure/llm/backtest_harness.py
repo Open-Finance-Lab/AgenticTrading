@@ -53,7 +53,12 @@ try:
 
     Anthropic = anthropic.Anthropic
     HAS_ANTHROPIC = True
-except ImportError:
+except (ImportError, AttributeError):
+    # AttributeError as well as ImportError: attribute access is what makes the
+    # re-export visible to `py/unused-import`, but it also moves the "SDK is
+    # unusable" signal from ImportError to AttributeError. This module is on the
+    # backend's import path, so an unhandled one would not just disable LLM
+    # trading -- it would take the app's import down with it.
     # Bind ``Anthropic`` to None (instead of leaving it undefined) so the legacy
     # script can unconditionally re-export it; consumers always guard on
     # ``HAS_ANTHROPIC`` before using the client.

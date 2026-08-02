@@ -68,6 +68,10 @@ if importlib.util.find_spec("pandas_ta") is None:
     # venv whose pip is not first on PATH, and installing into the wrong
     # interpreter would leave the import below still failing.
     subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas_ta"])
+    # The probe above populated the path-finder's directory caches with a miss;
+    # drop them so the module just written to site-packages is discoverable by
+    # the features import below rather than on the next process start.
+    importlib.invalidate_caches()
 
 # ---------------------------------------------------------------------------
 # Phase 2A extraction: the implementations below now live under the canonical
