@@ -127,6 +127,17 @@ def test_us_profiles_preserve_their_default_decision_behavior():
     assert simulation.llm_enabled is False
 
 
+def test_t_plus_one_is_enabled_only_for_ifind_ashares():
+    assert get_market_profile(ALPACA).t_plus_one_enabled is False
+    assert get_market_profile(VNPY_SIMULATION).t_plus_one_enabled is False
+    assert get_market_profile(IFIND_ASHARE, A_SHARE_DEMO_6).t_plus_one_enabled is True
+    assert (
+        get_market_profile(IFIND_ASHARE, CSI300_SAMPLE_20_2026H2)
+        .t_plus_one_enabled
+        is True
+    )
+
+
 @pytest.mark.parametrize(
     ("universe", "requested", "expected"),
     [

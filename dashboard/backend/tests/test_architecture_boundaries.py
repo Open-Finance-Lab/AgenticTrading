@@ -340,3 +340,48 @@ def test_discord_bot_imports_without_secrets():
     proc = _import_clean("dashboard.backend.integrations.discord_bot")
     assert proc.returncode == 0, proc.stderr
     assert "import-ok" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Settlement semantics come from the market profile, never a constructor default
+# ---------------------------------------------------------------------------
+
+def test_portfolio_manager_construction_always_declares_settlement():
+    """Every production PortfolioManager must pass ``t_plus_one_enabled``.
+
+    ``t_plus_one_enabled`` defaults to ``False``, which is correct for US
+    markets and silently wrong for A-shares. A site that omits it therefore
+    fails *closed but invisible*: no error, no log, just same-day settlement on
+    a market that does not have it. Requiring the argument at every call site
+    turns that into a test failure at the moment the site is written.
+
+    Pass ``get_market_profile(...).t_plus_one_enabled`` — resolving it from the
+    registry means wiring a new data source carries its settlement rules along
+    automatically. Hardcoding ``False`` satisfies this test but re-opens the
+    hole, so keep the profile lookup.
+
+    Known limits, so nobody reads a green run as full coverage. The match is by
+    **name**, so a call through an aliased import (``PortfolioManager as PM``)
+    is never inspected; ``**kwargs`` splats pass, since the keyword set is
+    unknowable statically; and a purely positional third argument is *flagged*
+    even though it is correct. The check exists to catch the one form anyone
+    actually writes — the keyword call that simply omits the argument.
+    """
+    offenders = []
+    for path in _production_py_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
+            if name != "PortfolioManager":
+                continue
+            passed = {kw.arg for kw in node.keywords}
+            if "t_plus_one_enabled" not in passed and None not in passed:
+                offenders.append(f"{path.relative_to(_REPO_ROOT)}:{node.lineno}")
+
+    assert offenders == [], (
+        "PortfolioManager built without an explicit t_plus_one_enabled at: "
+        + ", ".join(offenders)
+    )

@@ -47,6 +47,7 @@ EXPECTED_BACKTESTS_ROUTES = {
     ("GET", "/runs/{run_id}", "get_run"),
     ("GET", "/runs/{run_id}/equity", "get_equity_curve"),
     ("GET", "/runs/{run_id}/trades", "get_run_trades"),
+    ("GET", "/runs/{run_id}/rejected-orders", "get_run_rejected_orders"),
     ("GET", "/runs/{run_id}/plot.png", "get_run_plot"),
     ("GET", "/compare", "compare_runs"),
 }
@@ -176,6 +177,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/runs/{run_id}"),
     ("GET", "/runs/{run_id}/equity"),
     ("GET", "/runs/{run_id}/plot.png"),
+    ("GET", "/runs/{run_id}/rejected-orders"),
     ("GET", "/runs/{run_id}/trades"),
     ("GET", "/strategy"),
     ("GET", "/styles.css"),
