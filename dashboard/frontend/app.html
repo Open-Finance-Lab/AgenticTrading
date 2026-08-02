@@ -8,9 +8,16 @@
     <link rel="apple-touch-icon" href="/images/atltransparent.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <!-- API origin (Vercel serves this page, Render answers its fetches):
+         start the TCP+TLS handshake now, not at the first fetch. crossorigin
+         because every API call is a CORS request. -->
+    <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=75">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="styles.css?v=76">
+    <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
+         document order (this one first, the body-end ones after), all before
+         DOMContentLoaded, so Chart is defined before any chart renders. -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" defer></script>
     <script>
     (function () {
         var NAV_STATE_KEY = 'nav-state';
@@ -82,6 +89,15 @@
         html.setAttribute('data-nav-page', nav.page);
         html.setAttribute('data-nav-playground-tab', nav.playgroundTab || 'agents');
         html.setAttribute('data-nav-competition-tab', nav.competitionTab || 'daily');
+        // Warm the API before the JS pipeline even finishes downloading: on
+        // Render's free tier the first request may pay a 30-60s cold start,
+        // so every second saved here comes straight off page readiness.
+        // Mirrors app.js's API_BASE host rule; app.js reads window.API_WARMUP
+        // to decide whether to show the slow-boot notice.
+        var apiBase = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+            ? location.origin
+            : 'https://agentictrading.onrender.com';
+        window.API_WARMUP = fetch(apiBase + '/health').catch(function () { return null; });
     })();
     </script>
     <style id="nav-boot-style">
@@ -885,7 +901,15 @@
                             <h3 class="agents-category-title">Foundation Agents</h3>
                             <p class="agents-category-sub">A prompting game — give it money, an instruction, and a model, then backtest.</p>
                         </div>
-                        <div id="agentsGridBuiltin" class="agents-grid"></div>
+                        <div id="agentsGridBuiltin" class="agents-grid">
+                            <!-- Loading skeletons: visible pre-JS and while the first
+                                 agents fetch runs. No removal code needed — every render
+                                 path overwrites this grid's innerHTML (pinned by
+                                 test_frontend_fast_boot.py). -->
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                        </div>
                         <div id="agentsGridFooterBuiltin" class="agents-grid-footer" hidden></div>
                         <p id="agentsEmptyBuiltin" class="control-helper" hidden>No foundation agents yet. Click <strong>Add Agent</strong> to create one.</p>
                     </section>
@@ -894,7 +918,9 @@
                             <h3 class="agents-category-title">External Agents</h3>
                             <p class="agents-category-sub">Bring your own agent and connect it with an API key.</p>
                         </div>
-                        <div id="agentsGridExternal" class="agents-grid"></div>
+                        <div id="agentsGridExternal" class="agents-grid">
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                        </div>
                         <div id="agentsGridFooterExternal" class="agents-grid-footer" hidden></div>
                         <p id="agentsEmptyExternal" class="control-helper" hidden>No external agents match your search.</p>
                     </section>
@@ -1638,20 +1664,23 @@
     </div>
 
 
-    <script src="market-events/mockMarketEvents.js"></script>
-    <script src="market-events/marketEventRelativeTime.js"></script>
-    <script src="market-events/MarketEventCard.js"></script>
-    <script src="market-events/MarketEventFeed.js"></script>
-    <script src="js/portfolio.js?v=15"></script>
-    <script src="js/agent-editor.js?v=17"></script>
-    <script src="app.js?v=56"></script>
-    <script src="js/leaderboard.js?v=16"></script>
-    <script src="home-page.js?v=36"></script>
+    <!-- All deferred so the Chart.js CDN tag in <head> (also deferred) can
+         stay first in execution order: deferred scripts run in document
+         order, all before DOMContentLoaded. -->
+    <script src="market-events/mockMarketEvents.js" defer></script>
+    <script src="market-events/marketEventRelativeTime.js" defer></script>
+    <script src="market-events/MarketEventCard.js" defer></script>
+    <script src="market-events/MarketEventFeed.js" defer></script>
+    <script src="js/portfolio.js?v=15" defer></script>
+    <script src="js/agent-editor.js?v=17" defer></script>
+    <script src="app.js?v=57" defer></script>
+    <script src="js/leaderboard.js?v=16" defer></script>
+    <script src="home-page.js?v=36" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads
          before app.js. -->
-    <script src="home-news-signals.js"></script>
+    <script src="home-news-signals.js" defer></script>
     <!-- Never `hidden`: a live region has to stay rendered to be monitored. It
          hides itself visually via .app-toast's opacity + pointer-events. -->
     <div id="appToast" class="app-toast" role="status" aria-live="polite"></div>
