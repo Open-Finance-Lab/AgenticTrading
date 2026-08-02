@@ -23,6 +23,7 @@ This module is domain-level orchestration: it must NOT import dashboard scripts,
 """
 
 import json
+import math
 import os
 from datetime import datetime, timedelta
 from types import MappingProxyType
@@ -601,8 +602,15 @@ class PortfolioManager:
                     # not throw the whole decision into the rule-based fallback.
                     raw_size = llm_action.get("position_size", 0)
                     try:
-                        shares = int(raw_size or 0)
+                        shares = (
+                            float(raw_size or 0)
+                            if self.lot_size > 1
+                            else int(raw_size or 0)
+                        )
                     except (TypeError, ValueError, OverflowError):
+                        print(f"      ⚠️  BUY {symbol}: Skip (unparseable position_size {raw_size!r})")
+                        continue
+                    if isinstance(shares, float) and not math.isfinite(shares):
                         print(f"      ⚠️  BUY {symbol}: Skip (unparseable position_size {raw_size!r})")
                         continue
 
@@ -610,14 +618,24 @@ class PortfolioManager:
                     if shares == 0:
                         base_risk = portfolio_state["total_equity"] * 0.02
                         risk_amount = base_risk * confidence
-                        shares = int(risk_amount / price) if price > 0 else 0
+                        if price > 0:
+                            calculated = risk_amount / price
+                            shares = (
+                                calculated
+                                if self.lot_size > 1
+                                else int(calculated)
+                            )
+                        else:
+                            shares = 0
 
                     if shares > MAX_ORDER_SHARES:
                         # Same per-order ceiling validate_llm_response enforces
                         # on the safe path; a free-form strategy_prompt must
                         # not push an unbounded order through this loop.
                         print(f"      ⚠️  BUY {symbol}: Skip (position_size {shares} > per-order cap {MAX_ORDER_SHARES})")
-                    elif shares > 0 and shares * price <= self.cash:
+                    elif shares > 0 and (
+                        self.lot_size > 1 or shares * price <= self.cash
+                    ):
                         actions.append({
                             "symbol": symbol,
                             "action": "buy",

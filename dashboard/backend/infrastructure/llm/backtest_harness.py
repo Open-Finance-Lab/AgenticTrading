@@ -152,7 +152,8 @@ IMPORTANT INSTRUCTIONS:
 3. Always include a confidence score (0.0-1.0)
 4. Return a JSON object with an "actions" array containing one entry per stock
 5. Even if you decide HOLD, include it in the actions array
-6. Respond with ONLY valid JSON - no explanations outside JSON
+6. BUY and SELL position_size values must be positive multiples of 100 shares
+7. Respond with ONLY valid JSON - no explanations outside JSON
 
 Make precise, actionable trading decisions based on the technical indicators provided."""
 
