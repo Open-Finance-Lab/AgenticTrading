@@ -57,17 +57,29 @@ def test_account_served_from_cache_within_ttl(fake_alpaca):
     )
 
 
-def test_account_fetch_failure_is_not_cached(fake_alpaca, monkeypatch):
+def test_account_fetch_failure_is_not_cached(fake_alpaca):
+    # No monkeypatch here on purpose: the fixture and the test share one
+    # function-scoped monkeypatch instance, so undo() would also revert the
+    # fixture's class patch and the recovery request would hit the REAL
+    # Alpaca client -- green only on machines with live credentials.
     client = TestClient(app)
+
+    working_get_account = FakeAlpacaClient.get_account
 
     def broken(self):
         raise RuntimeError("alpaca down")
 
-    monkeypatch.setattr(FakeAlpacaClient, "get_account", broken)
-    failed = client.get("/paper/account")
-    assert failed.json()["success"] is False
+    FakeAlpacaClient.get_account = broken
+    try:
+        failed = client.get("/paper/account")
+        assert failed.json()["success"] is False
+    finally:
+        FakeAlpacaClient.get_account = working_get_account
 
     # Provider recovers: the failure must not have poisoned the cache.
-    monkeypatch.undo()
     recovered = client.get("/paper/account")
     assert recovered.json()["success"] is True
+    assert fake_alpaca.account_calls == 1, (
+        "recovery must be served by the fake provider, not a cached failure "
+        "or the real client"
+    )
