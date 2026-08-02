@@ -1,0 +1,36 @@
+name: Keep prod warm
+
+# Render's free tier spins the service down after ~15 minutes without
+# traffic; the next visitor then eats a 30-60s cold start before the app
+# answers at all. This ping keeps the instance alive around the clock.
+#
+# Budget: one always-on free service uses ~720 of the plan's 750 free
+# instance-hours per month, so this fits exactly one service — don't copy
+# this workflow for a second one on the same account.
+#
+# Cadence: nominally every 10 minutes. GitHub delays scheduled runs by a
+# few minutes under load, which still lands inside the ~15-minute idle
+# window most of the time; the retries below cover a ping that arrives
+# after a spin-down anyway (first attempt may hit the cold start).
+#
+# Note: GitHub auto-disables scheduled workflows after 60 days without
+# repo activity. This repo is active; if pushes ever stop, re-enable it
+# from the Actions tab.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    name: Ping /health
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ping backend health endpoint
+        run: |
+          curl --silent --show-error --fail \
+            --max-time 90 \
+            --retry 3 --retry-delay 15 --retry-all-errors \
+            https://agentictrading.onrender.com/health
