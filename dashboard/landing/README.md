@@ -42,7 +42,7 @@ React bundle. That layer is, by design, all that remains hand-written in
   a click delegation that funnels the landing's CTAs into it.
 
 Everything else the landing shows — the nav (with its native `data-landing-auth`
-**Start Free** button), the Discord-prompt and paper-trading sections, the
+**Start Free** and **Sign in** buttons), the Discord-prompt and paper-trading sections, the
 fixed-height agent playground — is now rendered **natively by the React source**.
 (An earlier shipped bundle injected those via a `MutationObserver` patch; the source
 has since absorbed them, and that obsolete patch machinery was removed so it can't
@@ -73,9 +73,11 @@ hashes move with toolchain versions, so a reproducibility check would be flaky.
 The auth layer binds to native `data-landing-auth` buttons + CTA labels, so it no
 longer depends on any patch-injected DOM. Still: it touches the live signup/login
 flow, so verify in a browser (or headlessly — load `/`, confirm each section renders
-once, the modal opens on every **Start Free** button, and the only console error is
+once, the modal opens on every **Start Free** button *in signup mode* and on the
+navbar's **Sign in** button *in login mode*, and the only console error is
 the `/_vercel/insights/script.js` 404, which exists off Vercel and is expected) before
-shipping. Longer term, folding the auth modal + gate into the React source would
+shipping. Note the **Sign in** control is `lg:`-gated — widen the viewport past
+1024px or it legitimately will not be in the DOM's layout. Longer term, folding the auth modal + gate into the React source would
 remove even this remnant, making the build output *exactly* the shipped page.
 
 ## History — why this failed to build from a clean clone
