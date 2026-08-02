@@ -2,9 +2,13 @@
 
 Replaces the fresh psycopg.connect() (a full TLS handshake to Neon) every
 store call used to pay. Small and short-lived by design: max_size 5 fits the
-single-worker deployment, and max_idle 300s closes idle sockets before Neon's
-scale-to-zero suspend can hand back a dead one. row_factory is configured at
-pool construction because every twin relies on dict-style row access.
+single-worker deployment. Two guards against Neon's ~5-minute scale-to-zero
+suspend killing pooled sockets: max_idle 120s retires idle connections well
+before the suspend timer can beat them to it, and check= pre-pings each
+connection at checkout so a socket that died anyway costs one silent
+reconnect instead of a 500 on the first request after idle. row_factory is
+configured at pool construction because every twin relies on dict-style row
+access.
 """
 
 from __future__ import annotations
@@ -39,8 +43,9 @@ def get_pool(database_url: str) -> ConnectionPool:
                 database_url,
                 min_size=0,
                 max_size=5,
-                max_idle=300,
+                max_idle=120,
                 timeout=POOL_TIMEOUT_SECONDS,
+                check=ConnectionPool.check_connection,
                 kwargs={"row_factory": dict_row},
                 open=True,
             )
