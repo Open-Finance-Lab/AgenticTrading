@@ -39,6 +39,10 @@ from dashboard.backend.domain.backtesting.metrics import (
 )
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
+from dashboard.backend.infrastructure.market_data.profiles import (
+    ALPACA,
+    get_market_profile,
+)
 
 from dashboard.backend.domain.backtesting import (
     baseline_worker,
@@ -169,7 +173,18 @@ class ExternalBacktestSession:
         self.context_ref_by_step: Dict[int, str] = {}
 
         self.initial_capital = resolve_initial_capital(initial_capital)
-        self.manager = PortfolioManager(initial_capital=self.initial_capital)
+        # This service is Alpaca-only by construction (it loads bars through
+        # AlpacaDataLoader and neither /api/v1 nor /api/v2 accepts a
+        # data_source). Resolve execution rules from the profile registry
+        # anyway, so wiring a second data source here carries its settlement
+        # semantics with it. Defaulting the flag instead would make a future
+        # A-share run silently execute with US same-day settlement — no error,
+        # no log, just wrong fills.
+        self.profile = get_market_profile(ALPACA)
+        self.manager = PortfolioManager(
+            initial_capital=self.initial_capital,
+            t_plus_one_enabled=self.profile.t_plus_one_enabled,
+        )
         self.all_data: Dict[str, pd.DataFrame] = {}
         self.timestamps: List[Any] = []
         self.price_cache: Dict[str, Dict[Any, float]] = {}

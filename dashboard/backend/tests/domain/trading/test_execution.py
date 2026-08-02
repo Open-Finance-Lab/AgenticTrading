@@ -9,6 +9,7 @@ canonical package path; no external services are touched.
 from datetime import datetime
 
 import pandas as pd
+import pytest
 
 from dashboard.backend.domain.trading.execution import execute_actions
 from dashboard.scripts import backtest_hourly_agent as bha
@@ -420,6 +421,50 @@ def test_t1_request_above_total_splits_frozen_and_insufficient_reasons():
     assert [item["unfilled_shares"] for item in pm.rejected_orders] == [60, 50]
 
 
+def test_t1_float_residue_does_not_mint_a_phantom_rejection():
+    """A fully-filled fractional sell must not audit ~1e-17 unfilled shares.
+
+    0.3 - 0.1 - 0.2 is -2.8e-17 in binary floating point, so an exact fill
+    leaves negative-zero-ish residue that a bare ``> 0`` test reads as a real
+    unfilled quantity — an ``insufficient_position`` record for a constraint
+    that was never violated.
+    """
+    pm = _t1_manager()
+    pm.positions = {"600519.SH": 0.3}
+    pm.entry_prices = {"600519.SH": 90.0}
+    pm.available_positions = {"600519.SH": 0.3}
+
+    for size in (0.1, 0.2):
+        pm.execute_actions(
+            [{"symbol": "600519.SH", "action": "sell", "shares": size}],
+            {"600519.SH": _row(100.0)},
+            datetime(2026, 4, 2, 10),
+        )
+
+    # Both sells fill (the second for the residual balance, itself inexact)…
+    assert len(pm.trades) == 2
+    assert sum(trade["shares"] for trade in pm.trades) == pytest.approx(0.3)
+    # …and neither leaves an audit record behind.
+    assert pm.rejected_orders == []
+
+
+def test_t1_genuine_shortfall_still_audits_above_the_epsilon():
+    """The tolerance must not swallow a real one-share shortfall."""
+    pm = _t1_manager()
+    pm.positions = {"600519.SH": 5}
+    pm.entry_prices = {"600519.SH": 90.0}
+    pm.available_positions = {"600519.SH": 5}
+
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "sell", "shares": 6}],
+        {"600519.SH": _row(100.0)},
+        datetime(2026, 4, 2, 10),
+    )
+
+    assert [item["reason"] for item in pm.rejected_orders] == ["insufficient_position"]
+    assert pm.rejected_orders[0]["unfilled_shares"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Trade records appended in place, earlier records unchanged
 # ---------------------------------------------------------------------------
@@ -528,3 +573,87 @@ def test_subclass_inherits_execute_actions():
     assert pm.custom_method() == "ok"
     # execute_actions resolves through the subclass MRO to the script-defined method
     assert MyPM.execute_actions is bha.PortfolioManager.execute_actions
+
+
+# ---------------------------------------------------------------------------
+# T+1 deferral ledger — the metric a capped order would otherwise erase
+# ---------------------------------------------------------------------------
+
+def test_t1_deferral_is_recorded_once_per_symbol_trading_day():
+    """Four bars of one day that all want out must not be four records."""
+    pm = _t1_manager()
+    day = datetime(2026, 4, 1).date()
+    pm.positions = {"600519.SH": 100}
+    pm.frozen_lots = {"600519.SH": [{"quantity": 100, "buy_date": day}]}
+
+    for _ in range(4):
+        pm.record_t1_deferral("600519.SH", 100, 0)
+
+    assert list(pm.t1_deferrals) == [("600519.SH", day)]
+    assert pm.t1_deferrals[("600519.SH", day)]["deferred_shares"] == 100
+
+
+def test_t1_deferral_keeps_the_worst_of_the_day():
+    pm = _t1_manager()
+    day = datetime(2026, 4, 1).date()
+    pm.frozen_lots = {"600519.SH": [{"quantity": 100, "buy_date": day}]}
+
+    pm.record_t1_deferral("600519.SH", 100, 60)   # 40 deferred
+    pm.record_t1_deferral("600519.SH", 100, 10)   # 90 deferred — worse
+    pm.record_t1_deferral("600519.SH", 100, 80)   # 20 deferred — not worse
+
+    assert pm.t1_deferrals[("600519.SH", day)]["deferred_shares"] == 90
+    assert pm.t1_deferrals[("600519.SH", day)]["sellable_shares"] == 10
+
+
+def test_t1_deferral_separates_symbols_and_days():
+    pm = _t1_manager()
+    d1, d2 = datetime(2026, 4, 1).date(), datetime(2026, 4, 2).date()
+    pm.frozen_lots = {
+        "600519.SH": [{"quantity": 10, "buy_date": d1}],
+        "601318.SH": [{"quantity": 10, "buy_date": d1}],
+    }
+    pm.record_t1_deferral("600519.SH", 10, 0)
+    pm.record_t1_deferral("601318.SH", 10, 0)
+    # Next day: the same symbol blocking again is a distinct event.
+    pm.frozen_lots["600519.SH"] = [{"quantity": 10, "buy_date": d2}]
+    pm.record_t1_deferral("600519.SH", 10, 0)
+
+    assert sorted(pm.t1_deferrals) == [
+        ("600519.SH", d1), ("600519.SH", d2), ("601318.SH", d1),
+    ]
+
+
+def test_t1_deferral_ignores_a_sell_that_was_not_actually_capped():
+    pm = _t1_manager()
+    pm.frozen_lots = {
+        "600519.SH": [{"quantity": 10, "buy_date": datetime(2026, 4, 1).date()}]
+    }
+    pm.record_t1_deferral("600519.SH", 10, 10)
+    assert pm.t1_deferrals == {}
+
+
+def test_t1_deferral_needs_a_frozen_lot_to_date_itself():
+    """No frozen lot means nothing was blocking, so there is no event."""
+    pm = _t1_manager()
+    pm.record_t1_deferral("600519.SH", 10, 0)
+    assert pm.t1_deferrals == {}
+
+
+def test_sellable_positions_is_a_read_only_view():
+    pm = _t1_manager()
+    pm.available_positions = {"600519.SH": 5}
+    view = pm.sellable_positions
+
+    assert view["600519.SH"] == 5
+    with pytest.raises(TypeError):
+        view["600519.SH"] = 999
+    # Still a live view, not a snapshot.
+    pm.available_positions["600519.SH"] = 7
+    assert view["600519.SH"] == 7
+
+
+def test_sellable_positions_is_none_without_t_plus_one():
+    pm = bha.PortfolioManager(100000)
+    pm.available_positions = {"AAPL": 0}
+    assert pm.sellable_positions is None

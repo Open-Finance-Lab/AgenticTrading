@@ -26,7 +26,7 @@ import pytz
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 # matplotlib is imported and configured (headless Agg backend) once at module
 # import, not per request: the plot endpoint previously re-imported it and
@@ -248,7 +248,20 @@ class RunMetadata(BaseModel):
     fx_start_rate: Optional[float] = None
     fx_end_rate: Optional[float] = None
     t_plus_one_enabled: Optional[bool] = None
-    rejected_orders: List[Dict[str, Any]] = Field(default_factory=list)
+    # Scalars only. The rejected-order records themselves are unbounded per-step
+    # audit data and this model is the response_model for two *list* routes
+    # (/api/backtest/runs and the public, unpaginated /runs), so shipping them
+    # inline would multiply a multi-megabyte array by the run count on a payload
+    # the dashboard fetches on every load. The records are served per run by
+    # GET /runs/{run_id}/rejected-orders instead, mirroring /runs/{run_id}/trades.
+    # None (not 0) for runs that predate the feature, matching t_plus_one_enabled.
+    rejected_orders_count: Optional[int] = None
+    rejected_orders_truncated: Optional[int] = None
+    # How hard T+1 actually bound: symbol-days on which the agent wanted to exit
+    # more than it could, and the total shares that deferred. Scalars for the
+    # same reason as above — the records live on the detail endpoint.
+    t1_deferred_events: Optional[int] = None
+    t1_deferred_shares: Optional[float] = None
 
 
 class EquityCurve(BaseModel):
@@ -302,7 +315,10 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "fx_start_rate",
             "fx_end_rate",
             "t_plus_one_enabled",
-            "rejected_orders",
+            "rejected_orders_count",
+            "rejected_orders_truncated",
+            "t1_deferred_events",
+            "t1_deferred_shares",
         ):
             if field in metadata:
                 payload[field] = metadata[field]
@@ -1539,6 +1555,46 @@ async def get_run_trades(run_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Run not found or not yours")
     trades = db.get_trades(run_id)
     return {"run_id": run_id, "trades": trades, "count": len(trades)}
+
+
+@router.get("/runs/{run_id}/rejected-orders")
+async def get_run_rejected_orders(run_id: str, request: Request):
+    """Rejected / partially-filled order records for a run owned by this session.
+
+    Served here rather than on RunMetadata because these are per-step audit
+    records — a T+1 A-share run can emit thousands — and RunMetadata is the
+    response_model for two list routes the dashboard fetches on every load.
+
+    ``count`` is the run's true total; ``returned`` is how many this response
+    carries. They differ when the engine capped the persisted sample, in which
+    case ``truncated`` says by how much.
+
+    ``t1_deferrals`` answers the complementary question. A rejected order means
+    the agent *submitted* something unfillable; a deferral means it wanted to
+    exit and sized down because it could not. The built-in agents now do the
+    latter, so for them this list — not ``rejected_orders`` — is where T+1's
+    effect on strategy shows up.
+    """
+    session_id = request.state.session_id
+    run = db.get_run_with_session(run_id, session_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found or not yours")
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    records = metadata.get("rejected_orders") or []
+    deferrals = metadata.get("t1_deferrals") or []
+    return {
+        "run_id": run_id,
+        "rejected_orders": records,
+        "count": metadata.get("rejected_orders_count", len(records)),
+        "returned": len(records),
+        "truncated": metadata.get("rejected_orders_truncated", 0),
+        "t1_deferrals": deferrals,
+        "t1_deferred_events": metadata.get("t1_deferred_events", len(deferrals)),
+        "t1_deferred_shares": metadata.get("t1_deferred_shares", 0),
+        "t1_deferrals_truncated": metadata.get("t1_deferrals_truncated", 0),
+    }
 
 
 @router.get("/runs/{run_id}/plot.png", include_in_schema=False)

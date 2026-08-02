@@ -29,12 +29,32 @@ The optional T+1 path adds an available-position balance, date-stamped frozen
 buy lots, partial fills, and rejected-order audit records. It is enabled only by
 the iFinD A-share market profiles.
 
+The T+1 SELL branch is a rewrite rather than a wrapper, so it also diverges from
+the legacy branch in two ways that are NOT T+1 semantics. Both are deliberate;
+neither can reach a run with ``t_plus_one_enabled=False``:
+
+* it guards ``shares <= 0`` and skips. The legacy branch does not: a sell of
+  ``-5`` evaluates ``min(-5, 100) == -5``, which *adds* 5 shares to the position
+  and *subtracts* the "proceeds" from cash. That is a latent bug, kept only
+  because the legacy path is frozen;
+* a sell of a symbol that is not held emits an ``insufficient_position`` audit
+  record, where the legacy branch skips silently. The audit trail is the point
+  of the T+1 path, so "the agent asked for something impossible" is recorded
+  rather than dropped.
+
 This module is domain-only: it must not import FastAPI, Anthropic, Alpaca
 clients, the database singleton, API routers, or scripts.
 """
 
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
+
+
+# Share quantities are integral for A-shares, but the ledger arithmetic is
+# float, so a fully-filled sell can leave residue on the order of 1e-17
+# (0.3 - 0.1 - 0.2). Without a tolerance that residue is "unfilled" and mints a
+# rejection record for ~0 shares, which reads as a real constraint violation.
+_SHARE_EPSILON = 1e-9
 
 
 def _trading_date(timestamp: Any) -> date:
@@ -200,11 +220,11 @@ def execute_actions(
                 })
 
             unfilled_shares = shares - sell_shares
-            if unfilled_shares <= 0:
+            if unfilled_shares <= _SHARE_EPSILON:
                 continue
             frozen_shares = max(held_shares - sellable_shares, 0)
             t1_unfilled = min(unfilled_shares, frozen_shares)
-            if t1_unfilled > 0:
+            if t1_unfilled > _SHARE_EPSILON:
                 _append_rejection(
                     rejected_orders,
                     timestamp=timestamp,
@@ -215,7 +235,7 @@ def execute_actions(
                     reason="t1_frozen",
                 )
             insufficient_shares = unfilled_shares - t1_unfilled
-            if insufficient_shares > 0:
+            if insufficient_shares > _SHARE_EPSILON:
                 _append_rejection(
                     rejected_orders,
                     timestamp=timestamp,
