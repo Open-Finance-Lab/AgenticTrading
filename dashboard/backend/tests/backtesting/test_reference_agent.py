@@ -27,11 +27,12 @@ def _state(total_equity=100000, signals=None):
     }
 
 
-def _decide(state, positions=None, cash=100000):
+def _decide(state, positions=None, cash=100000, lot_size=1):
     return make_rule_based_decision(
         portfolio_state=state,
         positions=dict(positions or {}),
         cash=cash,
+        lot_size=lot_size,
     )
 
 
@@ -118,6 +119,31 @@ def test_buy_share_quantity_uses_int_truncation():
     out = _decide(state, cash=100000)
     assert out["actions"][0]["shares"] == 13
     assert isinstance(out["actions"][0]["shares"], int)
+
+
+def test_ashare_buy_signal_requests_exactly_one_lot():
+    state = _state(total_equity=100000, signals={
+        "600519.SH": _signal(price=150, rsi=10, sma20=200),
+    })
+
+    out = _decide(state, cash=100000, lot_size=100)
+
+    assert out["actions"][0]["shares"] == 100
+
+
+def test_ashare_buy_signal_reaches_executor_when_cash_is_insufficient():
+    state = _state(total_equity=1000, signals={
+        "600519.SH": _signal(price=150, rsi=10, sma20=200),
+    })
+
+    out = _decide(state, cash=1000, lot_size=100)
+
+    assert out == {"actions": [{
+        "symbol": "600519.SH",
+        "action": "buy",
+        "shares": 100,
+        "reason": "RSI oversold (10), price below MA",
+    }]}
 
 
 # ---------------------------------------------------------------------------

@@ -80,6 +80,7 @@ class PortfolioManager:
         initial_capital: float = INITIAL_CAPITAL,
         allowed_symbols: Optional[List[str]] = None,
         t_plus_one_enabled: bool = False,
+        lot_size: int = 1,
     ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
@@ -87,6 +88,7 @@ class PortfolioManager:
         self.entry_prices = {}  # {symbol: entry_price}
         self.trades = []
         self.t_plus_one_enabled = t_plus_one_enabled
+        self.lot_size = lot_size
         self.available_positions = {}
         self.frozen_lots = {}
         self.rejected_orders = []
@@ -203,6 +205,7 @@ class PortfolioManager:
             positions=self.positions,
             cash=self.cash,
             available_positions=self.sellable_positions,
+            lot_size=self.lot_size,
         )
         # Drain into the run-level ledger and pop, so the returned shape stays
         # exactly {"actions": [...]} for every existing caller.
@@ -728,6 +731,7 @@ class PortfolioManager:
             available_positions=self.available_positions,
             frozen_lots=self.frozen_lots,
             rejected_orders=self.rejected_orders,
+            lot_size=self.lot_size,
         )
     
     def update_equity(self, market_data: Dict, price_cache: Dict = None, timestamp = None):

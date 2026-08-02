@@ -545,6 +545,7 @@ class HourlyBacktester:
             "symbols": list(self.symbols),
             "native_currency": profile.native_currency,
             "reporting_currency": profile.reporting_currency,
+            "lot_size": profile.lot_size,
         }
         if self.data_source == IFIND_ASHARE:
             metadata.update(
@@ -658,6 +659,7 @@ class HourlyBacktester:
             "paper_backtest": True,
             "native_currency": self.profile.native_currency,
             "reporting_currency": self.profile.reporting_currency,
+            "lot_size": self.profile.lot_size,
         }
         if self.profile.t_plus_one_enabled:
             # A bare `sellable_shares` number in each holding is not
@@ -765,6 +767,7 @@ class HourlyBacktester:
             initial_capital=self.native_initial_capital,
             allowed_symbols=self.symbols,
             t_plus_one_enabled=self.profile.t_plus_one_enabled,
+            lot_size=self.profile.lot_size,
         )
         _decision_steps, post_trade_steps = split_pipeline(self.pipeline)
         if post_trade_steps:

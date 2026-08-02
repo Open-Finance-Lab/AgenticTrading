@@ -72,6 +72,13 @@ def test_constructor_defaults():
     assert pm.llm_calls == 0
     assert pm.input_tokens == 0
     assert pm.output_tokens == 0
+    assert pm.lot_size == 1
+
+
+def test_constructor_accepts_market_lot_size():
+    pm = CanonicalPortfolioManager(1000, lot_size=100)
+
+    assert pm.lot_size == 100
 
 
 def test_constructor_custom_capital():

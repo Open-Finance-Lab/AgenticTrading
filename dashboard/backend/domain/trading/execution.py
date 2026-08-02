@@ -131,6 +131,7 @@ def execute_actions(
     available_positions: Optional[Dict] = None,
     frozen_lots: Optional[Dict] = None,
     rejected_orders: Optional[List[Dict]] = None,
+    lot_size: int = 1,
 ) -> float:
     """Apply ``actions`` to the given portfolio state in place.
 

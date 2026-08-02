@@ -184,6 +184,7 @@ def test_ifind_rule_and_llm_paths_share_t1_execution(
 
     manager = created_managers[0]
     assert manager.t_plus_one_enabled is True
+    assert manager.lot_size == 100
     assert [trade["side"] for trade in manager.trades] == ["BUY"]
     assert manager.rejected_orders[0]["reason"] == "t1_frozen"
     assert recording_db.runs[0]["metadata"]["rejected_orders"][0][
@@ -244,8 +245,9 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "t_plus_one_enabled": True,
         "symbols": list(A_SHARE_DEMO_6_SYMBOLS),
         "native_currency": "CNY",
-        "reporting_currency": "USD",
-        "fx_pair": "USD/CNY",
+            "reporting_currency": "USD",
+            "lot_size": 100,
+            "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",
         "fx_symbols": list(A_SHARE_DEMO_6_SYMBOLS),
@@ -308,8 +310,9 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "t_plus_one_enabled": True,
         "symbols": list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
         "native_currency": "CNY",
-        "reporting_currency": "USD",
-        "fx_pair": "USD/CNY",
+            "reporting_currency": "USD",
+            "lot_size": 100,
+            "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",
         "fx_symbols": list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
@@ -402,6 +405,7 @@ def test_ifind_registered_universe_runs_explicit_llm_with_strict_market_context(
             "paper_backtest": True,
             "native_currency": "CNY",
             "reporting_currency": "USD",
+            "lot_size": 100,
             # A_share profiles settle T+1, and the model is told so in words —
             # a bare sellable_shares integer in each holding is not
             # self-describing.
