@@ -14,7 +14,10 @@ drift apart silently, and either direction ships a blank page to prod:
   that makes the next refresh ambiguous about which bundle is live;
 * a forgotten *rebuild* leaves ``index-*.js`` older than ``landing/src`` — the page
   still renders, so nothing looks wrong, but it silently serves the previous CTA
-  wiring and every source edit since is simply absent from prod.
+  wiring and every source edit since is simply absent from prod;
+* an ``authMode`` the inline handler does not recognise is coerced to ``signup``
+  rather than rejected, so a CTA declared in ``cta.ts`` can quietly open the wrong
+  half of the modal — no console error, no failed request, page fully functional.
 
 These checks are deliberately *not* a build-reproducibility check: Vite's content
 hashes move with toolchain versions, so rebuilding and diffing would be flaky in
@@ -47,6 +50,18 @@ _AUTH_HOOK = "data-landing-auth"
 # `label: "Start Free"` in landing/src/lib/cta.ts — the single source of CTA copy.
 _CTA_LABEL = re.compile(r'label:\s*"([^"]+)"')
 
+# The modal mode each CTA asks for, either inline (`authMode: "login"`) or via a
+# shared const (`authMode: LANDING_AUTH_MODE`), which the second pattern resolves.
+_CTA_AUTH_MODE = re.compile(r'authMode:\s*(?:"([^"]+)"|([A-Za-z_$][\w$]*))')
+_CTA_MODE_CONST = re.compile(r'export const ([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)"\s*as const')
+
+# The shipped handler's mode coercion: `x === 'login' ? 'login' : 'signup'`, in both
+# `setAuthMode` and the delegated click handler. Matching the whole ternary — rather
+# than searching for the mode as a substring — is what makes this check mean
+# anything: "login" also appears in the `/api/auth/login` URL, so a substring test
+# would keep passing after the comparison itself was deleted.
+_MODE_COERCION = re.compile(r"===\s*'([a-z]+)'\s*\?\s*'\1'\s*:\s*'([a-z]+)'")
+
 
 def _index_html() -> str:
     return _INDEX_HTML.read_text(encoding="utf-8")
@@ -71,6 +86,33 @@ def _landing_sources() -> list[Path]:
         "_LANDING_SRC, or these staleness checks guard nothing."
     )
     return sorted(p for p in _LANDING_SRC.rglob("*") if p.suffix in {".ts", ".tsx"})
+
+
+def _cta_source() -> str:
+    assert _CTA_TS.is_file(), (
+        f"{_CTA_TS} does not exist. The shared CTA copy moved — re-point _CTA_TS, "
+        "or these checks guard nothing."
+    )
+    return _CTA_TS.read_text(encoding="utf-8")
+
+
+def _declared_auth_modes(src: str) -> set[str]:
+    """Every modal mode ``cta.ts`` asks for, with shared consts resolved to literals."""
+    consts = dict(_CTA_MODE_CONST.findall(src))
+    modes, unresolved = set(), []
+    for literal, identifier in _CTA_AUTH_MODE.findall(src):
+        if literal:
+            modes.add(literal)
+        elif identifier in consts:
+            modes.add(consts[identifier])
+        else:
+            unresolved.append(identifier)
+    assert not unresolved, (
+        f"cannot resolve authMode reference(s) {sorted(unresolved)} in {_CTA_TS.name} — "
+        "they are declared elsewhere or computed, so this guard can no longer see which "
+        "modes ship. Declare the mode as `export const X = \"...\" as const` in this file."
+    )
+    return modes
 
 
 def test_index_html_references_an_entry_bundle():
@@ -186,19 +228,59 @@ def test_shipped_bundle_carries_the_current_cta_label():
     Renaming the shared label in ``lib/cta.ts`` without rebuilding leaves the count
     matched while prod still shows the old wording — a silent regression precisely
     because the page keeps working.
-    """
-    assert _CTA_TS.is_file(), (
-        f"{_CTA_TS} does not exist. The shared CTA copy moved — re-point _CTA_TS, "
-        "or this check guards nothing."
-    )
 
-    labels = _CTA_LABEL.findall(_CTA_TS.read_text(encoding="utf-8"))
+    Keyed on ``label:"…"`` rather than the bare string: short generic copy ("Sign in")
+    is exactly the kind that can turn up somewhere unrelated in a future bundle and
+    satisfy a substring check vacuously. esbuild runs without ``--mangle-props``, so
+    the object key survives minification just as the string literal does.
+    """
+    labels = _CTA_LABEL.findall(_cta_source())
     assert labels, f"no `label: \"...\"` found in {_CTA_TS} — CTA copy moved elsewhere."
 
     bundle = _entry_bundle_text()
-    missing = [label for label in labels if label not in bundle]
+    missing = [
+        label for label in labels
+        if not re.search(r'label:\s*"' + re.escape(label) + r'"', bundle)
+    ]
     assert not missing, (
         f"CTA label(s) {missing} declared in landing/src/lib/cta.ts are absent from the "
         "shipped bundle, so prod still renders the previous copy. Rebuild the landing "
         "bundle (see dashboard/landing/README.md)."
+    )
+
+
+def test_every_cta_auth_mode_is_handled_by_the_shipped_click_handler():
+    """An unrecognised ``authMode`` opens the wrong modal half, silently.
+
+    The two coercion sites in ``index.html`` (``setAuthMode`` and the delegated
+    click handler) both read ``mode === 'login' ? 'login' : 'signup'`` — anything
+    they do not recognise becomes *signup*. So a typo in ``cta.ts`` ("signin",
+    "log-in"), or an edit to the hand-written layer that drops a branch, turns the
+    Sign in control into a second Start Free: no console error, no failed request,
+    the page keeps working. Nothing else in this suite can see it, because the
+    handler lives in the one file ``vite build`` cannot regenerate.
+    """
+    html = _index_html()
+    coercions = _MODE_COERCION.findall(html)
+    assert coercions, (
+        "found no `x === 'mode' ? 'mode' : 'default'` coercion in "
+        "dashboard/frontend/index.html. The inline auth handler was restructured — "
+        "re-point _MODE_COERCION at however it now decides which modal to open, or "
+        "this check silently guards nothing."
+    )
+    handled = {mode for mode, _ in coercions} | {default for _, default in coercions}
+
+    declared = _declared_auth_modes(_cta_source())
+    assert declared, (
+        f"no `authMode:` found in {_CTA_TS} — the landing CTAs no longer declare a "
+        "modal mode, or they moved out of this file."
+    )
+
+    unhandled = sorted(declared - handled)
+    assert not unhandled, (
+        f"landing/src/lib/cta.ts declares authMode(s) {unhandled} that the shipped "
+        f"handler in dashboard/frontend/index.html does not recognise (it handles "
+        f"{sorted(handled)}). Those CTAs will silently open the signup modal instead. "
+        "Fix the spelling in cta.ts, or teach the inline handler the new mode — it is "
+        "hand-written and no rebuild will do it for you (dashboard/landing/README.md)."
     )
