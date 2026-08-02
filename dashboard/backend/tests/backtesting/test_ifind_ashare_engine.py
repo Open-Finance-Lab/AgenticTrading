@@ -132,7 +132,7 @@ def test_ifind_rule_and_llm_paths_share_t1_execution(
         lambda _source, universe=None: provider,
     )
     monkeypatch.setattr(engine_module, "HAS_ANTHROPIC", True)
-    monkeypatch.setattr(engine_module, "make_llm_client", lambda: object())
+    monkeypatch.setattr(engine_module, "make_llm_client", object)
     recording_db = RecordingDB()
     monkeypatch.setattr(engine_module, "db", recording_db)
 
@@ -256,7 +256,8 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "fx_observation_start_date": "2026-03-31",
         "fx_observation_end_date": "2026-04-15",
         "native_initial_capital": 7_000.0,
-        "rejected_orders": [],
+        # No rejected_orders* keys at all: a clean run writes nothing rather
+        # than an empty array on every A-share row.
     }
     first_equity = recording_db.equity_points[0][1][0]
     assert first_equity["equity"] == pytest.approx(1_000)
@@ -665,3 +666,62 @@ def test_transport_failure_still_points_at_credentials(monkeypatch):
 
     with pytest.raises(MarketDataUnavailableError, match="permission"):
         backtester.load_data()
+
+
+# ---------------------------------------------------------------------------
+# Rejected-order persistence is bounded, and says so
+# ---------------------------------------------------------------------------
+
+def _metadata_stub(rejected, monkeypatch, data_source=IFIND_ASHARE):
+    """Run _agent_run_metadata over just the rejected-order branch."""
+    backtester = object.__new__(HourlyBacktester)
+    backtester.data_source = data_source
+    backtester.rejected_orders = rejected
+    backtester.use_llm = False
+    backtester.prompt_adaptations = None
+    backtester.initial_pipeline = None
+    backtester.pipeline = None
+    monkeypatch.setattr(HourlyBacktester, "_run_metadata", lambda self: {})
+    return backtester._agent_run_metadata()
+
+
+def test_agent_metadata_omits_rejected_orders_entirely_when_there_are_none(monkeypatch):
+    """A clean run must not write an empty array onto every A-share row."""
+    meta = _metadata_stub([], monkeypatch)
+    assert "rejected_orders" not in meta
+    assert "rejected_orders_count" not in meta
+    assert "rejected_orders_truncated" not in meta
+
+
+def test_agent_metadata_keeps_a_small_rejection_list_whole(monkeypatch):
+    records = [{"reason": "t1_frozen", "seq": i} for i in range(3)]
+    meta = _metadata_stub(records, monkeypatch)
+    assert meta["rejected_orders"] == records
+    assert meta["rejected_orders_count"] == 3
+    assert "rejected_orders_truncated" not in meta
+
+
+def test_agent_metadata_caps_the_sample_and_reports_the_true_total(monkeypatch):
+    """The cap must never be silent.
+
+    A 20-symbol A-share run can emit thousands of records at ~198 bytes each,
+    which would otherwise land whole in one agent_runs.metadata JSON cell.
+    """
+    limit = engine_module.REJECTED_ORDER_SAMPLE_LIMIT
+    records = [{"reason": "t1_frozen", "seq": i} for i in range(limit + 500)]
+    meta = _metadata_stub(records, monkeypatch)
+
+    assert len(meta["rejected_orders"]) == limit
+    assert meta["rejected_orders_count"] == limit + 500
+    assert meta["rejected_orders_truncated"] == 500
+    # Head sample: the first rejections are the diagnostic ones, and the count
+    # above is what tells a reader the list is partial.
+    assert meta["rejected_orders"][0]["seq"] == 0
+
+
+def test_agent_metadata_skips_rejected_orders_for_non_ashare_sources(monkeypatch):
+    meta = _metadata_stub(
+        [{"reason": "t1_frozen"}], monkeypatch, data_source="alpaca"
+    )
+    assert "rejected_orders" not in meta
+    assert "rejected_orders_count" not in meta

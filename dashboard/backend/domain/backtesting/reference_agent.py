@@ -23,11 +23,19 @@ Behavior is byte-for-byte identical to the original method. In particular:
 No thresholds, formulas, strings, or default quantities are changed. The LLM
 decision workflow is intentionally NOT extracted here.
 
+The one addition is the optional ``available_positions`` argument (T+1 markets).
+Left ``None`` — every non-A-share run — the held quantity *is* the sellable
+quantity and the emitted actions are unchanged. Supplied, the SELL size is
+capped at what would actually fill, and a fully-frozen holding emits no action
+at all. Without that cap the agent re-proposes an unfillable full-holding sell
+on every bar of the buy date, and each one becomes a ``t1_frozen`` audit record
+for a constraint the agent was never shown.
+
 This module is domain-only: it must not import Anthropic, Alpaca, the database,
 FastAPI, API routers, or scripts.
 """
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pandas as pd
 
@@ -37,14 +45,16 @@ def make_rule_based_decision(
     portfolio_state: Dict,
     positions: Dict,
     cash: float,
+    available_positions: Optional[Dict] = None,
 ) -> Dict:
     """Produce rule-based trading actions for the given portfolio state.
 
     ``portfolio_state`` must provide ``total_equity`` and ``market_signals`` (a
     mapping of symbol -> indicator dict). ``positions`` and ``cash`` reflect the
-    current holdings and available cash. Inputs are read only, never mutated.
-    Returns ``{"actions": [...]}`` with the same action dictionaries the original
-    method produced.
+    current holdings and available cash. ``available_positions`` is the T+1
+    sellable balance, or ``None`` when settlement is immediate. Inputs are read
+    only, never mutated. Returns ``{"actions": [...]}`` with the same action
+    dictionaries the original method produced.
     """
     actions: List[Dict] = []
 
@@ -78,11 +88,19 @@ def make_rule_based_decision(
 
         # SELL logic: RSI > 70 (overbought) or price above SMA50
         elif has_position and (rsi > 70 or (sma50 and price > sma50 * 1.02)):
-            actions.append({
-                "symbol": symbol,
-                "action": "sell",
-                "shares": positions[symbol],
-                "reason": f"RSI overbought ({rsi:.0f})" if rsi > 70 else "Price above MA50"
-            })
+            # Under T+1 the held quantity is not necessarily the sellable one.
+            # Proposing more than that would only mint rejection records.
+            sellable = (
+                positions[symbol]
+                if available_positions is None
+                else min(available_positions.get(symbol, 0), positions[symbol])
+            )
+            if sellable > 0:
+                actions.append({
+                    "symbol": symbol,
+                    "action": "sell",
+                    "shares": sellable,
+                    "reason": f"RSI overbought ({rsi:.0f})" if rsi > 70 else "Price above MA50"
+                })
 
     return {"actions": actions}

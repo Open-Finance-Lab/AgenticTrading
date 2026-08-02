@@ -225,3 +225,51 @@ def test_get_equity_curve_is_alias_not_copy():
 
 def test_module_importable():
     assert portfolio is not None
+
+
+# ---------------------------------------------------------------------------
+# T+1 sellable exposure (available_positions)
+# ---------------------------------------------------------------------------
+
+def test_portfolio_state_omits_sellable_shares_when_settlement_is_immediate():
+    """Non-A-share snapshots keep the pre-T+1 schema exactly.
+
+    The position dicts feed the LLM prompt, so an extra key here would change
+    every DJIA prompt and make historical runs non-comparable.
+    """
+    state = build_portfolio_state(
+        100000, {"AAPL": 10}, {"AAPL": 200.0}, {"AAPL": _row(200.0)}
+    )
+    assert "sellable_shares" not in state["positions"][0]
+
+
+def test_portfolio_state_exposes_sellable_shares_under_t_plus_one():
+    state = build_portfolio_state(
+        100000,
+        {"AAPL": 10, "MSFT": 5},
+        {"AAPL": 200.0, "MSFT": 400.0},
+        {"AAPL": _row(200.0), "MSFT": _row(400.0)},
+        available_positions={"AAPL": 4},
+    )
+    by_symbol = {p["symbol"]: p for p in state["positions"]}
+    assert by_symbol["AAPL"]["shares"] == 10
+    assert by_symbol["AAPL"]["sellable_shares"] == 4
+    # Absent from the balance means fully frozen, not "unconstrained".
+    assert by_symbol["MSFT"]["sellable_shares"] == 0
+
+
+def test_sellable_shares_never_exceeds_the_held_quantity():
+    state = build_portfolio_state(
+        100000, {"AAPL": 3}, {"AAPL": 200.0}, {"AAPL": _row(200.0)},
+        available_positions={"AAPL": 99},
+    )
+    assert state["positions"][0]["sellable_shares"] == 3
+
+
+def test_sellable_shares_does_not_disturb_valuation():
+    """Valuation is on the total holding; freezing changes what can be sold."""
+    args = (100000, {"AAPL": 10}, {"AAPL": 200.0}, {"AAPL": _row(200.0)})
+    plain = build_portfolio_state(*args)
+    frozen = build_portfolio_state(*args, available_positions={})
+    assert plain["positions_value"] == frozen["positions_value"] == 2000.0
+    assert plain["total_equity"] == frozen["total_equity"]

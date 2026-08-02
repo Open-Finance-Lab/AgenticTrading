@@ -529,10 +529,9 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
         "fx_observation_end_date": "2026-03-31",
         "native_initial_capital": 7_000.0,
     }
-    assert agent_run["metadata"] == {
-        **expected_metadata,
-        "rejected_orders": [],
-    }
+    # A run with nothing rejected writes no rejected_orders* keys at all, so the
+    # agent row matches the baseline row exactly.
+    assert agent_run["metadata"] == expected_metadata
     assert buyhold_run["metadata"] == expected_metadata
     assert agent_run["llm_calls"] == 0
     assert agent_run["baseline_djia_run_id"] is None

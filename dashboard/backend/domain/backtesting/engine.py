@@ -86,6 +86,17 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
 HOSTED_RUNTIME_MAX_FAILURE_RATIO = 0.2
 HOSTED_RUNTIME_MIN_FAILURE_BUDGET = 2
 
+# Rejected-order audit records are per-step, unbounded, and land in the
+# agent_runs.metadata JSON cell -- which for a run-history Postgres deployment
+# is a row in the free-tier ATL-runs-main project. A 20-symbol A-share run can
+# emit thousands. Persist a bounded head sample plus the true total, the same
+# shape runtime_step_failures already uses below, so the cap is never silent.
+REJECTED_ORDER_SAMPLE_LIMIT = 200
+# The live-progress file is rewritten in full on every step, so embedding the
+# whole growing list makes write volume quadratic in the run length. The live
+# view only ever shows the latest activity, so carry a tail window.
+LIVE_PROGRESS_REJECTED_ORDER_LIMIT = 50
+
 
 def _prior_market_date_by_decision_date(
     timestamps,
@@ -287,6 +298,14 @@ class HourlyBacktester:
 
     @staticmethod
     def _serialize_rejected_orders(rejected_orders: List[Dict]) -> List[Dict]:
+        """JSON-safe rejected-order records.
+
+        Static where the sibling ``_serialize_trades`` is an instance method,
+        and deliberately so: trades carry prices and values that must be
+        converted through ``self._require_currency_context()``, while a rejected
+        order records only share counts, which are currency-free. Taking ``self``
+        here just to look symmetric would imply a conversion that does not exist.
+        """
         serialized = []
         for item in rejected_orders:
             record = dict(item)
@@ -341,8 +360,9 @@ class HourlyBacktester:
             "equity_curve": serialized,
             "trades": self._serialize_trades(manager.trades),
             "rejected_orders": self._serialize_rejected_orders(
-                manager.rejected_orders
+                manager.rejected_orders[-LIVE_PROGRESS_REJECTED_ORDER_LIMIT:]
             ),
+            "rejected_orders_count": len(manager.rejected_orders),
         }
         try:
             Path(self.progress_file).write_text(json.dumps(payload), encoding="utf-8")
@@ -506,6 +526,12 @@ class HourlyBacktester:
                     # with the decision source they actually resolved.
                     "decision_source": RULE_BASED_DECISION_SOURCE,
                     "benchmark": profile.benchmark,
+                    # Market provenance, not execution provenance: this records
+                    # that the run's market settles T+1, which is true of the
+                    # buy-and-hold baseline rows too even though they never
+                    # build a T+1 PortfolioManager (they never sell, so the
+                    # rule cannot bind). Read it as "which market", not "which
+                    # executor ran".
                     "t_plus_one_enabled": profile.t_plus_one_enabled,
                 }
             )
@@ -552,9 +578,15 @@ class HourlyBacktester:
         if self.pipeline is not None:
             meta["final_pipeline"] = self.pipeline
         if self.data_source == IFIND_ASHARE:
-            meta["rejected_orders"] = list(
-                getattr(self, "rejected_orders", []) or []
-            )
+            rejected = list(getattr(self, "rejected_orders", []) or [])
+            if rejected:
+                # Count first, sample second: a consumer must be able to tell
+                # "3 rejections" from "the first 200 of 7,000".
+                meta["rejected_orders_count"] = len(rejected)
+                meta["rejected_orders"] = rejected[:REJECTED_ORDER_SAMPLE_LIMIT]
+                truncated = len(rejected) - REJECTED_ORDER_SAMPLE_LIMIT
+                if truncated > 0:
+                    meta["rejected_orders_truncated"] = truncated
         runtime_type = getattr(self, "runtime_type", PIPELINE_RUNTIME_TYPE)
         if runtime_type != PIPELINE_RUNTIME_TYPE:
             meta["runtime_type"] = runtime_type

@@ -107,6 +107,23 @@ class PortfolioManager:
         symbols = allowed_symbols if allowed_symbols is not None else DJIA_30
         self.allowed_symbols = [str(s).strip().upper() for s in symbols if s]
         self._allowed_set = set(self.allowed_symbols)
+    @property
+    def sellable_positions(self) -> Optional[Dict]:
+        """The T+1 sellable balance, or ``None`` when settlement is immediate.
+
+        ``None`` rather than ``self.positions`` on purpose: it is the sentinel
+        every downstream helper uses to keep the pre-T+1 schema and behavior
+        byte-identical for non-A-share runs.
+        """
+        return self.available_positions if self.t_plus_one_enabled else None
+
+    def sellable_shares(self, symbol: str) -> float:
+        """Shares of ``symbol`` an order submitted right now could actually fill."""
+        held = self.positions.get(symbol, 0)
+        if not self.t_plus_one_enabled:
+            return held
+        return min(self.available_positions.get(symbol, 0), held)
+
     def get_portfolio_state(self, market_data: Dict[str, pd.Series], price_cache: Dict = None, timestamp = None) -> Dict:
         """Get current portfolio state with market indicators.
 
@@ -119,6 +136,7 @@ class PortfolioManager:
             market_data,
             price_cache,
             timestamp,
+            self.sellable_positions,
         )
 
     def make_trading_decision(self, portfolio_state: Dict) -> Dict:
@@ -137,6 +155,7 @@ class PortfolioManager:
             portfolio_state=portfolio_state,
             positions=self.positions,
             cash=self.cash,
+            available_positions=self.sellable_positions,
         )
     
     def make_trading_decision_with_llm(
@@ -544,15 +563,20 @@ class PortfolioManager:
                         print(f"      ⚠️  BUY {symbol}: Skip (insufficient cash: need ${shares*price:,.0f}, have ${self.cash:,.0f})")
                 
                 elif action_type == "sell":
-                    if symbol in self.positions and self.positions[symbol] > 0:
+                    # Size at the sellable quantity, not the held one: under T+1
+                    # they differ, and the difference is unfillable.
+                    sellable = self.sellable_shares(symbol)
+                    if sellable > 0:
                         actions.append({
                             "symbol": symbol,
                             "action": "sell",
-                            "shares": self.positions[symbol],
+                            "shares": sellable,
                             "reason": f"[LLM] {reasoning} (confidence: {confidence:.0%})",
                             "confidence": confidence
                         })
-                        print(f"      ✅ SELL {symbol}: {self.positions[symbol]} shares @ ${price:.2f} (conf: {confidence:.0%})")
+                        print(f"      ✅ SELL {symbol}: {sellable} shares @ ${price:.2f} (conf: {confidence:.0%})")
+                    elif symbol in self.positions and self.positions[symbol] > 0:
+                        print(f"      ⚠️  SELL {symbol}: Skip (T+1 frozen, {self.positions[symbol]} shares settle next trading day)")
                     else:
                         print(f"      ⚠️  SELL {symbol}: Skip (not in portfolio, only owns: {list(self.positions.keys())})")
                 

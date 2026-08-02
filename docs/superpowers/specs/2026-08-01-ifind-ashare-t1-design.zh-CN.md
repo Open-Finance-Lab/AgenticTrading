@@ -20,6 +20,11 @@ Rule-based 和 LLM 两种决策来源都使用同一套执行语义。Alpaca 美
 3. 卖出请求超过可卖数量时允许部分成交，并明确记录未成交原因。
 4. 冻结数量不进入成交数、收益、现金变化或权益曲线。
 5. 保持现有成交接口、数据库交易记录和非 A 股数据源的兼容性。
+6. **决策方可以观察到该约束**：`portfolio_state` 的每个持仓在 T+1 市场下带
+   `sellable_shares`，内置 Rule-based 和 LLM 两条路径按可卖数量下单。否则
+   Agent 只能被动挨罚——它每根 K 线都会重复提交同一笔不可能成交的全仓卖出，
+   每一笔都变成一条 `t1_frozen` 审计记录，而它从未被告知这条规则。
+   审计日志应记录真实违规（外部 Agent、模型幻觉），而不是自己制造的噪声。
 
 ### 非目标
 
@@ -41,7 +46,13 @@ Rule-based 和 LLM 两种决策来源都使用同一套执行语义。Alpaca 美
 - 保留 `positions[symbol]`，现有组合估值、前端和 API 不需要改成批次持仓模型；
 - 用买入日期记录冻结批次，可以正确处理多个交易日分批买入和部分卖出；
 - T+1 只由 iFinD A 股市场配置打开，其他市场默认关闭；
-- 执行规则集中在领域执行器，Rule-based、LLM 和外部 Agent 回测共用。
+- 执行规则集中在领域执行器，Rule-based 和 LLM 两条回测路径共用。
+- 外部 Agent 回测（`external_run_service`）暂不在范围内：`/api/v1` 和 `/api/v2`
+  都不接受 `data_source`，该服务通过 `AlpacaDataLoader` 取数，结构上只支持
+  Alpaca。它仍然从 profile 注册表解析 `t_plus_one_enabled`（而不是依赖构造函数
+  默认值），因此将来接入 iFinD 时会自动带上对应的结算规则。
+  `test_portfolio_manager_construction_always_declares_settlement` 强制所有
+  构造点显式声明结算方式。
 
 ## 4. 状态模型
 
@@ -117,7 +128,8 @@ rejected_orders: List[Dict[str, Any]]
 
 ### 6.2 未成交审计
 
-新增 `rejected_orders` 结果字段，并在运行元数据中持久化完整列表。记录至少包含：
+新增 `rejected_orders` 结果字段，在运行元数据中持久化**有上限的样本**加真实总数。
+记录至少包含：
 
 ```json
 {
@@ -134,12 +146,27 @@ rejected_orders: List[Dict[str, Any]]
 
 完全不能卖时，`status` 为 `rejected`，`executed_shares` 为 0，但该对象不是 `trades` 中的 0 股成交。
 
-`rejected_orders` 作为可选字段加入回测结果和 live progress：
+**容量约束。** 这是逐步（per-step）审计数据，20 只股票的 A 股回测可产生数千条，
+每条约 198 字节。因此：
 
-- 旧客户端忽略该字段即可继续工作；
+- 元数据只持久化前 `REJECTED_ORDER_SAMPLE_LIMIT`（200）条，并同时写入
+  `rejected_orders_count`（真实总数）与 `rejected_orders_truncated`（被截断条数）。
+  截断必须可见——只截不报等于谎报"一共就这些"；
+- live progress 文件每步整体重写，因此只携带最近
+  `LIVE_PROGRESS_REJECTED_ORDER_LIMIT`（50）条，避免写入量随步数呈平方增长；
+- 完全没有拒单时不写入任何 `rejected_orders*` 键，而不是写空数组。
+
+**接口划分。** 记录本身通过独立接口返回，不进入列表接口：
+
+- 新增 `GET /runs/{run_id}/rejected-orders`，与现有 `/runs/{run_id}/trades` 对称，
+  返回 `rejected_orders` / `count`（总数）/ `returned`（本次返回数）/ `truncated`；
+- `RunMetadata` **只**携带 `rejected_orders_count` 和 `rejected_orders_truncated`
+  两个标量。该模型是 `/api/backtest/runs` 和公开且不分页的 `/runs` 两个**列表**
+  接口的 response_model，内联数组会把兆字节级负载乘以运行数量；
+- 旧客户端忽略新字段即可继续工作；
 - 现有 `/runs/{run_id}/trades` 仍然只返回成交；
-- 回测结果读取接口同时返回 `rejected_orders`，便于诊断 T+1 行为；
-- 现有 Alpaca/vn.py 结果返回空列表。
+- 旧运行（功能上线前）两个标量都是 `null` 而不是 `0`——"没有拒单"和"没有记录过"
+  必须可区分，与 `t_plus_one_enabled` 的约定一致。
 
 所有面向用户的新增文案使用英文；不增加凭证输入或打印任何凭证。
 
@@ -162,8 +189,9 @@ rejected_orders: List[Dict[str, Any]]
 使用确定性模拟 OHLCV 数据验证：
 
 - 两个 iFinD A 股股票池都打开 T+1；
-- Rule-based 和 LLM/外部 Agent 两条路径都传递同一 T+1 配置；
-- 回测结果包含 `rejected_orders`；
+- Rule-based 和 LLM 两条路径都传递同一 T+1 配置；
+- 所有 `PortfolioManager` 构造点都从 profile 解析结算规则（AST 守卫测试）；
+- `/runs/{run_id}/rejected-orders` 返回审计记录，并在样本被截断时如实报告；
 - 成交数、收益、权益曲线排除冻结部分。
 
 ### 7.3 回归测试
@@ -172,7 +200,9 @@ rejected_orders: List[Dict[str, Any]]
 
 - 非 A 股数据源的成交结果不变；
 - 旧 `trades` API 字段和语义不变；
-- 旧回测结果没有 `rejected_orders` 时按空列表兼容。
+- 旧回测结果的 `rejected_orders_count` / `rejected_orders_truncated` 为 `null`；
+- 非 T+1 市场的 `portfolio_state` 不含 `sellable_shares` 键（该快照进入 LLM
+  提示词，多一个键会改变每一次 DJIA 提示，使历史运行不可比）。
 
 ## 8. 验收标准
 

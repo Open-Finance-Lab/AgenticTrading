@@ -38,12 +38,24 @@ def resolve_price(symbol, market_data: Dict, price_cache: Optional[Dict] = None,
     return None
 
 
-def build_position_list(positions, entry_prices, market_data, price_cache=None, timestamp=None):
+def build_position_list(
+    positions,
+    entry_prices,
+    market_data,
+    price_cache=None,
+    timestamp=None,
+    available_positions=None,
+):
     """Build the per-position detail list and the aggregate positions value.
 
     Returns ``(position_list, positions_value)``. Symbols without an available
     price are skipped. ``positions_value`` starts at int ``0`` and accumulates
     ``shares * current_price``.
+
+    ``available_positions`` is the T+1 sellable balance. Pass ``None`` (the
+    default) when settlement is immediate and ``shares`` is itself sellable —
+    the position dicts are then byte-identical to the pre-T+1 schema, so
+    non-A-share LLM prompts are unchanged.
     """
     positions_value = 0
     position_list = []
@@ -58,14 +70,19 @@ def build_position_list(positions, entry_prices, market_data, price_cache=None, 
         entry_price = entry_prices.get(symbol, current_price)
         pnl_pct = ((current_price / entry_price) - 1) * 100 if entry_price > 0 else 0
 
-        position_list.append({
+        position = {
             "symbol": symbol,
             "shares": shares,
             "entry_price": entry_price,
             "current_price": current_price,
             "position_value": position_value,
             "pnl_pct": pnl_pct,
-        })
+        }
+        if available_positions is not None:
+            position["sellable_shares"] = min(
+                available_positions.get(symbol, 0), shares
+            )
+        position_list.append(position)
 
     return position_list, positions_value
 
@@ -87,10 +104,28 @@ def build_market_signals(market_data):
     return market_signals
 
 
-def build_portfolio_state(cash, positions, entry_prices, market_data, price_cache=None, timestamp=None) -> Dict:
-    """Assemble the full portfolio-state snapshot dictionary."""
+def build_portfolio_state(
+    cash,
+    positions,
+    entry_prices,
+    market_data,
+    price_cache=None,
+    timestamp=None,
+    available_positions=None,
+) -> Dict:
+    """Assemble the full portfolio-state snapshot dictionary.
+
+    ``available_positions`` (T+1 only) adds a ``sellable_shares`` key to each
+    position so a decision-maker can see what an order submitted now could
+    actually fill. Left ``None`` the snapshot schema is unchanged.
+    """
     position_list, positions_value = build_position_list(
-        positions, entry_prices, market_data, price_cache, timestamp
+        positions,
+        entry_prices,
+        market_data,
+        price_cache,
+        timestamp,
+        available_positions,
     )
     market_signals = build_market_signals(market_data)
 

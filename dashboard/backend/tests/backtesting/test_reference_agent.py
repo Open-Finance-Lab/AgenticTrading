@@ -268,3 +268,93 @@ def test_subclass_inherits_make_trading_decision():
     assert out["actions"][0]["action"] == "buy"
     assert pm.custom_method() == "ok"
     assert MyPM.make_trading_decision is bha.PortfolioManager.make_trading_decision
+
+
+# ---------------------------------------------------------------------------
+# T+1 sellable cap (available_positions)
+# ---------------------------------------------------------------------------
+
+def _sell_state():
+    """A state whose only signal triggers the SELL rule for MSFT."""
+    return _state(signals={"MSFT": _signal(price=110, rsi=80, sma20=100, sma50=100)})
+
+
+def test_sell_uses_held_quantity_when_settlement_is_immediate():
+    """The default (available_positions=None) must stay byte-identical."""
+    out = _decide(_sell_state(), positions={"MSFT": 10})
+    assert out["actions"] == [
+        {"symbol": "MSFT", "action": "sell", "shares": 10,
+         "reason": "RSI overbought (80)"},
+    ]
+
+
+def test_sell_is_capped_at_the_sellable_quantity():
+    out = make_rule_based_decision(
+        portfolio_state=_sell_state(),
+        positions={"MSFT": 10},
+        cash=100000,
+        available_positions={"MSFT": 4},
+    )
+    assert out["actions"] == [
+        {"symbol": "MSFT", "action": "sell", "shares": 4,
+         "reason": "RSI overbought (80)"},
+    ]
+
+
+def test_fully_frozen_holding_emits_no_action():
+    """The whole point: an unfillable order is not proposed at all.
+
+    Without this the agent re-proposes the full holding on every bar of the buy
+    date, and each one becomes a t1_frozen audit record for a rule it was never
+    shown.
+    """
+    for available in ({"MSFT": 0}, {}):
+        out = make_rule_based_decision(
+            portfolio_state=_sell_state(),
+            positions={"MSFT": 10},
+            cash=100000,
+            available_positions=available,
+        )
+        assert out["actions"] == []
+
+
+def test_empty_available_positions_does_not_disable_selling_outright():
+    """``{}`` means 'nothing settled yet'; ``None`` means 'no T+1 here'.
+
+    Conflating them would silently stop every DJIA run from ever selling.
+    """
+    frozen = make_rule_based_decision(
+        portfolio_state=_sell_state(), positions={"MSFT": 10},
+        cash=100000, available_positions={},
+    )
+    immediate = make_rule_based_decision(
+        portfolio_state=_sell_state(), positions={"MSFT": 10},
+        cash=100000, available_positions=None,
+    )
+    assert frozen["actions"] == []
+    assert immediate["actions"][0]["shares"] == 10
+
+
+def test_sellable_cap_does_not_leak_into_buy_branch():
+    """SELL is an ``elif``; a frozen holding must not fall through to BUY."""
+    state = _state(signals={"MSFT": _signal(price=110, rsi=80, sma20=100, sma50=100)})
+    out = make_rule_based_decision(
+        portfolio_state=state,
+        positions={"MSFT": 10},
+        cash=100000,
+        available_positions={"MSFT": 0},
+    )
+    assert out == {"actions": []}
+
+
+def test_inputs_are_not_mutated_by_the_sellable_cap():
+    positions = {"MSFT": 10}
+    available = {"MSFT": 4}
+    positions_before = copy.deepcopy(positions)
+    available_before = copy.deepcopy(available)
+    make_rule_based_decision(
+        portfolio_state=_sell_state(), positions=positions,
+        cash=100000, available_positions=available,
+    )
+    assert positions == positions_before
+    assert available == available_before

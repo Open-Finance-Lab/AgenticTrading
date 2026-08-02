@@ -9,6 +9,7 @@ canonical package path; no external services are touched.
 from datetime import datetime
 
 import pandas as pd
+import pytest
 
 from dashboard.backend.domain.trading.execution import execute_actions
 from dashboard.scripts import backtest_hourly_agent as bha
@@ -418,6 +419,50 @@ def test_t1_request_above_total_splits_frozen_and_insufficient_reasons():
         "insufficient_position",
     ]
     assert [item["unfilled_shares"] for item in pm.rejected_orders] == [60, 50]
+
+
+def test_t1_float_residue_does_not_mint_a_phantom_rejection():
+    """A fully-filled fractional sell must not audit ~1e-17 unfilled shares.
+
+    0.3 - 0.1 - 0.2 is -2.8e-17 in binary floating point, so an exact fill
+    leaves negative-zero-ish residue that a bare ``> 0`` test reads as a real
+    unfilled quantity — an ``insufficient_position`` record for a constraint
+    that was never violated.
+    """
+    pm = _t1_manager()
+    pm.positions = {"600519.SH": 0.3}
+    pm.entry_prices = {"600519.SH": 90.0}
+    pm.available_positions = {"600519.SH": 0.3}
+
+    for size in (0.1, 0.2):
+        pm.execute_actions(
+            [{"symbol": "600519.SH", "action": "sell", "shares": size}],
+            {"600519.SH": _row(100.0)},
+            datetime(2026, 4, 2, 10),
+        )
+
+    # Both sells fill (the second for the residual balance, itself inexact)…
+    assert len(pm.trades) == 2
+    assert sum(trade["shares"] for trade in pm.trades) == pytest.approx(0.3)
+    # …and neither leaves an audit record behind.
+    assert pm.rejected_orders == []
+
+
+def test_t1_genuine_shortfall_still_audits_above_the_epsilon():
+    """The tolerance must not swallow a real one-share shortfall."""
+    pm = _t1_manager()
+    pm.positions = {"600519.SH": 5}
+    pm.entry_prices = {"600519.SH": 90.0}
+    pm.available_positions = {"600519.SH": 5}
+
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "sell", "shares": 6}],
+        {"600519.SH": _row(100.0)},
+        datetime(2026, 4, 2, 10),
+    )
+
+    assert [item["reason"] for item in pm.rejected_orders] == ["insufficient_position"]
+    assert pm.rejected_orders[0]["unfilled_shares"] == 1
 
 
 # ---------------------------------------------------------------------------
