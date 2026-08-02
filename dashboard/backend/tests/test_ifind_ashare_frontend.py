@@ -327,10 +327,7 @@ def test_backtest_launch_failure_remains_visible_instead_of_loading_history(js):
 
 
 def test_completed_zero_trade_run_has_actionable_empty_state(js):
-    assert (
-        "No trades were executed. The selected strategy produced no executable orders."
-        in js
-    )
+    assert "No orders were submitted by the selected strategy." in js
 
 
 def test_frontend_never_collects_or_stores_ifind_credentials(html, js):

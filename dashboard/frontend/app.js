@@ -3562,7 +3562,7 @@ function highlightAgentCard(agentId) {
 let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
 let tradingLogFilter = 'all';
-let tradingLogEmptyMessage = 'No trades yet.';
+let tradingLogEmptyMessage = 'No orders yet.';
 let currentMode = "home";
 let currentPage = "home";
 let playgroundTab = "agents";
@@ -3708,7 +3708,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             tradingLogFilter = tradingLogFilterSelect.value || 'all';
             renderTradingLog(tradingLogCache, {
                 emptyMessage: tradingLogCache.length
-                    ? 'No trades match this filter.'
+                    ? 'No orders match this filter.'
                     : tradingLogEmptyMessage,
             });
         });
@@ -5150,7 +5150,7 @@ function prepareLiveBacktestView(launchConfig = null) {
     const runSelect = document.getElementById('backtestRunSelect');
     if (runSelect) runSelect.value = '';
     displayNoMetrics();
-    clearTradingLog('Backtest running… trades will appear here.');
+    clearTradingLog('Backtest running… orders will appear here.');
     initLiveBacktestChart();
     renderBacktestRunConfig(null, { running: true, launchConfig });
     showBacktestRunProgress(true);
@@ -5208,7 +5208,7 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
             stepPct,
         });
     } else if (!alreadyLive) {
-        clearTradingLog('Backtest running… trades will appear here.');
+        clearTradingLog('Backtest running… orders will appear here.');
     }
     ensureBacktestPolling();
 }
@@ -5401,23 +5401,70 @@ function updateLiveBacktestChart(progress) {
     chartInstance.update('none');
 }
 
-function normalizeTradeRecord(trade) {
-    const side = String(trade?.side || trade?.action || '').toUpperCase();
-    const quantity = Number(trade?.quantity ?? trade?.shares ?? 0);
-    const price = Number(trade?.price || 0);
-    const value = Number(
-        trade?.value ?? trade?.total_value ?? trade?.cost ?? trade?.proceeds ?? quantity * price
+function resolveTradingLogRecords(payload) {
+    if (Array.isArray(payload?.order_events)) return payload.order_events;
+    return Array.isArray(payload?.trades) ? payload.trades : [];
+}
+
+function resolveTradingAssetName(symbol) {
+    for (const profile of Object.values(IFIND_ASHARE_UNIVERSES)) {
+        const asset = profile.assets.find((item) => item.symbol === symbol);
+        if (asset) return asset.name;
+    }
+    return POPULAR_STOCKS[symbol] || '';
+}
+
+function formatOrderExecutionReason(reason, strategyReason = '') {
+    const labels = {
+        invalid_lot_size: 'Invalid lot size',
+        insufficient_cash_for_lot: 'Insufficient cash for one lot',
+        t1_frozen: 'T+1 frozen',
+        insufficient_position: 'Insufficient position',
+    };
+    const code = String(reason || '').trim();
+    if (labels[code]) return labels[code];
+    if (code) return 'Order not executed';
+    return String(strategyReason || '').trim() || '--';
+}
+
+function normalizeOrderRecord(record) {
+    const side = String(record?.side || record?.action || '').toUpperCase();
+    const legacyQuantity = Number(record?.quantity ?? record?.shares ?? 0);
+    const requestedValue = Number(record?.requested_shares ?? legacyQuantity);
+    const executedValue = Number(record?.executed_shares ?? legacyQuantity);
+    const requestedShares = Number.isFinite(requestedValue) ? requestedValue : 0;
+    const executedShares = Number.isFinite(executedValue) ? executedValue : 0;
+    const rawPrice = Number(record?.price ?? 0);
+    const price = Number.isFinite(rawPrice) ? rawPrice : 0;
+    const rawValue = Number(
+        record?.executed_value
+        ?? record?.value
+        ?? record?.total_value
+        ?? record?.cost
+        ?? record?.proceeds
+        ?? executedShares * price
     );
+    const value = Number.isFinite(rawValue) ? rawValue : 0;
+    const rawStatus = String(record?.status || '').toLowerCase();
+    const status = ['filled', 'partial', 'rejected'].includes(rawStatus)
+        ? rawStatus
+        : rawStatus
+            ? 'rejected'
+            : 'filled';
     return {
-        timestamp: trade?.timestamp,
+        timestamp: record?.timestamp,
         side,
-        symbol: trade?.symbol || '--',
-        quantity,
+        symbol: record?.symbol || '--',
+        requestedShares,
+        executedShares,
         price,
         value,
-        nativePrice: trade?.native_price == null ? null : Number(trade.native_price),
-        nativeValue: trade?.native_value == null ? null : Number(trade.native_value),
-        fxRate: trade?.fx_rate == null ? null : Number(trade.fx_rate),
+        status,
+        reason: record?.reason || '',
+        strategyReason: record?.strategy_reason || '',
+        nativePrice: record?.native_price == null ? null : Number(record.native_price),
+        nativeValue: record?.native_value == null ? null : Number(record.native_value),
+        fxRate: record?.fx_rate == null ? null : Number(record.fx_rate),
     };
 }
 
@@ -5438,11 +5485,13 @@ function formatTradeTimestamp(ts) {
     }
 }
 
-function renderTradingLog(trades, { emptyMessage = 'No trades yet.' } = {}) {
+function renderTradingLog(records, options) {
     const tbody = document.getElementById('tradingLogBody');
     if (!tbody) return;
+    options = options || {};
+    const emptyMessage = options.emptyMessage || 'No orders yet.';
 
-    tradingLogCache = Array.isArray(trades) ? trades.map(normalizeTradeRecord) : [];
+    tradingLogCache = Array.isArray(records) ? records.map(normalizeOrderRecord) : [];
     tradingLogEmptyMessage = emptyMessage;
     let filtered = tradingLogCache;
     if (tradingLogFilter === 'buy') {
@@ -5452,60 +5501,66 @@ function renderTradingLog(trades, { emptyMessage = 'No trades yet.' } = {}) {
     }
 
     if (filtered.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="trading-log-empty">${emptyMessage}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="trading-log-empty">${escapeHtml(emptyMessage)}</td></tr>`;
         return;
     }
 
-    tbody.innerHTML = filtered.map((trade) => {
-        const actionClass = trade.side === 'SELL' ? 'action-sell' : 'action-buy';
-        const actionLabel = trade.side === 'SELL' ? 'SELL' : 'BUY';
-        const totalValue = trade.value.toLocaleString('en-US', {
+    tbody.innerHTML = filtered.map((order) => {
+        const actionClass = order.side === 'SELL' ? 'action-sell' : 'action-buy';
+        const actionLabel = order.side === 'SELL' ? 'SELL' : 'BUY';
+        const statusLabel = order.status.toUpperCase();
+        const totalValue = order.value.toLocaleString('en-US', {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
         });
-        const hasNativeAudit = Number.isFinite(trade.nativePrice)
-            && Number.isFinite(trade.nativeValue)
-            && Number.isFinite(trade.fxRate);
+        const hasNativeAudit = Number.isFinite(order.nativePrice)
+            && Number.isFinite(order.nativeValue)
+            && Number.isFinite(order.fxRate);
         const priceAudit = hasNativeAudit
-            ? `<div class="trading-log-native">¥${trade.nativePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>`
+            ? `<div class="trading-log-native">¥${order.nativePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>`
             : '';
-        const valueAudit = hasNativeAudit
-            ? `<div class="trading-log-native">¥${trade.nativeValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · FX ${trade.fxRate.toFixed(4)}</div>`
+        const valueAudit = hasNativeAudit && order.executedShares > 0
+            ? `<div class="trading-log-native">¥${order.nativeValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · FX ${order.fxRate.toFixed(4)}</div>`
             : '';
+        const assetName = resolveTradingAssetName(order.symbol);
+        const quantity = `${order.executedShares.toLocaleString('en-US')} / ${order.requestedShares.toLocaleString('en-US')} shares`;
+        const reason = formatOrderExecutionReason(order.reason, order.strategyReason);
         return `<tr>
-            <td>${formatTradeTimestamp(trade.timestamp)}</td>
+            <td>${escapeHtml(formatTradeTimestamp(order.timestamp))}</td>
             <td><span class="${actionClass}">${actionLabel}</span></td>
-            <td>${trade.symbol}</td>
-            <td>${trade.quantity} shares</td>
-            <td>$${trade.price.toFixed(2)}${priceAudit}</td>
-            <td>$${totalValue}${valueAudit}</td>
+            <td><div class="trading-log-asset"><strong>${escapeHtml(order.symbol)}</strong>${assetName ? `<small>${escapeHtml(assetName)}</small>` : ''}</div></td>
+            <td class="trading-log-quantity">${escapeHtml(quantity)}</td>
+            <td>$${order.price.toFixed(2)}${priceAudit}</td>
+            <td>${order.executedShares > 0 ? `$${totalValue}${valueAudit}` : '--'}</td>
+            <td><span class="order-status order-status-${order.status}" title="Order status: ${statusLabel}" aria-label="Order status: ${statusLabel}">${statusLabel}</span></td>
+            <td class="trading-log-reason">${escapeHtml(reason)}</td>
         </tr>`;
     }).join('');
 }
 
-function clearTradingLog(message = 'Waiting for trades…') {
+function clearTradingLog(message = 'Waiting for orders…') {
     tradingLogCache = [];
     renderTradingLog([], { emptyMessage: message });
 }
 
 function updateLiveTradingLog(progress) {
-    if (!progress?.trades) return;
-    renderTradingLog(progress.trades);
+    if (!Array.isArray(progress?.order_events) && !Array.isArray(progress?.trades)) return;
+    renderTradingLog(resolveTradingLogRecords(progress));
 }
 
 async function loadTradingLogForRun(runId) {
     if (!runId) {
-        clearTradingLog('Run a backtest to see trades here.');
+        clearTradingLog('Run a backtest to see orders here.');
         return;
     }
     try {
         const data = await API.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/trades?t=${Date.now()}`);
-        renderTradingLog(data.trades || [], {
-            emptyMessage: 'No trades were executed. The selected strategy produced no executable orders.',
+        renderTradingLog(resolveTradingLogRecords(data), {
+            emptyMessage: 'No orders were submitted by the selected strategy.',
         });
     } catch (error) {
-        console.warn('Could not load trades:', error.message);
-        clearTradingLog('Trade log unavailable for this run.');
+        console.warn('Could not load orders:', error.message);
+        clearTradingLog('Order log unavailable for this run.');
     }
 }
 

@@ -1124,7 +1124,7 @@
                     <h2>Trading Log</h2>
                     <div class="log-controls">
                         <select class="filter-select" id="tradingLogFilter">
-                            <option value="all">All Trades</option>
+                            <option value="all">All Orders</option>
                             <option value="buy">Buys Only</option>
                             <option value="sell">Sells Only</option>
                         </select>
@@ -1141,11 +1141,13 @@
                                 <th>Quantity</th>
                                 <th>Price</th>
                                 <th>Total Value</th>
+                                <th>Status</th>
+                                <th>Reason</th>
                             </tr>
                         </thead>
                         <tbody id="tradingLogBody">
                             <tr>
-                                <td colspan="6" class="trading-log-empty">Run a backtest to see trades here.</td>
+                                <td colspan="8" class="trading-log-empty">Run a backtest to see orders here.</td>
                             </tr>
                         </tbody>
                     </table>
