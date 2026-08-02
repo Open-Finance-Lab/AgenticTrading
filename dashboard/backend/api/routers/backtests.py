@@ -248,6 +248,7 @@ class RunMetadata(BaseModel):
     fx_start_rate: Optional[float] = None
     fx_end_rate: Optional[float] = None
     t_plus_one_enabled: Optional[bool] = None
+    lot_size: Optional[int] = None
     # Scalars only. The rejected-order records themselves are unbounded per-step
     # audit data and this model is the response_model for two *list* routes
     # (/api/backtest/runs and the public, unpaginated /runs), so shipping them
@@ -257,6 +258,8 @@ class RunMetadata(BaseModel):
     # None (not 0) for runs that predate the feature, matching t_plus_one_enabled.
     rejected_orders_count: Optional[int] = None
     rejected_orders_truncated: Optional[int] = None
+    order_events_count: Optional[int] = None
+    order_events_truncated: Optional[int] = None
     # How hard T+1 actually bound: symbol-days on which the agent wanted to exit
     # more than it could, and the total shares that deferred. Scalars for the
     # same reason as above — the records live on the detail endpoint.
@@ -315,8 +318,11 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "fx_start_rate",
             "fx_end_rate",
             "t_plus_one_enabled",
+            "lot_size",
             "rejected_orders_count",
             "rejected_orders_truncated",
+            "order_events_count",
+            "order_events_truncated",
             "t1_deferred_events",
             "t1_deferred_shares",
         ):
@@ -1574,13 +1580,33 @@ async def get_equity_curve(run_id: str, request: Request):
 
 @router.get("/runs/{run_id}/trades")
 async def get_run_trades(run_id: str, request: Request):
-    """Trade log for a backtest run owned by this session."""
+    """Trades and the bounded order-outcome sample for an owned run."""
     session_id = request.state.session_id
     run = db.get_run_with_session(run_id, session_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found or not yours")
     trades = db.get_trades(run_id)
-    return {"run_id": run_id, "trades": trades, "count": len(trades)}
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    order_events = metadata.get("order_events")
+    if not isinstance(order_events, list):
+        order_events = []
+    order_event_count = metadata.get("order_events_count")
+    if not isinstance(order_event_count, int) or order_event_count < len(order_events):
+        order_event_count = len(order_events)
+    order_events_truncated = metadata.get("order_events_truncated")
+    if not isinstance(order_events_truncated, int) or order_events_truncated < 0:
+        order_events_truncated = max(order_event_count - len(order_events), 0)
+    return {
+        "run_id": run_id,
+        "trades": trades,
+        "count": len(trades),
+        "order_events": order_events,
+        "order_event_count": order_event_count,
+        "order_events_returned": len(order_events),
+        "order_events_truncated": order_events_truncated,
+    }
 
 
 @router.get("/runs/{run_id}/rejected-orders")

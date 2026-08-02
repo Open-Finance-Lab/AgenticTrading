@@ -154,6 +154,7 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
                 "fx_start_rate": 7.0,
                 "fx_end_rate": 7.1,
                 "t_plus_one_enabled": True,
+                "lot_size": 100,
                 # The records themselves are deliberately NOT projected onto
                 # RunMetadata (it backs two list routes); only the scalars are.
                 "rejected_orders": [{
@@ -163,6 +164,9 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
                 }],
                 "rejected_orders_count": 7200,
                 "rejected_orders_truncated": 7000,
+                "order_events": [{"status": "rejected"}],
+                "order_events_count": 7300,
+                "order_events_truncated": 7100,
             }
         )
     )
@@ -183,11 +187,15 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
     assert response.fx_start_rate == 7.0
     assert response.fx_end_rate == 7.1
     assert response.t_plus_one_enabled is True
+    assert response.lot_size == 100
     assert response.rejected_orders_count == 7200
     assert response.rejected_orders_truncated == 7000
+    assert response.order_events_count == 7300
+    assert response.order_events_truncated == 7100
     # The unbounded array must never reach a list-route payload.
     assert not hasattr(response, "rejected_orders")
     assert "rejected_orders" not in response.model_dump()
+    assert "order_events" not in response.model_dump()
 
 
 def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
@@ -207,10 +215,13 @@ def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
     assert response.fx_source is None
     assert response.fx_start_rate is None
     assert response.t_plus_one_enabled is None
+    assert response.lot_size is None
     # None, not 0: a legacy run predates the feature, it did not record zero
     # rejections. Same convention as t_plus_one_enabled above.
     assert response.rejected_orders_count is None
     assert response.rejected_orders_truncated is None
+    assert response.order_events_count is None
+    assert response.order_events_truncated is None
 
 
 @pytest.fixture(autouse=True)
@@ -728,7 +739,20 @@ def test_get_run_trades_endpoint(client, monkeypatch):
 
     def fake_get_run_with_session(rid, sid):
         if rid == run_id and sid == session_id:
-            return {"run_id": run_id, "agent_name": "Agent", "mode": "backtest"}
+            return {
+                "run_id": run_id,
+                "agent_name": "Agent",
+                "mode": "backtest",
+                "metadata": {
+                    "order_events": [{
+                        "symbol": "600519.SH",
+                        "status": "rejected",
+                        "reason": "insufficient_cash_for_lot",
+                    }],
+                    "order_events_count": 201,
+                    "order_events_truncated": 200,
+                },
+            }
         return None
 
     def fake_get_trades(rid):
@@ -752,6 +776,34 @@ def test_get_run_trades_endpoint(client, monkeypatch):
     assert body["run_id"] == run_id
     assert body["count"] == 1
     assert body["trades"][0]["symbol"] == "MSFT"
+    assert body["order_events"][0]["status"] == "rejected"
+    assert body["order_event_count"] == 201
+    assert body["order_events_returned"] == 1
+    assert body["order_events_truncated"] == 200
+
+
+def test_get_run_trades_tolerates_legacy_order_event_metadata(client, monkeypatch):
+    session_id = str(uuid.uuid4())
+    run_id = "agent_legacy_order_events"
+
+    monkeypatch.setattr(
+        bt.db,
+        "get_run_with_session",
+        lambda rid, sid: {"run_id": rid, "metadata": None}
+        if rid == run_id and sid == session_id
+        else None,
+    )
+    monkeypatch.setattr(bt.db, "get_trades", lambda _rid: [])
+
+    body = client.get(
+        f"/runs/{run_id}/trades", headers={"X-Session-Id": session_id}
+    ).json()
+
+    assert body["trades"] == []
+    assert body["count"] == 0
+    assert body["order_events"] == []
+    assert body["order_event_count"] == 0
+    assert body["order_events_truncated"] == 0
 
 
 def _rejected_orders_run(monkeypatch, run_id, session_id, metadata):

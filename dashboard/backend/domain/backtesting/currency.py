@@ -173,3 +173,25 @@ class CurrencyContext:
         if "proceeds" in result:
             result["proceeds"] = reporting_value
         return result
+
+    def reporting_order_event(self, event: Mapping[str, object]) -> dict:
+        """Return a reporting-currency order outcome with native audit values."""
+        result = dict(event)
+        if not self.requires_conversion:
+            return result
+        timestamp = result.get("timestamp")
+        rate = self.rate_at(timestamp)  # type: ignore[arg-type]
+        native_price = float(result.get("price") or 0)
+        # A rejected order executes no value. Never derive this field from the
+        # requested quantity, because that would make an unfilled order look paid.
+        native_value = float(result.get("executed_value") or 0)
+        result.update(
+            {
+                "price": native_price / rate,
+                "executed_value": native_value / rate,
+                "native_price": native_price,
+                "native_value": native_value,
+                "fx_rate": rate,
+            }
+        )
+        return result

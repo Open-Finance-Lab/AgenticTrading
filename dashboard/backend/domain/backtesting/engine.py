@@ -99,6 +99,7 @@ REJECTED_ORDER_SAMPLE_LIMIT = 200
 # whole growing list makes write volume quadratic in the run length. The live
 # view only ever shows the latest activity, so carry a tail window.
 LIVE_PROGRESS_REJECTED_ORDER_LIMIT = 50
+LIVE_PROGRESS_ORDER_EVENT_LIMIT = 50
 
 
 def _prior_market_date_by_decision_date(
@@ -161,6 +162,7 @@ class HourlyBacktester:
         )
         self.prompt_adaptations: List[Dict] = []
         self.rejected_orders: List[Dict] = []
+        self.order_events: List[Dict] = []
         self.t1_deferrals: List[Dict] = []
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
@@ -327,6 +329,35 @@ class HourlyBacktester:
             serialized.append(record)
         return serialized
 
+    def _serialize_order_events(self, order_events: List[Dict]) -> List[Dict]:
+        """Convert order outcomes to reporting currency and JSON-safe values."""
+        serialized = []
+        currency_context = self._require_currency_context()
+        for native_event in order_events:
+            record = currency_context.reporting_order_event(native_event)
+            timestamp = record.get("timestamp")
+            if hasattr(timestamp, "isoformat"):
+                record["timestamp"] = timestamp.isoformat()
+            for field in (
+                "requested_shares",
+                "executed_shares",
+                "unfilled_shares",
+            ):
+                value = record.get(field)
+                if hasattr(value, "item"):
+                    record[field] = value.item()
+            for field in (
+                "price",
+                "executed_value",
+                "native_price",
+                "native_value",
+                "fx_rate",
+            ):
+                if field in record:
+                    record[field] = float(record[field])
+            serialized.append(record)
+        return serialized
+
     @staticmethod
     def _serialize_t1_deferrals(t1_deferrals: Dict) -> List[Dict]:
         """JSON-safe T+1 deferral records, oldest symbol-day first.
@@ -395,6 +426,12 @@ class HourlyBacktester:
                 manager.rejected_orders[-LIVE_PROGRESS_REJECTED_ORDER_LIMIT:]
             ),
             "rejected_orders_count": len(manager.rejected_orders),
+            "order_events": self._serialize_order_events(
+                getattr(manager, "order_events", [])[
+                    -LIVE_PROGRESS_ORDER_EVENT_LIMIT:
+                ]
+            ),
+            "order_events_count": len(getattr(manager, "order_events", [])),
         }
         try:
             Path(self.progress_file).write_text(json.dumps(payload), encoding="utf-8")
@@ -633,6 +670,13 @@ class HourlyBacktester:
                 deferrals_truncated = len(deferrals) - REJECTED_ORDER_SAMPLE_LIMIT
                 if deferrals_truncated > 0:
                     meta["t1_deferrals_truncated"] = deferrals_truncated
+        order_events = list(getattr(self, "order_events", []) or [])
+        if order_events:
+            meta["order_events_count"] = len(order_events)
+            meta["order_events"] = order_events[:REJECTED_ORDER_SAMPLE_LIMIT]
+            order_events_truncated = len(order_events) - REJECTED_ORDER_SAMPLE_LIMIT
+            if order_events_truncated > 0:
+                meta["order_events_truncated"] = order_events_truncated
         runtime_type = getattr(self, "runtime_type", PIPELINE_RUNTIME_TYPE)
         if runtime_type != PIPELINE_RUNTIME_TYPE:
             meta["runtime_type"] = runtime_type
@@ -1018,6 +1062,7 @@ class HourlyBacktester:
         self.rejected_orders = self._serialize_rejected_orders(
             manager.rejected_orders
         )
+        self.order_events = self._serialize_order_events(manager.order_events)
         db.insert_run(
             run_id=run_id,
             session_id=self.session_id,

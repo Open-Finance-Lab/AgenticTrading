@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -14,6 +15,7 @@ import pytest
 
 from dashboard.backend.domain.backtesting import engine as engine_module
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+from dashboard.backend.domain.backtesting.currency import CurrencyContext
 from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
 from dashboard.backend.infrastructure.market_data.profiles import (
     A_SHARE_DEMO_6,
@@ -114,6 +116,81 @@ def test_rejected_order_serializer_normalizes_timestamp_and_numpy_numbers():
     }]
 
 
+def test_order_event_serializer_converts_currency_and_preserves_fractional_request():
+    backtester = object.__new__(HourlyBacktester)
+    backtester.currency_context = CurrencyContext(
+        native_currency="CNY",
+        reporting_currency="USD",
+        timezone="Asia/Shanghai",
+        rates={datetime(2026, 4, 1).date(): 7.0},
+    )
+    timestamp = pd.Timestamp("2026-04-01T10:00:00", tz=CN)
+
+    serialized = backtester._serialize_order_events([{
+        "timestamp": timestamp,
+        "symbol": "600519.SH",
+        "side": "BUY",
+        "requested_shares": pd.Series([100.5], dtype="float64").iloc[0],
+        "executed_shares": pd.Series([0], dtype="int64").iloc[0],
+        "unfilled_shares": pd.Series([100.5], dtype="float64").iloc[0],
+        "price": pd.Series([700], dtype="float64").iloc[0],
+        "executed_value": pd.Series([0], dtype="float64").iloc[0],
+        "status": "rejected",
+        "reason": "invalid_lot_size",
+        "strategy_reason": "Model request",
+    }])
+
+    assert serialized == [{
+        "timestamp": "2026-04-01T10:00:00+08:00",
+        "symbol": "600519.SH",
+        "side": "BUY",
+        "requested_shares": 100.5,
+        "executed_shares": 0,
+        "unfilled_shares": 100.5,
+        "price": 100.0,
+        "executed_value": 0.0,
+        "status": "rejected",
+        "reason": "invalid_lot_size",
+        "strategy_reason": "Model request",
+        "native_price": 700.0,
+        "native_value": 0.0,
+        "fx_rate": 7.0,
+    }]
+    json.dumps(serialized)
+
+
+def test_live_progress_keeps_bounded_order_event_tail(tmp_path):
+    backtester = object.__new__(HourlyBacktester)
+    backtester.progress_file = str(tmp_path / "progress.json")
+    backtester.live_run_id = "agent_order_events"
+    backtester.currency_context = CurrencyContext.identity("USD", "US/Eastern")
+    manager = SimpleNamespace(
+        get_equity_curve=lambda: [],
+        trades=[],
+        rejected_orders=[],
+        order_events=[{
+            "timestamp": datetime(2026, 4, 1, 10),
+            "symbol": "AAPL",
+            "side": "BUY",
+            "requested_shares": 1,
+            "executed_shares": 1,
+            "unfilled_shares": 0,
+            "price": 100,
+            "executed_value": 100,
+            "status": "filled",
+            "reason": "",
+            "strategy_reason": str(seq),
+        } for seq in range(60)],
+    )
+
+    backtester._publish_live_progress(3, 10, manager)
+
+    payload = json.loads((tmp_path / "progress.json").read_text())
+    assert payload["order_events_count"] == 60
+    assert len(payload["order_events"]) == 50
+    assert payload["order_events"][0]["strategy_reason"] == "10"
+
+
 @pytest.mark.parametrize(
     ("decision_source", "wants_llm"),
     [
@@ -188,6 +265,16 @@ def test_ifind_rule_and_llm_paths_share_t1_execution(
     assert manager.lot_size == 100
     assert [trade["side"] for trade in manager.trades] == ["BUY"]
     assert manager.rejected_orders[0]["reason"] == "t1_frozen"
+    assert [event["status"] for event in manager.order_events] == [
+        "filled",
+        "rejected",
+    ]
+    assert recording_db.runs[0]["num_trades"] == 1
+    assert recording_db.runs[0]["metadata"]["order_events_count"] == 2
+    assert [
+        event["status"]
+        for event in recording_db.runs[0]["metadata"]["order_events"]
+    ] == ["filled", "rejected"]
     assert recording_db.runs[0]["metadata"]["rejected_orders"][0][
         "reason"
     ] == "t1_frozen"
@@ -687,12 +774,19 @@ def test_transport_failure_still_points_at_credentials(monkeypatch):
 # Rejected-order persistence is bounded, and says so
 # ---------------------------------------------------------------------------
 
-def _metadata_stub(rejected, monkeypatch, data_source=IFIND_ASHARE, deferrals=()):
+def _metadata_stub(
+    rejected,
+    monkeypatch,
+    data_source=IFIND_ASHARE,
+    deferrals=(),
+    order_events=(),
+):
     """Run _agent_run_metadata over just the T+1 audit branches."""
     backtester = object.__new__(HourlyBacktester)
     backtester.data_source = data_source
     backtester.rejected_orders = rejected
     backtester.t1_deferrals = list(deferrals)
+    backtester.order_events = list(order_events)
     backtester.use_llm = False
     backtester.prompt_adaptations = None
     backtester.initial_pipeline = None
@@ -741,6 +835,23 @@ def test_agent_metadata_skips_rejected_orders_for_non_ashare_sources(monkeypatch
     )
     assert "rejected_orders" not in meta
     assert "rejected_orders_count" not in meta
+
+
+def test_agent_metadata_caps_order_events_for_every_market(monkeypatch):
+    limit = engine_module.REJECTED_ORDER_SAMPLE_LIMIT
+    records = [{"status": "filled", "seq": i} for i in range(limit + 25)]
+
+    meta = _metadata_stub(
+        [],
+        monkeypatch,
+        data_source="alpaca",
+        order_events=records,
+    )
+
+    assert len(meta["order_events"]) == limit
+    assert meta["order_events_count"] == limit + 25
+    assert meta["order_events_truncated"] == 25
+    assert meta["order_events"][0]["seq"] == 0
 
 
 # ---------------------------------------------------------------------------
