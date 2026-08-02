@@ -151,4 +151,3 @@ def test_rendered_partial_uses_actual_value_and_side_filter():
     assert "$2,000.00" in result
     assert "T+1 frozen" in result
     assert "Apple Inc." not in result
-
