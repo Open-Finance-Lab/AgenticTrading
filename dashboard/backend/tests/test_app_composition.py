@@ -329,7 +329,12 @@ def test_csp_middleware_lives_in_middleware_module():
 
 def test_middleware_order_preserved():
     names = [m.cls.__name__ for m in app.user_middleware]
-    assert names == ["CSPHeaderMiddleware", "SessionMiddleware", "CORSMiddleware"]
+    assert names == [
+        "CSPHeaderMiddleware",
+        "GZipMiddleware",
+        "SessionMiddleware",
+        "CORSMiddleware",
+    ]
 
 
 def test_cors_preflight_allows_every_routed_method():

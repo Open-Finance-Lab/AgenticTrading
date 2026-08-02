@@ -10,6 +10,7 @@ frontend. Backend API route bodies live in ``dashboard.backend.api.routers.*``.
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from pathlib import Path
 
@@ -77,6 +78,11 @@ app.add_middleware(
 
 # Add session middleware (selective: backtest routes only)
 app.add_middleware(SessionMiddleware)
+
+# Compress JSON responses when the client accepts it. Equity curves and agent
+# lists run to hundreds of KB uncompressed; minimum_size skips tiny payloads
+# where the gzip header would cost more than it saves.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Versioned REST API (auth, future teams/contest/config)
 app.include_router(api_router)

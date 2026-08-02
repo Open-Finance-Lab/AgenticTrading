@@ -14,7 +14,7 @@ router = APIRouter()
 
 
 @router.get("/ticker")
-async def get_ticker(symbols: str = "AAPL,NVDA,MSFT,BTC"):
+def get_ticker(symbols: str = "AAPL,NVDA,MSFT,BTC"):
     """
     Get live market quotes for symbols.
     
