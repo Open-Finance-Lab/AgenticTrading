@@ -86,10 +86,12 @@ body {
 }
 
 .header-brand {
-    /* Real middle track, not a full-span overlapping rail. Both side tracks are
-       minmax(0, 1fr) and always split the remainder equally, so the brand still
-       lands on the viewport centre -- but it now reserves its own width, so the
-       side chrome shrinks instead of painting over the logo and wordmark. */
+    /* Real middle track, not a full-span overlapping rail. The rail centred the
+       brand on the viewport by sharing the side chrome's grid area and
+       reserving no width of its own, which is exactly why the chrome could
+       paint over the logo and wordmark. Its own track cannot be overlapped;
+       the cost is that it now centres in the space the side groups leave
+       rather than on the viewport. See .header for why that trade is forced. */
     grid-column: 2;
     grid-row: 1;
     justify-self: center;
