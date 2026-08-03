@@ -18,7 +18,7 @@ from dashboard.backend.api.routers import config as config_canon
 from dashboard.backend.api.routers import health as health_canon
 from dashboard.backend.api.routers import market as market_canon
 from dashboard.backend import middleware as middleware_mod
-from dashboard.backend.app import app
+from dashboard.backend.app import app, _cors_allow_origins
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _APP_FILE = _BACKEND / "app.py"
@@ -431,38 +431,38 @@ def test_cors_allow_origins_defaults_to_wildcard_when_unset(monkeypatch):
     preflight on a deploy where the env var was never set -- which is the
     default state of the Render dashboard.
     """
-    import dashboard.backend.app as app_module
-
     monkeypatch.delenv("ATL_FRONTEND_ORIGINS", raising=False)
-    assert app_module._cors_allow_origins() == ["*"]
+    assert _cors_allow_origins() == ["*"]
 
     monkeypatch.setenv("ATL_FRONTEND_ORIGINS", "   ")
-    assert app_module._cors_allow_origins() == ["*"]
+    assert _cors_allow_origins() == ["*"]
 
 
 def test_cors_allow_origins_parses_allowlist_and_adds_local_hosts(monkeypatch):
-    import dashboard.backend.app as app_module
-
     monkeypatch.setenv(
         "ATL_FRONTEND_ORIGINS",
         "https://example.vercel.app/, , https://second.example",
     )
-    origins = app_module._cors_allow_origins()
+    origins = _cors_allow_origins()
 
-    # Trailing slash stripped -- a browser's Origin header never carries one,
-    # so an unstripped entry never matches and the allowlist silently fails shut.
-    assert "https://example.vercel.app" in origins
-    assert "https://example.vercel.app/" not in origins
-    assert "https://second.example" in origins
-    # Blank segments from a trailing/doubled comma must not become an origin.
-    assert "" not in origins
-    for host in (
+    # Compared as a whole list, not with ``in``: membership on a list is exact,
+    # but CodeQL reads ``"https://host" in x`` as a substring URL check and
+    # raises py/incomplete-url-substring-sanitization. An exact list comparison
+    # is both alert-free and the stronger assertion -- it pins order and
+    # rejects extra entries.
+    #
+    # The trailing slash must be stripped: a browser's Origin header never
+    # carries one, so an unstripped entry never matches and the allowlist
+    # silently fails shut. The blank segment from the doubled comma must not
+    # survive as an origin.
+    assert origins == [
+        "https://example.vercel.app",
+        "https://second.example",
         "http://localhost:8000",
         "http://127.0.0.1:8000",
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-    ):
-        assert host in origins, host
+    ]
 
 
 def test_cors_wildcard_is_never_mixed_into_an_explicit_allowlist(monkeypatch):
@@ -474,8 +474,5 @@ def test_cors_wildcard_is_never_mixed_into_an_explicit_allowlist(monkeypatch):
     origin while looking restricted, so a later flip of ``allow_credentials``
     would hand credentialed responses to any site.
     """
-    import dashboard.backend.app as app_module
-
     monkeypatch.setenv("ATL_FRONTEND_ORIGINS", "https://example.vercel.app")
-    origins = app_module._cors_allow_origins()
-    assert "*" not in origins
+    assert "*" not in _cors_allow_origins()
