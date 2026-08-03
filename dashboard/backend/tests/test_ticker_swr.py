@@ -129,3 +129,123 @@ def test_concurrent_cold_requests_fetch_once(monkeypatch):
 
     assert len(calls) == 1, "concurrent cold requests must share one provider fetch"
     assert results == [NEW_QUOTES] * 4
+
+
+def test_outage_past_serve_window_prefers_stale_over_empty(monkeypatch):
+    """A provider outage must never be worse than having no cache at all.
+
+    Preserving the stale payload protects the *cache*; without this it did not
+    protect the *response*. Past the serve window every request re-paid the
+    multi-second fetch and still handed back an empty ticker, while perfectly
+    good data sat in the cache -- strictly worse than the pre-SWR behaviour.
+    """
+    _seed_cache(quotes.TICKER_STALE_SERVE_SECONDS + 10, OLD_QUOTES)
+    calls = []
+
+    def outage(symbols):
+        calls.append(1)
+        return []
+
+    monkeypatch.setattr(quotes, "_fetch_quotes_uncached", outage)
+
+    assert quotes.get_market_quotes(["AAPL"]) == OLD_QUOTES, (
+        "stale data beats an empty ticker"
+    )
+    assert len(calls) == 1
+
+    # Inside the backoff the slow provider must not be retried per request.
+    assert quotes.get_market_quotes(["AAPL"]) == OLD_QUOTES
+    assert quotes.get_market_quotes(["AAPL"]) == OLD_QUOTES
+    assert len(calls) == 1, "a failed fetch must back off, not retry every request"
+
+
+def test_failure_backoff_expires_and_refetches(monkeypatch):
+    _seed_cache(quotes.TICKER_STALE_SERVE_SECONDS + 10, OLD_QUOTES)
+    quotes._ticker_failed_fetch_at["AAPL"] = (
+        time.time() - quotes.TICKER_FAILED_FETCH_BACKOFF_SECONDS - 1
+    )
+    monkeypatch.setattr(quotes, "_fetch_quotes_uncached", lambda symbols: NEW_QUOTES)
+
+    assert quotes.get_market_quotes(["AAPL"]) == NEW_QUOTES
+    assert "AAPL" not in quotes._ticker_failed_fetch_at, (
+        "a successful fetch must clear the failure marker"
+    )
+
+
+class _ThreadStartFails:
+    """Stands in for threading.Thread when the process cannot spawn one."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    def start(self):
+        raise RuntimeError("can't start new thread")
+
+
+def test_refresh_thread_that_cannot_start_does_not_wedge_the_key(monkeypatch):
+    _seed_cache(quotes.TICKER_CACHE_TTL_SECONDS + 5, OLD_QUOTES)
+    monkeypatch.setattr(quotes, "_fetch_quotes_uncached", lambda symbols: NEW_QUOTES)
+    # Patches the real threading module for the duration of this test; nothing
+    # else in-process spawns threads here and monkeypatch restores it.
+    monkeypatch.setattr(quotes.threading, "Thread", _ThreadStartFails)
+
+    # Must not raise: letting it propagate reaches the route's except branch and
+    # returns an empty ticker instead of the stale payload we already hold.
+    assert quotes.get_market_quotes(["AAPL"]) == OLD_QUOTES
+    assert quotes._ticker_refresh_inflight == set(), (
+        "a thread that never started must not leave its key marked inflight "
+        "forever -- that permanently disables background refresh for it"
+    )
+
+    monkeypatch.undo()
+    monkeypatch.setattr(quotes, "_fetch_quotes_uncached", lambda symbols: NEW_QUOTES)
+    quotes.get_market_quotes(["AAPL"])
+    assert _wait_until(lambda: quotes._ticker_cache["AAPL"][1] == NEW_QUOTES), (
+        "background refresh must recover once threads can start again"
+    )
+
+
+def test_cache_keys_are_bounded(monkeypatch):
+    """symbols= is unauthenticated input, so the keyed maps must not grow forever."""
+    monkeypatch.setattr(quotes, "_fetch_quotes_uncached", lambda symbols: NEW_QUOTES)
+
+    for i in range(quotes.TICKER_MAX_CACHE_KEYS + 40):
+        quotes.get_market_quotes([f"SYM{i}"])
+
+    assert len(quotes._ticker_cache) <= quotes.TICKER_MAX_CACHE_KEYS
+    assert len(quotes._ticker_fetch_locks) <= quotes.TICKER_MAX_CACHE_KEYS
+
+
+def test_ticker_route_caps_symbol_fan_out(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from dashboard.backend.api.routers import market
+    from dashboard.backend.app import app
+
+    def must_not_fetch(symbols):
+        raise AssertionError("an over-long symbol list must be rejected first")
+
+    monkeypatch.setattr(market, "get_market_quotes", must_not_fetch)
+    client = TestClient(app)
+
+    too_many = ",".join(f"SYM{i}" for i in range(market.MAX_TICKER_SYMBOLS + 1))
+    body = client.get(f"/ticker?symbols={too_many}").json()
+    assert body["quotes"] == []
+    assert "Too many symbols" in body["error"]
+
+
+def test_ticker_route_dedupes_symbols(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from dashboard.backend.api.routers import market
+    from dashboard.backend.app import app
+
+    seen = []
+
+    def record(symbols):
+        seen.append(list(symbols))
+        return NEW_QUOTES
+
+    monkeypatch.setattr(market, "get_market_quotes", record)
+    TestClient(app).get("/ticker?symbols=AAPL,aapl,AAPL")
+    assert seen == [["AAPL"]], "duplicate symbols must collapse to one fetch"

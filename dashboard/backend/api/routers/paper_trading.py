@@ -71,14 +71,16 @@ def get_paper_account():
             return {
                 "success": False,
                 "error": "Failed to fetch account",
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "cached": False
             }
     except Exception as e:
         print(f"/paper/account fetch failed: {e!r}")
         return {
             "success": False,
             "error": "Failed to fetch account",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "cached": False
         }
 
 

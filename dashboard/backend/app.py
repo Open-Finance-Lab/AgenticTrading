@@ -58,6 +58,25 @@ app = FastAPI(
 app.add_exception_handler(ApiError, api_error_handler)
 app.add_exception_handler(RequestValidationError, validation_error_handler)
 
+# Compress JSON responses when the client accepts it. Equity curves and agent
+# lists run to hundreds of KB uncompressed; minimum_size skips tiny payloads
+# where the gzip header would cost more than it saves.
+#
+# Added FIRST on purpose, which makes it the INNERMOST layer. add_middleware
+# prepends, so the last one added wraps everything. GZip must sit below
+# SessionMiddleware because that is a BaseHTTPMiddleware: it re-emits every
+# response as a stream, and GZip only honours minimum_size on the non-streaming
+# branch. Stacked above Session it therefore compressed *every* response
+# including a 15-byte {"status": "ok"} -- inflating it and burning event-loop
+# CPU -- with minimum_size silently inert (test_small_response_is_not_gzipped).
+#
+# compresslevel=6, not Starlette's default of 9: Starlette compresses inline on
+# the event loop (no threadpool hop), so the cost is paid by every concurrent
+# request. Measured on a 462 KB equity curve, level 9 costs 25.0 ms for 20.1%
+# of original while level 6 costs 6.4 ms for 20.8% -- 4x the event-loop stall
+# to save 0.7 percentage points, on a free-tier CPU that is slower still.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
@@ -78,11 +97,6 @@ app.add_middleware(
 
 # Add session middleware (selective: backtest routes only)
 app.add_middleware(SessionMiddleware)
-
-# Compress JSON responses when the client accepts it. Equity curves and agent
-# lists run to hundreds of KB uncompressed; minimum_size skips tiny payloads
-# where the gzip header would cost more than it saves.
-app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Versioned REST API (auth, future teams/contest/config)
 app.include_router(api_router)

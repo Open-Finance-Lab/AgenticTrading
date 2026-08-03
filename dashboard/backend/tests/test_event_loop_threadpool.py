@@ -37,6 +37,18 @@ BLOCKING_IO_ROUTER_MODULES = {
     "dashboard.backend.api.routers.discord",
     "dashboard.backend.api.routers.external_backtest",
     "dashboard.backend.api.v2.leaderboard",
+    # algo/* is the most expensive offender of the lot: /api/algo/chat calls
+    # anthropic's synchronous client.messages.create(), which parks the loop for
+    # as long as the model takes to answer. In the threadpool it costs one
+    # worker thread instead of the whole server.
+    "dashboard.backend.api.routers.algo",
+}
+
+# Handlers in modules that legitimately mix awaited and blocking work, so the
+# whole module cannot be pinned. auth.py's OAuth callbacks genuinely await, but
+# these do sync store I/O with no await in sight.
+BLOCKING_IO_HANDLERS = {
+    ("dashboard.backend.api.auth", "logout"),
 }
 
 
@@ -66,6 +78,26 @@ def test_covered_modules_actually_serve_routes():
     assert missing == [], f"pinned modules no longer serve any route: {missing}"
 
 
+def test_individually_pinned_handlers_are_sync():
+    by_name = {
+        (route.endpoint.__module__, route.endpoint.__name__): route.endpoint
+        for route in app.routes
+        if isinstance(route, APIRoute)
+    }
+    missing = sorted(k for k in BLOCKING_IO_HANDLERS if k not in by_name)
+    assert missing == [], f"pinned handlers no longer serve a route: {missing}"
+
+    offenders = sorted(
+        f"{mod}.{name}"
+        for (mod, name) in BLOCKING_IO_HANDLERS
+        if inspect.iscoroutinefunction(by_name[(mod, name)])
+    )
+    assert offenders == [], (
+        "these handlers do blocking store I/O with no await and must stay "
+        f"plain def: {offenders}"
+    )
+
+
 def test_slow_ticker_fetch_does_not_stall_concurrent_requests(monkeypatch):
     """A slow quote fetch inside /ticker must not delay other requests.
 
@@ -81,7 +113,10 @@ def test_slow_ticker_fetch_does_not_stall_concurrent_requests(monkeypatch):
 
     def slow_quotes(symbols):
         handler_entered.set()
-        time.sleep(0.6)
+        # 1.0s blocked vs a 0.5s assertion: a blocked loop overshoots by 2x
+        # while a healthy one answers in ~10ms, so the gap absorbs a loaded CI
+        # runner without letting a real regression squeak through.
+        time.sleep(1.0)
         return [
             {"symbol": s, "price": 1.0, "changePercent": 0.0, "timestamp": "t"}
             for s in symbols
@@ -108,7 +143,7 @@ def test_slow_ticker_fetch_does_not_stall_concurrent_requests(monkeypatch):
         return health_elapsed
 
     health_elapsed = asyncio.run(scenario())
-    assert health_elapsed < 0.4, (
+    assert health_elapsed < 0.5, (
         f"/health took {health_elapsed:.3f}s while /ticker was fetching quotes "
         "-- the ticker handler is blocking the event loop"
     )
