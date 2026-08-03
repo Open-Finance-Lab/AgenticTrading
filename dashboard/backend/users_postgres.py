@@ -8,7 +8,7 @@ disk-less Render free-tier host where that file resets on every deploy --
 silently deleting every account (see CLAUDE.md gotchas).
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
 import psycopg
@@ -33,7 +33,21 @@ from dashboard.backend.users import (
     verify_password,
 )
 
-SESSION_TTL_DAYS = 7
+# Mirrors users.AUTH_SESSIONS_DDL in Postgres dialect. Declared here rather than
+# imported so test_store_twin_parity can read both column lists out of their own
+# module's source; kept a plain (non-f) string for the same reason.
+AUTH_SESSIONS_DDL = """
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        user_agent TEXT,
+        ip_prefix TEXT
+    )
+"""
 
 
 class PostgresUserStore:
@@ -86,49 +100,47 @@ class PostgresUserStore:
                     WHERE discord_user_id IS NOT NULL
                     """
                 )
-                cur.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS auth_sessions (
-                        token_hash TEXT PRIMARY KEY,
-                        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                        created_at TEXT NOT NULL,
-                        last_seen_at TEXT NOT NULL,
-                        expires_at TEXT NOT NULL,
-                        revoked_at TEXT,
-                        user_agent TEXT,
-                        ip_prefix TEXT
-                    )
-                    """
-                )
+                cur.execute(AUTH_SESSIONS_DDL)
                 cur.execute(
                     """
                     SELECT 1
                     FROM information_schema.columns
-                    WHERE table_name = 'auth_sessions' AND column_name = 'token'
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'auth_sessions'
+                      AND column_name = 'token'
                     """
                 )
                 if cur.fetchone():
                     # Legacy plaintext-token table: cannot migrate without raw
                     # tokens. Drop and recreate; users must sign in again.
+                    #
+                    # current_schema() is not optional: information_schema.columns
+                    # spans every schema the role can see, so an unqualified
+                    # match can report a table this connection will never touch
+                    # -- and the action taken on that report is a DROP.
                     cur.execute("DROP TABLE auth_sessions")
-                    cur.execute(
-                        """
-                        CREATE TABLE auth_sessions (
-                            token_hash TEXT PRIMARY KEY,
-                            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                            created_at TEXT NOT NULL,
-                            last_seen_at TEXT NOT NULL,
-                            expires_at TEXT NOT NULL,
-                            revoked_at TEXT,
-                            user_agent TEXT,
-                            ip_prefix TEXT
-                        )
-                        """
+                    # Same DDL as the fresh install: the table is gone, so
+                    # IF NOT EXISTS creates it. One literal, one schema.
+                    cur.execute(AUTH_SESSIONS_DDL)
+                    # print(), not logger: see users._build_user_store(). This
+                    # drops every live login on a durable database.
+                    print(
+                        "auth_sessions: migrated from plaintext tokens to "
+                        "hashed tokens; all existing sessions were dropped and "
+                        "users must sign in again"
                     )
                 cur.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
                     ON auth_sessions(user_id)
+                    """
+                )
+                # Supports purge_expired_sessions(); without it the sweep is a
+                # full scan of a table whose whole purpose here is to grow.
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
+                    ON auth_sessions(expires_at)
                     """
                 )
                 cur.execute(
@@ -229,7 +241,25 @@ class PostgresUserStore:
                         ip_prefix or None,
                     ),
                 )
+                cur.execute(
+                    "DELETE FROM auth_sessions WHERE expires_at < %s",
+                    (created_at,),
+                )
         return raw_token
+
+    def purge_expired_sessions(self) -> int:
+        """Delete session rows past their absolute expiry. Returns the count.
+
+        Twin of UserStore.purge_expired_sessions -- see there for why a soft
+        revocation without a sweep leaves rows that nothing ever removes.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM auth_sessions WHERE expires_at < %s",
+                    (format_stored_timestamp(_utcnow()),),
+                )
+                return max(cur.rowcount, 0)
 
     def get_user_for_token(self, token: str) -> Optional[Dict[str, Any]]:
         if not token or not str(token).strip():
@@ -256,7 +286,7 @@ class PostgresUserStore:
                     return None
 
                 data = dict(row)
-                revoked_at = data.pop("session_revoked_at", None)
+                revoked_at = data.pop("session_revoked_at")
                 created_at = parse_stored_timestamp(data.pop("session_created_at"))
                 last_seen_raw = data.pop("session_last_seen_at")
                 last_seen_at = parse_stored_timestamp(

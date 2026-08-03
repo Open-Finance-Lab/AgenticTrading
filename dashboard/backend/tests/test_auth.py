@@ -1228,11 +1228,14 @@ def test_session_stores_hash_not_raw_token(client, temp_user_store):
     assert signup.status_code == 200
     token = signup.json()["token"]
     conn = temp_user_store._get_connection()
-    rows = list(conn.execute("SELECT token_hash, user_agent FROM auth_sessions"))
+    conn.row_factory = None
+    rows = list(conn.execute("SELECT * FROM auth_sessions"))
     conn.close()
     assert len(rows) == 1
-    assert rows[0][0] == hash_session_token(token)
-    assert token not in {rows[0][0]}
+    assert hash_session_token(token) in rows[0]
+    # Every column, not just token_hash: the point of the change is that the
+    # raw bearer token is nowhere in the row a database leak would expose.
+    assert token not in str(rows[0])
 
 
 def test_revoked_session_is_rejected(client):
@@ -1282,3 +1285,258 @@ def test_idle_session_is_rejected(client, temp_user_store, monkeypatch):
         client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code
         == 401
     )
+
+
+# ---------------------------------------------------------------------------
+# The plaintext-token -> token_hash migration
+#
+# This is the one destructive statement in the hashed-session change: it DROPs a
+# table that on prod holds every live login. It runs against durable Postgres
+# (USERS_DATABASE_URL) as well as SQLite, so "it worked when I tried it" is not
+# coverage. The Postgres twin has its own copy in test_users_postgres.py.
+# ---------------------------------------------------------------------------
+
+_LEGACY_SESSIONS_DDL = """
+    CREATE TABLE auth_sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+"""
+
+
+@pytest.fixture
+def legacy_session_db(tmp_path):
+    """A users database still on the pre-hash schema, with one live session."""
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            display_name TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(_LEGACY_SESSIONS_DDL)
+    conn.execute(
+        "INSERT INTO users (email, display_name, password_hash) VALUES (?, ?, ?)",
+        ("legacy@example.com", "Legacy", "unused-hash"),
+    )
+    conn.execute(
+        "INSERT INTO auth_sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+        ("legacy-plaintext-token", 1, "2099-01-01T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_the_legacy_session_migration_keeps_accounts_and_drops_logins(legacy_session_db):
+    """Sessions cannot be re-hashed without the raw token, so they go -- users stay.
+
+    The failure this guards is a DROP that takes the accounts with it. Nothing
+    would surface that until someone tried to sign in to an account that no
+    longer exists.
+    """
+    import sqlite3
+
+    UserStore(db_path=legacy_session_db)
+
+    conn = sqlite3.connect(legacy_session_db)
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(auth_sessions)")}
+        assert "token_hash" in columns and "token" not in columns
+        assert conn.execute("SELECT COUNT(*) FROM auth_sessions").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_the_legacy_session_migration_restores_the_user_id_index(legacy_session_db):
+    """DROP TABLE takes the table's indexes with it.
+
+    The recreate has to come before the CREATE INDEX IF NOT EXISTS, or the index
+    is silently gone and every session lookup by user_id degrades to a scan --
+    with nothing failing to show it.
+    """
+    import sqlite3
+
+    UserStore(db_path=legacy_session_db)
+
+    conn = sqlite3.connect(legacy_session_db)
+    try:
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+    finally:
+        conn.close()
+    assert "idx_auth_sessions_user_id" in indexes
+
+
+def test_a_surviving_legacy_token_cannot_authenticate_after_migration(legacy_session_db):
+    store = UserStore(db_path=legacy_session_db)
+    assert store.get_user_for_token("legacy-plaintext-token") is None
+
+
+def test_the_legacy_session_migration_announces_itself(legacy_session_db, capsys):
+    """Dropping every live login in prod must not happen in silence.
+
+    The only symptom otherwise is a wave of users being signed out with nothing
+    in the deploy log to connect it to the release.
+    """
+    UserStore(db_path=legacy_session_db)
+    assert "auth_sessions" in capsys.readouterr().out
+
+
+def test_a_migrated_store_does_not_re_announce_on_the_next_boot(legacy_session_db, capsys):
+    """The migration is one-shot; a restart must not keep claiming it ran."""
+    UserStore(db_path=legacy_session_db)
+    capsys.readouterr()
+    UserStore(db_path=legacy_session_db)
+    assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Reclaiming dead session rows
+#
+# Revocation is a soft UPDATE of revoked_at, and get_user_for_token returns at
+# the revoked check before reaching any cleanup -- so without a sweep a revoked
+# row is immortal. Expired rows fare no better: they are only deleted when
+# someone re-presents the dead token, which nobody does. Before hashing, logout
+# DELETEd the row and the table trimmed itself.
+# ---------------------------------------------------------------------------
+
+
+def _session_count(store) -> int:
+    conn = store._get_connection()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM auth_sessions").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _backdate_expiry(store, token_hash: str) -> None:
+    from dashboard.backend.users import _utcnow, format_stored_timestamp
+
+    conn = store._get_connection()
+    conn.execute(
+        "UPDATE auth_sessions SET expires_at = ? WHERE token_hash = ?",
+        (format_stored_timestamp(_utcnow() - timedelta(days=1)), token_hash),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_creating_a_session_reclaims_rows_that_have_already_expired(temp_user_store):
+    from dashboard.backend.session_tokens import hash_session_token
+
+    user = temp_user_store.create_user("sweep@example.com", "Sweep", "securepass1")
+    dead = temp_user_store.create_session(user["id"])
+    _backdate_expiry(temp_user_store, hash_session_token(dead))
+
+    temp_user_store.create_session(user["id"])
+
+    assert _session_count(temp_user_store) == 1
+
+
+def test_a_revoked_session_row_is_reclaimed_once_it_expires(temp_user_store):
+    """Soft revocation is not a licence to keep the row forever.
+
+    The absolute TTL bounds it: a revoked row is collected by the same sweep
+    within SESSION_TTL_DAYS at the latest, which is the pre-hash bound.
+    """
+    from dashboard.backend.session_tokens import hash_session_token
+
+    user = temp_user_store.create_user("revoked@example.com", "Rev", "securepass1")
+    token = temp_user_store.create_session(user["id"])
+    temp_user_store.delete_session(token)
+    _backdate_expiry(temp_user_store, hash_session_token(token))
+
+    temp_user_store.create_session(user["id"])
+
+    assert _session_count(temp_user_store) == 1
+
+
+def test_the_sweep_never_touches_a_live_session(temp_user_store):
+    """The negative half, and the one that matters.
+
+    A sweep with a wrong comparison signs everybody out at their next login and
+    looks exactly like a working sweep until someone complains.
+    """
+    user = temp_user_store.create_user("live@example.com", "Live", "securepass1")
+    keep = temp_user_store.create_session(user["id"])
+
+    temp_user_store.create_session(user["id"])
+
+    assert _session_count(temp_user_store) == 2
+    assert temp_user_store.get_user_for_token(keep) is not None
+
+
+def test_a_write_lock_cannot_invalidate_a_good_session(temp_user_store, monkeypatch):
+    """The last_seen_at touch is an optimisation; it must never fail the request.
+
+    get_user_for_token was read-only until sessions were hashed. It now writes,
+    so it can lose a race for the write lock -- and sqlite3 raising
+    OperationalError out of here reaches get_current_user as a 500 on a session
+    that is perfectly valid. Losing one throttled timestamp update is free;
+    signing the user out over it is not.
+    """
+    import sqlite3
+
+    from dashboard.backend.session_tokens import hash_session_token
+    from dashboard.backend.users import UserStore, _utcnow, format_stored_timestamp
+
+    monkeypatch.setenv("SESSION_LAST_SEEN_THROTTLE_SECONDS", "1")
+    user = temp_user_store.create_user("locked@example.com", "Locked", "securepass1")
+    token = temp_user_store.create_session(user["id"])
+
+    stale = format_stored_timestamp(_utcnow() - timedelta(hours=1))
+    conn = temp_user_store._get_connection()
+    conn.execute(
+        "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?",
+        (stale, hash_session_token(token)),
+    )
+    conn.commit()
+    conn.close()
+
+    # Don't sit out the default 5s busy timeout just to observe the failure.
+    original_get_connection = UserStore._get_connection
+
+    def impatient(self):
+        opened = original_get_connection(self)
+        opened.execute("PRAGMA busy_timeout = 0")
+        return opened
+
+    monkeypatch.setattr(UserStore, "_get_connection", impatient)
+
+    blocker = sqlite3.connect(str(temp_user_store.db_path), timeout=0)
+    blocker.execute("BEGIN IMMEDIATE")  # RESERVED: reads still pass, writes do not
+    try:
+        assert temp_user_store.get_user_for_token(token) is not None
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
+def test_a_revoked_but_unexpired_session_row_survives_the_sweep(temp_user_store):
+    """Revoked-and-still-inside-its-TTL is the window where revoked_at is read."""
+    user = temp_user_store.create_user("soft@example.com", "Soft", "securepass1")
+    token = temp_user_store.create_session(user["id"])
+    temp_user_store.delete_session(token)
+
+    temp_user_store.create_session(user["id"])
+
+    assert _session_count(temp_user_store) == 2
+    assert temp_user_store.get_user_for_token(token) is None

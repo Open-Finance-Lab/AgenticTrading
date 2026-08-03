@@ -46,6 +46,22 @@ services:
       # durable deploy sets BOTH, pointed at the same Neon DB.
       - key: USERS_DATABASE_URL
         sync: false
+      # HMAC key for auth_sessions.token_hash. REQUIRED here: the app refuses to
+      # start without it whenever RENDER is set, because a session digest keyed
+      # on a development fallback is not a protection. Set it in the Render
+      # dashboard BEFORE merging anything that depends on it -- env-var writes do
+      # not themselves redeploy, so setting it after the merge leaves one deploy
+      # cycle failing its boot. Rotating this value invalidates every live
+      # session; users sign in again.
+      - key: SESSION_HASH_SECRET
+        sync: false
+      # Optional session lifetimes; both default in session_tokens.py.
+      # SESSION_TTL_DAYS (7) is the absolute cap, SESSION_IDLE_HOURS (24) the
+      # idle window.
+      - key: SESSION_TTL_DAYS
+        sync: false
+      - key: SESSION_IDLE_HOURS
+        sync: false
       # Durable Postgres for backtest run history (agent_runs, equity_timeseries,
       # trades, backtest_decisions, run_manifest). Accounts and content are
       # separate: USERS_DATABASE_URL / CONTENT_DATABASE_URL. Set in the Render
