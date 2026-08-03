@@ -15,8 +15,9 @@ Consumes the canonical provider/domain modules:
 
 from datetime import datetime
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
+from dashboard.backend.api.auth import get_current_user
 from dashboard.backend.database import db
 from dashboard.backend.baselines_endpoint import get_baselines_from_db
 from dashboard.backend.cache import (
@@ -268,16 +269,26 @@ def get_paper_portfolio_history(timeframe: str = "1D"):
 
 
 @router.post("/start-session")
-def start_paper_session(agent_name: str = "Agent"):
+def start_paper_session(
+    agent_name: str = "Agent",
+    current_user: dict = Depends(get_current_user),
+):
     """
     Start a new paper trading session and return run_id.
-    
+
+    Requires a signed-in account. Read-only ``/paper/*`` GETs remain open for
+    the shared Alpaca paper demo; mutating session creation does not. Stays a
+    plain (sync) ``def`` — not ``async`` — so FastAPI keeps running it in the
+    threadpool rather than the event loop (#292); ``get_current_user`` is
+    itself sync, so the dependency doesn't require an async route.
+
     Query params:
     - agent_name: Name of agent/strategy (default: "Agent")
-    
+
     Returns:
         run_id for tracking this session
     """
+    _ = current_user  # auth gate only; shared Alpaca account is not per-user yet
     try:
         run_id = create_paper_trading_session(agent_name)
         
