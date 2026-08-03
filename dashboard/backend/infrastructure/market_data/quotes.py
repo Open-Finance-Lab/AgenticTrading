@@ -750,7 +750,10 @@ def _refresh_ticker_in_background(cache_key: str, symbols: List[str]) -> None:
         try:
             _fetch_and_store(cache_key, symbols)
         except Exception as exc:
-            print(f"Ticker background refresh failed for {cache_key}: {exc!r}")
+            # !r on the key, not str: it is built from unauthenticated
+            # ``symbols`` input, and repr escapes any embedded newline that
+            # would otherwise forge a second log line.
+            print(f"Ticker background refresh failed for {cache_key!r}: {exc!r}")
         finally:
             with _ticker_refresh_lock:
                 _ticker_refresh_inflight.discard(cache_key)
@@ -767,7 +770,7 @@ def _refresh_ticker_in_background(cache_key: str, symbols: List[str]) -> None:
         # start would otherwise bar it from ever refreshing again. Swallowing
         # the error also keeps the caller's good stale payload -- letting this
         # propagate would surface as an empty ticker instead.
-        print(f"Ticker background refresh could not start for {cache_key}: {exc!r}")
+        print(f"Ticker background refresh could not start for {cache_key!r}: {exc!r}")
         with _ticker_refresh_lock:
             _ticker_refresh_inflight.discard(cache_key)
 

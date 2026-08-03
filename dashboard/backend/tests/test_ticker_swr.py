@@ -205,6 +205,26 @@ def test_refresh_thread_that_cannot_start_does_not_wedge_the_key(monkeypatch):
     )
 
 
+def test_refresh_failure_log_escapes_injected_newlines(monkeypatch, capsys):
+    """cache_key is built from unauthenticated symbols=; it must not forge a log line."""
+    evil = "AAPL\nFAKE LOG LINE"
+    quotes._ticker_cache[evil] = (
+        time.time() - quotes.TICKER_CACHE_TTL_SECONDS - 5,
+        OLD_QUOTES,
+    )
+
+    def boom(symbols):
+        raise RuntimeError("provider exploded")
+
+    monkeypatch.setattr(quotes, "_fetch_quotes_uncached", boom)
+    quotes.get_market_quotes([evil])
+    assert _wait_until(lambda: not quotes._ticker_refresh_inflight)
+
+    out = capsys.readouterr().out
+    assert "Ticker background refresh failed" in out
+    assert "\nFAKE LOG LINE" not in out, "a raw newline reached the log unescaped"
+
+
 def test_cache_keys_are_bounded(monkeypatch):
     """symbols= is unauthenticated input, so the keyed maps must not grow forever."""
     monkeypatch.setattr(quotes, "_fetch_quotes_uncached", lambda symbols: NEW_QUOTES)
