@@ -41,14 +41,37 @@ def test_ticker_error_body_hides_exception_detail(monkeypatch):
 
 def test_paper_account_error_body_hides_exception_detail(monkeypatch):
     monkeypatch.setattr(paper_mod, "AlpacaPaperTradingClient", _ExplodingClient)
+    # An account cached by an earlier test would short-circuit the handler
+    # before the exploding client is ever constructed.
+    paper_mod.paper_trading_cache.clear_all()
     data = client.get("/paper/account").json()
     assert data["success"] is False
     assert "TRACE-MARKER" not in str(data)
 
 
 def test_paper_start_session_error_body_hides_exception_detail(monkeypatch):
+    import tempfile
+    from pathlib import Path
+
+    import dashboard.backend.users as users_module
+
     monkeypatch.setattr(paper_mod, "AlpacaPaperTradingClient", _ExplodingClient)
-    data = client.post("/paper/start-session").json()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = users_module.UserStore(db_path=Path(tmpdir) / "users.db")
+        monkeypatch.setattr(users_module, "user_store", store)
+        local = TestClient(app)
+        token = local.post(
+            "/api/auth/signup",
+            json={
+                "email": "paper-err@example.com",
+                "display_name": "Paper",
+                "password": "securepass1",
+            },
+        ).json()["token"]
+        data = local.post(
+            "/paper/start-session",
+            headers={"Authorization": f"Bearer {token}"},
+        ).json()
     assert data["success"] is False
     assert "TRACE-MARKER" not in str(data)
 

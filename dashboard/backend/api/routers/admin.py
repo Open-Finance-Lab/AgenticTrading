@@ -13,29 +13,47 @@ SQLite file a redeploy restored -- the wipe undid itself. Once
 ``AGENT_RUNS_DATABASE_URL`` makes that history durable, a single anonymous
 ``curl`` irreversibly destroys the only copy, with no redeploy to recover
 from. Nothing ever called it (no frontend, SDK, Discord bot or doc), so it was
-removed rather than gated -- there is no admin/owner tier in this codebase to
-gate it with (``users.role`` exists but is read for authorization nowhere).
+removed rather than gated. ``admin_delete_run`` below now does gate on
+``users.role == "admin"``, but nothing assigns that role -- no signup or profile
+route writes it and the column defaults to ``'user'`` -- so the tier only exists
+for an operator who flips the column by hand.
 ``db.clear_all()`` itself stays: it is still used by the test suite and by
 ``dashboard/scripts/backtest_hourly_agent.py --clear``, both of which run
 against a database the operator chose on purpose.
 """
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 
+from dashboard.backend.api.auth import get_current_user
 from dashboard.backend.database import db
 
 router = APIRouter()
 
 
 @router.delete("/admin/runs/{run_id}")
-async def admin_delete_run(run_id: str, request: Request):
-    """⚠️ Delete a specific run (must be owned by session)."""
+def admin_delete_run(
+    run_id: str,
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    """Delete a run owned by the caller's backtest session.
+
+    ``users.role`` is the gate: only ``admin`` may call this. Ordinary
+    accounts get 403 even with a valid session UUID — the previous check was
+    only ``X-Session-Id`` format, which any client can mint. Stays a plain
+    (sync) ``def`` — not ``async`` — so FastAPI keeps running it in the
+    threadpool rather than the event loop (#292); ``get_current_user`` is
+    itself sync, so the dependency doesn't require an async route.
+    """
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+
     session_id = request.state.session_id
-    
+
     # Verify ownership before deleting
     run = db.get_run_with_session(run_id, session_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found or not yours")
-    
+
     db.delete_run(run_id)
     return {"status": "deleted", "run_id": run_id}

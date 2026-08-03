@@ -16,7 +16,7 @@ router = APIRouter()
 
 
 @router.get("/config/features")
-async def get_features():
+def get_features():
     """Return optional dashboard capabilities enabled by configuration."""
     return {
         "vnpy_simulation_enabled": vnpy_simulation_enabled(),
@@ -25,7 +25,7 @@ async def get_features():
 
 
 @router.get("/config/defaults")
-async def get_defaults():
+def get_defaults():
     """
     Get default configuration for the website.
     

@@ -58,7 +58,7 @@ def _require_session(session_id: Optional[str]) -> str:
 
 
 @router.get("/setup")
-async def algo_setup_status():
+def algo_setup_status():
     """Tell frontend which credentials / routes are ready."""
     from dashboard.backend.domain.backtesting.algo_service import _has_alpaca_credentials
     import os
@@ -70,7 +70,7 @@ async def algo_setup_status():
 
 
 @router.get("/defaults")
-async def algo_defaults():
+def algo_defaults():
     from dashboard.backend.domain.backtesting.algo_service import _default_backtest_dates
     start, end = _default_backtest_dates()
     return {
@@ -80,14 +80,14 @@ async def algo_defaults():
 
 
 @router.post("/chat")
-async def algo_chat(body: ChatRequest, x_session_id: Optional[str] = Header(None)):
+def algo_chat(body: ChatRequest, x_session_id: Optional[str] = Header(None)):
     _require_session(x_session_id)
     blocks = _blocks_to_dict(body.blocks)
     return process_chat(body.message, blocks)
 
 
 @router.post("/execute")
-async def algo_execute(body: ExecuteRequest, x_session_id: Optional[str] = Header(None)):
+def algo_execute(body: ExecuteRequest, x_session_id: Optional[str] = Header(None)):
     session_id = _require_session(x_session_id)
     blocks = _blocks_to_dict(body.blocks)
     if not any(v.strip() for v in blocks.values()):
@@ -105,13 +105,13 @@ async def algo_execute(body: ExecuteRequest, x_session_id: Optional[str] = Heade
 
 
 @router.get("/status")
-async def algo_execution_status(x_session_id: Optional[str] = Header(None)):
+def algo_execution_status(x_session_id: Optional[str] = Header(None)):
     session_id = _require_session(x_session_id)
     return get_algo_status(session_id)
 
 
 @router.get("/submissions")
-async def list_submissions(
+def list_submissions(
     x_session_id: Optional[str] = Header(None),
     mine_only: bool = False,
 ):

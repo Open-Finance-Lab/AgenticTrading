@@ -1030,7 +1030,7 @@ def _resolve_backtest_session(request: Request, agent_id: Optional[str]) -> str:
 
 
 @router.post("/backtest/run")
-async def run_backtest_endpoint(
+def run_backtest_endpoint(
     request: Request,
     start_date: str = "2026-05-01",
     end_date: str = "2026-05-07",
@@ -1300,7 +1300,7 @@ async def run_backtest_endpoint(
     return response
 
 @router.get("/backtest/status")
-async def get_backtest_status(request: Request):
+def get_backtest_status(request: Request):
     """Get backtest status (running, error, or completed)."""
     session_id = request.state.session_id
     
@@ -1362,7 +1362,7 @@ async def get_backtest_status(request: Request):
 # ============================================================================
 
 @router.get("/api/backtest/runs", response_model=List[RunMetadata])
-async def get_backtest_runs(request: Request):
+def get_backtest_runs(request: Request):
     """Get all backtest runs for this session."""
     session_id = get_session_id_from_request(request)
     runs = db.get_runs_by_session(session_id)
@@ -1373,7 +1373,7 @@ async def get_backtest_runs(request: Request):
 # IMPORTANT: Register /compare/latest BEFORE /{run_id} to prevent {run_id} from matching "compare/latest"
 
 @router.get("/api/backtest/compare/latest", response_model=ComparisonResponse)
-async def compare_latest_backtests(request: Request):
+def compare_latest_backtests(request: Request):
     """Compare the latest backtest runs + baselines for this session."""
     session_id = get_session_id_from_request(request)
     
@@ -1428,7 +1428,7 @@ async def compare_latest_backtests(request: Request):
 
 
 @router.get("/api/backtest/{run_id}/chart-data", response_model=BacktestChartData)
-async def get_backtest_chart_data(run_id: str, request: Request):
+def get_backtest_chart_data(run_id: str, request: Request):
     """Chart-ready equity series for the Playground backtest page.
 
     Uses the same DJIA index + Nasdaq-100 baselines and gapless market-hour
@@ -1475,7 +1475,7 @@ async def get_backtest_chart_data(run_id: str, request: Request):
 
 
 @router.get("/api/backtest/{run_id}", response_model=EquityCurve)
-async def get_backtest_run(run_id: str, request: Request):
+def get_backtest_run(run_id: str, request: Request):
     """Get specific backtest run with equity curve."""
     session_id = get_session_id_from_request(request)
     run = db.get_run_with_session(run_id, session_id)
@@ -1498,7 +1498,7 @@ async def get_backtest_run(run_id: str, request: Request):
 
 
 @router.get("/runs/latest/metrics", response_model=RunMetadata)
-async def get_latest_metrics(request: Request):
+def get_latest_metrics(request: Request):
     """Get metrics for the latest Agent backtest run in this session (excludes baselines)."""
     session_id = request.state.session_id
     runs = [r for r in db.get_runs_by_session(session_id) or [] 
@@ -1511,7 +1511,7 @@ async def get_latest_metrics(request: Request):
 
 
 @router.get("/runs", response_model=List[RunMetadata])
-async def get_runs(request: Request, mode: Optional[str] = None):
+def get_runs(request: Request, mode: Optional[str] = None):
     """
     Get all backtest runs (public, not filtered by session).
     Backtest results are meant to be shared/viewed, not isolated per user.
@@ -1534,7 +1534,7 @@ async def get_runs(request: Request, mode: Optional[str] = None):
 
 
 @router.get("/runs/{run_id}", response_model=RunMetadata)
-async def get_run(run_id: str, request: Request):
+def get_run(run_id: str, request: Request):
     """Get metadata for a specific run."""
     session_id = request.state.session_id
     run = db.get_run_with_session(run_id, session_id)
@@ -1544,7 +1544,7 @@ async def get_run(run_id: str, request: Request):
 
 
 @router.get("/runs/{run_id}/equity", response_model=EquityCurve)
-async def get_equity_curve(run_id: str, request: Request):
+def get_equity_curve(run_id: str, request: Request):
     """
     Get equity curve for a specific run.
     
@@ -1573,7 +1573,7 @@ async def get_equity_curve(run_id: str, request: Request):
 
 
 @router.get("/runs/{run_id}/trades")
-async def get_run_trades(run_id: str, request: Request):
+def get_run_trades(run_id: str, request: Request):
     """Trade log for a backtest run owned by this session."""
     session_id = request.state.session_id
     run = db.get_run_with_session(run_id, session_id)
@@ -1584,7 +1584,7 @@ async def get_run_trades(run_id: str, request: Request):
 
 
 @router.get("/runs/{run_id}/rejected-orders")
-async def get_run_rejected_orders(run_id: str, request: Request):
+def get_run_rejected_orders(run_id: str, request: Request):
     """Rejected / partially-filled order records for a run owned by this session.
 
     Served here rather than on RunMetadata because these are per-step audit
@@ -1693,7 +1693,7 @@ def _render_run_plot_png(run_id: str) -> bytes:
 
 
 @router.get("/compare", response_model=ComparisonResponse)
-async def compare_runs(run_ids: str, request: Request):
+def compare_runs(run_ids: str, request: Request):
     """
     Compare multiple runs (public, not filtered by session).
     
