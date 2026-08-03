@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hmac
+import ipaddress
 import logging
 import math
 import os
@@ -14,7 +15,11 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from dashboard.backend.api import discord_oauth
-from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
+from dashboard.backend.api.rate_limit import (
+    FixedWindowRateLimiter,
+    client_ip,
+    client_key,
+)
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
 from dashboard.backend.infrastructure.email import sender as email_sender
@@ -240,6 +245,39 @@ class AuthResponse(BaseModel):
     token: str
 
 
+_MAX_STORED_USER_AGENT = 200
+
+
+def _session_client_context(request: Request) -> dict:
+    """What auth_sessions records about the client a session was issued to.
+
+    ``ip_prefix``, deliberately, not the address: this row outlives the request
+    and is meant to answer "was that me?" on a signed-in-devices list. Keeping
+    the exact address would turn the session table into a location log for
+    every user, which is a different product with different obligations. /24
+    and /48 are coarse enough to be that, and no coarser.
+
+    Both values come from headers the caller controls, so neither is a security
+    control -- see rate_limit's module docstring. They are display data.
+    """
+    raw_ip = client_ip(request)
+    try:
+        address = ipaddress.ip_address(raw_ip)
+    except ValueError:
+        prefix = None
+    else:
+        prefix = str(
+            ipaddress.ip_network(
+                f"{address}/{24 if address.version == 4 else 48}", strict=False
+            )
+        )
+    agent = (request.headers.get("user-agent") or "").strip()
+    return {
+        "user_agent": agent[:_MAX_STORED_USER_AGENT] or None,
+        "ip_prefix": prefix,
+    }
+
+
 def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
     if not authorization:
         return None
@@ -311,7 +349,9 @@ async def signup(payload: SignupRequest, request: Request):
             raise HTTPException(status_code=409, detail="Email is already registered") from exc
         raise
 
-    token = users_module.user_store.create_session(user["id"])
+    token = users_module.user_store.create_session(
+        user["id"], **_session_client_context(request)
+    )
     return {"user": user, "token": token}
 
 
@@ -352,7 +392,9 @@ async def login(payload: LoginRequest, request: Request):
         print(f"auth.login_failed domain={_email_domain(payload.email)}")
         raise HTTPException(status_code=401, detail=LOGIN_FAILURE_DETAIL)
 
-    token = users_module.user_store.create_session(user["id"])
+    token = users_module.user_store.create_session(
+        user["id"], **_session_client_context(request)
+    )
     return {"user": public_user(user), "token": token}
 
 

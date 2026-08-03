@@ -1951,3 +1951,64 @@ def test_env_int_disables_on_zero_and_reports_bad_overrides(monkeypatch, capsys)
 
     monkeypatch.delenv("AUTH_FAKE_MAX")
     assert auth_api._env_int("AUTH_FAKE_MAX", 30) == 30
+
+
+# ---------------------------------------------------------------------------
+# Session client context (auth_sessions.user_agent / ip_prefix)
+# ---------------------------------------------------------------------------
+
+
+def _only_session(store):
+    conn = store._get_connection()
+    try:
+        conn.row_factory = None
+        return conn.execute(
+            "SELECT user_agent, ip_prefix FROM auth_sessions"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("route", ["signup", "login"])
+def test_a_session_records_the_client_it_was_issued_to(client, temp_user_store, route):
+    """The columns exist to answer "what are my signed-in devices?".
+
+    Storing NULL in both makes the schema describe a feature that isn't there,
+    and the gap only surfaces once someone builds the session list on top.
+    """
+    payload = {
+        "email": "context@example.com",
+        "display_name": "Context",
+        "password": "securepass1",
+    }
+    headers = {"User-Agent": "AtlTest/1.0", "X-Forwarded-For": "203.0.113.42"}
+    signup = client.post("/api/auth/signup", json=payload, headers=headers)
+    assert signup.status_code == 200
+    if route == "login":
+        client.post(
+            "/api/auth/login",
+            json={"email": payload["email"], "password": payload["password"]},
+            headers=headers,
+        )
+
+    rows = _only_session(temp_user_store)
+    assert rows, "no session row was written"
+    assert all(row[0] == "AtlTest/1.0" for row in rows)
+    assert all(row[1] == "203.0.113.0/24" for row in rows)
+
+
+def test_the_stored_address_is_a_network_not_the_client(client, temp_user_store):
+    """ip_prefix, not ip. Storing the exact address turns a session table into
+    a location log for every signed-in user, which is not what it is for."""
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "coarse@example.com",
+            "display_name": "Coarse",
+            "password": "securepass1",
+        },
+        headers={"X-Forwarded-For": "198.51.100.77"},
+    )
+    stored = _only_session(temp_user_store)[0][1]
+    assert "198.51.100.77" not in stored
+    assert stored == "198.51.100.0/24"
