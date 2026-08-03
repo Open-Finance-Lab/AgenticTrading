@@ -26,14 +26,14 @@ def _owned_agent(agent_id: str, user_id: int) -> dict:
 
 
 @router.get("")
-async def get_portfolio(current_user: dict = Depends(get_current_user)):
+def get_portfolio(current_user: dict = Depends(get_current_user)):
     """Return the caller's portfolio, bootstrapping at $10k if missing."""
     portfolio = portfolio_service.get_or_create_portfolio(current_user["id"])
     return {"portfolio": portfolio}
 
 
 @router.post("/allocate")
-async def allocate_cash(
+def allocate_cash(
     body: TransferBody,
     current_user: dict = Depends(get_current_user),
 ):
@@ -53,7 +53,7 @@ async def allocate_cash(
 
 
 @router.post("/reclaim")
-async def reclaim_cash(
+def reclaim_cash(
     body: TransferBody,
     current_user: dict = Depends(get_current_user),
 ):

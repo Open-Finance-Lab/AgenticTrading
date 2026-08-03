@@ -329,7 +329,16 @@ def test_csp_middleware_lives_in_middleware_module():
 
 def test_middleware_order_preserved():
     names = [m.cls.__name__ for m in app.user_middleware]
-    assert names == ["CSPHeaderMiddleware", "SessionMiddleware", "CORSMiddleware"]
+    # Outermost first. GZipMiddleware must stay LAST: as the innermost layer it
+    # sees the router's single-shot response, which is the only way its
+    # minimum_size is honoured. Above SessionMiddleware (a BaseHTTPMiddleware,
+    # which re-streams every response) it silently compresses everything.
+    assert names == [
+        "CSPHeaderMiddleware",
+        "SessionMiddleware",
+        "CORSMiddleware",
+        "GZipMiddleware",
+    ]
 
 
 def test_cors_preflight_allows_every_routed_method():

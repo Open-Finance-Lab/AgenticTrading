@@ -362,7 +362,7 @@ async def me(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/logout")
-async def logout(authorization: Optional[str] = Header(default=None)):
+def logout(authorization: Optional[str] = Header(default=None)):
     token = _extract_bearer_token(authorization)
     if token:
         users_module.user_store.delete_session(token)

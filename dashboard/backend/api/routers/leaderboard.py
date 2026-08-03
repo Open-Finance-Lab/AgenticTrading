@@ -15,7 +15,7 @@ router = APIRouter(prefix="/v1/leaderboard", tags=["leaderboard"])
 
 
 @router.get("")
-async def api_get_leaderboard(
+def api_get_leaderboard(
     refresh: bool = Query(default=False),
     period: str = Query(
         default="contest",
