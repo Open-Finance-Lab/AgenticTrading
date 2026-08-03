@@ -34,7 +34,10 @@ _BARE_ORIGIN = re.compile(r"(?:API_BASE|API)\s*=\s*window\.location\.origin\s*;"
 # ``'https://evil.example/localhost'`` (CodeQL: py/incomplete-url-substring
 # -sanitization). Quote-delimiting the literal makes the match exact.
 _LOCALHOST_LITERAL = re.compile(r"""['"]localhost['"]""")
-_EMPTY_PROD_BASE = re.compile(r"""['"]{2}""")
+# Matching quote pairs only: ``['"]{2}`` also matches the mixed adjacency `'"`,
+# so an initializer that merely abuts two differently-quoted strings would
+# false-pass as "uses an empty API base".
+_EMPTY_PROD_BASE = re.compile(r"""(?:''|"")""")
 _LEGACY_ONRENDER = re.compile(r"""['"]https://agentictrading\.onrender\.com['"]""")
 
 

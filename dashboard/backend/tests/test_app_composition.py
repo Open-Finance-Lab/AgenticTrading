@@ -416,3 +416,66 @@ def test_app_first_party_imports_are_canonical():
     first_party = {m for m in modules if "backend" in m or m.startswith("dashboard")}
     for m in first_party:
         assert m.startswith("dashboard.backend"), m
+
+
+# ---------------------------------------------------------------------------
+# CORS allowlist resolution (same-origin migration)
+# ---------------------------------------------------------------------------
+
+def test_cors_allow_origins_defaults_to_wildcard_when_unset(monkeypatch):
+    """Unset must reproduce the pre-migration default exactly.
+
+    Same-origin Vercel traffic goes through the ``vercel.json`` rewrites and
+    never preflights, so the allowlist exists for the split-origin callers that
+    remain. Anything other than ``["*"]`` here silently 403s them at the
+    preflight on a deploy where the env var was never set -- which is the
+    default state of the Render dashboard.
+    """
+    import dashboard.backend.app as app_module
+
+    monkeypatch.delenv("ATL_FRONTEND_ORIGINS", raising=False)
+    assert app_module._cors_allow_origins() == ["*"]
+
+    monkeypatch.setenv("ATL_FRONTEND_ORIGINS", "   ")
+    assert app_module._cors_allow_origins() == ["*"]
+
+
+def test_cors_allow_origins_parses_allowlist_and_adds_local_hosts(monkeypatch):
+    import dashboard.backend.app as app_module
+
+    monkeypatch.setenv(
+        "ATL_FRONTEND_ORIGINS",
+        "https://example.vercel.app/, , https://second.example",
+    )
+    origins = app_module._cors_allow_origins()
+
+    # Trailing slash stripped -- a browser's Origin header never carries one,
+    # so an unstripped entry never matches and the allowlist silently fails shut.
+    assert "https://example.vercel.app" in origins
+    assert "https://example.vercel.app/" not in origins
+    assert "https://second.example" in origins
+    # Blank segments from a trailing/doubled comma must not become an origin.
+    assert "" not in origins
+    for host in (
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ):
+        assert host in origins, host
+
+
+def test_cors_wildcard_is_never_mixed_into_an_explicit_allowlist(monkeypatch):
+    """``*`` plus a real allowlist is the shape that becomes unsafe.
+
+    Starlette rejects ``allow_origins=["*"]`` combined with
+    ``allow_credentials=True``, but only when the wildcard is the *whole* list.
+    A list that merely contains ``"*"`` alongside named origins matches every
+    origin while looking restricted, so a later flip of ``allow_credentials``
+    would hand credentialed responses to any site.
+    """
+    import dashboard.backend.app as app_module
+
+    monkeypatch.setenv("ATL_FRONTEND_ORIGINS", "https://example.vercel.app")
+    origins = app_module._cors_allow_origins()
+    assert "*" not in origins
