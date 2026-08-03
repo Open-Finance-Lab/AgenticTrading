@@ -9,6 +9,24 @@
     box-sizing: border-box;
 }
 
+/*
+ * Form controls do not inherit the page font: the UA stylesheet gives every
+ * `button`/`input`/`select` its own default (Arial here) and every `textarea`
+ * `monospace`. With no base rule, 15 of the 16 buttons on My Agents and the
+ * plain-English "Trading instruction" textarea painted in a different typeface
+ * than the text around them -- the single widest typographic inconsistency in
+ * the app. `font-family` only, deliberately: `font: inherit` would also reset
+ * size/weight, and the controls that set those want to keep them. The mono
+ * fields (.agent-capital-input, .date-input, .control-select, ...) declare
+ * `font-family: var(--font-mono)` on a class, so they still win over this.
+ */
+button,
+input,
+select,
+textarea {
+    font-family: inherit;
+}
+
 :root {
     /* 10jqka-inspired dark theme - professional trading */
     --bg-primary: #0a0e27;
@@ -520,7 +538,14 @@ a.header-brand:hover .title-section h1 {
     border: none;
     border-radius: 6px;
     background: var(--info-color);
-    color: #fff;
+    /*
+     * Dark on cyan, not #fff: white on --info-color (#00bfff) measures 2.12:1,
+     * under the WCAG AA 4.5:1 floor. This rule paints the primary button of the
+     * sign-in modal, the Run Backtest modal and both create-agent modals -- i.e.
+     * the submit control at every step of this flow. #041018 measures ~9:1 and
+     * matches how the same cyan is already paired on .home-btn-primary.
+     */
+    color: #041018;
     font-weight: 700;
     font-size: 13px;
     cursor: pointer;
@@ -4512,6 +4537,35 @@ a.header-brand:hover .title-section h1 {
     width: min(560px, calc(100vw - 32px));
     max-height: calc(100vh - 48px);
     overflow: auto;
+    /* Column layout so the submit button can be pinned to the bottom below. */
+    display: flex;
+    flex-direction: column;
+}
+
+/*
+ * Pin the primary CTA. The panel's content runs ~1080px tall, so on a 1440x900
+ * screen the "▶ Run Backtest" button rendered at y=1045 -- 145px past the fold
+ * (measured live), and worse on a 1366x768 laptop. The panel scrolls, but
+ * nothing said so, so the payoff action of the whole product was invisible on
+ * open. Sticky keeps it in view at every scroll position.
+ */
+.run-backtest-modal-panel > #runBacktestModalSubmit {
+    position: sticky;
+    bottom: 0;
+    margin-top: auto;
+    /* Opaque: the content scrolls underneath this button. Matches .auth-submit. */
+    background-color: var(--info-color);
+    box-shadow: 0 -8px 16px -8px rgba(0, 0, 0, 0.6);
+}
+
+/*
+ * Reclaim ~170px of that overflow at the source: two preset cards each
+ * reserving 180px for three short lines is what pushed the CTA off-screen.
+ * Scoped to this modal so the roomier cards elsewhere are untouched.
+ */
+.run-backtest-modal .preset-card {
+    min-height: 0;
+    padding: 12px;
 }
 
 .run-backtest-modal-body {
@@ -8193,8 +8247,19 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     background: rgba(34, 211, 238, 0.1);
 }
 
+/*
+ * A neutral treatment, not a faded primary. `opacity: 0.45` over the solid
+ * cyan fill left the permanently-disabled "Run Paper Trading" button sitting
+ * next to the real "Run Backtest" as the same shape and colour at a slightly
+ * different brightness -- the action row squint-tested as two cyan CTAs, which
+ * halved the pull of the one action this flow exists to drive. The blend also
+ * dropped the label to roughly 3:1 against its own fill.
+ */
 .agent-card-cta--disabled {
-    opacity: 0.45;
+    opacity: 1;
+    background: rgba(148, 163, 184, 0.10);
+    border-color: var(--border-color);
+    color: var(--text-muted);
     cursor: not-allowed;
 }
 
@@ -8401,26 +8466,54 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 }
 
 .subtab-btn {
-    padding: 7px 16px;
+    /*
+     * 13px/9px, not 11px/7px: this bar is the primary navigation *inside* the
+     * product (My Agents / Backtest / Paper Trading), yet it was the smallest
+     * interactive text on the page -- 11px in a 26px-tall target, against a
+     * 14px/32px top nav. 13px + 9px padding brings it to ~32px, matching the
+     * nav above it.
+     */
+    padding: 9px 16px;
     border: none;
     background: transparent;
     color: var(--text-secondary);
     border-radius: 3px;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 700;
     cursor: pointer;
-    transition: all 0.15s;
+    /* Enumerated, not `all`: `all` also animates layout properties. */
+    transition: background-color 0.15s ease, color 0.15s ease;
     white-space: nowrap;
 }
 
 .subtab-btn.active {
     background: var(--info-color);
-    color: white;
+    /*
+     * Dark on cyan, not white: white on --info-color (#00bfff) measures 2.12:1,
+     * below the WCAG AA 4.5:1 floor, on the most-used control in the flow.
+     * #041018 measures ~9:1 and matches how the same cyan is already paired
+     * with a dark foreground on .home-btn-primary / .agent-card-cta.
+     */
+    color: #041018;
 }
 
 .subtab-btn:hover:not(.active) {
     color: var(--text-primary);
     background: var(--bg-hover);
+}
+
+/*
+ * styles.css had zero `:focus-visible` rules and eight bare `outline: none`
+ * resets, and this bar had no focus style of any kind -- keyboard users could
+ * not see which tab they were on. Scoped to the flow's controls rather than a
+ * global reset so it cannot disturb unrelated views.
+ */
+.subtab-btn:focus-visible,
+.agent-card-cta:focus-visible,
+.agent-view-btn:focus-visible,
+.home-btn:focus-visible {
+    outline: 2px solid var(--home-accent-cyan);
+    outline-offset: 2px;
 }
 
 .overview-grid {
@@ -8633,10 +8726,12 @@ body.agent-editor-open {
     margin-bottom: 12px;
 }
 
-.agent-capital-title {
+/* Beat `.section-card h3 { font-size: 12px }` (higher specificity). */
+.section-card .agent-capital-title {
     margin: 0 0 12px;
     font-size: 17px;
     font-weight: 700;
+    letter-spacing: normal;
     color: var(--text-primary);
 }
 
@@ -8844,10 +8939,12 @@ body.agent-editor-open {
     gap: 12px;
 }
 
-.agent-editor-history-title {
+/* Beat `.section-card h3 { font-size: 12px }` (higher specificity). */
+.section-card .agent-editor-history-title {
     margin: 0;
     font-size: 15px;
     font-weight: 700;
+    letter-spacing: normal;
     color: var(--text-primary);
 }
 
@@ -8942,10 +9039,12 @@ body.agent-editor-open {
     font-size: 12px;
 }
 
-.agent-editor-intro-title {
+/* Beat `.section-card h3 { font-size: 12px }` (higher specificity). */
+.section-card .agent-editor-intro-title {
     margin: 0 0 6px;
     font-size: 15px;
     font-weight: 700;
+    letter-spacing: normal;
     color: var(--text-primary);
 }
 
@@ -9377,7 +9476,13 @@ body.agent-editor-open {
     border: 1px solid var(--border-color);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 0.95rem;
+    /*
+     * 14px, not `0.95rem`: `rem` resolves against the 16px html root while the
+     * whole app is sized off the 14px body, so 0.95rem painted this field at
+     * 15.2px -- a fractional size (blurry sub-pixel text) on a different scale
+     * from every other control.
+     */
+    font-size: 14px;
     line-height: 1.5;
     padding: 10px 12px;
     margin-top: 10px;

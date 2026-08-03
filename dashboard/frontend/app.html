@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=78">
+    <link rel="stylesheet" href="styles.css?v=79">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -263,7 +263,7 @@
 
                 <div class="control-group">
                     <label>Period</label>
-                    <p class="control-helper">Pre-filled with a recent window that has full market data. Change it to any range you have data for.</p>
+                    <p class="control-helper">Pre-filled with a recent window that has full market data. You can pick any window up to 31 days.</p>
                     <div class="date-range-inputs">
                         <div class="date-input-wrapper">
                             <input type="date" id="startDate" value="2026-04-15" class="date-input">
@@ -1671,9 +1671,9 @@
     <script src="market-events/marketEventRelativeTime.js" defer></script>
     <script src="market-events/MarketEventCard.js" defer></script>
     <script src="market-events/MarketEventFeed.js" defer></script>
-    <script src="js/portfolio.js?v=15" defer></script>
-    <script src="js/agent-editor.js?v=17" defer></script>
-    <script src="app.js?v=58" defer></script>
+    <script src="js/portfolio.js?v=16" defer></script>
+    <script src="js/agent-editor.js?v=18" defer></script>
+    <script src="app.js?v=59" defer></script>
     <script src="js/leaderboard.js?v=16" defer></script>
     <script src="home-page.js?v=36" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

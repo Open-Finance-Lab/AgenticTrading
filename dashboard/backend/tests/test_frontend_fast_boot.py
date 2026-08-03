@@ -172,5 +172,5 @@ def test_slow_boot_notice_is_wired():
 # ---------------------------------------------------------------------------
 
 def test_cache_busters_bumped():
-    assert "app.js?v=58" in APP_HTML
-    assert "styles.css?v=78" in APP_HTML
+    assert "app.js?v=59" in APP_HTML
+    assert "styles.css?v=79" in APP_HTML

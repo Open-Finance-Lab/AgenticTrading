@@ -1156,9 +1156,9 @@ function renderAgentGridFooter(categoryKey, total, page, pageCount) {
   const atStart = page <= 0;
   const atEnd = page >= pageCount - 1;
   footer.innerHTML = `
-    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="上一页" ${atStart ? 'disabled' : ''}>←</button>
-    <span class="agents-grid-footer-count">第 ${page + 1} / ${pageCount} 页 · 共 ${total} 个</span>
-    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="下一页" ${atEnd ? 'disabled' : ''}>→</button>`;
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="Previous page" ${atStart ? 'disabled' : ''}>←</button>
+    <span class="agents-grid-footer-count">Page ${page + 1} of ${pageCount} · ${total} total</span>
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="Next page" ${atEnd ? 'disabled' : ''}>→</button>`;
 }
 
 function renderAgentCards(grid, agents, categoryKey) {
@@ -3349,11 +3349,14 @@ function initAuthUI(options = {}) {
       // post-sign-in housekeeping and must not hold the modal open — a slow or
       // hung backend used to leave the popup up over an already-signed-in UI.
       closeAuthModal();
-      // First-time accounts should greet on Home, not a leftover My Agents tab
-      // from browsing while logged out (nav-state restore).
-      if (authMode === 'signup') {
-        navigateToPage('home');
-      }
+      // Land on My Agents after either sign-up or sign-in, matching the landing
+      // page's goToDashboardLoggedIn. Sign-up used to go to Home (a second
+      // marketing hero); sign-in used to navigate nowhere at all, so the only
+      // confirmation it had worked was the header avatar swapping in, and the
+      // user was left on whatever page they happened to be reading.
+      // navigateToPage maps 'agents' → playground + the 'agents' subtab itself.
+      navigateToPage('agents');
+      showAppToast(`Signed in as ${data.user?.display_name || data.user?.email || 'your account'}`);
       claimAgentsForUser()
         .then(() => {
           // If we arrived here from a Discord deep link that needed this account
@@ -5869,8 +5872,7 @@ async function runBacktest() {
     const startDate = startDateInput.value;
     const endDate = endDateInput.value;
     
-    if (!startDate || !endDate) {
-        const msg = 'Please select both start and end dates.';
+    const showModalError = (msg) => {
         const err = document.getElementById('runBacktestModalError');
         if (err && !document.getElementById('runBacktestModal')?.hidden) {
             err.textContent = msg;
@@ -5878,6 +5880,30 @@ async function runBacktest() {
         } else {
             console.warn(msg);
         }
+    };
+
+    if (!startDate || !endDate) {
+        showModalError('Please select both start and end dates.');
+        return;
+    }
+
+    // Mirror the server's MAX_BACKTEST_DAYS (api/routers/backtests.py) here so an
+    // over-long window is caught while the modal is still open and the dates are
+    // still on screen. Without this the only feedback is a 422 that arrives after
+    // the modal has closed, and the helper copy used to actively invite the
+    // mistake ("Change it to any range you have data for").
+    const MAX_BACKTEST_DAYS = 31;
+    const spanDays = Math.round(
+        (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86400000,
+    );
+    if (Number.isFinite(spanDays) && spanDays < 0) {
+        showModalError('The end date must be on or after the start date.');
+        return;
+    }
+    if (Number.isFinite(spanDays) && spanDays > MAX_BACKTEST_DAYS) {
+        showModalError(
+            `Pick a window of ${MAX_BACKTEST_DAYS} days or fewer — that range is ${spanDays} days.`,
+        );
         return;
     }
 

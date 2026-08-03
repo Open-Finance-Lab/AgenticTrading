@@ -664,6 +664,20 @@
   }
 
   function showSaveStatus(message, isError) {
+    // Toast as well as write the inline note. #agentEditorSaveStatus lives at
+    // the bottom of the editor's left column, but every one of this function's
+    // callers is a click on a control in the sticky header (Save, Run Backtest,
+    // Run Live, Connect/Disconnect Robinhood). Measured live at 1440x900: the
+    // header button sits at y=14 and this element renders at y=934 -- 920px
+    // below the fold in a 900px viewport, and it carries no aria-live. So
+    // "Save changes before Run Backtest" and "Agent name is required" both
+    // landed somewhere nobody was looking, and the button read as dead.
+    // #appToast is role="status" aria-live="polite", so this reaches sighted
+    // and screen-reader users both. Done here rather than at the 16 call sites
+    // so no future message can regress to inline-only.
+    if (typeof window.showAppToast === 'function') {
+      window.showAppToast(message);
+    }
     const el = document.getElementById('agentEditorSaveStatus');
     if (!el) return;
     el.hidden = false;
