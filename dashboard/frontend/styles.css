@@ -6982,6 +6982,26 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     gap: 10px;
 }
 
+/* My Agents loading skeletons — shipped in app.html so the grid shows card
+   shapes pre-JS; the first agents render overwrites the grid and clears them. */
+.agent-card--skeleton {
+    min-height: 172px;
+    border: 1px solid var(--border-color);
+    background: linear-gradient(100deg,
+        var(--bg-card) 40%, var(--bg-hover) 50%, var(--bg-card) 60%);
+    background-size: 200% 100%;
+    animation: agent-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes agent-skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-card--skeleton { animation: none; }
+}
+
 .agent-card-head {
     display: flex;
     justify-content: space-between;
