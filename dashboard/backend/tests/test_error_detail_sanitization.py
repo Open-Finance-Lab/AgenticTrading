@@ -41,6 +41,9 @@ def test_ticker_error_body_hides_exception_detail(monkeypatch):
 
 def test_paper_account_error_body_hides_exception_detail(monkeypatch):
     monkeypatch.setattr(paper_mod, "AlpacaPaperTradingClient", _ExplodingClient)
+    # An account cached by an earlier test would short-circuit the handler
+    # before the exploding client is ever constructed.
+    paper_mod.paper_trading_cache.clear_all()
     data = client.get("/paper/account").json()
     assert data["success"] is False
     assert "TRACE-MARKER" not in str(data)

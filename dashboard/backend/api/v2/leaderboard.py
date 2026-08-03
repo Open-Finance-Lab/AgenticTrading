@@ -37,5 +37,5 @@ def build_leaderboard(runs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 @router.get("/leaderboard")
-async def leaderboard():
+def leaderboard():
     return {"leaderboard": build_leaderboard(db.get_all_runs())}

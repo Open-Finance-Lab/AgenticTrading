@@ -19,6 +19,8 @@ Usage:
 import sys
 import json
 import argparse
+import importlib.util
+import subprocess
 from pathlib import Path
 
 # Bootstrap for non-package execution contexts: when this module is run directly
@@ -44,19 +46,32 @@ from dashboard.backend.infrastructure.llm.validator import DJIA_30
 # harness at dashboard.backend.infrastructure.llm.backtest_harness. These symbols
 # are re-exported here so existing consumers (engines/strategies/llm_agent.py,
 # backtest_custom_algo.py, and bha.* callers) keep working unchanged.
-from dashboard.backend.infrastructure.llm.backtest_harness import (
-    Anthropic,
-    HAS_ANTHROPIC,
-    LLM_MODEL_NAME,
-)
+#
+# Bound by assignment from a module alias rather than a bare `from ... import X`
+# so each re-export is explicit and static analysis sees it as used -- the
+# convention external_run_service.py already documents. Do not collapse back:
+# `py/unused-import` is intra-file only, so it cannot see the cross-module
+# contract these three exist to satisfy.
+import dashboard.backend.infrastructure.llm.backtest_harness as _backtest_harness
 
-try:
-    import pandas_ta as ta
-except ImportError:
+Anthropic = _backtest_harness.Anthropic
+HAS_ANTHROPIC = _backtest_harness.HAS_ANTHROPIC
+LLM_MODEL_NAME = _backtest_harness.LLM_MODEL_NAME
+
+# A presence probe, not a use: dashboard.backend.domain.backtesting.features
+# imports pandas_ta itself. This script installs it first so that import cannot
+# fail part-way through a run. find_spec rather than a try/except import because
+# nothing here needs the module object -- only the answer to "is it installed?".
+if importlib.util.find_spec("pandas_ta") is None:
     print("Installing pandas_ta...")
-    import subprocess
-    subprocess.check_call(["pip", "install", "pandas_ta"])
-    import pandas_ta as ta
+    # sys.executable, not a bare "pip": the script may well be running under a
+    # venv whose pip is not first on PATH, and installing into the wrong
+    # interpreter would leave the import below still failing.
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas_ta"])
+    # The probe above populated the path-finder's directory caches with a miss;
+    # drop them so the module just written to site-packages is discoverable by
+    # the features import below rather than on the next process start.
+    importlib.invalidate_caches()
 
 # ---------------------------------------------------------------------------
 # Phase 2A extraction: the implementations below now live under the canonical
@@ -65,13 +80,23 @@ except ImportError:
 # stays unchanged. pandas_ta is imported above first so the features module can
 # rely on it being available.
 # ---------------------------------------------------------------------------
-from dashboard.backend.domain.backtesting.features import TechnicalIndicators
-from dashboard.backend.domain.backtesting.metrics import (
-    calculate_sharpe,
-    calculate_max_drawdown,
-)
-from dashboard.backend.infrastructure.llm.decision_parsing import fix_json_formatting
-from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
+#
+# Same explicit-assignment form as the harness re-exports above, for the same
+# reason: these five are referenced only through `bha.<name>` from other
+# modules, which `py/unused-import` cannot see. The guard suites
+# (test_backtest_compatibility, test_canonical_consumers) assert each one is the
+# canonical object, so deleting any of them reddens those tests.
+import dashboard.backend.domain.backtesting.features as _features
+import dashboard.backend.domain.backtesting.metrics as _metrics
+import dashboard.backend.infrastructure.llm.decision_parsing as _decision_parsing
+import dashboard.backend.infrastructure.market_data.alpaca_bars as _alpaca_bars
+
+TechnicalIndicators = _features.TechnicalIndicators
+calculate_sharpe = _metrics.calculate_sharpe
+calculate_max_drawdown = _metrics.calculate_max_drawdown
+fix_json_formatting = _decision_parsing.fix_json_formatting
+AlpacaDataLoader = _alpaca_bars.AlpacaDataLoader
+
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
     IFIND_ASHARE,
@@ -137,10 +162,11 @@ TIMEFRAME = "1h"  # Hourly
 # `PortfolioManager` now lives in
 # dashboard.backend.domain.backtesting.portfolio_manager and is re-exported
 # here so the legacy public path (bha.PortfolioManager) and existing
-# subclasses (e.g. backtest_custom_algo) keep working unchanged.
-from dashboard.backend.domain.backtesting.portfolio_manager import (
-    PortfolioManager,
-)
+# subclasses (e.g. backtest_custom_algo) keep working unchanged. Explicit
+# assignment, as above.
+import dashboard.backend.domain.backtesting.portfolio_manager as _portfolio_manager
+
+PortfolioManager = _portfolio_manager.PortfolioManager
 
 
 # ============================================================================
@@ -436,13 +462,13 @@ def main():
 
 
 if __name__ == "__main__":
-    from dashboard.backend.infrastructure.market_data.alpaca_bars import (
-        MarketDataUnavailableError,
-    )
-
+    # Reached through the module alias bound at the top rather than a second
+    # `from` import of the same module: importing one module both ways in one
+    # file is its own CodeQL finding (py/import-and-import-from), and the alias
+    # already exists.
     try:
         main()
-    except MarketDataUnavailableError as exc:
+    except _alpaca_bars.MarketDataUnavailableError as exc:
         # Library code raises (so server threads can catch it); the CLI
         # boundary is where the process exit belongs.
         print(f"❌ {exc}")

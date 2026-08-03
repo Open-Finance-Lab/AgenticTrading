@@ -22,10 +22,12 @@ from dashboard.backend.database import db
 from dashboard.backend.baselines_endpoint import get_baselines_from_db
 from dashboard.backend.cache import (
     paper_trading_cache,
+    CACHE_KEY_ACCOUNT,
     CACHE_KEY_POSITIONS,
     CACHE_KEY_TRADES,
     CACHE_KEY_PORTFOLIO_HISTORY,
     CACHE_KEY_BASELINES,
+    TTL_ACCOUNT,
     TTL_POSITIONS,
     TTL_TRADES,
     TTL_PORTFOLIO_HISTORY,
@@ -38,7 +40,7 @@ router = APIRouter(prefix="/paper")
 
 
 @router.get("/account")
-async def get_paper_account():
+def get_paper_account():
     """
     Get live paper trading account info from Alpaca.
     
@@ -46,32 +48,45 @@ async def get_paper_account():
         Account details: cash, equity, buying_power, portfolio_value, etc.
     """
     try:
+        cached = paper_trading_cache.get(CACHE_KEY_ACCOUNT)
+        if cached:
+            return {
+                "success": True,
+                "account": cached,
+                "timestamp": datetime.now().isoformat(),
+                "cached": True
+            }
+
         client = AlpacaPaperTradingClient()
         account = client.get_account()
-        
+
         if account:
+            paper_trading_cache.set(CACHE_KEY_ACCOUNT, account, TTL_ACCOUNT)
             return {
                 "success": True,
                 "account": account,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "cached": False
             }
         else:
             return {
                 "success": False,
                 "error": "Failed to fetch account",
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                "cached": False
             }
     except Exception as e:
         print(f"/paper/account fetch failed: {e!r}")
         return {
             "success": False,
             "error": "Failed to fetch account",
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            "cached": False
         }
 
 
 @router.get("/positions")
-async def get_paper_positions():
+def get_paper_positions():
     """
     Get current positions from Alpaca paper trading account.
     Cached for 30 seconds (prices update frequently).
@@ -129,7 +144,7 @@ async def get_paper_positions():
 
 
 @router.get("/trades")
-async def get_paper_trades(limit: int = 50):
+def get_paper_trades(limit: int = 50):
     """
     Get recent trades/fills from Alpaca paper trading account.
     Cached for 60 seconds (trade history changes infrequently).
@@ -188,7 +203,7 @@ async def get_paper_trades(limit: int = 50):
 
 
 @router.get("/portfolio-history")
-async def get_paper_portfolio_history(timeframe: str = "1D"):
+def get_paper_portfolio_history(timeframe: str = "1D"):
     """
     Get portfolio history/equity curve from Alpaca.
     Cached for 2 minutes (updated frequently but not every second).
@@ -254,7 +269,7 @@ async def get_paper_portfolio_history(timeframe: str = "1D"):
 
 
 @router.post("/start-session")
-async def start_paper_session(
+def start_paper_session(
     agent_name: str = "Agent",
     current_user: dict = Depends(get_current_user),
 ):
@@ -262,11 +277,14 @@ async def start_paper_session(
     Start a new paper trading session and return run_id.
 
     Requires a signed-in account. Read-only ``/paper/*`` GETs remain open for
-    the shared Alpaca paper demo; mutating session creation does not.
-    
+    the shared Alpaca paper demo; mutating session creation does not. Stays a
+    plain (sync) ``def`` — not ``async`` — so FastAPI keeps running it in the
+    threadpool rather than the event loop (#292); ``get_current_user`` is
+    itself sync, so the dependency doesn't require an async route.
+
     Query params:
     - agent_name: Name of agent/strategy (default: "Agent")
-    
+
     Returns:
         run_id for tracking this session
     """
@@ -320,7 +338,7 @@ async def start_paper_session(
 # ============================================================================
 
 @router.get("/baselines")
-async def get_paper_baselines(days: int = 31):
+def get_paper_baselines(days: int = 31):
     """
     Get baseline equity curves from database (real historical data).
     Pre-computed from same data source as backtesting.

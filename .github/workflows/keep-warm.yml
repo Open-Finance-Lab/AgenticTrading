@@ -1,0 +1,54 @@
+name: Keep prod warm
+
+# Render's free tier spins the service down after ~15 minutes without
+# traffic; the next visitor then eats a 30-60s cold start before the app
+# answers at all. This ping keeps the instance alive around the clock.
+#
+# Budget: one always-on free service uses ~720 of the plan's 750 free
+# instance-hours per month, so this fits exactly one service — don't copy
+# this workflow for a second one on the same account. The cadence below
+# does not change that figure: the cost is the instance being up, not the
+# number of pings.
+#
+# Cadence: every 5 minutes, not every 10. GitHub delays scheduled runs
+# under load — routinely by 5-15 minutes, and a run can be dropped
+# outright — so a */10 schedule against a ~15-minute idle window leaves no
+# margin for the very case this exists to prevent. */5 is free on a public
+# repo and tolerates a skipped run plus a delay.
+#
+# Note: GitHub auto-disables scheduled workflows after 60 days without
+# repo activity. This repo is active; if pushes ever stop, re-enable it
+# from the Actions tab. A silently disabled (or failing) workflow shows up
+# as the 30-60s cold start returning, so treat that symptom as "check this
+# workflow first".
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+# A delayed run must not stack on top of the next scheduled one.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    name: Ping /health
+    runs-on: ubuntu-latest
+    # Must exceed curl's worst case, which is per-attempt: --max-time applies
+    # to each try, so 4 attempts x 90s + 3 x 15s of delay = 405s. At the
+    # original 5 minutes the job was killed mid-retry in exactly the
+    # cold-start scenario the retries are there to ride out.
+    timeout-minutes: 8
+    steps:
+      - name: Ping backend health endpoint
+        env:
+          # Overridable so a fork or a staging service can point elsewhere
+          # without editing the workflow.
+          HEALTH_URL: ${{ vars.KEEP_WARM_URL || 'https://agentictrading.onrender.com/health' }}
+        run: |
+          curl --silent --show-error --fail \
+            --max-time 90 \
+            --retry 3 --retry-delay 15 --retry-all-errors \
+            "$HEALTH_URL"

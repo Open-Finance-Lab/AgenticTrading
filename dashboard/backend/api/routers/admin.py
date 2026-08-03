@@ -29,7 +29,7 @@ router = APIRouter()
 
 
 @router.delete("/admin/runs/{run_id}")
-async def admin_delete_run(
+def admin_delete_run(
     run_id: str,
     request: Request,
     current_user: dict = Depends(get_current_user),
@@ -38,7 +38,10 @@ async def admin_delete_run(
 
     ``users.role`` is the gate: only ``admin`` may call this. Ordinary
     accounts get 403 even with a valid session UUID — the previous check was
-    only ``X-Session-Id`` format, which any client can mint.
+    only ``X-Session-Id`` format, which any client can mint. Stays a plain
+    (sync) ``def`` — not ``async`` — so FastAPI keeps running it in the
+    threadpool rather than the event loop (#292); ``get_current_user`` is
+    itself sync, so the dependency doesn't require an async route.
     """
     if current_user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin only")
