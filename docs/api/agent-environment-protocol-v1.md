@@ -81,7 +81,10 @@ GET /api/v1/environments/{environment_id}
 }
 ```
 
-The current universe is the DJIA 30 with an initial cash of `100000`.
+The current universe is the DJIA 30 with a default initial cash of `1000`.
+Callers may override it via `config.initial_cash` on `POST /api/v1/runs`, up to
+a `10000` cap — a request above the cap gets a 400 `invalid_config` error, not
+a silent clamp.
 
 ---
 

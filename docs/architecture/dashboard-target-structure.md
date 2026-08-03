@@ -43,7 +43,8 @@ dashboard/
 │   │                           #   external_backtest, algo, leaderboard, backtests,
 │   │                           #   paper_trading, market, config, admin, health
 │   ├── domain/
-│   │   ├── agents/             # repository, version_repository, service
+│   │   ├── agents/             # repository, version_repository, service,
+│   │   │                       #   credential_store, runtime (hosted-runtime dispatch)
 │   │   ├── backtesting/        # engine, portfolio_manager, features, metrics,
 │   │   │                       #   constants, algo_service, external_run_service,
 │   │   │                       #   reference_agent, baselines/paper.py
@@ -52,6 +53,7 @@ dashboard/
 │   │   ├── runs/               # repository, service, protocol, environment
 │   │   └── trading/            # paper_session, portfolio, execution
 │   └── infrastructure/
+│       ├── ai_hedge_fund/      # adapter, bridge: subprocess-isolated hosted-runtime bridge
 │       ├── brokers/            # alpaca_paper
 │       ├── llm/                # validator, prompts, token_cost, decision_parsing, backtest_harness
 │       └── market_data/        # quotes, alpaca_bars
@@ -78,7 +80,8 @@ dashboard/
 - **New domain logic?** put it under `domain/<area>/`; it must not import API or
   `app.py`.
 - **Adapters:** market-data → `infrastructure/market_data/`, broker →
-  `infrastructure/brokers/`, LLM → `infrastructure/llm/`.
+  `infrastructure/brokers/`, LLM → `infrastructure/llm/`, hosted agent runtime →
+  `infrastructure/ai_hedge_fund/` (dispatched via `domain/agents/runtime.py`).
 - **Scripts** are thin entrypoints. They import the backend via
   `dashboard.backend.*` after calling `_bootstrap.ensure_repo_root()`; backend
   code never imports `dashboard.scripts`.

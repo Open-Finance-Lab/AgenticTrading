@@ -23,8 +23,33 @@ import bcrypt
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
+from dashboard.backend.session_tokens import (
+    absolute_expiry,
+    hash_session_token,
+    idle_deadline,
+    new_session_token,
+    require_session_hash_secret,
+    should_touch_last_seen,
+)
 
-SESSION_TTL_DAYS = 7
+# One literal, executed both on a fresh install and after the legacy-schema
+# DROP, so the two paths cannot produce different tables. Kept as a plain
+# (non-f) string: test_store_twin_parity reads column names out of the source
+# text, and an interpolation would collapse to a placeholder there.
+AUTH_SESSIONS_DDL = """
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at TIMESTAMP NOT NULL,
+        last_seen_at TIMESTAMP NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        revoked_at TIMESTAMP,
+        user_agent TEXT,
+        ip_prefix TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+"""
+
 BCRYPT_ROUNDS = 12
 LEGACY_PBKDF2_ITERATIONS = 100_000
 BCRYPT_MAX_BYTES = 72
@@ -150,6 +175,61 @@ def verify_password(password: str, password_hash: str) -> bool:
     return _verify_legacy_pbkdf2(password, password_hash)
 
 
+def _best_effort_write(conn, cursor, sql: str, params: tuple) -> bool:
+    """Run a housekeeping write that must never fail its caller.
+
+    get_user_for_token runs on every authenticated request and was read-only
+    until sessions were hashed; it now touches last_seen_at and reaps rows it
+    finds dead. None of that is what the caller asked for, so losing it to a
+    lost race for the write lock is free -- while letting sqlite3's
+    OperationalError escape turns a valid session into a 500, and an expired
+    one into a 500 instead of a 401.
+    """
+    try:
+        cursor.execute(sql, params)
+        conn.commit()
+        return True
+    except sqlite3.OperationalError:
+        conn.rollback()
+        return False
+
+
+_DUMMY_PASSWORD_HASH: Optional[str] = None
+
+
+def _dummy_password_hash() -> str:
+    """A bcrypt hash of a value nobody can present, built on first use.
+
+    Lazily, because generating it costs a full bcrypt round (~190 ms at
+    ``BCRYPT_ROUNDS=12``) and every CLI script and test collection imports this
+    module. The cost of that is one skewed sample: the first unknown-email
+    login after a restart pays the hash *and* the compare. An attacker would
+    have to already be probing at that exact moment to see it.
+    """
+    global _DUMMY_PASSWORD_HASH
+    if _DUMMY_PASSWORD_HASH is None:
+        _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
+    return _DUMMY_PASSWORD_HASH
+
+
+def verify_password_for_account(password: str, password_hash: Optional[str]) -> bool:
+    """``verify_password`` that costs the same whether or not the account exists.
+
+    Returning early when the email matches no row makes a miss ~3000x faster
+    than a wrong password (measured: 0.06 ms vs 182 ms), so response *time*
+    answers "is this address registered?" no matter how carefully the response
+    *body* is made uniform. Hashing against a throwaway hash on that path puts
+    both branches through the same single bcrypt compare.
+
+    Callers must still discard the result for a missing account -- this only
+    equalises the clock, it never authenticates one.
+    """
+    if password_hash is None:
+        verify_password(password, _dummy_password_hash())
+        return False
+    return verify_password(password, password_hash)
+
+
 def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
     data = dict(row)
     discord_user_id = data.get("discord_user_id")
@@ -193,21 +273,38 @@ class UserStore:
             )
             """
         )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS auth_sessions (
-                token TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        cursor.execute(AUTH_SESSIONS_DDL)
+        # Pre-hash plaintext-token schema: wipe and rebuild. Existing sessions
+        # cannot be re-hashed without the raw token; users must sign in again.
+        cursor.execute("PRAGMA table_info(auth_sessions)")
+        session_columns = {row[1] for row in cursor.fetchall()}
+        if session_columns and "token_hash" not in session_columns:
+            cursor.execute("DROP TABLE auth_sessions")
+            # Same DDL: the table is gone, so IF NOT EXISTS creates it. Reusing
+            # the one literal is what keeps the migrated schema from drifting
+            # away from the fresh-install schema.
+            cursor.execute(AUTH_SESSIONS_DDL)
+            # print(), not logger: see _build_user_store() below. Dropping every
+            # live login is not something to do silently -- otherwise the only
+            # symptom is a wave of users being signed out with nothing in the
+            # deploy log tying it to the release.
+            print(
+                "auth_sessions: migrated from plaintext tokens to hashed "
+                "tokens; all existing sessions were dropped and users must "
+                "sign in again"
             )
-            """
-        )
         cursor.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
             ON auth_sessions(user_id)
+            """
+        )
+        # Supports purge_expired_sessions(); without it the sweep is a full scan
+        # of a table whose whole purpose here is to keep growing.
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
+            ON auth_sessions(expires_at)
             """
         )
         # Lazy migration: Discord OAuth link column (nullable unique).
@@ -304,69 +401,165 @@ class UserStore:
         return dict(row) if row else None
 
     def authenticate(self, email: str, password: str) -> Optional[Dict[str, Any]]:
+        # One bcrypt compare on both branches -- see verify_password_for_account.
         user = self.get_user_by_email(email)
-        if not user:
-            return None
-        if not verify_password(password, user["password_hash"]):
+        if not verify_password_for_account(
+            password, user["password_hash"] if user else None
+        ):
             return None
         return user
 
-    def create_session(self, user_id: int) -> str:
-        token = secrets.token_urlsafe(32)
-        expires_at = (_utcnow() + timedelta(days=SESSION_TTL_DAYS)).replace(microsecond=0).isoformat()
+    def create_session(
+        self,
+        user_id: int,
+        *,
+        user_agent: Optional[str] = None,
+        ip_prefix: Optional[str] = None,
+    ) -> str:
+        raw_token = new_session_token()
+        token_hash = hash_session_token(raw_token)
+        now = _utcnow().replace(microsecond=0)
+        created_at = format_stored_timestamp(now)
+        expires_at = format_stored_timestamp(absolute_expiry(now))
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO auth_sessions (token, user_id, expires_at)
-            VALUES (?, ?, ?)
+            INSERT INTO auth_sessions (
+                token_hash, user_id, created_at, last_seen_at, expires_at,
+                user_agent, ip_prefix
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (token, user_id, expires_at),
+            (
+                token_hash,
+                user_id,
+                created_at,
+                created_at,
+                expires_at,
+                (user_agent or None),
+                (ip_prefix or None),
+            ),
         )
         conn.commit()
+        # Commit the login first, then reap. Sweeping inside the same
+        # transaction would let a failed housekeeping DELETE take the INSERT
+        # down with it -- losing the session the user just asked for.
+        _best_effort_write(
+            conn,
+            cursor,
+            "DELETE FROM auth_sessions WHERE expires_at < ?",
+            (format_stored_timestamp(now),),
+        )
         conn.close()
-        return token
+        return raw_token
+
+    def purge_expired_sessions(self) -> int:
+        """Delete session rows past their absolute expiry. Returns the count.
+
+        Revocation is a soft UPDATE and get_user_for_token returns at the
+        revoked check before any cleanup, so without this a revoked row lives
+        forever; expired rows are only deleted when someone re-presents the
+        dead token, which nobody does. Keying the sweep on expires_at collects
+        both, and bounds the table at "sessions created in the last
+        SESSION_TTL_DAYS" -- the same bound it had before hashing, when logout
+        was a DELETE.
+
+        Run from create_session (logins are rare next to reads, and it is the
+        moment the table grows) rather than from the read path, which must stay
+        free of writes it does not need.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM auth_sessions WHERE expires_at < ?",
+            (format_stored_timestamp(_utcnow()),),
+        )
+        removed = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return max(removed, 0)
 
     def get_user_for_token(self, token: str) -> Optional[Dict[str, Any]]:
+        if not token or not str(token).strip():
+            return None
+        token_hash = hash_session_token(token.strip())
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT users.*
+            SELECT
+                users.*,
+                auth_sessions.created_at AS session_created_at,
+                auth_sessions.last_seen_at AS session_last_seen_at,
+                auth_sessions.expires_at AS session_expires_at,
+                auth_sessions.revoked_at AS session_revoked_at
             FROM auth_sessions
             JOIN users ON users.id = auth_sessions.user_id
-            WHERE auth_sessions.token = ?
+            WHERE auth_sessions.token_hash = ?
             """,
-            (token,),
+            (token_hash,),
         )
         row = cursor.fetchone()
         if not row:
             conn.close()
             return None
 
-        cursor.execute(
-            "SELECT expires_at FROM auth_sessions WHERE token = ?",
-            (token,),
+        data = dict(row)
+        revoked_at = data.pop("session_revoked_at")
+        created_at = parse_stored_timestamp(data.pop("session_created_at"))
+        last_seen_at = parse_stored_timestamp(
+            data.pop("session_last_seen_at") or format_stored_timestamp(created_at)
         )
-        session_row = cursor.fetchone()
+        expires_at = parse_stored_timestamp(data.pop("session_expires_at"))
+        now = _utcnow()
+
+        if revoked_at:
+            conn.close()
+            return None
+        if expires_at < now:
+            _best_effort_write(
+                conn,
+                cursor,
+                "DELETE FROM auth_sessions WHERE token_hash = ?",
+                (token_hash,),
+            )
+            conn.close()
+            return None
+        if idle_deadline(last_seen_at) < now:
+            _best_effort_write(
+                conn,
+                cursor,
+                "DELETE FROM auth_sessions WHERE token_hash = ?",
+                (token_hash,),
+            )
+            conn.close()
+            return None
+
+        if should_touch_last_seen(last_seen_at, now):
+            _best_effort_write(
+                conn,
+                cursor,
+                "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?",
+                (format_stored_timestamp(now.replace(microsecond=0)), token_hash),
+            )
         conn.close()
-
-        if not session_row:
-            return None
-
-        expires_at = datetime.fromisoformat(session_row["expires_at"])
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < _utcnow():
-            self.delete_session(token)
-            return None
-
-        return dict(row)
+        return data
 
     def delete_session(self, token: str) -> None:
+        if not token or not str(token).strip():
+            return
+        token_hash = hash_session_token(token.strip())
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+        cursor.execute(
+            """
+            UPDATE auth_sessions
+            SET revoked_at = ?
+            WHERE token_hash = ? AND revoked_at IS NULL
+            """,
+            (format_stored_timestamp(_utcnow().replace(microsecond=0)), token_hash),
+        )
         conn.commit()
         conn.close()
 
@@ -384,13 +577,26 @@ class UserStore:
         """Revoke every session for the user except keep_token (None = all)."""
         conn = self._get_connection()
         cursor = conn.cursor()
+        now = format_stored_timestamp(_utcnow().replace(microsecond=0))
         if keep_token:
+            keep_hash = hash_session_token(keep_token.strip())
             cursor.execute(
-                "DELETE FROM auth_sessions WHERE user_id = ? AND token != ?",
-                (user_id, keep_token),
+                """
+                UPDATE auth_sessions
+                SET revoked_at = ?
+                WHERE user_id = ? AND token_hash != ? AND revoked_at IS NULL
+                """,
+                (now, user_id, keep_hash),
             )
         else:
-            cursor.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+            cursor.execute(
+                """
+                UPDATE auth_sessions
+                SET revoked_at = ?
+                WHERE user_id = ? AND revoked_at IS NULL
+                """,
+                (now, user_id),
+            )
         conn.commit()
         conn.close()
 
@@ -720,6 +926,13 @@ class UserStore:
 
 
 def _build_user_store():
+    # Resolve the session HMAC key before anything can serve a request. It is
+    # only read on the session paths, so without this a prod deploy missing
+    # SESSION_HASH_SECRET boots clean, answers /health 200, and then 500s every
+    # login and every authenticated request. Failing the boot instead leaves
+    # the previous Render version live.
+    require_session_hash_secret()
+
     # USERS_DATABASE_URL only, deliberately: CONTENT_DATABASE_URL is scoped to
     # agents/versions/strategies and must not select the account database
     # (spec, Decision 2). Do not "simplify" this into a fallback chain.

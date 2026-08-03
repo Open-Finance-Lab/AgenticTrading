@@ -28,7 +28,7 @@ router = APIRouter()
 
 
 @router.delete("/admin/runs/{run_id}")
-async def admin_delete_run(run_id: str, request: Request):
+def admin_delete_run(run_id: str, request: Request):
     """⚠️ Delete a specific run (must be owned by session)."""
     session_id = request.state.session_id
     

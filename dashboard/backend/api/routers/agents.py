@@ -126,7 +126,7 @@ class FinancialDatasetsCredentialBody(BaseModel):
 
 
 @router.post("")
-async def create_agent(
+def create_agent(
     body: CreateAgentBody,
     request: Request,
     authorization: Optional[str] = Header(default=None),
@@ -186,7 +186,7 @@ async def create_agent(
 
 
 @router.get("")
-async def list_agents(
+def list_agents(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
@@ -204,7 +204,7 @@ async def list_agents(
 
 
 @router.get("/marketplace")
-async def list_marketplace_agents():
+def list_marketplace_agents():
     """List open agent templates available in the Agent Marketplace.
 
     Public and unauthenticated. Templates are config-driven and do not expose
@@ -218,7 +218,7 @@ class CloneMarketplaceBody(BaseModel):
 
 
 @router.post("/marketplace/{template_id}/clone")
-async def clone_marketplace_agent(
+def clone_marketplace_agent(
     template_id: str,
     body: CloneMarketplaceBody,
     request: Request,
@@ -247,7 +247,7 @@ async def clone_marketplace_agent(
 
 
 @router.get("/builtin")
-async def list_builtin_agents():
+def list_builtin_agents():
     """List all platform-hosted (built-in) agents.
 
     Public and unauthenticated: built-in agents are globally discoverable so
@@ -273,7 +273,7 @@ async def list_builtin_agents():
 
 
 @router.post("/claim-account")
-async def claim_account_agents(
+def claim_account_agents(
     request: Request,
     authorization: Optional[str] = Header(default=None),
 ):
@@ -296,7 +296,7 @@ class ImportSessionBody(BaseModel):
 
 
 @router.post("/import-session")
-async def import_session_agent(
+def import_session_agent(
     body: ImportSessionBody,
     request: Request,
     authorization: Optional[str] = Header(default=None),
@@ -321,7 +321,7 @@ async def import_session_agent(
 
 
 @router.get("/resolve")
-async def resolve_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+def resolve_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
     """Resolve a registered agent API key to its trading session (for CLI clients)."""
     agent = agent_service.resolve_api_key(x_api_key or "")
     if not agent:
@@ -335,7 +335,7 @@ async def resolve_api_key(x_api_key: Optional[str] = Header(default=None, alias=
 
 
 @router.get("/{agent_id}/runs")
-async def list_agent_runs(
+def list_agent_runs(
     agent_id: str,
     request: Request,
     authorization: Optional[str] = Header(default=None),
@@ -348,7 +348,7 @@ async def list_agent_runs(
 
 
 @router.get("/{agent_id}")
-async def get_agent(
+def get_agent(
     agent_id: str,
     request: Request,
     authorization: Optional[str] = Header(default=None),
@@ -359,7 +359,7 @@ async def get_agent(
 
 
 @router.patch("/{agent_id}")
-async def update_agent(
+def update_agent(
     agent_id: str,
     body: UpdateAgentBody,
     request: Request,
@@ -470,7 +470,7 @@ _credential_rate_limiter = FixedWindowRateLimiter(max_events=20, window_seconds=
 
 
 @router.get("/{agent_id}/credentials/financial-datasets")
-async def get_financial_datasets_credential_status(
+def get_financial_datasets_credential_status(
     agent_id: str,
     request: Request,
     authorization: Optional[str] = Header(default=None),
@@ -492,7 +492,7 @@ async def get_financial_datasets_credential_status(
 
 
 @router.put("/{agent_id}/credentials/financial-datasets")
-async def set_financial_datasets_credential(
+def set_financial_datasets_credential(
     agent_id: str,
     body: FinancialDatasetsCredentialBody,
     request: Request,
@@ -531,7 +531,7 @@ async def set_financial_datasets_credential(
 
 
 @router.delete("/{agent_id}/credentials/financial-datasets")
-async def delete_financial_datasets_credential(
+def delete_financial_datasets_credential(
     agent_id: str,
     request: Request,
     authorization: Optional[str] = Header(default=None),
@@ -549,7 +549,7 @@ async def delete_financial_datasets_credential(
 
 
 @router.delete("/{agent_id}")
-async def delete_agent(
+def delete_agent(
     agent_id: str,
     request: Request,
     authorization: Optional[str] = Header(default=None),
@@ -575,7 +575,7 @@ async def delete_agent(
 
 
 @router.post("/{agent_id}/rotate-api-key")
-async def rotate_agent_api_key(
+def rotate_agent_api_key(
     agent_id: str,
     request: Request,
     authorization: Optional[str] = Header(default=None),
@@ -595,7 +595,7 @@ async def rotate_agent_api_key(
 
 
 @router.post("/{agent_id}/activate")
-async def activate_agent(
+def activate_agent(
     agent_id: str,
     request: Request,
     authorization: Optional[str] = Header(default=None),

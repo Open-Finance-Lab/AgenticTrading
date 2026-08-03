@@ -61,14 +61,55 @@ def fn_body(signature: str) -> str:
     return APP_JS[start : _match_brace(APP_JS, open_brace) + 1]
 
 
-def at_rule_blocks(prelude: str) -> list[str]:
-    """Every styles.css at-rule block with this prelude, brace-matched.
+def js_const(name: str) -> str:
+    """The named top-level `const` declaration, verbatim including the `;`.
+
+    For guards that execute app.js source under node: a harness that restates a
+    threshold instead of lifting it tests the code against the harness's own
+    value, so changing the shipped constant silently stops being covered while
+    every case stays green.
+
+    The initializer stops at the first `;`, so a value that *contains* one is
+    truncated. That fails loudly rather than vacuously -- the truncation is not
+    valid JS, so node exits non-zero and the harness's `returncode == 0` assert
+    reports it. Use `js_string_const` for string constants.
+    """
+    match = re.search(rf"^const {re.escape(name)} = [^;]+;", APP_JS, re.MULTILINE)
+    assert match, f"{name} not found in app.js"
+    return match.group(0)
+
+
+def js_string_const(name: str) -> str:
+    """The *value* of a single-quoted JS string constant in app.js.
+
+    The sibling of `js_const`, which returns the whole declaration: guards that
+    execute app.js under node need the declaration verbatim, guards that compare
+    a frontend copy against its Python original need the string itself.
+    """
+    match = re.search(
+        rf"const\s+{re.escape(name)}\s*=\s*\n?\s*'((?:[^'\\]|\\.)*)'", APP_JS
+    )
+    assert match, f"{name} is no longer a single-quoted const in app.js"
+    return match.group(1).replace("\\'", "'")
+
+
+def css_blocks(prelude: str) -> list[str]:
+    """Every styles.css block introduced by this prelude, brace-matched.
 
     styles.css carries eight separate reduced-motion blocks. Slicing from a
     class name to end-of-file would sweep in all the later ones, so any test
     asking "does *this* rule have a fallback" has to isolate the real block.
+
+    Returns every match rather than the first: a selector commonly appears both
+    as a plain rule and again inside a media query, and a test that silently
+    took whichever came first would depend on authoring order.
     """
     return [
         STYLES[match.start() : _match_brace(STYLES, STYLES.index("{", match.start())) + 1]
         for match in re.finditer(re.escape(prelude) + r"\s*\{", STYLES)
     ]
+
+
+def at_rule_blocks(prelude: str) -> list[str]:
+    """`css_blocks` under its original name, kept for the Phase A guards."""
+    return css_blocks(prelude)

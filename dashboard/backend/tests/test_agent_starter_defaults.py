@@ -32,6 +32,7 @@ from dashboard.backend.domain.agents.defaults import (
     SIMPLE_INSTRUCTION_OUTPUT_FORMAT,
     SIMPLE_INSTRUCTION_PRESET_KEY,
 )
+from dashboard.backend.tests._frontend_source import js_string_const
 
 AgentStore = agent_store_module.AgentStore
 
@@ -164,11 +165,9 @@ def test_marketplace_clone_without_a_pipeline_gets_the_starter_seed(client, monk
 # --------------------------------------------------------------------------
 
 
-def _js_const(name: str) -> str:
-    """Read a single-quoted JS string constant out of app.js."""
-    match = re.search(rf"const\s+{name}\s*=\s*\n?\s*'((?:[^'\\]|\\.)*)'", _APP_JS)
-    assert match, f"{name} is no longer a single-quoted const in app.js"
-    return match.group(1).replace("\\'", "'")
+#: Shared with the node-executing frontend guards -- see _frontend_source.py.
+#: Kept under the local name so the assertions below read unchanged.
+_js_const = js_string_const
 
 
 def test_the_js_constants_are_still_matched():
