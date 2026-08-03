@@ -17,9 +17,10 @@ suite never touches this one:
   ``dashboard/config/defaults.json`` names as the dashboard's default comparison.
 * **Adding rows prod must not carry.** Running the app locally writes real accounts,
   sessions and agent keys into this same file (``CREATE TABLE IF NOT EXISTS`` against
-  ``DATABASE_PATH``), and a later seed refresh commits them. ``auth_sessions.token``
-  is a *plaintext* bearer token, and ``broker_connections`` holds Robinhood OAuth
-  credentials — neither belongs in a public repository.
+  ``DATABASE_PATH``), and a later seed refresh commits them. ``auth_sessions`` holds
+  session digests (and historically held plaintext bearer tokens), and
+  ``broker_connections`` holds Robinhood OAuth credentials — neither belongs in a
+  public repository.
 
 Read-only and ``immutable=1`` on purpose: this DB is in WAL mode, so an ordinary
 connection would leave ``-wal``/``-shm`` sidecars in the working tree just by

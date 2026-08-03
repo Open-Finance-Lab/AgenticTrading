@@ -138,6 +138,10 @@ let appToastTimer = null;
 
 const APP_TOAST_VISIBLE_MS = 4000;
 const APP_TOAST_FADE_MS = 240;
+// How long the head boot script's /health warmup may stay pending before the
+// boot handler tells the user the free-tier server is waking up. A warm
+// server answers well under this; a cold start takes 30-60s.
+const SLOW_BOOT_NOTICE_MS = 3000;
 
 /**
  * Non-blocking confirmation channel for /app.
@@ -1589,7 +1593,38 @@ async function ensureDefaultFoundationAgent(agents) {
   }
 }
 
+// Auth boot gate: nav goes live before the boot's auth awaits, so a My Agents
+// click can arrive while refreshAuthUser → claimAgentsForUser is still in
+// flight. Fetching agents at that moment misses the guest Foundation agent a
+// landing signup is about to claim, and ensureDefaultFoundationAgent would
+// provision a duplicate starter. Every external caller therefore waits here;
+// the DOMContentLoaded handler opens the gate once the claim phase settles.
+let openAuthBootGate;
+const authBootGate = new Promise((resolve) => {
+  openAuthBootGate = resolve;
+});
+let agentsLoadInFlight = null;
+
 async function loadAgents() {
+  // Coalesce concurrent callers: several early clicks during a cold boot must
+  // share one fetch, not stack identical requests behind the gate. Sequential
+  // calls still refetch (re-clicking the subtab is the user's refresh).
+  if (agentsLoadInFlight) return agentsLoadInFlight;
+  agentsLoadInFlight = (async () => {
+    try {
+      await authBootGate;
+      return await loadAgentsNow();
+    } finally {
+      agentsLoadInFlight = null;
+    }
+  })();
+  return agentsLoadInFlight;
+}
+
+// The ungated loader: only for callers already ordered after the account
+// claim (claimAgentsForUser itself, which runs inside the gated section and
+// would deadlock on the gate above).
+async function loadAgentsNow() {
   try {
     let data = await API.get(`${API_BASE}/api/v1/agents`);
     let agents = data.agents || [];
@@ -2474,7 +2509,9 @@ async function claimAgentsForUser({ reload = true } = {}) {
     console.warn('Agent account claim skipped:', error.message);
   }
   if (reload) {
-    await loadAgents();
+    // Ungated on purpose: this call IS the claim-then-load ordering the auth
+    // boot gate exists to protect, and it runs before the gate opens.
+    await loadAgentsNow();
   }
 }
 
@@ -3570,6 +3607,11 @@ let currentMode = "home";
 let currentPage = "home";
 let playgroundTab = "agents";
 let competitionTab = "daily";
+// True once the user explicitly navigates (any history:'push' navigation).
+// Nav is wired before boot's auth awaits, so applyInitialNavigation may run
+// AFTER a real click — restoring the saved page then would yank the page out
+// from under the user.
+let userHasNavigated = false;
 let allRuns = [];
 let comparisonData = null;
 let backtestChartData = null;
@@ -3583,86 +3625,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // landing signup → /app handoff does not miss the guest Foundation agent.
     initAuthUI({ refresh: false });
     bindCashStepInputs();
-    await restoreActiveAgentSession();
-    if (localStorage.getItem(AUTH_TOKEN_KEY)) {
-        try {
-            await refreshAuthUser();
-        } catch (error) {
-            console.warn('Boot refreshAuthUser failed:', error?.message || error);
-        }
-    }
-    // Portfolio overview must not wait on the agents waterfall. Paint any
-    // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
-    // then show the page while loadAgents continues in the background.
-    if (typeof window.paintPortfolioBoot === 'function') {
-        try {
-            window.paintPortfolioBoot(
-                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
-            );
-        } catch (error) {
-            console.warn('Portfolio boot paint failed:', error?.message || error);
-        }
-    }
-    if (typeof window.prefetchPortfolio === 'function') {
-        Promise.resolve(
-            window.prefetchPortfolio(
-                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
-            ),
-        ).catch((error) => {
-            console.warn('Portfolio prefetch failed:', error?.message || error);
-        });
-    }
-    // refreshAuthUser → claimAgentsForUser already loadAgents when signed in.
-    const agentsReady = localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser()
-        ? Promise.resolve()
-        : loadAgents().catch((error) => {
-            console.warn('Initial loadAgents failed:', error.message);
-        });
-    applyInitialNavigation();
-    // Home modules / agent cards catch up once the list lands; do not block
-    // first navigation on that wait.
-    await agentsReady;
-    window.addEventListener('agent-editor-saved', async (event) => {
-        const agent = event.detail?.agent;
-        if (agent?.agent_id) {
-            const idx = allAgents.findIndex((a) => a.agent_id === agent.agent_id);
-            if (idx >= 0) {
-                allAgents[idx] = { ...allAgents[idx], ...agent };
-            }
-            applyAgentFilters();
-        }
-        if (agent?.agent_id === localStorage.getItem(ACTIVE_AGENT_KEY)) {
-            localStorage.setItem(ACTIVE_AGENT_NAME_KEY, agent.name || '');
-            const nameEl = document.getElementById('playgroundAgentName');
-            if (nameEl) nameEl.textContent = agent.name || 'Agent';
-        }
-        await loadAgents();
-    });
-    window.addEventListener('agent-editor-open-run', async (event) => {
-        const { agent, runId } = event.detail || {};
-        if (!agent || !runId) return;
-        if (window.AgentEditor) window.AgentEditor.close(true);
-        await activateAgent(agent);
-        localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
-        navigateToPage('playground', { playgroundTab: 'backtest' });
-        currentMode = 'backtest';
-        await loadData();
-    });
-    // Guarded: this awaits loadData() internally, and an unhandled rejection here
-    // used to abort the rest of boot — including initNavigation(), which wires
-    // every nav button. A failed deep link must not cost the user navigation.
-    try {
-        await applyAgentRunDeepLink();
-    } catch (error) {
-        console.warn('Deep link failed:', error.message);
-    }
-    const config = loadConfigFromURL();
-    window.CURRENT_CONFIG = config;
-    console.log('⚙️ Experiment config:', config);
-    console.log('Session ID:', window.SESSION_ID);
-    
-    console.log('Dashboard initializing...');
 
+    // ---- Pure-DOM wiring before ANY network await. On a cold backend start
+    // every fetch below this block can hang for tens of seconds, and nothing
+    // here needs one: nav must respond to clicks immediately. Data loads an
+    // early click triggers are held by authBootGate until the account-claim
+    // phase settles, so wiring early cannot reorder the claim invariant. ----
+    initNavigation();
     setupTickerResizeHandler();
     setupTickerScrollControls();
 
@@ -3737,46 +3706,144 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelectorAll('.universe-tab').forEach(tab => {
         tab.addEventListener('click', (e) => handleUniverseTabSwitch(e.target));
     });
-    
+
     // Setup preset cards
     document.getElementById('djiaCard')?.addEventListener('click', () => selectPreset('djia'));
     document.getElementById('mag7Card')?.addEventListener('click', () => selectPreset('mag7'));
-    
+
     // Setup custom universe builder
     setupAssetSearch();
-    
+
     const addAssetBtn = document.querySelector('.add-asset-btn');
     if (addAssetBtn) {
         addAssetBtn.addEventListener('click', handleAddAsset);
     }
-    
+
     const searchInput = document.getElementById('assetSearchInput');
     if (searchInput) {
         searchInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') handleAddAsset();
         });
     }
-    
+
     // Setup chip removal
     document.querySelectorAll('.chip-remove').forEach(btn => {
         btn.addEventListener('click', (e) => removeChip(e.target.closest('.chip')));
     });
 
-    // Load default configuration if available (after DOM is ready)
-    try {
-      await loadDefaults();
-    } catch (error) {
-      console.warn('Failed to load defaults:', error);
-    }
-    await loadMarketDataFeatures();
-
-    initNavigation();
-
-    // Load ticker without blocking the rest of the page
+    // Ticker immediately: it is the page's de-facto liveness signal and
+    // depends on nothing above.
     loadMarketTicker();
     setInterval(loadMarketTicker, 30000);
     updateMarketsOpenStatus();
     setInterval(updateMarketsOpenStatus, 60000);
+
+    // Config fetches in parallel, off the boot critical path; awaited at the
+    // end of boot so "Dashboard ready" still means fully configured.
+    const configReady = Promise.all([
+        loadDefaults().catch((error) => {
+            console.warn('Failed to load defaults:', error);
+        }),
+        loadMarketDataFeatures(),
+    ]);
+
+    // If the head boot script's warmup ping is still pending after a beat,
+    // say so — a free-tier cold start otherwise looks like a broken page.
+    if (window.API_WARMUP) {
+        let warmupSettled = false;
+        window.API_WARMUP.then(() => { warmupSettled = true; });
+        setTimeout(() => {
+            if (!warmupSettled) {
+                showAppToast('Waking up the server — the first load can take up to a minute on our free hosting.');
+            }
+        }, SLOW_BOOT_NOTICE_MS);
+    }
+
+    await restoreActiveAgentSession();
+    if (localStorage.getItem(AUTH_TOKEN_KEY)) {
+        try {
+            await refreshAuthUser();
+        } catch (error) {
+            console.warn('Boot refreshAuthUser failed:', error?.message || error);
+        }
+    }
+    // Claim phase settled (or there was nothing to claim): gated loadAgents
+    // callers queued by early clicks may fetch now.
+    openAuthBootGate();
+    // Portfolio overview must not wait on the agents waterfall. Paint any
+    // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
+    // then show the page while loadAgents continues in the background.
+    if (typeof window.paintPortfolioBoot === 'function') {
+        try {
+            window.paintPortfolioBoot(
+                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
+            );
+        } catch (error) {
+            console.warn('Portfolio boot paint failed:', error?.message || error);
+        }
+    }
+    if (typeof window.prefetchPortfolio === 'function') {
+        Promise.resolve(
+            window.prefetchPortfolio(
+                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
+            ),
+        ).catch((error) => {
+            console.warn('Portfolio prefetch failed:', error?.message || error);
+        });
+    }
+    // refreshAuthUser → claimAgentsForUser already loadAgents when signed in.
+    const agentsReady = localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser()
+        ? Promise.resolve()
+        : loadAgents().catch((error) => {
+            console.warn('Initial loadAgents failed:', error.message);
+        });
+    applyInitialNavigation();
+    // Home modules / agent cards catch up once the list lands; do not block
+    // first navigation on that wait.
+    await agentsReady;
+    window.addEventListener('agent-editor-saved', async (event) => {
+        const agent = event.detail?.agent;
+        if (agent?.agent_id) {
+            const idx = allAgents.findIndex((a) => a.agent_id === agent.agent_id);
+            if (idx >= 0) {
+                allAgents[idx] = { ...allAgents[idx], ...agent };
+            }
+            applyAgentFilters();
+        }
+        if (agent?.agent_id === localStorage.getItem(ACTIVE_AGENT_KEY)) {
+            localStorage.setItem(ACTIVE_AGENT_NAME_KEY, agent.name || '');
+            const nameEl = document.getElementById('playgroundAgentName');
+            if (nameEl) nameEl.textContent = agent.name || 'Agent';
+        }
+        await loadAgents();
+    });
+    window.addEventListener('agent-editor-open-run', async (event) => {
+        const { agent, runId } = event.detail || {};
+        if (!agent || !runId) return;
+        if (window.AgentEditor) window.AgentEditor.close(true);
+        await activateAgent(agent);
+        localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
+        navigateToPage('playground', { playgroundTab: 'backtest' });
+        currentMode = 'backtest';
+        await loadData();
+    });
+    // Guarded: this awaits loadData() internally, and an unhandled rejection here
+    // used to abort the rest of boot — including initNavigation(), which wires
+    // every nav button. A failed deep link must not cost the user navigation.
+    try {
+        await applyAgentRunDeepLink();
+    } catch (error) {
+        console.warn('Deep link failed:', error.message);
+    }
+    const config = loadConfigFromURL();
+    window.CURRENT_CONFIG = config;
+    console.log('⚙️ Experiment config:', config);
+    console.log('Session ID:', window.SESSION_ID);
+    
+    console.log('Dashboard initializing...');
+
+    // Kicked off before the auth awaits; settled before boot reports ready.
+    await configReady;
 
     console.log('🎯 Dashboard ready. Default runs:', window.DEFAULT_RUNS || 'None configured');
 });
@@ -6170,12 +6237,17 @@ function applyInitialNavigation() {
     // single point of failure when the listener is free and order-independent.
     window.addEventListener('popstate', onNavigationPopState);
 
-    const initial = resolveInitialNavigation();
-    navigateToPage(initial.page, {
-        playgroundTab: initial.playgroundTab || 'agents',
-        competitionTab: initial.competitionTab || 'daily',
-        history: 'replace',
-    });
+    // Skip the restore once the user has already clicked somewhere: nav is
+    // live during boot's auth awaits, and stomping an explicit navigation
+    // with the saved page reads as the app fighting the user.
+    if (!userHasNavigated) {
+        const initial = resolveInitialNavigation();
+        navigateToPage(initial.page, {
+            playgroundTab: initial.playgroundTab || 'agents',
+            competitionTab: initial.competitionTab || 'daily',
+            history: 'replace',
+        });
+    }
     if (typeof initHomePage === 'function') {
         initHomePage();
     }
@@ -6455,6 +6527,7 @@ function navigateToPage(page, options = {}) {
     }
 
     const historyMode = options.history || 'push';
+    if (historyMode === 'push') userHasNavigated = true;
     const prevState = getNavigationState();
 
     currentPage = page;
