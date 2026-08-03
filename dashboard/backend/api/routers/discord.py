@@ -32,7 +32,7 @@ def _require_bot_auth(
 
 
 @router.get("/agents")
-async def list_discord_user_agents(
+def list_discord_user_agents(
     x_discord_bot_secret: Optional[str] = Header(default=None, alias="X-Discord-Bot-Secret"),
     x_discord_user_id: Optional[str] = Header(default=None, alias="X-Discord-User-Id"),
 ):

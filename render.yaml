@@ -23,6 +23,13 @@ services:
         value: true
       - key: PYTHON_VERSION
         value: 3.13.5
+      # Trusts Render's edge router as the X-Forwarded-For source, so
+      # uvicorn's own proxy handling agrees with rate_limit.client_ip()'s
+      # left-most-entry read instead of returning the router's own IP for
+      # every visitor. Granularity fix, not a trust boundary -- the header is
+      # still caller-suppliable -- see rate_limit.py's module docstring.
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
       - key: AI_HEDGE_FUND_PYTHON
         value: .ai-hedge-fund-venv/bin/python
       - key: OPENROUTER_API_KEY

@@ -30,7 +30,7 @@ from dashboard.backend.users import (
     is_expired,
     parse_stored_timestamp,
     public_user,
-    verify_password,
+    verify_password_for_account,
 )
 
 # Mirrors users.AUTH_SESSIONS_DDL in Postgres dialect. Declared here rather than
@@ -202,10 +202,11 @@ class PostgresUserStore:
         return dict(row) if row else None
 
     def authenticate(self, email: str, password: str) -> Optional[Dict[str, Any]]:
+        # One bcrypt compare on both branches -- see verify_password_for_account.
         user = self.get_user_by_email(email)
-        if not user:
-            return None
-        if not verify_password(password, user["password_hash"]):
+        if not verify_password_for_account(
+            password, user["password_hash"] if user else None
+        ):
             return None
         return user
 

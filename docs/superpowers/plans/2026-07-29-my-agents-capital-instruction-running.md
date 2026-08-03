@@ -1569,6 +1569,10 @@ Add next to the other card renderers, above `renderAgentCardBody`:
  * The bar is deliberately indeterminate rather than a percentage: the launch
  * path has no honest completion estimate, and a fake percentage that stalls is
  * worse than an animation that only claims "still working".
+ *
+ * Superseded 2026-08-01: the shipped bar is determinate once the engine has
+ * published a step; see the 2026-08-01 UX-round spec §B2 and app.js's current
+ * renderAgentRunningBody.
  */
 function renderAgentRunningBody(agent, running) {
   return `

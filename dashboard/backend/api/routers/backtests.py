@@ -247,6 +247,21 @@ class RunMetadata(BaseModel):
     fx_policy: Optional[str] = None
     fx_start_rate: Optional[float] = None
     fx_end_rate: Optional[float] = None
+    t_plus_one_enabled: Optional[bool] = None
+    # Scalars only. The rejected-order records themselves are unbounded per-step
+    # audit data and this model is the response_model for two *list* routes
+    # (/api/backtest/runs and the public, unpaginated /runs), so shipping them
+    # inline would multiply a multi-megabyte array by the run count on a payload
+    # the dashboard fetches on every load. The records are served per run by
+    # GET /runs/{run_id}/rejected-orders instead, mirroring /runs/{run_id}/trades.
+    # None (not 0) for runs that predate the feature, matching t_plus_one_enabled.
+    rejected_orders_count: Optional[int] = None
+    rejected_orders_truncated: Optional[int] = None
+    # How hard T+1 actually bound: symbol-days on which the agent wanted to exit
+    # more than it could, and the total shares that deferred. Scalars for the
+    # same reason as above — the records live on the detail endpoint.
+    t1_deferred_events: Optional[int] = None
+    t1_deferred_shares: Optional[float] = None
 
 
 class EquityCurve(BaseModel):
@@ -299,6 +314,11 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "fx_policy",
             "fx_start_rate",
             "fx_end_rate",
+            "t_plus_one_enabled",
+            "rejected_orders_count",
+            "rejected_orders_truncated",
+            "t1_deferred_events",
+            "t1_deferred_shares",
         ):
             if field in metadata:
                 payload[field] = metadata[field]
@@ -322,7 +342,24 @@ backtest_session_id = None  # Track which session owns the running backtest
 
 
 def _read_backtest_progress() -> Optional[Dict[str, Any]]:
-    """Load incremental equity snapshots written by the backtest subprocess."""
+    """Load incremental equity snapshots written by the backtest subprocess.
+
+    ``progress_updated_at`` (the file's mtime) and ``progress_age_seconds`` (how
+    old that is) are not fields the writer emits. Together they answer "are these
+    numbers current?", which the payload alone cannot.
+
+    The *age* is what the UI reads, and it is computed here rather than in the
+    browser deliberately: differencing a server mtime against the client clock
+    makes any machine more than the staleness threshold out of step
+    indistinguishable from a wedged run -- a fast clock pins a permanent "No
+    progress for 47m" onto a healthy backtest, a slow one suppresses the warning
+    forever, and suspended laptops drift by minutes routinely. Both ends of this
+    subtraction are read in this process, so it carries no skew.
+
+    stat() and read_text() are separate syscalls, so a file rewritten between
+    them yields an mtime marginally older than the payload -- immaterial against
+    a 120s staleness threshold, and not worth a lock to avoid.
+    """
     progress_file = backtest_status.get("progress_file")
     if not progress_file:
         return None
@@ -330,10 +367,19 @@ def _read_backtest_progress() -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
     try:
+        updated_at = path.stat().st_mtime
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    return {
+        **payload,
+        "progress_updated_at": updated_at,
+        # Clamped at zero: a clock stepping backwards between the write and this
+        # read would otherwise report a negative age, and "-3s" reads as a bug.
+        "progress_age_seconds": max(0.0, time.time() - updated_at),
+    }
 
 def run_backtest_background(
     start_date: str,
@@ -984,7 +1030,7 @@ def _resolve_backtest_session(request: Request, agent_id: Optional[str]) -> str:
 
 
 @router.post("/backtest/run")
-async def run_backtest_endpoint(
+def run_backtest_endpoint(
     request: Request,
     start_date: str = "2026-05-01",
     end_date: str = "2026-05-07",
@@ -1254,7 +1300,7 @@ async def run_backtest_endpoint(
     return response
 
 @router.get("/backtest/status")
-async def get_backtest_status(request: Request):
+def get_backtest_status(request: Request):
     """Get backtest status (running, error, or completed)."""
     session_id = request.state.session_id
     
@@ -1316,7 +1362,7 @@ async def get_backtest_status(request: Request):
 # ============================================================================
 
 @router.get("/api/backtest/runs", response_model=List[RunMetadata])
-async def get_backtest_runs(request: Request):
+def get_backtest_runs(request: Request):
     """Get all backtest runs for this session."""
     session_id = get_session_id_from_request(request)
     runs = db.get_runs_by_session(session_id)
@@ -1327,7 +1373,7 @@ async def get_backtest_runs(request: Request):
 # IMPORTANT: Register /compare/latest BEFORE /{run_id} to prevent {run_id} from matching "compare/latest"
 
 @router.get("/api/backtest/compare/latest", response_model=ComparisonResponse)
-async def compare_latest_backtests(request: Request):
+def compare_latest_backtests(request: Request):
     """Compare the latest backtest runs + baselines for this session."""
     session_id = get_session_id_from_request(request)
     
@@ -1382,7 +1428,7 @@ async def compare_latest_backtests(request: Request):
 
 
 @router.get("/api/backtest/{run_id}/chart-data", response_model=BacktestChartData)
-async def get_backtest_chart_data(run_id: str, request: Request):
+def get_backtest_chart_data(run_id: str, request: Request):
     """Chart-ready equity series for the Playground backtest page.
 
     Uses the same DJIA index + Nasdaq-100 baselines and gapless market-hour
@@ -1429,7 +1475,7 @@ async def get_backtest_chart_data(run_id: str, request: Request):
 
 
 @router.get("/api/backtest/{run_id}", response_model=EquityCurve)
-async def get_backtest_run(run_id: str, request: Request):
+def get_backtest_run(run_id: str, request: Request):
     """Get specific backtest run with equity curve."""
     session_id = get_session_id_from_request(request)
     run = db.get_run_with_session(run_id, session_id)
@@ -1452,7 +1498,7 @@ async def get_backtest_run(run_id: str, request: Request):
 
 
 @router.get("/runs/latest/metrics", response_model=RunMetadata)
-async def get_latest_metrics(request: Request):
+def get_latest_metrics(request: Request):
     """Get metrics for the latest Agent backtest run in this session (excludes baselines)."""
     session_id = request.state.session_id
     runs = [r for r in db.get_runs_by_session(session_id) or [] 
@@ -1465,7 +1511,7 @@ async def get_latest_metrics(request: Request):
 
 
 @router.get("/runs", response_model=List[RunMetadata])
-async def get_runs(request: Request, mode: Optional[str] = None):
+def get_runs(request: Request, mode: Optional[str] = None):
     """
     Get all backtest runs (public, not filtered by session).
     Backtest results are meant to be shared/viewed, not isolated per user.
@@ -1488,7 +1534,7 @@ async def get_runs(request: Request, mode: Optional[str] = None):
 
 
 @router.get("/runs/{run_id}", response_model=RunMetadata)
-async def get_run(run_id: str, request: Request):
+def get_run(run_id: str, request: Request):
     """Get metadata for a specific run."""
     session_id = request.state.session_id
     run = db.get_run_with_session(run_id, session_id)
@@ -1498,7 +1544,7 @@ async def get_run(run_id: str, request: Request):
 
 
 @router.get("/runs/{run_id}/equity", response_model=EquityCurve)
-async def get_equity_curve(run_id: str, request: Request):
+def get_equity_curve(run_id: str, request: Request):
     """
     Get equity curve for a specific run.
     
@@ -1527,7 +1573,7 @@ async def get_equity_curve(run_id: str, request: Request):
 
 
 @router.get("/runs/{run_id}/trades")
-async def get_run_trades(run_id: str, request: Request):
+def get_run_trades(run_id: str, request: Request):
     """Trade log for a backtest run owned by this session."""
     session_id = request.state.session_id
     run = db.get_run_with_session(run_id, session_id)
@@ -1535,6 +1581,46 @@ async def get_run_trades(run_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Run not found or not yours")
     trades = db.get_trades(run_id)
     return {"run_id": run_id, "trades": trades, "count": len(trades)}
+
+
+@router.get("/runs/{run_id}/rejected-orders")
+def get_run_rejected_orders(run_id: str, request: Request):
+    """Rejected / partially-filled order records for a run owned by this session.
+
+    Served here rather than on RunMetadata because these are per-step audit
+    records — a T+1 A-share run can emit thousands — and RunMetadata is the
+    response_model for two list routes the dashboard fetches on every load.
+
+    ``count`` is the run's true total; ``returned`` is how many this response
+    carries. They differ when the engine capped the persisted sample, in which
+    case ``truncated`` says by how much.
+
+    ``t1_deferrals`` answers the complementary question. A rejected order means
+    the agent *submitted* something unfillable; a deferral means it wanted to
+    exit and sized down because it could not. The built-in agents now do the
+    latter, so for them this list — not ``rejected_orders`` — is where T+1's
+    effect on strategy shows up.
+    """
+    session_id = request.state.session_id
+    run = db.get_run_with_session(run_id, session_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found or not yours")
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    records = metadata.get("rejected_orders") or []
+    deferrals = metadata.get("t1_deferrals") or []
+    return {
+        "run_id": run_id,
+        "rejected_orders": records,
+        "count": metadata.get("rejected_orders_count", len(records)),
+        "returned": len(records),
+        "truncated": metadata.get("rejected_orders_truncated", 0),
+        "t1_deferrals": deferrals,
+        "t1_deferred_events": metadata.get("t1_deferred_events", len(deferrals)),
+        "t1_deferred_shares": metadata.get("t1_deferred_shares", 0),
+        "t1_deferrals_truncated": metadata.get("t1_deferrals_truncated", 0),
+    }
 
 
 @router.get("/runs/{run_id}/plot.png", include_in_schema=False)
@@ -1607,7 +1693,7 @@ def _render_run_plot_png(run_id: str) -> bytes:
 
 
 @router.get("/compare", response_model=ComparisonResponse)
-async def compare_runs(run_ids: str, request: Request):
+def compare_runs(run_ids: str, request: Request):
     """
     Compare multiple runs (public, not filtered by session).
     

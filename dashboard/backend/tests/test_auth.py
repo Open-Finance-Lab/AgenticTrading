@@ -26,6 +26,8 @@ def client(temp_user_store, monkeypatch):
     from dashboard.backend import users
 
     monkeypatch.setattr(users, "user_store", temp_user_store)
+    # The process-global auth limiters are reset by conftest's autouse
+    # _reset_shared_scale_state, which pytest runs before this fixture.
     return TestClient(app)
 
 
@@ -99,6 +101,33 @@ def test_login_invalid_password(client):
         json={"email": "bob@example.com", "password": "wrong-password"},
     )
     assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid email or password."
+
+
+def test_login_unknown_email_uses_same_generic_error(client):
+    """Do not reveal whether an address is registered."""
+    known = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "known@example.com",
+            "display_name": "Known",
+            "password": "securepass1",
+        },
+    )
+    assert known.status_code == 200
+    wrong_password = client.post(
+        "/api/auth/login",
+        json={"email": "known@example.com", "password": "not-the-password"},
+    )
+    unknown = client.post(
+        "/api/auth/login",
+        json={"email": "nobody@example.com", "password": "securepass1"},
+    )
+    assert wrong_password.status_code == 401
+    assert unknown.status_code == 401
+    assert wrong_password.json()["detail"] == unknown.json()["detail"] == (
+        "Invalid email or password."
+    )
 
 
 def test_signup_rejects_common_password(client):
@@ -1540,3 +1569,385 @@ def test_a_revoked_but_unexpired_session_row_survives_the_sweep(temp_user_store)
 
     assert _session_count(temp_user_store) == 2
     assert temp_user_store.get_user_for_token(token) is None
+
+
+# --- Login / signup rate limits -------------------------------------------------
+
+
+@pytest.fixture
+def auth_rate_limit_clock(monkeypatch):
+    """Deterministic clock + tiny limits for auth rate-limit tests."""
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = [1000.0]
+
+    def clock() -> float:
+        return now[0]
+
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=5, window_seconds=60, clock=clock),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=3, window_seconds=60, clock=clock),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=2, window_seconds=60, clock=clock),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=2, window_seconds=60, clock=clock),
+    )
+    return now
+
+
+def test_login_ip_rate_limit_returns_429(client, auth_rate_limit_clock, monkeypatch):
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = auth_rate_limit_clock
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+    assert (
+        client.post(
+            "/api/auth/signup",
+            json={
+                "email": "rate-ip@example.com",
+                "display_name": "Rate",
+                "password": "securepass1",
+            },
+        ).status_code
+        == 200
+    )
+    for _ in range(5):
+        resp = client.post(
+            "/api/auth/login",
+            json={"email": "rate-ip@example.com", "password": "wrong"},
+        )
+        assert resp.status_code == 401, resp.text
+
+    blocked = client.post(
+        "/api/auth/login",
+        json={"email": "rate-ip@example.com", "password": "wrong"},
+    )
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+    # Bounded at both ends: >= 1 alone would pass for a header telling the
+    # client to wait longer than the window it is actually waiting on.
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 60
+
+
+def test_login_email_rate_limit_after_failures(client, auth_rate_limit_clock, monkeypatch):
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = auth_rate_limit_clock
+    # Generous IP budget so only the per-email failure counter trips.
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "rate-email@example.com",
+            "display_name": "Rate",
+            "password": "securepass1",
+        },
+    )
+    for _ in range(3):
+        resp = client.post(
+            "/api/auth/login",
+            json={"email": "rate-email@example.com", "password": "wrong"},
+        )
+        assert resp.status_code == 401, resp.text
+
+    blocked = client.post(
+        "/api/auth/login",
+        json={"email": "rate-email@example.com", "password": "wrong"},
+    )
+    assert blocked.status_code == 429
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 60
+
+    # Correct password still works: the email counter only meters *failures*
+    # so an attacker cannot lock the account out of a legitimate login.
+    ok = client.post(
+        "/api/auth/login",
+        json={"email": "rate-email@example.com", "password": "securepass1"},
+    )
+    assert ok.status_code == 200, ok.text
+
+    now[0] += 61
+    # After the window, wrong passwords are accepted into the failure budget again.
+    again = client.post(
+        "/api/auth/login",
+        json={"email": "rate-email@example.com", "password": "wrong"},
+    )
+    assert again.status_code == 401
+
+
+def test_signup_ip_rate_limit_returns_429(client, auth_rate_limit_clock):
+    assert (
+        client.post(
+            "/api/auth/signup",
+            json={
+                "email": "su1@example.com",
+                "display_name": "One",
+                "password": "securepass1",
+            },
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/auth/signup",
+            json={
+                "email": "su2@example.com",
+                "display_name": "Two",
+                "password": "securepass1",
+            },
+        ).status_code
+        == 200
+    )
+    blocked = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "su3@example.com",
+            "display_name": "Three",
+            "password": "securepass1",
+        },
+    )
+    assert blocked.status_code == 429
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 60
+
+
+def test_successful_logins_do_not_consume_the_ip_budget(client, auth_rate_limit_clock):
+    """The per-IP budget meters failures only.
+
+    Without this, ``allow()`` runs before ``authenticate()`` and charges every
+    caller including the ones typing the right password -- so the budget is
+    really a cap on *how many people may sign in*, which is a self-inflicted
+    outage rather than a control. It bites hardest exactly where the key is
+    coarsest: one office, one classroom, or (before client_ip() read the
+    forwarded header) every visitor to the site at once.
+    """
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "busy@example.com",
+            "display_name": "Busy",
+            "password": "securepass1",
+        },
+    )
+    assert signup.status_code == 200
+
+    # The fixture's IP budget is 5; sign in more times than that.
+    for i in range(8):
+        ok = client.post(
+            "/api/auth/login",
+            json={"email": "busy@example.com", "password": "securepass1"},
+        )
+        assert ok.status_code == 200, f"login {i + 1} refused: {ok.text}"
+
+    # And the budget is genuinely untouched, not merely not-yet-exhausted: a
+    # wrong password is still answered 401 rather than 429.
+    assert (
+        client.post(
+            "/api/auth/login",
+            json={"email": "busy@example.com", "password": "wrong"},
+        ).status_code
+        == 401
+    )
+
+
+def test_login_ip_budget_is_per_forwarded_address(
+    client, auth_rate_limit_clock, monkeypatch
+):
+    """Two clients behind the same proxy get their own budgets.
+
+    ``request.client.host`` is the proxy for every visitor on a PaaS router, so
+    keying on it alone puts the whole site in one bucket. Nothing here is
+    spoof-proof -- the point is that honest clients stop colliding.
+    """
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = auth_rate_limit_clock
+    # Generous per-email budget so only the per-IP one can trip.
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+
+    for email in ("fwd-a@example.com", "fwd-b@example.com"):
+        assert (
+            client.post(
+                "/api/auth/signup",
+                json={
+                    "email": email,
+                    "display_name": "Fwd",
+                    "password": "securepass1",
+                },
+            ).status_code
+            == 200
+        )
+
+    # Exhaust the 5-failure IP budget for one address...
+    for _ in range(5):
+        assert (
+            client.post(
+                "/api/auth/login",
+                json={"email": "fwd-a@example.com", "password": "wrong"},
+                headers={"x-forwarded-for": "203.0.113.7"},
+            ).status_code
+            == 401
+        )
+    assert (
+        client.post(
+            "/api/auth/login",
+            json={"email": "fwd-a@example.com", "password": "wrong"},
+            headers={"x-forwarded-for": "203.0.113.7"},
+        ).status_code
+        == 429
+    )
+
+    # ...a different forwarded address is unaffected.
+    assert (
+        client.post(
+            "/api/auth/login",
+            json={"email": "fwd-b@example.com", "password": "wrong"},
+            headers={"x-forwarded-for": "198.51.100.4"},
+        ).status_code
+        == 401
+    )
+
+
+def test_login_unknown_email_still_costs_one_password_compare(client, monkeypatch):
+    """Constant-time miss path: the generic 401 copy is not enough on its own.
+
+    Returning before bcrypt made an unknown address answer ~3000x faster than a
+    wrong password (0.06 ms vs 182 ms measured), so the *timing* kept answering
+    the question the *body* had stopped answering. Asserted behaviourally --
+    that a compare happens, at the real cost factor -- because a wall-clock
+    assertion would be flaky under CI load.
+    """
+    from dashboard.backend import users as users_mod
+
+    seen: list[str] = []
+    real_verify = users_mod.verify_password
+
+    def spy(password: str, password_hash: str) -> bool:
+        seen.append(password_hash)
+        return real_verify(password, password_hash)
+
+    monkeypatch.setattr(users_mod, "verify_password", spy)
+
+    resp = client.post(
+        "/api/auth/login",
+        json={"email": "no-such-account@example.com", "password": "whatever1"},
+    )
+    assert resp.status_code == 401
+    assert len(seen) == 1, "an unknown email must still pay one bcrypt compare"
+    # Same cost factor as a stored password, or the two paths diverge again.
+    assert seen[0].startswith("$2b$")
+    assert seen[0].split("$")[2] == str(users_mod.BCRYPT_ROUNDS)
+
+
+def test_weak_password_signup_does_not_consume_the_signup_budget(
+    client, auth_rate_limit_clock
+):
+    """Policy first, budget second: iterating on a rejected password creates
+    nothing, so it must not spend the allowance for the account being created."""
+    for _ in range(4):
+        rejected = client.post(
+            "/api/auth/signup",
+            json={"email": "weak@example.com", "display_name": "W", "password": "short"},
+        )
+        assert rejected.status_code == 400
+
+    # The fixture's signup IP budget is 2 and is still fully available.
+    for email in ("real1@example.com", "real2@example.com"):
+        assert (
+            client.post(
+                "/api/auth/signup",
+                json={
+                    "email": email,
+                    "display_name": "Real",
+                    "password": "securepass1",
+                },
+            ).status_code
+            == 200
+        )
+
+
+def test_login_logging_cannot_be_used_to_forge_log_lines(client, capsys):
+    """Log injection: the failure line is the record an operator reads while
+    deciding whether they are under attack, so an unauthenticated caller must
+    not be able to write entries into it.
+
+    ``_normalize_email`` only strips the ends of the address, so an interior
+    newline survives validation. CodeQL reported this as py/log-injection while
+    these were ``logger`` calls and goes quiet at a ``print`` sink it does not
+    model -- the alert going away is not what makes it safe, this is.
+    """
+    forged = "auth.login_failed domain=attacker.test"
+    resp = client.post(
+        "/api/auth/login",
+        json={"email": f"victim@example.com\n{forged}", "password": "whatever1"},
+    )
+    assert resp.status_code == 401
+
+    out = capsys.readouterr().out
+    assert "auth.login_failed domain=example.com" in out, "the real line is still logged"
+    assert forged not in out
+    assert "attacker.test" not in out
+
+
+def test_env_int_disables_on_zero_and_reports_bad_overrides(monkeypatch, capsys):
+    """0 disables (the MAX_ACTIVE_RUNS_GLOBAL convention) and junk is loud.
+
+    capsys, not caplog: logger output is invisible under the deployed uvicorn
+    config, so these warnings go to stdout.
+    """
+    from dashboard.backend.api import auth as auth_api
+
+    monkeypatch.setenv("AUTH_FAKE_MAX", "0")
+    assert auth_api._env_int("AUTH_FAKE_MAX", 30) == 0
+
+    monkeypatch.setenv("AUTH_FAKE_MAX", "thirty")
+    assert auth_api._env_int("AUTH_FAKE_MAX", 30) == 30
+    assert "not an integer" in capsys.readouterr().out
+
+    monkeypatch.setenv("AUTH_FAKE_MAX", "-1")
+    assert auth_api._env_int("AUTH_FAKE_MAX", 30) == 30
+    assert "below the minimum" in capsys.readouterr().out
+
+    # A window of 0 is not a setting anyone means, so counts and windows differ.
+    monkeypatch.setenv("AUTH_FAKE_WINDOW", "0")
+    assert auth_api._env_int("AUTH_FAKE_WINDOW", 900, minimum=1) == 900
+
+    monkeypatch.delenv("AUTH_FAKE_MAX")
+    assert auth_api._env_int("AUTH_FAKE_MAX", 30) == 30

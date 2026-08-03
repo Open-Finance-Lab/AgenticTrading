@@ -102,11 +102,19 @@ def _reset_shared_scale_state(monkeypatch):
     from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
     from dashboard.backend.domain.agents import auth_cache
     from dashboard.backend import db_pool
+    from dashboard.backend.api import auth as auth_api
+
     monkeypatch.setattr(db_pool, "POOL_TIMEOUT_SECONDS", 1.0)
     market_data_store._reset_for_tests()
     baseline_worker._reset_for_tests()
     auth_cache._reset_for_tests()
     db_pool._reset_for_tests()
+    # Login/signup limiters are process-global; without a reset, the shared
+    # TestClient peer (testclient) burns the signup IP budget across the suite.
+    auth_api._LOGIN_IP_LIMITER.reset()
+    auth_api._LOGIN_EMAIL_LIMITER.reset()
+    auth_api._SIGNUP_IP_LIMITER.reset()
+    auth_api._SIGNUP_EMAIL_LIMITER.reset()
     yield
     # Best-effort drain so a job enqueued in this test doesn't leak into the
     # next. Note pytest tears fixtures down LIFO, so a test's own monkeypatches

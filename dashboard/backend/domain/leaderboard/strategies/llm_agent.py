@@ -19,6 +19,10 @@ from typing import Any, Dict, List
 import pandas as pd
 
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
+from dashboard.backend.infrastructure.market_data.profiles import (
+    ALPACA,
+    get_market_profile,
+)
 from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.domain.backtesting.portfolio_manager import PortfolioManager
 from dashboard.backend.infrastructure.llm.backtest_harness import (
@@ -141,7 +145,15 @@ class LLMAgentStrategy(BaselineStrategy):
         # rejects.
         model_id = self.model_id or default_model_name(self.integration)
 
-        manager = PortfolioManager(initial_capital=initial_capital)
+        # Contest entries replay the hourly DJIA window over Alpaca bars, so the
+        # execution rules come from that profile rather than a constructor
+        # default — a leaderboard curve must never be produced under settlement
+        # semantics its market does not have.
+        profile = get_market_profile(ALPACA)
+        manager = PortfolioManager(
+            initial_capital=initial_capital,
+            t_plus_one_enabled=profile.t_plus_one_enabled,
+        )
         total = len(timestamps)
         integration_label = self.integration or "auto"
         print(
