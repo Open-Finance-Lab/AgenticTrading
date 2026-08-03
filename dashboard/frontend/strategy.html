@@ -99,11 +99,12 @@
   <script>
     const params = new URLSearchParams(location.search);
     const code = params.get("code");
-    // Match app.js: same-origin locally; empty base on Vercel so /api and
-    // other backend paths hit vercel.json rewrites to Render.
+    // Match app.js: same-origin locally, hosted backend on Vercel (where the
+    // static frontend and the API live on different origins, so location.origin
+    // would point at the frontend and every API call would 404).
     const API = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
         ? window.location.origin
-        : "";
+        : "https://agentictrading.onrender.com";
 
     const $ = (id) => document.getElementById(id);
     const metaEl = $("meta");

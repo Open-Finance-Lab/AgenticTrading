@@ -2338,7 +2338,7 @@ const API = {
 
 const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? window.location.origin
-    : '';
+    : 'https://agentictrading.onrender.com';
 
 const AUTH_TOKEN_KEY = 'auth-token';
 const AUTH_USER_KEY = 'auth-user';
