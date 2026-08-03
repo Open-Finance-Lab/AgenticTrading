@@ -70,7 +70,13 @@ body {
 
 .header {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    /* Content-sized, not minmax(0, 1fr) either side. Two fr tracks are forced
+       equal, so the wider group sets both: the nav side wants ~505px, which
+       reserves ~1010px for side chrome and leaves the row needing ~1480px
+       before it fits. Under that the brand was the only thing with no reserved
+       width, so it was what got covered. Sized to content, the row fits from
+       900px up and the free space is shared out instead. */
+    grid-template-columns: auto auto auto;
     align-items: center;
     background-color: var(--bg-surface);
     padding: 10px 24px;
@@ -80,15 +86,16 @@ body {
 }
 
 .header-brand {
-    /* True viewport-center rail (same trick as landing), independent of side chrome width. */
-    grid-column: 1 / -1;
+    /* Real middle track, not a full-span overlapping rail. Both side tracks are
+       minmax(0, 1fr) and always split the remainder equally, so the brand still
+       lands on the viewport centre -- but it now reserves its own width, so the
+       side chrome shrinks instead of painting over the logo and wordmark. */
+    grid-column: 2;
     grid-row: 1;
     justify-self: center;
-    z-index: 1;
     display: flex;
     align-items: center;
     gap: 12px;
-    min-width: 0;
     text-decoration: none;
     color: inherit;
     cursor: pointer;
@@ -103,7 +110,6 @@ body {
     display: flex;
     align-items: center;
     gap: 12px;
-    min-width: 0;
     flex-wrap: nowrap;
 }
 
@@ -286,7 +292,6 @@ a.header-brand:hover .title-section h1 {
     display: flex;
     align-items: center;
     gap: 10px;
-    min-width: 0;
     flex-wrap: nowrap;
 }
 
@@ -333,7 +338,9 @@ a.header-brand:hover .title-section h1 {
     color: inherit;
     font-size: 14px;
     font-weight: 600;
-    max-width: 140px;
+    /* The cap, not the name, is what the header has to be laid out against --
+       it is the account group's worst case at every width above 1024px. */
+    max-width: 100px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -2312,11 +2319,28 @@ a.header-brand:hover .title-section h1 {
     }
 }
 
-@media (max-width: 700px) {
+/* The header is one row only down to 900px, where the nav becomes a hamburger.
+   In that band the three groups have to actually fit: everything in .header-left
+   and .header-account is flex-shrink: 0, so nothing gives way on its own and the
+   surplus lands on the brand. The labels below are dropped in the order they
+   stop earning their width, each at the measured point where the row overflows.
+
+   Staged rather than collapsed all at once because the brand centres in whatever
+   space the two side groups leave: the further apart their widths, the further
+   the brand sits from the centre. Hiding the left group in one step costs ~215px
+   of offset; hiding it in two keeps it near ~160px down to 1340px.
+
+   Each width is the measured overflow point of the *signed-in* header, which is
+   the wider one -- an avatar, a 100px-capped name and a caret where signed out
+   has just "Sign in". Sizing these to the signed-out header would leave every
+   signed-in user, i.e. every user the fix is for, still overflowing. */
+@media (max-width: 1440px) {
     .header-github-name {
         display: none;
     }
+}
 
+@media (max-width: 1340px) {
     .header-discord-btn {
         padding: 7px 10px;
         gap: 8px;
@@ -2332,6 +2356,19 @@ a.header-brand:hover .title-section h1 {
     }
 }
 
+/* Avatar only, and the row's own side padding halved. By here these are the
+   difference between the header fitting and the account controls leaving the
+   viewport -- the name is still in the account menu one click away. */
+@media (max-width: 1024px) {
+    .auth-user-label {
+        display: none;
+    }
+
+    .header {
+        padding: 10px 12px;
+    }
+}
+
 @media (max-width: 900px) {
     .header {
         grid-template-columns: 1fr;
@@ -2342,6 +2379,11 @@ a.header-brand:hover .title-section h1 {
         grid-column: 1;
         grid-row: auto;
         justify-self: center;
+        /* Safe again here, and needed: one column per group means nothing can
+           be overlapped, while the wordmark is wider than a 320px viewport --
+           left to size the track it would sit hard against the left padding
+           and overhang only to the right. */
+        min-width: 0;
     }
 
     .header-left {
