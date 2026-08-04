@@ -20,7 +20,8 @@ def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
     pipeline = raw.get("pipeline")
     step_count = len(pipeline) if isinstance(pipeline, list) else 0
     runtime_type = str(raw.get("runtime_type") or "pipeline")
-    return {
+    repo_url = str(raw.get("repo_url") or "").strip()
+    public = {
         "template_id": raw["template_id"],
         "name": raw["name"],
         "model_name": raw.get("model_name") or "local-model",
@@ -36,6 +37,9 @@ def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
             else ("simple" if step_count <= 1 else "pipeline")
         ),
     }
+    if repo_url.startswith(("https://github.com/", "http://github.com/")):
+        public["repo_url"] = repo_url
+    return public
 
 
 @lru_cache(maxsize=1)

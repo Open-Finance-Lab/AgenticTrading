@@ -468,7 +468,17 @@ let allAgents = [];
 let agentViewMode = 'grid';
 const AGENT_GRID_PAGE_SIZE = 5;
 /** Per-category page index (0-based). Reset on search change. */
-let agentGridPage = { builtin: 0, external: 0 };
+let agentGridPage = { builtin: 0, open: 0, external: 0 };
+
+const AGENT_GRID_FOOTER_IDS = {
+  builtin: 'agentsGridFooterBuiltin',
+  open: 'agentsGridFooterOpen',
+  external: 'agentsGridFooterExternal',
+};
+
+function isOpenAgent(agent) {
+  return (agent?.runtime_type || 'pipeline') === 'ai_hedge_fund';
+}
 
 function agentGridPageCount(total) {
   return Math.max(1, Math.ceil(total / AGENT_GRID_PAGE_SIZE));
@@ -1018,7 +1028,7 @@ function getFilteredAgents() {
 
 function applyAgentFilters(resetPagination = true) {
   if (resetPagination) {
-    agentGridPage = { builtin: 0, external: 0 };
+    agentGridPage = { builtin: 0, open: 0, external: 0 };
   }
   renderAgentCategories(getFilteredAgents());
 }
@@ -1077,17 +1087,17 @@ function renderAgentsError() {
   document.querySelectorAll('.agents-section .agents-grid').forEach((grid) => {
     grid.innerHTML = '';
   });
-  ['agentsGridFooterBuiltin', 'agentsGridFooterExternal'].forEach((id) => {
+  Object.values(AGENT_GRID_FOOTER_IDS).forEach((id) => {
     const footer = document.getElementById(id);
     if (footer) {
       footer.hidden = true;
       footer.innerHTML = '';
     }
   });
-  const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
-  if (builtinEmpty) builtinEmpty.hidden = true;
-  const externalEmpty = document.getElementById('agentsEmptyExternal');
-  if (externalEmpty) externalEmpty.hidden = true;
+  ['agentsEmptyBuiltin', 'agentsEmptyOpen', 'agentsEmptyExternal'].forEach((id) => {
+    const empty = document.getElementById(id);
+    if (empty) empty.hidden = true;
+  });
   if (errorEl) errorEl.hidden = false;
 }
 
@@ -1144,7 +1154,7 @@ function bindAgentCardMenus(grid) {
 }
 
 function renderAgentGridFooter(categoryKey, total, page, pageCount) {
-  const footerId = categoryKey === 'builtin' ? 'agentsGridFooterBuiltin' : 'agentsGridFooterExternal';
+  const footerId = AGENT_GRID_FOOTER_IDS[categoryKey];
   const footer = document.getElementById(footerId);
   if (!footer) return;
   if (pageCount <= 1) {
@@ -1297,9 +1307,10 @@ function renderAgentCards(grid, agents, categoryKey) {
 
 function renderAgentCategories(agents) {
   const builtinGrid = document.getElementById('agentsGridBuiltin');
+  const openGrid = document.getElementById('agentsGridOpen');
   const externalGrid = document.getElementById('agentsGridExternal');
   const errorEl = document.getElementById('agentsErrorState');
-  if (!builtinGrid || !externalGrid) return;
+  if (!builtinGrid || !openGrid || !externalGrid) return;
 
   if (errorEl) errorEl.hidden = true; // a successful render clears any prior error
 
@@ -1308,22 +1319,38 @@ function renderAgentCategories(agents) {
     [...list].sort((a, b) => (b.agent_id === defaultId) - (a.agent_id === defaultId));
 
   // A live search narrows the list: distinguish "no agents at all" (onboarding)
-  // from "none match your search" so we neither mis-say "No foundation agents
-  // yet" nor surface the External onboarding card as if it were a search result.
+  // from "none match your search" so we neither mis-say empty onboarding copy
+  // nor surface the External onboarding card as if it were a search result.
   const searching = !!(document.getElementById('agentSearchInput')?.value || '').trim();
 
-  const builtin = pinDefaultFirst(agents.filter((a) => a.agent_type === 'builtin'));
+  // Prompting LLMs = instruction + model builtins. Open Agents = hosted
+  // runtimes such as AI Hedge Fund (still agent_type=builtin, different shelf).
+  const builtin = pinDefaultFirst(
+    agents.filter((a) => a.agent_type === 'builtin' && !isOpenAgent(a)),
+  );
+  const openAgents = pinDefaultFirst(
+    agents.filter((a) => a.agent_type === 'builtin' && isOpenAgent(a)),
+  );
   const external = pinDefaultFirst(agents.filter((a) => a.agent_type !== 'builtin'));
 
   renderAgentCards(builtinGrid, builtin, 'builtin');
+  renderAgentCards(openGrid, openAgents, 'open');
   renderAgentCards(externalGrid, external, 'external');
 
   const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
   if (builtinEmpty) {
     builtinEmpty.hidden = builtin.length > 0;
     builtinEmpty.innerHTML = searching
-      ? 'No foundation agents match your search.'
-      : 'No foundation agents yet. Click <strong>Add Agent</strong> to create one.';
+      ? 'No prompting LLMs match your search.'
+      : 'No prompting LLMs yet. Click <strong>Add Agent</strong> to create one.';
+  }
+
+  const openEmpty = document.getElementById('agentsEmptyOpen');
+  if (openEmpty) {
+    openEmpty.hidden = openAgents.length > 0;
+    openEmpty.innerHTML = searching
+      ? 'No open agents match your search.'
+      : 'No open agents yet. Add one from Community.';
   }
 
   const externalEmpty = document.getElementById('agentsEmptyExternal');
@@ -1750,15 +1777,29 @@ function renderMarketplaceGrid() {
   templates.forEach((template) => {
     const card = document.createElement('div');
     card.className = 'section-card agent-card marketplace-card';
-    const isAiHedgeFundTemplate = template.runtime_type === 'ai_hedge_fund';
     const modeLabel = template.mode === 'runtime'
       ? 'Hosted runtime'
       : (template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction');
-    const cloneLabel = isAiHedgeFundTemplate ? 'Copy to My Agents' : 'Add to My Agents';
+    const cloneLabel = 'Add to My Agents';
     const tags = (template.tags || [])
       .slice(0, 3)
       .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
       .join('');
+    const repoLabel = (() => {
+      if (!template.repo_url) return '';
+      try {
+        const path = new URL(template.repo_url).pathname.replace(/^\/+|\/+$/g, '');
+        return path || template.author || 'GitHub';
+      } catch {
+        return template.author || 'GitHub';
+      }
+    })();
+    const authorMeta = template.repo_url
+      ? `<a class="marketplace-repo-btn" href="${escapeHtml(template.repo_url)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(repoLabel)} on GitHub">
+            <svg class="ui-icon marketplace-repo-icon" aria-hidden="true"><use href="#icon-github"></use></svg>
+            <span>${escapeHtml(repoLabel)}</span>
+          </a>`
+      : `<span>By ${escapeHtml(template.author || 'Community')}</span>`;
     card.innerHTML = `
       <div class="agent-card-top">
         <div class="agent-card-identity">
@@ -1773,7 +1814,7 @@ function renderMarketplaceGrid() {
       <div class="marketplace-card-body">
         <p class="marketplace-card-description">${escapeHtml(template.description || 'Open agent template.')}</p>
         <div class="marketplace-card-meta">
-          <span>By ${escapeHtml(template.author || 'Community')}</span>
+          ${authorMeta}
           ${template.step_count ? `<span>${template.step_count} step${template.step_count === 1 ? '' : 's'}</span>` : ''}
         </div>
         ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
