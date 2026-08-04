@@ -80,6 +80,16 @@ def test_no_real_money_sentence_is_present_verbatim():
     assert _NO_REAL_MONEY_SENTENCE in _shipped_text()
 
 
+def test_footer_names_the_operating_entity():
+    """The footer previously read only "© 2026 Agentic Trading Lab. All rights
+    reserved." with no indication of who runs the platform -- all three personas
+    ranked "who runs this?" the #1 trust-killer. Pins the operating entity and
+    the open-source framing in the shipped bundle."""
+    text = _shipped_text()
+    assert "© 2026 SecureFinAI Lab" in text
+    assert "open-source research platform" in text
+
+
 def test_auth_error_gives_a_next_step():
     """The sign-up/sign-in modal's generic failure fallback used to read as a dead
     end ("Something went wrong.") with nothing telling this audience what to do
