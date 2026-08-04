@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from pathlib import Path
+import os
 
 import dashboard.backend.database as _database
 from dashboard.backend.paths import FRONTEND_DIR
@@ -58,6 +59,31 @@ app = FastAPI(
 app.add_exception_handler(ApiError, api_error_handler)
 app.add_exception_handler(RequestValidationError, validation_error_handler)
 
+
+def _cors_allow_origins() -> list[str]:
+    """Browser origins allowed to call this API cross-origin.
+
+    Same-origin Vercel→rewrite traffic does not need CORS. External agent
+    browsers and legacy split-origin frontends still do. When
+    ``ATL_FRONTEND_ORIGINS`` is unset we keep ``*`` (credentials remain
+    disabled). When set, only that allowlist (+ local dev hosts) is used —
+    never combine ``*`` with ``allow_credentials=True``.
+    """
+    raw = (os.getenv("ATL_FRONTEND_ORIGINS") or "").strip()
+    locals_ = [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    if not raw:
+        return ["*"]
+    origins = [part.strip().rstrip("/") for part in raw.split(",") if part.strip()]
+    for host in locals_:
+        if host not in origins:
+            origins.append(host)
+    return origins
+
 # Compress JSON responses when the client accepts it. Equity curves and agent
 # lists run to hundreds of KB uncompressed; minimum_size skips tiny payloads
 # where the gzip header would cost more than it saves.
@@ -80,11 +106,12 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_allow_origins(),
     allow_credentials=False,
-    # PATCH backs the agent Configure screen's Save. Frontend and API are
-    # separate origins in prod, so a method absent here fails at the preflight
-    # even though the route exists (test_cors_preflight_allows_every_routed_method).
+    # PATCH backs the agent Configure screen's Save. Cross-origin callers
+    # (and pre-proxy split-origin frontends) need the method listed here or
+    # the browser fails at preflight even though the route exists
+    # (test_cors_preflight_allows_every_routed_method).
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["content-type", "authorization", "x-session-id", "x-browser-id", "x-api-key", "accept"],
     # x-ratelimit-*/retry-after: the v2 spec promises these to agent clients;
