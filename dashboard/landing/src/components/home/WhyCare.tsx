@@ -35,8 +35,8 @@ const EXTRAS = [
   },
   {
     icon: Hash,
-    title: "Talk to it on Discord",
-    body: "If you would rather just chat.",
+    title: "Talk to it in our Discord community",
+    body: "If you would rather have a conversation.",
   },
 ] as const;
 

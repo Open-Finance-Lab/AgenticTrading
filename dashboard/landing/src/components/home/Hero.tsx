@@ -285,7 +285,7 @@ function ChatSimulation() {
                 <LineChart className="w-4 h-4" />
                 <span className="font-bold">Backtest Complete</span>
               </div>
-              <span className="text-[10px] font-mono text-muted-foreground">Illustrative example</span>
+              <span className="text-xs font-mono text-muted-foreground">Illustrative example</span>
             </div>
             <EquityCurve />
             <div className="grid grid-cols-4 gap-2 text-xs mt-1">

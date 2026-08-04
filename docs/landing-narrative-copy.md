@@ -39,7 +39,7 @@ Scroll target `#landing-stats` is preserved as a hidden anchor inside Talk.
 | H2 | Test your trading idea |
 | Body (1 line) | Full agent run with fixed experiment settings + baselines. |
 | Figure | Equity: Alpha vs DJIA / S&P 500 / Buy & Hold |
-| Experiment settings | Initial capital · Time period (1 month) · Universe (DJIA 30) · Baselines · Model · Est. token cost — **no prompt field** |
+| Experiment settings | Initial capital · Time period (1 month) · Universe (DJIA 30) · Baselines · Model · Est. AI cost (dollar figure only, no raw token counts) — **no prompt field** |
 | Metrics | Return · Sharpe · Max DD · vs Buy & Hold · trades / avg hold |
 | Log | Decision log with step, size, rationale |
 | Primary CTA | Race this agent ↓ |

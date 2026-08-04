@@ -90,6 +90,29 @@ def test_footer_names_the_operating_entity():
     assert "open-source research platform" in text
 
 
+_BANNED_FRAGMENTS = (
+    "different brains",
+    "one sentence and a few minutes",
+    "Est. token cost",
+    "All rights reserved",
+    "just chat",
+    "Talk to it on Discord",
+    "412k in",
+)
+
+
+def test_final_review_fix_wave_fragments_are_gone():
+    """Curated exact fragments only — no stemmed/root matching (e.g. never ban
+    "play"; the deferred agent-playground.exe string would false-positive)."""
+    text = _shipped_text()
+    for fragment in _BANNED_FRAGMENTS:
+        assert fragment not in text, f"banned fragment still present: {fragment!r}"
+
+
+def test_discord_first_mention_uses_the_community_phrase():
+    assert "our Discord community" in _shipped_text()
+
+
 def test_auth_error_gives_a_next_step():
     """The sign-up/sign-in modal's generic failure fallback used to read as a dead
     end ("Something went wrong.") with nothing telling this audience what to do
