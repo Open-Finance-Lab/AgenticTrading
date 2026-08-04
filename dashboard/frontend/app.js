@@ -2401,6 +2401,9 @@ function csrfHeaders() {
   return token ? { 'X-CSRF-Token': token } : {};
 }
 window.csrfHeaders = csrfHeaders;
+// Classic-script `const API` is not a window property; agent-editor and others
+// look up window.API.patch for credentialed mutating calls.
+window.API = API;
 
 
 const AuthAPI = {
