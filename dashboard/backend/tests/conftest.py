@@ -49,6 +49,11 @@ os.environ.pop("USERS_DATABASE_URL", None)
 # Hermetic HMAC key for session-token digests (see session_tokens.py).
 os.environ["SESSION_HASH_SECRET"] = "test-session-hash-secret"
 
+# Cookie CSRF is on by default in production; the broad TestClient suite does
+# not yet attach X-CSRF-Token on every mutating call. Dedicated CSRF tests
+# re-enable enforcement via monkeypatch (see test_csrf.py).
+os.environ["ATL_CSRF"] = "0"
+
 # The session cookie's name and Secure flag key off these (auth_cookies.py).
 # Inherited from a shell (a sourced prod .env, a Render-like deploy env) they
 # flip every test onto __Host-atl_session + Secure, which TestClient's plain

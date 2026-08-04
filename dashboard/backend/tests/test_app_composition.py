@@ -346,6 +346,7 @@ def test_middleware_order_preserved():
     # which re-streams every response) it silently compresses everything.
     assert names == [
         "CSPHeaderMiddleware",
+        "CsrfMiddleware",
         "SessionMiddleware",
         "CORSMiddleware",
         "GZipMiddleware",

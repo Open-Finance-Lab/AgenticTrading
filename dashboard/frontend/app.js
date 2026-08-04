@@ -2310,6 +2310,7 @@ const API = {
       'Content-Type': 'application/json',
       'x-session-id': window.SESSION_ID,
       'x-browser-id': window.BROWSER_OWNER_ID,
+      ...csrfHeaders(),
       ...options.headers,
     };
     try {
@@ -2384,10 +2385,29 @@ function clearLegacyAuthToken() {
   try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch (_) { /* ignore */ }
 }
 
+function readCsrfToken() {
+  try {
+    const raw = document.cookie || '';
+    for (const name of ['atl_csrf', '__Host-atl_csrf']) {
+      const match = raw.match(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'));
+      if (match) return decodeURIComponent(match[1]);
+    }
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
+function csrfHeaders() {
+  const token = readCsrfToken();
+  return token ? { 'X-CSRF-Token': token } : {};
+}
+window.csrfHeaders = csrfHeaders;
+
+
 const AuthAPI = {
   async request(path, options = {}) {
     const headers = {
       'Content-Type': 'application/json',
+      ...csrfHeaders(),
       ...options.headers,
     };
     const response = await fetch(`${API_BASE}${path}`, {
@@ -3117,7 +3137,7 @@ async function openDiscordWithAccount(event) {
 async function finishRobinhoodLinkSuccess(agentId) {
   if (agentId && window.AgentEditor?.open) {
     try {
-      const headers = { 'x-session-id': SESSION_ID };
+      const headers = { 'x-session-id': SESSION_ID, ...csrfHeaders() };
       const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, {
         headers,
         credentials: 'include',
@@ -3157,7 +3177,7 @@ async function handleRobinhoodOAuthReturn() {
 
   if (robinhood === 'pending') {
     try {
-      const headers = { 'Content-Type': 'application/json', 'x-session-id': SESSION_ID };
+      const headers = { 'Content-Type': 'application/json', 'x-session-id': SESSION_ID, ...csrfHeaders() };
       const response = await fetch(`${API_BASE}/api/auth/robinhood/complete`, {
         method: 'POST',
         headers,
