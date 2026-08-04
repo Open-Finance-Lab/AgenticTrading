@@ -121,7 +121,11 @@ flight returns *A live run is already in progress*. Supply an
 API
 ---
 
-All routes need your ATL session token in the ``Authorization`` header.
+All routes act as your signed-in ATL account (see :doc:`accounts`). The browser
+sends the ``HttpOnly`` session cookie automatically — there is no user-visible
+token. A script must sign in with ``POST /api/auth/login`` using a cookie jar,
+and on mutating requests echo the CSRF cookie's value (``__Host-atl_csrf``, or
+``atl_csrf`` on plain-HTTP dev servers) in an ``X-CSRF-Token`` header.
 
 .. list-table::
    :header-rows: 1
