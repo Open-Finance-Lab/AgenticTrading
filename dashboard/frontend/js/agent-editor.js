@@ -827,11 +827,17 @@
 
     async function requestWithHeaders(extraHeaders) {
       if (window.API?.patch) {
-        return window.API.patch(endpoint, payload, extraHeaders);
+        return window.API.patch(endpoint, payload, {
+          ...authHeaders(),
+          ...extraHeaders,
+        });
       }
+      // window.API is a const in app.js and is not on `window` unless exported —
+      // this fallback is the live prod path. It must send X-CSRF-Token whenever
+      // the session cookie is present (#285), same as Robinhood / credential calls.
       const headers = {
         'Content-Type': 'application/json',
-        'x-session-id': window.SESSION_ID,
+        ...authHeaders(),
         ...extraHeaders,
       };
       const response = await fetch(endpoint, {
