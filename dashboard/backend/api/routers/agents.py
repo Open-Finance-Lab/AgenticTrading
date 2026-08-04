@@ -142,7 +142,10 @@ def create_agent(
     """
     ctx = _require_owner_context(request, authorization)
     if body.category is not None and body.category not in AGENT_CATEGORIES:
-        raise HTTPException(status_code=422, detail=f"Unknown category: {body.category!r}")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown category: {body.category!r}. Allowed: {sorted(AGENT_CATEGORIES)}",
+        )
     agent_type = "builtin" if body.agent_type.strip().lower() == "builtin" else "external"
     cash = float(
         body.cash_allocation
@@ -270,6 +273,7 @@ def list_builtin_agents():
                 "name": agent["name"],
                 "model_name": agent.get("model_name") or "local-model",
                 "description": agent.get("description"),
+                "category": agent.get("category"),
                 "run_count": agent.get("run_count", 0),
                 "latest_return": latest.get("total_return"),
                 "latest_sharpe": latest.get("sharpe_ratio"),
@@ -397,7 +401,10 @@ def update_agent(
         raise HTTPException(status_code=400, detail="No fields to update")
 
     if category_provided and body.category is not None and body.category not in AGENT_CATEGORIES:
-        raise HTTPException(status_code=422, detail=f"Unknown category: {body.category!r}")
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown category: {body.category!r}. Allowed: {sorted(AGENT_CATEGORIES)}",
+        )
     category_arg = body.category if category_provided else _UNSET
 
     if pipeline_provided:

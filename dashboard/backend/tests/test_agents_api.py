@@ -952,3 +952,23 @@ def test_patch_agent_unknown_category_422(client):
         headers=headers,
     )
     assert resp.status_code == 422
+
+
+def test_builtin_listing_echoes_category(client):
+    """Deploy-probe mirror (B4/PR C gate): GET /api/v1/agents/builtin rows must
+    carry a "category" key, since it is the only unauthenticated, public
+    surface some integrations (e.g. Discord) read agent shelving from."""
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Shelved Builtin", "agent_type": "builtin", "category": "cn_ashares"},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    agent_id = created.json()["agent"]["agent_id"]
+
+    listing = client.get("/api/v1/agents/builtin")
+    assert listing.status_code == 200
+    entry = next(a for a in listing.json()["agents"] if a["agent_id"] == agent_id)
+    assert "category" in entry
+    assert entry["category"] == "cn_ashares"
