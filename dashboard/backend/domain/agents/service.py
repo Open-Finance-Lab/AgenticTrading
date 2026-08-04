@@ -20,6 +20,7 @@ from dashboard.backend.domain.agents.repository import agent_store, _UNSET
 from dashboard.backend.domain.agents import auth_cache
 from dashboard.backend.domain.agents.credential_store import agent_credential_store
 from dashboard.backend.domain.agents.defaults import default_starter_pipeline
+from dashboard.backend.domain.agents.taxonomy import normalize_category
 from dashboard.backend.domain.agents.runtime import (
     DEFAULT_RUNTIME_TYPE,
     PIPELINE_RUNTIME_TYPE,
@@ -411,6 +412,10 @@ class AgentService:
             seed_default_pipeline=(
                 runtime_type == PIPELINE_RUNTIME_TYPE and not has_own_pipeline
             ),
+            # Lenient on purpose: the live catalog still carries legacy values
+            # ("Foundation", "Advanced", "Hosted") until they're recategorized,
+            # and those must stamp None rather than reject the clone.
+            category=normalize_category(template.get("category")),
         )
         if has_own_pipeline:
             agent = self.agents.update_agent(agent["agent_id"], pipeline=pipeline) or agent

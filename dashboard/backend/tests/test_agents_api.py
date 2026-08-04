@@ -884,6 +884,58 @@ def test_marketplace_clone_unknown_template(client):
     assert resp.status_code == 404
 
 
+def test_clone_stamps_normalized_category(client, monkeypatch):
+    """A template carrying a recognized category slug stamps it onto the clone."""
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+
+    fake_template = {
+        "template_id": "categorized-template",
+        "name": "Categorized Template",
+        "model_name": "local-model",
+        "description": "A template with a normalized category.",
+        "category": "us_stocks",
+    }
+    monkeypatch.setattr(
+        marketplace_mod,
+        "get_marketplace_template",
+        lambda template_id: fake_template if template_id == "categorized-template" else None,
+    )
+    cloned = client.post(
+        "/api/v1/agents/marketplace/categorized-template/clone",
+        json={},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert cloned.json()["agent"]["category"] == "us_stocks"
+
+
+def test_clone_legacy_category_stamps_none(client):
+    """Live catalog entries still carry legacy category strings (e.g. "Foundation")
+    until PR C recategorizes marketplace.json; those must stamp None, not 422.
+
+    NOTE: once PR C's Task C1 lands, repoint this at a monkeypatched legacy
+    fixture (the live catalog will no longer carry legacy values by then).
+    """
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+
+    marketplace_mod.reload_marketplace_catalog()
+    template = marketplace_mod.get_marketplace_template("momentum-scout")
+    assert template is not None, "fixture assumption: momentum-scout must exist in marketplace.json"
+    assert template.get("category") == "Foundation", (
+        "fixture assumption: momentum-scout's live category is still the legacy "
+        "'Foundation' string -- if this changed, PR C already recategorized the "
+        "catalog and this test should switch to a monkeypatched legacy fixture"
+    )
+
+    cloned = client.post(
+        "/api/v1/agents/marketplace/momentum-scout/clone",
+        json={},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert cloned.json()["agent"]["category"] is None
+
+
 def test_create_agent_with_category_round_trips(client):
     headers = {"X-Session-Id": str(uuid.uuid4())}
     created = client.post(
