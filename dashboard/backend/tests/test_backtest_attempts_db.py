@@ -91,6 +91,43 @@ def test_get_attempts_for_session_orders_newest_first_and_limits(tmp_path):
     assert created == sorted(created, reverse=True)
 
 
+def test_insert_attempt_duplicate_run_id_resets_terminal_fields(tmp_path):
+    """A second insert_attempt for the same run_id is SQLite's ``INSERT OR
+    REPLACE``, i.e. a DELETE+INSERT: every column the statement's column list
+    omits (``error``, ``finished_at``, ``created_at``) reverts to its schema
+    default, it does not survive from the row being replaced.
+
+    Pinned here (2026-08-04 fix round) because the Postgres twin's
+    ``ON CONFLICT (run_id) DO UPDATE`` must reproduce this exact reset
+    column-by-column rather than silently preserving the old terminal state
+    -- see database_postgres.py's insert_attempt docstring. A relaunch under
+    a reused run_id must read as a fresh 'running' attempt, not one still
+    carrying the previous attempt's error/finished_at.
+    """
+    db = _db(tmp_path)
+    _insert(db, "run-relaunch")
+    db.finalize_attempt("run-relaunch", "failed", error="first attempt died")
+
+    row = db.get_attempts_for_session("sess-1")[0]
+    assert row["status"] == "failed"
+    assert row["error"] == "first attempt died"
+    assert row["finished_at"]
+
+    # Relaunch under the same run_id (e.g. a client retry of the launch call).
+    _insert(db, "run-relaunch", agent_name="Retried Agent")
+
+    row = db.get_attempts_for_session("sess-1")[0]
+    assert row["status"] == "running"
+    assert row["error"] is None
+    assert row["finished_at"] is None
+    assert row["agent_name"] == "Retried Agent"
+    # created_at is also reset by REPLACE (schema DEFAULT CURRENT_TIMESTAMP);
+    # not asserted against the pre-relaunch value since CURRENT_TIMESTAMP's
+    # 1-second resolution would make an equality/inequality check flaky --
+    # its presence after the relaunch is enough to prove it wasn't dropped.
+    assert row["created_at"]
+
+
 def test_get_latest_attempt_for_agents_is_batched_by_agent(tmp_path):
     db = _db(tmp_path)
     _insert(db, "run-a1-old", agent_id="agent-a")

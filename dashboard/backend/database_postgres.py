@@ -491,7 +491,23 @@ class PostgresBacktestDatabase:
                        end_date: Optional[str] = None,
                        params: Optional[Dict[str, Any]] = None,
                        timeout_seconds: Optional[int] = None) -> None:
-        """Record a launched frontend backtest as 'running'."""
+        """Record a launched frontend backtest as 'running'.
+
+        ON CONFLICT (run_id) DO UPDATE, not DO NOTHING (owner ruling,
+        2026-08-04 fix round -- matches this file's convention of mirroring
+        SQLite's ``INSERT OR REPLACE`` via an explicit ``DO UPDATE SET``
+        rather than silently no-opping on a repeat key). SQLite's REPLACE is
+        a DELETE+INSERT: every column this statement's column list omits
+        (``error``, ``finished_at``, ``created_at``) reverts to its schema
+        default on a re-insert, not just the columns actually named. The
+        ``DO UPDATE SET`` below reproduces that column-by-column -- named
+        columns take the new value, ``error``/``finished_at`` are forced back
+        to NULL, and ``created_at`` is recomputed -- so a relaunch under a
+        reused ``run_id`` reads as a fresh 'running' attempt on both twins,
+        not one still carrying a stale terminal error from whatever this
+        run_id was attached to before. See ``finalize_attempt`` below for the
+        same reasoning applied to its own (disjoint) column set.
+        """
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -500,7 +516,19 @@ class PostgresBacktestDatabase:
                     (run_id, agent_id, session_id, agent_name, start_date,
                      end_date, params_json, status, timeout_seconds)
                     VALUES (%s, %s, %s, %s, %s, %s, %s, 'running', %s)
-                    ON CONFLICT (run_id) DO NOTHING
+                    ON CONFLICT (run_id) DO UPDATE SET
+                        agent_id = EXCLUDED.agent_id,
+                        session_id = EXCLUDED.session_id,
+                        agent_name = EXCLUDED.agent_name,
+                        start_date = EXCLUDED.start_date,
+                        end_date = EXCLUDED.end_date,
+                        params_json = EXCLUDED.params_json,
+                        status = EXCLUDED.status,
+                        timeout_seconds = EXCLUDED.timeout_seconds,
+                        error = NULL,
+                        finished_at = NULL,
+                        created_at = to_char(now() AT TIME ZONE 'utc',
+                                             'YYYY-MM-DD HH24:MI:SS')
                     """,
                     (run_id, agent_id, session_id, agent_name, start_date,
                      end_date,
@@ -511,7 +539,28 @@ class PostgresBacktestDatabase:
     def finalize_attempt(self, run_id: str, status: str, *,
                          error: Optional[str] = None,
                          session_id: Optional[str] = None) -> None:
-        """Mark an attempt terminal; upsert a minimal row if insert never landed."""
+        """Mark an attempt terminal; upsert a minimal row if insert never landed.
+
+        The fallback INSERT's ``ON CONFLICT (run_id) DO UPDATE`` mirrors
+        ``insert_attempt`` above for the same owner-ruled reason (DO NOTHING
+        -> DO UPDATE, column-by-column reproduction of SQLite's REPLACE
+        reset). Columns this INSERT's list omits -- ``agent_id``,
+        ``agent_name``, ``start_date``, ``end_date``, ``params_json``,
+        ``timeout_seconds``, ``created_at`` -- are forced back to their
+        default (NULL, or recomputed for ``created_at``) on conflict, exactly
+        as SQLite's ``INSERT OR REPLACE`` would.
+
+        In practice this branch only inserts (never conflicts) when called
+        through the public API sequentially on one connection: it runs
+        precisely when the UPDATE above matched zero rows, i.e. no row with
+        this run_id exists yet, so the INSERT that follows has nothing to
+        conflict with -- reaching the ON CONFLICT arm requires a genuine
+        concurrent write between the UPDATE and this INSERT (a different
+        connection racing in), not any call sequence a single caller can
+        produce. The DO UPDATE SET is still written out in full rather than
+        left as DO NOTHING: if that race is ever hit, the two twins must
+        still agree on the result rather than silently diverging.
+        """
         from dashboard.backend.database import ATTEMPT_ERROR_MAX_CHARS
 
         error_text = str(error)[:ATTEMPT_ERROR_MAX_CHARS] if error else None
@@ -535,7 +584,19 @@ class PostgresBacktestDatabase:
                         VALUES (%s, %s, %s, %s,
                                 to_char(now() AT TIME ZONE 'utc',
                                         'YYYY-MM-DD HH24:MI:SS'))
-                        ON CONFLICT (run_id) DO NOTHING
+                        ON CONFLICT (run_id) DO UPDATE SET
+                            session_id = EXCLUDED.session_id,
+                            status = EXCLUDED.status,
+                            error = EXCLUDED.error,
+                            finished_at = EXCLUDED.finished_at,
+                            agent_id = NULL,
+                            agent_name = NULL,
+                            start_date = NULL,
+                            end_date = NULL,
+                            params_json = NULL,
+                            timeout_seconds = NULL,
+                            created_at = to_char(now() AT TIME ZONE 'utc',
+                                                 'YYYY-MM-DD HH24:MI:SS')
                         """,
                         (run_id, session_id, status, error_text),
                     )

@@ -891,3 +891,38 @@ def test_attempt_lifecycle_round_trips_postgres(pg_backtest_db):
 
     latest = pg_backtest_db.get_latest_attempt_for_agents(["agent-pg"])
     assert latest["agent-pg"]["run_id"] == "att-pg-1"
+
+
+@pg_only
+def test_insert_attempt_duplicate_run_id_resets_terminal_fields_postgres(pg_backtest_db):
+    """Postgres twin of test_backtest_attempts_db.py's
+    test_insert_attempt_duplicate_run_id_resets_terminal_fields: a relaunch
+    under the same run_id must reset error/finished_at via insert_attempt's
+    ON CONFLICT (run_id) DO UPDATE, reproducing SQLite's INSERT OR REPLACE
+    (a DELETE+INSERT, so omitted columns revert to default) rather than
+    silently preserving the previous attempt's terminal state.
+    """
+    pg_backtest_db.insert_attempt(
+        "run-relaunch-pg", "sess-pg", agent_id="agent-pg", agent_name="PG Agent",
+    )
+    pg_backtest_db.finalize_attempt(
+        "run-relaunch-pg", "failed", error="first attempt died"
+    )
+
+    row = pg_backtest_db.get_attempts_for_session("sess-pg")[0]
+    assert row["status"] == "failed"
+    assert row["error"] == "first attempt died"
+    assert row["finished_at"]
+
+    # Relaunch under the same run_id (e.g. a client retry of the launch call).
+    pg_backtest_db.insert_attempt(
+        "run-relaunch-pg", "sess-pg",
+        agent_id="agent-pg", agent_name="Retried PG Agent",
+    )
+
+    row = pg_backtest_db.get_attempts_for_session("sess-pg")[0]
+    assert row["status"] == "running"
+    assert row["error"] is None
+    assert row["finished_at"] is None
+    assert row["agent_name"] == "Retried PG Agent"
+    assert row["created_at"]
