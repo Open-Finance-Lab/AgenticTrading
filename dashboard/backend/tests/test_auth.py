@@ -61,7 +61,7 @@ def test_signup_login_me_logout_flow(client):
     assert signup_data["user"]["role"] == "user"
     assert "password_hash" not in signup_data["user"]
     assert "token" not in signup_data
-    token = _session_token(client)
+    assert _session_token(client)  # signup set the session cookie
 
     duplicate = client.post(
         "/api/auth/signup",
@@ -2129,3 +2129,19 @@ def test_me_upgrades_a_legacy_bearer_session_to_a_cookie(client):
     again = client.get("/api/auth/me")
     assert again.status_code == 200
     assert not again.headers.get_list("set-cookie")
+
+
+def test_set_session_cookie_rejects_malformed_tokens():
+    """The /me bridge feeds set_session_cookie a client-supplied Bearer value;
+    anything outside the token_urlsafe alphabet must never reach Set-Cookie."""
+    from fastapi import Response
+
+    from dashboard.backend.auth_cookies import set_session_cookie
+
+    response = Response()
+    set_session_cookie(response, "evil;\r\nSet-Cookie: hijack=1")
+    assert "set-cookie" not in response.headers
+
+    response = Response()
+    set_session_cookie(response, "x" * 43)  # well-formed shape still works
+    assert "set-cookie" in response.headers

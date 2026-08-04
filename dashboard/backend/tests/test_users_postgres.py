@@ -123,7 +123,7 @@ def test_signup_login_me_logout_flow_postgres(pg_client, temp_postgres_store):
     assert signup_data["user"]["role"] == "user"
     assert "password_hash" not in signup_data["user"]
     assert "token" not in signup_data
-    token = _cookie_session_token(pg_client)
+    assert _cookie_session_token(pg_client)  # signup set the session cookie
 
     # Prove the route's write actually landed in Postgres. Without this, a
     # regression that re-detaches the routes from the patched store would

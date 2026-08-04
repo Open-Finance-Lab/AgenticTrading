@@ -155,10 +155,6 @@
     return { 'x-session-id': window.SESSION_ID };
   }
 
-  function withCredentials(options = {}) {
-    return { ...options, credentials: 'include' };
-  }
-
   function isEditorSignedIn() {
     if (typeof window.getStoredAuthUser === 'function') return !!window.getStoredAuthUser();
     try {

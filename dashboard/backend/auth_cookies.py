@@ -7,6 +7,7 @@ carries the opaque token; the DB stores only its HMAC digest (session_tokens).
 from __future__ import annotations
 
 import os
+import re
 from typing import Optional
 
 from fastapi import Request, Response
@@ -15,6 +16,10 @@ from dashboard.backend.session_tokens import session_ttl_days
 
 _HOST_COOKIE = "__Host-atl_session"
 _DEV_COOKIE = "atl_session"
+
+# Server tokens are secrets.token_urlsafe(32) — 43 chars of [A-Za-z0-9_-].
+# The bounds stay loose so a future length change doesn't lock users out.
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,128}")
 
 
 def cookie_secure() -> bool:
@@ -42,6 +47,12 @@ def read_session_token(request: Request) -> Optional[str]:
 
 
 def set_session_cookie(response: Response, raw_token: str) -> None:
+    # The /me migration bridge feeds this a client-supplied Bearer value, so
+    # gate on the exact server-token alphabet before it can reach a Set-Cookie
+    # header. Server-generated tokens always match; anything else is garbage a
+    # cookie could never authenticate with, so silently skipping it is safe.
+    if not _TOKEN_RE.fullmatch(raw_token):
+        return
     response.set_cookie(
         key=session_cookie_name(),
         value=raw_token,
