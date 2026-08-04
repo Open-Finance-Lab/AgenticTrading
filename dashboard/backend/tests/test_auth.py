@@ -59,7 +59,7 @@ def test_signup_login_me_logout_flow(client):
     assert signup_data["user"]["role"] == "user"
     assert "password_hash" not in signup_data["user"]
     assert "token" not in signup_data
-    token = _session_token(client)
+    assert _session_token(client)  # signup set the session cookie
 
     duplicate = client.post(
         "/api/auth/signup",

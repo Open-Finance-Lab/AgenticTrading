@@ -170,10 +170,6 @@
     return { ...headers, ...csrf };
   }
 
-  function withCredentials(options = {}) {
-    return { ...options, credentials: 'include' };
-  }
-
   function isEditorSignedIn() {
     if (typeof window.getStoredAuthUser === 'function') return !!window.getStoredAuthUser();
     try {
