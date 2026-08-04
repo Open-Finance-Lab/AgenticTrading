@@ -18,6 +18,8 @@ from dashboard.backend.db_url import describe_database_url
 # Use persistent disk path if set (Render), otherwise local dashboard storage path
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(DEFAULT_DB_PATH)))
 
+ATTEMPT_ERROR_MAX_CHARS = 500
+
 
 def enable_wal(db_path) -> None:
     """Switch a SQLite file to WAL journal mode (best-effort, idempotent).
@@ -229,6 +231,34 @@ class BacktestDatabase:
                 manifest_json TEXT NOT NULL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        """)
+
+        # backtest_attempts: launch-time journal for frontend backtests.
+        # One row per POST /backtest/run; the only durable record of a run
+        # that failed before insert_run (2026-08-04 backtest-visibility spec).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS backtest_attempts (
+                run_id TEXT PRIMARY KEY,
+                agent_id TEXT,
+                session_id TEXT NOT NULL,
+                agent_name TEXT,
+                start_date TEXT,
+                end_date TEXT,
+                params_json TEXT,
+                status TEXT NOT NULL,
+                error TEXT,
+                timeout_seconds INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                finished_at TIMESTAMP
+            )
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_backtest_attempts_agent
+            ON backtest_attempts(agent_id, created_at)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_backtest_attempts_session
+            ON backtest_attempts(session_id, created_at)
         """)
 
         conn.commit()
@@ -588,6 +618,93 @@ class BacktestDatabase:
 
         conn.commit()
         conn.close()
+
+    # ------------------------------------------------------------------
+    # backtest_attempts journal (2026-08-04 backtest-visibility spec)
+    # ------------------------------------------------------------------
+
+    def insert_attempt(self, run_id: str, session_id: str, *,
+                       agent_id: Optional[str] = None,
+                       agent_name: Optional[str] = None,
+                       start_date: Optional[str] = None,
+                       end_date: Optional[str] = None,
+                       params: Optional[Dict[str, Any]] = None,
+                       timeout_seconds: Optional[int] = None) -> None:
+        """Record a launched frontend backtest as 'running'."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT OR REPLACE INTO backtest_attempts
+            (run_id, agent_id, session_id, agent_name, start_date, end_date,
+             params_json, status, timeout_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?)
+        """, (run_id, agent_id, session_id, agent_name, start_date, end_date,
+              json.dumps(params) if params is not None else None,
+              timeout_seconds))
+        conn.commit()
+        conn.close()
+
+    def finalize_attempt(self, run_id: str, status: str, *,
+                         error: Optional[str] = None,
+                         session_id: Optional[str] = None) -> None:
+        """Mark an attempt terminal ('completed'/'failed').
+
+        If the launch-time insert never landed, upsert a minimal terminal row
+        (needs ``session_id`` — NOT NULL) so the failure record survives; a
+        missing row with no session is a no-op, never an error.
+        """
+        error_text = str(error)[:ATTEMPT_ERROR_MAX_CHARS] if error else None
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE backtest_attempts
+            SET status = ?, error = ?, finished_at = CURRENT_TIMESTAMP
+            WHERE run_id = ?
+        """, (status, error_text, run_id))
+        if cursor.rowcount == 0 and session_id:
+            cursor.execute("""
+                INSERT OR REPLACE INTO backtest_attempts
+                (run_id, session_id, status, error, finished_at)
+                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+            """, (run_id, session_id, status, error_text))
+        conn.commit()
+        conn.close()
+
+    def get_attempts_for_session(self, session_id: str,
+                                 limit: int = 50) -> List[Dict]:
+        """Newest-first attempts for a session (the history-merge read)."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT * FROM backtest_attempts
+            WHERE session_id = ?
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT ?
+        """, (session_id, limit))
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
+    def get_latest_attempt_for_agents(self, agent_ids: List[str]) -> Dict[str, Dict]:
+        """Latest attempt per agent, one query (My Agents list is the hot path)."""
+        wanted = [a for a in agent_ids if a]
+        if not wanted:
+            return {}
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        placeholders = ",".join("?" * len(wanted))
+        cursor.execute(f"""
+            SELECT * FROM backtest_attempts
+            WHERE agent_id IN ({placeholders})
+            ORDER BY created_at DESC, rowid DESC
+        """, wanted)
+        rows = cursor.fetchall()
+        conn.close()
+        latest: Dict[str, Dict] = {}
+        for row in rows:
+            record = dict(row)
+            latest.setdefault(record["agent_id"], record)
+        return latest
 
     def update_run_baselines(
         self,
