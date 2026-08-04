@@ -89,7 +89,7 @@ AgenticTrading/
 ├── orchestration/             # FinAgent multi-agent framework (separate)
 ├── requirements.txt           # Dashboard deps (not root pyproject.toml)
 ├── Dockerfile / render.yaml   # Backend deploy
-└── vercel.json                # Frontend static deploy
+└── dashboard/frontend/vercel.json  # Frontend static deploy (must sit in the Vercel Root Directory)
 ```
 
 ## User Workflow

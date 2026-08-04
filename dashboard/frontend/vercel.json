@@ -1,7 +1,6 @@
 {
   "name": "AgenticTrading Dashboard",
   "cleanUrls": true,
-  "outputDirectory": "dashboard/frontend",
   "headers": [
     {
       "source": "/(.*)",
