@@ -75,6 +75,7 @@ def test_create_agent_schema(store):
         "description", "pipeline", "cash_allocation", "backtest_allocation",
         "api_key_prefix", "owner_user_id", "scopes",
         "created_at", "last_used_at", "api_key", "live_trading_enabled",
+        "category",
     }
     assert agent["name"] == "My Agent"
     assert agent["model_name"] == "gpt-x"
@@ -123,6 +124,56 @@ def test_legacy_agent_schema_migrates_runtime_defaults(tmp_path):
 
     assert migrated["runtime_type"] == "pipeline"
     assert migrated["runtime_config"] == {}
+
+
+def test_agent_row_carries_category(store):
+    agent = store.create_agent(name="Cat Test", agent_type="builtin", category="us_stocks")
+    assert agent["category"] == "us_stocks"
+
+
+def test_category_defaults_to_none_and_survives_update_clear(store):
+    agent = store.create_agent(name="Cat Default")
+    assert agent["category"] is None
+    store.update_agent(agent["agent_id"], category="cn_ashares")
+    assert store.get_agent(agent["agent_id"])["category"] == "cn_ashares"
+    store.update_agent(agent["agent_id"], category=None)
+    assert store.get_agent(agent["agent_id"])["category"] is None
+
+
+def test_category_column_added_to_preexisting_table(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "legacy-category-agents.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE external_agents (
+            agent_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            session_id TEXT NOT NULL UNIQUE,
+            api_key_hash TEXT NOT NULL UNIQUE,
+            api_key_prefix TEXT NOT NULL,
+            model_name TEXT NOT NULL DEFAULT 'local-model',
+            owner_user_id INTEGER,
+            owner_browser_session TEXT,
+            created_at TEXT,
+            last_used_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO external_agents (
+            agent_id, name, session_id, api_key_hash, api_key_prefix
+        ) VALUES ('agent_legacy_cat', 'Legacy', 'legacy-cat-session', 'hash', 'ag_legacy')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = AgentStore(db_path=db_path).get_agent("agent_legacy_cat")
+
+    assert migrated["category"] is None
 
 
 def test_get_agent_and_missing(store):
