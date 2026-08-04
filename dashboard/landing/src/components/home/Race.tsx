@@ -86,7 +86,7 @@ export function Race() {
                 </h3>
                 <LiveBadge />
               </div>
-              <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded shrink-0">Example</span>
+              <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded shrink-0">Illustrative example</span>
             </div>
             <div className="space-y-2 mt-4">
               <div className="grid grid-cols-12 text-xs font-mono text-muted-foreground pb-2 px-2">
@@ -122,7 +122,7 @@ export function Race() {
               <h3 className="text-lg font-bold">Leaderboard</h3>
               <LiveBadge />
             </div>
-            <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded w-fit shrink-0">Example</span>
+            <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded w-fit shrink-0">Illustrative example</span>
           </div>
 
           <div className="h-[320px] md:h-[400px] w-full">

@@ -10,7 +10,7 @@ export function Talk() {
         <div className="grid lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.25fr)] gap-10 xl:gap-14 items-center">
           <div>
             <p className="text-base md:text-lg font-mono tracking-wide text-primary mb-3">01 — Talk</p>
-            <h2 className="text-3xl md:text-4xl font-bold mb-3">Describe your idea, in a sentence</h2>
+            <h2 className="text-3xl md:text-4xl font-bold mb-3">Describe your idea in plain language</h2>
             <p className="text-foreground/80 mb-8 text-lg">
               Write how you want to trade. The agent follows it, hour by hour.
             </p>

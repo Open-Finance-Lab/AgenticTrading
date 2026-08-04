@@ -99,6 +99,10 @@ export function Hero() {
               <HeadlineWords words={HEADLINE_LINE_2} startDelay={line2Delay} />
             </span>
           </h1>
+          <p className="max-w-xl mx-auto lg:mx-0 mb-8 text-sm text-foreground/60">
+            Every test here uses simulated money. Real money is involved only if you explicitly
+            connect a brokerage account and turn on live trading.
+          </p>
           <motion.div
             className="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-4"
             initial={{ opacity: 0, y: 20 }}
@@ -276,9 +280,12 @@ function ChatSimulation() {
       {step >= 3 && (
         <FadeIn>
           <AgentBubble>
-            <div className="flex items-center gap-2 mb-1 text-positive">
-              <LineChart className="w-4 h-4" />
-              <span className="font-bold">Backtest Complete</span>
+            <div className="flex items-center justify-between gap-2 mb-1">
+              <div className="flex items-center gap-2 text-positive">
+                <LineChart className="w-4 h-4" />
+                <span className="font-bold">Backtest Complete</span>
+              </div>
+              <span className="text-[10px] font-mono text-muted-foreground">Illustrative example</span>
             </div>
             <EquityCurve />
             <div className="grid grid-cols-4 gap-2 text-xs mt-1">
@@ -296,7 +303,8 @@ function ChatSimulation() {
           <AgentBubble>
             <p className="text-foreground mb-3">
               Looks solid. Want me to run this in{" "}
-              <span className="text-primary font-semibold">paper trading</span>{" "}
+              <span className="text-primary font-semibold">paper trading</span>
+              {" "}— practice trading with simulated money at live market prices —
               and alert you when Berkshire&apos;s next 13F drops?
             </p>
             <div className="flex flex-wrap gap-2">
