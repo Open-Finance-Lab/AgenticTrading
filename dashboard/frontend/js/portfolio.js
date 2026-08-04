@@ -354,7 +354,7 @@ function renderAllocationLegend(legendEl, slices) {
     const toggleHtml = needsExpand
         ? `<div class="allocation-legend-toggle-row">
             <button type="button" class="allocation-legend-toggle" data-allocation-legend-toggle aria-expanded="${expanded ? 'true' : 'false'}">
-                ${expanded ? '收起' : `展开全部 (${agentCount})`}
+                ${expanded ? 'Show less' : `Show all (${agentCount})`}
             </button>
            </div>`
         : '';

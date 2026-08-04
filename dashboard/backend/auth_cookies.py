@@ -56,5 +56,18 @@ def set_session_cookie(response: Response, raw_token: str) -> None:
 def clear_session_cookie(response: Response) -> None:
     # Clear both names so a device that flipped Secure mid-flight cannot keep
     # a stale cookie under the other name.
+    #
+    # The __Host- deletion must itself carry Secure: RFC 6265bis §4.1.3.1 makes
+    # a UA reject any Set-Cookie for a __Host-* name that lacks it, and
+    # delete_cookie defaults secure=False — so without this flag the prod
+    # cookie survives logout in the browser (revoked server-side, but still
+    # sent). httponly/samesite match the set path so the delete is the exact
+    # attribute-for-attribute counterpart of set_session_cookie.
     for name in {_HOST_COOKIE, _DEV_COOKIE, session_cookie_name()}:
-        response.delete_cookie(key=name, path="/")
+        response.delete_cookie(
+            key=name,
+            path="/",
+            secure=name.startswith("__Host-") or cookie_secure(),
+            httponly=True,
+            samesite="lax",
+        )

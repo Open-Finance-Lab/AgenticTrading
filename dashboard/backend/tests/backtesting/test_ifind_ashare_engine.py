@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
+import json
 import os
 import subprocess
 import sys
@@ -95,6 +96,101 @@ def make_cn_bars(symbols=A_SHARE_DEMO_6_SYMBOLS, count=60):
     return bars
 
 
+def test_rejected_order_serializer_normalizes_timestamp_and_numpy_numbers():
+    serialized = HourlyBacktester._serialize_rejected_orders([{
+        "timestamp": pd.Timestamp("2026-04-01T10:00:00", tz=CN),
+        "requested_shares": pd.Series([100], dtype="int64").iloc[0],
+        "executed_shares": pd.Series([40], dtype="int64").iloc[0],
+        "unfilled_shares": pd.Series([60], dtype="int64").iloc[0],
+        "reason": "t1_frozen",
+    }])
+
+    assert serialized == [{
+        "timestamp": "2026-04-01T10:00:00+08:00",
+        "requested_shares": 100,
+        "executed_shares": 40,
+        "unfilled_shares": 60,
+        "reason": "t1_frozen",
+    }]
+
+
+@pytest.mark.parametrize(
+    ("decision_source", "wants_llm"),
+    [
+        (RULE_BASED_DECISION_SOURCE, False),
+        (LLM_DECISION_SOURCE, True),
+    ],
+)
+def test_ifind_rule_and_llm_paths_share_t1_execution(
+    monkeypatch,
+    decision_source,
+    wants_llm,
+):
+    provider = RecordingProvider(make_cn_bars())
+    monkeypatch.setattr(
+        engine_module,
+        "create_market_data_provider",
+        lambda _source, universe=None: provider,
+    )
+    monkeypatch.setattr(engine_module, "HAS_ANTHROPIC", True)
+    monkeypatch.setattr(engine_module, "make_llm_client", object)
+    recording_db = RecordingDB()
+    monkeypatch.setattr(engine_module, "db", recording_db)
+
+    created_managers = []
+    base_manager = engine_module.PortfolioManager
+
+    class ScriptedPortfolioManager(base_manager):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.script_step = 0
+            created_managers.append(self)
+
+        def _scripted_decision(self):
+            self.script_step += 1
+            if self.script_step == 1:
+                return {"actions": [{
+                    "symbol": A_SHARE_DEMO_6_SYMBOLS[0],
+                    "action": "buy",
+                    "shares": 10,
+                }]}
+            if self.script_step == 2:
+                return {"actions": [{
+                    "symbol": A_SHARE_DEMO_6_SYMBOLS[0],
+                    "action": "sell",
+                    "shares": 10,
+                }]}
+            return {"actions": []}
+
+        def make_trading_decision(self, _portfolio_state):
+            return self._scripted_decision()
+
+        def make_trading_decision_with_llm(self, *_args, **_kwargs):
+            return self._scripted_decision()
+
+    monkeypatch.setattr(engine_module, "PortfolioManager", ScriptedPortfolioManager)
+
+    backtester = HourlyBacktester(
+        START,
+        END,
+        session_id=f"ifind-t1-{decision_source}",
+        use_llm=wants_llm,
+        data_source=IFIND_ASHARE,
+        decision_source=decision_source,
+    )
+    backtester.load_data()
+    backtester.calculate_indicators()
+    backtester.run_agent_backtest()
+
+    manager = created_managers[0]
+    assert manager.t_plus_one_enabled is True
+    assert [trade["side"] for trade in manager.trades] == ["BUY"]
+    assert manager.rejected_orders[0]["reason"] == "t1_frozen"
+    assert recording_db.runs[0]["metadata"]["rejected_orders"][0][
+        "reason"
+    ] == "t1_frozen"
+
+
 def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
     provider = RecordingProvider(make_cn_bars())
     monkeypatch.setattr(engine_module, "create_market_data_provider", lambda _source, universe=None: provider)
@@ -145,6 +241,7 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "timezone": "Asia/Shanghai",
         "decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
+        "t_plus_one_enabled": True,
         "symbols": list(A_SHARE_DEMO_6_SYMBOLS),
         "native_currency": "CNY",
         "reporting_currency": "USD",
@@ -160,6 +257,8 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "fx_observation_start_date": "2026-03-31",
         "fx_observation_end_date": "2026-04-15",
         "native_initial_capital": 7_000.0,
+        # No rejected_orders* keys at all: a clean run writes nothing rather
+        # than an empty array on every A-share row.
     }
     first_equity = recording_db.equity_points[0][1][0]
     assert first_equity["equity"] == pytest.approx(1_000)
@@ -206,6 +305,7 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "timezone": "Asia/Shanghai",
         "decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
+        "t_plus_one_enabled": True,
         "symbols": list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
         "native_currency": "CNY",
         "reporting_currency": "USD",
@@ -302,6 +402,15 @@ def test_ifind_registered_universe_runs_explicit_llm_with_strict_market_context(
             "paper_backtest": True,
             "native_currency": "CNY",
             "reporting_currency": "USD",
+            # A_share profiles settle T+1, and the model is told so in words —
+            # a bare sellable_shares integer in each holding is not
+            # self-describing.
+            "settlement": "T+1",
+            "settlement_note": (
+                "Shares bought today cannot be sold until the next trading "
+                "day. Each holding reports sellable_shares; a sell above that "
+                "amount is truncated to it."
+            ),
             "fx_pair": "USD/CNY",
             "fx_source": "iFinD Historical Conversion Rate",
         }
@@ -567,3 +676,128 @@ def test_transport_failure_still_points_at_credentials(monkeypatch):
 
     with pytest.raises(MarketDataUnavailableError, match="permission"):
         backtester.load_data()
+
+
+# ---------------------------------------------------------------------------
+# Rejected-order persistence is bounded, and says so
+# ---------------------------------------------------------------------------
+
+def _metadata_stub(rejected, monkeypatch, data_source=IFIND_ASHARE, deferrals=()):
+    """Run _agent_run_metadata over just the T+1 audit branches."""
+    backtester = object.__new__(HourlyBacktester)
+    backtester.data_source = data_source
+    backtester.rejected_orders = rejected
+    backtester.t1_deferrals = list(deferrals)
+    backtester.use_llm = False
+    backtester.prompt_adaptations = None
+    backtester.initial_pipeline = None
+    backtester.pipeline = None
+    monkeypatch.setattr(HourlyBacktester, "_run_metadata", lambda self: {})
+    return backtester._agent_run_metadata()
+
+
+def test_agent_metadata_omits_rejected_orders_entirely_when_there_are_none(monkeypatch):
+    """A clean run must not write an empty array onto every A-share row."""
+    meta = _metadata_stub([], monkeypatch)
+    assert "rejected_orders" not in meta
+    assert "rejected_orders_count" not in meta
+    assert "rejected_orders_truncated" not in meta
+
+
+def test_agent_metadata_keeps_a_small_rejection_list_whole(monkeypatch):
+    records = [{"reason": "t1_frozen", "seq": i} for i in range(3)]
+    meta = _metadata_stub(records, monkeypatch)
+    assert meta["rejected_orders"] == records
+    assert meta["rejected_orders_count"] == 3
+    assert "rejected_orders_truncated" not in meta
+
+
+def test_agent_metadata_caps_the_sample_and_reports_the_true_total(monkeypatch):
+    """The cap must never be silent.
+
+    A 20-symbol A-share run can emit thousands of records at ~198 bytes each,
+    which would otherwise land whole in one agent_runs.metadata JSON cell.
+    """
+    limit = engine_module.REJECTED_ORDER_SAMPLE_LIMIT
+    records = [{"reason": "t1_frozen", "seq": i} for i in range(limit + 500)]
+    meta = _metadata_stub(records, monkeypatch)
+
+    assert len(meta["rejected_orders"]) == limit
+    assert meta["rejected_orders_count"] == limit + 500
+    assert meta["rejected_orders_truncated"] == 500
+    # Head sample: the first rejections are the diagnostic ones, and the count
+    # above is what tells a reader the list is partial.
+    assert meta["rejected_orders"][0]["seq"] == 0
+
+
+def test_agent_metadata_skips_rejected_orders_for_non_ashare_sources(monkeypatch):
+    meta = _metadata_stub(
+        [{"reason": "t1_frozen"}], monkeypatch, data_source="alpaca"
+    )
+    assert "rejected_orders" not in meta
+    assert "rejected_orders_count" not in meta
+
+
+# ---------------------------------------------------------------------------
+# T+1 deferrals: the "did the rule actually bind?" metric
+# ---------------------------------------------------------------------------
+
+def _deferral(seq, deferred=10):
+    return {
+        "date": f"2026-04-{(seq % 28) + 1:02d}",
+        "symbol": f"60000{seq % 5}.SH",
+        "requested_shares": deferred + 5,
+        "sellable_shares": 5,
+        "deferred_shares": deferred,
+    }
+
+
+def test_agent_metadata_omits_deferrals_when_t1_never_bound(monkeypatch):
+    meta = _metadata_stub([], monkeypatch, deferrals=[])
+    assert "t1_deferrals" not in meta
+    assert "t1_deferred_events" not in meta
+    assert "t1_deferred_shares" not in meta
+
+
+def test_agent_metadata_totals_the_deferred_shares(monkeypatch):
+    records = [_deferral(i, deferred=10) for i in range(3)]
+    meta = _metadata_stub([], monkeypatch, deferrals=records)
+
+    assert meta["t1_deferred_events"] == 3
+    assert meta["t1_deferred_shares"] == 30
+    assert meta["t1_deferrals"] == records
+    assert "t1_deferrals_truncated" not in meta
+
+
+def test_agent_metadata_caps_the_deferral_sample_too(monkeypatch):
+    limit = engine_module.REJECTED_ORDER_SAMPLE_LIMIT
+    records = [_deferral(i) for i in range(limit + 7)]
+    meta = _metadata_stub([], monkeypatch, deferrals=records)
+
+    assert len(meta["t1_deferrals"]) == limit
+    assert meta["t1_deferred_events"] == limit + 7
+    assert meta["t1_deferrals_truncated"] == 7
+    # The total counts every event, not just the persisted sample.
+    assert meta["t1_deferred_shares"] == 10 * (limit + 7)
+
+
+def test_deferral_serializer_sorts_and_isoformats_dates():
+    from datetime import date as _date
+
+    serialized = HourlyBacktester._serialize_t1_deferrals({
+        ("601318.SH", _date(2026, 4, 2)): {
+            "date": _date(2026, 4, 2), "symbol": "601318.SH",
+            "requested_shares": 10, "sellable_shares": 0, "deferred_shares": 10,
+        },
+        ("600519.SH", _date(2026, 4, 1)): {
+            "date": _date(2026, 4, 1), "symbol": "600519.SH",
+            "requested_shares": pd.Series([7], dtype="int64").iloc[0],
+            "sellable_shares": 2, "deferred_shares": 5,
+        },
+    })
+
+    assert [item["date"] for item in serialized] == ["2026-04-01", "2026-04-02"]
+    # numpy scalar unwrapped to a plain int, or json.dumps would reject it.
+    assert serialized[0]["requested_shares"] == 7
+    assert type(serialized[0]["requested_shares"]) is int
+    json.dumps(serialized)

@@ -43,6 +43,27 @@ def test_build_user_store_defaults_to_sqlite(monkeypatch):
     assert isinstance(store, users_module.UserStore)
 
 
+@pytest.mark.parametrize("marker", ["RENDER", "ATL_ENV"])
+def test_build_user_store_refuses_to_boot_without_a_session_secret(monkeypatch, marker):
+    """A missing SESSION_HASH_SECRET has to kill the boot, not the traffic.
+
+    session_hash_secret() raises at *call* time. With nothing resolving it
+    during startup the service comes up healthy, /health returns 200 and the CI
+    deploy hook reports success -- then every login and every authenticated
+    request 500s with no CORS headers, which reaches the browser as a CORS
+    error rather than a server error. Render keeps the previous version live
+    when a boot fails, so this is the safer half of the trade.
+    """
+    import dashboard.backend.users as users_module
+
+    monkeypatch.delenv("USERS_DATABASE_URL", raising=False)
+    monkeypatch.delenv("SESSION_HASH_SECRET", raising=False)
+    monkeypatch.setenv(marker, "true" if marker == "RENDER" else "production")
+
+    with pytest.raises(RuntimeError, match="SESSION_HASH_SECRET"):
+        users_module._build_user_store()
+
+
 def test_build_user_store_picks_postgres_when_url_set(monkeypatch):
     import dashboard.backend.users as users_module
     import dashboard.backend.users_postgres as users_postgres_module
@@ -281,6 +302,80 @@ def test_change_password_and_avatar_postgres(pg_client, temp_postgres_store):
     )
     assert delete.status_code == 200
     assert temp_postgres_store.get_user_by_email("nina@example.com")["avatar"] is None
+
+
+@pg_only
+def test_legacy_plaintext_session_table_is_migrated_postgres(temp_postgres_store):
+    """The destructive half of hashed sessions, on the store that keeps data.
+
+    USERS_DATABASE_URL points at Neon in prod, so this DROP takes every live
+    login with it -- and unlike the SQLite path it cannot be replayed by
+    redeploying. The SQLite twin of this test lives in test_auth.py; both exist
+    because "it worked when I ran it once" is not coverage for a DROP.
+    """
+    import dashboard.backend.users_postgres as users_postgres_module
+
+    user = temp_postgres_store.create_user("legacy@example.com", "Legacy", "securepass1")
+    with temp_postgres_store._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DROP TABLE IF EXISTS auth_sessions")
+            cur.execute(
+                """
+                CREATE TABLE auth_sessions (
+                    token TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    created_at TEXT NOT NULL,
+                    expires_at TEXT NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                "INSERT INTO auth_sessions (token, user_id, created_at, expires_at) "
+                "VALUES (%s, %s, %s, %s)",
+                ("legacy-plaintext-token", user["id"], "2026-01-01", "2099-01-01"),
+            )
+
+    migrated = users_postgres_module.PostgresUserStore(TEST_POSTGRES_URL)
+
+    with migrated._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_schema = current_schema() AND table_name = 'auth_sessions'"
+            )
+            columns = {row["column_name"] for row in cur.fetchall()}
+            cur.execute("SELECT COUNT(*) AS n FROM auth_sessions")
+            sessions_left = cur.fetchone()["n"]
+            cur.execute("SELECT COUNT(*) AS n FROM users")
+            users_left = cur.fetchone()["n"]
+
+    assert "token_hash" in columns and "token" not in columns
+    assert sessions_left == 0, "legacy sessions cannot be re-hashed; they must go"
+    assert users_left == 1, "the accounts must survive the session table's DROP"
+    assert migrated.get_user_for_token("legacy-plaintext-token") is None
+
+
+@pg_only
+def test_expired_sessions_are_reclaimed_postgres(temp_postgres_store):
+    """Twin of the SQLite sweep tests -- see test_auth.py for the rationale."""
+    from dashboard.backend.session_tokens import hash_session_token
+    from dashboard.backend.users import _utcnow, format_stored_timestamp
+
+    user = temp_postgres_store.create_user("sweep@example.com", "Sweep", "securepass1")
+    dead = temp_postgres_store.create_session(user["id"])
+    live = temp_postgres_store.create_session(user["id"])
+    with temp_postgres_store._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE auth_sessions SET expires_at = %s WHERE token_hash = %s",
+                (
+                    format_stored_timestamp(_utcnow() - timedelta(days=1)),
+                    hash_session_token(dead),
+                ),
+            )
+
+    assert temp_postgres_store.purge_expired_sessions() == 1
+    assert temp_postgres_store.get_user_for_token(live) is not None
 
 
 @pg_only

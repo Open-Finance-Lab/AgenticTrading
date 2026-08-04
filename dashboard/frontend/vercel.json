@@ -1,7 +1,6 @@
 {
   "name": "AgenticTrading Dashboard",
   "cleanUrls": true,
-  "outputDirectory": "dashboard/frontend",
   "headers": [
     {
       "source": "/(.*)",
@@ -9,6 +8,10 @@
         {
           "key": "Cache-Control",
           "value": "public, max-age=3600"
+        },
+        {
+          "key": "Content-Security-Policy",
+          "value": "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' https://agentictrading.onrender.com; img-src 'self' data: https:;"
         }
       ]
     },
@@ -45,6 +48,15 @@
         {
           "key": "Cache-Control",
           "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/(api|paper|backtest|runs|config|admin|ticker|health|compare)(/.*)?",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store"
         }
       ]
     }

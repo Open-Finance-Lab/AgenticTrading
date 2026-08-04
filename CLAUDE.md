@@ -101,7 +101,7 @@ Two step-driven agent surfaces coexist; they are **not peers**:
 ## Deployment
 
 - **Backend** → Render (`render.yaml`): `uvicorn dashboard.backend.app:app`, persistent disk at `/data`, health check `/health`.
-- **Frontend** → Vercel (`vercel.json`): static `dashboard/frontend`.
+- **Frontend** → Vercel (`dashboard/frontend/vercel.json`): static `dashboard/frontend`. The Vercel project's Root Directory is `dashboard/frontend`, so the config **must** live there — a repo-root `vercel.json` is silently ignored (issue #301).
 - **Container** (`Dockerfile`): `WORKDIR /app`; `uvicorn dashboard.backend.app:app`.
 
 ## Merge & branch discipline

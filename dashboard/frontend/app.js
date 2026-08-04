@@ -138,6 +138,10 @@ let appToastTimer = null;
 
 const APP_TOAST_VISIBLE_MS = 4000;
 const APP_TOAST_FADE_MS = 240;
+// How long the head boot script's /health warmup may stay pending before the
+// boot handler tells the user the free-tier server is waking up. A warm
+// server answers well under this; a cold start takes 30-60s.
+const SLOW_BOOT_NOTICE_MS = 3000;
 
 /**
  * Non-blocking confirmation channel for /app.
@@ -811,21 +815,35 @@ function renderAgentAllocatedCapitalHero(agent) {
 /**
  * Card body for an agent with a backtest in flight.
  *
- * The bar is deliberately indeterminate rather than a percentage: the launch
- * path has no honest completion estimate, and a fake percentage that stalls is
- * worse than an animation that only claims "still working".
+ * The bar is determinate whenever the engine has published a step: engine.py's
+ * `_publish_live_progress` writes step/total_steps every step and the status
+ * endpoint surfaces them. (The 2026-07-29 spec specified an indeterminate bar
+ * "since no honest completion estimate exists" -- that was already untrue; see
+ * the 2026-08-01 spec.) It falls back to indeterminate before the first step,
+ * which is a normal state on every run, not an error.
  */
 function renderAgentRunningBody(agent, running) {
+  // Every value below comes from deriveRunningProgress, which the per-second
+  // patch path reads too -- see refreshRunningAgentCards().
+  const view = deriveRunningProgress(running);
+  // Every dynamic node carries a data-running-* hook, including the ones that
+  // are empty right now: the patch path finds nodes by attribute, and a node
+  // rendered only when it has content can never be filled in later.
+  const id = escapeHtml(agent.agent_id);
+
   return `
     <div class="agent-card-running">
       <div class="agent-card-running-head">
         <span class="agent-card-running-dot" aria-hidden="true"></span>
         <span class="agent-card-running-label">Backtesting…</span>
-        <span class="agent-card-running-elapsed" data-running-elapsed="${escapeHtml(agent.agent_id)}">${escapeHtml(formatBacktestElapsed(running.elapsedSeconds))}</span>
+        <span class="agent-card-running-step" data-running-step="${id}">${escapeHtml(view.stepLabel)}</span>
+        <span class="agent-card-running-elapsed" data-running-elapsed="${id}">${escapeHtml(formatBacktestElapsed(running.elapsedSeconds))}</span>
       </div>
-      <div class="agent-card-running-track" role="progressbar" aria-label="Backtest in progress">
-        <div class="agent-card-running-bar"></div>
+      <div class="agent-card-running-track" role="progressbar" aria-label="Backtest in progress" data-running-track="${id}"${view.determinate ? ` aria-valuenow="${view.pct}" aria-valuemin="0" aria-valuemax="100"` : ''}>
+        <div class="agent-card-running-bar${view.determinate ? ' is-determinate' : ''}" data-running-bar="${id}"${view.determinate ? ` style="width: ${view.pct}%"` : ''}></div>
       </div>
+      <p class="agent-card-running-detail" data-running-detail="${id}">${escapeHtml(view.detail)}</p>
+      <p class="agent-card-running-stale" data-running-stale="${id}">${escapeHtml(view.notice)}</p>
     </div>
     ${renderAgentAllocatedCapitalHero(agent)}`;
 }
@@ -1138,9 +1156,9 @@ function renderAgentGridFooter(categoryKey, total, page, pageCount) {
   const atStart = page <= 0;
   const atEnd = page >= pageCount - 1;
   footer.innerHTML = `
-    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="上一页" ${atStart ? 'disabled' : ''}>←</button>
-    <span class="agents-grid-footer-count">第 ${page + 1} / ${pageCount} 页 · 共 ${total} 个</span>
-    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="下一页" ${atEnd ? 'disabled' : ''}>→</button>`;
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="Previous page" ${atStart ? 'disabled' : ''}>←</button>
+    <span class="agents-grid-footer-count">Page ${page + 1} of ${pageCount} · ${total} total</span>
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="Next page" ${atEnd ? 'disabled' : ''}>→</button>`;
 }
 
 function renderAgentCards(grid, agents, categoryKey) {
@@ -1575,7 +1593,38 @@ async function ensureDefaultFoundationAgent(agents) {
   }
 }
 
+// Auth boot gate: nav goes live before the boot's auth awaits, so a My Agents
+// click can arrive while refreshAuthUser → claimAgentsForUser is still in
+// flight. Fetching agents at that moment misses the guest Foundation agent a
+// landing signup is about to claim, and ensureDefaultFoundationAgent would
+// provision a duplicate starter. Every external caller therefore waits here;
+// the DOMContentLoaded handler opens the gate once the claim phase settles.
+let openAuthBootGate;
+const authBootGate = new Promise((resolve) => {
+  openAuthBootGate = resolve;
+});
+let agentsLoadInFlight = null;
+
 async function loadAgents() {
+  // Coalesce concurrent callers: several early clicks during a cold boot must
+  // share one fetch, not stack identical requests behind the gate. Sequential
+  // calls still refetch (re-clicking the subtab is the user's refresh).
+  if (agentsLoadInFlight) return agentsLoadInFlight;
+  agentsLoadInFlight = (async () => {
+    try {
+      await authBootGate;
+      return await loadAgentsNow();
+    } finally {
+      agentsLoadInFlight = null;
+    }
+  })();
+  return agentsLoadInFlight;
+}
+
+// The ungated loader: only for callers already ordered after the account
+// claim (claimAgentsForUser itself, which runs inside the gated section and
+// would deadlock on the gate above).
+async function loadAgentsNow() {
   try {
     let data = await API.get(`${API_BASE}/api/v1/agents`);
     let agents = data.agents || [];
@@ -2375,7 +2424,14 @@ const AuthAPI = {
   },
 
   me() {
-    return this.request('/api/auth/me', { method: 'GET' });
+    // Migration bridge: a session issued before the HttpOnly-cookie change
+    // exists only in localStorage. Send it once as Bearer; the backend
+    // answers with Set-Cookie, and refreshAuthUser then clears the legacy key.
+    const legacyToken = localStorage.getItem(AUTH_TOKEN_KEY);
+    return this.request('/api/auth/me', {
+      method: 'GET',
+      ...(legacyToken ? { headers: { Authorization: `Bearer ${legacyToken}` } } : {}),
+    });
   },
 
   logout() {
@@ -2462,7 +2518,9 @@ async function claimAgentsForUser({ reload = true } = {}) {
     console.warn('Agent account claim skipped:', error.message);
   }
   if (reload) {
-    await loadAgents();
+    // Ungated on purpose: this call IS the claim-then-load ordering the auth
+    // boot gate exists to protect, and it runs before the gate opens.
+    await loadAgentsNow();
   }
 }
 
@@ -3298,11 +3356,14 @@ function initAuthUI(options = {}) {
       // post-sign-in housekeeping and must not hold the modal open — a slow or
       // hung backend used to leave the popup up over an already-signed-in UI.
       closeAuthModal();
-      // First-time accounts should greet on Home, not a leftover My Agents tab
-      // from browsing while logged out (nav-state restore).
-      if (authMode === 'signup') {
-        navigateToPage('home');
-      }
+      // Land on My Agents after either sign-up or sign-in, matching the landing
+      // page's goToDashboardLoggedIn. Sign-up used to go to Home (a second
+      // marketing hero); sign-in used to navigate nowhere at all, so the only
+      // confirmation it had worked was the header avatar swapping in, and the
+      // user was left on whatever page they happened to be reading.
+      // navigateToPage maps 'agents' → playground + the 'agents' subtab itself.
+      navigateToPage('agents');
+      showAppToast(`Signed in as ${data.user?.display_name || data.user?.email || 'your account'}`);
       claimAgentsForUser()
         .then(() => {
           // If we arrived here from a Discord deep link that needed this account
@@ -3356,6 +3417,13 @@ let chartInstance = null;
 let liveBacktestChartActive = false;
 /** When set, Backtest view is pinned to this in-flight run (blocks history chart paint). */
 let liveBacktestRunId = null;
+/** Latest polled progress for the single in-flight run, or null before the
+ *  first step. backtest_status is one process-global dict on the server, so at
+ *  most one backtest runs at a time and a single shared object is correct.
+ *  Declared beside liveBacktestRunId because the two are only ever read
+ *  together: getAgentBacktestRunning() applies this to a card only when the
+ *  card's run id matches liveBacktestRunId. */
+let liveBacktestProgress = null;
 let liveBacktestLaunchPending = false;
 let liveBacktestLaunchError = false;
 /** Active status-poll timer id (so dropdown can re-attach to a running job). */
@@ -3413,7 +3481,21 @@ function getAgentBacktestRunning(agentId) {
         clearAgentBacktestRunning(agentId);
         return null;
     }
-    return { ...entry, elapsedSeconds: Math.floor(elapsed) };
+    // Progress belongs to the run the poller is following, and ONLY to it.
+    // The map can transiently hold two entries: runBacktest() marks an agent
+    // running before its POST resolves (:5689, runId still null) and the
+    // backend rejects a second concurrent run, so clicking Run on an idle
+    // agent while another is genuinely in flight briefly leaves both marked.
+    // An unconditional spread would paint the running agent's step/percent/ETA
+    // onto a card whose launch is about to be refused. An entry with no runId
+    // yet is pre-confirmation and correctly renders indeterminate -- there is
+    // no progress to show that early anyway.
+    const ownsProgress = Boolean(liveBacktestRunId) && entry.runId === liveBacktestRunId;
+    return {
+        ...entry,
+        ...(ownsProgress && liveBacktestProgress ? liveBacktestProgress : {}),
+        elapsedSeconds: Math.floor(elapsed),
+    };
 }
 
 let lastRenderedRunningKey = null;
@@ -3438,13 +3520,70 @@ function refreshRunningAgentCards() {
     // Query by attribute presence and compare values in JS rather than
     // interpolating an agent id into a selector string: no escaping, no
     // CSS.escape feature detection, and nothing to get wrong later.
-    const elapsedNodes = document.querySelectorAll('[data-running-elapsed]');
+    //
+    // EVERY field renderAgentRunningBody() paints is patched here, not just the
+    // text ones. A full re-render fires only when the *set* of running agents
+    // changes -- twice in a normal run -- so anything missing from this list is
+    // frozen at its launch value for the whole run. That is how the bar, its
+    // aria-valuenow and the staleness note previously never moved while the
+    // numbers beside them climbed: the card showed "84/240 · 35%" next to a bar
+    // still running the indeterminate sweep, and the staleness warning this
+    // feature exists for was unreachable outside a re-render.
+    const nodes = {
+        elapsed: document.querySelectorAll('[data-running-elapsed]'),
+        step: document.querySelectorAll('[data-running-step]'),
+        detail: document.querySelectorAll('[data-running-detail]'),
+        stale: document.querySelectorAll('[data-running-stale]'),
+        track: document.querySelectorAll('[data-running-track]'),
+        bar: document.querySelectorAll('[data-running-bar]'),
+    };
+    const patch = (list, attribute, agentId, apply) => {
+        list.forEach((el) => {
+            if (el.getAttribute(attribute) !== agentId) return;
+            apply(el);
+        });
+    };
     Object.keys(running).forEach((agentId) => {
         const entry = getAgentBacktestRunning(agentId);
         if (!entry) return;
-        elapsedNodes.forEach((el) => {
-            if (el.getAttribute('data-running-elapsed') !== agentId) return;
+        // Same derivation the full render uses, so the two cannot drift.
+        const view = deriveRunningProgress(entry);
+        patch(nodes.elapsed, 'data-running-elapsed', agentId, (el) => {
             el.textContent = formatBacktestElapsed(entry.elapsedSeconds);
+        });
+        // Assigned unconditionally, empty string included: a tick where the
+        // status endpoint reports no progress (file caught mid-rewrite, a
+        // transient OSError) must clear the last numbers rather than leave them
+        // on screen looking current.
+        patch(nodes.step, 'data-running-step', agentId, (el) => {
+            el.textContent = view.stepLabel;
+        });
+        patch(nodes.detail, 'data-running-detail', agentId, (el) => {
+            el.textContent = view.detail;
+        });
+        patch(nodes.stale, 'data-running-stale', agentId, (el) => {
+            el.textContent = view.notice;
+        });
+        patch(nodes.track, 'data-running-track', agentId, (el) => {
+            if (!view.determinate) {
+                // Removed, not zeroed: a progressbar reporting valuenow=0
+                // forever is a false statement, whereas the absent attribute is
+                // exactly what tells assistive tech the value is indeterminate.
+                el.removeAttribute('aria-valuenow');
+                el.removeAttribute('aria-valuemin');
+                el.removeAttribute('aria-valuemax');
+                return;
+            }
+            el.setAttribute('aria-valuenow', String(view.pct));
+            el.setAttribute('aria-valuemin', '0');
+            el.setAttribute('aria-valuemax', '100');
+        });
+        patch(nodes.bar, 'data-running-bar', agentId, (el) => {
+            el.classList.toggle('is-determinate', view.determinate);
+            // Cleared rather than set to 0%: the stylesheet's 40% width is what
+            // makes the indeterminate sweep visible, and a 0%-wide bar would
+            // animate nothing across the track.
+            el.style.width = view.determinate ? `${view.pct}%` : '';
         });
     });
 }
@@ -3475,6 +3614,11 @@ let currentMode = "home";
 let currentPage = "home";
 let playgroundTab = "agents";
 let competitionTab = "daily";
+// True once the user explicitly navigates (any history:'push' navigation).
+// Nav is wired before boot's auth awaits, so applyInitialNavigation may run
+// AFTER a real click — restoring the saved page then would yank the page out
+// from under the user.
+let userHasNavigated = false;
 let allRuns = [];
 let comparisonData = null;
 let backtestChartData = null;
@@ -3488,84 +3632,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // landing signup → /app handoff does not miss the guest Foundation agent.
     initAuthUI({ refresh: false });
     bindCashStepInputs();
-    await restoreActiveAgentSession();
-    try {
-        await refreshAuthUser();
-    } catch (error) {
-        console.warn('Boot refreshAuthUser failed:', error?.message || error);
-    }
-    // Portfolio overview must not wait on the agents waterfall. Paint any
-    // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
-    // then show the page while loadAgents continues in the background.
-    if (typeof window.paintPortfolioBoot === 'function') {
-        try {
-            window.paintPortfolioBoot(
-                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
-            );
-        } catch (error) {
-            console.warn('Portfolio boot paint failed:', error?.message || error);
-        }
-    }
-    if (typeof window.prefetchPortfolio === 'function') {
-        Promise.resolve(
-            window.prefetchPortfolio(
-                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
-            ),
-        ).catch((error) => {
-            console.warn('Portfolio prefetch failed:', error?.message || error);
-        });
-    }
-    // refreshAuthUser → claimAgentsForUser already loadAgents when signed in.
-    const agentsReady = isSignedIn()
-        ? Promise.resolve()
-        : loadAgents().catch((error) => {
-            console.warn('Initial loadAgents failed:', error.message);
-        });
-    applyInitialNavigation();
-    // Home modules / agent cards catch up once the list lands; do not block
-    // first navigation on that wait.
-    await agentsReady;
-    window.addEventListener('agent-editor-saved', async (event) => {
-        const agent = event.detail?.agent;
-        if (agent?.agent_id) {
-            const idx = allAgents.findIndex((a) => a.agent_id === agent.agent_id);
-            if (idx >= 0) {
-                allAgents[idx] = { ...allAgents[idx], ...agent };
-            }
-            applyAgentFilters();
-        }
-        if (agent?.agent_id === localStorage.getItem(ACTIVE_AGENT_KEY)) {
-            localStorage.setItem(ACTIVE_AGENT_NAME_KEY, agent.name || '');
-            const nameEl = document.getElementById('playgroundAgentName');
-            if (nameEl) nameEl.textContent = agent.name || 'Agent';
-        }
-        await loadAgents();
-    });
-    window.addEventListener('agent-editor-open-run', async (event) => {
-        const { agent, runId } = event.detail || {};
-        if (!agent || !runId) return;
-        if (window.AgentEditor) window.AgentEditor.close(true);
-        await activateAgent(agent);
-        localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
-        navigateToPage('playground', { playgroundTab: 'backtest' });
-        currentMode = 'backtest';
-        await loadData();
-    });
-    // Guarded: this awaits loadData() internally, and an unhandled rejection here
-    // used to abort the rest of boot — including initNavigation(), which wires
-    // every nav button. A failed deep link must not cost the user navigation.
-    try {
-        await applyAgentRunDeepLink();
-    } catch (error) {
-        console.warn('Deep link failed:', error.message);
-    }
-    const config = loadConfigFromURL();
-    window.CURRENT_CONFIG = config;
-    console.log('⚙️ Experiment config:', config);
-    console.log('Session ID:', window.SESSION_ID);
-    
-    console.log('Dashboard initializing...');
 
+    // ---- Pure-DOM wiring before ANY network await. On a cold backend start
+    // every fetch below this block can hang for tens of seconds, and nothing
+    // here needs one: nav must respond to clicks immediately. Data loads an
+    // early click triggers are held by authBootGate until the account-claim
+    // phase settles, so wiring early cannot reorder the claim invariant. ----
+    initNavigation();
     setupTickerResizeHandler();
     setupTickerScrollControls();
 
@@ -3640,46 +3713,147 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelectorAll('.universe-tab').forEach(tab => {
         tab.addEventListener('click', (e) => handleUniverseTabSwitch(e.target));
     });
-    
+
     // Setup preset cards
     document.getElementById('djiaCard')?.addEventListener('click', () => selectPreset('djia'));
     document.getElementById('mag7Card')?.addEventListener('click', () => selectPreset('mag7'));
-    
+
     // Setup custom universe builder
     setupAssetSearch();
-    
+
     const addAssetBtn = document.querySelector('.add-asset-btn');
     if (addAssetBtn) {
         addAssetBtn.addEventListener('click', handleAddAsset);
     }
-    
+
     const searchInput = document.getElementById('assetSearchInput');
     if (searchInput) {
         searchInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') handleAddAsset();
         });
     }
-    
+
     // Setup chip removal
     document.querySelectorAll('.chip-remove').forEach(btn => {
         btn.addEventListener('click', (e) => removeChip(e.target.closest('.chip')));
     });
 
-    // Load default configuration if available (after DOM is ready)
-    try {
-      await loadDefaults();
-    } catch (error) {
-      console.warn('Failed to load defaults:', error);
-    }
-    await loadMarketDataFeatures();
-
-    initNavigation();
-
-    // Load ticker without blocking the rest of the page
+    // Ticker immediately: it is the page's de-facto liveness signal and
+    // depends on nothing above.
     loadMarketTicker();
     setInterval(loadMarketTicker, 30000);
     updateMarketsOpenStatus();
     setInterval(updateMarketsOpenStatus, 60000);
+
+    // Config fetches in parallel, off the boot critical path; awaited at the
+    // end of boot so "Dashboard ready" still means fully configured.
+    const configReady = Promise.all([
+        loadDefaults().catch((error) => {
+            console.warn('Failed to load defaults:', error);
+        }),
+        loadMarketDataFeatures(),
+    ]);
+
+    // If the head boot script's warmup ping is still pending after a beat,
+    // say so — a free-tier cold start otherwise looks like a broken page.
+    if (window.API_WARMUP) {
+        let warmupSettled = false;
+        window.API_WARMUP.then(() => { warmupSettled = true; });
+        setTimeout(() => {
+            if (!warmupSettled) {
+                showAppToast('Waking up the server — the first load can take up to a minute on our free hosting.');
+            }
+        }, SLOW_BOOT_NOTICE_MS);
+    }
+
+    await restoreActiveAgentSession();
+    // The HttpOnly session cookie is invisible to JS, so the boot signal is
+    // the cached auth-user (written on every cookie sign-in) or a pre-cookie
+    // legacy localStorage token (upgraded to a cookie by the /me bridge).
+    if (localStorage.getItem(AUTH_TOKEN_KEY) || getStoredAuthUser()) {
+        try {
+            await refreshAuthUser();
+        } catch (error) {
+            console.warn('Boot refreshAuthUser failed:', error?.message || error);
+        }
+    }
+    // Claim phase settled (or there was nothing to claim): gated loadAgents
+    // callers queued by early clicks may fetch now.
+    openAuthBootGate();
+    // Portfolio overview must not wait on the agents waterfall. Paint any
+    // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
+    // then show the page while loadAgents continues in the background.
+    if (typeof window.paintPortfolioBoot === 'function') {
+        try {
+            window.paintPortfolioBoot(
+                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
+            );
+        } catch (error) {
+            console.warn('Portfolio boot paint failed:', error?.message || error);
+        }
+    }
+    if (typeof window.prefetchPortfolio === 'function') {
+        Promise.resolve(
+            window.prefetchPortfolio(
+                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
+            ),
+        ).catch((error) => {
+            console.warn('Portfolio prefetch failed:', error?.message || error);
+        });
+    }
+    // refreshAuthUser → claimAgentsForUser already loadAgents when signed in.
+    const agentsReady = isSignedIn()
+        ? Promise.resolve()
+        : loadAgents().catch((error) => {
+            console.warn('Initial loadAgents failed:', error.message);
+        });
+    applyInitialNavigation();
+    // Home modules / agent cards catch up once the list lands; do not block
+    // first navigation on that wait.
+    await agentsReady;
+    window.addEventListener('agent-editor-saved', async (event) => {
+        const agent = event.detail?.agent;
+        if (agent?.agent_id) {
+            const idx = allAgents.findIndex((a) => a.agent_id === agent.agent_id);
+            if (idx >= 0) {
+                allAgents[idx] = { ...allAgents[idx], ...agent };
+            }
+            applyAgentFilters();
+        }
+        if (agent?.agent_id === localStorage.getItem(ACTIVE_AGENT_KEY)) {
+            localStorage.setItem(ACTIVE_AGENT_NAME_KEY, agent.name || '');
+            const nameEl = document.getElementById('playgroundAgentName');
+            if (nameEl) nameEl.textContent = agent.name || 'Agent';
+        }
+        await loadAgents();
+    });
+    window.addEventListener('agent-editor-open-run', async (event) => {
+        const { agent, runId } = event.detail || {};
+        if (!agent || !runId) return;
+        if (window.AgentEditor) window.AgentEditor.close(true);
+        await activateAgent(agent);
+        localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
+        navigateToPage('playground', { playgroundTab: 'backtest' });
+        currentMode = 'backtest';
+        await loadData();
+    });
+    // Guarded: this awaits loadData() internally, and an unhandled rejection here
+    // used to abort the rest of boot — including initNavigation(), which wires
+    // every nav button. A failed deep link must not cost the user navigation.
+    try {
+        await applyAgentRunDeepLink();
+    } catch (error) {
+        console.warn('Deep link failed:', error.message);
+    }
+    const config = loadConfigFromURL();
+    window.CURRENT_CONFIG = config;
+    console.log('⚙️ Experiment config:', config);
+    console.log('Session ID:', window.SESSION_ID);
+    
+    console.log('Dashboard initializing...');
+
+    // Kicked off before the auth awaits; settled before boot reports ready.
+    await configReady;
 
     console.log('🎯 Dashboard ready. Default runs:', window.DEFAULT_RUNS || 'None configured');
 });
@@ -4674,6 +4848,196 @@ function formatBacktestElapsed(seconds) {
     return `${minutes}:${String(secs).padStart(2, '0')}`;
 }
 
+/** A progress file older than this is reported as stale (seconds). */
+const BACKTEST_STALE_SECONDS = 120;
+
+/**
+ * Coarse remaining-time estimate, or null when no honest one exists.
+ *
+ * Measured over an *observed* window -- seconds and steps counted from the first
+ * step this client saw -- rather than over the whole run. Both elapsed clocks
+ * start before any step exists (the card's at the click that fires the POST, the
+ * panel's at the server's run start), so dividing the full span by the step
+ * count folds process start, imports, the market-data fetch and gateway warm-up
+ * into the per-step rate. With ~25s of startup and ~1s steps that reports
+ * "~37m left" for a run that finishes in four, and the later collapse to
+ * "~4m left" is itself an "is this broken?" signal.
+ *
+ * Suppressed below three observed steps: the first estimates swing wildly, and
+ * a number that visibly jumps reads as broken. Coarse buckets thereafter -- a
+ * precise-looking ETA that drifts is worse than an obviously approximate one.
+ */
+function formatBacktestEta(observedSeconds, observedSteps, remainingSteps) {
+    const seconds = Number(observedSeconds);
+    const done = Number(observedSteps);
+    const left = Number(remainingSteps);
+    if (!Number.isFinite(seconds) || seconds <= 0) return null;
+    if (!Number.isFinite(done) || done < 3) return null;
+    if (!Number.isFinite(left) || left <= 0) return null;
+    const remaining = (seconds / done) * left;
+    if (!Number.isFinite(remaining) || remaining <= 0) return null;
+    if (remaining < 60) return '<1m left';
+    return `~${Math.round(remaining / 60)}m left`;
+}
+
+/**
+ * ETA for a running entry, anchored to the step this client first observed.
+ *
+ * `firstStep`/`firstStepAt` are stamped by the poller the first time a run
+ * reports a step and then carried forward untouched, so launch cost never
+ * enters the per-step rate. Both ends of the elapsed subtraction are Date.now()
+ * reads on this machine, so -- unlike the server's elapsed_seconds -- it
+ * carries no clock skew.
+ */
+function resolveBacktestEta(running) {
+    const step = Number(running.step);
+    const total = Number(running.totalSteps);
+    const anchorStep = Number(running.firstStep);
+    const anchorAt = Number(running.firstStepAt);
+    if (!Number.isFinite(step) || !Number.isFinite(total) || total <= 0) return null;
+    if (step <= 0 || step >= total) return null;
+    if (!Number.isFinite(anchorStep) || !Number.isFinite(anchorAt)) return null;
+    return formatBacktestEta((Date.now() - anchorAt) / 1000, step - anchorStep, total - step);
+}
+
+/**
+ * Seconds since the progress file was last written, or null when unknown.
+ *
+ * The age arrives already computed from the server (`progress_age_seconds`)
+ * rather than being derived from the mtime here. Differencing a server
+ * timestamp against the browser clock makes any client more than
+ * BACKTEST_STALE_SECONDS out of step indistinguishable from a wedged run: a
+ * fast clock pins a permanent "No progress for 47m" onto a healthy backtest, a
+ * slow one suppresses the warning forever. Only the time since *this* client
+ * took the reading is added, which is a difference of two local Date.now()
+ * calls and so skew-free.
+ */
+function resolveProgressAgeSeconds(running) {
+    const age = running.ageSeconds;
+    // typeof, not Number(): Number(null) is 0, so a coercing check would report
+    // a run with no age reading at all as perfectly fresh.
+    if (typeof age !== 'number' || !Number.isFinite(age) || age < 0) return null;
+    const takenAt = Number(running.ageAt);
+    const local = Number.isFinite(takenAt) ? Math.max(0, (Date.now() - takenAt) / 1000) : 0;
+    return age + local;
+}
+
+/**
+ * Staleness notice, or null while progress is fresh.
+ *
+ * Reports the *actual* gap, never the threshold: a message frozen at "2m" while
+ * the real gap grows to ten actively misinforms. Deliberately does not say
+ * "stuck" -- we know the file is old, not that the run died, and a long model
+ * step looks exactly like this.
+ */
+function formatProgressStaleness(secondsSinceUpdate) {
+    const gap = Number(secondsSinceUpdate);
+    if (!Number.isFinite(gap) || gap < BACKTEST_STALE_SECONDS) return null;
+    const minutes = Math.floor(gap / 60);
+    return `No progress for ${minutes}m — long model steps can do this.`;
+}
+
+/**
+ * Startup-phase counterpart of formatProgressStaleness.
+ *
+ * The likeliest wedge publishes *no* progress file at all: a subprocess that
+ * dies or hangs in imports, the market-data fetch or the LLM gateway never
+ * writes a step, so there is no mtime to age and the notice above can never
+ * fire. That left the exact scenario this feature exists for -- "watched it and
+ * could not tell running from stuck" -- as the one case with no signal on either
+ * surface, for the full ten-minute poll ceiling.
+ *
+ * Same honesty constraint as the other notice: reports what is known (no steps
+ * yet), not a diagnosis (dead).
+ */
+function formatStartupStaleness(elapsedSeconds) {
+    const elapsed = Number(elapsedSeconds);
+    if (!Number.isFinite(elapsed) || elapsed < BACKTEST_STALE_SECONDS) return null;
+    const minutes = Math.floor(elapsed / 60);
+    return `Still starting up — no steps reported after ${minutes}m.`;
+}
+
+/** Whichever staleness notice applies to this running entry, or null. */
+function resolveRunningNotice(running) {
+    const step = Number(running.step);
+    if (!Number.isFinite(step) || step <= 0) {
+        return formatStartupStaleness(running.elapsedSeconds);
+    }
+    const age = resolveProgressAgeSeconds(running);
+    return age === null ? null : formatProgressStaleness(age);
+}
+
+/**
+ * Fold a poll's `progress` payload into the shared live-progress store.
+ *
+ * `firstStep`/`firstStepAt` anchor the ETA to the first step this client saw and
+ * are then carried forward untouched, so process start, imports, the
+ * market-data fetch and gateway warm-up never enter the per-step rate. The
+ * anchor resets with the store itself at every terminal branch, and again here
+ * if a step count moves backwards -- which only happens when a fresh run's
+ * first tick lands before the previous run was cleared.
+ *
+ * Split out of ensureBacktestPolling() so it can be exercised directly: an
+ * anchor accidentally re-stamped on every tick would quietly restore the
+ * launch-biased ETA while every other assertion stayed green.
+ */
+function advanceBacktestProgress(previous, progress, now) {
+    const step = Number(progress?.step);
+    const total = Number(progress?.total_steps);
+    if (!Number.isFinite(step) || step <= 0) return null;
+    const anchorStep = previous ? Number(previous.firstStep) : NaN;
+    const anchorAt = previous ? Number(previous.firstStepAt) : NaN;
+    const keepAnchor =
+        Number.isFinite(anchorStep) && Number.isFinite(anchorAt) && anchorStep <= step;
+    const age = Number(progress?.progress_age_seconds);
+    return {
+        step,
+        totalSteps: total,
+        // Server-computed (see resolveProgressAgeSeconds), and null when a
+        // backend omits it -- which suppresses the staleness notice rather than
+        // guessing at a value the payload never claimed.
+        ageSeconds: Number.isFinite(age) ? age : null,
+        ageAt: now,
+        firstStep: keepAnchor ? anchorStep : step,
+        firstStepAt: keepAnchor ? anchorAt : now,
+    };
+}
+
+/**
+ * Everything a running card reports, derived once for both renderers.
+ *
+ * renderAgentRunningBody() builds an HTML string and refreshRunningAgentCards()
+ * mutates the live DOM, so they cannot share the emitting code -- but they must
+ * never disagree about *what* to emit. Deriving here is what stops the next
+ * added field from reaching only one of them, which is exactly how the bar,
+ * aria-valuenow and the staleness note came to repaint on a full re-render and
+ * never on the per-second patch that runs for the rest of the run.
+ *
+ * Text is returned as '' rather than null so the patch path can assign it
+ * unconditionally -- a tick with no progress must *clear* the last numbers, not
+ * leave them standing as though current. :empty hides the emptied nodes.
+ */
+function deriveRunningProgress(running) {
+    const step = Number(running.step);
+    const total = Number(running.totalSteps);
+    const determinate =
+        Number.isFinite(step) && Number.isFinite(total) && total > 0 && step > 0;
+    const pct = determinate ? Math.min(99, Math.round((100 * step) / total)) : null;
+    const eta = determinate ? resolveBacktestEta(running) : null;
+    return {
+        determinate,
+        pct,
+        eta,
+        stepLabel: determinate ? `${step}/${total}` : '',
+        // Deliberately excludes elapsed: the head already renders it one line
+        // above, and printing "3:05" beside "3:05 elapsed" is the kind of noise
+        // this change exists to remove. Built from raw values; escaping happens
+        // once at each interpolation site.
+        detail: [determinate ? `${pct}%` : null, eta].filter(Boolean).join(' · '),
+        notice: resolveRunningNotice(running) || '',
+    };
+}
+
 function showBacktestRunProgress(show, { isError = false } = {}) {
     const panel = document.getElementById('backtestRunProgress');
     if (!panel) return;
@@ -4689,7 +5053,23 @@ function showBacktestRunProgress(show, { isError = false } = {}) {
     if (hint) hint.hidden = !!isError;
 }
 
-function updateBacktestRunProgress({ elapsedSeconds, message = '', maxSeconds = BACKTEST_POLL_MAX_SECONDS, stepPct = null } = {}) {
+/**
+ * Repaint the Backtest tab's run panel.
+ *
+ * `progress` is the live poller's shared progress object -- the same one the My
+ * Agents card reads -- or null. Null at the five terminal call sites (launch
+ * error, backtest error, completion, timeout): those render their own message
+ * alone and must not gain an ETA or a "still starting up" notice. The running
+ * branch always passes an object, `{}` included, which is what opts it into the
+ * startup-staleness notice before any step exists.
+ */
+function updateBacktestRunProgress({
+    elapsedSeconds,
+    message = '',
+    maxSeconds = BACKTEST_POLL_MAX_SECONDS,
+    stepPct = null,
+    progress = null,
+} = {}) {
     const elapsedEl = document.getElementById('backtestRunElapsed');
     const messageEl = document.getElementById('backtestRunProgressMessage');
     const barEl = document.getElementById('backtestRunProgressBar');
@@ -4698,7 +5078,20 @@ function updateBacktestRunProgress({ elapsedSeconds, message = '', maxSeconds = 
         const elapsed = Math.max(0, Number(elapsedSeconds) || 0);
         elapsedEl.textContent = formatBacktestElapsed(elapsed);
     }
-    if (messageEl && message) messageEl.textContent = message;
+    if (messageEl && message) {
+        // Same two derived facts the card shows, from the same helper fed the
+        // same object -- so the ETA and the staleness notice cannot diverge
+        // between the two surfaces. Elapsed still differs (the card's is
+        // client-side from startedAt, this one is the server's elapsed_seconds)
+        // but nothing derived from it does: the ETA is measured from the
+        // poller's own step anchor, not from either elapsed clock.
+        const view = progress
+            ? deriveRunningProgress({ ...progress, elapsedSeconds })
+            : null;
+        messageEl.textContent = [message, view?.eta, view?.notice]
+            .filter(Boolean)
+            .join(' · ');
+    }
     if (barEl) {
         const pct = Number.isFinite(stepPct)
             ? Math.min(99, Math.round(stepPct))
@@ -4954,6 +5347,21 @@ function ensureBacktestPolling() {
 
             if (status.running) {
                 if (liveId) liveBacktestRunId = liveId;
+                const step = Number(status.progress?.step);
+                const total = Number(status.progress?.total_steps);
+                const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
+                    ? (100 * step / total)
+                    : null;
+                // Assigned BEFORE refreshRunningAgentCards() below, which reads
+                // it through getAgentBacktestRunning(). Painting first would
+                // show the previous tick's step on the card while the Backtest
+                // panel — handed the same object a few lines down — showed this
+                // tick's: two surfaces disagreeing by one poll.
+                liveBacktestProgress = advanceBacktestProgress(
+                    liveBacktestProgress,
+                    status.progress,
+                    Date.now(),
+                );
                 // Repaint the My Agents card even when the user is not on the
                 // Backtest tab — that page is now the landing page after launch.
                 // refreshRunningAgentCards() patches the elapsed timer in place
@@ -4961,11 +5369,6 @@ function ensureBacktestPolling() {
                 if (playgroundTab === 'agents' && currentPage === 'playground') {
                     refreshRunningAgentCards();
                 }
-                const step = Number(status.progress?.step);
-                const total = Number(status.progress?.total_steps);
-                const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
-                    ? (100 * step / total)
-                    : null;
 
                 if (viewingLive) {
                     liveBacktestChartActive = true;
@@ -4977,6 +5380,11 @@ function ensureBacktestPolling() {
                         elapsedSeconds: displayElapsed,
                         message: status.message || 'Backtest is running…',
                         stepPct,
+                        // `{}` rather than null before the first step: an empty
+                        // object still opts this surface into the startup
+                        // staleness notice, which is the only warning available
+                        // while the subprocess has published nothing.
+                        progress: liveBacktestProgress || {},
                     });
                     showBacktestRunProgress(true);
                     renderBacktestRunConfig(
@@ -4989,7 +5397,9 @@ function ensureBacktestPolling() {
                 liveBacktestChartActive = false;
                 const finishedId = liveBacktestRunId;
                 liveBacktestRunId = null;
+                liveBacktestProgress = null;
                 Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);
+                lastRenderedRunningKey = null;
                 if (playgroundTab === 'agents' && currentPage === 'playground') {
                     loadAgents();
                 }
@@ -5036,6 +5446,22 @@ function ensureBacktestPolling() {
                 }
                 liveBacktestChartActive = false;
                 liveBacktestRunId = null;
+                // The finished branch above clears the running map; this one
+                // never did. Harmless while an orphaned entry only showed a
+                // wrong elapsed timer, but liveBacktestProgress is a single
+                // global spread into *every* entry, so a stale entry would
+                // render the NEXT run's step, percent and ETA until it aged out.
+                Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);
+                liveBacktestProgress = null;
+                lastRenderedRunningKey = null;
+                // Clearing the map is not visible on its own: polling has just
+                // stopped, so refreshRunningAgentCards() will never run again
+                // and the card would sit on "Backtesting…" with a frozen timer
+                // until some unrelated re-render happened by. Same repaint the
+                // finished branch does.
+                if (playgroundTab === 'agents' && currentPage === 'playground') {
+                    loadAgents();
+                }
             }
         } catch (error) {
             console.error('Error polling backtest status:', error);
@@ -5456,8 +5882,7 @@ async function runBacktest() {
     const startDate = startDateInput.value;
     const endDate = endDateInput.value;
     
-    if (!startDate || !endDate) {
-        const msg = 'Please select both start and end dates.';
+    const showModalError = (msg) => {
         const err = document.getElementById('runBacktestModalError');
         if (err && !document.getElementById('runBacktestModal')?.hidden) {
             err.textContent = msg;
@@ -5465,6 +5890,30 @@ async function runBacktest() {
         } else {
             console.warn(msg);
         }
+    };
+
+    if (!startDate || !endDate) {
+        showModalError('Please select both start and end dates.');
+        return;
+    }
+
+    // Mirror the server's MAX_BACKTEST_DAYS (api/routers/backtests.py) here so an
+    // over-long window is caught while the modal is still open and the dates are
+    // still on screen. Without this the only feedback is a 422 that arrives after
+    // the modal has closed, and the helper copy used to actively invite the
+    // mistake ("Change it to any range you have data for").
+    const MAX_BACKTEST_DAYS = 31;
+    const spanDays = Math.round(
+        (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86400000,
+    );
+    if (Number.isFinite(spanDays) && spanDays < 0) {
+        showModalError('The end date must be on or after the start date.');
+        return;
+    }
+    if (Number.isFinite(spanDays) && spanDays > MAX_BACKTEST_DAYS) {
+        showModalError(
+            `Pick a window of ${MAX_BACKTEST_DAYS} days or fewer — that range is ${spanDays} days.`,
+        );
         return;
     }
 
@@ -5798,12 +6247,17 @@ function applyInitialNavigation() {
     // single point of failure when the listener is free and order-independent.
     window.addEventListener('popstate', onNavigationPopState);
 
-    const initial = resolveInitialNavigation();
-    navigateToPage(initial.page, {
-        playgroundTab: initial.playgroundTab || 'agents',
-        competitionTab: initial.competitionTab || 'daily',
-        history: 'replace',
-    });
+    // Skip the restore once the user has already clicked somewhere: nav is
+    // live during boot's auth awaits, and stomping an explicit navigation
+    // with the saved page reads as the app fighting the user.
+    if (!userHasNavigated) {
+        const initial = resolveInitialNavigation();
+        navigateToPage(initial.page, {
+            playgroundTab: initial.playgroundTab || 'agents',
+            competitionTab: initial.competitionTab || 'daily',
+            history: 'replace',
+        });
+    }
     if (typeof initHomePage === 'function') {
         initHomePage();
     }
@@ -6083,6 +6537,7 @@ function navigateToPage(page, options = {}) {
     }
 
     const historyMode = options.history || 'push';
+    if (historyMode === 'push') userHasNavigated = true;
     const prevState = getNavigationState();
 
     currentPage = page;
