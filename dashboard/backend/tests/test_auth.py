@@ -2047,3 +2047,85 @@ def test_the_stored_address_is_a_network_not_the_client(client, temp_user_store)
     stored = _only_session(temp_user_store)[0][1]
     assert "198.51.100.77" not in stored
     assert stored == "198.51.100.0/24"
+
+
+# ---------------------------------------------------------------------------
+# Cookie mechanics that only show up on the raw Set-Cookie header. TestClient's
+# jar silently drops Secure cookies over http://testserver, so jar-based
+# assertions cannot see the production (__Host-) branch at all — these tests
+# read response.headers directly.
+# ---------------------------------------------------------------------------
+
+
+def test_prod_logout_deletes_the_host_cookie_with_secure(client, monkeypatch):
+    """RFC 6265bis: a UA rejects any __Host-* Set-Cookie without Secure.
+
+    delete_cookie defaults secure=False, so an unflagged deletion leaves the
+    prod cookie alive in the browser after logout (revoked server-side, but
+    still sent on every request). Guard the exact failure: the deletion for
+    the __Host- name must itself carry Secure.
+    """
+    monkeypatch.setenv("ATL_COOKIE_SECURE", "true")
+    response = client.post("/api/auth/logout")
+    assert response.status_code == 200
+    host_deletions = [
+        value
+        for value in response.headers.get_list("set-cookie")
+        if value.startswith('__Host-atl_session="";') or value.startswith("__Host-atl_session=;")
+    ]
+    assert host_deletions, response.headers.get_list("set-cookie")
+    for header in host_deletions:
+        assert "Secure" in header
+        assert "HttpOnly" in header
+
+
+def test_prod_login_sets_secure_httponly_cookie_header(client, monkeypatch):
+    monkeypatch.setenv("ATL_COOKIE_SECURE", "true")
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "prodcookie@example.com",
+            "display_name": "Prod",
+            "password": "securepass1",
+        },
+    )
+    set_cookie = [
+        value
+        for value in client.post(
+            "/api/auth/login",
+            json={"email": "prodcookie@example.com", "password": "securepass1"},
+        ).headers.get_list("set-cookie")
+        if value.startswith("__Host-atl_session=")
+    ]
+    assert set_cookie, "login did not set the __Host- session cookie"
+    header = set_cookie[0]
+    assert "Secure" in header and "HttpOnly" in header and "Path=/" in header
+    assert "Domain" not in header  # __Host- forbids a Domain attribute
+
+
+def test_me_upgrades_a_legacy_bearer_session_to_a_cookie(client):
+    """Migration bridge: pre-cookie sessions live only in localStorage.
+
+    app.js sends that token once as Bearer on the boot /me probe; the response
+    must carry Set-Cookie so the session survives the HttpOnly migration
+    instead of force-logging the user out on deploy.
+    """
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "bridge@example.com",
+            "display_name": "Bridge",
+            "password": "securepass1",
+        },
+    )
+    token = _session_token(client)
+    client.cookies.clear()  # simulate a browser that never got the cookie
+    response = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    set_cookie = response.headers.get_list("set-cookie")
+    assert any("atl_session=" in value for value in set_cookie), set_cookie
+
+    # And once the cookie is present, /me must NOT keep re-setting it.
+    again = client.get("/api/auth/me")
+    assert again.status_code == 200
+    assert not again.headers.get_list("set-cookie")

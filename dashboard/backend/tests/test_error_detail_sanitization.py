@@ -14,6 +14,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 from dashboard.backend.api.routers import market as market_mod
 from dashboard.backend.api.routers import paper_trading as paper_mod
 from dashboard.backend.domain.backtesting import algo_service
@@ -60,14 +61,16 @@ def test_paper_start_session_error_body_hides_exception_detail(monkeypatch):
         store = users_module.UserStore(db_path=Path(tmpdir) / "users.db")
         monkeypatch.setattr(users_module, "user_store", store)
         local = TestClient(app)
-        token = local.post(
+        signup = local.post(
             "/api/auth/signup",
             json={
                 "email": "paper-err@example.com",
                 "display_name": "Paper",
                 "password": "securepass1",
             },
-        ).json()["token"]
+        )
+        assert signup.status_code == 200
+        token = _cookie_session_token(local)
         data = local.post(
             "/paper/start-session",
             headers={"Authorization": f"Bearer {token}"},

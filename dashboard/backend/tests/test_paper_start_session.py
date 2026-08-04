@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 import dashboard.backend.users as users_module
 from dashboard.backend.app import app
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 from dashboard.backend.api.routers import paper_trading as paper_mod
 from dashboard.backend.database import db
 
@@ -38,7 +39,7 @@ def test_start_session_succeeds_and_records_run(monkeypatch):
             },
         )
         assert signup.status_code == 200
-        token = signup.json()["token"]
+        token = _cookie_session_token(client)
         data = client.post(
             "/paper/start-session",
             params={"agent_name": "guard-test"},
