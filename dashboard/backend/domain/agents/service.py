@@ -265,6 +265,7 @@ class AgentService:
         cash_allocation: Any = _UNSET,
         backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
+        category: Any = _UNSET,
     ) -> Dict[str, Any]:
         current = self.agents.get_agent(agent_id)
         if not current:
@@ -301,6 +302,7 @@ class AgentService:
             cash_allocation=cash_allocation,
             backtest_allocation=backtest_allocation,
             live_trading_enabled=live_trading_enabled,
+            category=category,
         )
         if not agent:
             raise AgentNotFoundError()
@@ -327,6 +329,7 @@ class AgentService:
         cash_allocation: Optional[float] = None,
         backtest_allocation: Optional[float] = None,
         seed_default_pipeline: bool = True,
+        category: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Register an agent.
 
@@ -356,6 +359,7 @@ class AgentService:
             runtime_config=runtime_config,
             cash_allocation=cash_allocation,
             backtest_allocation=backtest_allocation,
+            category=category,
         )
         if (
             seed_default_pipeline

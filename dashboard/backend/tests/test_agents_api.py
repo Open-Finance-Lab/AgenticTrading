@@ -882,3 +882,73 @@ def test_marketplace_clone_unknown_template(client):
         headers=headers,
     )
     assert resp.status_code == 404
+
+
+def test_create_agent_with_category_round_trips(client):
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Shelved", "agent_type": "builtin", "category": "us_stocks"},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["agent"]["category"] == "us_stocks"
+
+    listed = client.get("/api/v1/agents", headers=headers)
+    assert listed.status_code == 200
+    assert any(a.get("category") == "us_stocks" for a in listed.json()["agents"])
+
+
+def test_create_agent_unknown_category_422(client):
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    resp = client.post(
+        "/api/v1/agents",
+        json={"name": "Bad Shelf", "agent_type": "builtin", "category": "crypto"},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
+def test_patch_category_and_patch_to_null(client):
+    headers = {"X-Session-Id": str(uuid.uuid4()), "X-Browser-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Categorized", "agent_type": "builtin"},
+        headers=headers,
+    )
+    assert created.status_code == 200
+    agent_id = created.json()["agent"]["agent_id"]
+
+    ok = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"category": "cn_ashares"},
+        headers=headers,
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["agent"]["category"] == "cn_ashares"
+
+    cleared = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"category": None},
+        headers=headers,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["agent"]["category"] is None
+
+
+def test_patch_agent_unknown_category_422(client):
+    headers = {"X-Session-Id": str(uuid.uuid4()), "X-Browser-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Categorized 2", "agent_type": "builtin"},
+        headers=headers,
+    )
+    assert created.status_code == 200
+    agent_id = created.json()["agent"]["agent_id"]
+
+    resp = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"category": "futures"},
+        headers=headers,
+    )
+    assert resp.status_code == 422

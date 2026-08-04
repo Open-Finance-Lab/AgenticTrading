@@ -19,6 +19,7 @@ from dashboard.backend.domain.backtesting.constants import (
     MIN_BACKTEST_INITIAL_CAPITAL,
 )
 from dashboard.backend.domain.agents.repository import _UNSET
+from dashboard.backend.domain.agents.taxonomy import AGENT_CATEGORIES
 from dashboard.backend.domain.agents.credential_store import (
     FINANCIAL_DATASETS_CREDENTIAL,
     agent_credential_store,
@@ -62,6 +63,7 @@ class CreateAgentBody(BaseModel):
         ge=MIN_BACKTEST_INITIAL_CAPITAL,
         le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
+    category: Optional[str] = None
 
 
 class PipelineStep(BaseModel):
@@ -94,6 +96,7 @@ class UpdateAgentBody(BaseModel):
         le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
     live_trading_enabled: Optional[bool] = None
+    category: Optional[str] = None
 
     @field_validator("name", "model_name")
     @classmethod
@@ -138,6 +141,8 @@ def create_agent(
     Discord). Any other value is normalized to ``external``.
     """
     ctx = _require_owner_context(request, authorization)
+    if body.category is not None and body.category not in AGENT_CATEGORIES:
+        raise HTTPException(status_code=422, detail=f"Unknown category: {body.category!r}")
     agent_type = "builtin" if body.agent_type.strip().lower() == "builtin" else "external"
     cash = float(
         body.cash_allocation
@@ -171,6 +176,7 @@ def create_agent(
         runtime_config=runtime_config,
         cash_allocation=cash,
         backtest_allocation=body.backtest_allocation,
+        category=body.category,
     )
     if ctx["user_id"]:
         portfolio_service.get_or_create_portfolio(ctx["user_id"])
@@ -375,6 +381,7 @@ def update_agent(
     live_trading_provided = "live_trading_enabled" in fields_set
     runtime_type_provided = "runtime_type" in fields_set
     runtime_config_provided = "runtime_config" in fields_set
+    category_provided = "category" in fields_set
     if (
         body.name is None
         and body.model_name is None
@@ -385,8 +392,13 @@ def update_agent(
         and not live_trading_provided
         and not runtime_type_provided
         and not runtime_config_provided
+        and not category_provided
     ):
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    if category_provided and body.category is not None and body.category not in AGENT_CATEGORIES:
+        raise HTTPException(status_code=422, detail=f"Unknown category: {body.category!r}")
+    category_arg = body.category if category_provided else _UNSET
 
     if pipeline_provided:
         pipeline_arg = (
@@ -439,6 +451,7 @@ def update_agent(
             cash_allocation=cash_allocation_arg,
             backtest_allocation=backtest_allocation_arg,
             live_trading_enabled=live_trading_arg,
+            category=category_arg,
         )
     except AgentNotFoundError:
         raise HTTPException(status_code=404, detail="Agent not found")
