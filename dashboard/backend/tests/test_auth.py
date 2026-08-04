@@ -34,6 +34,8 @@ def client(temp_user_store, monkeypatch):
     from dashboard.backend import users
 
     monkeypatch.setattr(users, "user_store", temp_user_store)
+    # The process-global auth limiters are reset by conftest's autouse
+    # _reset_shared_scale_state, which pytest runs before this fixture.
     return TestClient(app)
 
 
@@ -128,6 +130,33 @@ def test_login_invalid_password(client):
         json={"email": "bob@example.com", "password": "wrong-password"},
     )
     assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid email or password."
+
+
+def test_login_unknown_email_uses_same_generic_error(client):
+    """Do not reveal whether an address is registered."""
+    known = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "known@example.com",
+            "display_name": "Known",
+            "password": "securepass1",
+        },
+    )
+    assert known.status_code == 200
+    wrong_password = client.post(
+        "/api/auth/login",
+        json={"email": "known@example.com", "password": "not-the-password"},
+    )
+    unknown = client.post(
+        "/api/auth/login",
+        json={"email": "nobody@example.com", "password": "securepass1"},
+    )
+    assert wrong_password.status_code == 401
+    assert unknown.status_code == 401
+    assert wrong_password.json()["detail"] == unknown.json()["detail"] == (
+        "Invalid email or password."
+    )
 
 
 def test_signup_rejects_common_password(client):
@@ -1261,11 +1290,14 @@ def test_session_stores_hash_not_raw_token(client, temp_user_store):
     assert "token" not in signup.json()
     token = _session_token(client)
     conn = temp_user_store._get_connection()
-    rows = list(conn.execute("SELECT token_hash, user_agent FROM auth_sessions"))
+    conn.row_factory = None
+    rows = list(conn.execute("SELECT * FROM auth_sessions"))
     conn.close()
     assert len(rows) == 1
-    assert rows[0][0] == hash_session_token(token)
-    assert token not in {rows[0][0]}
+    assert hash_session_token(token) in rows[0]
+    # Every column, not just token_hash: the point of the change is that the
+    # raw bearer token is nowhere in the row a database leak would expose.
+    assert token not in str(rows[0])
 
 
 def test_revoked_session_is_rejected(client):
@@ -1317,3 +1349,799 @@ def test_idle_session_is_rejected(client, temp_user_store, monkeypatch):
         client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code
         == 401
     )
+
+
+# ---------------------------------------------------------------------------
+# The plaintext-token -> token_hash migration
+#
+# This is the one destructive statement in the hashed-session change: it DROPs a
+# table that on prod holds every live login. It runs against durable Postgres
+# (USERS_DATABASE_URL) as well as SQLite, so "it worked when I tried it" is not
+# coverage. The Postgres twin has its own copy in test_users_postgres.py.
+# ---------------------------------------------------------------------------
+
+_LEGACY_SESSIONS_DDL = """
+    CREATE TABLE auth_sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP NOT NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+"""
+
+
+@pytest.fixture
+def legacy_session_db(tmp_path):
+    """A users database still on the pre-hash schema, with one live session."""
+    import sqlite3
+
+    db_path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            display_name TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        """
+    )
+    conn.execute(_LEGACY_SESSIONS_DDL)
+    conn.execute(
+        "INSERT INTO users (email, display_name, password_hash) VALUES (?, ?, ?)",
+        ("legacy@example.com", "Legacy", "unused-hash"),
+    )
+    conn.execute(
+        "INSERT INTO auth_sessions (token, user_id, expires_at) VALUES (?, ?, ?)",
+        ("legacy-plaintext-token", 1, "2099-01-01T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+    return db_path
+
+
+def test_the_legacy_session_migration_keeps_accounts_and_drops_logins(legacy_session_db):
+    """Sessions cannot be re-hashed without the raw token, so they go -- users stay.
+
+    The failure this guards is a DROP that takes the accounts with it. Nothing
+    would surface that until someone tried to sign in to an account that no
+    longer exists.
+    """
+    import sqlite3
+
+    UserStore(db_path=legacy_session_db)
+
+    conn = sqlite3.connect(legacy_session_db)
+    try:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(auth_sessions)")}
+        assert "token_hash" in columns and "token" not in columns
+        assert conn.execute("SELECT COUNT(*) FROM auth_sessions").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_the_legacy_session_migration_restores_the_user_id_index(legacy_session_db):
+    """DROP TABLE takes the table's indexes with it.
+
+    The recreate has to come before the CREATE INDEX IF NOT EXISTS, or the index
+    is silently gone and every session lookup by user_id degrades to a scan --
+    with nothing failing to show it.
+    """
+    import sqlite3
+
+    UserStore(db_path=legacy_session_db)
+
+    conn = sqlite3.connect(legacy_session_db)
+    try:
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'"
+            )
+        }
+    finally:
+        conn.close()
+    assert "idx_auth_sessions_user_id" in indexes
+
+
+def test_a_surviving_legacy_token_cannot_authenticate_after_migration(legacy_session_db):
+    store = UserStore(db_path=legacy_session_db)
+    assert store.get_user_for_token("legacy-plaintext-token") is None
+
+
+def test_the_legacy_session_migration_announces_itself(legacy_session_db, capsys):
+    """Dropping every live login in prod must not happen in silence.
+
+    The only symptom otherwise is a wave of users being signed out with nothing
+    in the deploy log to connect it to the release.
+    """
+    UserStore(db_path=legacy_session_db)
+    assert "auth_sessions" in capsys.readouterr().out
+
+
+def test_a_migrated_store_does_not_re_announce_on_the_next_boot(legacy_session_db, capsys):
+    """The migration is one-shot; a restart must not keep claiming it ran."""
+    UserStore(db_path=legacy_session_db)
+    capsys.readouterr()
+    UserStore(db_path=legacy_session_db)
+    assert capsys.readouterr().out == ""
+
+
+# ---------------------------------------------------------------------------
+# Reclaiming dead session rows
+#
+# Revocation is a soft UPDATE of revoked_at, and get_user_for_token returns at
+# the revoked check before reaching any cleanup -- so without a sweep a revoked
+# row is immortal. Expired rows fare no better: they are only deleted when
+# someone re-presents the dead token, which nobody does. Before hashing, logout
+# DELETEd the row and the table trimmed itself.
+# ---------------------------------------------------------------------------
+
+
+def _session_count(store) -> int:
+    conn = store._get_connection()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM auth_sessions").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def _backdate_expiry(store, token_hash: str) -> None:
+    from dashboard.backend.users import _utcnow, format_stored_timestamp
+
+    conn = store._get_connection()
+    conn.execute(
+        "UPDATE auth_sessions SET expires_at = ? WHERE token_hash = ?",
+        (format_stored_timestamp(_utcnow() - timedelta(days=1)), token_hash),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_creating_a_session_reclaims_rows_that_have_already_expired(temp_user_store):
+    from dashboard.backend.session_tokens import hash_session_token
+
+    user = temp_user_store.create_user("sweep@example.com", "Sweep", "securepass1")
+    dead = temp_user_store.create_session(user["id"])
+    _backdate_expiry(temp_user_store, hash_session_token(dead))
+
+    temp_user_store.create_session(user["id"])
+
+    assert _session_count(temp_user_store) == 1
+
+
+def test_a_revoked_session_row_is_reclaimed_once_it_expires(temp_user_store):
+    """Soft revocation is not a licence to keep the row forever.
+
+    The absolute TTL bounds it: a revoked row is collected by the same sweep
+    within SESSION_TTL_DAYS at the latest, which is the pre-hash bound.
+    """
+    from dashboard.backend.session_tokens import hash_session_token
+
+    user = temp_user_store.create_user("revoked@example.com", "Rev", "securepass1")
+    token = temp_user_store.create_session(user["id"])
+    temp_user_store.delete_session(token)
+    _backdate_expiry(temp_user_store, hash_session_token(token))
+
+    temp_user_store.create_session(user["id"])
+
+    assert _session_count(temp_user_store) == 1
+
+
+def test_the_sweep_never_touches_a_live_session(temp_user_store):
+    """The negative half, and the one that matters.
+
+    A sweep with a wrong comparison signs everybody out at their next login and
+    looks exactly like a working sweep until someone complains.
+    """
+    user = temp_user_store.create_user("live@example.com", "Live", "securepass1")
+    keep = temp_user_store.create_session(user["id"])
+
+    temp_user_store.create_session(user["id"])
+
+    assert _session_count(temp_user_store) == 2
+    assert temp_user_store.get_user_for_token(keep) is not None
+
+
+def test_a_write_lock_cannot_invalidate_a_good_session(temp_user_store, monkeypatch):
+    """The last_seen_at touch is an optimisation; it must never fail the request.
+
+    get_user_for_token was read-only until sessions were hashed. It now writes,
+    so it can lose a race for the write lock -- and sqlite3 raising
+    OperationalError out of here reaches get_current_user as a 500 on a session
+    that is perfectly valid. Losing one throttled timestamp update is free;
+    signing the user out over it is not.
+    """
+    import sqlite3
+
+    from dashboard.backend.session_tokens import hash_session_token
+    from dashboard.backend.users import UserStore, _utcnow, format_stored_timestamp
+
+    monkeypatch.setenv("SESSION_LAST_SEEN_THROTTLE_SECONDS", "1")
+    user = temp_user_store.create_user("locked@example.com", "Locked", "securepass1")
+    token = temp_user_store.create_session(user["id"])
+
+    stale = format_stored_timestamp(_utcnow() - timedelta(hours=1))
+    conn = temp_user_store._get_connection()
+    conn.execute(
+        "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?",
+        (stale, hash_session_token(token)),
+    )
+    conn.commit()
+    conn.close()
+
+    # Don't sit out the default 5s busy timeout just to observe the failure.
+    original_get_connection = UserStore._get_connection
+
+    def impatient(self):
+        opened = original_get_connection(self)
+        opened.execute("PRAGMA busy_timeout = 0")
+        return opened
+
+    monkeypatch.setattr(UserStore, "_get_connection", impatient)
+
+    blocker = sqlite3.connect(str(temp_user_store.db_path), timeout=0)
+    blocker.execute("BEGIN IMMEDIATE")  # RESERVED: reads still pass, writes do not
+    try:
+        assert temp_user_store.get_user_for_token(token) is not None
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+
+def test_a_revoked_but_unexpired_session_row_survives_the_sweep(temp_user_store):
+    """Revoked-and-still-inside-its-TTL is the window where revoked_at is read."""
+    user = temp_user_store.create_user("soft@example.com", "Soft", "securepass1")
+    token = temp_user_store.create_session(user["id"])
+    temp_user_store.delete_session(token)
+
+    temp_user_store.create_session(user["id"])
+
+    assert _session_count(temp_user_store) == 2
+    assert temp_user_store.get_user_for_token(token) is None
+
+
+# --- Login / signup rate limits -------------------------------------------------
+
+
+@pytest.fixture
+def auth_rate_limit_clock(monkeypatch):
+    """Deterministic clock + tiny limits for auth rate-limit tests."""
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = [1000.0]
+
+    def clock() -> float:
+        return now[0]
+
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=5, window_seconds=60, clock=clock),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=3, window_seconds=60, clock=clock),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=2, window_seconds=60, clock=clock),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=2, window_seconds=60, clock=clock),
+    )
+    return now
+
+
+def test_login_ip_rate_limit_returns_429(client, auth_rate_limit_clock, monkeypatch):
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = auth_rate_limit_clock
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_SIGNUP_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+    assert (
+        client.post(
+            "/api/auth/signup",
+            json={
+                "email": "rate-ip@example.com",
+                "display_name": "Rate",
+                "password": "securepass1",
+            },
+        ).status_code
+        == 200
+    )
+    for _ in range(5):
+        resp = client.post(
+            "/api/auth/login",
+            json={"email": "rate-ip@example.com", "password": "wrong"},
+        )
+        assert resp.status_code == 401, resp.text
+
+    blocked = client.post(
+        "/api/auth/login",
+        json={"email": "rate-ip@example.com", "password": "wrong"},
+    )
+    assert blocked.status_code == 429
+    assert "Retry-After" in blocked.headers
+    # Bounded at both ends: >= 1 alone would pass for a header telling the
+    # client to wait longer than the window it is actually waiting on.
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 60
+
+
+def test_login_email_rate_limit_after_failures(client, auth_rate_limit_clock, monkeypatch):
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = auth_rate_limit_clock
+    # Generous IP budget so only the per-email failure counter trips.
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "rate-email@example.com",
+            "display_name": "Rate",
+            "password": "securepass1",
+        },
+    )
+    for _ in range(3):
+        resp = client.post(
+            "/api/auth/login",
+            json={"email": "rate-email@example.com", "password": "wrong"},
+        )
+        assert resp.status_code == 401, resp.text
+
+    blocked = client.post(
+        "/api/auth/login",
+        json={"email": "rate-email@example.com", "password": "wrong"},
+    )
+    assert blocked.status_code == 429
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 60
+
+    # Correct password still works: the email counter only meters *failures*
+    # so an attacker cannot lock the account out of a legitimate login.
+    ok = client.post(
+        "/api/auth/login",
+        json={"email": "rate-email@example.com", "password": "securepass1"},
+    )
+    assert ok.status_code == 200, ok.text
+
+    now[0] += 61
+    # After the window, wrong passwords are accepted into the failure budget again.
+    again = client.post(
+        "/api/auth/login",
+        json={"email": "rate-email@example.com", "password": "wrong"},
+    )
+    assert again.status_code == 401
+
+
+def test_signup_ip_rate_limit_returns_429(client, auth_rate_limit_clock):
+    assert (
+        client.post(
+            "/api/auth/signup",
+            json={
+                "email": "su1@example.com",
+                "display_name": "One",
+                "password": "securepass1",
+            },
+        ).status_code
+        == 200
+    )
+    assert (
+        client.post(
+            "/api/auth/signup",
+            json={
+                "email": "su2@example.com",
+                "display_name": "Two",
+                "password": "securepass1",
+            },
+        ).status_code
+        == 200
+    )
+    blocked = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "su3@example.com",
+            "display_name": "Three",
+            "password": "securepass1",
+        },
+    )
+    assert blocked.status_code == 429
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 60
+
+
+def test_successful_logins_do_not_consume_the_ip_budget(client, auth_rate_limit_clock):
+    """The per-IP budget meters failures only.
+
+    Without this, ``allow()`` runs before ``authenticate()`` and charges every
+    caller including the ones typing the right password -- so the budget is
+    really a cap on *how many people may sign in*, which is a self-inflicted
+    outage rather than a control. It bites hardest exactly where the key is
+    coarsest: one office, one classroom, or (before client_ip() read the
+    forwarded header) every visitor to the site at once.
+    """
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "busy@example.com",
+            "display_name": "Busy",
+            "password": "securepass1",
+        },
+    )
+    assert signup.status_code == 200
+
+    # The fixture's IP budget is 5; sign in more times than that.
+    for i in range(8):
+        ok = client.post(
+            "/api/auth/login",
+            json={"email": "busy@example.com", "password": "securepass1"},
+        )
+        assert ok.status_code == 200, f"login {i + 1} refused: {ok.text}"
+
+    # And the budget is genuinely untouched, not merely not-yet-exhausted: a
+    # wrong password is still answered 401 rather than 429.
+    assert (
+        client.post(
+            "/api/auth/login",
+            json={"email": "busy@example.com", "password": "wrong"},
+        ).status_code
+        == 401
+    )
+
+
+def test_login_ip_budget_is_per_forwarded_address(
+    client, auth_rate_limit_clock, monkeypatch
+):
+    """Two clients behind the same proxy get their own budgets.
+
+    ``request.client.host`` is the proxy for every visitor on a PaaS router, so
+    keying on it alone puts the whole site in one bucket. Nothing here is
+    spoof-proof -- the point is that honest clients stop colliding.
+    """
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = auth_rate_limit_clock
+    # Generous per-email budget so only the per-IP one can trip.
+    monkeypatch.setattr(
+        auth_api,
+        "_LOGIN_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=100, window_seconds=60, clock=lambda: now[0]),
+    )
+
+    for email in ("fwd-a@example.com", "fwd-b@example.com"):
+        assert (
+            client.post(
+                "/api/auth/signup",
+                json={
+                    "email": email,
+                    "display_name": "Fwd",
+                    "password": "securepass1",
+                },
+            ).status_code
+            == 200
+        )
+
+    # Exhaust the 5-failure IP budget for one address...
+    for _ in range(5):
+        assert (
+            client.post(
+                "/api/auth/login",
+                json={"email": "fwd-a@example.com", "password": "wrong"},
+                headers={"x-forwarded-for": "203.0.113.7"},
+            ).status_code
+            == 401
+        )
+    assert (
+        client.post(
+            "/api/auth/login",
+            json={"email": "fwd-a@example.com", "password": "wrong"},
+            headers={"x-forwarded-for": "203.0.113.7"},
+        ).status_code
+        == 429
+    )
+
+    # ...a different forwarded address is unaffected.
+    assert (
+        client.post(
+            "/api/auth/login",
+            json={"email": "fwd-b@example.com", "password": "wrong"},
+            headers={"x-forwarded-for": "198.51.100.4"},
+        ).status_code
+        == 401
+    )
+
+
+def test_login_unknown_email_still_costs_one_password_compare(client, monkeypatch):
+    """Constant-time miss path: the generic 401 copy is not enough on its own.
+
+    Returning before bcrypt made an unknown address answer ~3000x faster than a
+    wrong password (0.06 ms vs 182 ms measured), so the *timing* kept answering
+    the question the *body* had stopped answering. Asserted behaviourally --
+    that a compare happens, at the real cost factor -- because a wall-clock
+    assertion would be flaky under CI load.
+    """
+    from dashboard.backend import users as users_mod
+
+    seen: list[str] = []
+    real_verify = users_mod.verify_password
+
+    def spy(password: str, password_hash: str) -> bool:
+        seen.append(password_hash)
+        return real_verify(password, password_hash)
+
+    monkeypatch.setattr(users_mod, "verify_password", spy)
+
+    resp = client.post(
+        "/api/auth/login",
+        json={"email": "no-such-account@example.com", "password": "whatever1"},
+    )
+    assert resp.status_code == 401
+    assert len(seen) == 1, "an unknown email must still pay one bcrypt compare"
+    # Same cost factor as a stored password, or the two paths diverge again.
+    assert seen[0].startswith("$2b$")
+    assert seen[0].split("$")[2] == str(users_mod.BCRYPT_ROUNDS)
+
+
+def test_weak_password_signup_does_not_consume_the_signup_budget(
+    client, auth_rate_limit_clock
+):
+    """Policy first, budget second: iterating on a rejected password creates
+    nothing, so it must not spend the allowance for the account being created."""
+    for _ in range(4):
+        rejected = client.post(
+            "/api/auth/signup",
+            json={"email": "weak@example.com", "display_name": "W", "password": "short"},
+        )
+        assert rejected.status_code == 400
+
+    # The fixture's signup IP budget is 2 and is still fully available.
+    for email in ("real1@example.com", "real2@example.com"):
+        assert (
+            client.post(
+                "/api/auth/signup",
+                json={
+                    "email": email,
+                    "display_name": "Real",
+                    "password": "securepass1",
+                },
+            ).status_code
+            == 200
+        )
+
+
+def test_login_logging_cannot_be_used_to_forge_log_lines(client, capsys):
+    """Log injection: the failure line is the record an operator reads while
+    deciding whether they are under attack, so an unauthenticated caller must
+    not be able to write entries into it.
+
+    ``_normalize_email`` only strips the ends of the address, so an interior
+    newline survives validation. CodeQL reported this as py/log-injection while
+    these were ``logger`` calls and goes quiet at a ``print`` sink it does not
+    model -- the alert going away is not what makes it safe, this is.
+    """
+    forged = "auth.login_failed domain=attacker.test"
+    resp = client.post(
+        "/api/auth/login",
+        json={"email": f"victim@example.com\n{forged}", "password": "whatever1"},
+    )
+    assert resp.status_code == 401
+
+    out = capsys.readouterr().out
+    assert "auth.login_failed domain=example.com" in out, "the real line is still logged"
+    assert forged not in out
+    assert "attacker.test" not in out
+
+
+def test_env_int_disables_on_zero_and_reports_bad_overrides(monkeypatch, capsys):
+    """0 disables (the MAX_ACTIVE_RUNS_GLOBAL convention) and junk is loud.
+
+    capsys, not caplog: logger output is invisible under the deployed uvicorn
+    config, so these warnings go to stdout.
+    """
+    from dashboard.backend.api import auth as auth_api
+
+    monkeypatch.setenv("AUTH_FAKE_MAX", "0")
+    assert auth_api._env_int("AUTH_FAKE_MAX", 30) == 0
+
+    monkeypatch.setenv("AUTH_FAKE_MAX", "thirty")
+    assert auth_api._env_int("AUTH_FAKE_MAX", 30) == 30
+    assert "not an integer" in capsys.readouterr().out
+
+    monkeypatch.setenv("AUTH_FAKE_MAX", "-1")
+    assert auth_api._env_int("AUTH_FAKE_MAX", 30) == 30
+    assert "below the minimum" in capsys.readouterr().out
+
+    # A window of 0 is not a setting anyone means, so counts and windows differ.
+    monkeypatch.setenv("AUTH_FAKE_WINDOW", "0")
+    assert auth_api._env_int("AUTH_FAKE_WINDOW", 900, minimum=1) == 900
+
+    monkeypatch.delenv("AUTH_FAKE_MAX")
+    assert auth_api._env_int("AUTH_FAKE_MAX", 30) == 30
+
+
+# ---------------------------------------------------------------------------
+# Session client context (auth_sessions.user_agent / ip_prefix)
+# ---------------------------------------------------------------------------
+
+
+def _only_session(store):
+    conn = store._get_connection()
+    try:
+        conn.row_factory = None
+        return conn.execute(
+            "SELECT user_agent, ip_prefix FROM auth_sessions"
+        ).fetchall()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("route", ["signup", "login"])
+def test_a_session_records_the_client_it_was_issued_to(client, temp_user_store, route):
+    """The columns exist to answer "what are my signed-in devices?".
+
+    Storing NULL in both makes the schema describe a feature that isn't there,
+    and the gap only surfaces once someone builds the session list on top.
+    """
+    payload = {
+        "email": "context@example.com",
+        "display_name": "Context",
+        "password": "securepass1",
+    }
+    headers = {"User-Agent": "AtlTest/1.0", "X-Forwarded-For": "203.0.113.42"}
+    signup = client.post("/api/auth/signup", json=payload, headers=headers)
+    assert signup.status_code == 200
+    if route == "login":
+        client.post(
+            "/api/auth/login",
+            json={"email": payload["email"], "password": payload["password"]},
+            headers=headers,
+        )
+
+    rows = _only_session(temp_user_store)
+    assert rows, "no session row was written"
+    assert all(row[0] == "AtlTest/1.0" for row in rows)
+    assert all(row[1] == "203.0.113.0/24" for row in rows)
+
+
+def test_the_stored_address_is_a_network_not_the_client(client, temp_user_store):
+    """ip_prefix, not ip. Storing the exact address turns a session table into
+    a location log for every signed-in user, which is not what it is for."""
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "coarse@example.com",
+            "display_name": "Coarse",
+            "password": "securepass1",
+        },
+        headers={"X-Forwarded-For": "198.51.100.77"},
+    )
+    stored = _only_session(temp_user_store)[0][1]
+    assert "198.51.100.77" not in stored
+    assert stored == "198.51.100.0/24"
+
+
+# ---------------------------------------------------------------------------
+# Cookie mechanics that only show up on the raw Set-Cookie header. TestClient's
+# jar silently drops Secure cookies over http://testserver, so jar-based
+# assertions cannot see the production (__Host-) branch at all — these tests
+# read response.headers directly.
+# ---------------------------------------------------------------------------
+
+
+def test_prod_logout_deletes_the_host_cookie_with_secure(client, monkeypatch):
+    """RFC 6265bis: a UA rejects any __Host-* Set-Cookie without Secure.
+
+    delete_cookie defaults secure=False, so an unflagged deletion leaves the
+    prod cookie alive in the browser after logout (revoked server-side, but
+    still sent on every request). Guard the exact failure: the deletion for
+    the __Host- name must itself carry Secure.
+    """
+    monkeypatch.setenv("ATL_COOKIE_SECURE", "true")
+    response = client.post("/api/auth/logout")
+    assert response.status_code == 200
+    host_deletions = [
+        value
+        for value in response.headers.get_list("set-cookie")
+        if value.startswith('__Host-atl_session="";') or value.startswith("__Host-atl_session=;")
+    ]
+    assert host_deletions, response.headers.get_list("set-cookie")
+    for header in host_deletions:
+        assert "Secure" in header
+        assert "HttpOnly" in header
+
+
+def test_prod_login_sets_secure_httponly_cookie_header(client, monkeypatch):
+    monkeypatch.setenv("ATL_COOKIE_SECURE", "true")
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "prodcookie@example.com",
+            "display_name": "Prod",
+            "password": "securepass1",
+        },
+    )
+    set_cookie = [
+        value
+        for value in client.post(
+            "/api/auth/login",
+            json={"email": "prodcookie@example.com", "password": "securepass1"},
+        ).headers.get_list("set-cookie")
+        if value.startswith("__Host-atl_session=")
+    ]
+    assert set_cookie, "login did not set the __Host- session cookie"
+    header = set_cookie[0]
+    assert "Secure" in header and "HttpOnly" in header and "Path=/" in header
+    assert "Domain" not in header  # __Host- forbids a Domain attribute
+
+
+def test_me_upgrades_a_legacy_bearer_session_to_a_cookie(client):
+    """Migration bridge: pre-cookie sessions live only in localStorage.
+
+    app.js sends that token once as Bearer on the boot /me probe; the response
+    must carry Set-Cookie so the session survives the HttpOnly migration
+    instead of force-logging the user out on deploy.
+    """
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "bridge@example.com",
+            "display_name": "Bridge",
+            "password": "securepass1",
+        },
+    )
+    token = _session_token(client)
+    client.cookies.clear()  # simulate a browser that never got the cookie
+    response = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    set_cookie = response.headers.get_list("set-cookie")
+    assert any("atl_session=" in value for value in set_cookie), set_cookie
+
+    # And once the cookie is present, /me must NOT keep re-setting it.
+    again = client.get("/api/auth/me")
+    assert again.status_code == 200
+    assert not again.headers.get_list("set-cookie")
+
+
+def test_set_session_cookie_rejects_malformed_tokens():
+    """The /me bridge feeds set_session_cookie a client-supplied Bearer value;
+    anything outside the token_urlsafe alphabet must never reach Set-Cookie."""
+    from fastapi import Response
+
+    from dashboard.backend.auth_cookies import set_session_cookie
+
+    response = Response()
+    set_session_cookie(response, "evil;\r\nSet-Cookie: hijack=1")
+    assert "set-cookie" not in response.headers
+
+    response = Response()
+    set_session_cookie(response, "x" * 43)  # well-formed shape still works
+    assert "set-cookie" in response.headers

@@ -28,6 +28,14 @@ _DEV_CSRF = "atl_csrf"
 CSRF_HEADER = "x-csrf-token"
 _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 
+# Login/signup must stay reachable for a browser holding a *stale* session
+# cookie: sessions idle out at 24h while the cookie lives 7 days, so the
+# ordinary return visit carries a dead session cookie (and possibly no CSRF
+# cookie). Gating these on double-submit would 403 the only endpoints that can
+# mint fresh cookies — an unrecoverable lockout. The Origin allowlist still
+# applies, and both endpoints authenticate by credentials, not by the session.
+_CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/signup"})
+
 
 def csrf_cookie_name() -> str:
     return _HOST_CSRF if cookie_secure() else _DEV_CSRF
@@ -130,7 +138,9 @@ def csrf_tokens_match(request: Request) -> bool:
     header = _csrf_header_token(request)
     if not cookie or not header:
         return False
-    return secrets.compare_digest(cookie, header)
+    # Compare bytes: compare_digest raises TypeError on non-ASCII str (headers
+    # decode as latin-1), which would surface as an unauthenticated bare 500.
+    return secrets.compare_digest(cookie.encode("utf-8"), header.encode("utf-8"))
 
 
 def csrf_enforced() -> bool:
@@ -157,6 +167,9 @@ class CsrfMiddleware(BaseHTTPMiddleware):
                 status_code=403,
                 content={"detail": "Cross-origin request blocked"},
             )
+
+        if request.url.path in _CSRF_EXEMPT_PATHS:
+            return await call_next(request)
 
         # Session cookie present ⇒ double-submit CSRF required. A forged
         # X-API-Key header must not bypass this when the browser also sends

@@ -54,6 +54,14 @@ os.environ["SESSION_HASH_SECRET"] = "test-session-hash-secret"
 # re-enable enforcement via monkeypatch (see test_csrf.py).
 os.environ["ATL_CSRF"] = "0"
 
+# The session cookie's name and Secure flag key off these (auth_cookies.py).
+# Inherited from a shell (a sourced prod .env, a Render-like deploy env) they
+# flip every test onto __Host-atl_session + Secure, which TestClient's plain
+# http://testserver jar refuses — surfacing as misleading "missing session
+# cookie" failures across the auth-dependent modules.
+for _cookie_var in ("ATL_COOKIE_SECURE", "ATL_ENV", "RENDER"):
+    os.environ.pop(_cookie_var, None)
+
 # Same guarantee for CONTENT_DATABASE_URL: it selects Postgres backends for the
 # agent / agent-version / strategy stores, so a value inherited from the
 # developer's environment (a sourced prod .env, a deploy shell) would point the
@@ -107,11 +115,19 @@ def _reset_shared_scale_state(monkeypatch):
     from dashboard.backend.domain.backtesting import baseline_worker, market_data_store
     from dashboard.backend.domain.agents import auth_cache
     from dashboard.backend import db_pool
+    from dashboard.backend.api import auth as auth_api
+
     monkeypatch.setattr(db_pool, "POOL_TIMEOUT_SECONDS", 1.0)
     market_data_store._reset_for_tests()
     baseline_worker._reset_for_tests()
     auth_cache._reset_for_tests()
     db_pool._reset_for_tests()
+    # Login/signup limiters are process-global; without a reset, the shared
+    # TestClient peer (testclient) burns the signup IP budget across the suite.
+    auth_api._LOGIN_IP_LIMITER.reset()
+    auth_api._LOGIN_EMAIL_LIMITER.reset()
+    auth_api._SIGNUP_IP_LIMITER.reset()
+    auth_api._SIGNUP_EMAIL_LIMITER.reset()
     yield
     # Best-effort drain so a job enqueued in this test doesn't leak into the
     # next. Note pytest tears fixtures down LIFO, so a test's own monkeypatches

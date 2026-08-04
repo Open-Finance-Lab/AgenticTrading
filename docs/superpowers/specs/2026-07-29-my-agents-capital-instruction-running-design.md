@@ -29,7 +29,9 @@ Five distinct friction points on the My Agents page, reported together:
 - Building live paper trading. The new button ships **disabled**; `execution/paper_backend.py`
   remains a stub and this work does not touch it.
 - Real-time backtest telemetry on the card. An indeterminate progress indicator plus an
-  elapsed timer is the agreed bar; step-level data stays on the Backtest tab.
+  elapsed timer is the agreed bar; step-level data stays on the Backtest tab. **Superseded
+  2026-08-01** — the card now shows a determinate step/percent/ETA bar once the engine has
+  published a step; see the 2026-08-01 UX-round spec §B2.
 - Any change to the Backtest tab's existing detailed progress panel.
 
 ## Decisions
@@ -196,7 +198,8 @@ RUNNING                                  COMPLETE (brief highlight, then normal)
 ```
 
 The running indicator is a pulsing dot plus an **indeterminate** animated bar — deliberately
-not a percentage, since no honest completion estimate exists. The elapsed timer reuses
+not a percentage, since no honest completion estimate exists. **Superseded 2026-08-01: see
+the UX-round spec §B2 — the bar is determinate once `step`/`total_steps` are known.** The elapsed timer reuses
 `formatBacktestElapsed()`. Card actions are disabled for the duration.
 
 Both the pulse and the bar animation must be wrapped in `@media (prefers-reduced-motion: reduce)`

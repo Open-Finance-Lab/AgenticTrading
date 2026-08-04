@@ -11,6 +11,7 @@ logging are unchanged; only the module location moved.
 import json
 import os
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
@@ -21,7 +22,24 @@ import requests
 from dashboard.backend.paths import CREDENTIALS_DIR
 
 TICKER_CACHE_TTL_SECONDS = 30
+# How long a stale payload may still be served while a background thread
+# refreshes it. Beyond this the data is too old to show and the request pays
+# the inline fetch again.
+TICKER_STALE_SERVE_SECONDS = 900
+# After a fetch comes back empty (provider outage), stop hammering the provider
+# for this long. Without it a sustained outage puts every single request back on
+# the multi-second inline path -- exactly the behaviour this cache exists to
+# remove -- because a failed fetch never advances the cache timestamp.
+TICKER_FAILED_FETCH_BACKOFF_SECONDS = 60
+# /ticker is session-exempt and takes an arbitrary ``symbols=`` string, so every
+# map keyed on that string is reachable by unauthenticated input. Bound them, or
+# they grow without limit (and each distinct stale key can own a refresh thread).
+TICKER_MAX_CACHE_KEYS = 256
 _ticker_cache: Dict[str, Tuple[float, List[Dict]]] = {}
+_ticker_refresh_lock = threading.Lock()
+_ticker_refresh_inflight: set = set()
+_ticker_fetch_locks: Dict[str, threading.Lock] = {}
+_ticker_failed_fetch_at: Dict[str, float] = {}
 
 # Symbols are interpolated into Alpaca URL paths, so anything outside a real
 # ticker's alphabet (letters, digits, "." and "-", e.g. BRK.B / BF-B) could
@@ -647,25 +665,14 @@ def get_yahoo_quotes_batch(symbols: List[str]) -> List[Dict]:
     return quotes
 
 
-def get_market_quotes(symbols: List[str]) -> List[Dict]:
-    """
-    Convenience function to fetch quotes for stocks and crypto.
-    
-    Usage:
-        quotes = get_market_quotes(["AAPL", "NVDA", "MSFT", "BTC"])
-    """
-    cache_key = ",".join(sorted(symbol.strip().upper() for symbol in symbols if symbol.strip()))
-    now = time.time()
-    cached = _ticker_cache.get(cache_key)
-    if cached and now - cached[0] < TICKER_CACHE_TTL_SECONDS:
-        return cached[1]
-
+def _fetch_quotes_uncached(symbols: List[str]) -> List[Dict]:
+    """Fetch quotes from the providers with no cache involved (slow: seconds)."""
     # Separate stocks and crypto
     stocks = [s for s in symbols if s not in ["BTC", "ETH", "XRP", "SOL"]]
     crypto = [s for s in symbols if s in ["BTC", "ETH", "XRP", "SOL"]]
-    
+
     quotes = []
-    
+
     # Fetch stocks from Yahoo Finance (fast, no Alpaca credentials needed)
     if stocks:
         quotes.extend(get_yahoo_quotes_batch(stocks))
@@ -678,7 +685,7 @@ def get_market_quotes(symbols: List[str]) -> List[Dict]:
                     quotes.extend(market_data.get_quotes_batch(missing_stocks))
                 except Exception as e:
                     print(f"Error initializing Alpaca fallback: {e}")
-    
+
     # Fetch crypto
     if crypto:
         try:
@@ -690,7 +697,137 @@ def get_market_quotes(symbols: List[str]) -> List[Dict]:
         except Exception as e:
             print(f"Error fetching crypto: {e}")
 
-    if cache_key:
-        _ticker_cache[cache_key] = (now, quotes)
-    
     return quotes
+
+
+def _evict_ticker_keys_locked() -> None:
+    """Bound the symbol-keyed maps. Call with ``_ticker_refresh_lock`` held."""
+    overflow = len(_ticker_cache) - TICKER_MAX_CACHE_KEYS
+    if overflow > 0:
+        # Oldest first; entries are (timestamp, payload).
+        oldest = sorted(_ticker_cache.items(), key=lambda kv: kv[1][0])[:overflow]
+        for key, _ in oldest:
+            _ticker_cache.pop(key, None)
+            _ticker_failed_fetch_at.pop(key, None)
+    for key in list(_ticker_fetch_locks):
+        if key not in _ticker_cache and key not in _ticker_refresh_inflight:
+            _ticker_fetch_locks.pop(key, None)
+
+
+def _in_failure_backoff(cache_key: str) -> bool:
+    failed_at = _ticker_failed_fetch_at.get(cache_key)
+    return (
+        failed_at is not None
+        and time.time() - failed_at < TICKER_FAILED_FETCH_BACKOFF_SECONDS
+    )
+
+
+def _fetch_and_store(cache_key: str, symbols: List[str]) -> List[Dict]:
+    quotes = _fetch_quotes_uncached(symbols)
+    existing = _ticker_cache.get(cache_key)
+    if quotes or not (existing and existing[1]):
+        # An empty fetch (provider outage) must never overwrite a payload that
+        # is still inside the serve-stale window.
+        _ticker_cache[cache_key] = (time.time(), quotes)
+    if quotes:
+        _ticker_failed_fetch_at.pop(cache_key, None)
+    else:
+        # Remember the failure so callers back off instead of retrying the slow
+        # provider on every request for as long as the outage lasts.
+        _ticker_failed_fetch_at[cache_key] = time.time()
+    with _ticker_refresh_lock:
+        _evict_ticker_keys_locked()
+    return quotes
+
+
+def _refresh_ticker_in_background(cache_key: str, symbols: List[str]) -> None:
+    with _ticker_refresh_lock:
+        if cache_key in _ticker_refresh_inflight:
+            return
+        _ticker_refresh_inflight.add(cache_key)
+
+    def worker():
+        try:
+            _fetch_and_store(cache_key, symbols)
+        except Exception as exc:
+            # !r on the key, not str: it is built from unauthenticated
+            # ``symbols`` input, and repr escapes any embedded newline that
+            # would otherwise forge a second log line.
+            print(f"Ticker background refresh failed for {cache_key!r}: {exc!r}")
+        finally:
+            with _ticker_refresh_lock:
+                _ticker_refresh_inflight.discard(cache_key)
+
+    # cache_key is unauthenticated input, so it is truncated rather than pasted
+    # whole into the thread name.
+    thread = threading.Thread(
+        target=worker, name=f"ticker-refresh-{cache_key[:40]}", daemon=True
+    )
+    try:
+        thread.start()
+    except (RuntimeError, OSError) as exc:
+        # The key was marked inflight before the thread existed, so a failed
+        # start would otherwise bar it from ever refreshing again. Swallowing
+        # the error also keeps the caller's good stale payload -- letting this
+        # propagate would surface as an empty ticker instead.
+        print(f"Ticker background refresh could not start for {cache_key!r}: {exc!r}")
+        with _ticker_refresh_lock:
+            _ticker_refresh_inflight.discard(cache_key)
+
+
+def _reset_ticker_refresh_state_for_tests() -> None:
+    with _ticker_refresh_lock:
+        _ticker_refresh_inflight.clear()
+        _ticker_fetch_locks.clear()
+        _ticker_failed_fetch_at.clear()
+
+
+def get_market_quotes(symbols: List[str]) -> List[Dict]:
+    """
+    Convenience function to fetch quotes for stocks and crypto.
+
+    Stale-while-revalidate: a fresh cache entry (< TICKER_CACHE_TTL_SECONDS)
+    is returned as-is; a stale-but-recent one (< TICKER_STALE_SERVE_SECONDS)
+    is returned immediately while one background thread refreshes it; only a
+    genuinely cold cache pays the multi-second provider fetch in-request, and
+    concurrent cold callers share a single fetch.
+
+    Usage:
+        quotes = get_market_quotes(["AAPL", "NVDA", "MSFT", "BTC"])
+    """
+    cache_key = ",".join(sorted(symbol.strip().upper() for symbol in symbols if symbol.strip()))
+    if not cache_key:
+        return _fetch_quotes_uncached(symbols)
+
+    cached = _ticker_cache.get(cache_key)
+    if cached:
+        age = time.time() - cached[0]
+        if age < TICKER_CACHE_TTL_SECONDS:
+            return cached[1]
+        if cached[1]:
+            if age < TICKER_STALE_SERVE_SECONDS:
+                if not _in_failure_backoff(cache_key):
+                    _refresh_ticker_in_background(cache_key, list(symbols))
+                return cached[1]
+            if _in_failure_backoff(cache_key):
+                # Aged out of the serve window *and* the provider is failing.
+                # Retrying inline per request would restore the multi-second
+                # blocking fetch this cache exists to avoid, and would hand the
+                # caller an empty ticker while usable data sits right here.
+                return cached[1]
+
+    # Cold cache (or stale beyond the serve window / empty payload): fetch
+    # inline, but let concurrent callers share one provider round-trip.
+    with _ticker_refresh_lock:
+        fetch_lock = _ticker_fetch_locks.setdefault(cache_key, threading.Lock())
+    with fetch_lock:
+        cached = _ticker_cache.get(cache_key)
+        if cached and cached[1] and time.time() - cached[0] < TICKER_CACHE_TTL_SECONDS:
+            return cached[1]  # another caller fetched while we waited
+        quotes = _fetch_and_store(cache_key, symbols)
+        if quotes:
+            return quotes
+        # The fetch came back empty. _fetch_and_store deliberately preserved any
+        # good-but-expired payload, so prefer that over handing back nothing.
+        stale = _ticker_cache.get(cache_key)
+        return stale[1] if stale and stale[1] else quotes

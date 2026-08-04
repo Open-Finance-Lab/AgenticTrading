@@ -18,7 +18,7 @@ from dashboard.backend.api.routers import config as config_canon
 from dashboard.backend.api.routers import health as health_canon
 from dashboard.backend.api.routers import market as market_canon
 from dashboard.backend import middleware as middleware_mod
-from dashboard.backend.app import app
+from dashboard.backend.app import app, _cors_allow_origins
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _APP_FILE = _BACKEND / "app.py"
@@ -47,6 +47,7 @@ EXPECTED_BACKTESTS_ROUTES = {
     ("GET", "/runs/{run_id}", "get_run"),
     ("GET", "/runs/{run_id}/equity", "get_equity_curve"),
     ("GET", "/runs/{run_id}/trades", "get_run_trades"),
+    ("GET", "/runs/{run_id}/rejected-orders", "get_run_rejected_orders"),
     ("GET", "/runs/{run_id}/plot.png", "get_run_plot"),
     ("GET", "/compare", "compare_runs"),
 }
@@ -177,6 +178,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/runs/{run_id}"),
     ("GET", "/runs/{run_id}/equity"),
     ("GET", "/runs/{run_id}/plot.png"),
+    ("GET", "/runs/{run_id}/rejected-orders"),
     ("GET", "/runs/{run_id}/trades"),
     ("GET", "/strategy"),
     ("GET", "/styles.css"),
@@ -326,9 +328,29 @@ def test_csp_middleware_lives_in_middleware_module():
     assert app_csp is middleware_mod.CSPHeaderMiddleware
 
 
+def test_csp_header_omits_unsafe_eval():
+    from fastapi.testclient import TestClient
+    from dashboard.backend.app import app
+
+    response = TestClient(app).get("/api/health")
+    csp = response.headers.get("content-security-policy", "")
+    assert "script-src" in csp
+    assert "unsafe-eval" not in csp
+
+
 def test_middleware_order_preserved():
     names = [m.cls.__name__ for m in app.user_middleware]
-    assert names == ["CSPHeaderMiddleware", "CsrfMiddleware", "SessionMiddleware", "CORSMiddleware"]
+    # Outermost first. GZipMiddleware must stay LAST: as the innermost layer it
+    # sees the router's single-shot response, which is the only way its
+    # minimum_size is honoured. Above SessionMiddleware (a BaseHTTPMiddleware,
+    # which re-streams every response) it silently compresses everything.
+    assert names == [
+        "CSPHeaderMiddleware",
+        "CsrfMiddleware",
+        "SessionMiddleware",
+        "CORSMiddleware",
+        "GZipMiddleware",
+    ]
 
 
 def test_cors_preflight_allows_every_routed_method():
@@ -396,3 +418,63 @@ def test_app_first_party_imports_are_canonical():
     first_party = {m for m in modules if "backend" in m or m.startswith("dashboard")}
     for m in first_party:
         assert m.startswith("dashboard.backend"), m
+
+
+# ---------------------------------------------------------------------------
+# CORS allowlist resolution (same-origin migration)
+# ---------------------------------------------------------------------------
+
+def test_cors_allow_origins_defaults_to_wildcard_when_unset(monkeypatch):
+    """Unset must reproduce the pre-migration default exactly.
+
+    Same-origin Vercel traffic goes through the ``vercel.json`` rewrites and
+    never preflights, so the allowlist exists for the split-origin callers that
+    remain. Anything other than ``["*"]`` here silently 403s them at the
+    preflight on a deploy where the env var was never set -- which is the
+    default state of the Render dashboard.
+    """
+    monkeypatch.delenv("ATL_FRONTEND_ORIGINS", raising=False)
+    assert _cors_allow_origins() == ["*"]
+
+    monkeypatch.setenv("ATL_FRONTEND_ORIGINS", "   ")
+    assert _cors_allow_origins() == ["*"]
+
+
+def test_cors_allow_origins_parses_allowlist_and_adds_local_hosts(monkeypatch):
+    monkeypatch.setenv(
+        "ATL_FRONTEND_ORIGINS",
+        "https://example.vercel.app/, , https://second.example",
+    )
+    origins = _cors_allow_origins()
+
+    # Compared as a whole list, not with ``in``: membership on a list is exact,
+    # but CodeQL reads ``"https://host" in x`` as a substring URL check and
+    # raises py/incomplete-url-substring-sanitization. An exact list comparison
+    # is both alert-free and the stronger assertion -- it pins order and
+    # rejects extra entries.
+    #
+    # The trailing slash must be stripped: a browser's Origin header never
+    # carries one, so an unstripped entry never matches and the allowlist
+    # silently fails shut. The blank segment from the doubled comma must not
+    # survive as an origin.
+    assert origins == [
+        "https://example.vercel.app",
+        "https://second.example",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+
+def test_cors_wildcard_is_never_mixed_into_an_explicit_allowlist(monkeypatch):
+    """``*`` plus a real allowlist is the shape that becomes unsafe.
+
+    Starlette rejects ``allow_origins=["*"]`` combined with
+    ``allow_credentials=True``, but only when the wildcard is the *whole* list.
+    A list that merely contains ``"*"`` alongside named origins matches every
+    origin while looking restricted, so a later flip of ``allow_credentials``
+    would hand credentialed responses to any site.
+    """
+    monkeypatch.setenv("ATL_FRONTEND_ORIGINS", "https://example.vercel.app")
+    assert "*" not in _cors_allow_origins()
