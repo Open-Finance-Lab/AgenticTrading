@@ -78,3 +78,15 @@ def test_illustrative_example_label_appears_at_least_twice():
 
 def test_no_real_money_sentence_is_present_verbatim():
     assert _NO_REAL_MONEY_SENTENCE in _shipped_text()
+
+
+def test_auth_error_gives_a_next_step():
+    """The sign-up/sign-in modal's generic failure fallback used to read as a dead
+    end ("Something went wrong.") with nothing telling this audience what to do
+    next. Pins the follow-up sentence and forbids the bare version it replaces —
+    this string lives only in index.html's hand-written end-of-body auth <script>
+    (see dashboard/landing/README.md), not in landing/src, so no TSX source or
+    rebuild is involved."""
+    text = _shipped_text()
+    assert "Something went wrong. Please try again." in text
+    assert not re.search(r"Something went wrong\.(?! Please try again\.)", text)

@@ -382,7 +382,7 @@
               goToDashboardLoggedIn(data.user);
             } catch (error) {
               if (errorEl) {
-                errorEl.textContent = error.message || 'Something went wrong.';
+                errorEl.textContent = error.message || 'Something went wrong. Please try again.';
                 errorEl.hidden = false;
               }
               if (submitBtn) submitBtn.disabled = false;
