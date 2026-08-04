@@ -750,8 +750,8 @@ function getHomeAuthUser() {
 }
 
 function isHomeSignedIn() {
-    const token = localStorage.getItem(typeof AUTH_TOKEN_KEY === 'string' ? AUTH_TOKEN_KEY : 'auth-token');
-    return !!(token && getHomeAuthUser());
+    if (typeof isSignedIn === 'function') return isSignedIn();
+    return !!getHomeAuthUser();
 }
 
 function openHomeCreateAgent() {

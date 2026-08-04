@@ -172,6 +172,6 @@ def test_slow_boot_notice_is_wired():
 # ---------------------------------------------------------------------------
 
 def test_cache_busters_bumped():
-    # v=60: bumped when the same-origin API re-land (#302 follow-up) changed app.js
-    assert "app.js?v=60" in APP_HTML
+    # v=61: bumped when the HttpOnly-cookie auth migration (#284) changed app.js
+    assert "app.js?v=61" in APP_HTML
     assert "styles.css?v=79" in APP_HTML

@@ -15,6 +15,8 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
+
 from dashboard.backend.app import app
 import dashboard.backend.domain.agents.repository as agent_store_module
 import dashboard.backend.database as db_module
@@ -184,7 +186,8 @@ def _signup(client, email="backtest-alloc@example.com"):
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    return data["token"], data["user"]
+    assert "token" not in data
+    return _cookie_session_token(client), data["user"]
 
 
 def _auth_headers(token, browser="browser-backtest-alloc-1"):

@@ -152,10 +152,16 @@
   }
 
   function authHeaders() {
-    const headers = { 'x-session-id': window.SESSION_ID };
-    const token = localStorage.getItem('auth-token');
-    if (token) headers.Authorization = `Bearer ${token}`;
-    return headers;
+    return { 'x-session-id': window.SESSION_ID };
+  }
+
+  function isEditorSignedIn() {
+    if (typeof window.getStoredAuthUser === 'function') return !!window.getStoredAuthUser();
+    try {
+      return !!JSON.parse(localStorage.getItem('auth-user') || 'null');
+    } catch (_) {
+      return false;
+    }
   }
 
   function renderAiHedgeFundAnalysts(agent) {
@@ -225,6 +231,7 @@
       const response = await fetch(endpoint, {
         method,
         headers,
+        credentials: 'include',
         body: body == null ? undefined : JSON.stringify(body),
       });
       const data = await response.json().catch(() => ({}));
@@ -277,7 +284,7 @@
   function fetchWithTimeout(url, options, timeoutMs) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+    return fetch(url, { credentials: 'include', ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
   }
 
   /**
@@ -300,9 +307,7 @@
     const connectBtn = document.getElementById('agentEditorConnectRobinhoodBtn');
     const disconnectBtn = document.getElementById('agentEditorDisconnectRobinhoodBtn');
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
-    const token = localStorage.getItem('auth-token');
-
-    if (!token) {
+    if (!isEditorSignedIn()) {
       if (statusEl) {
         statusEl.textContent = 'Sign in required';
         statusEl.className = 'agent-editor-broker-status agent-editor-broker-status--warn';
@@ -398,8 +403,7 @@
   }
 
   async function connectRobinhood() {
-    const token = localStorage.getItem('auth-token');
-    if (!token) {
+    if (!isEditorSignedIn()) {
       setBrokerMessage('Please sign in first.', true);
       if (typeof window.openAuthModal === 'function') window.openAuthModal('login');
       else alert('Please sign in to your ATL account first.');
@@ -425,6 +429,7 @@
       const response = await fetch(`${API_BASE}/api/auth/robinhood/start`, {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ agent_id: currentAgent.agent_id }),
       });
       let data = {};
@@ -470,6 +475,7 @@
       const response = await fetch(`${API_BASE}/api/v1/robinhood/disconnect`, {
         method: 'DELETE',
         headers: authHeaders(),
+        credentials: 'include',
       });
       if (!response.ok) {
         const data = await response.json();
@@ -519,6 +525,7 @@
         {
           method: 'POST',
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({ dry_run: false }),
         }
       );
@@ -812,12 +819,10 @@
         'x-session-id': window.SESSION_ID,
         ...extraHeaders,
       };
-      const token = localStorage.getItem('auth-token');
-      if (token) headers.Authorization = `Bearer ${token}`;
-
       const response = await fetch(endpoint, {
         method: 'PATCH',
         headers,
+        credentials: 'include',
         body: JSON.stringify(payload),
       });
       const data = await response.json().catch(() => ({}));
@@ -929,12 +934,10 @@
 
     try {
       const headers = { 'x-session-id': window.SESSION_ID };
-      const token = localStorage.getItem('auth-token');
-      if (token) headers.Authorization = `Bearer ${token}`;
 
       const response = await fetch(
         `${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}`,
-        { headers },
+        { headers, credentials: 'include' },
       );
       if (!response.ok) return;
       const data = await response.json();

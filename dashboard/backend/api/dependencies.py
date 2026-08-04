@@ -13,7 +13,6 @@ from typing import Any, Dict, Optional
 
 from fastapi import HTTPException, Request
 
-from dashboard.backend.api.auth import _extract_bearer_token
 from dashboard.backend.domain.agents.service import (
     AgentAccessDeniedError,
     AgentNotFoundError,
@@ -21,14 +20,14 @@ from dashboard.backend.domain.agents.service import (
 )
 
 
-def _optional_user(authorization: Optional[str]) -> Optional[dict]:
-    token = _extract_bearer_token(authorization)
-    if not token:
-        return None
+def _optional_user(request: Request, authorization: Optional[str] = None) -> Optional[dict]:
+    from dashboard.backend.api.auth import _session_token
     from dashboard.backend.users import user_store
 
-    user = user_store.get_user_for_token(token)
-    return user
+    token = _session_token(request, authorization)
+    if not token:
+        return None
+    return user_store.get_user_for_token(token)
 
 
 def _owner_context(request: Request, authorization: Optional[str]) -> Dict[str, Any]:
@@ -42,7 +41,7 @@ def _owner_context(request: Request, authorization: Optional[str]) -> Dict[str, 
         # for built-in agents. Clients that can send X-Browser-Id should; this
         # branch exists for API-only importers with no browser identity.
         browser_owner = trading_session
-    user = _optional_user(authorization)
+    user = _optional_user(request, authorization)
     return {
         "user_id": user["id"] if user else None,
         "browser_session": browser_owner.strip() if browser_owner else None,

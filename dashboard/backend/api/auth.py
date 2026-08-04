@@ -11,10 +11,15 @@ from typing import Optional
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from dashboard.backend.api import discord_oauth
+from dashboard.backend.auth_cookies import (
+    clear_session_cookie,
+    read_session_token,
+    set_session_cookie,
+)
 from dashboard.backend.api.rate_limit import (
     FixedWindowRateLimiter,
     client_ip,
@@ -242,7 +247,6 @@ def _validate_avatar_data_uri(value: str) -> str:
 
 class AuthResponse(BaseModel):
     user: dict
-    token: str
 
 
 _MAX_STORED_USER_AGENT = 200
@@ -287,14 +291,35 @@ def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
     return token.strip()
 
 
-def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
-    token = _extract_bearer_token(authorization)
+def _session_token(
+    request: Request,
+    authorization: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve the raw session token for this request.
+
+    Explicit ``Authorization: Bearer`` wins when present (scripts / TestClient);
+    browsers after the HttpOnly migration send only the cookie.
+    """
+    return _extract_bearer_token(authorization) or read_session_token(request)
+
+
+def get_current_user(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    token = _session_token(request, authorization)
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     user = users_module.user_store.get_user_for_token(token)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
     return user
+
+
+def _auth_json(user: dict, raw_token: str) -> JSONResponse:
+    response = JSONResponse({"user": user})
+    set_session_cookie(response, raw_token)
+    return response
 
 
 @router.post("/signup", response_model=AuthResponse)
@@ -352,7 +377,7 @@ async def signup(payload: SignupRequest, request: Request):
     token = users_module.user_store.create_session(
         user["id"], **_session_client_context(request)
     )
-    return {"user": user, "token": token}
+    return _auth_json(user, token)
 
 
 @router.post("/login", response_model=AuthResponse)
@@ -395,25 +420,52 @@ async def login(payload: LoginRequest, request: Request):
     token = users_module.user_store.create_session(
         user["id"], **_session_client_context(request)
     )
-    return {"user": public_user(user), "token": token}
+    return _auth_json(public_user(user), token)
 
 
 @router.get("/me")
-async def me(current_user: dict = Depends(get_current_user)):
-    return {"user": public_user(current_user)}
+async def me(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    current_user: dict = Depends(get_current_user),
+):
+    response = JSONResponse({"user": public_user(current_user)})
+    # Migration bridge: a browser signed in before the HttpOnly-cookie change
+    # holds a valid session only in localStorage. app.js sends it once as
+    # Bearer on the boot /me probe; upgrading it to a cookie here keeps that
+    # session alive instead of force-logging every user out on deploy.
+    if not read_session_token(request):
+        token = _extract_bearer_token(authorization)
+        if token:
+            set_session_cookie(response, token)
+    return response
 
 
 @router.post("/logout")
-def logout(authorization: Optional[str] = Header(default=None)):
-    token = _extract_bearer_token(authorization)
+def logout(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    token = _session_token(request, authorization)
     if token:
         users_module.user_store.delete_session(token)
-    return {"status": "ok"}
+    response = JSONResponse({"status": "ok"})
+    clear_session_cookie(response)
+    return response
+
+
+@router.post("/logout-all")
+async def logout_all(request: Request, current_user: dict = Depends(get_current_user)):
+    users_module.user_store.delete_other_sessions(current_user["id"], keep_token=None)
+    response = JSONResponse({"status": "ok"})
+    clear_session_cookie(response)
+    return response
 
 
 @router.post("/change-password")
 async def change_password(
     payload: ChangePasswordRequest,
+    request: Request,
     current_user: dict = Depends(get_current_user),
     authorization: Optional[str] = Header(default=None),
 ):
@@ -433,7 +485,7 @@ async def change_password(
     # return ok. Revocation is defence-in-depth, not a hard guarantee.
     try:
         users_module.user_store.delete_other_sessions(
-            current_user["id"], keep_token=_extract_bearer_token(authorization)
+            current_user["id"], keep_token=_session_token(request, authorization)
         )
     except Exception as exc:  # noqa: BLE001 -- password change already committed
         print(
@@ -660,6 +712,7 @@ async def cancel_email_change(current_user: dict = Depends(get_current_user)):
 @router.post("/email-change/verify")
 async def verify_email_change(
     payload: EmailChangeVerifyRequest,
+    request: Request,
     current_user: dict = Depends(get_current_user),
     authorization: Optional[str] = Header(default=None),
 ):
@@ -729,7 +782,7 @@ async def verify_email_change(
     # failures above, where the user genuinely gets nothing.
     try:
         store.delete_other_sessions(
-            current_user["id"], keep_token=_extract_bearer_token(authorization)
+            current_user["id"], keep_token=_session_token(request, authorization)
         )
     except Exception as exc:  # noqa: BLE001 -- email change already committed
         print(

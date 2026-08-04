@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
+
 import dashboard.backend.domain.agents.repository as agent_repo
 import dashboard.backend.domain.portfolios.repository as portfolio_repo
 import dashboard.backend.domain.portfolios.service as portfolio_service_module
@@ -56,7 +58,8 @@ def _signup(client: TestClient, email: str = "pf@example.com") -> str:
         },
     )
     assert resp.status_code == 200, resp.text
-    return resp.json()["token"]
+    assert "token" not in resp.json()
+    return _cookie_session_token(client)
 
 
 def test_signup_lands_in_the_fixture_user_store(client, temp_stores):

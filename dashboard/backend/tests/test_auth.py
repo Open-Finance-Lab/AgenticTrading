@@ -13,6 +13,14 @@ from fastapi.testclient import TestClient
 from dashboard.backend.app import app
 from dashboard.backend.users import UserStore
 
+def _session_token(client) -> str:
+    """Raw session token from the HttpOnly cookie set by login/signup."""
+    from dashboard.backend.auth_cookies import session_cookie_name
+    token = client.cookies.get(session_cookie_name())
+    assert token, f"missing session cookie {session_cookie_name()!r} in {dict(client.cookies)}"
+    return token
+
+
 
 @pytest.fixture
 def temp_user_store():
@@ -52,7 +60,8 @@ def test_signup_login_me_logout_flow(client):
     assert signup_data["user"]["display_name"] == "Alice"
     assert signup_data["user"]["role"] == "user"
     assert "password_hash" not in signup_data["user"]
-    assert signup_data["token"]
+    assert "token" not in signup_data
+    assert _session_token(client)  # signup set the session cookie
 
     duplicate = client.post(
         "/api/auth/signup",
@@ -69,7 +78,8 @@ def test_signup_login_me_logout_flow(client):
         json={"email": "alice@example.com", "password": "securepass1"},
     )
     assert login.status_code == 200
-    token = login.json()["token"]
+    assert "token" not in login.json()
+    token = _session_token(client)
 
     me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
@@ -85,6 +95,25 @@ def test_signup_login_me_logout_flow(client):
 def test_me_requires_auth(client):
     response = client.get("/api/auth/me")
     assert response.status_code == 401
+
+
+def test_me_accepts_session_cookie_without_bearer(client):
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "cookie@example.com",
+            "display_name": "Cookie",
+            "password": "securepass1",
+        },
+    )
+    assert signup.status_code == 200
+    assert "token" not in signup.json()
+    from dashboard.backend.auth_cookies import session_cookie_name
+
+    assert session_cookie_name() in client.cookies
+    me = client.get("/api/auth/me")  # cookie jar only — no Authorization
+    assert me.status_code == 200
+    assert me.json()["user"]["email"] == "cookie@example.com"
 
 
 def test_login_invalid_password(client):
@@ -175,7 +204,8 @@ def _signup_and_token(client, email="dave@example.com", password="orig-sturdy-pw
         json={"email": email, "display_name": "Dave", "password": password},
     )
     assert response.status_code == 200
-    return response.json()["token"]
+    assert "token" not in response.json()
+    return _session_token(client)
 
 
 def test_change_password_happy_path(client):
@@ -239,10 +269,11 @@ def test_change_password_rejects_weak_new_password(client):
 
 def test_change_password_invalidates_other_sessions_keeps_current(client):
     token_a = _signup_and_token(client, email="gina@example.com")
-    token_b = client.post(
+    client.post(
         "/api/auth/login",
         json={"email": "gina@example.com", "password": "orig-sturdy-pw-1"},
-    ).json()["token"]
+    )
+    token_b = _session_token(client)
 
     response = client.post(
         "/api/auth/change-password",
@@ -1198,10 +1229,11 @@ def test_email_change_commit_revokes_other_sessions_but_keeps_the_caller(
     client, sent_emails
 ):
     token_a = _signup_and_token(client, email="sessions@example.com")
-    token_b = client.post(
+    client.post(
         "/api/auth/login",
         json={"email": "sessions@example.com", "password": "orig-sturdy-pw-1"},
-    ).json()["token"]
+    )
+    token_b = _session_token(client)
     headers = {"Authorization": f"Bearer {token_a}"}
     _start_email_change(client, token_a)
 
@@ -1255,7 +1287,8 @@ def test_session_stores_hash_not_raw_token(client, temp_user_store):
         },
     )
     assert signup.status_code == 200
-    token = signup.json()["token"]
+    assert "token" not in signup.json()
+    token = _session_token(client)
     conn = temp_user_store._get_connection()
     conn.row_factory = None
     rows = list(conn.execute("SELECT * FROM auth_sessions"))
@@ -1276,7 +1309,8 @@ def test_revoked_session_is_rejected(client):
             "password": "securepass1",
         },
     )
-    token = signup.json()["token"]
+    assert "token" not in signup.json()
+    token = _session_token(client)
     assert client.post(
         "/api/auth/logout", headers={"Authorization": f"Bearer {token}"}
     ).status_code == 200
@@ -1296,7 +1330,8 @@ def test_idle_session_is_rejected(client, temp_user_store, monkeypatch):
             "password": "securepass1",
         },
     )
-    token = signup.json()["token"]
+    assert "token" not in signup.json()
+    token = _session_token(client)
     from datetime import timedelta
 
     from dashboard.backend.session_tokens import hash_session_token
@@ -2012,3 +2047,101 @@ def test_the_stored_address_is_a_network_not_the_client(client, temp_user_store)
     stored = _only_session(temp_user_store)[0][1]
     assert "198.51.100.77" not in stored
     assert stored == "198.51.100.0/24"
+
+
+# ---------------------------------------------------------------------------
+# Cookie mechanics that only show up on the raw Set-Cookie header. TestClient's
+# jar silently drops Secure cookies over http://testserver, so jar-based
+# assertions cannot see the production (__Host-) branch at all — these tests
+# read response.headers directly.
+# ---------------------------------------------------------------------------
+
+
+def test_prod_logout_deletes_the_host_cookie_with_secure(client, monkeypatch):
+    """RFC 6265bis: a UA rejects any __Host-* Set-Cookie without Secure.
+
+    delete_cookie defaults secure=False, so an unflagged deletion leaves the
+    prod cookie alive in the browser after logout (revoked server-side, but
+    still sent on every request). Guard the exact failure: the deletion for
+    the __Host- name must itself carry Secure.
+    """
+    monkeypatch.setenv("ATL_COOKIE_SECURE", "true")
+    response = client.post("/api/auth/logout")
+    assert response.status_code == 200
+    host_deletions = [
+        value
+        for value in response.headers.get_list("set-cookie")
+        if value.startswith('__Host-atl_session="";') or value.startswith("__Host-atl_session=;")
+    ]
+    assert host_deletions, response.headers.get_list("set-cookie")
+    for header in host_deletions:
+        assert "Secure" in header
+        assert "HttpOnly" in header
+
+
+def test_prod_login_sets_secure_httponly_cookie_header(client, monkeypatch):
+    monkeypatch.setenv("ATL_COOKIE_SECURE", "true")
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "prodcookie@example.com",
+            "display_name": "Prod",
+            "password": "securepass1",
+        },
+    )
+    set_cookie = [
+        value
+        for value in client.post(
+            "/api/auth/login",
+            json={"email": "prodcookie@example.com", "password": "securepass1"},
+        ).headers.get_list("set-cookie")
+        if value.startswith("__Host-atl_session=")
+    ]
+    assert set_cookie, "login did not set the __Host- session cookie"
+    header = set_cookie[0]
+    assert "Secure" in header and "HttpOnly" in header and "Path=/" in header
+    assert "Domain" not in header  # __Host- forbids a Domain attribute
+
+
+def test_me_upgrades_a_legacy_bearer_session_to_a_cookie(client):
+    """Migration bridge: pre-cookie sessions live only in localStorage.
+
+    app.js sends that token once as Bearer on the boot /me probe; the response
+    must carry Set-Cookie so the session survives the HttpOnly migration
+    instead of force-logging the user out on deploy.
+    """
+    client.post(
+        "/api/auth/signup",
+        json={
+            "email": "bridge@example.com",
+            "display_name": "Bridge",
+            "password": "securepass1",
+        },
+    )
+    token = _session_token(client)
+    client.cookies.clear()  # simulate a browser that never got the cookie
+    response = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    set_cookie = response.headers.get_list("set-cookie")
+    assert any("atl_session=" in value for value in set_cookie), set_cookie
+
+    # And once the cookie is present, /me must NOT keep re-setting it.
+    again = client.get("/api/auth/me")
+    assert again.status_code == 200
+    assert not again.headers.get_list("set-cookie")
+
+
+def test_set_session_cookie_rejects_malformed_tokens():
+    """The /me bridge feeds set_session_cookie a client-supplied Bearer value;
+    anything outside the token_urlsafe alphabet must never reach Set-Cookie."""
+    from fastapi import Response
+
+    from dashboard.backend.auth_cookies import set_session_cookie
+
+    response = Response()
+    set_session_cookie(response, "evil;\r\nSet-Cookie: hijack=1")
+    assert "set-cookie" not in response.headers
+
+    response = Response()
+    set_session_cookie(response, "x" * 43)  # well-formed shape still works
+    assert "set-cookie" in response.headers

@@ -84,6 +84,13 @@ def _cors_allow_origins() -> list[str]:
             origins.append(host)
     return origins
 
+
+_CORS_ORIGINS = _cors_allow_origins()
+# Browsers refuse credentials with Access-Control-Allow-Origin: *. Only enable
+# credentialed CORS when ATL_FRONTEND_ORIGINS pins an explicit allowlist
+# (same-origin Vercel rewrites do not need CORS at all).
+_CORS_ALLOW_CREDENTIALS = _CORS_ORIGINS != ["*"]
+
 # Compress JSON responses when the client accepts it. Equity curves and agent
 # lists run to hundreds of KB uncompressed; minimum_size skips tiny payloads
 # where the gzip header would cost more than it saves.
@@ -106,8 +113,8 @@ app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_cors_allow_origins(),
-    allow_credentials=False,
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=_CORS_ALLOW_CREDENTIALS,
     # PATCH backs the agent Configure screen's Save. Cross-origin callers
     # (and pre-proxy split-origin frontends) need the method listed here or
     # the browser fails at preflight even though the route exists

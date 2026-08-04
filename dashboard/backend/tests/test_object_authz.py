@@ -16,6 +16,7 @@ import dashboard.backend.domain.agents.repository as agent_repo
 import dashboard.backend.domain.portfolios.repository as portfolio_repo
 import dashboard.backend.users as users_module
 from dashboard.backend.app import app
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 
 
 @pytest.fixture
@@ -41,7 +42,7 @@ def _signup(client: TestClient, email: str) -> str:
         },
     )
     assert resp.status_code == 200, resp.text
-    return resp.json()["token"]
+    return _cookie_session_token(client)
 
 
 def _auth(token: str, browser: str | None = None) -> dict:

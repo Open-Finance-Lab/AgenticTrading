@@ -24,6 +24,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 from dashboard.backend.tests._postgres_testing import require_local_postgres_url
 
 TEST_POSTGRES_URL = os.getenv("TEST_POSTGRES_URL")
@@ -121,7 +122,8 @@ def test_signup_login_me_logout_flow_postgres(pg_client, temp_postgres_store):
     assert signup_data["user"]["display_name"] == "Alice"
     assert signup_data["user"]["role"] == "user"
     assert "password_hash" not in signup_data["user"]
-    assert signup_data["token"]
+    assert "token" not in signup_data
+    assert _cookie_session_token(pg_client)  # signup set the session cookie
 
     # Prove the route's write actually landed in Postgres. Without this, a
     # regression that re-detaches the routes from the patched store would
@@ -140,7 +142,8 @@ def test_signup_login_me_logout_flow_postgres(pg_client, temp_postgres_store):
         json={"email": "alice@example.com", "password": "securepass1"},
     )
     assert login.status_code == 200
-    token = login.json()["token"]
+    assert "token" not in login.json()
+    token = _cookie_session_token(pg_client)
 
     me = pg_client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
     assert me.status_code == 200
@@ -254,11 +257,13 @@ def test_change_password_and_avatar_postgres(pg_client, temp_postgres_store):
         json={"email": "nina@example.com", "display_name": "Nina", "password": "orig-sturdy-pw-1"},
     )
     assert signup.status_code == 200
-    token_a = signup.json()["token"]
-    token_b = pg_client.post(
+    assert "token" not in signup.json()
+    token_a = _cookie_session_token(pg_client)
+    pg_client.post(
         "/api/auth/login",
         json={"email": "nina@example.com", "password": "orig-sturdy-pw-1"},
-    ).json()["token"]
+    )
+    token_b = _cookie_session_token(pg_client)
 
     change = pg_client.post(
         "/api/auth/change-password",

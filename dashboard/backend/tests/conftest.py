@@ -49,6 +49,14 @@ os.environ.pop("USERS_DATABASE_URL", None)
 # Hermetic HMAC key for session-token digests (see session_tokens.py).
 os.environ["SESSION_HASH_SECRET"] = "test-session-hash-secret"
 
+# The session cookie's name and Secure flag key off these (auth_cookies.py).
+# Inherited from a shell (a sourced prod .env, a Render-like deploy env) they
+# flip every test onto __Host-atl_session + Secure, which TestClient's plain
+# http://testserver jar refuses — surfacing as misleading "missing session
+# cookie" failures across the auth-dependent modules.
+for _cookie_var in ("ATL_COOKIE_SECURE", "ATL_ENV", "RENDER"):
+    os.environ.pop(_cookie_var, None)
+
 # Same guarantee for CONTENT_DATABASE_URL: it selects Postgres backends for the
 # agent / agent-version / strategy stores, so a value inherited from the
 # developer's environment (a sourced prod .env, a deploy shell) would point the

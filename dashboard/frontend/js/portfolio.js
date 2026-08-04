@@ -51,11 +51,9 @@ function setPortfolioSampleBadgeVisible(visible) {
 
 function isPortfolioSignedIn() {
     try {
-        const tokenKey = typeof AUTH_TOKEN_KEY === 'string' ? AUTH_TOKEN_KEY : 'auth-token';
-        const token = localStorage.getItem(tokenKey);
-        if (!token) return false;
+        if (typeof isSignedIn === 'function') return isSignedIn();
         if (typeof getStoredAuthUser === 'function') return !!getStoredAuthUser();
-        return true;
+        return !!JSON.parse(localStorage.getItem('auth-user') || 'null');
     } catch (_) {
         return false;
     }

@@ -2312,15 +2312,11 @@ const API = {
       'x-browser-id': window.BROWSER_OWNER_ID,
       ...options.headers,
     };
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    
     try {
       const response = await fetch(endpoint, { 
         ...options, 
         headers,
+        credentials: 'include',
       });
       
       const contentType = response.headers.get('content-type');
@@ -2375,8 +2371,18 @@ const API_BASE = window.location.hostname === 'localhost' || window.location.hos
     ? window.location.origin
     : '';
 
+// Legacy localStorage key — cleared on sign-in/out; never written for new sessions.
+// Session identity lives in an HttpOnly cookie (credentials: 'include').
 const AUTH_TOKEN_KEY = 'auth-token';
 const AUTH_USER_KEY = 'auth-user';
+
+function isSignedIn() {
+  return !!getStoredAuthUser();
+}
+
+function clearLegacyAuthToken() {
+  try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch (_) { /* ignore */ }
+}
 
 const AuthAPI = {
   async request(path, options = {}) {
@@ -2384,14 +2390,10 @@ const AuthAPI = {
       'Content-Type': 'application/json',
       ...options.headers,
     };
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-
     const response = await fetch(`${API_BASE}${path}`, {
       ...options,
       headers,
+      credentials: 'include',
     });
 
     const contentType = response.headers.get('content-type');
@@ -2422,7 +2424,14 @@ const AuthAPI = {
   },
 
   me() {
-    return this.request('/api/auth/me', { method: 'GET' });
+    // Migration bridge: a session issued before the HttpOnly-cookie change
+    // exists only in localStorage. Send it once as Bearer; the backend
+    // answers with Set-Cookie, and refreshAuthUser then clears the legacy key.
+    const legacyToken = localStorage.getItem(AUTH_TOKEN_KEY);
+    return this.request('/api/auth/me', {
+      method: 'GET',
+      ...(legacyToken ? { headers: { Authorization: `Bearer ${legacyToken}` } } : {}),
+    });
   },
 
   logout() {
@@ -2492,17 +2501,17 @@ function getStoredAuthUser() {
     return null;
   }
 }
+window.getStoredAuthUser = getStoredAuthUser;
 
-function setAuthState(user, token) {
-  localStorage.setItem(AUTH_TOKEN_KEY, token);
+function setAuthState(user) {
+  clearLegacyAuthToken();
   localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
   window.AUTH_USER = user;
   updateAuthUI();
 }
 
 async function claimAgentsForUser({ reload = true } = {}) {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token) return;
+  if (!getStoredAuthUser()) return;
   try {
     await API.post(`${API_BASE}/api/v1/agents/claim-account`, {});
   } catch (error) {
@@ -2516,7 +2525,7 @@ async function claimAgentsForUser({ reload = true } = {}) {
 }
 
 function clearAuthState() {
-  localStorage.removeItem(AUTH_TOKEN_KEY);
+  clearLegacyAuthToken();
   localStorage.removeItem(AUTH_USER_KEY);
   window.AUTH_USER = null;
   // The email-change form keeps its stage in a closure keyed to nobody: left
@@ -3044,7 +3053,7 @@ function openAuthFromUrl() {
   if (auth !== 'login' && auth !== 'signup') return;
 
   // Already signed in — stay on the dashboard, no modal.
-  if (localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser()) {
+  if (isSignedIn()) {
     params.delete('auth');
     const clean = params.toString();
     const next = `${window.location.pathname}${clean ? `?${clean}` : ''}${window.location.hash}`;
@@ -3081,8 +3090,7 @@ async function openDiscordWithAccount(event) {
     event.stopPropagation();
   }
 
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token || !getStoredAuthUser()) {
+  if (!isSignedIn()) {
     openAuthModal('login');
     return;
   }
@@ -3110,9 +3118,10 @@ async function finishRobinhoodLinkSuccess(agentId) {
   if (agentId && window.AgentEditor?.open) {
     try {
       const headers = { 'x-session-id': SESSION_ID };
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, { headers });
+      const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, {
+        headers,
+        credentials: 'include',
+      });
       if (response.ok) {
         const data = await response.json();
         if (data.agent) window.AgentEditor.open(data.agent);
@@ -3149,11 +3158,10 @@ async function handleRobinhoodOAuthReturn() {
   if (robinhood === 'pending') {
     try {
       const headers = { 'Content-Type': 'application/json', 'x-session-id': SESSION_ID };
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      if (token) headers.Authorization = `Bearer ${token}`;
       const response = await fetch(`${API_BASE}/api/auth/robinhood/complete`, {
         method: 'POST',
         headers,
+        credentials: 'include',
         body: JSON.stringify({ link_code: linkCode }),
       });
       if (response.ok) {
@@ -3236,20 +3244,19 @@ function wireDiscordAccountButtons() {
 }
 
 async function refreshAuthUser() {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token) {
-    clearAuthState();
-    return;
-  }
-
+  // Probe the cookie session. Guests get 401; signed-in users refresh the
+  // cached auth-user profile. A stale auth-user alone must not skip this.
   try {
     const data = await AuthAPI.me();
+    clearLegacyAuthToken();
     localStorage.setItem(AUTH_USER_KEY, JSON.stringify(data.user));
     window.AUTH_USER = data.user;
     updateAuthUI();
     await claimAgentsForUser();
   } catch (error) {
-    console.warn('Auth session expired:', error.message);
+    if (getStoredAuthUser()) {
+      console.warn('Auth session expired:', error.message);
+    }
     clearAuthState();
   }
 }
@@ -3344,7 +3351,7 @@ function initAuthUI(options = {}) {
       const data = authMode === 'signup'
         ? await AuthAPI.signup(email, displayName, password)
         : await AuthAPI.login(email, password);
-      setAuthState(data.user, data.token);
+      setAuthState(data.user);
       // Authentication is complete here, so dismiss now. Everything below is
       // post-sign-in housekeeping and must not hold the modal open — a slow or
       // hung backend used to leave the popup up over an already-signed-in UI.
@@ -3760,7 +3767,10 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     await restoreActiveAgentSession();
-    if (localStorage.getItem(AUTH_TOKEN_KEY)) {
+    // The HttpOnly session cookie is invisible to JS, so the boot signal is
+    // the cached auth-user (written on every cookie sign-in) or a pre-cookie
+    // legacy localStorage token (upgraded to a cookie by the /me bridge).
+    if (localStorage.getItem(AUTH_TOKEN_KEY) || getStoredAuthUser()) {
         try {
             await refreshAuthUser();
         } catch (error) {
@@ -3792,7 +3802,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
     // refreshAuthUser → claimAgentsForUser already loadAgents when signed in.
-    const agentsReady = localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser()
+    const agentsReady = isSignedIn()
         ? Promise.resolve()
         : loadAgents().catch((error) => {
             console.warn('Initial loadAgents failed:', error.message);
@@ -6391,7 +6401,7 @@ async function applyAgentRunDeepLink() {
     }
 
     if (agentId && !agent && agentAuthError) {
-        const signedIn = !!(localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser());
+        const signedIn = isSignedIn();
         if (!signedIn) {
             // Park it so a successful sign-in retries — see PENDING_DEEP_LINK_KEY.
             savePendingDeepLink({ agentId, runId });

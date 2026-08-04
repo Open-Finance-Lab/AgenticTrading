@@ -69,6 +69,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/algo/submissions"),
     ("POST", "/api/auth/login"),
     ("POST", "/api/auth/logout"),
+    ("POST", "/api/auth/logout-all"),
     ("GET", "/api/auth/me"),
     ("POST", "/api/auth/signup"),
     ("POST", "/api/auth/change-password"),
