@@ -42,13 +42,12 @@
     ['valuation_analyst', 'Valuation'],
   ];
   // Match app.js: same-origin locally, hosted backend everywhere else. In
-  // production the static frontend (Vercel) and the API (Render) are different
-  // origins, so a bare location.origin sends every /api call to the static host
-  // -- which answers with an HTML 404 page, not JSON.
+  // Same-origin API base. Local uvicorn serves the backend; production Vercel
+  // rewrites API paths to Render (see vercel.json). Empty string = root-relative.
   const API_BASE =
     window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
       ? window.location.origin
-      : 'https://agentictrading.onrender.com';
+      : '';
 
   // The simple-instruction contract (preset key + trading-actions output format)
   // has a single source of truth in app.js, published on `window`. app.js loads
