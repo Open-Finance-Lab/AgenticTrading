@@ -6482,6 +6482,10 @@ async function runBacktest() {
     // Pin live view BEFORE navigateToPage → showPlaygroundPanel → loadData(),
     // otherwise the async history load paints the previous run over the chart.
     closeRunBacktestModal();
+    // The agent editor is a fullscreen overlay (z-index 1200) and the run modal
+    // sits above it — without this, a run launched from inside the editor
+    // repaints My Agents invisibly underneath the settings page.
+    if (window.AgentEditor?.close) window.AgentEditor.close(true);
     prepareLiveBacktestView(launchConfigBase);
     markAgentBacktestRunning(activeAgent.agent_id, null);
     // A synchronous throw anywhere in here would otherwise leave the agent
