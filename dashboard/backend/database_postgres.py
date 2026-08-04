@@ -201,6 +201,36 @@ class PostgresBacktestDatabase:
                     """
                 )
 
+                # backtest_attempts: launch-time journal for frontend
+                # backtests (2026-08-04 backtest-visibility spec). New table,
+                # so CREATE IF NOT EXISTS alone reaches deployed databases.
+                cur.execute(
+                    f"""
+                    CREATE TABLE IF NOT EXISTS backtest_attempts (
+                        run_id TEXT PRIMARY KEY,
+                        agent_id TEXT,
+                        session_id TEXT NOT NULL,
+                        agent_name TEXT,
+                        start_date TEXT,
+                        end_date TEXT,
+                        params_json TEXT,
+                        status TEXT NOT NULL,
+                        error TEXT,
+                        timeout_seconds INTEGER,
+                        created_at TEXT NOT NULL {created_at_default},
+                        finished_at TEXT
+                    )
+                    """
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_backtest_attempts_agent "
+                    "ON backtest_attempts(agent_id, created_at)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_backtest_attempts_session "
+                    "ON backtest_attempts(session_id, created_at)"
+                )
+
                 cur.execute(
                     "CREATE INDEX IF NOT EXISTS idx_agent_runs_session "
                     "ON agent_runs(session_id)"
@@ -449,6 +479,105 @@ class PostgresBacktestDatabase:
                         json.dumps(metadata) if metadata is not None else None,
                     ),
                 )
+
+    # ------------------------------------------------------------------
+    # backtest_attempts journal (2026-08-04 backtest-visibility spec)
+    # ------------------------------------------------------------------
+
+    def insert_attempt(self, run_id: str, session_id: str, *,
+                       agent_id: Optional[str] = None,
+                       agent_name: Optional[str] = None,
+                       start_date: Optional[str] = None,
+                       end_date: Optional[str] = None,
+                       params: Optional[Dict[str, Any]] = None,
+                       timeout_seconds: Optional[int] = None) -> None:
+        """Record a launched frontend backtest as 'running'."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO backtest_attempts
+                    (run_id, agent_id, session_id, agent_name, start_date,
+                     end_date, params_json, status, timeout_seconds)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, 'running', %s)
+                    ON CONFLICT (run_id) DO NOTHING
+                    """,
+                    (run_id, agent_id, session_id, agent_name, start_date,
+                     end_date,
+                     json.dumps(params) if params is not None else None,
+                     timeout_seconds),
+                )
+
+    def finalize_attempt(self, run_id: str, status: str, *,
+                         error: Optional[str] = None,
+                         session_id: Optional[str] = None) -> None:
+        """Mark an attempt terminal; upsert a minimal row if insert never landed."""
+        from dashboard.backend.database import ATTEMPT_ERROR_MAX_CHARS
+
+        error_text = str(error)[:ATTEMPT_ERROR_MAX_CHARS] if error else None
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE backtest_attempts
+                    SET status = %s, error = %s,
+                        finished_at = to_char(now() AT TIME ZONE 'utc',
+                                              'YYYY-MM-DD HH24:MI:SS')
+                    WHERE run_id = %s
+                    """,
+                    (status, error_text, run_id),
+                )
+                if cur.rowcount == 0 and session_id:
+                    cur.execute(
+                        """
+                        INSERT INTO backtest_attempts
+                        (run_id, session_id, status, error, finished_at)
+                        VALUES (%s, %s, %s, %s,
+                                to_char(now() AT TIME ZONE 'utc',
+                                        'YYYY-MM-DD HH24:MI:SS'))
+                        ON CONFLICT (run_id) DO NOTHING
+                        """,
+                        (run_id, session_id, status, error_text),
+                    )
+
+    def get_attempts_for_session(self, session_id: str,
+                                 limit: int = 50) -> List[Dict]:
+        """Newest-first attempts for a session (the history-merge read)."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM backtest_attempts
+                    WHERE session_id = %s
+                    ORDER BY created_at DESC, run_id DESC
+                    LIMIT %s
+                    """,
+                    (session_id, limit),
+                )
+                rows = cur.fetchall()
+        return [dict(row) for row in rows]
+
+    def get_latest_attempt_for_agents(self, agent_ids: List[str]) -> Dict[str, Dict]:
+        """Latest attempt per agent, one query (My Agents list is the hot path)."""
+        wanted = [a for a in agent_ids if a]
+        if not wanted:
+            return {}
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM backtest_attempts
+                    WHERE agent_id = ANY(%s)
+                    ORDER BY created_at DESC, run_id DESC
+                    """,
+                    (wanted,),
+                )
+                rows = cur.fetchall()
+        latest: Dict[str, Dict] = {}
+        for row in rows:
+            record = dict(row)
+            latest.setdefault(record["agent_id"], record)
+        return latest
 
     def update_run_baselines(
         self,

@@ -197,11 +197,16 @@ def pg_backtest_db():
             # agent_runs (ON DELETE CASCADE) and must go first; run_manifest
             # has no FK at all (see database_postgres.py) so its position
             # here doesn't matter for integrity, it's just grouped with the
-            # other per-run tables before the agent_runs parent row
+            # other per-run tables before the agent_runs parent row.
+            # backtest_attempts has no FK to agent_runs either (it journals
+            # launches that may never produce a run row), so it can clear
+            # anywhere in this list -- grouped here to keep every truncated
+            # table in one place.
             cur.execute("DELETE FROM equity_timeseries")
             cur.execute("DELETE FROM trades")
             cur.execute("DELETE FROM backtest_decisions")
             cur.execute("DELETE FROM run_manifest")
+            cur.execute("DELETE FROM backtest_attempts")
             cur.execute("DELETE FROM agent_runs")
     yield store
 
@@ -860,3 +865,29 @@ def test_update_run_baselines_coalesce_preserves_unset_field_postgres(pg_backtes
     run = pg_backtest_db.get_run("run-base")
     assert run["baseline_djia_run_id"] == "djia-1"  # untouched by the second call
     assert run["baseline_buyhold_run_id"] == "bh-1"
+
+
+@pg_only
+def test_attempt_lifecycle_round_trips_postgres(pg_backtest_db):
+    """insert → running; finalize → failed; orphan finalize upserts."""
+    pg_backtest_db.insert_attempt(
+        "att-pg-1", "sess-pg",
+        agent_id="agent-pg", agent_name="PG Agent",
+        start_date="2026-05-01", end_date="2026-05-07",
+        params={"initial_capital": 10000}, timeout_seconds=1800,
+    )
+    rows = pg_backtest_db.get_attempts_for_session("sess-pg")
+    assert rows[0]["status"] == "running" and rows[0]["finished_at"] is None
+
+    pg_backtest_db.finalize_attempt("att-pg-1", "failed", error="e" * 900)
+    row = pg_backtest_db.get_attempts_for_session("sess-pg")[0]
+    assert row["status"] == "failed"
+    assert len(row["error"]) == 500 and row["finished_at"]
+
+    pg_backtest_db.finalize_attempt("att-pg-2", "failed", error="boom",
+                                    session_id="sess-pg")
+    run_ids = {r["run_id"] for r in pg_backtest_db.get_attempts_for_session("sess-pg")}
+    assert "att-pg-2" in run_ids
+
+    latest = pg_backtest_db.get_latest_attempt_for_agents(["agent-pg"])
+    assert latest["agent-pg"]["run_id"] == "att-pg-1"
