@@ -19,6 +19,8 @@ Usage:
 import sys
 import json
 import argparse
+import importlib.util
+import subprocess
 from pathlib import Path
 
 # Bootstrap for non-package execution contexts: when this module is run directly
@@ -44,19 +46,32 @@ from dashboard.backend.infrastructure.llm.validator import DJIA_30
 # harness at dashboard.backend.infrastructure.llm.backtest_harness. These symbols
 # are re-exported here so existing consumers (engines/strategies/llm_agent.py,
 # backtest_custom_algo.py, and bha.* callers) keep working unchanged.
-from dashboard.backend.infrastructure.llm.backtest_harness import (
-    Anthropic,
-    HAS_ANTHROPIC,
-    LLM_MODEL_NAME,
-)
+#
+# Bound by assignment from a module alias rather than a bare `from ... import X`
+# so each re-export is explicit and static analysis sees it as used -- the
+# convention external_run_service.py already documents. Do not collapse back:
+# `py/unused-import` is intra-file only, so it cannot see the cross-module
+# contract these three exist to satisfy.
+import dashboard.backend.infrastructure.llm.backtest_harness as _backtest_harness
 
-try:
-    import pandas_ta as ta
-except ImportError:
+Anthropic = _backtest_harness.Anthropic
+HAS_ANTHROPIC = _backtest_harness.HAS_ANTHROPIC
+LLM_MODEL_NAME = _backtest_harness.LLM_MODEL_NAME
+
+# A presence probe, not a use: dashboard.backend.domain.backtesting.features
+# imports pandas_ta itself. This script installs it first so that import cannot
+# fail part-way through a run. find_spec rather than a try/except import because
+# nothing here needs the module object -- only the answer to "is it installed?".
+if importlib.util.find_spec("pandas_ta") is None:
     print("Installing pandas_ta...")
-    import subprocess
-    subprocess.check_call(["pip", "install", "pandas_ta"])
-    import pandas_ta as ta
+    # sys.executable, not a bare "pip": the script may well be running under a
+    # venv whose pip is not first on PATH, and installing into the wrong
+    # interpreter would leave the import below still failing.
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "pandas_ta"])
+    # The probe above populated the path-finder's directory caches with a miss;
+    # drop them so the module just written to site-packages is discoverable by
+    # the features import below rather than on the next process start.
+    importlib.invalidate_caches()
 
 # ---------------------------------------------------------------------------
 # Phase 2A extraction: the implementations below now live under the canonical
@@ -65,13 +80,23 @@ except ImportError:
 # stays unchanged. pandas_ta is imported above first so the features module can
 # rely on it being available.
 # ---------------------------------------------------------------------------
-from dashboard.backend.domain.backtesting.features import TechnicalIndicators
-from dashboard.backend.domain.backtesting.metrics import (
-    calculate_sharpe,
-    calculate_max_drawdown,
-)
-from dashboard.backend.infrastructure.llm.decision_parsing import fix_json_formatting
-from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
+#
+# Same explicit-assignment form as the harness re-exports above, for the same
+# reason: these five are referenced only through `bha.<name>` from other
+# modules, which `py/unused-import` cannot see. The guard suites
+# (test_backtest_compatibility, test_canonical_consumers) assert each one is the
+# canonical object, so deleting any of them reddens those tests.
+import dashboard.backend.domain.backtesting.features as _features
+import dashboard.backend.domain.backtesting.metrics as _metrics
+import dashboard.backend.infrastructure.llm.decision_parsing as _decision_parsing
+import dashboard.backend.infrastructure.market_data.alpaca_bars as _alpaca_bars
+
+TechnicalIndicators = _features.TechnicalIndicators
+calculate_sharpe = _metrics.calculate_sharpe
+calculate_max_drawdown = _metrics.calculate_max_drawdown
+fix_json_formatting = _decision_parsing.fix_json_formatting
+AlpacaDataLoader = _alpaca_bars.AlpacaDataLoader
+
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
     IFIND_ASHARE,
@@ -84,6 +109,10 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     resolve_decision_source,
 )
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
+from dashboard.backend.domain.agents.runtime import (
+    AI_HEDGE_FUND_RUNTIME_TYPE,
+    PIPELINE_RUNTIME_TYPE,
+)
 
 # DJIA_30 is imported from validator (the single source of truth, guarded by
 # tests/test_djia30_universe.py) rather than redefined here.
@@ -133,10 +162,11 @@ TIMEFRAME = "1h"  # Hourly
 # `PortfolioManager` now lives in
 # dashboard.backend.domain.backtesting.portfolio_manager and is re-exported
 # here so the legacy public path (bha.PortfolioManager) and existing
-# subclasses (e.g. backtest_custom_algo) keep working unchanged.
-from dashboard.backend.domain.backtesting.portfolio_manager import (
-    PortfolioManager,
-)
+# subclasses (e.g. backtest_custom_algo) keep working unchanged. Explicit
+# assignment, as above.
+import dashboard.backend.domain.backtesting.portfolio_manager as _portfolio_manager
+
+PortfolioManager = _portfolio_manager.PortfolioManager
 
 
 # ============================================================================
@@ -175,6 +205,17 @@ def main():
     parser.add_argument("--mode", default="safe_trading", choices=["safe_trading", "buy_and_hold"], help="Agent mode: 'safe_trading' (risk management) or 'buy_and_hold' (debug)")
     parser.add_argument("--strategy-prompt-file", default=None, help="Path to a UTF-8 file with a free-form strategy prompt that REPLACES the built-in agent prompt for this run")
     parser.add_argument("--pipeline-file", default=None, help="Path to a UTF-8 JSON file with the sub-agent pipeline steps for this run")
+    parser.add_argument(
+        "--runtime-type",
+        default=PIPELINE_RUNTIME_TYPE,
+        choices=[PIPELINE_RUNTIME_TYPE, AI_HEDGE_FUND_RUNTIME_TYPE],
+        help="Hosted agent runtime (default: pipeline)",
+    )
+    parser.add_argument(
+        "--runtime-config-file",
+        default=None,
+        help="Path to the hosted runtime's non-secret JSON configuration",
+    )
     parser.add_argument("--model", default=None, help="Override the LLM model id (e.g. anthropic/claude-haiku-4-5). Defaults to the gateway-appropriate slug.")
     parser.add_argument("--run-id", default=None, help="Preset run id (used for live progress + DB row)")
     parser.add_argument("--progress-file", default=None, help="Path to write incremental equity snapshots for live dashboard charting")
@@ -258,6 +299,19 @@ def main():
         except (OSError, json.JSONDecodeError) as exc:
             print(f"⚠️  Could not read --pipeline-file ({args.pipeline_file}): {exc}")
             pipeline = None
+
+    runtime_config = {}
+    if args.runtime_config_file:
+        try:
+            raw_runtime_config = json.loads(
+                Path(args.runtime_config_file).read_text(encoding="utf-8")
+            )
+            if isinstance(raw_runtime_config, dict):
+                runtime_config = raw_runtime_config
+            else:
+                parser.error("--runtime-config-file must contain a JSON object")
+        except (OSError, json.JSONDecodeError) as exc:
+            parser.error(f"Could not read --runtime-config-file: {exc}")
     
     # Validate and swap dates if backwards
     from datetime import datetime as dt_parser
@@ -300,7 +354,19 @@ def main():
     print(f"Capital: ${capital:,.0f}")
     
     # Show mode
-    mode_display = "Sub-agent Pipeline" if pipeline else ("Custom Prompt" if strategy_prompt else args.mode.replace("_", " ").title())
+    mode_display = (
+        "AI Hedge Fund"
+        if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE
+        else (
+            "Sub-agent Pipeline"
+            if pipeline
+            else (
+                "Custom Prompt"
+                if strategy_prompt
+                else args.mode.replace("_", " ").title()
+            )
+        )
+    )
     print(f"Mode: {mode_display}")
     if pipeline:
         print(f"Sub-agent pipeline: {len(pipeline)} step(s)")
@@ -326,9 +392,13 @@ def main():
         symbols=symbols,
         universe=market_profile.universe,
         decision_source=decision_source,
+        runtime_type=args.runtime_type,
+        runtime_config=runtime_config,
     )
     
-    if backtester.use_llm:
+    if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+        print("🧠 Using hosted AI Hedge Fund runtime for trading decisions\n")
+    elif backtester.use_llm:
         print(f"🧠 Using {LLM_MODEL_NAME} for trading decisions (Mode: {mode_display})\n")
     else:
         print("⚙️  Using rule-based logic for trading decisions\n")
@@ -392,13 +462,13 @@ def main():
 
 
 if __name__ == "__main__":
-    from dashboard.backend.infrastructure.market_data.alpaca_bars import (
-        MarketDataUnavailableError,
-    )
-
+    # Reached through the module alias bound at the top rather than a second
+    # `from` import of the same module: importing one module both ways in one
+    # file is its own CodeQL finding (py/import-and-import-from), and the alias
+    # already exists.
     try:
         main()
-    except MarketDataUnavailableError as exc:
+    except _alpaca_bars.MarketDataUnavailableError as exc:
         # Library code raises (so server threads can catch it); the CLI
         # boundary is where the process exit belongs.
         print(f"❌ {exc}")

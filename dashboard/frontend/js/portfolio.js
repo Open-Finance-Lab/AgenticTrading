@@ -51,11 +51,9 @@ function setPortfolioSampleBadgeVisible(visible) {
 
 function isPortfolioSignedIn() {
     try {
-        const tokenKey = typeof AUTH_TOKEN_KEY === 'string' ? AUTH_TOKEN_KEY : 'auth-token';
-        const token = localStorage.getItem(tokenKey);
-        if (!token) return false;
+        if (typeof isSignedIn === 'function') return isSignedIn();
         if (typeof getStoredAuthUser === 'function') return !!getStoredAuthUser();
-        return true;
+        return !!JSON.parse(localStorage.getItem('auth-user') || 'null');
     } catch (_) {
         return false;
     }
@@ -356,7 +354,7 @@ function renderAllocationLegend(legendEl, slices) {
     const toggleHtml = needsExpand
         ? `<div class="allocation-legend-toggle-row">
             <button type="button" class="allocation-legend-toggle" data-allocation-legend-toggle aria-expanded="${expanded ? 'true' : 'false'}">
-                ${expanded ? '收起' : `展开全部 (${agentCount})`}
+                ${expanded ? 'Show less' : `Show all (${agentCount})`}
             </button>
            </div>`
         : '';

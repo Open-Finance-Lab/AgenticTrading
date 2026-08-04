@@ -572,6 +572,33 @@ def test_background_command_propagates_explicit_ifind_llm(monkeypatch):
     assert "--no-llm" not in command
 
 
+def test_background_injects_only_resolved_financial_datasets_credential(monkeypatch):
+    captured = {}
+
+    def fake_run(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs["env"]
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv(
+        "FINANCIAL_DATASETS_API_KEY", "ambient-key-must-be-replaced"
+    )
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(backtests.db, "get_runs_by_mode", lambda mode: [])
+
+    REAL_RUN_BACKTEST_BACKGROUND(
+        "2026-04-01",
+        "2026-04-23",
+        "session-id",
+        runtime_type="ai_hedge_fund",
+        runtime_config={"analysts": ["technical_analyst"]},
+        financial_datasets_api_key="authorized-user-key",
+    )
+
+    assert captured["env"]["FINANCIAL_DATASETS_API_KEY"] == "authorized-user-key"
+    assert "authorized-user-key" not in captured["command"]
+
+
 def test_background_error_is_sanitized_and_clears_running_state(monkeypatch):
     secret = "test-ifind-token-that-must-not-leak"
     monkeypatch.setenv("IFIND_ACCESS_TOKEN", secret)

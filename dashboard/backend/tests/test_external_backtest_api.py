@@ -7,28 +7,20 @@ import dashboard.backend.app as app_module
 import dashboard.backend.database as db_module
 import dashboard.backend.domain.backtesting.external_run_service as svc
 
-from dashboard.backend.app import app
-from dashboard.backend.database import BacktestDatabase
-from dashboard.backend.domain.backtesting.external_run_service import (
-    _sessions,
-    get_decision_format,
-    parse_actions_payload,
-)
-
 
 @pytest.fixture
 def client(temp_db, monkeypatch):
     monkeypatch.setattr(app_module, "db", temp_db)
     monkeypatch.setattr(db_module, "db", temp_db)
     monkeypatch.setattr(svc, "db", temp_db)
-    _sessions.clear()
-    return TestClient(app)
+    svc._sessions.clear()
+    return TestClient(app_module.app)
 
 
 @pytest.fixture
 def temp_db(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
-    test_db = BacktestDatabase(db_path=db_path)
+    test_db = db_module.BacktestDatabase(db_path=db_path)
     yield test_db
 
 
@@ -59,13 +51,13 @@ def test_parse_actions_payload_valid():
             "position_size": 0,
         }]
     }
-    decisions, err = parse_actions_payload(payload)
+    decisions, err = svc.parse_actions_payload(payload)
     assert err is None
     assert len(decisions) == 1
 
 
 def test_get_decision_format():
-    fmt = get_decision_format()
+    fmt = svc.get_decision_format()
     assert "actions" in fmt
 
 
@@ -109,7 +101,7 @@ def test_insert_trades_legacy_schema(tmp_path):
     conn.commit()
     conn.close()
 
-    legacy_db = BacktestDatabase(db_path=db_path)
+    legacy_db = db_module.BacktestDatabase(db_path=db_path)
     legacy_db.insert_trades("ext_test", [{
         "timestamp": "2026-04-15T14:00:00",
         "symbol": "AAPL",

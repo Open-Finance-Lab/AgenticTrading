@@ -8,7 +8,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-import dashboard.backend.api.auth as auth_module
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
+
 import dashboard.backend.domain.agents.repository as agent_repo
 import dashboard.backend.domain.portfolios.repository as portfolio_repo
 import dashboard.backend.domain.portfolios.service as portfolio_service_module
@@ -16,7 +17,7 @@ import dashboard.backend.users as users_module
 from dashboard.backend.app import app
 from dashboard.backend.domain.backtesting.constants import DEFAULT_PORTFOLIO_EQUITY
 
-# These five are imported as *modules*, not `from ... import UserStore`, because
+# These four are imported as *modules*, not `from ... import UserStore`, because
 # the fixture below has to monkeypatch attributes on the module objects. Keeping
 # a single import form per module also keeps CodeQL's py/import-and-import-from
 # quiet.
@@ -32,11 +33,6 @@ def temp_stores(monkeypatch):
         agent_store = agent_repo.AgentStore(db_path=content_db)
 
         monkeypatch.setattr(users_module, "user_store", user_store)
-        # api/auth.py binds user_store at import (`from ...users import user_store`),
-        # so patching only users_module leaves signup and get_current_user talking
-        # to the process-global store -- the temp DB below would go unused and the
-        # accounts these tests create would leak into the session-wide test DB.
-        monkeypatch.setattr(auth_module, "user_store", user_store)
         monkeypatch.setattr(portfolio_repo, "portfolio_store", portfolio_store)
         monkeypatch.setattr(portfolio_service_module, "portfolio_store", portfolio_store)
         # cash_available is derived from the agent sleeves (service._reconcile),
@@ -62,14 +58,15 @@ def _signup(client: TestClient, email: str = "pf@example.com") -> str:
         },
     )
     assert resp.status_code == 200, resp.text
-    return resp.json()["token"]
+    assert "token" not in resp.json()
+    return _cookie_session_token(client)
 
 
 def test_signup_lands_in_the_fixture_user_store(client, temp_stores):
-    """Guards the auth_module patch in temp_stores.
+    """Guards call-time store resolution in api/auth.py (issue #185).
 
-    Without it the patch silently misses api/auth.py's import-time binding, the
-    temp users.db stays empty, and every account these tests create leaks into
+    If any auth route goes back to binding the singleton at import time, the
+    temp users.db stays empty and every account these tests create leaks into
     the session-wide DB -- making the fixed email above an ordering hazard for
     any other test that signs up with it. The failure is invisible otherwise:
     the tests still pass, against the wrong store.

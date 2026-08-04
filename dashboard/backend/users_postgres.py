@@ -8,16 +8,46 @@ disk-less Render free-tier host where that file resets on every deploy --
 silently deleting every account (see CLAUDE.md gotchas).
 """
 
-import secrets
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from datetime import timedelta
+from typing import Any, Dict, List, Optional
 
 import psycopg
 
 from dashboard.backend.db_url import require_postgres_url
-from dashboard.backend.users import _utcnow, _utcnow_iso, hash_password, public_user, verify_password
+from dashboard.backend.session_tokens import (
+    absolute_expiry,
+    hash_session_token,
+    idle_deadline,
+    new_session_token,
+    should_touch_last_seen,
+)
+from dashboard.backend.users import (
+    EMAIL_CHANGE_TTL_MINUTES,
+    _utcnow,
+    _utcnow_iso,
+    format_stored_timestamp,
+    hash_password,
+    is_expired,
+    parse_stored_timestamp,
+    public_user,
+    verify_password_for_account,
+)
 
-SESSION_TTL_DAYS = 7
+# Mirrors users.AUTH_SESSIONS_DDL in Postgres dialect. Declared here rather than
+# imported so test_store_twin_parity can read both column lists out of their own
+# module's source; kept a plain (non-f) string for the same reason.
+AUTH_SESSIONS_DDL = """
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        revoked_at TEXT,
+        user_agent TEXT,
+        ip_prefix TEXT
+    )
+"""
 
 
 class PostgresUserStore:
@@ -70,20 +100,69 @@ class PostgresUserStore:
                     WHERE discord_user_id IS NOT NULL
                     """
                 )
+                cur.execute(AUTH_SESSIONS_DDL)
                 cur.execute(
                     """
-                    CREATE TABLE IF NOT EXISTS auth_sessions (
-                        token TEXT PRIMARY KEY,
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = current_schema()
+                      AND table_name = 'auth_sessions'
+                      AND column_name = 'token'
+                    """
+                )
+                if cur.fetchone():
+                    # Legacy plaintext-token table: cannot migrate without raw
+                    # tokens. Drop and recreate; users must sign in again.
+                    #
+                    # current_schema() is not optional: information_schema.columns
+                    # spans every schema the role can see, so an unqualified
+                    # match can report a table this connection will never touch
+                    # -- and the action taken on that report is a DROP.
+                    cur.execute("DROP TABLE auth_sessions")
+                    # Same DDL as the fresh install: the table is gone, so
+                    # IF NOT EXISTS creates it. One literal, one schema.
+                    cur.execute(AUTH_SESSIONS_DDL)
+                    # print(), not logger: see users._build_user_store(). This
+                    # drops every live login on a durable database.
+                    print(
+                        "auth_sessions: migrated from plaintext tokens to "
+                        "hashed tokens; all existing sessions were dropped and "
+                        "users must sign in again"
+                    )
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
+                    ON auth_sessions(user_id)
+                    """
+                )
+                # Supports purge_expired_sessions(); without it the sweep is a
+                # full scan of a table whose whole purpose here is to grow.
+                cur.execute(
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
+                    ON auth_sessions(expires_at)
+                    """
+                )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS email_change_requests (
+                        id SERIAL PRIMARY KEY,
                         user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                        new_email TEXT NOT NULL,
+                        stage TEXT NOT NULL,
+                        code_hash TEXT NOT NULL,
+                        attempts INTEGER NOT NULL DEFAULT 0,
                         created_at TEXT NOT NULL,
-                        expires_at TEXT NOT NULL
+                        expires_at TEXT NOT NULL,
+                        used_at TEXT,
+                        cancelled_at TEXT
                     )
                     """
                 )
                 cur.execute(
                     """
-                    CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
-                    ON auth_sessions(user_id)
+                    CREATE INDEX IF NOT EXISTS idx_email_change_requests_user_id
+                    ON email_change_requests(user_id)
                     """
                 )
 
@@ -123,67 +202,146 @@ class PostgresUserStore:
         return dict(row) if row else None
 
     def authenticate(self, email: str, password: str) -> Optional[Dict[str, Any]]:
+        # One bcrypt compare on both branches -- see verify_password_for_account.
         user = self.get_user_by_email(email)
-        if not user:
-            return None
-        if not verify_password(password, user["password_hash"]):
+        if not verify_password_for_account(
+            password, user["password_hash"] if user else None
+        ):
             return None
         return user
 
-    def create_session(self, user_id: int) -> str:
-        token = secrets.token_urlsafe(32)
-        now = _utcnow()
-        created_at = now.replace(microsecond=0).isoformat()
-        expires_at = (now + timedelta(days=SESSION_TTL_DAYS)).replace(microsecond=0).isoformat()
+    def create_session(
+        self,
+        user_id: int,
+        *,
+        user_agent: Optional[str] = None,
+        ip_prefix: Optional[str] = None,
+    ) -> str:
+        raw_token = new_session_token()
+        token_hash = hash_session_token(raw_token)
+        now = _utcnow().replace(microsecond=0)
+        created_at = format_stored_timestamp(now)
+        expires_at = format_stored_timestamp(absolute_expiry(now))
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    INSERT INTO auth_sessions (token, user_id, created_at, expires_at)
-                    VALUES (%s, %s, %s, %s)
+                    INSERT INTO auth_sessions (
+                        token_hash, user_id, created_at, last_seen_at, expires_at,
+                        user_agent, ip_prefix
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     """,
-                    (token, user_id, created_at, expires_at),
+                    (
+                        token_hash,
+                        user_id,
+                        created_at,
+                        created_at,
+                        expires_at,
+                        user_agent or None,
+                        ip_prefix or None,
+                    ),
                 )
-        return token
+                cur.execute(
+                    "DELETE FROM auth_sessions WHERE expires_at < %s",
+                    (created_at,),
+                )
+        return raw_token
+
+    def purge_expired_sessions(self) -> int:
+        """Delete session rows past their absolute expiry. Returns the count.
+
+        Twin of UserStore.purge_expired_sessions -- see there for why a soft
+        revocation without a sweep leaves rows that nothing ever removes.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM auth_sessions WHERE expires_at < %s",
+                    (format_stored_timestamp(_utcnow()),),
+                )
+                return max(cur.rowcount, 0)
 
     def get_user_for_token(self, token: str) -> Optional[Dict[str, Any]]:
+        if not token or not str(token).strip():
+            return None
+        token_hash = hash_session_token(token.strip())
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
-                    SELECT users.*
+                    SELECT
+                        users.*,
+                        auth_sessions.created_at AS session_created_at,
+                        auth_sessions.last_seen_at AS session_last_seen_at,
+                        auth_sessions.expires_at AS session_expires_at,
+                        auth_sessions.revoked_at AS session_revoked_at
                     FROM auth_sessions
                     JOIN users ON users.id = auth_sessions.user_id
-                    WHERE auth_sessions.token = %s
+                    WHERE auth_sessions.token_hash = %s
                     """,
-                    (token,),
+                    (token_hash,),
                 )
                 row = cur.fetchone()
                 if not row:
                     return None
 
-                cur.execute(
-                    "SELECT expires_at FROM auth_sessions WHERE token = %s",
-                    (token,),
+                data = dict(row)
+                revoked_at = data.pop("session_revoked_at")
+                created_at = parse_stored_timestamp(data.pop("session_created_at"))
+                last_seen_raw = data.pop("session_last_seen_at")
+                last_seen_at = parse_stored_timestamp(
+                    last_seen_raw or format_stored_timestamp(created_at)
                 )
-                session_row = cur.fetchone()
+                expires_at = parse_stored_timestamp(data.pop("session_expires_at"))
+                now = _utcnow()
 
-        if not session_row:
-            return None
+                if revoked_at:
+                    return None
+                if expires_at < now:
+                    cur.execute(
+                        "DELETE FROM auth_sessions WHERE token_hash = %s",
+                        (token_hash,),
+                    )
+                    return None
+                if idle_deadline(last_seen_at) < now:
+                    cur.execute(
+                        "DELETE FROM auth_sessions WHERE token_hash = %s",
+                        (token_hash,),
+                    )
+                    return None
 
-        expires_at = datetime.fromisoformat(session_row["expires_at"])
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < _utcnow():
-            self.delete_session(token)
-            return None
-
-        return dict(row)
+                if should_touch_last_seen(last_seen_at, now):
+                    cur.execute(
+                        """
+                        UPDATE auth_sessions
+                        SET last_seen_at = %s
+                        WHERE token_hash = %s
+                        """,
+                        (
+                            format_stored_timestamp(now.replace(microsecond=0)),
+                            token_hash,
+                        ),
+                    )
+                return data
 
     def delete_session(self, token: str) -> None:
+        if not token or not str(token).strip():
+            return
+        token_hash = hash_session_token(token.strip())
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("DELETE FROM auth_sessions WHERE token = %s", (token,))
+                cur.execute(
+                    """
+                    UPDATE auth_sessions
+                    SET revoked_at = %s
+                    WHERE token_hash = %s AND revoked_at IS NULL
+                    """,
+                    (
+                        format_stored_timestamp(_utcnow().replace(microsecond=0)),
+                        token_hash,
+                    ),
+                )
 
     def update_password(self, user_id: int, new_password: str) -> None:
         with self._get_connection() as conn:
@@ -195,16 +353,27 @@ class PostgresUserStore:
 
     def delete_other_sessions(self, user_id: int, keep_token: Optional[str]) -> None:
         """Revoke every session for the user except keep_token (None = all)."""
+        now = format_stored_timestamp(_utcnow().replace(microsecond=0))
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 if keep_token:
+                    keep_hash = hash_session_token(keep_token.strip())
                     cur.execute(
-                        "DELETE FROM auth_sessions WHERE user_id = %s AND token != %s",
-                        (user_id, keep_token),
+                        """
+                        UPDATE auth_sessions
+                        SET revoked_at = %s
+                        WHERE user_id = %s AND token_hash != %s AND revoked_at IS NULL
+                        """,
+                        (now, user_id, keep_hash),
                     )
                 else:
                     cur.execute(
-                        "DELETE FROM auth_sessions WHERE user_id = %s", (user_id,)
+                        """
+                        UPDATE auth_sessions
+                        SET revoked_at = %s
+                        WHERE user_id = %s AND revoked_at IS NULL
+                        """,
+                        (now, user_id),
                     )
 
     def set_avatar(self, user_id: int, avatar: Optional[str]) -> Dict[str, Any]:
@@ -215,6 +384,203 @@ class PostgresUserStore:
                     (avatar, user_id),
                 )
                 row = cur.fetchone()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def update_display_name(self, user_id: int, display_name: str) -> Dict[str, Any]:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE users SET display_name = %s WHERE id = %s RETURNING *",
+                    (display_name.strip(), user_id),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def _email_change_expiry(self) -> str:
+        return (
+            (_utcnow() + timedelta(minutes=EMAIL_CHANGE_TTL_MINUTES))
+            .replace(microsecond=0)
+            .isoformat()
+        )
+
+    def create_email_change_request(
+        self, user_id: int, new_email: str, code_hash: str
+    ) -> Dict[str, Any]:
+        """Supersede any in-flight request with a fresh stage-'old' one.
+
+        Supersede, not DELETE -- see the SQLite twin: the log has to survive for
+        the daily and 7-day limits to have anything to read.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_change_requests SET cancelled_at = %s
+                    WHERE user_id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                    """,
+                    (_utcnow_iso(), user_id),
+                )
+                cur.execute(
+                    """
+                    INSERT INTO email_change_requests
+                        (user_id, new_email, stage, code_hash, created_at, expires_at)
+                    VALUES (%s, %s, 'old', %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (
+                        user_id,
+                        new_email.strip().lower(),
+                        code_hash,
+                        _utcnow_iso(),
+                        self._email_change_expiry(),
+                    ),
+                )
+                row = cur.fetchone()
+        return dict(row)
+
+    def get_active_email_change(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """The user's in-flight request, or None if absent, used, cancelled, or expired."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM email_change_requests
+                    WHERE user_id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        if not row or is_expired(row["expires_at"]):
+            return None
+        return dict(row)
+
+    def advance_email_change(self, request_id: int, code_hash: str) -> Dict[str, Any]:
+        """Move a verified stage-'old' request to stage 'new' with a fresh code."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_change_requests
+                    SET stage = 'new', code_hash = %s, attempts = 0, expires_at = %s
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (code_hash, self._email_change_expiry(), request_id),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return dict(row)
+
+    def record_email_change_attempt(self, request_id: int) -> int:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_change_requests
+                    SET attempts = attempts + 1
+                    WHERE id = %s
+                    RETURNING attempts
+                    """,
+                    (request_id,),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return int(row["attempts"])
+
+    def mark_email_change_used(self, request_id: int) -> None:
+        """Retire a completed request without deleting it (see the SQLite twin)."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE email_change_requests SET used_at = %s WHERE id = %s",
+                    (_utcnow_iso(), request_id),
+                )
+
+    def cancel_email_change(self, user_id: int) -> None:
+        """Deactivate without deleting, scoped to still-active rows.
+
+        See the SQLite twin's cancel_email_change for both halves of the why.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE email_change_requests SET cancelled_at = %s
+                    WHERE user_id = %s AND used_at IS NULL AND cancelled_at IS NULL
+                    """,
+                    (_utcnow_iso(), user_id),
+                )
+
+    def last_email_change_request_at(self, user_id: int) -> Optional[str]:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT created_at FROM email_change_requests
+                    WHERE user_id = %s ORDER BY id DESC LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        return str(row["created_at"]) if row else None
+
+    def last_email_change_completed_at(self, user_id: int) -> Optional[str]:
+        """When this user's email last actually changed (see the SQLite twin)."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT used_at FROM email_change_requests
+                    WHERE user_id = %s AND used_at IS NOT NULL
+                    ORDER BY used_at DESC LIMIT 1
+                    """,
+                    (user_id,),
+                )
+                row = cur.fetchone()
+        return str(row["used_at"]) if row else None
+
+    def email_change_request_times_since(self, user_id: int, since: str) -> List[str]:
+        """created_at of every request at or after `since`, oldest first.
+
+        created_at is TEXT here, exactly as in the SQLite twin, so `>=` is the
+        same lexicographic comparison over the same fixed-width ISO-8601 form.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT created_at FROM email_change_requests
+                    WHERE user_id = %s AND created_at >= %s
+                    ORDER BY created_at ASC
+                    """,
+                    (user_id, since),
+                )
+                rows = cur.fetchall()
+        return [str(row["created_at"]) for row in rows]
+
+    def update_email(self, user_id: int, new_email: str) -> Dict[str, Any]:
+        # .lower() is mandatory, not stylistic: this twin's users.email UNIQUE is
+        # case-SENSITIVE (the SQLite twin's is COLLATE NOCASE), so skipping it
+        # would let two casings of one address coexist in prod while being
+        # rejected locally -- twin drift no SQLite-only test run can see.
+        normalized_email = new_email.strip().lower()
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "UPDATE users SET email = %s WHERE id = %s RETURNING *",
+                        (normalized_email, user_id),
+                    )
+                    row = cur.fetchone()
+        except psycopg.errors.UniqueViolation as exc:
+            raise ValueError("email_already_registered") from exc
         if not row:
             raise ValueError("user_not_found")
         return public_user(row)

@@ -11,7 +11,9 @@ before. Engine-coupled, network-bound flows are exercised end-to-end by
 
 import ast
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
 
 from dashboard.backend.database import BacktestDatabase
@@ -139,6 +141,142 @@ def test_get_decision_format_schema():
     action = fmt["actions"][0]
     for key in ("action", "symbol", "confidence", "reasoning", "position_size"):
         assert key in action
+
+
+def test_protocol_bars_serializes_current_allowed_symbols_only():
+    timestamp = pd.Timestamp(2026, 4, 15, 10, tz=ZoneInfo("US/Eastern"))
+    session = svc.ExternalBacktestSession(
+        backtest_id="bt-bars",
+        session_id="sess-bars",
+        agent_name="agent-bars",
+        model_name="local-model",
+        start_date="2026-04-15",
+        end_date="2026-04-16",
+        symbols=["AAPL"],
+    )
+    session.all_data = {
+        "AAPL": pd.DataFrame(
+            {
+                "open": [100.0],
+                "high": [102.0],
+                "low": [99.0],
+                "close": [101.5],
+                "volume": [1_000_000],
+            },
+            index=pd.DatetimeIndex([timestamp]),
+        ),
+        "MSFT": pd.DataFrame(
+            {
+                "open": [200.0],
+                "high": [202.0],
+                "low": [199.0],
+                "close": [201.5],
+                "volume": [2_000_000],
+            },
+            index=pd.DatetimeIndex([timestamp]),
+        ),
+    }
+
+    assert session.protocol_bars(timestamp) == {
+        "AAPL": {
+            "timestamp": timestamp.isoformat(),
+            "open": 100.0,
+            "high": 102.0,
+            "low": 99.0,
+            "close": 101.5,
+            "volume": 1_000_000.0,
+        }
+    }
+    assert session.protocol_bars(timestamp + pd.Timedelta(hours=1)) == {}
+
+
+def test_protocol_bars_drops_invalid_rows_instead_of_raising():
+    """protocol_bars() is polled unconditionally on every /steps/next call; a
+    malformed bar must be dropped, not raised, or it permanently 500s the run's
+    step loop (the timestamp doesn't advance until a decision is submitted).
+    """
+    timestamp = pd.Timestamp(2026, 4, 15, 10, tz=ZoneInfo("US/Eastern"))
+    session = svc.ExternalBacktestSession(
+        backtest_id="bt-bad-bar",
+        session_id="sess-bad-bar",
+        agent_name="agent-bad-bar",
+        model_name="local-model",
+        start_date="2026-04-15",
+        end_date="2026-04-16",
+        symbols=["AAPL", "MSFT"],
+    )
+    session.all_data = {
+        "AAPL": pd.DataFrame(
+            {
+                "open": [100.0],
+                "high": [102.0],
+                "low": [99.0],
+                "close": [float("nan")],
+                "volume": [1_000_000],
+            },
+            index=pd.DatetimeIndex([timestamp]),
+        ),
+        "MSFT": pd.DataFrame(
+            {
+                "open": [200.0],
+                "high": [202.0],
+                "low": [199.0],
+                "close": [201.5],
+                "volume": [2_000_000],
+            },
+            index=pd.DatetimeIndex([timestamp]),
+        ),
+    }
+
+    bars = session.protocol_bars(timestamp)
+    assert "AAPL" not in bars
+    assert bars == {
+        "MSFT": {
+            "timestamp": timestamp.isoformat(),
+            "open": 200.0,
+            "high": 202.0,
+            "low": 199.0,
+            "close": 201.5,
+            "volume": 2_000_000.0,
+        }
+    }
+
+
+def test_protocol_bars_accepts_prefetched_market_data():
+    timestamp = pd.Timestamp(2026, 4, 15, 10, tz=ZoneInfo("US/Eastern"))
+    session = svc.ExternalBacktestSession(
+        backtest_id="bt-prefetch",
+        session_id="sess-prefetch",
+        agent_name="agent-prefetch",
+        model_name="local-model",
+        start_date="2026-04-15",
+        end_date="2026-04-16",
+        symbols=["AAPL"],
+    )
+    session.all_data = {
+        "AAPL": pd.DataFrame(
+            {
+                "open": [100.0],
+                "high": [102.0],
+                "low": [99.0],
+                "close": [101.5],
+                "volume": [1_000_000],
+            },
+            index=pd.DatetimeIndex([timestamp]),
+        ),
+    }
+
+    market_data = session.protocol_market_data(timestamp)
+    assert session.protocol_bars(timestamp, market_data=market_data) == {
+        "AAPL": {
+            "timestamp": timestamp.isoformat(),
+            "open": 100.0,
+            "high": 102.0,
+            "low": 99.0,
+            "close": 101.5,
+            "volume": 1_000_000.0,
+        }
+    }
 
 
 # ---------------------------------------------------------------------------

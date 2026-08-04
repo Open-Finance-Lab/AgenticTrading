@@ -8,7 +8,7 @@ from fastapi import APIRouter, Header, HTTPException
 
 from dashboard.backend.api import discord_oauth
 from dashboard.backend.domain.agents.service import agent_service
-from dashboard.backend.users import user_store
+from dashboard.backend import users as users_module
 
 router = APIRouter(prefix="/v1/discord", tags=["discord"])
 
@@ -22,7 +22,7 @@ def _require_bot_auth(
     discord_user_id = (x_discord_user_id or "").strip()
     if not discord_user_id:
         raise HTTPException(status_code=400, detail="X-Discord-User-Id is required")
-    user = user_store.get_user_by_discord_id(discord_user_id)
+    user = users_module.user_store.get_user_by_discord_id(discord_user_id)
     if not user:
         raise HTTPException(
             status_code=404,
@@ -32,7 +32,7 @@ def _require_bot_auth(
 
 
 @router.get("/agents")
-async def list_discord_user_agents(
+def list_discord_user_agents(
     x_discord_bot_secret: Optional[str] = Header(default=None, alias="X-Discord-Bot-Secret"),
     x_discord_user_id: Optional[str] = Header(default=None, alias="X-Discord-User-Id"),
 ):

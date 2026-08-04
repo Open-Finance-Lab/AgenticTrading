@@ -1,0 +1,8 @@
+# Installed only into the dedicated AI Hedge Fund virtual environment.
+# Pin the reviewed upstream source; never install these dependencies into ATL's
+# main environment because its LangChain/Pydantic constraints are independent.
+#
+# Install with Python 3.11 or 3.12 only. Upstream pins numpy^1.24 (<2); the
+# 1.26.x line has no cp313 wheels, so a 3.13 venv tries (and fails) to build
+# numpy from source. The Dockerfile uses uv to provision 3.12 for this reason.
+ai-hedge-fund @ https://github.com/virattt/ai-hedge-fund/archive/9557e64273e212635a4a28cbd8128df22f166c07.tar.gz

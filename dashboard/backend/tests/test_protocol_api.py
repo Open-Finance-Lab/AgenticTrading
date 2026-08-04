@@ -212,6 +212,72 @@ def test_create_run_and_first_step(client):
     assert step["constraints"]["allow_short"] is False
 
 
+def test_observation_bars_are_complete_and_scoped_to_allowed_symbols(client):
+    agent_id, key, _ = _new_agent(client)
+    version_id = _new_version(client, agent_id, key)
+    resp = client.post(
+        "/api/v1/runs",
+        json={
+            "agent_version_id": version_id,
+            "environment": {
+                "type": "backtest",
+                "environment_id": "us-equity-hourly-v1",
+            },
+            "config": {
+                "start_date": "2026-04-15",
+                "end_date": "2026-04-16",
+                "symbols": ["AAPL"],
+            },
+        },
+        headers={"X-API-Key": key},
+    )
+    assert resp.status_code == 200, resp.text
+
+    step = _wait_for_step(client, resp.json()["run_id"], key)
+    bars = step["observation"]["market"]["bars"]
+
+    assert set(bars) == {"AAPL"}
+    assert bars["AAPL"] == {
+        "timestamp": step["timestamp"],
+        "open": 100.0,
+        "high": 101.0,
+        "low": 99.0,
+        "close": 100.0,
+        "volume": 1_000_000.0,
+    }
+
+
+class _BadBarLoader:
+    def fetch_bars(self, symbols, start, end):
+        data = _synthetic_bars()
+        data["AAPL"] = data["AAPL"].copy()
+        data["AAPL"].loc[data["AAPL"].index[0], "close"] = float("nan")
+        return data
+
+
+def test_observation_bars_drops_invalid_symbol_without_500ing_the_poll_loop(client, monkeypatch):
+    """A malformed bar must not raise out of /steps/next: the offending symbol
+    is dropped from ``bars`` and the endpoint stays pollable, instead of
+    permanently wedging the run with an unstructured 500.
+    """
+    import dashboard.backend.domain.backtesting.external_run_service as ebs
+
+    monkeypatch.setattr(ebs, "AlpacaDataLoader", _BadBarLoader)
+
+    agent_id, key, _ = _new_agent(client)
+    version_id = _new_version(client, agent_id, key)
+    run_id = _create_run(client, key, version_id)
+
+    step = _wait_for_step(client, run_id, key)
+    bars = step["observation"]["market"]["bars"]
+
+    assert "AAPL" not in bars
+    assert "MSFT" in bars
+
+    resp = client.get(f"/api/v1/runs/{run_id}/steps/next", headers={"X-API-Key": key})
+    assert resp.status_code == 200, resp.text
+
+
 def test_create_run_requires_api_key(client):
     resp = client.post("/api/v1/runs", json={"config": {"start_date": "2026-04-15", "end_date": "2026-04-16"}})
     assert resp.status_code == 401
@@ -1001,7 +1067,7 @@ def test_repeat_poll_does_not_rewrite_step_row(client, monkeypatch):
     """steps/next is polled in a loop; re-awaiting an unchanged step must not
     pay a synchronous SQLite write per poll."""
     import dashboard.backend.domain.runs.service as run_service
-    from dashboard.backend.domain.runs.repository import run_store
+    import dashboard.backend.domain.runs.repository as run_store_module
 
     agent_id, key, _ = _new_agent(client)
     version_id = _new_version(client, agent_id, key)
@@ -1009,6 +1075,7 @@ def test_repeat_poll_does_not_rewrite_step_row(client, monkeypatch):
     _wait_for_step(client, run_id, key)
 
     calls = []
+    run_store = run_store_module.run_store
     real = run_store.save_step
     monkeypatch.setattr(
         run_store, "save_step",

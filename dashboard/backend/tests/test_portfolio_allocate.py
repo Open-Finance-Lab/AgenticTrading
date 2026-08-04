@@ -8,12 +8,13 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
+
 # These are imported as *modules*, not `from ... import <name>`, because the
 # fixture below monkeypatches attributes on them and the tests must read those
 # attributes at call time to see the patched value. Importing the classes
 # directly as well would bind two names to one module (CodeQL
 # py/import-and-import-from) and make it easy to grab a stale, unpatched store.
-import dashboard.backend.api.auth as auth_module
 import dashboard.backend.domain.agents.repository as agent_repo
 import dashboard.backend.domain.agents.service as agent_service_module
 import dashboard.backend.domain.portfolios.repository as portfolio_repo
@@ -38,8 +39,6 @@ def env(monkeypatch):
         agent_store = agent_repo.AgentStore(db_path=content_db)
 
         monkeypatch.setattr(users_module, "user_store", user_store)
-        # auth.py binds user_store at import time — patch that name too.
-        monkeypatch.setattr(auth_module, "user_store", user_store)
         monkeypatch.setattr(portfolio_repo, "portfolio_store", portfolio_store)
         monkeypatch.setattr(portfolio_service_module, "portfolio_store", portfolio_store)
         monkeypatch.setattr(agent_repo, "agent_store", agent_store)
@@ -63,7 +62,8 @@ def _signup(client: TestClient, email: str = "alloc@example.com") -> tuple[str, 
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    return data["token"], data["user"]
+    assert "token" not in data
+    return _cookie_session_token(client), data["user"]
 
 
 def _auth(token: str, browser: str = "browser-alloc-1") -> dict:

@@ -1,0 +1,110 @@
+{
+  "name": "AgenticTrading Dashboard",
+  "cleanUrls": true,
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=3600"
+        },
+        {
+          "key": "Content-Security-Policy",
+          "value": "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' https://agentictrading.onrender.com; img-src 'self' data: https:;"
+        }
+      ]
+    },
+    {
+      "source": "/app.js",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/styles.css",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/assets/(.*)",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=31536000, immutable"
+        }
+      ]
+    },
+    {
+      "source": "/",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/(api|paper|backtest|runs|config|admin|ticker|health|compare)(/.*)?",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "no-store"
+        }
+      ]
+    }
+  ],
+  "rewrites": [
+    {
+      "source": "/app",
+      "destination": "/app.html"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "https://agentictrading.onrender.com/api/:path*"
+    },
+    {
+      "source": "/paper/:path*",
+      "destination": "https://agentictrading.onrender.com/paper/:path*"
+    },
+    {
+      "source": "/backtest/:path*",
+      "destination": "https://agentictrading.onrender.com/backtest/:path*"
+    },
+    {
+      "source": "/runs/:path*",
+      "destination": "https://agentictrading.onrender.com/runs/:path*"
+    },
+    {
+      "source": "/runs",
+      "destination": "https://agentictrading.onrender.com/runs"
+    },
+    {
+      "source": "/config/:path*",
+      "destination": "https://agentictrading.onrender.com/config/:path*"
+    },
+    {
+      "source": "/admin/:path*",
+      "destination": "https://agentictrading.onrender.com/admin/:path*"
+    },
+    {
+      "source": "/ticker",
+      "destination": "https://agentictrading.onrender.com/ticker"
+    },
+    {
+      "source": "/health",
+      "destination": "https://agentictrading.onrender.com/health"
+    },
+    {
+      "source": "/compare",
+      "destination": "https://agentictrading.onrender.com/compare"
+    }
+  ]
+}

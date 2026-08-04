@@ -136,7 +136,7 @@ def test_execute_algo_writes_config_and_forwards(monkeypatch, tmp_path):
         captured["args"] = kwargs.get("args")
 
         class _T:
-            def start(self_inner):
+            def start(self):
                 captured["started"] = True
 
         return _T()
@@ -179,3 +179,89 @@ def test_execute_algo_writes_config_and_forwards(monkeypatch, tmp_path):
     assert fwd[1] == "sess-1"  # session_id
     assert fwd[2] == "My Team"  # team_name
     assert Path(fwd[0]).parent == tmp_path / "data" / "algo_configs"
+
+
+# ---------------------------------------------------------------------------
+# Default date range: a settings file that yields no range must not fail
+# silently
+# ---------------------------------------------------------------------------
+#
+# A bare `except: pass` here made "the file is absent" and "the file is on disk
+# but unusable" byte-identical: both fall through to the hardcoded pair,
+# silently running every backtest over the wrong window with no error, no
+# metric and a green suite -- the fail-closed-but-not-fail-visible shape the
+# news adapter already taught this repo.
+#
+# There are three ways to reach that fallback with the file present, and each
+# must announce itself: unparseable bytes, valid JSON of the wrong *shape*, and
+# valid JSON of the right shape carrying no usable range. The last two are the
+# likelier failures in practice (a key rename outlives a corrupt write), and a
+# fix that covers only the first leaves the hole where it actually opens.
+#
+# Asserted on stdout, not caplog: `logger.info()` emits nothing under the
+# deployed uvicorn, so print() is the convention here.
+
+FALLBACK_DATES = ("2026-05-04", "2026-05-12")
+
+
+def _resolve_dates(tmp_path, monkeypatch, capsys, text):
+    """Point the service at a defaults.json holding ``text``; return result + stdout."""
+    path = tmp_path / "defaults.json"
+    path.write_text(text, encoding="utf-8")
+    monkeypatch.setattr(svc, "DEFAULTS_FILE", path)
+    result = svc._default_backtest_dates()
+    return result, capsys.readouterr().out, path
+
+
+def test_unparseable_defaults_file_is_reported(tmp_path, monkeypatch, capsys):
+    dates, out, path = _resolve_dates(tmp_path, monkeypatch, capsys, "{not json")
+
+    assert dates == FALLBACK_DATES
+    assert str(path) in out  # the operator has to learn *which* file
+
+
+def test_defaults_file_without_a_usable_range_is_reported(tmp_path, monkeypatch, capsys):
+    """Parses fine, right shape, but the keys were renamed upstream."""
+    dates, out, path = _resolve_dates(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        json.dumps({"defaultSettings": {"from": "2026-01-02", "to": "2026-01-09"}}),
+    )
+
+    assert dates == FALLBACK_DATES
+    assert str(path) in out
+
+
+def test_defaults_file_that_is_not_an_object_is_reported(tmp_path, monkeypatch, capsys):
+    """Valid JSON, wrong shape: `.get` on a list raises, which is neither a
+    JSONDecodeError nor an OSError, so it escaped the handler entirely."""
+    dates, out, path = _resolve_dates(tmp_path, monkeypatch, capsys, "[]")
+
+    assert dates == FALLBACK_DATES
+    assert str(path) in out
+
+
+def test_the_failure_modes_are_distinguishable(tmp_path, monkeypatch, capsys):
+    """The whole point of the notice: two different faults must not read the
+    same, or the message is back to hiding which one happened."""
+    _, corrupt, _ = _resolve_dates(tmp_path, monkeypatch, capsys, "{not json")
+    _, no_range, _ = _resolve_dates(
+        tmp_path, monkeypatch, capsys, json.dumps({"defaultSettings": {}})
+    )
+
+    assert corrupt and no_range
+    assert corrupt != no_range
+
+
+def test_a_usable_defaults_file_says_nothing(tmp_path, monkeypatch, capsys):
+    """The notice must mark the anomaly, not narrate the happy path."""
+    dates, out, _ = _resolve_dates(
+        tmp_path,
+        monkeypatch,
+        capsys,
+        json.dumps({"defaultSettings": {"startDate": "2026-01-02", "endDate": "2026-01-09"}}),
+    )
+
+    assert dates == ("2026-01-02", "2026-01-09")
+    assert out == ""

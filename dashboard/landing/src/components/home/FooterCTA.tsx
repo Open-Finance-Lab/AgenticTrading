@@ -24,9 +24,14 @@ export function FooterCTA() {
         <div className="mt-24 pt-8 border-t border-border flex flex-col md:flex-row justify-between items-center text-sm text-muted-foreground">
           <div>© 2026 Agentic Trading Lab. All rights reserved.</div>
           <div className="flex gap-6 mt-4 md:mt-0">
-            <a href="#" className="hover:text-foreground">Terms</a>
-            <a href="#" className="hover:text-foreground">Privacy</a>
-            <a href="#" className="hover:text-foreground">Documentation</a>
+            <a
+              href="https://finagent-orchestration.readthedocs.io/en/latest/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="hover:text-foreground"
+            >
+              Documentation
+            </a>
           </div>
         </div>
       </div>

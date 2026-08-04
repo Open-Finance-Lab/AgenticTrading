@@ -13,6 +13,8 @@ const ACTIVE_AGENT_NAME_KEY = 'active-agent-name';
 const BROWSER_OWNER_KEY = 'browser-owner-id';
 const HIDDEN_DEMO_AGENTS_KEY = 'hidden-demo-agent-ids';
 const SELECTED_BACKTEST_RUN_KEY = 'selected-backtest-run-id';
+// index.html's goToDashboardLoggedIn() writes this same key as a bare string
+// literal (no build step to share this constant across the landing/app split).
 const NAV_STATE_KEY = 'nav-state';
 const DISCORD_SERVER_URL = 'https://discord.gg/9HnQ6XDG98';
 const BACKTEST_POLL_MAX_SECONDS = 600; // 10 minutes at 1-second polling intervals
@@ -132,6 +134,46 @@ function formatTokenCount(value) {
   return String(num);
 }
 
+let appToastTimer = null;
+
+const APP_TOAST_VISIBLE_MS = 4000;
+const APP_TOAST_FADE_MS = 240;
+// How long the head boot script's /health warmup may stay pending before the
+// boot handler tells the user the free-tier server is waking up. A warm
+// server answers well under this; a cold start takes 30-60s.
+const SLOW_BOOT_NOTICE_MS = 3000;
+
+/**
+ * Non-blocking confirmation channel for /app.
+ *
+ * The pre-existing convention here is alert(), which is modal: acceptable for a
+ * launch-time refusal the user must acknowledge, wrong for a success they only
+ * need to notice. Text (not innerHTML) -- callers pass agent names.
+ *
+ * The container is never `hidden`, and this function must never set it. `hidden`
+ * is display:none, which takes the node out of the render tree, and a live
+ * region is only monitored for mutations while it is rendered -- so writing the
+ * message first and unhiding after (the obvious order) announces nothing on the
+ * screen readers this role="status" exists for. .app-toast hides itself with
+ * opacity + pointer-events, so `hidden` was buying no visual behaviour either.
+ * Emptying the text on the way out is what replaces it: the region stays
+ * registered from page load, and no stale message is left for a browsing user.
+ */
+function showAppToast(message) {
+  const el = document.getElementById('appToast');
+  if (!el) return;
+  el.classList.remove('is-visible');
+  // Force a reflow so re-showing an already-visible toast replays the transition.
+  void el.offsetWidth;
+  el.textContent = String(message);
+  el.classList.add('is-visible');
+  if (appToastTimer) clearTimeout(appToastTimer);
+  appToastTimer = setTimeout(() => {
+    el.classList.remove('is-visible');
+    appToastTimer = setTimeout(() => { el.textContent = ''; }, APP_TOAST_FADE_MS);
+  }, APP_TOAST_VISIBLE_MS);
+}
+
 // ============================================================================
 // Local mock agents — fallback used when the backend returns no agents (or is
 // unavailable). Lets the redesigned My Agents page render without a backend.
@@ -139,6 +181,8 @@ function formatTokenCount(value) {
 // ============================================================================
 const MAX_AGENT_CASH_ALLOCATION = 3000;
 const DEFAULT_AGENT_CASH_ALLOCATION = 1000;
+/** Simulated cash ceiling for a single backtest run — unrelated to the paper sleeve above. */
+const MAX_BACKTEST_ALLOCATED_CAPITAL = 10000;
 const DEFAULT_PORTFOLIO_EQUITY = 10000;
 const AGENT_CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
 
@@ -174,8 +218,41 @@ const SIMPLE_INSTRUCTION_OUTPUT_FORMAT =
 // same preset key + output format at call time instead of keeping its own copy.
 window.SIMPLE_INSTRUCTION_PRESET_KEY = SIMPLE_INSTRUCTION_PRESET_KEY;
 window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT = SIMPLE_INSTRUCTION_OUTPUT_FORMAT;
+// Mirrors DEFAULT_STARTER_INSTRUCTION in dashboard/backend/domain/agents/defaults.py,
+// which is what actually seeds new agents. The copy here populates the
+// "See the default instruction" disclosure in Configure's empty-instruction
+// state, so the editor can show what an agent falls back to without a pipeline.
+// tests/test_agent_starter_defaults.py pins the two copies together.
 const DEFAULT_STARTER_INSTRUCTION =
   'Spread the money across a few of the strongest available stocks. Buy on meaningful dips, take profits after strong run-ups, and never put everything into one stock.';
+window.DEFAULT_STARTER_INSTRUCTION = DEFAULT_STARTER_INSTRUCTION;
+
+function defaultAgentProvisionGuardKey() {
+  // Prefer the signed-in account so a brand-new user on a browser that already
+  // provisioned (or deleted) a guest starter still gets their own default.
+  // Guests keep the browser-scoped key so logout→login claim can find it.
+  const user = typeof getStoredAuthUser === 'function' ? getStoredAuthUser() : null;
+  if (user?.id != null) {
+    return `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}u:${user.id}`;
+  }
+  return `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}b:${window.BROWSER_OWNER_ID || 'anon'}`;
+}
+
+function hasDefaultAgentProvisionGuard() {
+  try {
+    const key = defaultAgentProvisionGuardKey();
+    if (localStorage.getItem(key)) return true;
+    // Pre-fix legacy key (no u:/b: prefix). Honor it for guests only so we
+    // do not duplicate a starter that was already provisioned; signed-in users
+    // intentionally ignore it so a new account still gets onboarding.
+    const user = typeof getStoredAuthUser === 'function' ? getStoredAuthUser() : null;
+    if (user?.id != null) return false;
+    const legacy = `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}${window.BROWSER_OWNER_ID || 'anon'}`;
+    return Boolean(localStorage.getItem(legacy));
+  } catch (e) {
+    return true; // no storage → cannot guard → do not provision
+  }
+}
 
 function formatAgentCashAllocation(value) {
   if (value == null || value === '') return '—';
@@ -193,10 +270,10 @@ function parseAgentCashAllocationInput(raw) {
   }
   const value = Number(raw);
   if (!Number.isFinite(value) || value < 0) {
-    throw new Error(`Allocated capital must be between $0 and $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
+    throw new Error(`Paper Trading Allocated Capital must be between $0 and $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
   }
   if (value > MAX_AGENT_CASH_ALLOCATION) {
-    throw new Error(`Allocated capital cannot exceed $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
+    throw new Error(`Paper Trading Allocated Capital cannot exceed $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
   }
   return Math.round(value);
 }
@@ -210,7 +287,7 @@ const CASH_STEP_INPUT_IDS = [
   'externalAgentCashAllocation',
   'builtinAgentCashAllocation',
   'agentEditorCashAllocation',
-  'backtestInitialCapital',
+  'agentEditorBacktestAllocation',
 ];
 
 function cashStepMeta(input) {
@@ -416,9 +493,11 @@ function resolveAgentStatusBadge(agent) {
   }
   const runCount = Number(agent.run_count) || (Array.isArray(agent.runs) ? agent.runs.length : 0);
   if (runCount > 0 || agent.latest_run?.run_id || agent.latest_run?.total_return != null) {
-    return { key: 'backtested', label: 'IDLE', className: 'idle' };
+    return { key: 'backtested', label: 'BACKTESTED', className: 'idle' };
   }
-  return { key: 'draft', label: 'DRAFT', className: 'draft' };
+  // Not "DRAFT": the agent is saved and its capital is already reserved from
+  // My Portfolio. The only thing missing is a run.
+  return { key: 'draft', label: 'READY', className: 'draft' };
 }
 
 function formatAgentMoney(value, { cents = true } = {}) {
@@ -693,20 +772,80 @@ function formatSignedReturnPct(frac) {
   return body;
 }
 
-/** Shared top block: portfolio sleeve always leads (draft + backtested cards). */
+/**
+ * Saved simulated capital for an agent's backtests.
+ *
+ * Mirrors the backend fallback chain exactly: an agent created before
+ * `backtest_allocation` existed has a NULL column and must keep behaving as it
+ * did, i.e. starting from its paper sleeve.
+ */
+function resolveBacktestCapital(agent) {
+  const candidates = [agent?.backtest_allocation, agent?.cash_allocation];
+  for (const raw of candidates) {
+    const value = Number(raw);
+    if (Number.isFinite(value) && value > 0) {
+      return Math.min(Math.round(value), MAX_BACKTEST_ALLOCATED_CAPITAL);
+    }
+  }
+  return DEFAULT_AGENT_CASH_ALLOCATION;
+}
+
+/** Shared top block: both capital figures, equal weight (draft + backtested). */
 function renderAgentAllocatedCapitalHero(agent) {
-  const capital =
+  const paper =
     agent.cash_allocation != null
       ? formatAgentCashAllocation(agent.cash_allocation)
       : '$1,000';
+  const backtest = formatAgentCashAllocation(resolveBacktestCapital(agent));
   return `
-    <div class="agent-card-hero agent-card-hero--draft">
-      <div class="agent-card-hero-text">
-        <span class="agent-card-metric-label">Allocated Capital</span>
-        <p class="agent-card-metric-value">${escapeHtml(capital)}</p>
+    <div class="agent-card-capitals">
+      <div class="agent-card-capital">
+        <span class="agent-card-metric-label">Paper Trading</span>
+        <p class="agent-card-metric-value">${escapeHtml(paper)}</p>
         <p class="agent-card-capital-note">From My Portfolio</p>
       </div>
+      <div class="agent-card-capital">
+        <span class="agent-card-metric-label">Backtesting</span>
+        <p class="agent-card-metric-value">${escapeHtml(backtest)}</p>
+        <p class="agent-card-capital-note">Simulated</p>
+      </div>
     </div>`;
+}
+
+/**
+ * Card body for an agent with a backtest in flight.
+ *
+ * The bar is determinate whenever the engine has published a step: engine.py's
+ * `_publish_live_progress` writes step/total_steps every step and the status
+ * endpoint surfaces them. (The 2026-07-29 spec specified an indeterminate bar
+ * "since no honest completion estimate exists" -- that was already untrue; see
+ * the 2026-08-01 spec.) It falls back to indeterminate before the first step,
+ * which is a normal state on every run, not an error.
+ */
+function renderAgentRunningBody(agent, running) {
+  // Every value below comes from deriveRunningProgress, which the per-second
+  // patch path reads too -- see refreshRunningAgentCards().
+  const view = deriveRunningProgress(running);
+  // Every dynamic node carries a data-running-* hook, including the ones that
+  // are empty right now: the patch path finds nodes by attribute, and a node
+  // rendered only when it has content can never be filled in later.
+  const id = escapeHtml(agent.agent_id);
+
+  return `
+    <div class="agent-card-running">
+      <div class="agent-card-running-head">
+        <span class="agent-card-running-dot" aria-hidden="true"></span>
+        <span class="agent-card-running-label">Backtesting…</span>
+        <span class="agent-card-running-step" data-running-step="${id}">${escapeHtml(view.stepLabel)}</span>
+        <span class="agent-card-running-elapsed" data-running-elapsed="${id}">${escapeHtml(formatBacktestElapsed(running.elapsedSeconds))}</span>
+      </div>
+      <div class="agent-card-running-track" role="progressbar" aria-label="Backtest in progress" data-running-track="${id}"${view.determinate ? ` aria-valuenow="${view.pct}" aria-valuemin="0" aria-valuemax="100"` : ''}>
+        <div class="agent-card-running-bar${view.determinate ? ' is-determinate' : ''}" data-running-bar="${id}"${view.determinate ? ` style="width: ${view.pct}%"` : ''}></div>
+      </div>
+      <p class="agent-card-running-detail" data-running-detail="${id}">${escapeHtml(view.detail)}</p>
+      <p class="agent-card-running-stale" data-running-stale="${id}">${escapeHtml(view.notice)}</p>
+    </div>
+    ${renderAgentAllocatedCapitalHero(agent)}`;
 }
 
 function renderAgentCardBody(agent, statusKey) {
@@ -721,7 +860,7 @@ function renderAgentCardBody(agent, statusKey) {
           : '';
       changeHtml = `<p class="agent-card-change ${positive ? 'is-pos' : 'is-neg'}">${escapeHtml(formatSignedMoney(m.dayPnl))}${escapeHtml(pct)} today</p>`;
     } else if (!m.hasLive) {
-      changeHtml = `<p class="agent-card-change is-muted">Allocated capital · paper session not live yet</p>`;
+      changeHtml = `<p class="agent-card-change is-muted">Paper Trading Allocated Capital · session not live yet</p>`;
     }
     const activity = m.lastActivity
       ? escapeHtml(m.lastActivity)
@@ -785,7 +924,6 @@ function renderAgentCardBody(agent, statusKey) {
           ${renderAgentSparkline(agent, m.positive, m)}
         </div>
         <p class="agent-card-latest-meta">${escapeHtml(metaParts.join(' · '))}</p>
-        <p class="agent-card-latest-note">Separate from allocated capital.</p>
         ${renderAgentRunsLink(agent)}
       </div>`;
   }
@@ -807,7 +945,13 @@ function renderAgentCardActions(agent, statusKey) {
   if (statusKey === 'paper') {
     primary = `<button class="agent-card-cta agent-open-btn" type="button" data-agent-id="${id}">Open Agent</button>`;
   } else {
-    primary = `<button class="agent-card-cta agent-run-backtest-btn" type="button" data-agent-id="${id}">Run Backtest</button>`;
+    // Paper trading is Phase B (execution/paper_backend.py is a stub). Ship the
+    // affordance disabled *with a reason* -- an unexplained grey button reads as
+    // a bug, and its absence hides that the two capital figures above map onto
+    // two different things you can eventually run.
+    primary = `
+      <button class="agent-card-cta agent-run-backtest-btn" type="button" data-agent-id="${id}">Run Backtest</button>
+      <button class="agent-card-cta agent-card-cta--disabled" type="button" disabled aria-disabled="true" title="Paper trading is coming soon" aria-label="Run Paper Trading — Paper trading is coming soon">Run Paper Trading</button>`;
   }
   const configure = `<button class="agent-card-cta agent-card-cta--configure agent-configure-btn" type="button" data-agent-id="${id}">Configure</button>`;
   const rotate =
@@ -828,6 +972,15 @@ function renderAgentCardActions(agent, statusKey) {
           <button class="agent-menu-item agent-menu-item--danger agent-delete-btn" type="button" data-agent-id="${id}">Delete</button>
         </div>
       </div>
+    </div>`;
+}
+
+function renderAgentRunningActions(agent) {
+  const id = escapeHtml(agent.agent_id);
+  return `
+    <div class="agent-card-actions agent-card-actions--status">
+      <button class="agent-card-cta agent-card-cta--configure agent-card-cta--disabled" type="button" disabled aria-disabled="true" data-agent-id="${id}">Configure</button>
+      <button class="agent-card-cta agent-card-cta--disabled" type="button" disabled aria-disabled="true">Running…</button>
     </div>`;
 }
 
@@ -1003,9 +1156,9 @@ function renderAgentGridFooter(categoryKey, total, page, pageCount) {
   const atStart = page <= 0;
   const atEnd = page >= pageCount - 1;
   footer.innerHTML = `
-    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="上一页" ${atStart ? 'disabled' : ''}>←</button>
-    <span class="agents-grid-footer-count">第 ${page + 1} / ${pageCount} 页 · 共 ${total} 个</span>
-    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="下一页" ${atEnd ? 'disabled' : ''}>→</button>`;
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="Previous page" ${atStart ? 'disabled' : ''}>←</button>
+    <span class="agents-grid-footer-count">Page ${page + 1} of ${pageCount} · ${total} total</span>
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="Next page" ${atEnd ? 'disabled' : ''}>→</button>`;
 }
 
 function renderAgentCards(grid, agents, categoryKey) {
@@ -1023,8 +1176,11 @@ function renderAgentCards(grid, agents, categoryKey) {
     const statusBadge = resolveAgentStatusBadge(agent);
     const card = document.createElement('div');
     card.className = `section-card agent-card agent-card--status agent-card--${statusBadge.key}${isBuiltin ? ' agent-card-builtin' : ''}`;
-    const model = escapeHtml(agent.model_name || 'local-model');
+    card.setAttribute('data-agent-id', agent.agent_id);
+    const model = escapeHtml(formatAgentModelLabel(agent.model_name));
     const type = escapeHtml(agentTypeLabel(agent));
+    const running = getAgentBacktestRunning(agent.agent_id);
+    if (running) card.classList.add('agent-card--running');
 
     card.innerHTML = `
       <div class="agent-card-top">
@@ -1037,8 +1193,8 @@ function renderAgentCards(grid, agents, categoryKey) {
         </div>
         <span class="status-badge ${statusBadge.className}"><span class="status-badge-dot" aria-hidden="true"></span>${statusBadge.label}</span>
       </div>
-      ${renderAgentCardBody(agent, statusBadge.key)}
-      ${renderAgentCardActions(agent, statusBadge.key)}
+      ${running ? renderAgentRunningBody(agent, running) : renderAgentCardBody(agent, statusBadge.key)}
+      ${running ? renderAgentRunningActions(agent) : renderAgentCardActions(agent, statusBadge.key)}
     `;
     grid.appendChild(card);
   });
@@ -1290,13 +1446,43 @@ function findBacktestModelOption(modelSelect, modelName) {
   ) || null;
 }
 
+/**
+ * The picker is a live control only for iFinD A-share, where it doubles as the
+ * rule-based-vs-LLM decision source. Everywhere else the run uses the agent's
+ * saved model, so the picker is hidden behind a read-only echo of it.
+ */
+function backtestModelPickerIsLiveControl() {
+  return document.getElementById('marketDataSourceSelect')?.value === IFIND_ASHARE_SOURCE;
+}
+
 function resolveBacktestModelRequest(modelSelect, agent) {
   const selectedModel = modelSelect?.value || '';
   const agentOption = findBacktestModelOption(modelSelect, agent?.model_name);
   if (agentOption?.value === selectedModel && agent?.model_name) {
     return agent.model_name;
   }
+  // A model the nine-option list cannot represent still belongs to the agent:
+  // without this the run submits whatever value a previous agent left behind.
+  if (agent?.model_name && !backtestModelPickerIsLiveControl()) {
+    return agent.model_name;
+  }
   return selectedModel || agent?.model_name || 'claude-haiku-4.5';
+}
+
+/** Show the picker only where it is a real control; otherwise echo the agent's model. */
+function syncBacktestModelFieldMode() {
+  const modelSelect = document.getElementById('modelSelect');
+  const readonly = document.getElementById('runBacktestModelReadonly');
+  const source = document.getElementById('marketDataSourceSelect')?.value || 'alpaca';
+  const isIFind = source === IFIND_ASHARE_SOURCE;
+  if (modelSelect) modelSelect.hidden = !isIFind;
+  if (!readonly) return;
+  readonly.hidden = isIFind;
+  readonly.textContent = (runBacktestModalAgent?.runtime_type || 'pipeline') !== 'pipeline'
+    ? 'AI Hedge Fund — hosted runtime'
+    : (source === 'vnpy_simulation'
+      ? 'Rule-based — vn.py simulation makes no LLM calls'
+      : formatAgentModelLabel(runBacktestModalAgent?.model_name));
 }
 
 function syncModelSelectFromAgent(agent) {
@@ -1334,59 +1520,111 @@ async function onBacktestAgentSelectChange() {
 
 // First-visit onboarding: a brand-new owner gets one real Foundation agent so
 // the row is never empty. The guard key means "we provisioned once for this
-// browser identity" — deleting the agent must NOT resurrect it.
-let defaultAgentProvisionInFlight = false;
+// identity" — deleting the agent must NOT resurrect it.
+let defaultAgentProvisionInFlight = null;
 
 async function ensureDefaultFoundationAgent(agents) {
   if (isDemoMode()) return false;
-  if (agents.some((a) => a.agent_type === 'builtin')) return false;
-  const guardKey = `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}${window.BROWSER_OWNER_ID || 'anon'}`;
-  try {
-    if (localStorage.getItem(guardKey)) return false;
-  } catch (e) {
-    return false; // no storage → cannot guard → do not provision
-  }
-  if (defaultAgentProvisionInFlight) return false;
-  defaultAgentProvisionInFlight = true;
-  try {
-    const data = await API.post(`${API_BASE}/api/v1/agents`, {
-      name: 'My Foundation Agent',
-      model_name: DEFAULT_FOUNDATION_MODEL,
-      agent_type: 'builtin',
-      description: 'Your starter agent — configure it and run a backtest.',
-      cash_allocation: DEFAULT_AGENT_CASH_ALLOCATION,
-    });
-    const agent = data?.agent;
-    if (!agent?.agent_id) return false;
-    localStorage.setItem(guardKey, agent.agent_id);
-    try {
-      await API.patch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}`, {
-        pipeline: [
-          {
-            id: `sub_starter_${agent.agent_id}`,
-            presetKey: SIMPLE_INSTRUCTION_PRESET_KEY,
-            label: 'Trading instruction',
-            prompt: DEFAULT_STARTER_INSTRUCTION,
-            outputFormat: SIMPLE_INSTRUCTION_OUTPUT_FORMAT,
-          },
-        ],
-      });
-    } catch (seedError) {
-      // Non-fatal: the agent exists; the editor just opens with a blank instruction.
-      console.warn('Starter instruction seed failed:', seedError.message);
+  const builtins = agents.filter((a) => a.agent_type === 'builtin');
+  if (builtins.length) {
+    // A builtin visible only via the unclaimed-browser-session fallback (#235)
+    // is not proof claim-account actually landed — owner_user_id is still null
+    // server-side. Stamping the guard against it would permanently mark this
+    // identity "onboarded" for an agent it may never end up owning. Still skip
+    // provisioning either way (never worth creating a duplicate starter), but
+    // only persist the guard once ownership is confirmed.
+    const user = typeof getStoredAuthUser === 'function' ? getStoredAuthUser() : null;
+    const owned = user?.id != null
+      ? builtins.find((a) => a.owner_user_id === user.id)
+      : builtins[0];
+    if (owned) {
+      try {
+        const guardKey = defaultAgentProvisionGuardKey();
+        if (!localStorage.getItem(guardKey)) {
+          localStorage.setItem(guardKey, owned.agent_id);
+        }
+      } catch (e) {
+        /* storage unavailable — delete-guard simply won't persist */
+      }
     }
-    if (!getDefaultAgentId()) setDefaultAgentId(agent.agent_id);
-    return true;
-  } catch (error) {
-    // Non-fatal: the row falls back to its empty state with the Add Agent CTA.
-    console.warn('Default agent provisioning skipped:', error.message);
     return false;
+  }
+  const guardKey = defaultAgentProvisionGuardKey();
+  if (hasDefaultAgentProvisionGuard()) return false;
+  if (defaultAgentProvisionInFlight) {
+    // Another loadAgents is already creating the starter — wait for it so a
+    // signup race does not skip provisioning and leave My Agents empty.
+    try {
+      return await defaultAgentProvisionInFlight;
+    } catch (e) {
+      return false;
+    }
+  }
+  defaultAgentProvisionInFlight = (async () => {
+    try {
+      const data = await API.post(`${API_BASE}/api/v1/agents`, {
+        name: 'My Foundation Agent',
+        model_name: DEFAULT_FOUNDATION_MODEL,
+        agent_type: 'builtin',
+        description: 'Your starter agent — configure it and run a backtest.',
+        cash_allocation: DEFAULT_AGENT_CASH_ALLOCATION,
+      });
+      const agent = data?.agent;
+      if (!agent?.agent_id) return false;
+      localStorage.setItem(guardKey, agent.agent_id);
+      // The starter instruction is seeded server-side by AgentService.create_agent
+      // for every builtin agent. It used to be a follow-up PATCH from here, which
+      // failed silently in prod for months (PATCH was missing from the CORS
+      // allow_methods, so the preflight 400'd) and left every default agent with
+      // an empty pipeline. Seeding in the same call that creates the row means it
+      // cannot half-succeed.
+      if (!getDefaultAgentId()) setDefaultAgentId(agent.agent_id);
+      return true;
+    } catch (error) {
+      // Non-fatal: the row falls back to its empty state with the Add Agent CTA.
+      console.warn('Default agent provisioning skipped:', error.message);
+      return false;
+    }
+  })();
+  try {
+    return await defaultAgentProvisionInFlight;
   } finally {
-    defaultAgentProvisionInFlight = false;
+    defaultAgentProvisionInFlight = null;
   }
 }
 
+// Auth boot gate: nav goes live before the boot's auth awaits, so a My Agents
+// click can arrive while refreshAuthUser → claimAgentsForUser is still in
+// flight. Fetching agents at that moment misses the guest Foundation agent a
+// landing signup is about to claim, and ensureDefaultFoundationAgent would
+// provision a duplicate starter. Every external caller therefore waits here;
+// the DOMContentLoaded handler opens the gate once the claim phase settles.
+let openAuthBootGate;
+const authBootGate = new Promise((resolve) => {
+  openAuthBootGate = resolve;
+});
+let agentsLoadInFlight = null;
+
 async function loadAgents() {
+  // Coalesce concurrent callers: several early clicks during a cold boot must
+  // share one fetch, not stack identical requests behind the gate. Sequential
+  // calls still refetch (re-clicking the subtab is the user's refresh).
+  if (agentsLoadInFlight) return agentsLoadInFlight;
+  agentsLoadInFlight = (async () => {
+    try {
+      await authBootGate;
+      return await loadAgentsNow();
+    } finally {
+      agentsLoadInFlight = null;
+    }
+  })();
+  return agentsLoadInFlight;
+}
+
+// The ungated loader: only for callers already ordered after the account
+// claim (claimAgentsForUser itself, which runs inside the gated section and
+// would deadlock on the gate above).
+async function loadAgentsNow() {
   try {
     let data = await API.get(`${API_BASE}/api/v1/agents`);
     let agents = data.agents || [];
@@ -1469,6 +1707,7 @@ async function loadAgents() {
 
 let marketplaceTemplates = [];
 let marketplaceCloneInFlight = false;
+let marketplaceLoadInFlight = null;
 
 function getFilteredMarketplaceTemplates() {
   const query = (document.getElementById('marketplaceSearchInput')?.value || '').trim().toLowerCase();
@@ -1511,7 +1750,11 @@ function renderMarketplaceGrid() {
   templates.forEach((template) => {
     const card = document.createElement('div');
     card.className = 'section-card agent-card marketplace-card';
-    const modeLabel = template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction';
+    const isAiHedgeFundTemplate = template.runtime_type === 'ai_hedge_fund';
+    const modeLabel = template.mode === 'runtime'
+      ? 'Hosted runtime'
+      : (template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction');
+    const cloneLabel = isAiHedgeFundTemplate ? 'Copy to My Agents' : 'Add to My Agents';
     const tags = (template.tags || [])
       .slice(0, 3)
       .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
@@ -1536,7 +1779,7 @@ function renderMarketplaceGrid() {
         ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
       </div>
       <div class="agent-card-actions agent-card-actions--status">
-        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">Copy to My Agents</button>
+        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
       </div>`;
     grid.appendChild(card);
   });
@@ -1549,11 +1792,11 @@ function renderMarketplaceGrid() {
       marketplaceCloneInFlight = true;
       btn.disabled = true;
       const prevLabel = btn.textContent;
-      btn.textContent = 'Copying…';
+      btn.textContent = 'Adding…';
       try {
         await cloneMarketplaceTemplate(template);
       } catch (error) {
-        alert(error.message || 'Failed to copy template');
+        alert(error.message || 'Failed to add template');
       } finally {
         marketplaceCloneInFlight = false;
         btn.disabled = false;
@@ -1572,16 +1815,37 @@ function renderMarketplaceError() {
   if (errorEl) errorEl.hidden = false;
 }
 
+/**
+ * Fetch the template catalog, at most once per page load.
+ *
+ * Community is a top-level page now, so this runs on every nav click, every
+ * Back/Forward and the initial boot -- where it used to run once, when the
+ * Playground marketplace subtab was opened. The catalog is static config the
+ * server already caches in-process, so repeat visits repaint from memory and
+ * skip the network entirely. A failure clears the cache, so the next visit
+ * retries rather than showing the error forever.
+ */
 async function loadMarketplace() {
-  try {
-    const data = await API.get(`${API_BASE}/api/v1/agents/marketplace`);
-    marketplaceTemplates = data.templates || [];
+  if (marketplaceTemplates.length) {
     renderMarketplaceGrid();
-  } catch (error) {
-    console.warn('Failed to load marketplace:', error.message);
-    marketplaceTemplates = [];
-    renderMarketplaceError();
+    return;
   }
+  // Concurrent callers share one request (boot + a fast nav click can overlap).
+  if (marketplaceLoadInFlight) return marketplaceLoadInFlight;
+  marketplaceLoadInFlight = (async () => {
+    try {
+      const data = await API.get(`${API_BASE}/api/v1/agents/marketplace`);
+      marketplaceTemplates = data.templates || [];
+      renderMarketplaceGrid();
+    } catch (error) {
+      console.warn('Failed to load marketplace:', error.message);
+      marketplaceTemplates = [];
+      renderMarketplaceError();
+    } finally {
+      marketplaceLoadInFlight = null;
+    }
+  })();
+  return marketplaceLoadInFlight;
 }
 
 async function cloneMarketplaceTemplate(template) {
@@ -1591,7 +1855,7 @@ async function cloneMarketplaceTemplate(template) {
   );
   const agent = data?.agent;
   if (!agent?.agent_id) {
-    throw new Error('Copy failed — no agent returned');
+    throw new Error('Add failed — no agent returned');
   }
   applyActiveAgent(agent);
   await loadAgents();
@@ -1614,6 +1878,29 @@ function openCreateExternalAgentModal() {
 function closeCreateExternalAgentModal() {
   const modal = document.getElementById('createExternalAgentModal');
   if (modal) modal.hidden = true;
+}
+
+/**
+ * Lock a submit button and say what it is doing.
+ *
+ * disabled alone is nearly invisible in this theme, which is why a create that
+ * already set it still read as a dead click.
+ */
+function setButtonPending(btn, label) {
+  if (!btn) return;
+  if (btn.dataset.idleLabel === undefined) btn.dataset.idleLabel = btn.textContent;
+  btn.disabled = true;
+  btn.setAttribute('aria-busy', 'true');
+  btn.classList.add('is-pending');
+  btn.textContent = label;
+}
+
+function restoreButton(btn) {
+  if (!btn) return;
+  btn.disabled = false;
+  btn.removeAttribute('aria-busy');
+  btn.classList.remove('is-pending');
+  if (btn.dataset.idleLabel !== undefined) btn.textContent = btn.dataset.idleLabel;
 }
 
 function openCreateBuiltinAgentModal() {
@@ -1657,7 +1944,7 @@ async function submitCreateBuiltinAgent(event) {
   }
 
   if (errorEl) errorEl.hidden = true;
-  if (submitBtn) submitBtn.disabled = true;
+  setButtonPending(submitBtn, 'Creating…');
 
   try {
     const data = await API.post(`${API_BASE}/api/v1/agents`, {
@@ -1667,16 +1954,20 @@ async function submitCreateBuiltinAgent(event) {
       description,
       cash_allocation,
     });
+    // Confirm on the POST result, not after loadAgents(): that is a second
+    // round trip, and gating the toast on it reinstates most of the delay.
     closeCreateBuiltinAgentModal();
+    showAppToast(`"${name}" created`);
     if (data.agent) applyActiveAgent(data.agent);
     await loadAgents();
+    if (data.agent) highlightAgentCard(data.agent.agent_id);
   } catch (error) {
     if (errorEl) {
       errorEl.textContent = error.message;
       errorEl.hidden = false;
     }
   } finally {
-    if (submitBtn) submitBtn.disabled = false;
+    restoreButton(submitBtn);
   }
 }
 
@@ -1761,21 +2052,25 @@ async function submitCreateExternalAgent(event) {
   }
 
   if (errorEl) errorEl.hidden = true;
-  if (submitBtn) submitBtn.disabled = true;
+  setButtonPending(submitBtn, 'Creating…');
 
   try {
     const data = await API.post(`${API_BASE}/api/v1/agents`, { name, model_name, cash_allocation });
+    // Same POST, same round trip as the built-in flow, so the same rule: confirm
+    // on the response. The API key is shown once and exists only in this
+    // response, so gating it on loadAgents() delays the one thing the user has
+    // to copy before it is unrecoverable.
     closeCreateExternalAgentModal();
+    showAgentCredentials(data.api_key);
     applyActiveAgent(data.agent);
     await loadAgents();
-    showAgentCredentials(data.api_key);
   } catch (error) {
     if (errorEl) {
       errorEl.textContent = error.message;
       errorEl.hidden = false;
     }
   } finally {
-    if (submitBtn) submitBtn.disabled = false;
+    restoreButton(submitBtn);
   }
 }
 
@@ -1961,10 +2256,11 @@ function syncMarketDataSourceUI(options = {}) {
   if (modelSelectHint && !isIFind) {
     modelSelectHint.textContent = isSimulation
       ? 'vn.py simulation uses rule-based decisions.'
-      : 'Defaults to this agent’s model. Changing it here is temporary and is not saved to the agent.';
+      : 'Set on the agent in Configure — this backtest always runs the agent’s saved model.';
   }
   if (notice) notice.hidden = !isSimulation;
   if (ifindNotice) ifindNotice.hidden = !isIFind;
+  syncBacktestModelFieldMode();
 }
 
 function renderBacktestDataSourceBadge(run) {
@@ -2014,17 +2310,14 @@ const API = {
       'Content-Type': 'application/json',
       'x-session-id': window.SESSION_ID,
       'x-browser-id': window.BROWSER_OWNER_ID,
+      ...csrfHeaders(),
       ...options.headers,
     };
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    
     try {
       const response = await fetch(endpoint, { 
         ...options, 
         headers,
+        credentials: 'include',
       });
       
       const contentType = response.headers.get('content-type');
@@ -2077,25 +2370,53 @@ const API = {
 
 const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? window.location.origin
-    : 'https://agentictrading.onrender.com';
+    : '';
 
+// Legacy localStorage key — cleared on sign-in/out; never written for new sessions.
+// Session identity lives in an HttpOnly cookie (credentials: 'include').
 const AUTH_TOKEN_KEY = 'auth-token';
 const AUTH_USER_KEY = 'auth-user';
+
+function isSignedIn() {
+  return !!getStoredAuthUser();
+}
+
+function clearLegacyAuthToken() {
+  try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch (_) { /* ignore */ }
+}
+
+function readCsrfToken() {
+  try {
+    const raw = document.cookie || '';
+    for (const name of ['atl_csrf', '__Host-atl_csrf']) {
+      const match = raw.match(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'));
+      if (match) return decodeURIComponent(match[1]);
+    }
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
+function csrfHeaders() {
+  const token = readCsrfToken();
+  return token ? { 'X-CSRF-Token': token } : {};
+}
+window.csrfHeaders = csrfHeaders;
+// Classic-script `const API` is not a window property; agent-editor and others
+// look up window.API.patch for credentialed mutating calls.
+window.API = API;
+
 
 const AuthAPI = {
   async request(path, options = {}) {
     const headers = {
       'Content-Type': 'application/json',
+      ...csrfHeaders(),
       ...options.headers,
     };
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-
     const response = await fetch(`${API_BASE}${path}`, {
       ...options,
       headers,
+      credentials: 'include',
     });
 
     const contentType = response.headers.get('content-type');
@@ -2126,7 +2447,14 @@ const AuthAPI = {
   },
 
   me() {
-    return this.request('/api/auth/me', { method: 'GET' });
+    // Migration bridge: a session issued before the HttpOnly-cookie change
+    // exists only in localStorage. Send it once as Bearer; the backend
+    // answers with Set-Cookie, and refreshAuthUser then clears the legacy key.
+    const legacyToken = localStorage.getItem(AUTH_TOKEN_KEY);
+    return this.request('/api/auth/me', {
+      method: 'GET',
+      ...(legacyToken ? { headers: { Authorization: `Bearer ${legacyToken}` } } : {}),
+    });
   },
 
   logout() {
@@ -2151,6 +2479,35 @@ const AuthAPI = {
     return this.request('/api/auth/avatar', { method: 'DELETE' });
   },
 
+  updateDisplayName(displayName) {
+    return this.request('/api/auth/display-name', {
+      method: 'PUT',
+      body: JSON.stringify({ display_name: displayName }),
+    });
+  },
+
+  requestEmailChange(currentPassword, newEmail) {
+    return this.request('/api/auth/email-change', {
+      method: 'POST',
+      body: JSON.stringify({ current_password: currentPassword, new_email: newEmail }),
+    });
+  },
+
+  verifyEmailChange(code) {
+    return this.request('/api/auth/email-change/verify', {
+      method: 'POST',
+      body: JSON.stringify({ code }),
+    });
+  },
+
+  emailChangeStatus() {
+    return this.request('/api/auth/email-change', { method: 'GET' });
+  },
+
+  cancelEmailChange() {
+    return this.request('/api/auth/email-change', { method: 'DELETE' });
+  },
+
   discordStart() {
     return this.request('/api/auth/discord/start', { method: 'POST' });
   },
@@ -2167,29 +2524,38 @@ function getStoredAuthUser() {
     return null;
   }
 }
+window.getStoredAuthUser = getStoredAuthUser;
 
-function setAuthState(user, token) {
-  localStorage.setItem(AUTH_TOKEN_KEY, token);
+function setAuthState(user) {
+  clearLegacyAuthToken();
   localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
   window.AUTH_USER = user;
   updateAuthUI();
 }
 
-async function claimAgentsForUser() {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token) return;
+async function claimAgentsForUser({ reload = true } = {}) {
+  if (!getStoredAuthUser()) return;
   try {
     await API.post(`${API_BASE}/api/v1/agents/claim-account`, {});
   } catch (error) {
     console.warn('Agent account claim skipped:', error.message);
   }
-  await loadAgents();
+  if (reload) {
+    // Ungated on purpose: this call IS the claim-then-load ordering the auth
+    // boot gate exists to protect, and it runs before the gate opens.
+    await loadAgentsNow();
+  }
 }
 
 function clearAuthState() {
-  localStorage.removeItem(AUTH_TOKEN_KEY);
+  clearLegacyAuthToken();
   localStorage.removeItem(AUTH_USER_KEY);
   window.AUTH_USER = null;
+  // The email-change form keeps its stage in a closure keyed to nobody: left
+  // alone, the next user to sign in on this tab resumes the previous user's
+  // half-finished change. Reset here -- every sign-out path (logout button,
+  // missing token, expired session) funnels through clearAuthState.
+  resetEmailChangeForm();
   updateAuthUI();
 }
 
@@ -2206,6 +2572,11 @@ function updateAccountPage() {
     signedOut.hidden = true;
     if (nameEl) nameEl.textContent = user.display_name || '—';
     if (emailEl) emailEl.textContent = user.email || '—';
+    const nameInput = document.getElementById('displayNameInput');
+    // Skip while focused so a re-render mid-edit does not stomp what is typed.
+    if (nameInput && document.activeElement !== nameInput) {
+      nameInput.value = user.display_name || '';
+    }
     renderAvatar(document.getElementById('accountAvatarPreview'), user);
     const removeBtn = document.getElementById('avatarRemoveBtn');
     if (removeBtn) removeBtn.hidden = !user.avatar;
@@ -2390,6 +2761,196 @@ function initChangePasswordForm() {
   });
 }
 
+function initDisplayNameForm() {
+  const form = document.getElementById('accountDisplayNameForm');
+  if (!form) return;
+  const input = document.getElementById('displayNameInput');
+  const errorEl = document.getElementById('displayNameError');
+  const successEl = document.getElementById('displayNameSuccess');
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (errorEl) errorEl.hidden = true;
+    if (successEl) successEl.hidden = true;
+
+    const value = (input?.value || '').trim();
+    if (!value) {
+      if (errorEl) {
+        errorEl.textContent = 'Display name cannot be empty.';
+        errorEl.hidden = false;
+      }
+      return;
+    }
+
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      const data = await AuthAPI.updateDisplayName(value);
+      applyUpdatedUser(data.user);   // cascades into updateAuthUI() -> updateAccountPage()
+      if (successEl) successEl.hidden = false;
+    } catch (error) {
+      if (errorEl) {
+        errorEl.textContent = error.message;
+        errorEl.hidden = false;
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+}
+
+function renderEmailChangeState(state) {
+  const idle = document.getElementById('emailChangeIdle');
+  const codeStep = document.getElementById('emailChangeCodeStep');
+  const copy = document.getElementById('emailChangeStepCopy');
+  const submitBtn = document.getElementById('emailChangeSubmitBtn');
+  const cancelBtn = document.getElementById('emailChangeCancelBtn');
+  if (!idle || !codeStep) return;
+
+  const pending = Boolean(state && state.pending);
+  idle.hidden = pending;
+  codeStep.hidden = !pending;
+  if (cancelBtn) cancelBtn.hidden = !pending;
+
+  if (!pending) {
+    if (submitBtn) submitBtn.textContent = 'Send code';
+    return;
+  }
+
+  const user = getStoredAuthUser();
+  if (copy) {
+    // textContent, never innerHTML: new_email is user-supplied.
+    copy.textContent = state.stage === 'new'
+      ? `Code sent to ${state.new_email}. Enter it to finish — check your spam folder if it doesn't arrive.`
+      : `We sent a 6-character code to ${user?.email || 'your current address'}. Check your spam folder if it doesn't arrive.`;
+  }
+  if (submitBtn) submitBtn.textContent = state.stage === 'new' ? 'Confirm' : 'Verify';
+}
+
+// Rebound to the form's real reset by initEmailChangeForm(); the no-op covers
+// clearAuthState() firing before init (e.g. token expiry on page load).
+let resetEmailChangeForm = () => {};
+
+function initEmailChangeForm() {
+  const form = document.getElementById('accountEmailForm');
+  if (!form) return;
+  const errorEl = document.getElementById('emailChangeError');
+  const successEl = document.getElementById('emailChangeSuccess');
+  const codeInput = document.getElementById('emailChangeCodeInput');
+  const cancelBtn = document.getElementById('emailChangeCancelBtn');
+  let stage = null;
+
+  const showError = (message) => {
+    if (errorEl) {
+      errorEl.textContent = message;
+      errorEl.hidden = false;
+    }
+  };
+
+  const reset = () => {
+    stage = null;
+    form.reset();
+    if (errorEl) errorEl.hidden = true;
+    if (successEl) successEl.hidden = true;
+    renderEmailChangeState({ pending: false });
+  };
+  resetEmailChangeForm = reset;
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitBtn = document.getElementById('emailChangeSubmitBtn');
+    if (errorEl) errorEl.hidden = true;
+    if (successEl) successEl.hidden = true;
+    if (submitBtn) submitBtn.disabled = true;
+    try {
+      if (!stage) {
+        const newEmail = (document.getElementById('newEmailInput')?.value || '').trim();
+        // Emptiness is checked on the trimmed value, but the RAW password is what
+        // gets sent -- leading/trailing whitespace can be meaningful in a password,
+        // and the sibling change-password form reads its field raw too.
+        const password = document.getElementById('emailChangePasswordInput')?.value || '';
+        if (!newEmail || !password.trim()) {
+          showError('Enter a new email address and your current password.');
+          return;
+        }
+        const state = await AuthAPI.requestEmailChange(password, newEmail);
+        stage = state.stage;
+        renderEmailChangeState({ pending: true, ...state });
+        const pwInput = document.getElementById('emailChangePasswordInput');
+        if (pwInput) pwInput.value = '';
+      } else {
+        const code = (codeInput?.value || '').trim();
+        if (!code) {
+          showError('Enter the 6-character code from your email.');
+          return;
+        }
+        const data = await AuthAPI.verifyEmailChange(code);
+        if (data.status === 'ok') {
+          applyUpdatedUser(data.user);   // cascades into updateAuthUI() -> updateAccountPage()
+          reset();
+          if (successEl) successEl.hidden = false;
+        } else {
+          // Stage advanced: a fresh code just went to the new address.
+          stage = data.stage;
+          if (codeInput) codeInput.value = '';
+          renderEmailChangeState({ pending: true, ...data });
+        }
+      }
+    } catch (error) {
+      showError(error.message);
+      // A failed verify can mean the server tore the whole request down --
+      // it cancels on the 5th wrong code and on a commit-time 409. The client
+      // only learns `stage` from successful responses, so re-read the
+      // authoritative state instead of leaving a dead code box on screen.
+      if (stage) {
+        try {
+          const state = await AuthAPI.emailChangeStatus();
+          stage = state.pending ? state.stage : null;
+          // Clear the code only when the request is actually gone. On a
+          // stage-two send failure the backend deliberately leaves stage 'old'
+          // intact so the code the user already holds stays valid -- wiping the
+          // box would force a needless retype of a code that still works.
+          if (!state.pending && codeInput) codeInput.value = '';
+          renderEmailChangeState(state);
+        } catch (statusError) {
+          // Keep the current view; the error above already told the user.
+        }
+      }
+    } finally {
+      if (submitBtn) submitBtn.disabled = false;
+    }
+  });
+
+  cancelBtn?.addEventListener('click', async () => {
+    if (errorEl) errorEl.hidden = true;
+    try {
+      await AuthAPI.cancelEmailChange();
+    } catch (error) {
+      showError(error.message);
+      return;
+    }
+    reset();
+  });
+
+  // Re-entering the page mid-flow must not strand the user on the idle form.
+  if (getStoredAuthUser()) {
+    AuthAPI.emailChangeStatus()
+      .then((state) => {
+        stage = state.pending ? state.stage : null;
+        renderEmailChangeState(state);
+      })
+      .catch(() => {
+        // Fail-closed, and deliberately not fail-visible: a failed status check
+        // is indistinguishable here from "nothing pending", and we show the idle
+        // form rather than blocking the page. If a change really was in flight,
+        // the next submit either hits the 60s cooldown (429) or replaces it --
+        // self-healing, but the user is not told which happened. Accepted
+        // tradeoff; see the fail-closed-is-not-fail-visible note in CLAUDE.md.
+        renderEmailChangeState({ pending: false });
+      });
+  }
+}
+
 function toggleAccountMenu(force) {
   const menu = document.getElementById('accountMenu');
   const btn = document.getElementById('authAccountBtn');
@@ -2515,7 +3076,7 @@ function openAuthFromUrl() {
   if (auth !== 'login' && auth !== 'signup') return;
 
   // Already signed in — stay on the dashboard, no modal.
-  if (localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser()) {
+  if (isSignedIn()) {
     params.delete('auth');
     const clean = params.toString();
     const next = `${window.location.pathname}${clean ? `?${clean}` : ''}${window.location.hash}`;
@@ -2552,8 +3113,7 @@ async function openDiscordWithAccount(event) {
     event.stopPropagation();
   }
 
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token || !getStoredAuthUser()) {
+  if (!isSignedIn()) {
     openAuthModal('login');
     return;
   }
@@ -2580,10 +3140,11 @@ async function openDiscordWithAccount(event) {
 async function finishRobinhoodLinkSuccess(agentId) {
   if (agentId && window.AgentEditor?.open) {
     try {
-      const headers = { 'x-session-id': SESSION_ID };
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, { headers });
+      const headers = { 'x-session-id': SESSION_ID, ...csrfHeaders() };
+      const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, {
+        headers,
+        credentials: 'include',
+      });
       if (response.ok) {
         const data = await response.json();
         if (data.agent) window.AgentEditor.open(data.agent);
@@ -2619,12 +3180,11 @@ async function handleRobinhoodOAuthReturn() {
 
   if (robinhood === 'pending') {
     try {
-      const headers = { 'Content-Type': 'application/json', 'x-session-id': SESSION_ID };
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      if (token) headers.Authorization = `Bearer ${token}`;
+      const headers = { 'Content-Type': 'application/json', 'x-session-id': SESSION_ID, ...csrfHeaders() };
       const response = await fetch(`${API_BASE}/api/auth/robinhood/complete`, {
         method: 'POST',
         headers,
+        credentials: 'include',
         body: JSON.stringify({ link_code: linkCode }),
       });
       if (response.ok) {
@@ -2707,25 +3267,25 @@ function wireDiscordAccountButtons() {
 }
 
 async function refreshAuthUser() {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token) {
-    clearAuthState();
-    return;
-  }
-
+  // Probe the cookie session. Guests get 401; signed-in users refresh the
+  // cached auth-user profile. A stale auth-user alone must not skip this.
   try {
     const data = await AuthAPI.me();
+    clearLegacyAuthToken();
     localStorage.setItem(AUTH_USER_KEY, JSON.stringify(data.user));
     window.AUTH_USER = data.user;
     updateAuthUI();
     await claimAgentsForUser();
   } catch (error) {
-    console.warn('Auth session expired:', error.message);
+    if (getStoredAuthUser()) {
+      console.warn('Auth session expired:', error.message);
+    }
     clearAuthState();
   }
 }
 
-function initAuthUI() {
+function initAuthUI(options = {}) {
+  const { refresh = true } = options;
   const signInBtn = document.getElementById('authSignInBtn');
   const accountBtn = document.getElementById('authAccountBtn');
   const accountSignInBtn = document.getElementById('accountSignInBtn');
@@ -2744,9 +3304,6 @@ function initAuthUI() {
   document.getElementById('accountMenuAccountBtn')?.addEventListener('click', () => {
     closeAccountMenu();
     navigateToPage('account');
-  });
-  document.getElementById('accountMenuLandingLink')?.addEventListener('click', () => {
-    closeAccountMenu();
   });
   document.getElementById('accountMenuLogoutBtn')?.addEventListener('click', () => {
     closeAccountMenu();
@@ -2817,11 +3374,19 @@ function initAuthUI() {
       const data = authMode === 'signup'
         ? await AuthAPI.signup(email, displayName, password)
         : await AuthAPI.login(email, password);
-      setAuthState(data.user, data.token);
+      setAuthState(data.user);
       // Authentication is complete here, so dismiss now. Everything below is
       // post-sign-in housekeeping and must not hold the modal open — a slow or
       // hung backend used to leave the popup up over an already-signed-in UI.
       closeAuthModal();
+      // Land on My Agents after either sign-up or sign-in, matching the landing
+      // page's goToDashboardLoggedIn. Sign-up used to go to Home (a second
+      // marketing hero); sign-in used to navigate nowhere at all, so the only
+      // confirmation it had worked was the header avatar swapping in, and the
+      // user was left on whatever page they happened to be reading.
+      // navigateToPage maps 'agents' → playground + the 'agents' subtab itself.
+      navigateToPage('agents');
+      showAppToast(`Signed in as ${data.user?.display_name || data.user?.email || 'your account'}`);
       claimAgentsForUser()
         .then(() => {
           // If we arrived here from a Discord deep link that needed this account
@@ -2858,8 +3423,14 @@ function initAuthUI() {
   handleRobinhoodOAuthReturn();
   wireDiscordAccountButtons();
   initChangePasswordForm();
+  initDisplayNameForm();
+  initEmailChangeForm();
   initAvatarControls();
-  refreshAuthUser();
+  // Boot claims + loads agents itself so landing signup → /app does not race
+  // a fire-and-forget refresh against the first My Agents paint.
+  if (refresh) {
+    refreshAuthUser();
+  }
 }
 
 // Store default run IDs
@@ -2869,10 +3440,195 @@ let chartInstance = null;
 let liveBacktestChartActive = false;
 /** When set, Backtest view is pinned to this in-flight run (blocks history chart paint). */
 let liveBacktestRunId = null;
+/** Latest polled progress for the single in-flight run, or null before the
+ *  first step. backtest_status is one process-global dict on the server, so at
+ *  most one backtest runs at a time and a single shared object is correct.
+ *  Declared beside liveBacktestRunId because the two are only ever read
+ *  together: getAgentBacktestRunning() applies this to a card only when the
+ *  card's run id matches liveBacktestRunId. */
+let liveBacktestProgress = null;
 let liveBacktestLaunchPending = false;
 let liveBacktestLaunchError = false;
 /** Active status-poll timer id (so dropdown can re-attach to a running job). */
 let backtestPollTimer = null;
+
+// Which agents have a backtest in flight, so My Agents can show it. Mirrored to
+// sessionStorage: a refresh mid-run must not silently drop the indicator and
+// make a running backtest look like it never started.
+const RUNNING_BACKTESTS_KEY = 'running-backtests';
+
+function readRunningBacktests() {
+    try {
+        const raw = sessionStorage.getItem(RUNNING_BACKTESTS_KEY);
+        const parsed = raw ? JSON.parse(raw) : {};
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+        return {};
+    }
+}
+
+function writeRunningBacktests(map) {
+    try {
+        sessionStorage.setItem(RUNNING_BACKTESTS_KEY, JSON.stringify(map));
+    } catch (error) {
+        /* sessionStorage unavailable — the in-page indicator still works */
+    }
+}
+
+function markAgentBacktestRunning(agentId, runId) {
+    if (!agentId) return;
+    const map = readRunningBacktests();
+    map[agentId] = { runId: runId || null, startedAt: Date.now() };
+    writeRunningBacktests(map);
+}
+
+function clearAgentBacktestRunning(agentId) {
+    if (!agentId) return;
+    const map = readRunningBacktests();
+    if (!(agentId in map)) return;
+    delete map[agentId];
+    writeRunningBacktests(map);
+}
+
+/**
+ * Running entry for an agent, or null.
+ *
+ * Entries older than the poll ceiling are discarded: a run that died without a
+ * terminal status would otherwise pin a card to "Backtesting…" forever.
+ */
+function getAgentBacktestRunning(agentId) {
+    const entry = readRunningBacktests()[agentId];
+    if (!entry) return null;
+    const elapsed = (Date.now() - Number(entry.startedAt || 0)) / 1000;
+    if (!Number.isFinite(elapsed) || elapsed > BACKTEST_POLL_MAX_SECONDS) {
+        clearAgentBacktestRunning(agentId);
+        return null;
+    }
+    // Progress belongs to the run the poller is following, and ONLY to it.
+    // The map can transiently hold two entries: runBacktest() marks an agent
+    // running before its POST resolves (:5689, runId still null) and the
+    // backend rejects a second concurrent run, so clicking Run on an idle
+    // agent while another is genuinely in flight briefly leaves both marked.
+    // An unconditional spread would paint the running agent's step/percent/ETA
+    // onto a card whose launch is about to be refused. An entry with no runId
+    // yet is pre-confirmation and correctly renders indeterminate -- there is
+    // no progress to show that early anyway.
+    const ownsProgress = Boolean(liveBacktestRunId) && entry.runId === liveBacktestRunId;
+    return {
+        ...entry,
+        ...(ownsProgress && liveBacktestProgress ? liveBacktestProgress : {}),
+        elapsedSeconds: Math.floor(elapsed),
+    };
+}
+
+let lastRenderedRunningKey = null;
+
+/**
+ * Per-second refresh for running cards.
+ *
+ * Patches the elapsed timer in place rather than re-rendering the grid:
+ * renderAgentCards() starts with `grid.innerHTML = ''`, so doing that once a
+ * second would destroy focus, scroll position and any open card menu for the
+ * whole duration of a run. A full re-render happens only when the set of
+ * running agents changes.
+ */
+function refreshRunningAgentCards() {
+    const running = readRunningBacktests();
+    const key = Object.keys(running).sort().join(',');
+    if (key !== lastRenderedRunningKey) {
+        lastRenderedRunningKey = key;
+        applyAgentFilters(false);
+        return;
+    }
+    // Query by attribute presence and compare values in JS rather than
+    // interpolating an agent id into a selector string: no escaping, no
+    // CSS.escape feature detection, and nothing to get wrong later.
+    //
+    // EVERY field renderAgentRunningBody() paints is patched here, not just the
+    // text ones. A full re-render fires only when the *set* of running agents
+    // changes -- twice in a normal run -- so anything missing from this list is
+    // frozen at its launch value for the whole run. That is how the bar, its
+    // aria-valuenow and the staleness note previously never moved while the
+    // numbers beside them climbed: the card showed "84/240 · 35%" next to a bar
+    // still running the indeterminate sweep, and the staleness warning this
+    // feature exists for was unreachable outside a re-render.
+    const nodes = {
+        elapsed: document.querySelectorAll('[data-running-elapsed]'),
+        step: document.querySelectorAll('[data-running-step]'),
+        detail: document.querySelectorAll('[data-running-detail]'),
+        stale: document.querySelectorAll('[data-running-stale]'),
+        track: document.querySelectorAll('[data-running-track]'),
+        bar: document.querySelectorAll('[data-running-bar]'),
+    };
+    const patch = (list, attribute, agentId, apply) => {
+        list.forEach((el) => {
+            if (el.getAttribute(attribute) !== agentId) return;
+            apply(el);
+        });
+    };
+    Object.keys(running).forEach((agentId) => {
+        const entry = getAgentBacktestRunning(agentId);
+        if (!entry) return;
+        // Same derivation the full render uses, so the two cannot drift.
+        const view = deriveRunningProgress(entry);
+        patch(nodes.elapsed, 'data-running-elapsed', agentId, (el) => {
+            el.textContent = formatBacktestElapsed(entry.elapsedSeconds);
+        });
+        // Assigned unconditionally, empty string included: a tick where the
+        // status endpoint reports no progress (file caught mid-rewrite, a
+        // transient OSError) must clear the last numbers rather than leave them
+        // on screen looking current.
+        patch(nodes.step, 'data-running-step', agentId, (el) => {
+            el.textContent = view.stepLabel;
+        });
+        patch(nodes.detail, 'data-running-detail', agentId, (el) => {
+            el.textContent = view.detail;
+        });
+        patch(nodes.stale, 'data-running-stale', agentId, (el) => {
+            el.textContent = view.notice;
+        });
+        patch(nodes.track, 'data-running-track', agentId, (el) => {
+            if (!view.determinate) {
+                // Removed, not zeroed: a progressbar reporting valuenow=0
+                // forever is a false statement, whereas the absent attribute is
+                // exactly what tells assistive tech the value is indeterminate.
+                el.removeAttribute('aria-valuenow');
+                el.removeAttribute('aria-valuemin');
+                el.removeAttribute('aria-valuemax');
+                return;
+            }
+            el.setAttribute('aria-valuenow', String(view.pct));
+            el.setAttribute('aria-valuemin', '0');
+            el.setAttribute('aria-valuemax', '100');
+        });
+        patch(nodes.bar, 'data-running-bar', agentId, (el) => {
+            el.classList.toggle('is-determinate', view.determinate);
+            // Cleared rather than set to 0%: the stylesheet's 40% width is what
+            // makes the indeterminate sweep visible, and a 0%-wide bar would
+            // animate nothing across the track.
+            el.style.width = view.determinate ? `${view.pct}%` : '';
+        });
+    });
+}
+
+/**
+ * Scroll the named agent's card into view and flash it.
+ *
+ * Attribute lookup then compare in JS -- no escaping, no CSS.escape feature
+ * detection -- matching refreshRunningAgentCards() above.
+ *
+ * Scoped to .agent-card: every card also contains 5-8 buttons carrying the same
+ * data-agent-id, and the unscoped selector would scroll to each of them in turn.
+ */
+function highlightAgentCard(agentId) {
+  if (!agentId) return;
+  document.querySelectorAll('.agent-card[data-agent-id]').forEach((card) => {
+    if (card.getAttribute('data-agent-id') !== agentId) return;
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.add('is-just-created');
+    setTimeout(() => card.classList.remove('is-just-created'), 2400);
+  });
+}
 let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
 let tradingLogFilter = 'all';
@@ -2881,6 +3637,11 @@ let currentMode = "home";
 let currentPage = "home";
 let playgroundTab = "agents";
 let competitionTab = "daily";
+// True once the user explicitly navigates (any history:'push' navigation).
+// Nav is wired before boot's auth awaits, so applyInitialNavigation may run
+// AFTER a real click — restoring the saved page then would yank the page out
+// from under the user.
+let userHasNavigated = false;
 let allRuns = [];
 let comparisonData = null;
 let backtestChartData = null;
@@ -2890,78 +3651,17 @@ let defaultConfig = null;
 document.addEventListener('DOMContentLoaded', async () => {
     // Initialize session FIRST (before any API calls)
     initSession();
-    initAuthUI();
+    // Defer refreshAuthUser: claim must finish before the first loadAgents so a
+    // landing signup → /app handoff does not miss the guest Foundation agent.
+    initAuthUI({ refresh: false });
     bindCashStepInputs();
-    await restoreActiveAgentSession();
-    // Portfolio overview must not wait on the agents waterfall. Paint any
-    // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
-    // then show the page while loadAgents continues in the background.
-    if (typeof window.paintPortfolioBoot === 'function') {
-        try {
-            window.paintPortfolioBoot(
-                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
-            );
-        } catch (error) {
-            console.warn('Portfolio boot paint failed:', error?.message || error);
-        }
-    }
-    if (typeof window.prefetchPortfolio === 'function') {
-        Promise.resolve(
-            window.prefetchPortfolio(
-                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
-            ),
-        ).catch((error) => {
-            console.warn('Portfolio prefetch failed:', error?.message || error);
-        });
-    }
-    const agentsReady = loadAgents().catch((error) => {
-        console.warn('Initial loadAgents failed:', error.message);
-    });
-    applyInitialNavigation();
-    // Home modules / agent cards catch up once the list lands; do not block
-    // first navigation on that wait.
-    await agentsReady;
-    window.addEventListener('agent-editor-saved', async (event) => {
-        const agent = event.detail?.agent;
-        if (agent?.agent_id) {
-            const idx = allAgents.findIndex((a) => a.agent_id === agent.agent_id);
-            if (idx >= 0) {
-                allAgents[idx] = { ...allAgents[idx], ...agent };
-            }
-            applyAgentFilters();
-        }
-        if (agent?.agent_id === localStorage.getItem(ACTIVE_AGENT_KEY)) {
-            localStorage.setItem(ACTIVE_AGENT_NAME_KEY, agent.name || '');
-            const nameEl = document.getElementById('playgroundAgentName');
-            if (nameEl) nameEl.textContent = agent.name || 'Agent';
-        }
-        await loadAgents();
-    });
-    window.addEventListener('agent-editor-open-run', async (event) => {
-        const { agent, runId } = event.detail || {};
-        if (!agent || !runId) return;
-        if (window.AgentEditor) window.AgentEditor.close(true);
-        await activateAgent(agent);
-        localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
-        navigateToPage('playground', { playgroundTab: 'backtest' });
-        currentMode = 'backtest';
-        await loadData();
-    });
-    // Guarded: this awaits loadData() internally, and an unhandled rejection here
-    // used to abort the rest of boot — including initNavigation(), which wires
-    // every nav button. A failed deep link must not cost the user navigation.
-    try {
-        await applyAgentRunDeepLink();
-    } catch (error) {
-        console.warn('Deep link failed:', error.message);
-    }
-    const config = loadConfigFromURL();
-    window.CURRENT_CONFIG = config;
-    console.log('⚙️ Experiment config:', config);
-    console.log('Session ID:', window.SESSION_ID);
-    
-    console.log('Dashboard initializing...');
 
+    // ---- Pure-DOM wiring before ANY network await. On a cold backend start
+    // every fetch below this block can hang for tens of seconds, and nothing
+    // here needs one: nav must respond to clicks immediately. Data loads an
+    // early click triggers are held by authBootGate until the account-claim
+    // phase settles, so wiring early cannot reorder the claim invariant. ----
+    initNavigation();
     setupTickerResizeHandler();
     setupTickerScrollControls();
 
@@ -2977,6 +3677,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('runBacktestModalBackdrop')?.addEventListener('click', closeRunBacktestModal);
     document.getElementById('runBacktestModalSubmit')?.addEventListener('click', () => {
         runBacktest();
+    });
+    document.getElementById('runBacktestEditCapitalBtn')?.addEventListener('click', () => {
+        const agent = runBacktestModalAgent;
+        closeRunBacktestModal();
+        if (agent && window.AgentEditor?.open) window.AgentEditor.open(agent);
     });
     document.addEventListener('keydown', (event) => {
         if (event.key !== 'Escape') return;
@@ -3031,46 +3736,147 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelectorAll('.universe-tab').forEach(tab => {
         tab.addEventListener('click', (e) => handleUniverseTabSwitch(e.target));
     });
-    
+
     // Setup preset cards
     document.getElementById('djiaCard')?.addEventListener('click', () => selectPreset('djia'));
     document.getElementById('mag7Card')?.addEventListener('click', () => selectPreset('mag7'));
-    
+
     // Setup custom universe builder
     setupAssetSearch();
-    
+
     const addAssetBtn = document.querySelector('.add-asset-btn');
     if (addAssetBtn) {
         addAssetBtn.addEventListener('click', handleAddAsset);
     }
-    
+
     const searchInput = document.getElementById('assetSearchInput');
     if (searchInput) {
         searchInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') handleAddAsset();
         });
     }
-    
+
     // Setup chip removal
     document.querySelectorAll('.chip-remove').forEach(btn => {
         btn.addEventListener('click', (e) => removeChip(e.target.closest('.chip')));
     });
 
-    // Load default configuration if available (after DOM is ready)
-    try {
-      await loadDefaults();
-    } catch (error) {
-      console.warn('Failed to load defaults:', error);
-    }
-    await loadMarketDataFeatures();
-
-    initNavigation();
-
-    // Load ticker without blocking the rest of the page
+    // Ticker immediately: it is the page's de-facto liveness signal and
+    // depends on nothing above.
     loadMarketTicker();
     setInterval(loadMarketTicker, 30000);
     updateMarketsOpenStatus();
     setInterval(updateMarketsOpenStatus, 60000);
+
+    // Config fetches in parallel, off the boot critical path; awaited at the
+    // end of boot so "Dashboard ready" still means fully configured.
+    const configReady = Promise.all([
+        loadDefaults().catch((error) => {
+            console.warn('Failed to load defaults:', error);
+        }),
+        loadMarketDataFeatures(),
+    ]);
+
+    // If the head boot script's warmup ping is still pending after a beat,
+    // say so — a free-tier cold start otherwise looks like a broken page.
+    if (window.API_WARMUP) {
+        let warmupSettled = false;
+        window.API_WARMUP.then(() => { warmupSettled = true; });
+        setTimeout(() => {
+            if (!warmupSettled) {
+                showAppToast('Waking up the server — the first load can take up to a minute on our free hosting.');
+            }
+        }, SLOW_BOOT_NOTICE_MS);
+    }
+
+    await restoreActiveAgentSession();
+    // The HttpOnly session cookie is invisible to JS, so the boot signal is
+    // the cached auth-user (written on every cookie sign-in) or a pre-cookie
+    // legacy localStorage token (upgraded to a cookie by the /me bridge).
+    if (localStorage.getItem(AUTH_TOKEN_KEY) || getStoredAuthUser()) {
+        try {
+            await refreshAuthUser();
+        } catch (error) {
+            console.warn('Boot refreshAuthUser failed:', error?.message || error);
+        }
+    }
+    // Claim phase settled (or there was nothing to claim): gated loadAgents
+    // callers queued by early clicks may fetch now.
+    openAuthBootGate();
+    // Portfolio overview must not wait on the agents waterfall. Paint any
+    // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
+    // then show the page while loadAgents continues in the background.
+    if (typeof window.paintPortfolioBoot === 'function') {
+        try {
+            window.paintPortfolioBoot(
+                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
+            );
+        } catch (error) {
+            console.warn('Portfolio boot paint failed:', error?.message || error);
+        }
+    }
+    if (typeof window.prefetchPortfolio === 'function') {
+        Promise.resolve(
+            window.prefetchPortfolio(
+                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
+            ),
+        ).catch((error) => {
+            console.warn('Portfolio prefetch failed:', error?.message || error);
+        });
+    }
+    // refreshAuthUser → claimAgentsForUser already loadAgents when signed in.
+    const agentsReady = isSignedIn()
+        ? Promise.resolve()
+        : loadAgents().catch((error) => {
+            console.warn('Initial loadAgents failed:', error.message);
+        });
+    applyInitialNavigation();
+    // Home modules / agent cards catch up once the list lands; do not block
+    // first navigation on that wait.
+    await agentsReady;
+    window.addEventListener('agent-editor-saved', async (event) => {
+        const agent = event.detail?.agent;
+        if (agent?.agent_id) {
+            const idx = allAgents.findIndex((a) => a.agent_id === agent.agent_id);
+            if (idx >= 0) {
+                allAgents[idx] = { ...allAgents[idx], ...agent };
+            }
+            applyAgentFilters();
+        }
+        if (agent?.agent_id === localStorage.getItem(ACTIVE_AGENT_KEY)) {
+            localStorage.setItem(ACTIVE_AGENT_NAME_KEY, agent.name || '');
+            const nameEl = document.getElementById('playgroundAgentName');
+            if (nameEl) nameEl.textContent = agent.name || 'Agent';
+        }
+        await loadAgents();
+    });
+    window.addEventListener('agent-editor-open-run', async (event) => {
+        const { agent, runId } = event.detail || {};
+        if (!agent || !runId) return;
+        if (window.AgentEditor) window.AgentEditor.close(true);
+        await activateAgent(agent);
+        localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
+        navigateToPage('playground', { playgroundTab: 'backtest' });
+        currentMode = 'backtest';
+        await loadData();
+    });
+    // Guarded: this awaits loadData() internally, and an unhandled rejection here
+    // used to abort the rest of boot — including initNavigation(), which wires
+    // every nav button. A failed deep link must not cost the user navigation.
+    try {
+        await applyAgentRunDeepLink();
+    } catch (error) {
+        console.warn('Deep link failed:', error.message);
+    }
+    const config = loadConfigFromURL();
+    window.CURRENT_CONFIG = config;
+    console.log('⚙️ Experiment config:', config);
+    console.log('Session ID:', window.SESSION_ID);
+    
+    console.log('Dashboard initializing...');
+
+    // Kicked off before the auth awaits; settled before boot reports ready.
+    await configReady;
 
     console.log('🎯 Dashboard ready. Default runs:', window.DEFAULT_RUNS || 'None configured');
 });
@@ -4018,6 +4824,7 @@ function formatBacktestError(error, dataSource = null) {
  */
 function loadAgentPipelineForBacktest(agent) {
     if (!agent) return null;
+    if ((agent.runtime_type || 'pipeline') !== 'pipeline') return null;
     if (Array.isArray(agent.pipeline) && agent.pipeline.length) {
         return agent.pipeline;
     }
@@ -4064,6 +4871,196 @@ function formatBacktestElapsed(seconds) {
     return `${minutes}:${String(secs).padStart(2, '0')}`;
 }
 
+/** A progress file older than this is reported as stale (seconds). */
+const BACKTEST_STALE_SECONDS = 120;
+
+/**
+ * Coarse remaining-time estimate, or null when no honest one exists.
+ *
+ * Measured over an *observed* window -- seconds and steps counted from the first
+ * step this client saw -- rather than over the whole run. Both elapsed clocks
+ * start before any step exists (the card's at the click that fires the POST, the
+ * panel's at the server's run start), so dividing the full span by the step
+ * count folds process start, imports, the market-data fetch and gateway warm-up
+ * into the per-step rate. With ~25s of startup and ~1s steps that reports
+ * "~37m left" for a run that finishes in four, and the later collapse to
+ * "~4m left" is itself an "is this broken?" signal.
+ *
+ * Suppressed below three observed steps: the first estimates swing wildly, and
+ * a number that visibly jumps reads as broken. Coarse buckets thereafter -- a
+ * precise-looking ETA that drifts is worse than an obviously approximate one.
+ */
+function formatBacktestEta(observedSeconds, observedSteps, remainingSteps) {
+    const seconds = Number(observedSeconds);
+    const done = Number(observedSteps);
+    const left = Number(remainingSteps);
+    if (!Number.isFinite(seconds) || seconds <= 0) return null;
+    if (!Number.isFinite(done) || done < 3) return null;
+    if (!Number.isFinite(left) || left <= 0) return null;
+    const remaining = (seconds / done) * left;
+    if (!Number.isFinite(remaining) || remaining <= 0) return null;
+    if (remaining < 60) return '<1m left';
+    return `~${Math.round(remaining / 60)}m left`;
+}
+
+/**
+ * ETA for a running entry, anchored to the step this client first observed.
+ *
+ * `firstStep`/`firstStepAt` are stamped by the poller the first time a run
+ * reports a step and then carried forward untouched, so launch cost never
+ * enters the per-step rate. Both ends of the elapsed subtraction are Date.now()
+ * reads on this machine, so -- unlike the server's elapsed_seconds -- it
+ * carries no clock skew.
+ */
+function resolveBacktestEta(running) {
+    const step = Number(running.step);
+    const total = Number(running.totalSteps);
+    const anchorStep = Number(running.firstStep);
+    const anchorAt = Number(running.firstStepAt);
+    if (!Number.isFinite(step) || !Number.isFinite(total) || total <= 0) return null;
+    if (step <= 0 || step >= total) return null;
+    if (!Number.isFinite(anchorStep) || !Number.isFinite(anchorAt)) return null;
+    return formatBacktestEta((Date.now() - anchorAt) / 1000, step - anchorStep, total - step);
+}
+
+/**
+ * Seconds since the progress file was last written, or null when unknown.
+ *
+ * The age arrives already computed from the server (`progress_age_seconds`)
+ * rather than being derived from the mtime here. Differencing a server
+ * timestamp against the browser clock makes any client more than
+ * BACKTEST_STALE_SECONDS out of step indistinguishable from a wedged run: a
+ * fast clock pins a permanent "No progress for 47m" onto a healthy backtest, a
+ * slow one suppresses the warning forever. Only the time since *this* client
+ * took the reading is added, which is a difference of two local Date.now()
+ * calls and so skew-free.
+ */
+function resolveProgressAgeSeconds(running) {
+    const age = running.ageSeconds;
+    // typeof, not Number(): Number(null) is 0, so a coercing check would report
+    // a run with no age reading at all as perfectly fresh.
+    if (typeof age !== 'number' || !Number.isFinite(age) || age < 0) return null;
+    const takenAt = Number(running.ageAt);
+    const local = Number.isFinite(takenAt) ? Math.max(0, (Date.now() - takenAt) / 1000) : 0;
+    return age + local;
+}
+
+/**
+ * Staleness notice, or null while progress is fresh.
+ *
+ * Reports the *actual* gap, never the threshold: a message frozen at "2m" while
+ * the real gap grows to ten actively misinforms. Deliberately does not say
+ * "stuck" -- we know the file is old, not that the run died, and a long model
+ * step looks exactly like this.
+ */
+function formatProgressStaleness(secondsSinceUpdate) {
+    const gap = Number(secondsSinceUpdate);
+    if (!Number.isFinite(gap) || gap < BACKTEST_STALE_SECONDS) return null;
+    const minutes = Math.floor(gap / 60);
+    return `No progress for ${minutes}m — long model steps can do this.`;
+}
+
+/**
+ * Startup-phase counterpart of formatProgressStaleness.
+ *
+ * The likeliest wedge publishes *no* progress file at all: a subprocess that
+ * dies or hangs in imports, the market-data fetch or the LLM gateway never
+ * writes a step, so there is no mtime to age and the notice above can never
+ * fire. That left the exact scenario this feature exists for -- "watched it and
+ * could not tell running from stuck" -- as the one case with no signal on either
+ * surface, for the full ten-minute poll ceiling.
+ *
+ * Same honesty constraint as the other notice: reports what is known (no steps
+ * yet), not a diagnosis (dead).
+ */
+function formatStartupStaleness(elapsedSeconds) {
+    const elapsed = Number(elapsedSeconds);
+    if (!Number.isFinite(elapsed) || elapsed < BACKTEST_STALE_SECONDS) return null;
+    const minutes = Math.floor(elapsed / 60);
+    return `Still starting up — no steps reported after ${minutes}m.`;
+}
+
+/** Whichever staleness notice applies to this running entry, or null. */
+function resolveRunningNotice(running) {
+    const step = Number(running.step);
+    if (!Number.isFinite(step) || step <= 0) {
+        return formatStartupStaleness(running.elapsedSeconds);
+    }
+    const age = resolveProgressAgeSeconds(running);
+    return age === null ? null : formatProgressStaleness(age);
+}
+
+/**
+ * Fold a poll's `progress` payload into the shared live-progress store.
+ *
+ * `firstStep`/`firstStepAt` anchor the ETA to the first step this client saw and
+ * are then carried forward untouched, so process start, imports, the
+ * market-data fetch and gateway warm-up never enter the per-step rate. The
+ * anchor resets with the store itself at every terminal branch, and again here
+ * if a step count moves backwards -- which only happens when a fresh run's
+ * first tick lands before the previous run was cleared.
+ *
+ * Split out of ensureBacktestPolling() so it can be exercised directly: an
+ * anchor accidentally re-stamped on every tick would quietly restore the
+ * launch-biased ETA while every other assertion stayed green.
+ */
+function advanceBacktestProgress(previous, progress, now) {
+    const step = Number(progress?.step);
+    const total = Number(progress?.total_steps);
+    if (!Number.isFinite(step) || step <= 0) return null;
+    const anchorStep = previous ? Number(previous.firstStep) : NaN;
+    const anchorAt = previous ? Number(previous.firstStepAt) : NaN;
+    const keepAnchor =
+        Number.isFinite(anchorStep) && Number.isFinite(anchorAt) && anchorStep <= step;
+    const age = Number(progress?.progress_age_seconds);
+    return {
+        step,
+        totalSteps: total,
+        // Server-computed (see resolveProgressAgeSeconds), and null when a
+        // backend omits it -- which suppresses the staleness notice rather than
+        // guessing at a value the payload never claimed.
+        ageSeconds: Number.isFinite(age) ? age : null,
+        ageAt: now,
+        firstStep: keepAnchor ? anchorStep : step,
+        firstStepAt: keepAnchor ? anchorAt : now,
+    };
+}
+
+/**
+ * Everything a running card reports, derived once for both renderers.
+ *
+ * renderAgentRunningBody() builds an HTML string and refreshRunningAgentCards()
+ * mutates the live DOM, so they cannot share the emitting code -- but they must
+ * never disagree about *what* to emit. Deriving here is what stops the next
+ * added field from reaching only one of them, which is exactly how the bar,
+ * aria-valuenow and the staleness note came to repaint on a full re-render and
+ * never on the per-second patch that runs for the rest of the run.
+ *
+ * Text is returned as '' rather than null so the patch path can assign it
+ * unconditionally -- a tick with no progress must *clear* the last numbers, not
+ * leave them standing as though current. :empty hides the emptied nodes.
+ */
+function deriveRunningProgress(running) {
+    const step = Number(running.step);
+    const total = Number(running.totalSteps);
+    const determinate =
+        Number.isFinite(step) && Number.isFinite(total) && total > 0 && step > 0;
+    const pct = determinate ? Math.min(99, Math.round((100 * step) / total)) : null;
+    const eta = determinate ? resolveBacktestEta(running) : null;
+    return {
+        determinate,
+        pct,
+        eta,
+        stepLabel: determinate ? `${step}/${total}` : '',
+        // Deliberately excludes elapsed: the head already renders it one line
+        // above, and printing "3:05" beside "3:05 elapsed" is the kind of noise
+        // this change exists to remove. Built from raw values; escaping happens
+        // once at each interpolation site.
+        detail: [determinate ? `${pct}%` : null, eta].filter(Boolean).join(' · '),
+        notice: resolveRunningNotice(running) || '',
+    };
+}
+
 function showBacktestRunProgress(show, { isError = false } = {}) {
     const panel = document.getElementById('backtestRunProgress');
     if (!panel) return;
@@ -4079,7 +5076,23 @@ function showBacktestRunProgress(show, { isError = false } = {}) {
     if (hint) hint.hidden = !!isError;
 }
 
-function updateBacktestRunProgress({ elapsedSeconds, message = '', maxSeconds = BACKTEST_POLL_MAX_SECONDS, stepPct = null } = {}) {
+/**
+ * Repaint the Backtest tab's run panel.
+ *
+ * `progress` is the live poller's shared progress object -- the same one the My
+ * Agents card reads -- or null. Null at the five terminal call sites (launch
+ * error, backtest error, completion, timeout): those render their own message
+ * alone and must not gain an ETA or a "still starting up" notice. The running
+ * branch always passes an object, `{}` included, which is what opts it into the
+ * startup-staleness notice before any step exists.
+ */
+function updateBacktestRunProgress({
+    elapsedSeconds,
+    message = '',
+    maxSeconds = BACKTEST_POLL_MAX_SECONDS,
+    stepPct = null,
+    progress = null,
+} = {}) {
     const elapsedEl = document.getElementById('backtestRunElapsed');
     const messageEl = document.getElementById('backtestRunProgressMessage');
     const barEl = document.getElementById('backtestRunProgressBar');
@@ -4088,7 +5101,20 @@ function updateBacktestRunProgress({ elapsedSeconds, message = '', maxSeconds = 
         const elapsed = Math.max(0, Number(elapsedSeconds) || 0);
         elapsedEl.textContent = formatBacktestElapsed(elapsed);
     }
-    if (messageEl && message) messageEl.textContent = message;
+    if (messageEl && message) {
+        // Same two derived facts the card shows, from the same helper fed the
+        // same object -- so the ETA and the staleness notice cannot diverge
+        // between the two surfaces. Elapsed still differs (the card's is
+        // client-side from startedAt, this one is the server's elapsed_seconds)
+        // but nothing derived from it does: the ETA is measured from the
+        // poller's own step anchor, not from either elapsed clock.
+        const view = progress
+            ? deriveRunningProgress({ ...progress, elapsedSeconds })
+            : null;
+        messageEl.textContent = [message, view?.eta, view?.notice]
+            .filter(Boolean)
+            .join(' · ');
+    }
     if (barEl) {
         const pct = Number.isFinite(stepPct)
             ? Math.min(99, Math.round(stepPct))
@@ -4291,6 +5317,10 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
 }
 
 function showBacktestLaunchFailure(message, launchConfig) {
+    if (launchConfig?.agentId) {
+        clearAgentBacktestRunning(launchConfig.agentId);
+        applyAgentFilters(false);
+    }
     liveBacktestChartActive = false;
     liveBacktestRunId = null;
     liveBacktestLaunchPending = false;
@@ -4300,6 +5330,14 @@ function showBacktestLaunchFailure(message, launchConfig) {
     clearTradingLog('Backtest did not start.');
     showBacktestRunProgress(true, { isError: true });
     updateBacktestRunProgress({ elapsedSeconds: 0, message });
+    // The panel painted above lives under the Backtest tab, which is hidden
+    // when the user is standing on My Agents -- the landing page after a
+    // launch. Surface the failure where they actually are, using this
+    // file's existing alert() convention for launch-time refusals (see
+    // openRunBacktestModal / runBacktest) rather than inventing a new one.
+    if (playgroundTab === 'agents' && currentPage === 'playground') {
+        alert(message);
+    }
 }
 
 function stopBacktestPolling() {
@@ -4337,6 +5375,23 @@ function ensureBacktestPolling() {
                 const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
                     ? (100 * step / total)
                     : null;
+                // Assigned BEFORE refreshRunningAgentCards() below, which reads
+                // it through getAgentBacktestRunning(). Painting first would
+                // show the previous tick's step on the card while the Backtest
+                // panel — handed the same object a few lines down — showed this
+                // tick's: two surfaces disagreeing by one poll.
+                liveBacktestProgress = advanceBacktestProgress(
+                    liveBacktestProgress,
+                    status.progress,
+                    Date.now(),
+                );
+                // Repaint the My Agents card even when the user is not on the
+                // Backtest tab — that page is now the landing page after launch.
+                // refreshRunningAgentCards() patches the elapsed timer in place
+                // instead of tearing down the whole grid every second.
+                if (playgroundTab === 'agents' && currentPage === 'playground') {
+                    refreshRunningAgentCards();
+                }
 
                 if (viewingLive) {
                     liveBacktestChartActive = true;
@@ -4348,6 +5403,11 @@ function ensureBacktestPolling() {
                         elapsedSeconds: displayElapsed,
                         message: status.message || 'Backtest is running…',
                         stepPct,
+                        // `{}` rather than null before the first step: an empty
+                        // object still opts this surface into the startup
+                        // staleness notice, which is the only warning available
+                        // while the subprocess has published nothing.
+                        progress: liveBacktestProgress || {},
                     });
                     showBacktestRunProgress(true);
                     renderBacktestRunConfig(
@@ -4360,6 +5420,12 @@ function ensureBacktestPolling() {
                 liveBacktestChartActive = false;
                 const finishedId = liveBacktestRunId;
                 liveBacktestRunId = null;
+                liveBacktestProgress = null;
+                Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);
+                lastRenderedRunningKey = null;
+                if (playgroundTab === 'agents' && currentPage === 'playground') {
+                    loadAgents();
+                }
 
                 if (status.error) {
                     if (viewingLive) {
@@ -4403,6 +5469,22 @@ function ensureBacktestPolling() {
                 }
                 liveBacktestChartActive = false;
                 liveBacktestRunId = null;
+                // The finished branch above clears the running map; this one
+                // never did. Harmless while an orphaned entry only showed a
+                // wrong elapsed timer, but liveBacktestProgress is a single
+                // global spread into *every* entry, so a stale entry would
+                // render the NEXT run's step, percent and ETA until it aged out.
+                Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);
+                liveBacktestProgress = null;
+                lastRenderedRunningKey = null;
+                // Clearing the map is not visible on its own: polling has just
+                // stopped, so refreshRunningAgentCards() will never run again
+                // and the card would sit on "Backtesting…" with a frozen timer
+                // until some unrelated re-render happened by. Same repaint the
+                // finished branch does.
+                if (playgroundTab === 'agents' && currentPage === 'playground') {
+                    loadAgents();
+                }
             }
         } catch (error) {
             console.error('Error polling backtest status:', error);
@@ -4743,6 +5825,7 @@ function openRunBacktestModal(agent) {
     }
 
     runBacktestModalAgent = agent;
+    const isHostedRuntime = (agent.runtime_type || 'pipeline') !== 'pipeline';
     populateBacktestAgentSelect();
     const select = document.getElementById('backtestAgentSelect');
     if (select) select.value = agent.agent_id;
@@ -4754,11 +5837,27 @@ function openRunBacktestModal(agent) {
     const hint = document.getElementById('runBacktestCapitalHint');
     if (hint) {
         hint.textContent = Number.isFinite(sleeve)
-            ? `Does not change Allocated Capital ($${sleeve.toLocaleString()}).`
-            : 'Does not change Allocated Capital.';
+            ? `Does not change Paper Trading Allocated Capital ($${sleeve.toLocaleString()}).`
+            : 'Does not change Paper Trading Allocated Capital.';
+    }
+
+    const capitalValue = document.getElementById('runBacktestCapitalValue');
+    if (capitalValue) {
+        capitalValue.textContent = `$${resolveBacktestCapital(agent).toLocaleString()}`;
     }
 
     syncModelSelectFromAgent(agent);
+    const marketDataSourceSelect = document.getElementById('marketDataSourceSelect');
+    if (marketDataSourceSelect) {
+        // The hosted adapter consumes the upstream project's US-equity data
+        // contract. Keep the modal on the one ATL market profile it supports.
+        if (isHostedRuntime) marketDataSourceSelect.value = 'alpaca';
+        marketDataSourceSelect.disabled = isHostedRuntime;
+        marketDataSourceSelect.setAttribute(
+            'aria-disabled',
+            String(isHostedRuntime),
+        );
+    }
     selectPreset('djia');
     const builtinTabBtn = document.querySelector('#runBacktestModal .universe-tab[data-tab="builtin"]');
     if (builtinTabBtn) handleUniverseTabSwitch(builtinTabBtn);
@@ -4806,8 +5905,7 @@ async function runBacktest() {
     const startDate = startDateInput.value;
     const endDate = endDateInput.value;
     
-    if (!startDate || !endDate) {
-        const msg = 'Please select both start and end dates.';
+    const showModalError = (msg) => {
         const err = document.getElementById('runBacktestModalError');
         if (err && !document.getElementById('runBacktestModal')?.hidden) {
             err.textContent = msg;
@@ -4815,6 +5913,30 @@ async function runBacktest() {
         } else {
             console.warn(msg);
         }
+    };
+
+    if (!startDate || !endDate) {
+        showModalError('Please select both start and end dates.');
+        return;
+    }
+
+    // Mirror the server's MAX_BACKTEST_DAYS (api/routers/backtests.py) here so an
+    // over-long window is caught while the modal is still open and the dates are
+    // still on screen. Without this the only feedback is a 422 that arrives after
+    // the modal has closed, and the helper copy used to actively invite the
+    // mistake ("Change it to any range you have data for").
+    const MAX_BACKTEST_DAYS = 31;
+    const spanDays = Math.round(
+        (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86400000,
+    );
+    if (Number.isFinite(spanDays) && spanDays < 0) {
+        showModalError('The end date must be on or after the start date.');
+        return;
+    }
+    if (Number.isFinite(spanDays) && spanDays > MAX_BACKTEST_DAYS) {
+        showModalError(
+            `Pick a window of ${MAX_BACKTEST_DAYS} days or fewer — that range is ${spanDays} days.`,
+        );
         return;
     }
 
@@ -4846,29 +5968,15 @@ async function runBacktest() {
     }
 
     await activateAgent(activeAgent);
-    if (!isIFind) {
-        syncModelSelectFromAgent(activeAgent);
-    }
-    const pipeline = isRuleBasedDecision ? null : loadAgentPipelineForBacktest(activeAgent);
+    const isHostedRuntime = (activeAgent.runtime_type || 'pipeline') !== 'pipeline';
+    const pipeline = isRuleBasedDecision
+        ? null
+        : (isHostedRuntime ? null : loadAgentPipelineForBacktest(activeAgent));
     const model = isRuleBasedDecision
         ? null
-        : resolveBacktestModelRequest(modelSelect, activeAgent);
+        : (isHostedRuntime ? null : resolveBacktestModelRequest(modelSelect, activeAgent));
 
-    const capitalInput = document.getElementById('backtestInitialCapital');
-    let initialCapital = 1000;
-    if (capitalInput && capitalInput.value !== '') {
-        const parsed = Number(capitalInput.value);
-        if (!Number.isFinite(parsed) || parsed <= 0) {
-            alert('Initial capital must be greater than 0.');
-            return;
-        }
-        if (parsed > 10000) {
-            alert('Initial capital cannot exceed $10,000.');
-            return;
-        }
-        initialCapital = Math.round(parsed);
-        capitalInput.value = String(initialCapital);
-    }
+    const initialCapital = resolveBacktestCapital(activeAgent);
 
     const promptSummary = formatPromptFromPipeline(pipeline);
     const universeLabel = isIFind
@@ -4898,7 +6006,9 @@ async function runBacktest() {
     const launchConfigBase = {
         agentId: activeAgent.agent_id,
         agentName: activeAgent.name,
-        model: isRuleBasedDecision ? 'Rule-based' : (model || null),
+        model: isHostedRuntime
+            ? 'AI Hedge Fund (hosted)'
+            : (isRuleBasedDecision ? 'Rule-based' : (model || null)),
         prompt: promptSummary,
         initialCapital,
         startDate,
@@ -4926,15 +6036,28 @@ async function runBacktest() {
     // otherwise the async history load paints the previous run over the chart.
     closeRunBacktestModal();
     prepareLiveBacktestView(launchConfigBase);
-    navigateToPage('playground', { playgroundTab: 'backtest' });
-    currentMode = 'backtest';
-    updateBacktestRunProgress({
-        elapsedSeconds: 0,
-        message: pipeline?.length
-            ? `Running ${pipeline.length}-step agent pipeline…`
-            : 'Starting backtest…',
-    });
-    
+    markAgentBacktestRunning(activeAgent.agent_id, null);
+    // A synchronous throw anywhere in here would otherwise leave the agent
+    // marked running with no poller ever attached to clear it — narrow
+    // try/catch (not the outer one below, which governs the API call) so we
+    // can clear the mark and rethrow rather than swallow the failure.
+    try {
+        navigateToPage('playground', { playgroundTab: 'agents' });
+        currentMode = 'backtest';
+        applyAgentFilters(false);
+        updateBacktestRunProgress({
+            elapsedSeconds: 0,
+            message: isHostedRuntime
+                ? 'Running hosted AI Hedge Fund…'
+                : (pipeline?.length
+                    ? `Running ${pipeline.length}-step agent pipeline…`
+                    : 'Starting backtest…'),
+        });
+    } catch (error) {
+        clearAgentBacktestRunning(activeAgent.agent_id);
+        throw error;
+    }
+
     try {
         // Call API with session ID, assets, and model
         const params = new URLSearchParams({
@@ -4981,6 +6104,7 @@ async function runBacktest() {
         const liveRunId = data.live_run_id || data.run_id;
         if (liveRunId) {
             stashBacktestLaunchConfig(liveRunId, launchConfigBase);
+            markAgentBacktestRunning(activeAgent.agent_id, liveRunId);
             attachToLiveBacktest(liveRunId, null, launchConfigBase);
         }
         
@@ -5040,6 +6164,9 @@ function getSelectedSymbols() {
 // A divergence would paint one page and render another — a flash bug no test
 // in this repo can catch, so there is deliberately only ever one object.
 const NAV_VIEW_MAP = window.NAV_VIEW_MAP;
+// Same deal, same reason: both files restore the same saved nav blob, so the
+// rule that rewrites a pre-move one lives in exactly one place.
+const migrateSavedNavState = window.migrateSavedNavState;
 
 // Persist the current tab so a page refresh restores it instead of going home.
 function persistNavigation() {
@@ -5078,8 +6205,10 @@ function navigationStatesEqual(a, b) {
  * hand-maintained inverses — change one, check the other.
  *
  * Several NAV_VIEW_MAP keys are read-only aliases that this never emits
- * ('contest', 'competition', 'playground', 'my-algo'); old links keep working,
- * new URLs get the canonical slug.
+ * ('contest', 'competition', 'playground', 'my-algo', 'marketplace'); old links
+ * keep working, new URLs get the canonical slug. 'marketplace' joined that list
+ * when the catalog moved to Community: ?view=marketplace still opens it, but a
+ * URL written from that page now says ?view=community.
  */
 function viewParamForNavState(state) {
     if (state.page === 'home') return 'home';
@@ -5088,7 +6217,6 @@ function viewParamForNavState(state) {
     if (state.page === 'playground') {
         if (state.playgroundTab === 'backtest') return 'backtest';
         if (state.playgroundTab === 'paper') return 'paper';
-        if (state.playgroundTab === 'marketplace') return 'marketplace';
         return 'agents';
     }
     if (state.page === 'competition') {
@@ -5142,12 +6270,17 @@ function applyInitialNavigation() {
     // single point of failure when the listener is free and order-independent.
     window.addEventListener('popstate', onNavigationPopState);
 
-    const initial = resolveInitialNavigation();
-    navigateToPage(initial.page, {
-        playgroundTab: initial.playgroundTab || 'agents',
-        competitionTab: initial.competitionTab || 'daily',
-        history: 'replace',
-    });
+    // Skip the restore once the user has already clicked somewhere: nav is
+    // live during boot's auth awaits, and stomping an explicit navigation
+    // with the saved page reads as the app fighting the user.
+    if (!userHasNavigated) {
+        const initial = resolveInitialNavigation();
+        navigateToPage(initial.page, {
+            playgroundTab: initial.playgroundTab || 'agents',
+            competitionTab: initial.competitionTab || 'daily',
+            history: 'replace',
+        });
+    }
     if (typeof initHomePage === 'function') {
         initHomePage();
     }
@@ -5171,7 +6304,14 @@ function resolveInitialNavigation() {
 
     // Otherwise restore the last visited tab across refreshes.
     try {
-        const saved = JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null');
+        // Migrated here as well as in navigateToPage's redirect: this function
+        // is documented to return a *current* nav state, and popstate reads it
+        // directly. Returning a page/subtab pair that no longer exists would be
+        // a live trap for the next caller that does not route through
+        // navigateToPage.
+        const saved = migrateSavedNavState(
+            JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null'),
+        );
         const validPages = ['home', 'playground', 'competition', 'community', 'account'];
         if (saved && validPages.includes(saved.page)) {
             return saved;
@@ -5284,7 +6424,7 @@ async function applyAgentRunDeepLink() {
     }
 
     if (agentId && !agent && agentAuthError) {
-        const signedIn = !!(localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser());
+        const signedIn = isSignedIn();
         if (!signedIn) {
             // Park it so a successful sign-in retries — see PENDING_DEEP_LINK_KEY.
             savePendingDeepLink({ agentId, runId });
@@ -5327,17 +6467,25 @@ function updateCompetitionSubtabs() {
 }
 
 function showPlaygroundPanel(tab) {
+    // Belt and braces: navigateToPage already redirects the retired subtab, so
+    // nothing in-tree reaches this. It stays because this function is also the
+    // direct target of the subtab click handler, where a stray
+    // data-playground-tab="marketplace" would otherwise blank the page -- every
+    // panel hidden and none shown.
+    if (tab === 'marketplace') {
+        navigateToPage('community');
+        return;
+    }
+
     playgroundTab = tab;
     updatePlaygroundSubtabs();
 
     const agents = document.getElementById('playgroundAgentsPanel');
-    const marketplace = document.getElementById('playgroundMarketplacePanel');
     const backtest = document.querySelector('.playground-backtest-panel')
       || document.querySelector('.main-container');
     const paper = document.getElementById('paperTradingView');
 
     if (agents) agents.style.display = tab === 'agents' ? 'block' : 'none';
-    if (marketplace) marketplace.style.display = tab === 'marketplace' ? 'block' : 'none';
     if (backtest) backtest.style.display = tab === 'backtest' ? 'grid' : 'none';
     if (paper) paper.style.display = tab === 'paper' ? 'block' : 'none';
 
@@ -5350,9 +6498,6 @@ function showPlaygroundPanel(tab) {
     } else if (tab === 'paper') {
         currentMode = 'paper';
         loadPaperTradingData();
-    } else if (tab === 'marketplace') {
-        currentMode = 'marketplace';
-        loadMarketplace();
     } else {
         currentMode = 'agents';
         // Cache-only repaint so the panel is not blank while agents load;
@@ -5361,6 +6506,12 @@ function showPlaygroundPanel(tab) {
             window.repaintPortfolioFromCache(allAgents.map(decorateAgent));
         }
         loadAgents();
+        // A refresh mid-run restores the sessionStorage running marks but
+        // drops the poller that would ever clear them -- reattach it here so
+        // the card doesn't strand at "Backtesting…" for up to
+        // BACKTEST_POLL_MAX_SECONDS. ensureBacktestPolling() is a no-op if a
+        // poller is already attached.
+        if (Object.keys(readRunningBacktests()).length) ensureBacktestPolling();
     }
 
     persistNavigation();
@@ -5397,8 +6548,19 @@ function navigateToPage(page, options = {}) {
         page = 'playground';
         options = { ...options, playgroundTab: options.playgroundTab || 'agents' };
     }
+    // Marketplace moved from Playground → Community. This is the choke point
+    // every navigation funnels through, so the redirect belongs here rather than
+    // at each call site. Reads the module-level playgroundTab too, so a session
+    // that entered this page load holding the retired subtab cannot land back on
+    // it, and rewrites the tab to 'agents' rather than clearing it -- leaving it
+    // set to 'marketplace' would bounce the *next* Playground visit as well.
+    if (page === 'playground' && (options.playgroundTab || playgroundTab) === 'marketplace') {
+        page = 'community';
+        options = { ...options, playgroundTab: 'agents' };
+    }
 
     const historyMode = options.history || 'push';
+    if (historyMode === 'push') userHasNavigated = true;
     const prevState = getNavigationState();
 
     currentPage = page;
@@ -5440,7 +6602,6 @@ function navigateToPage(page, options = {}) {
     hide(myAlgoView);
     hide(leaderboardView);
     hide(document.getElementById('playgroundAgentsPanel'));
-    hide(document.getElementById('playgroundMarketplacePanel'));
     hide(document.getElementById('competitionParticipantsPanel'));
     hide(document.getElementById('competitionAboutPanel'));
 
@@ -5457,7 +6618,9 @@ function navigateToPage(page, options = {}) {
             if (competitionView) competitionView.style.display = 'block';
             showCompetitionPanel(competitionTab);
         } else if (page === 'community') {
+            currentMode = 'community';
             if (communityView) communityView.style.display = 'block';
+            loadMarketplace();
         } else if (page === 'account') {
             currentMode = 'account';
             if (accountView) accountView.style.display = 'block';

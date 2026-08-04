@@ -60,6 +60,23 @@ from dashboard.backend.infrastructure.llm.providers import (
 )
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.agents.service import agent_service
+from dashboard.backend.domain.agents.credential_store import (
+    FINANCIAL_DATASETS_CREDENTIAL,
+    agent_credential_store,
+)
+from dashboard.backend.api.dependencies import _owner_context, _require_agent_access
+from dashboard.backend.domain.agents.runtime import (
+    AI_HEDGE_FUND_RUNTIME_TYPE,
+    DEFAULT_RUNTIME_TYPE,
+    PIPELINE_RUNTIME_TYPE,
+    normalize_runtime_config,
+    normalize_runtime_type,
+)
+from dashboard.backend.infrastructure.ai_hedge_fund.adapter import (
+    AiHedgeFundConfigurationError,
+    resolve_step_timeout_seconds,
+    runtime_unavailable_reason,
+)
 from dashboard.backend.domain.backtesting.constants import (
     MAX_BACKTEST_INITIAL_CAPITAL,
     resolve_initial_capital,
@@ -230,6 +247,21 @@ class RunMetadata(BaseModel):
     fx_policy: Optional[str] = None
     fx_start_rate: Optional[float] = None
     fx_end_rate: Optional[float] = None
+    t_plus_one_enabled: Optional[bool] = None
+    # Scalars only. The rejected-order records themselves are unbounded per-step
+    # audit data and this model is the response_model for two *list* routes
+    # (/api/backtest/runs and the public, unpaginated /runs), so shipping them
+    # inline would multiply a multi-megabyte array by the run count on a payload
+    # the dashboard fetches on every load. The records are served per run by
+    # GET /runs/{run_id}/rejected-orders instead, mirroring /runs/{run_id}/trades.
+    # None (not 0) for runs that predate the feature, matching t_plus_one_enabled.
+    rejected_orders_count: Optional[int] = None
+    rejected_orders_truncated: Optional[int] = None
+    # How hard T+1 actually bound: symbol-days on which the agent wanted to exit
+    # more than it could, and the total shares that deferred. Scalars for the
+    # same reason as above — the records live on the detail endpoint.
+    t1_deferred_events: Optional[int] = None
+    t1_deferred_shares: Optional[float] = None
 
 
 class EquityCurve(BaseModel):
@@ -282,6 +314,11 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "fx_policy",
             "fx_start_rate",
             "fx_end_rate",
+            "t_plus_one_enabled",
+            "rejected_orders_count",
+            "rejected_orders_truncated",
+            "t1_deferred_events",
+            "t1_deferred_shares",
         ):
             if field in metadata:
                 payload[field] = metadata[field]
@@ -305,7 +342,24 @@ backtest_session_id = None  # Track which session owns the running backtest
 
 
 def _read_backtest_progress() -> Optional[Dict[str, Any]]:
-    """Load incremental equity snapshots written by the backtest subprocess."""
+    """Load incremental equity snapshots written by the backtest subprocess.
+
+    ``progress_updated_at`` (the file's mtime) and ``progress_age_seconds`` (how
+    old that is) are not fields the writer emits. Together they answer "are these
+    numbers current?", which the payload alone cannot.
+
+    The *age* is what the UI reads, and it is computed here rather than in the
+    browser deliberately: differencing a server mtime against the client clock
+    makes any machine more than the staleness threshold out of step
+    indistinguishable from a wedged run -- a fast clock pins a permanent "No
+    progress for 47m" onto a healthy backtest, a slow one suppresses the warning
+    forever, and suspended laptops drift by minutes routinely. Both ends of this
+    subtraction are read in this process, so it carries no skew.
+
+    stat() and read_text() are separate syscalls, so a file rewritten between
+    them yields an mtime marginally older than the payload -- immaterial against
+    a 120s staleness threshold, and not worth a lock to avoid.
+    """
     progress_file = backtest_status.get("progress_file")
     if not progress_file:
         return None
@@ -313,10 +367,19 @@ def _read_backtest_progress() -> Optional[Dict[str, Any]]:
     if not path.is_file():
         return None
     try:
+        updated_at = path.stat().st_mtime
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    return payload if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        return None
+    return {
+        **payload,
+        "progress_updated_at": updated_at,
+        # Clamped at zero: a clock stepping backwards between the write and this
+        # read would otherwise report a negative age, and "-3s" reads as a bug.
+        "progress_age_seconds": max(0.0, time.time() - updated_at),
+    }
 
 def run_backtest_background(
     start_date: str,
@@ -333,12 +396,16 @@ def run_backtest_background(
     initial_capital: Optional[float] = None,
     assets: Optional[List[str]] = None,
     decision_source: Optional[str] = None,
+    runtime_type: str = DEFAULT_RUNTIME_TYPE,
+    runtime_config: Optional[Dict[str, Any]] = None,
+    financial_datasets_api_key: Optional[str] = None,
 ):
     """Run backtest in background thread."""
     global backtest_status, backtest_session_id
 
     strategy_prompt_path = None
     pipeline_path = None
+    runtime_config_path = None
     progress_file = None
     try:
         import subprocess
@@ -387,6 +454,13 @@ def run_backtest_background(
         print(f"📁 Can write to {db_path.parent}: {os.access(db_path.parent, os.W_OK)}", flush=True)
         
         env = os.environ.copy()
+        if runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+            # A Financial Datasets key is agent-owner material, never a platform
+            # fallback. Isolate it only for the hosted runtime; pipeline
+            # subprocesses retain their established environment unchanged.
+            env.pop("FINANCIAL_DATASETS_API_KEY", None)
+            if financial_datasets_api_key:
+                env["FINANCIAL_DATASETS_API_KEY"] = financial_datasets_api_key
         if uses_llm:
             print(f"{data_source} selected; LLM decision source enabled", flush=True)
         else:
@@ -401,6 +475,17 @@ def run_backtest_background(
             "--timeframe", timeframe,
             "--decision-source", decision_source,
         ]
+
+        if runtime_type != PIPELINE_RUNTIME_TYPE:
+            cmd += ["--runtime-type", runtime_type]
+
+        if runtime_config:
+            fd, runtime_config_path = tempfile.mkstemp(
+                prefix="agent_runtime_", suffix=".json"
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(runtime_config, f)
+            cmd += ["--runtime-config-file", runtime_config_path]
 
         # Optional free-form strategy prompt: written to a temp file (avoids
         # shell-escaping a long prompt) and passed via --strategy-prompt-file.
@@ -429,13 +514,18 @@ def run_backtest_background(
             print(f"   Assets: {', '.join(assets)}", flush=True)
 
         print(f"📋 Running: {' '.join(cmd)}", flush=True)
-        
+
+        subprocess_timeout = _backtest_subprocess_timeout(
+            runtime_type, start_date, end_date
+        )
+        print(f"⏱️  Subprocess timeout: {subprocess_timeout}s", flush=True)
+
         result = subprocess.run(
             cmd,
             cwd=str(DASHBOARD_DIR),
             capture_output=True,
             text=True,
-            timeout=1800,  # 30 minutes for LLM backtest (longer than rule-based)
+            timeout=subprocess_timeout,
             env=env
         )
         
@@ -445,15 +535,25 @@ def run_backtest_background(
         # survives in the deployed config, so trimming the dump would drop the
         # head of every run (universe, decision source, FX bootstrap).
         if result.stdout:
-            print(f"STDOUT:\n{_redact_credentials(result.stdout)}", flush=True)
+            print(
+                f"STDOUT:\n{_redact_credentials(result.stdout, financial_datasets_api_key)}",
+                flush=True,
+            )
         if result.stderr:
-            print(f"STDERR:\n{_redact_credentials(result.stderr)}", flush=True)
+            print(
+                f"STDERR:\n{_redact_credentials(result.stderr, financial_datasets_api_key)}",
+                flush=True,
+            )
         print(f"Return code: {result.returncode}", flush=True)
         print(f"=== END BACKTEST OUTPUT ===", flush=True)
         
         if result.returncode != 0:
             error_msg = result.stderr if result.stderr else result.stdout
-            summary = _sanitize_backtest_error(error_msg, 500)
+            summary = _sanitize_backtest_error(
+                error_msg,
+                500,
+                extra_secret=financial_datasets_api_key,
+            )
             backtest_status["error"] = (
                 f"Backtest failed with return code {result.returncode}. {summary}"
             )
@@ -466,7 +566,11 @@ def run_backtest_background(
                 print(f"   Latest run IDs: {[r['run_id'] for r in runs[:3]]}", flush=True)
             _maybe_writeback_adapted_pipeline(agent_id, live_run_id)
     except Exception as e:
-        summary = _sanitize_backtest_error(e, 500)
+        summary = _sanitize_backtest_error(
+            e,
+            500,
+            extra_secret=financial_datasets_api_key,
+        )
         backtest_status["error"] = summary
         print(f"❌ Backtest exception: {summary}", flush=True)
     finally:
@@ -489,10 +593,80 @@ def run_backtest_background(
                 os.remove(pipeline_path)
             except OSError:
                 pass
+        if runtime_config_path:
+            try:
+                os.remove(runtime_config_path)
+            except OSError:
+                # Best-effort cleanup of a temp file the run no longer needs;
+                # the OS reclaims it regardless, and failing here would mask
+                # the backtest's own outcome.
+                pass
         print("✋ Backtest background thread finished", flush=True)
 
 
-def _redact_credentials(text: object) -> str:
+# The backtest subprocess budget. 30 minutes is right for a pipeline run, whose
+# per-step LLM call is seconds long. A hosted run instead spends one *upstream
+# subprocess* per trading day, each allowed AI_HEDGE_FUND_TIMEOUT_SECONDS -- so
+# a fixed parent cap silently becomes the binding constraint (1800s over ~21
+# decision days is ~85s per step, not the 300s configured) and kills the child
+# mid-run with no partial results. Size the parent from the same per-step number
+# the runtime reads, so the inner timeout is what fires.
+PIPELINE_SUBPROCESS_TIMEOUT_SECONDS = 1800
+# Data load, baseline generation and persistence sit outside the decision loop.
+SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS = 600
+# Ceiling, so a long date range cannot pin a worker thread indefinitely.
+MAX_SUBPROCESS_TIMEOUT_SECONDS = 14400
+
+
+def _estimated_decision_days(start_date: str, end_date: str) -> int:
+    """Upper-bound the trading days in an inclusive date range.
+
+    Weekday count, not a market calendar: holidays only make the real number
+    smaller, and over-provisioning the parent timeout is the safe direction.
+    """
+    try:
+        start = datetime.strptime(str(start_date)[:10], "%Y-%m-%d").date()
+        end = datetime.strptime(str(end_date)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return 0
+    if end < start:
+        return 0
+    total_days = (end - start).days + 1
+    whole_weeks, remainder = divmod(total_days, 7)
+    weekdays = whole_weeks * 5
+    start_weekday = start.weekday()
+    for offset in range(remainder):
+        if (start_weekday + offset) % 7 < 5:
+            weekdays += 1
+    return weekdays
+
+
+def _backtest_subprocess_timeout(
+    runtime_type: str, start_date: str, end_date: str
+) -> int:
+    """Return the parent subprocess timeout for this run's runtime."""
+    if runtime_type == PIPELINE_RUNTIME_TYPE:
+        return PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+    step_seconds = resolve_step_timeout_seconds()
+    required = (
+        step_seconds * _estimated_decision_days(start_date, end_date)
+        + SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS
+    )
+    budget = max(PIPELINE_SUBPROCESS_TIMEOUT_SECONDS, required)
+    if budget > MAX_SUBPROCESS_TIMEOUT_SECONDS:
+        # Say so rather than truncating quietly: past this point the parent is
+        # the binding constraint again, and the run can be killed mid-flight.
+        print(
+            f"⚠️  Hosted backtest needs ~{budget}s but is capped at "
+            f"{MAX_SUBPROCESS_TIMEOUT_SECONDS}s; shorten the date range or "
+            f"lower AI_HEDGE_FUND_TIMEOUT_SECONDS (currently {step_seconds}s)",
+            flush=True,
+        )
+        return MAX_SUBPROCESS_TIMEOUT_SECONDS
+    return budget
+
+
+def _redact_credentials(text: object, extra_secret: Optional[str] = None) -> str:
     """Strip credentials from text without dropping any of it.
 
     Kept separate from truncation on purpose: the subprocess log dump needs
@@ -503,6 +677,8 @@ def _redact_credentials(text: object) -> str:
     token = os.getenv("IFIND_ACCESS_TOKEN", "").strip()
     if token:
         message = message.replace(token, "[REDACTED]")
+    if extra_secret:
+        message = message.replace(extra_secret, "[REDACTED]")
     message = re.sub(
         r"(?i)(access[_-]?token\s*[=:]\s*)[^\s,;]+",
         r"\1[REDACTED]",
@@ -516,9 +692,14 @@ def _redact_credentials(text: object) -> str:
     return message
 
 
-def _sanitize_backtest_error(error: object, max_chars: int = 500) -> str:
+def _sanitize_backtest_error(
+    error: object,
+    max_chars: int = 500,
+    *,
+    extra_secret: Optional[str] = None,
+) -> str:
     """Return a bounded background error summary without credentials."""
-    return _redact_credentials(error)[-max_chars:]
+    return _redact_credentials(error, extra_secret)[-max_chars:]
 
 
 def _maybe_writeback_adapted_pipeline(agent_id: Optional[str], run_id: Optional[str]) -> None:
@@ -764,6 +945,70 @@ def _resolve_backtest_pipeline(
     return None
 
 
+def _resolve_backtest_runtime(
+    agent_id: Optional[str],
+) -> tuple[str, Dict[str, Any]]:
+    """Return the persisted hosted runtime for an agent-backed run."""
+    if not agent_id:
+        return DEFAULT_RUNTIME_TYPE, {}
+    agent = agent_service.get_agent(agent_id)
+    if not agent:
+        # The session resolver owns the established 404 response.
+        return DEFAULT_RUNTIME_TYPE, {}
+    runtime_type = normalize_runtime_type(agent.get("runtime_type"))
+    runtime_config = normalize_runtime_config(
+        runtime_type, agent.get("runtime_config") or {}
+    )
+    return runtime_type, runtime_config
+
+
+def _resolve_ai_hedge_fund_credential(request: Request, agent_id: Optional[str]) -> str:
+    """Authorize and decrypt the per-agent market-data credential for one run."""
+    if not agent_id:
+        raise HTTPException(
+            status_code=422,
+            detail="AI Hedge Fund backtests must reference an owned agent",
+        )
+    ctx = _owner_context(request, request.headers.get("authorization"))
+    agent = _require_agent_access(agent_id, ctx)
+    if (agent.get("runtime_type") or DEFAULT_RUNTIME_TYPE) != AI_HEDGE_FUND_RUNTIME_TYPE:
+        raise HTTPException(status_code=422, detail="Agent runtime is not AI Hedge Fund")
+    if not (os.getenv("OPENROUTER_API_KEY") or "").strip():
+        raise HTTPException(
+            status_code=503,
+            detail="AI Hedge Fund's platform-managed OpenRouter provider is not configured",
+        )
+    # The isolated venv is created by the deploy build, and render.yaml is
+    # documentation rather than the deploy mechanism for this service -- so a
+    # deployment without it is a live possibility. Reject the run here instead
+    # of accepting it and failing inside a background subprocess minutes later.
+    try:
+        unavailable = runtime_unavailable_reason()
+    except AiHedgeFundConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if unavailable:
+        raise HTTPException(status_code=503, detail=unavailable)
+    try:
+        resolve_step_timeout_seconds()
+    except AiHedgeFundConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    try:
+        credential = agent_credential_store.get_secret(
+            agent_id, FINANCIAL_DATASETS_CREDENTIAL
+        )
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if not credential:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Configure a Financial Datasets API key on this AI Hedge Fund "
+                "agent before running a backtest"
+            ),
+        )
+    return credential
+
+
 def _resolve_backtest_session(request: Request, agent_id: Optional[str]) -> str:
     """Return the session that should own this backtest run.
 
@@ -785,7 +1030,7 @@ def _resolve_backtest_session(request: Request, agent_id: Optional[str]) -> str:
 
 
 @router.post("/backtest/run")
-async def run_backtest_endpoint(
+def run_backtest_endpoint(
     request: Request,
     start_date: str = "2026-05-01",
     end_date: str = "2026-05-07",
@@ -830,6 +1075,11 @@ async def run_backtest_endpoint(
         if body.assets is not None:
             raw_assets = body.assets
 
+    try:
+        runtime_type, runtime_config = _resolve_backtest_runtime(agent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     decision_source_was_explicit = decision_source is not None
     profile, resolved_decision_source = _resolve_market_profile_request(
         data_source,
@@ -837,6 +1087,25 @@ async def run_backtest_endpoint(
         timeframe,
         decision_source,
     )
+    if runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
+        if data_source != ALPACA:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "AI Hedge Fund currently supports the Alpaca US-equity "
+                    "profile only."
+                ),
+            )
+        if resolved_decision_source != LLM_DECISION_SOURCE:
+            raise HTTPException(
+                status_code=422,
+                detail="AI Hedge Fund requires decision_source='llm'.",
+            )
+        financial_datasets_api_key = _resolve_ai_hedge_fund_credential(
+            request, agent_id
+        )
+    else:
+        financial_datasets_api_key = None
     selected_assets = (
         list(profile.symbols)
         if data_source == IFIND_ASHARE
@@ -858,11 +1127,25 @@ async def run_backtest_endpoint(
 
     ignored_llm_fields: List[str] = []
     if resolved_decision_source == LLM_DECISION_SOURCE:
-        pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
-        if agent_id and not model:
-            agent = agent_service.get_agent(agent_id)
-            if agent and agent.get("model_name"):
-                model = agent["model_name"]
+        if runtime_type == PIPELINE_RUNTIME_TYPE:
+            pipeline = _resolve_backtest_pipeline(agent_id, pipeline)
+            if agent_id and not model:
+                agent = agent_service.get_agent(agent_id)
+                if agent and agent.get("model_name"):
+                    model = agent["model_name"]
+        else:
+            ignored_llm_fields = [
+                name
+                for name, value in (
+                    ("strategy_prompt", strategy_prompt),
+                    ("model", model),
+                    ("pipeline", pipeline),
+                )
+                if value
+            ]
+            strategy_prompt = None
+            model = None
+            pipeline = None
     else:
         # A rule-based run drops the LLM-only fields — but validate them FIRST.
         # Dropping them before _validate_backtest_params meant a malformed model
@@ -888,6 +1171,7 @@ async def run_backtest_endpoint(
     if (
         decision_source_was_explicit
         and resolved_decision_source == LLM_DECISION_SOURCE
+        and runtime_type == PIPELINE_RUNTIME_TYPE
         and not (model or "").strip()
     ):
         raise HTTPException(
@@ -900,7 +1184,11 @@ async def run_backtest_endpoint(
     # the per-client run budget.
     _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipeline)
 
-    if decision_source_was_explicit and resolved_decision_source == LLM_DECISION_SOURCE:
+    if (
+        decision_source_was_explicit
+        and resolved_decision_source == LLM_DECISION_SOURCE
+        and runtime_type == PIPELINE_RUNTIME_TYPE
+    ):
         try:
             ensure_llm_client_available()
         except LLMProviderConfigurationError as exc:
@@ -917,6 +1205,7 @@ async def run_backtest_endpoint(
     print(f"   Session: {session_id[:8]}...", flush=True)
     print(f"   Market data: {data_source}", flush=True)
     print(f"   Decision source: {resolved_decision_source}", flush=True)
+    print(f"   Agent runtime: {runtime_type}", flush=True)
     if strategy_prompt and not pipeline:
         print(f"   Custom strategy prompt: {len(strategy_prompt)} chars", flush=True)
     if pipeline:
@@ -969,6 +1258,9 @@ async def run_backtest_endpoint(
             "strategy_prompt": strategy_prompt,
             "model": model,
             "pipeline": pipeline,
+            "runtime_type": runtime_type,
+            "runtime_config": runtime_config,
+            "financial_datasets_api_key": financial_datasets_api_key,
             "agent_id": agent_id,
             "data_source": data_source,
             "live_run_id": live_run_id,
@@ -998,6 +1290,8 @@ async def run_backtest_endpoint(
         "benchmark": profile.benchmark,
         "assets": selected_assets or list(DJIA_30),
     }
+    if runtime_type != PIPELINE_RUNTIME_TYPE:
+        response["runtime_type"] = runtime_type
     if ignored_llm_fields:
         # Say what a rule-based run threw away. Dropping LLM-only fields is
         # correct, doing it invisibly is not: the caller otherwise cannot tell
@@ -1006,7 +1300,7 @@ async def run_backtest_endpoint(
     return response
 
 @router.get("/backtest/status")
-async def get_backtest_status(request: Request):
+def get_backtest_status(request: Request):
     """Get backtest status (running, error, or completed)."""
     session_id = request.state.session_id
     
@@ -1068,7 +1362,7 @@ async def get_backtest_status(request: Request):
 # ============================================================================
 
 @router.get("/api/backtest/runs", response_model=List[RunMetadata])
-async def get_backtest_runs(request: Request):
+def get_backtest_runs(request: Request):
     """Get all backtest runs for this session."""
     session_id = get_session_id_from_request(request)
     runs = db.get_runs_by_session(session_id)
@@ -1079,7 +1373,7 @@ async def get_backtest_runs(request: Request):
 # IMPORTANT: Register /compare/latest BEFORE /{run_id} to prevent {run_id} from matching "compare/latest"
 
 @router.get("/api/backtest/compare/latest", response_model=ComparisonResponse)
-async def compare_latest_backtests(request: Request):
+def compare_latest_backtests(request: Request):
     """Compare the latest backtest runs + baselines for this session."""
     session_id = get_session_id_from_request(request)
     
@@ -1134,7 +1428,7 @@ async def compare_latest_backtests(request: Request):
 
 
 @router.get("/api/backtest/{run_id}/chart-data", response_model=BacktestChartData)
-async def get_backtest_chart_data(run_id: str, request: Request):
+def get_backtest_chart_data(run_id: str, request: Request):
     """Chart-ready equity series for the Playground backtest page.
 
     Uses the same DJIA index + Nasdaq-100 baselines and gapless market-hour
@@ -1181,7 +1475,7 @@ async def get_backtest_chart_data(run_id: str, request: Request):
 
 
 @router.get("/api/backtest/{run_id}", response_model=EquityCurve)
-async def get_backtest_run(run_id: str, request: Request):
+def get_backtest_run(run_id: str, request: Request):
     """Get specific backtest run with equity curve."""
     session_id = get_session_id_from_request(request)
     run = db.get_run_with_session(run_id, session_id)
@@ -1204,7 +1498,7 @@ async def get_backtest_run(run_id: str, request: Request):
 
 
 @router.get("/runs/latest/metrics", response_model=RunMetadata)
-async def get_latest_metrics(request: Request):
+def get_latest_metrics(request: Request):
     """Get metrics for the latest Agent backtest run in this session (excludes baselines)."""
     session_id = request.state.session_id
     runs = [r for r in db.get_runs_by_session(session_id) or [] 
@@ -1217,7 +1511,7 @@ async def get_latest_metrics(request: Request):
 
 
 @router.get("/runs", response_model=List[RunMetadata])
-async def get_runs(request: Request, mode: Optional[str] = None):
+def get_runs(request: Request, mode: Optional[str] = None):
     """
     Get all backtest runs (public, not filtered by session).
     Backtest results are meant to be shared/viewed, not isolated per user.
@@ -1240,7 +1534,7 @@ async def get_runs(request: Request, mode: Optional[str] = None):
 
 
 @router.get("/runs/{run_id}", response_model=RunMetadata)
-async def get_run(run_id: str, request: Request):
+def get_run(run_id: str, request: Request):
     """Get metadata for a specific run."""
     session_id = request.state.session_id
     run = db.get_run_with_session(run_id, session_id)
@@ -1250,7 +1544,7 @@ async def get_run(run_id: str, request: Request):
 
 
 @router.get("/runs/{run_id}/equity", response_model=EquityCurve)
-async def get_equity_curve(run_id: str, request: Request):
+def get_equity_curve(run_id: str, request: Request):
     """
     Get equity curve for a specific run.
     
@@ -1279,7 +1573,7 @@ async def get_equity_curve(run_id: str, request: Request):
 
 
 @router.get("/runs/{run_id}/trades")
-async def get_run_trades(run_id: str, request: Request):
+def get_run_trades(run_id: str, request: Request):
     """Trade log for a backtest run owned by this session."""
     session_id = request.state.session_id
     run = db.get_run_with_session(run_id, session_id)
@@ -1287,6 +1581,46 @@ async def get_run_trades(run_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Run not found or not yours")
     trades = db.get_trades(run_id)
     return {"run_id": run_id, "trades": trades, "count": len(trades)}
+
+
+@router.get("/runs/{run_id}/rejected-orders")
+def get_run_rejected_orders(run_id: str, request: Request):
+    """Rejected / partially-filled order records for a run owned by this session.
+
+    Served here rather than on RunMetadata because these are per-step audit
+    records — a T+1 A-share run can emit thousands — and RunMetadata is the
+    response_model for two list routes the dashboard fetches on every load.
+
+    ``count`` is the run's true total; ``returned`` is how many this response
+    carries. They differ when the engine capped the persisted sample, in which
+    case ``truncated`` says by how much.
+
+    ``t1_deferrals`` answers the complementary question. A rejected order means
+    the agent *submitted* something unfillable; a deferral means it wanted to
+    exit and sized down because it could not. The built-in agents now do the
+    latter, so for them this list — not ``rejected_orders`` — is where T+1's
+    effect on strategy shows up.
+    """
+    session_id = request.state.session_id
+    run = db.get_run_with_session(run_id, session_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found or not yours")
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    records = metadata.get("rejected_orders") or []
+    deferrals = metadata.get("t1_deferrals") or []
+    return {
+        "run_id": run_id,
+        "rejected_orders": records,
+        "count": metadata.get("rejected_orders_count", len(records)),
+        "returned": len(records),
+        "truncated": metadata.get("rejected_orders_truncated", 0),
+        "t1_deferrals": deferrals,
+        "t1_deferred_events": metadata.get("t1_deferred_events", len(deferrals)),
+        "t1_deferred_shares": metadata.get("t1_deferred_shares", 0),
+        "t1_deferrals_truncated": metadata.get("t1_deferrals_truncated", 0),
+    }
 
 
 @router.get("/runs/{run_id}/plot.png", include_in_schema=False)
@@ -1359,7 +1693,7 @@ def _render_run_plot_png(run_id: str) -> bytes:
 
 
 @router.get("/compare", response_model=ComparisonResponse)
-async def compare_runs(run_ids: str, request: Request):
+def compare_runs(run_ids: str, request: Request):
     """
     Compare multiple runs (public, not filtered by session).
     

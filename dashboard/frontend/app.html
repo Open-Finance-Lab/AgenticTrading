@@ -8,9 +8,16 @@
     <link rel="apple-touch-icon" href="/images/atltransparent.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <!-- API origin (Vercel serves this page, Render answers its fetches):
+         start the TCP+TLS handshake now, not at the first fetch. crossorigin
+         because every API call is a CORS request. -->
+    <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=64">
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <link rel="stylesheet" href="styles.css?v=79">
+    <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
+         document order (this one first, the body-end ones after), all before
+         DOMContentLoaded, so Chart is defined before any chart renders. -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous" defer></script>
     <script>
     (function () {
         var NAV_STATE_KEY = 'nav-state';
@@ -25,7 +32,7 @@
             backtest: { page: 'playground', playgroundTab: 'backtest' },
             paper: { page: 'playground', playgroundTab: 'paper' },
             agents: { page: 'playground', playgroundTab: 'agents' },
-            marketplace: { page: 'playground', playgroundTab: 'marketplace' },
+            marketplace: { page: 'community' },
             playground: { page: 'playground', playgroundTab: 'agents' },
             'my-algo': { page: 'playground', playgroundTab: 'agents' },
             contest: { page: 'competition', competitionTab: 'daily' },
@@ -36,6 +43,17 @@
             about: { page: 'competition', competitionTab: 'about' },
         };
         window.NAV_VIEW_MAP = NAV_VIEW_MAP;
+        // Saved nav state written before the marketplace moved out of Playground.
+        // Exported for the same reason NAV_VIEW_MAP is: the boot below and app.js
+        // read the SAME localStorage blob, so a second hand-written copy of this
+        // rule could paint Playground while app.js renders Community.
+        function migrateSavedNavState(saved) {
+            if (saved && saved.page === 'playground' && saved.playgroundTab === 'marketplace') {
+                return { page: 'community' };
+            }
+            return saved;
+        }
+        window.migrateSavedNavState = migrateSavedNavState;
         function resolveBootNavigation() {
             var params = new URLSearchParams(window.location.search);
             var view = params.get('view') || params.get('mode');
@@ -55,9 +73,13 @@
                 };
             }
             try {
-                var saved = JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null');
+                var saved = migrateSavedNavState(
+                    JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null'),
+                );
                 var valid = ['home', 'playground', 'competition', 'community', 'account'];
-                if (saved && valid.indexOf(saved.page) !== -1) return saved;
+                if (saved && valid.indexOf(saved.page) !== -1) {
+                    return saved;
+                }
             } catch (e) { /* ignore */ }
             return { page: 'home' };
         }
@@ -67,6 +89,15 @@
         html.setAttribute('data-nav-page', nav.page);
         html.setAttribute('data-nav-playground-tab', nav.playgroundTab || 'agents');
         html.setAttribute('data-nav-competition-tab', nav.competitionTab || 'daily');
+        // Warm the API before the JS pipeline even finishes downloading: on
+        // Render's free tier the first request may pay a 30-60s cold start,
+        // so every second saved here comes straight off page readiness.
+        // Mirrors app.js's API_BASE host rule; app.js reads window.API_WARMUP
+        // to decide whether to show the slow-boot notice.
+        var apiBase = (location.hostname === 'localhost' || location.hostname === '127.0.0.1')
+            ? location.origin
+            : 'https://agentictrading.onrender.com';
+        window.API_WARMUP = fetch(apiBase + '/health').catch(function () { return null; });
     })();
     </script>
     <style id="nav-boot-style">
@@ -82,13 +113,10 @@
     html[data-nav-boot][data-nav-page="community"] .primary-nav [data-mode="community"] { background-color: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="playground"] .playground-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="agents"] .playground-subtabs [data-playground-tab="agents"],
-    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="marketplace"] .playground-subtabs [data-playground-tab="marketplace"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .playground-subtabs [data-playground-tab="backtest"],
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] .playground-subtabs [data-playground-tab="paper"] { background: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] #playgroundAgentsPanel,
-    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="marketplace"] #playgroundAgentsPanel,
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #playgroundAgentsPanel { display: none !important; }
-    html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="marketplace"] #playgroundMarketplacePanel { display: block !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .main-container.playground-backtest-panel { display: grid !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #paperTradingView { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"] .competition-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
@@ -180,7 +208,6 @@
                             <span id="accountMenuEmail" class="account-menu-email"></span>
                         </div>
                         <button id="accountMenuAccountBtn" class="account-menu-item" type="button">Account</button>
-                        <a id="accountMenuLandingLink" class="account-menu-item" href="/?stay=1">Visit Landing Page</a>
                         <button id="accountMenuLogoutBtn" class="account-menu-item account-menu-item--danger" type="button">Log out</button>
                     </div>
                 </div>
@@ -221,7 +248,7 @@
         <div class="auth-modal-panel run-backtest-modal-panel" role="dialog" aria-labelledby="runBacktestModalTitle">
             <button id="runBacktestModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
             <h2 id="runBacktestModalTitle" class="auth-modal-title">Run Backtest</h2>
-            <p class="auth-modal-subtitle">Simulation settings for this agent. Does not change allocated capital.</p>
+            <p class="auth-modal-subtitle">Simulation settings for this agent. Does not change its Paper Trading Allocated Capital.</p>
 
             <div class="run-backtest-modal-body">
                 <div class="control-group">
@@ -230,12 +257,13 @@
                 </div>
 
                 <div class="control-group" id="runBacktestPromptGroup" hidden>
-                    <label>Prompt</label>
+                    <label>Trading instruction</label>
                     <pre id="runBacktestPromptPreview" class="run-backtest-prompt-preview"></pre>
                 </div>
 
                 <div class="control-group">
                     <label>Period</label>
+                    <p class="control-helper">Pre-filled with a recent window that has full market data. You can pick any window up to 31 days.</p>
                     <div class="date-range-inputs">
                         <div class="date-input-wrapper">
                             <input type="date" id="startDate" value="2026-04-15" class="date-input">
@@ -317,25 +345,19 @@
                 </div>
 
                 <div class="control-group">
-                    <label for="backtestInitialCapital">Initial Capital</label>
-                    <p class="control-helper">Simulation starting cash for this backtest only (max $10,000). Independent of portfolio allocation and paper trading.</p>
-                    <input
-                        class="control-select"
-                        id="backtestInitialCapital"
-                        type="number"
-                        min="1"
-                        max="10000"
-                        step="1"
-                        value="1000"
-                        aria-label="Backtest initial capital"
-                    >
-                    <p id="runBacktestCapitalHint" class="control-helper">Does not change Allocated Capital.</p>
+                    <label>Allocated Capital</label>
+                    <div class="run-backtest-capital-row">
+                        <p id="runBacktestCapitalValue" class="run-backtest-readonly">—</p>
+                        <button id="runBacktestEditCapitalBtn" class="run-backtest-edit-link" type="button">Edit in Configure</button>
+                    </div>
+                    <p id="runBacktestCapitalHint" class="control-helper">Simulated starting cash. Does not change Paper Trading Allocated Capital.</p>
                 </div>
 
                 <div class="control-group">
                     <label for="modelSelect">Model</label>
-                    <p id="modelSelectHint" class="control-helper">Defaults to this agent’s model. Changing it here is temporary and is not saved to the agent.</p>
-                    <select class="control-select" id="modelSelect">
+                    <p id="runBacktestModelReadonly" class="run-backtest-readonly" hidden>—</p>
+                    <p id="modelSelectHint" class="control-helper">Set on the agent in Configure — this backtest always runs the agent's saved model.</p>
+                    <select class="control-select" id="modelSelect" hidden>
                         <option value="claude-haiku-4.5">Claude Haiku 4.5</option>
                         <option value="claude-sonnet-4.6">Claude Sonnet 4.6</option>
                         <option value="claude-opus-4.7">Claude Opus 4.7</option>
@@ -749,10 +771,10 @@
                     <input id="externalAgentModel" type="text" maxlength="100" placeholder="gpt-4 / rule-based" autocomplete="off">
                 </label>
                 <label class="auth-field">
-                    <span>Allocated capital (max $3,000)</span>
+                    <span>Paper Trading Allocated Capital (max $3,000)</span>
                     <input id="externalAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="externalAgentCashHint">
                 </label>
-                <p id="externalAgentCashHint" class="credential-hint">Starting capital budget for this agent's backtests and trading sessions.</p>
+                <p id="externalAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createExternalAgentError" class="auth-error" hidden></p>
                 <button id="createExternalAgentSubmit" class="auth-submit-btn" type="submit">Create agent</button>
             </form>
@@ -772,7 +794,7 @@
                 </label>
                 <label class="auth-field">
                     <span>Model</span>
-                    <select id="builtinAgentModel" class="auth-input">
+                    <select id="builtinAgentModel">
                         <option value="anthropic/claude-haiku-4-5">Claude Haiku 4.5</option>
                         <option value="anthropic/claude-sonnet-4-6">Claude Sonnet 4.6</option>
                         <option value="openai/gpt-5.5">GPT-5.5</option>
@@ -786,10 +808,10 @@
                     <input id="builtinAgentDescription" type="text" maxlength="280" placeholder="What is this agent's edge?" autocomplete="off">
                 </label>
                 <label class="auth-field">
-                    <span>Allocated capital (max $3,000)</span>
+                    <span>Paper Trading Allocated Capital (max $3,000)</span>
                     <input id="builtinAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="builtinAgentCashHint">
                 </label>
-                <p id="builtinAgentCashHint" class="credential-hint">Starting capital budget for this agent's backtests and trading sessions.</p>
+                <p id="builtinAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createBuiltinAgentError" class="auth-error" hidden></p>
                 <button id="createBuiltinAgentSubmit" class="auth-submit-btn" type="submit">Create built-in agent</button>
             </form>
@@ -820,7 +842,6 @@
     <div id="playgroundView" class="page-view playground-view" style="display: none;">
         <div class="subtab-bar playground-subtabs">
             <button class="subtab-btn active" data-playground-tab="agents">My Agents</button>
-            <button class="subtab-btn" data-playground-tab="marketplace">Agent Marketplace</button>
             <button class="subtab-btn" data-playground-tab="backtest">Backtest</button>
             <button class="subtab-btn" data-playground-tab="paper">Paper Trading</button>
         </div>
@@ -877,10 +898,18 @@
                 <div id="agentsCategories">
                     <section class="agents-category" data-category="builtin">
                         <div class="agents-category-head">
-                            <h3 class="agents-category-title">Foundation Models</h3>
+                            <h3 class="agents-category-title">Foundation Agents</h3>
                             <p class="agents-category-sub">A prompting game — give it money, an instruction, and a model, then backtest.</p>
                         </div>
-                        <div id="agentsGridBuiltin" class="agents-grid"></div>
+                        <div id="agentsGridBuiltin" class="agents-grid">
+                            <!-- Loading skeletons: visible pre-JS and while the first
+                                 agents fetch runs. No removal code needed — every render
+                                 path overwrites this grid's innerHTML (pinned by
+                                 test_frontend_fast_boot.py). -->
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                        </div>
                         <div id="agentsGridFooterBuiltin" class="agents-grid-footer" hidden></div>
                         <p id="agentsEmptyBuiltin" class="control-helper" hidden>No foundation agents yet. Click <strong>Add Agent</strong> to create one.</p>
                     </section>
@@ -889,29 +918,14 @@
                             <h3 class="agents-category-title">External Agents</h3>
                             <p class="agents-category-sub">Bring your own agent and connect it with an API key.</p>
                         </div>
-                        <div id="agentsGridExternal" class="agents-grid"></div>
+                        <div id="agentsGridExternal" class="agents-grid">
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                        </div>
                         <div id="agentsGridFooterExternal" class="agents-grid-footer" hidden></div>
                         <p id="agentsEmptyExternal" class="control-helper" hidden>No external agents match your search.</p>
                     </section>
                 </div>
                 <p id="agentsErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't reach the server to load agents. Check your connection and try again.</p>
-            </div>
-        </div>
-        <div id="playgroundMarketplacePanel" class="playground-panel" style="display: none;">
-            <div class="marketplace-section">
-                <div class="marketplace-section-head">
-                    <div>
-                        <h2 class="page-title">Agent Marketplace</h2>
-                        <p class="marketplace-section-sub">Browse open agent templates and copy them into My Agents to customize and backtest.</p>
-                    </div>
-                    <div class="agent-toolbar-search marketplace-search">
-                        <svg class="agent-toolbar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-                        <input id="marketplaceSearchInput" type="search" placeholder="Search templates..." aria-label="Search marketplace templates">
-                    </div>
-                </div>
-                <div id="marketplaceGrid" class="agents-grid marketplace-grid"></div>
-                <p id="marketplaceEmptyState" class="control-helper" hidden>No templates match your search.</p>
-                <p id="marketplaceErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't load the marketplace. Check your connection and try again.</p>
             </div>
         </div>
     </div>
@@ -926,15 +940,16 @@
             <div class="agent-editor-title-wrap">
                 <input id="agentEditorNameInput" class="agent-editor-name-input" type="text" maxlength="100" placeholder="Agent name" aria-label="Agent name" autocomplete="off">
                 <p id="agentEditorMeta" class="agent-editor-meta"></p>
-                <label class="agent-editor-model-field" for="agentEditorModelSelect">
+                <label id="agentEditorModelField" class="agent-editor-model-field" for="agentEditorModelSelect">
                     <span class="agent-editor-model-label">Model</span>
                     <select id="agentEditorModelSelect" class="agent-editor-model-select" aria-label="Agent model"></select>
                 </label>
+                <div id="agentEditorManagedModelField" class="agent-editor-managed-model-field" aria-label="Managed model provider" hidden>
+                    <span class="agent-editor-model-label">Managed provider / model</span>
+                    <strong id="agentEditorManagedModelValue" class="agent-editor-managed-model-value">OpenRouter · nvidia/nemotron-3-nano-30b-a3b</strong>
+                    <span class="agent-editor-managed-model-note">Managed by Agentic Trading Lab</span>
+                </div>
                 <textarea id="agentEditorDescription" class="agent-editor-description" rows="2" maxlength="280" placeholder="Optional description for this agent…" aria-label="Agent description"></textarea>
-                <label class="agent-editor-cash-field" for="agentEditorCashAllocation">
-                    <span class="agent-editor-cash-label">Allocated capital (paper, max $3,000)</span>
-                    <input id="agentEditorCashAllocation" class="agent-editor-cash-input" type="number" min="0" max="3000" step="100" placeholder="0" aria-label="Allocated capital for paper trading">
-                </label>
                 <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
                     <div class="agent-editor-broker-head">
                         <h3 class="agent-editor-intro-title">Robinhood live trading</h3>
@@ -955,12 +970,7 @@
                 </div>
             </div>
             <div class="agent-editor-header-actions">
-                <div class="agent-editor-mode-toggle" role="group" aria-label="Editor mode">
-                    <button id="agentEditorModeSimple" class="agent-editor-mode-btn" type="button" aria-pressed="true">Simple</button>
-                    <button id="agentEditorModeAdvanced" class="agent-editor-mode-btn" type="button" aria-pressed="false">Advanced</button>
-                </div>
                 <span id="agentEditorDirtyBadge" class="agent-editor-dirty-badge" hidden>Unsaved changes</span>
-                <button id="agentEditorResetBtn" class="home-btn home-btn-secondary agent-editor-reset-btn" type="button">Reset pipeline</button>
                 <button id="agentEditorRunBacktestBtn" class="home-btn home-btn-secondary" type="button">Run Backtest</button>
                 <button id="agentEditorSaveBtn" class="home-btn home-btn-primary" type="button">Save</button>
             </div>
@@ -968,36 +978,46 @@
         <div class="agent-editor-body">
             <div class="agent-editor-layout">
                 <div class="agent-editor-main">
-                    <div id="agentEditorSimplePanel" class="agent-editor-simple section-card compact" hidden>
+                    <div class="agent-capital-card section-card compact">
+                        <h3 class="agent-capital-title">Allocated Capital</h3>
+                        <div class="agent-capital-grid">
+                            <label class="agent-capital-field" for="agentEditorCashAllocation">
+                                <span class="agent-capital-label">Paper Trading <span class="agent-capital-max">max $3,000</span></span>
+                                <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital">
+                                <span class="agent-capital-note">Reserved from My Portfolio. Real sleeve.</span>
+                            </label>
+                            <label class="agent-capital-field" for="agentEditorBacktestAllocation">
+                                <span class="agent-capital-label">Backtesting <span class="agent-capital-max">max $10,000</span></span>
+                                <input id="agentEditorBacktestAllocation" class="agent-capital-input" type="number" min="1" max="10000" step="100" placeholder="1000" aria-label="Backtest Allocated Capital">
+                                <span class="agent-capital-note">Simulated only. Never spends real cash.</span>
+                            </label>
+                        </div>
+                    </div>
+                    <div id="agentEditorSimplePanel" class="agent-editor-simple section-card compact">
                         <h3 class="agent-editor-intro-title">Trading instruction</h3>
                         <p class="agent-editor-intro-text">Tell the agent how to trade in plain language. Each market hour it sees prices and its portfolio, follows your instruction, and decides what to buy or sell.</p>
                         <textarea id="agentEditorSimpleInstruction" rows="6" maxlength="8000" placeholder="e.g. Spread the money across a few of the strongest available stocks. Buy on meaningful dips and take profits after strong run-ups." aria-label="Trading instruction"></textarea>
-                        <p id="agentEditorSimpleReplaceNote" class="agent-editor-simple-note" hidden>This agent currently uses a custom pipeline. Saving in Simple mode replaces it with this one instruction.</p>
+                        <p class="agent-editor-simple-note">Leave this empty and the agent uses the platform's default trading strategy.</p>
+                        <details class="agent-editor-default-details">
+                            <summary>See the default instruction</summary>
+                            <p id="agentEditorDefaultInstructionText" class="agent-editor-default-text"></p>
+                        </details>
+                        <p id="agentEditorSimpleReplaceNote" class="agent-editor-simple-note" hidden>This agent currently uses a custom multi-step pipeline. Saving this instruction replaces it.</p>
                     </div>
-                    <div id="agentEditorAdvancedPanel">
-                        <div class="agent-editor-intro section-card compact">
-                            <div class="agent-editor-intro-head">
-                                <div>
-                                    <h3 class="agent-editor-intro-title">Sub-agent pipeline</h3>
-                                    <p class="agent-editor-intro-text">Configure sub-agents in order. Each step defines a task prompt and the output format passed to the next model.</p>
-                                </div>
-                                <span id="agentEditorStepCount" class="agent-editor-step-count">0 steps</span>
-                            </div>
-                        </div>
-                        <div id="agentEditorPipeline" class="agent-editor-pipeline" role="list"></div>
-                        <div class="agent-editor-add-row section-card compact">
-                            <label class="agent-editor-add-label" for="agentEditorAddSelect">Add sub-agent</label>
-                            <div class="agent-editor-add-controls">
-                                <select id="agentEditorAddSelect" class="agent-editor-add-select" aria-label="Select sub-agent type to add">
-                                    <option value="">— Select type —</option>
-                                </select>
-                                <input id="agentEditorCustomName" class="agent-editor-custom-name" type="text" maxlength="80" placeholder="Custom name (optional)" hidden aria-label="Custom sub-agent name">
-                                <button id="agentEditorAddBtn" class="home-btn home-btn-secondary" type="button">+ Add</button>
-                            </div>
-                        </div>
+                    <div id="agentEditorAiHedgeFundPanel" class="agent-editor-simple section-card compact" hidden>
+                        <h3 class="agent-editor-intro-title">AI Hedge Fund analyst committee</h3>
+                        <p class="agent-editor-intro-text">Choose the upstream analysts that compose this agent's strategy. The hosted OpenRouter model and runtime controls are managed by Agentic Trading Lab.</p>
+                        <div id="agentEditorAiHedgeFundAnalysts" class="agent-editor-analyst-grid" role="group" aria-label="AI Hedge Fund analysts"></div>
+                        <label class="auth-field agent-editor-credential-field" for="agentEditorFinancialDatasetsKey">
+                            <span>Financial Datasets API key</span>
+                            <input id="agentEditorFinancialDatasetsKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep the stored key" aria-describedby="agentEditorFinancialDatasetsStatus">
+                        </label>
+                        <p id="agentEditorFinancialDatasetsStatus" class="agent-editor-simple-note">Checking credential…</p>
+                        <button id="agentEditorFinancialDatasetsRemove" class="agent-editor-credential-remove" type="button" hidden>Remove stored key</button>
+                        <p class="agent-editor-simple-note">Encrypted in credential storage. The value is never returned to this browser after saving.</p>
                     </div>
                     <p id="agentEditorSaveStatus" class="agent-editor-save-status" hidden></p>
-                    <p class="agent-editor-hint">Tip: use ↑↓ to reorder steps. Press <kbd>Ctrl</kbd>+<kbd>S</kbd> to save.</p>
+                    <p class="agent-editor-hint">Tip: press <kbd>Ctrl</kbd>+<kbd>S</kbd> to save.</p>
                 </div>
                 <aside class="agent-editor-history" aria-label="Backtest history">
                     <div class="agent-editor-history-card section-card compact">
@@ -1517,12 +1537,29 @@
         </div>
     </div>
 
-    <!-- Community -->
+    <!-- Community -- Agent Marketplace is its first section, not the whole page:
+         the nav button says "Community", so the page has to say it too. -->
     <div id="communityView" class="page-view community-view" style="display: none;">
         <div class="page-header">
             <div>
                 <h2 class="page-title">Community</h2>
+                <p class="page-description">Agent templates shared by the Agentic Trading Lab community.</p>
             </div>
+        </div>
+        <div class="marketplace-section">
+            <div class="marketplace-section-head">
+                <div>
+                    <h3 class="marketplace-section-title">Agent Marketplace</h3>
+                    <p class="marketplace-section-sub">Browse open agent templates and add them to My Agents to customize and backtest.</p>
+                </div>
+                <div class="agent-toolbar-search marketplace-search">
+                    <svg class="agent-toolbar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                    <input id="marketplaceSearchInput" type="search" placeholder="Search templates..." aria-label="Search marketplace templates">
+                </div>
+            </div>
+            <div id="marketplaceGrid" class="agents-grid marketplace-grid"></div>
+            <p id="marketplaceEmptyState" class="control-helper" hidden>No templates match your search.</p>
+            <p id="marketplaceErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't load the marketplace. Check your connection and try again.</p>
         </div>
     </div>
 
@@ -1542,8 +1579,46 @@
                 <span class="account-label">Email</span>
                 <span id="accountEmail" class="account-value">—</span>
             </div>
-            <div class="account-actions">
-                <button id="authLogoutBtn" class="auth-btn auth-btn-secondary" type="button">Log out</button>
+            <div class="account-section">
+                <h3 class="account-section-title">Display name</h3>
+                <form id="accountDisplayNameForm" class="auth-form account-password-form">
+                    <label class="auth-field">
+                        <span>Display name</span>
+                        <input id="displayNameInput" type="text" maxlength="100" autocomplete="nickname" required>
+                    </label>
+                    <p id="displayNameError" class="auth-error" hidden></p>
+                    <p id="displayNameSuccess" class="account-success" hidden>Display name updated.</p>
+                    <button class="auth-btn auth-btn-primary" type="submit">Save name</button>
+                </form>
+            </div>
+            <div class="account-section">
+                <h3 class="account-section-title">Change email address</h3>
+                <form id="accountEmailForm" class="auth-form account-password-form">
+                    <div id="emailChangeIdle">
+                        <label class="auth-field">
+                            <span>New email address</span>
+                            <input id="newEmailInput" type="email" maxlength="254" autocomplete="email">
+                        </label>
+                        <label class="auth-field">
+                            <span>Current password</span>
+                            <input id="emailChangePasswordInput" type="password" autocomplete="current-password">
+                        </label>
+                        <p class="account-hint">You can change your email address once every 7 days.</p>
+                    </div>
+                    <div id="emailChangeCodeStep" hidden>
+                        <p id="emailChangeStepCopy" class="account-hint"></p>
+                        <label class="auth-field">
+                            <span>Confirmation code</span>
+                            <input id="emailChangeCodeInput" type="text" maxlength="6" autocomplete="one-time-code">
+                        </label>
+                    </div>
+                    <p id="emailChangeError" class="auth-error" hidden></p>
+                    <p id="emailChangeSuccess" class="account-success" hidden>Email address updated. Other devices were signed out.</p>
+                    <div class="account-email-actions">
+                        <button id="emailChangeSubmitBtn" class="auth-btn auth-btn-primary" type="submit">Send code</button>
+                        <button id="emailChangeCancelBtn" class="auth-btn auth-btn-secondary" type="button" hidden>Cancel</button>
+                    </div>
+                </form>
             </div>
             <div class="account-section">
                 <h3 class="account-section-title">Profile photo</h3>
@@ -1578,6 +1653,9 @@
                     <button class="auth-btn auth-btn-primary" type="submit">Update password</button>
                 </form>
             </div>
+            <div class="account-section account-actions">
+                <button id="authLogoutBtn" class="auth-btn auth-btn-danger" type="button">Log out</button>
+            </div>
         </div>
         <div id="accountSignedOut" class="account-card account-card--empty" hidden>
             <p class="account-empty-copy">Sign in to view your account.</p>
@@ -1586,19 +1664,25 @@
     </div>
 
 
-    <script src="market-events/mockMarketEvents.js"></script>
-    <script src="market-events/marketEventRelativeTime.js"></script>
-    <script src="market-events/MarketEventCard.js"></script>
-    <script src="market-events/MarketEventFeed.js"></script>
-    <script src="js/portfolio.js?v=15"></script>
-    <script src="js/agent-editor.js?v=12"></script>
-    <script src="app.js?v=47"></script>
-    <script src="js/leaderboard.js?v=16"></script>
-    <script src="home-page.js?v=36"></script>
+    <!-- All deferred so the Chart.js CDN tag in <head> (also deferred) can
+         stay first in execution order: deferred scripts run in document
+         order, all before DOMContentLoaded. -->
+    <script src="market-events/mockMarketEvents.js" defer></script>
+    <script src="market-events/marketEventRelativeTime.js" defer></script>
+    <script src="market-events/MarketEventCard.js" defer></script>
+    <script src="market-events/MarketEventFeed.js" defer></script>
+    <script src="js/portfolio.js?v=17" defer></script>
+    <script src="js/agent-editor.js?v=23" defer></script>
+    <script src="app.js?v=63" defer></script>
+    <script src="js/leaderboard.js?v=16" defer></script>
+    <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads
          before app.js. -->
-    <script src="home-news-signals.js"></script>
+    <script src="home-news-signals.js" defer></script>
+    <!-- Never `hidden`: a live region has to stay rendered to be monitored. It
+         hides itself visually via .app-toast's opacity + pointer-events. -->
+    <div id="appToast" class="app-toast" role="status" aria-live="polite"></div>
 </body>
 </html>

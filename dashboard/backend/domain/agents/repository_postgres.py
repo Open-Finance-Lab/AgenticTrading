@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 from dashboard.backend.db_url import require_postgres_url
 from dashboard.backend.domain.agents.repository import (
     DEFAULT_SCOPES,
+    DEFAULT_RUNTIME_TYPE,
     _UNSET,
     _hash_api_key,
     _new_api_key,
@@ -49,9 +50,9 @@ class PostgresAgentStore:
         # in tests, and CI's Postgres service container is empty on every run,
         # so the @pg_only tier only ever exercises the CREATE path -- except
         # test_agent_schema_lazily_migrates_an_old_table_postgres, which recreates
-        # the pre-migration table to force the migrate path. The five ALTER ...
-        # ADD COLUMN IF NOT EXISTS statements below re-add the columns the SQLite
-        # store accreted as lazy migrations, so a deployment whose table predates
+        # the pre-migration table to force the migrate path. Every ALTER ...
+        # ADD COLUMN IF NOT EXISTS statement below re-adds a column the SQLite
+        # store accreted as a lazy migration, so a deployment whose table predates
         # them is brought up to shape on the next boot; on a fresh or current
         # table they no-op. Add the next column the same way (Postgres supports
         # ADD COLUMN IF NOT EXISTS natively; users_postgres.py has the pattern).
@@ -80,14 +81,19 @@ class PostgresAgentStore:
                         agent_type TEXT NOT NULL DEFAULT 'external',
                         description TEXT,
                         pipeline_config TEXT,
-                        cash_allocation DOUBLE PRECISION
+                        cash_allocation DOUBLE PRECISION,
+                        backtest_allocation DOUBLE PRECISION,
+                        live_trading_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                        runtime_type TEXT NOT NULL DEFAULT 'pipeline',
+                        runtime_config TEXT NOT NULL DEFAULT '{{}}'
                     )
                     """
                 )
                 # Lazy migrations for a table created before these columns
-                # existed (mirrors the SQLite store's five post-ship ALTERs).
-                # Each no-ops on a fresh or already-current table. Must run
-                # before idx_external_agents_type, which indexes agent_type.
+                # existed (mirrors every one of the SQLite store's post-ship
+                # ALTERs). Each no-ops on a fresh or already-current table.
+                # Must run before idx_external_agents_type, which indexes
+                # agent_type.
                 cur.execute(
                     "ALTER TABLE external_agents "
                     "ADD COLUMN IF NOT EXISTS agent_type TEXT NOT NULL DEFAULT 'external'"
@@ -105,7 +111,23 @@ class PostgresAgentStore:
                 )
                 cur.execute(
                     "ALTER TABLE external_agents "
+                    "ADD COLUMN IF NOT EXISTS backtest_allocation DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE external_agents "
                     f"ADD COLUMN IF NOT EXISTS scopes TEXT NOT NULL DEFAULT '{DEFAULT_SCOPES}'"
+                )
+                cur.execute(
+                    "ALTER TABLE external_agents "
+                    "ADD COLUMN IF NOT EXISTS live_trading_enabled BOOLEAN NOT NULL DEFAULT FALSE"
+                )
+                cur.execute(
+                    "ALTER TABLE external_agents "
+                    "ADD COLUMN IF NOT EXISTS runtime_type TEXT NOT NULL DEFAULT 'pipeline'"
+                )
+                cur.execute(
+                    "ALTER TABLE external_agents "
+                    "ADD COLUMN IF NOT EXISTS runtime_config TEXT NOT NULL DEFAULT '{}'"
                 )
                 cur.execute(
                     """
@@ -136,7 +158,10 @@ class PostgresAgentStore:
         session_id: Optional[str] = None,
         agent_type: str = "external",
         description: Optional[str] = None,
+        runtime_type: str = DEFAULT_RUNTIME_TYPE,
+        runtime_config: Optional[Dict[str, Any]] = None,
         cash_allocation: Optional[float] = None,
+        backtest_allocation: Optional[float] = None,
     ) -> Dict[str, Any]:
         agent_id = f"agent_{uuid.uuid4().hex[:12]}"
         session_id = session_id or str(uuid.uuid4())
@@ -152,8 +177,9 @@ class PostgresAgentStore:
                     INSERT INTO external_agents (
                         agent_id, name, session_id, api_key_hash, api_key_prefix,
                         model_name, agent_type, description, cash_allocation,
+                        backtest_allocation, runtime_type, runtime_config,
                         owner_user_id, owner_browser_session, created_at, last_used_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
@@ -166,6 +192,9 @@ class PostgresAgentStore:
                         (agent_type or "external").strip() or "external",
                         (description or None),
                         cash_allocation,
+                        backtest_allocation,
+                        (runtime_type or DEFAULT_RUNTIME_TYPE).strip() or DEFAULT_RUNTIME_TYPE,
+                        json.dumps(runtime_config or {}),
                         owner_user_id,
                         owner_browser_session,
                         now,
@@ -248,6 +277,18 @@ class PostgresAgentStore:
                         """,
                         (owner_user_id,),
                     )
+                    # Also surface unclaimed agents created in this browser
+                    # before login/claim (same rationale as the SQLite twin).
+                    if owner_browser_session:
+                        _add_rows(
+                            """
+                            SELECT * FROM external_agents
+                            WHERE owner_browser_session = %s
+                              AND owner_user_id IS NULL
+                            ORDER BY created_at DESC
+                            """,
+                            (owner_browser_session,),
+                        )
                 elif owner_browser_session:
                     _add_rows(
                         """
@@ -268,6 +309,10 @@ class PostgresAgentStore:
                         (trading_session_id,),
                     )
 
+        # Each _add_rows call is independently sorted, but the groups are
+        # appended query-by-query, so a recent unclaimed browser agent could
+        # otherwise land after an older owned agent. Re-sort the union once.
+        rows.sort(key=lambda row: row["created_at"], reverse=True)
         return [_public_agent(row) for row in rows]
 
     def list_builtin_agents(self) -> List[Dict[str, Any]]:
@@ -419,7 +464,11 @@ class PostgresAgentStore:
         model_name: Optional[str] = None,
         description: Optional[str] = None,
         pipeline: Any = _UNSET,
+        runtime_type: Any = _UNSET,
+        runtime_config: Any = _UNSET,
         cash_allocation: Any = _UNSET,
+        backtest_allocation: Any = _UNSET,
+        live_trading_enabled: Any = _UNSET,
     ) -> Optional[Dict[str, Any]]:
         """Update display fields for an agent. Returns the updated record or None.
 
@@ -441,9 +490,23 @@ class PostgresAgentStore:
         if pipeline is not _UNSET:
             sets.append("pipeline_config = %s")
             params.append(json.dumps(pipeline) if pipeline else None)
+        if runtime_type is not _UNSET:
+            sets.append("runtime_type = %s")
+            params.append(
+                (runtime_type or DEFAULT_RUNTIME_TYPE).strip() or DEFAULT_RUNTIME_TYPE
+            )
+        if runtime_config is not _UNSET:
+            sets.append("runtime_config = %s")
+            params.append(json.dumps(runtime_config or {}))
         if cash_allocation is not _UNSET:
             sets.append("cash_allocation = %s")
             params.append(cash_allocation)
+        if backtest_allocation is not _UNSET:
+            sets.append("backtest_allocation = %s")
+            params.append(backtest_allocation)
+        if live_trading_enabled is not _UNSET:
+            sets.append("live_trading_enabled = %s")
+            params.append(bool(live_trading_enabled))
         if not sets:
             return self.get_agent(agent_id)
         sets.append("last_used_at = %s")

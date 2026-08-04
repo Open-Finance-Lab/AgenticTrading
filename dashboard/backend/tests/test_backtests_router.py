@@ -153,6 +153,16 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
                 "fx_policy": "daily_implied_median_forward_fill",
                 "fx_start_rate": 7.0,
                 "fx_end_rate": 7.1,
+                "t_plus_one_enabled": True,
+                # The records themselves are deliberately NOT projected onto
+                # RunMetadata (it backs two list routes); only the scalars are.
+                "rejected_orders": [{
+                    "symbol": "600519.SH",
+                    "reason": "t1_frozen",
+                    "status": "rejected",
+                }],
+                "rejected_orders_count": 7200,
+                "rejected_orders_truncated": 7000,
             }
         )
     )
@@ -172,6 +182,12 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
     assert response.fx_source == "ifind_history_currency_conversion"
     assert response.fx_start_rate == 7.0
     assert response.fx_end_rate == 7.1
+    assert response.t_plus_one_enabled is True
+    assert response.rejected_orders_count == 7200
+    assert response.rejected_orders_truncated == 7000
+    # The unbounded array must never reach a list-route payload.
+    assert not hasattr(response, "rejected_orders")
+    assert "rejected_orders" not in response.model_dump()
 
 
 def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
@@ -190,6 +206,11 @@ def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
     assert response.fx_pair is None
     assert response.fx_source is None
     assert response.fx_start_rate is None
+    assert response.t_plus_one_enabled is None
+    # None, not 0: a legacy run predates the feature, it did not record zero
+    # rejections. Same convention as t_plus_one_enabled above.
+    assert response.rejected_orders_count is None
+    assert response.rejected_orders_truncated is None
 
 
 @pytest.fixture(autouse=True)
@@ -253,6 +274,212 @@ def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
     assert resp.json()["session_id"] == agent_session
     assert spy.calls == 1
     assert spy.last_kwargs["session_id"] == agent_session
+    assert spy.last_kwargs["runtime_type"] == "pipeline"
+    assert spy.last_kwargs["runtime_config"] == {}
+
+
+def _stub_hosted_runtime_installed(monkeypatch):
+    """Pretend the isolated upstream venv exists on this deployment.
+
+    CI installs core requirements only, so the real check always reports the
+    runtime as missing. Tests about *other* preconditions have to say which
+    deployment they are describing.
+    """
+    monkeypatch.setattr(bt, "runtime_unavailable_reason", lambda: None)
+
+
+def test_backtest_run_dispatches_ai_hedge_fund_runtime(client, monkeypatch):
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_hosted_runtime_installed(monkeypatch)
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: "user-financial-datasets-test-key",
+    )
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    cloned = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    )
+    assert cloned.status_code == 200
+    agent = cloned.json()["agent"]
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "model": "claude-haiku-4.5",
+            "pipeline": [{"label": "must be ignored"}],
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["runtime_type"] == "ai_hedge_fund"
+    assert set(response.json()["ignored_fields"]) == {"model", "pipeline"}
+    assert spy.calls == 1
+    assert spy.last_kwargs["runtime_type"] == "ai_hedge_fund"
+    assert spy.last_kwargs["runtime_config"]["analysts"]
+    assert (
+        spy.last_kwargs["financial_datasets_api_key"]
+        == "user-financial-datasets-test-key"
+    )
+    assert spy.last_kwargs["model"] is None
+    assert spy.last_kwargs["pipeline"] is None
+
+
+def test_ai_hedge_fund_backtest_requires_owned_agent_credential(client, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    _stub_hosted_runtime_installed(monkeypatch)
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: None,
+    )
+
+    missing = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+    assert missing.status_code == 422
+    assert "Financial Datasets API key" in missing.text
+
+    unauthorized = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert unauthorized.status_code == 403
+
+
+def test_ai_hedge_fund_backtest_rejects_run_when_runtime_not_installed(
+    client, monkeypatch
+):
+    """A missing isolated venv must fail at request time, not 30 minutes later.
+
+    render.yaml is documentation rather than the deploy mechanism here, so a
+    service without the venv is a live possibility. Without this the run is
+    accepted, backgrounded, and dies on its first decision step.
+    """
+    spy = _Spy()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "platform-openrouter-test-key")
+    monkeypatch.setattr(
+        bt,
+        "runtime_unavailable_reason",
+        lambda: "AI Hedge Fund runtime is not installed; configure AI_HEDGE_FUND_PYTHON",
+    )
+    monkeypatch.setattr(
+        bt.agent_credential_store,
+        "get_secret",
+        lambda agent_id, credential_name: "user-financial-datasets-test-key",
+    )
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 503, response.text
+    assert "AI_HEDGE_FUND_PYTHON" in response.text
+    assert spy.calls == 0
+
+
+def test_hosted_backtest_timeout_covers_every_decision_step():
+    """The parent timeout must not be the binding constraint on a hosted run.
+
+    A fixed 1800s cap over a month of trading days leaves ~85s per step while
+    the runtime is configured for 300s, so the parent kills the child mid-run
+    and discards every completed step.
+    """
+    step_seconds = bt.resolve_step_timeout_seconds()
+    decision_days = bt._estimated_decision_days("2026-01-01", "2026-01-31")
+    assert decision_days == 22
+
+    hosted = bt._backtest_subprocess_timeout(
+        "ai_hedge_fund", "2026-01-01", "2026-01-31"
+    )
+    assert hosted >= step_seconds * decision_days
+    assert hosted > bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+
+    # Pipeline runs keep their established budget exactly.
+    assert (
+        bt._backtest_subprocess_timeout("pipeline", "2026-01-01", "2026-01-31")
+        == bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+    )
+
+
+def test_hosted_backtest_timeout_is_capped_and_never_below_pipeline():
+    """A long range is capped rather than pinning a worker thread forever."""
+    capped = bt._backtest_subprocess_timeout(
+        "ai_hedge_fund", "2020-01-01", "2030-01-01"
+    )
+    assert capped == bt.MAX_SUBPROCESS_TIMEOUT_SECONDS
+
+    # Unparseable dates must not collapse the budget to the overhead constant.
+    assert (
+        bt._backtest_subprocess_timeout("ai_hedge_fund", "not-a-date", "also-bad")
+        == bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+    )
+
+
+def test_ai_hedge_fund_requires_openrouter_not_direct_openai(client, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-authorize-hosted-runtime")
+    owner = str(uuid.uuid4())
+    headers = {"X-Session-Id": owner}
+    agent = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    ).json()["agent"]
+
+    response = client.post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "agent_id": agent["agent_id"],
+        },
+        headers=headers,
+    )
+
+    assert response.status_code == 503
+    assert "platform-managed OpenRouter provider" in response.text
 
 
 def test_backtest_run_forwards_selected_assets(client, monkeypatch):
@@ -462,6 +689,11 @@ def test_backtest_status_includes_live_progress(tmp_path):
             "price": 150.25,
             "value": 1502.5,
         }],
+        "rejected_orders": [{
+            "symbol": "600519.SH",
+            "reason": "t1_frozen",
+            "status": "rejected",
+        }],
     }), encoding="utf-8")
     bt.backtest_status.update({
         "running": True,
@@ -477,10 +709,17 @@ def test_backtest_status_includes_live_progress(tmp_path):
     assert body["progress"]["step"] == 5
     assert body["progress"]["total_steps"] == 100
     assert len(body["progress"]["equity_curve"]) == 1
-    assert len(body["progress"]["equity_curve"]) == 1
     assert len(body["progress"]["trades"]) == 1
     assert body["progress"]["trades"][0]["symbol"] == "AAPL"
+    assert body["progress"]["rejected_orders"][0]["reason"] == "t1_frozen"
     assert "step 5/100" in body["message"]
+    # Pinned at the wire, not just at _read_backtest_progress: the payload is
+    # assigned wholesale today, so a later whitelist would drop these fields with
+    # a green helper test and a UI that silently stops reporting staleness.
+    assert body["progress"]["progress_updated_at"] == progress_file.stat().st_mtime
+    # The age is the field the browser actually reads -- deriving it client-side
+    # from the mtime above would make a skewed clock look like a wedged run.
+    assert 0 <= body["progress"]["progress_age_seconds"] < 30
 
 
 def test_get_run_trades_endpoint(client, monkeypatch):
@@ -513,6 +752,82 @@ def test_get_run_trades_endpoint(client, monkeypatch):
     assert body["run_id"] == run_id
     assert body["count"] == 1
     assert body["trades"][0]["symbol"] == "MSFT"
+
+
+def _rejected_orders_run(monkeypatch, run_id, session_id, metadata):
+    def fake_get_run_with_session(rid, sid):
+        if rid == run_id and sid == session_id:
+            return {
+                "run_id": run_id,
+                "agent_name": "Agent",
+                "mode": "backtest",
+                "metadata": metadata,
+            }
+        return None
+
+    monkeypatch.setattr(bt.db, "get_run_with_session", fake_get_run_with_session)
+
+
+def test_get_run_rejected_orders_endpoint(client, monkeypatch):
+    session_id = str(uuid.uuid4())
+    run_id = "agent_test_rejections"
+    _rejected_orders_run(monkeypatch, run_id, session_id, {
+        "rejected_orders": [{"symbol": "600519.SH", "reason": "t1_frozen"}],
+        "rejected_orders_count": 1,
+    })
+
+    resp = client.get(
+        f"/runs/{run_id}/rejected-orders", headers={"X-Session-Id": session_id}
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == run_id
+    assert body["count"] == 1
+    assert body["returned"] == 1
+    assert body["truncated"] == 0
+    assert body["rejected_orders"][0]["reason"] == "t1_frozen"
+
+
+def test_get_run_rejected_orders_reports_the_cap_it_applied(client, monkeypatch):
+    """A capped sample must never read as the run's full rejection history."""
+    session_id = str(uuid.uuid4())
+    run_id = "agent_test_rejections_capped"
+    _rejected_orders_run(monkeypatch, run_id, session_id, {
+        "rejected_orders": [{"symbol": "600519.SH", "reason": "t1_frozen"}] * 200,
+        "rejected_orders_count": 7_200,
+        "rejected_orders_truncated": 7_000,
+    })
+
+    body = client.get(
+        f"/runs/{run_id}/rejected-orders", headers={"X-Session-Id": session_id}
+    ).json()
+    assert body["count"] == 7_200      # what the run actually produced
+    assert body["returned"] == 200     # what this response carries
+    assert body["truncated"] == 7_000  # the difference, stated outright
+
+
+def test_get_run_rejected_orders_is_session_scoped(client, monkeypatch):
+    session_id = str(uuid.uuid4())
+    _rejected_orders_run(monkeypatch, "agent_owned", session_id, {})
+
+    resp = client.get(
+        "/runs/agent_owned/rejected-orders",
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert resp.status_code == 404
+
+
+def test_get_run_rejected_orders_tolerates_legacy_runs(client, monkeypatch):
+    """Runs predating the feature have no metadata dict at all."""
+    session_id = str(uuid.uuid4())
+    _rejected_orders_run(monkeypatch, "agent_legacy", session_id, None)
+
+    body = client.get(
+        "/runs/agent_legacy/rejected-orders", headers={"X-Session-Id": session_id}
+    ).json()
+    assert body["rejected_orders"] == []
+    assert body["count"] == 0
+    assert body["truncated"] == 0
 
 
 def test_backtest_run_rate_limited_per_client(monkeypatch):
@@ -604,6 +919,28 @@ def test_subprocess_log_dump_is_redacted_but_not_truncated(monkeypatch):
     assert "[REDACTED]" in redacted
 
 
+def test_subprocess_log_redacts_user_financial_datasets_credential():
+    credential = "user-financial-datasets-plaintext-canary"
+
+    redacted = bt._redact_credentials(
+        f"upstream failed with key={credential}", credential
+    )
+
+    assert credential not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_background_error_redacts_user_financial_datasets_credential():
+    credential = "user-financial-datasets-test-key"
+    summary = bt._sanitize_backtest_error(
+        f"runtime rejected credential={credential}",
+        extra_secret=credential,
+    )
+
+    assert credential not in summary
+    assert "[REDACTED]" in summary
+
+
 def test_error_summary_stays_bounded(monkeypatch):
     monkeypatch.setenv("IFIND_ACCESS_TOKEN", "super-secret-token")
 
@@ -611,3 +948,53 @@ def test_error_summary_stays_bounded(monkeypatch):
 
     assert len(summary) == 500
     assert "super-secret-token" not in summary
+
+
+def test_rejected_orders_endpoint_reports_t1_deferrals(client, monkeypatch):
+    """Built-in agents size down instead of over-asking, so deferrals -- not
+    rejections -- are where T+1's effect on strategy shows up."""
+    session_id = str(uuid.uuid4())
+    run_id = "agent_test_deferrals"
+    _rejected_orders_run(monkeypatch, run_id, session_id, {
+        "t1_deferrals": [{
+            "date": "2026-04-01", "symbol": "600519.SH",
+            "requested_shares": 100, "sellable_shares": 40,
+            "deferred_shares": 60,
+        }],
+        "t1_deferred_events": 12,
+        "t1_deferred_shares": 640,
+        "t1_deferrals_truncated": 11,
+    })
+
+    body = client.get(
+        f"/runs/{run_id}/rejected-orders", headers={"X-Session-Id": session_id}
+    ).json()
+    assert body["t1_deferred_events"] == 12
+    assert body["t1_deferred_shares"] == 640
+    assert body["t1_deferrals_truncated"] == 11
+    assert body["t1_deferrals"][0]["deferred_shares"] == 60
+    # A clean run on the rejection side must not read as missing data.
+    assert body["rejected_orders"] == []
+    assert body["count"] == 0
+
+
+def test_run_metadata_exposes_deferral_scalars(client, monkeypatch):
+    response = bt._run_metadata_response(
+        _run_record(metadata={
+            "data_source": "ifind_ashare",
+            "t_plus_one_enabled": True,
+            "t1_deferred_events": 12,
+            "t1_deferred_shares": 640,
+            "t1_deferrals": [{"symbol": "600519.SH"}] * 200,
+        })
+    )
+    assert response.t1_deferred_events == 12
+    assert response.t1_deferred_shares == 640
+    # Scalars only: the records stay off the list-route model.
+    assert "t1_deferrals" not in response.model_dump()
+
+
+def test_run_metadata_deferral_scalars_are_none_for_legacy_runs():
+    response = bt._run_metadata_response(_run_record())
+    assert response.t1_deferred_events is None
+    assert response.t1_deferred_shares is None

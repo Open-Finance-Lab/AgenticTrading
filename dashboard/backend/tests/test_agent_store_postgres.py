@@ -107,10 +107,10 @@ def test_unreachable_postgres_agent_store_raises_instead_of_falling_back():
     """
     import psycopg
 
-    from dashboard.backend.domain.agents.repository_postgres import PostgresAgentStore
+    import dashboard.backend.domain.agents.repository_postgres as repo_pg
 
     with pytest.raises(psycopg.OperationalError):
-        PostgresAgentStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
+        repo_pg.PostgresAgentStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
 
 
 def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
@@ -123,10 +123,10 @@ def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
     into __init__ -- testing the helper alone would not catch it being dropped
     from the constructor.
     """
-    from dashboard.backend.domain.agents.repository_postgres import PostgresAgentStore
+    import dashboard.backend.domain.agents.repository_postgres as repo_pg
 
     with pytest.raises(ValueError) as excinfo:
-        PostgresAgentStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
+        repo_pg.PostgresAgentStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
     assert "sup3r-s3cret" not in str(excinfo.value)
 
 
@@ -135,9 +135,9 @@ def test_malformed_url_is_rejected_before_psycopg_can_echo_it():
 @pytest.fixture
 def pg_agent_store():
     require_local_postgres_url(TEST_POSTGRES_URL)
-    from dashboard.backend.domain.agents.repository_postgres import PostgresAgentStore
+    import dashboard.backend.domain.agents.repository_postgres as repo_pg
 
-    store = PostgresAgentStore(TEST_POSTGRES_URL)
+    store = repo_pg.PostgresAgentStore(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM external_agents")
@@ -183,6 +183,69 @@ def test_browser_claim_and_ownership_postgres(pg_agent_store):
 
 
 @pg_only
+def test_list_agents_signed_in_includes_unclaimed_browser_agents_postgres(
+    pg_agent_store,
+):
+    """Postgres mirror of the SQLite regression test in test_repository_move.py.
+
+    #235 added an unclaimed-browser-session fallback to list_agents so a
+    signed-in user still sees a guest-provisioned agent whose claim hasn't
+    landed yet. The SQLite twin had a test for the exclusion boundaries
+    (other user's claimed agent, other browser's agent); this store's twin
+    -- the one CONTENT_DATABASE_URL actually points prod at -- had none.
+    """
+    owned = pg_agent_store.create_agent(
+        name="Owned", owner_user_id=7, owner_browser_session="b1"
+    )
+    unclaimed = pg_agent_store.create_agent(name="Guest", owner_browser_session="b1")
+    other_user = pg_agent_store.create_agent(
+        name="Other", owner_user_id=99, owner_browser_session="b1"
+    )
+    other_browser = pg_agent_store.create_agent(name="Elsewhere", owner_browser_session="b2")
+
+    listed = pg_agent_store.list_agents(owner_user_id=7, owner_browser_session="b1")
+    ids = {a["agent_id"] for a in listed}
+    assert owned["agent_id"] in ids
+    assert unclaimed["agent_id"] in ids
+    assert other_user["agent_id"] not in ids
+    assert other_browser["agent_id"] not in ids
+
+
+@pg_only
+def test_list_agents_merges_owned_and_unclaimed_by_recency_postgres(
+    pg_agent_store, monkeypatch
+):
+    """The owned-rows and unclaimed-browser-rows groups must merge into one
+    global ORDER BY, not just be independently sorted within each group.
+
+    Without the merge, a browser agent created after every owned agent would
+    still sort last, because list_agents appends the unclaimed-browser group
+    only after the owned group is fully built.
+    """
+    import itertools
+
+    import dashboard.backend.domain.agents.repository_postgres as repo_pg
+
+    day = itertools.count(1)
+    monkeypatch.setattr(
+        repo_pg, "_utcnow_iso", lambda: f"2020-01-{next(day):02d}T00:00:00+00:00"
+    )
+
+    older_owned = pg_agent_store.create_agent(
+        name="Older Owned", owner_user_id=7, owner_browser_session="b1"
+    )
+    newer_unclaimed = pg_agent_store.create_agent(
+        name="Newer Guest", owner_browser_session="b1"
+    )
+
+    listed = pg_agent_store.list_agents(owner_user_id=7, owner_browser_session="b1")
+    assert [a["agent_id"] for a in listed] == [
+        newer_unclaimed["agent_id"],
+        older_owned["agent_id"],
+    ]
+
+
+@pg_only
 def test_register_or_get_agent_is_idempotent_postgres(pg_agent_store):
     first = pg_agent_store.register_or_get_agent(session_id="sess-1", name="A")
     again = pg_agent_store.register_or_get_agent(session_id="sess-1", name="A renamed")
@@ -215,6 +278,29 @@ def test_update_agent_partial_updates_postgres(pg_agent_store):
     assert same["name"] == "Renamed"
 
     assert pg_agent_store.update_agent("agent_missing", name="X") is None
+
+
+@pg_only
+def test_update_agent_live_trading_enabled_postgres(pg_agent_store):
+    """#227 regression: live_trading_enabled reached only the SQLite twin.
+
+    The missing kwarg TypeError'd EVERY update_agent call on prod (the service
+    always passes it, as _UNSET), so any Configure save — rename-only included
+    — 500'd. Round-trip the flag against a real Postgres: default False, on,
+    off, and untouched by an unrelated update.
+    """
+    created = pg_agent_store.create_agent(name="Live Toggle PG")
+    assert created["live_trading_enabled"] is False
+
+    enabled = pg_agent_store.update_agent(created["agent_id"], live_trading_enabled=True)
+    assert enabled["live_trading_enabled"] is True
+
+    # Omitting the kwarg (service sends _UNSET) leaves the stored flag alone.
+    renamed = pg_agent_store.update_agent(created["agent_id"], name="Renamed Live")
+    assert renamed["live_trading_enabled"] is True
+
+    disabled = pg_agent_store.update_agent(created["agent_id"], live_trading_enabled=False)
+    assert disabled["live_trading_enabled"] is False
 
 
 @pg_only
@@ -281,8 +367,10 @@ def test_builtin_listing_and_delete_postgres(pg_agent_store):
 def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
     """#135: the twin must ADD COLUMN IF NOT EXISTS for post-ship columns.
 
-    Simulate a deployment created before the five lazy-migration columns
-    (agent_type, description, pipeline_config, cash_allocation, scopes) existed:
+    Simulate a deployment created before the seven lazy-migration columns
+    (agent_type, description, pipeline_config, cash_allocation,
+    backtest_allocation, scopes, live_trading_enabled, runtime_type,
+    runtime_config) existed:
     a table with only the original base schema, already holding a real agent row
     that predates those columns. Re-running _init_schema() -- what every redeploy
     does -- must bring it up to the current shape. CREATE TABLE IF NOT EXISTS
@@ -305,8 +393,8 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
     written today; the ADDING A COLUMN LATER? comment in repository_postgres.py is
     what guards that, and it is the thing to keep alive.
     """
-    from dashboard.backend.domain.agents.repository import DEFAULT_SCOPES
-    from dashboard.backend.domain.agents.repository_postgres import PostgresAgentStore
+    import dashboard.backend.domain.agents.repository as repo_module
+    import dashboard.backend.domain.agents.repository_postgres as repo_pg
 
     with pg_agent_store._get_connection() as conn:
         with conn.cursor() as cur:
@@ -338,7 +426,7 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
             )
 
     # A redeploy re-runs _init_schema() against the existing "old" table.
-    PostgresAgentStore(TEST_POSTGRES_URL)
+    repo_pg.PostgresAgentStore(TEST_POSTGRES_URL)
 
     with pg_agent_store._get_connection() as conn:
         with conn.cursor() as cur:
@@ -361,16 +449,27 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
         "description",
         "pipeline_config",
         "cash_allocation",
+        "backtest_allocation",
         "scopes",
+        "live_trading_enabled",
+        "runtime_type",
+        "runtime_config",
     } <= columns
     # The pre-existing row was backfilled with the column defaults, not NULL.
     assert legacy["agent_type"] == "external"
-    assert legacy["scopes"] == DEFAULT_SCOPES
+    assert legacy["scopes"] == repo_module.DEFAULT_SCOPES
+
+    migrated = pg_agent_store.get_agent("agent_legacy")
+    assert migrated["runtime_type"] == "pipeline"
+    assert migrated["runtime_config"] == {}
 
     # The store is actually usable after the migration: a real registration
     # writes every migrated column, and the scopes column default applies.
-    created = pg_agent_store.create_agent(name="Post-migration", cash_allocation=123.0)
+    created = pg_agent_store.create_agent(
+        name="Post-migration", cash_allocation=123.0, backtest_allocation=123.0
+    )
     assert created["cash_allocation"] == 123.0
+    assert created["backtest_allocation"] == 123.0
 
 
 @pg_only
@@ -408,7 +507,7 @@ def test_create_agent_stores_default_scopes_verbatim_postgres(pg_agent_store):
     masked back to DEFAULT_SCOPES in the public view -- only the stored value
     proves the column default itself is right.
     """
-    from dashboard.backend.domain.agents.repository import DEFAULT_SCOPES
+    import dashboard.backend.domain.agents.repository as repo_module
 
     created = pg_agent_store.create_agent(name="Scoped")  # no scopes passed
     with pg_agent_store._get_connection() as conn:
@@ -418,7 +517,7 @@ def test_create_agent_stores_default_scopes_verbatim_postgres(pg_agent_store):
                 (created["agent_id"],),
             )
             raw = cur.fetchone()["scopes"]
-    assert raw == DEFAULT_SCOPES
+    assert raw == repo_module.DEFAULT_SCOPES
 
 
 @pg_only
@@ -538,22 +637,18 @@ def test_unreachable_postgres_version_store_raises_instead_of_falling_back():
     """Fail loud — see the agent-store twin of this test above."""
     import psycopg
 
-    from dashboard.backend.domain.agents.version_repository_postgres import (
-        PostgresAgentVersionStore,
-    )
+    import dashboard.backend.domain.agents.version_repository_postgres as vrepo_pg
 
     with pytest.raises(psycopg.OperationalError):
-        PostgresAgentVersionStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
+        vrepo_pg.PostgresAgentVersionStore("postgresql://u:p@127.0.0.1:1/nope?connect_timeout=2")
 
 
 def test_malformed_url_is_rejected_before_psycopg_can_echo_it_version_store():
     """See the agent-store twin of this test above."""
-    from dashboard.backend.domain.agents.version_repository_postgres import (
-        PostgresAgentVersionStore,
-    )
+    import dashboard.backend.domain.agents.version_repository_postgres as vrepo_pg
 
     with pytest.raises(ValueError) as excinfo:
-        PostgresAgentVersionStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
+        vrepo_pg.PostgresAgentVersionStore('"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"')
     assert "sup3r-s3cret" not in str(excinfo.value)
 
 
@@ -562,11 +657,9 @@ def test_malformed_url_is_rejected_before_psycopg_can_echo_it_version_store():
 @pytest.fixture
 def pg_version_store():
     require_local_postgres_url(TEST_POSTGRES_URL)
-    from dashboard.backend.domain.agents.version_repository_postgres import (
-        PostgresAgentVersionStore,
-    )
+    import dashboard.backend.domain.agents.version_repository_postgres as vrepo_pg
 
-    store = PostgresAgentVersionStore(TEST_POSTGRES_URL)
+    store = vrepo_pg.PostgresAgentVersionStore(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM agent_versions")

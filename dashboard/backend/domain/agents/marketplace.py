@@ -19,6 +19,7 @@ _MARKETPLACE_PATH = CONFIG_DIR / "marketplace.json"
 def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
     pipeline = raw.get("pipeline")
     step_count = len(pipeline) if isinstance(pipeline, list) else 0
+    runtime_type = str(raw.get("runtime_type") or "pipeline")
     return {
         "template_id": raw["template_id"],
         "name": raw["name"],
@@ -27,8 +28,13 @@ def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
         "category": raw.get("category") or "General",
         "tags": list(raw.get("tags") or []),
         "author": raw.get("author") or "Community",
+        "runtime_type": runtime_type,
         "step_count": step_count,
-        "mode": "simple" if step_count <= 1 else "pipeline",
+        "mode": (
+            "runtime"
+            if runtime_type != "pipeline"
+            else ("simple" if step_count <= 1 else "pipeline")
+        ),
     }
 
 

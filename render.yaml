@@ -5,8 +5,11 @@ services:
     region: oregon
     plan: standard
     
-    # Build and run from repository root (dashboard lives under dashboard/)
-    buildCommand: pip install -r requirements.txt
+    # Build and run from repository root (dashboard lives under dashboard/).
+    # Prod deploys via Dockerfile (ATL on 3.13, AI Hedge Fund venv on 3.12 via
+    # uv). This native buildCommand is documentation — upstream numpy^1.24 has
+    # no cp313 wheels, so the isolated venv must use 3.12.
+    buildCommand: pip install -r requirements.txt && pip install uv && uv python install 3.12 && uv venv --python 3.12 .ai-hedge-fund-venv && uv pip install --python .ai-hedge-fund-venv -r requirements-ai-hedge-fund.txt
     
     # Start command (canonical ASGI package target; runs via Render's shell,
     # which expands $PORT). No import-path workarounds needed.
@@ -20,6 +23,21 @@ services:
         value: true
       - key: PYTHON_VERSION
         value: 3.13.5
+      # Trusts Render's edge router as the X-Forwarded-For source, so
+      # uvicorn's own proxy handling agrees with rate_limit.client_ip()'s
+      # left-most-entry read instead of returning the router's own IP for
+      # every visitor. Granularity fix, not a trust boundary -- the header is
+      # still caller-suppliable -- see rate_limit.py's module docstring.
+      - key: FORWARDED_ALLOW_IPS
+        value: "*"
+      - key: AI_HEDGE_FUND_PYTHON
+        value: .ai-hedge-fund-venv/bin/python
+      - key: OPENROUTER_API_KEY
+        sync: false
+      # Encrypts both broker OAuth tokens and per-agent hosted-runtime
+      # credentials. Retains the established name for ciphertext compatibility.
+      - key: BROKER_TOKEN_ENCRYPTION_KEY
+        sync: false
       - key: DATABASE_PATH
         value: /data/backtest.db
       # Durable Postgres for user-created content (agents, versions,
@@ -34,6 +52,29 @@ services:
       # above -- set in the Render dashboard, not synced from this yaml. A fully
       # durable deploy sets BOTH, pointed at the same Neon DB.
       - key: USERS_DATABASE_URL
+        sync: false
+      # HMAC key for auth_sessions.token_hash. REQUIRED here: the app refuses to
+      # start without it whenever RENDER is set, because a session digest keyed
+      # on a development fallback is not a protection. Set it in the Render
+      # dashboard BEFORE merging anything that depends on it -- env-var writes do
+      # not themselves redeploy, so setting it after the merge leaves one deploy
+      # cycle failing its boot. Rotating this value invalidates every live
+      # session; users sign in again.
+      - key: SESSION_HASH_SECRET
+        sync: false
+      # Optional session lifetimes; both default in session_tokens.py.
+      # SESSION_TTL_DAYS (7) is the absolute cap, SESSION_IDLE_HOURS (24) the
+      # idle window.
+      - key: SESSION_TTL_DAYS
+        sync: false
+      - key: SESSION_IDLE_HOURS
+        sync: false
+      # Durable Postgres for backtest run history (agent_runs, equity_timeseries,
+      # trades, backtest_decisions, run_manifest). Accounts and content are
+      # separate: USERS_DATABASE_URL / CONTENT_DATABASE_URL. Set in the Render
+      # dashboard BEFORE merging -- this yaml is documentation, not the mechanism
+      # (prod does not sync from it; see CLAUDE.md "Prod deploy reality").
+      - key: AGENT_RUNS_DATABASE_URL
         sync: false
       - key: DISCORD_BOT_API_SECRET
         sync: false

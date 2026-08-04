@@ -1,8 +1,17 @@
 /**
  * agent-editor.js — Fullscreen agent Configure screen.
- * Simple mode: capital + one plain-language instruction (stored as a 1-step
- * pipeline) + model. Advanced mode: the multi-step sub-agent chain.
- * Agent fields: PATCH /api/v1/agents/{id}. Pipeline cache: localStorage.
+ * Pipeline agents edit capital + one plain-language instruction + model.
+ * AI Hedge Fund agents edit capital + analyst composition and can place their
+ * Financial Datasets API key into server-side encrypted credential storage.
+ *
+ * The multi-step "Advanced" sub-agent editor was removed. Multi-step pipelines
+ * still EXECUTE server-side (infrastructure/llm/pipeline_runner.py) and the
+ * marketplace still ships a 3-step template, so an agent may legitimately hold a
+ * pipeline this screen cannot author. Such a pipeline is carried opaquely in
+ * `subAgents` and re-sent when the user has an instruction; an EMPTY
+ * instruction deliberately clears it instead, so the backend falls back to
+ * its platform default -- save() guards that with a confirm when the
+ * existing pipeline is multi-step. See `sendPipeline` in getEditorState().
  */
 (function () {
   'use strict';
@@ -10,11 +19,39 @@
   const STORAGE_PREFIX = 'agent-pipeline-config:';
   const NAME_OVERRIDE_PREFIX = 'agent-name-override:';
   const CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
-  const API_BASE = window.location.origin;
+  const AI_HEDGE_FUND_RUNTIME = 'ai_hedge_fund';
+  const AI_HEDGE_FUND_ANALYSTS = [
+    ['aswath_damodaran', 'Aswath Damodaran'],
+    ['ben_graham', 'Ben Graham'],
+    ['bill_ackman', 'Bill Ackman'],
+    ['cathie_wood', 'Cathie Wood'],
+    ['charlie_munger', 'Charlie Munger'],
+    ['michael_burry', 'Michael Burry'],
+    ['mohnish_pabrai', 'Mohnish Pabrai'],
+    ['nassim_taleb', 'Nassim Taleb'],
+    ['peter_lynch', 'Peter Lynch'],
+    ['phil_fisher', 'Phil Fisher'],
+    ['rakesh_jhunjhunwala', 'Rakesh Jhunjhunwala'],
+    ['stanley_druckenmiller', 'Stanley Druckenmiller'],
+    ['warren_buffett', 'Warren Buffett'],
+    ['technical_analyst', 'Technical'],
+    ['fundamentals_analyst', 'Fundamentals'],
+    ['growth_analyst', 'Growth'],
+    ['news_sentiment_analyst', 'News Sentiment'],
+    ['sentiment_analyst', 'Sentiment'],
+    ['valuation_analyst', 'Valuation'],
+  ];
+  // Match app.js: same-origin locally, hosted backend everywhere else. In
+  // Same-origin API base. Local uvicorn serves the backend; production Vercel
+  // rewrites API paths to Render (see vercel.json). Empty string = root-relative.
+  const API_BASE =
+    window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+      ? window.location.origin
+      : '';
 
-  // The Simple-mode contract (preset key + trading-actions output format) has a
-  // single source of truth in app.js, published on `window`. app.js loads AFTER
-  // this file, so read lazily at call time — every use below is inside an
+  // The simple-instruction contract (preset key + trading-actions output format)
+  // has a single source of truth in app.js, published on `window`. app.js loads
+  // AFTER this file, so read lazily at call time — every use below is inside an
   // event-driven function, by which point window.* is populated. The fallbacks
   // only matter if app.js somehow failed to load (whole app is broken anyway).
   function simplePresetKey() {
@@ -28,6 +65,9 @@
       (typeof window !== 'undefined' && window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT) || ''
     );
   }
+  function defaultStarterInstruction() {
+    return (typeof window !== 'undefined' && window.DEFAULT_STARTER_INSTRUCTION) || '';
+  }
 
   // Demo/mock agents (see MOCK_AGENTS in app.js) only exist in the frontend —
   // they have no database row, so PATCH would 404. We persist their edits
@@ -36,71 +76,16 @@
     return typeof agentId === 'string' && agentId.startsWith('mock-');
   }
 
-  const SUB_AGENT_PRESETS = [
-    {
-      presetKey: 'info_gather',
-      label: 'Information Gathering',
-      defaultPrompt:
-        'You are the information-gathering sub-agent. Collect key facts relevant to trading decisions from market data, news, and macro events. Filter noise and keep high-confidence facts and indicator changes.',
-      defaultOutputFormat:
-        'JSON: { "timestamp": "ISO8601", "symbols": ["..."], "facts": [{ "source": "...", "summary": "...", "impact": "bullish|bearish|neutral" }], "confidence": 0.0-1.0 }',
-    },
-    {
-      presetKey: 'info_to_signal',
-      label: 'Information to Signal',
-      defaultPrompt:
-        'You are the signal-generation sub-agent. Based on upstream information-gathering output, convert facts and indicators into executable trading signals (direction, strength, time horizon).',
-      defaultOutputFormat:
-        'JSON: { "signals": [{ "symbol": "...", "direction": "long|short|flat", "strength": 0.0-1.0, "horizon": "1h|4h|1d", "rationale": "..." }] }',
-    },
-    {
-      presetKey: 'signal_to_execution',
-      label: 'Signal to Execution',
-      defaultPrompt:
-        'You are the trade-execution sub-agent. Turn signals into concrete order instructions, respecting position limits, liquidity, and slippage. Output a submit-ready buy/sell plan.',
-      defaultOutputFormat:
-        'JSON: { "orders": [{ "symbol": "...", "side": "buy|sell|hold", "qty": number, "order_type": "market|limit", "limit_price": number|null, "reason": "..." }] }',
-    },
-    {
-      presetKey: 'global_strategy',
-      label: 'Global Trading Strategy',
-      defaultPrompt:
-        'You are the global strategy sub-agent. Coordinate asset allocation, risk budget, and conflicting signals so the overall portfolio stays within strategy constraints and target return/risk profile.',
-      defaultOutputFormat:
-        'JSON: { "portfolio_targets": [{ "symbol": "...", "target_weight": 0.0-1.0 }], "risk_budget": { "max_drawdown": number, "max_single_position": number }, "strategy_notes": "..." }',
-    },
-    {
-      presetKey: 'stop_loss_take_profit',
-      label: 'Stop Loss / Take Profit',
-      defaultPrompt:
-        'You are the risk-management sub-agent. Set stop-loss and take-profit rules for open positions, monitor unrealized P/L, and output close or reduce instructions when triggers fire.',
-      defaultOutputFormat:
-        'JSON: { "risk_actions": [{ "symbol": "...", "action": "stop_loss|take_profit|trail|hold", "trigger_price": number, "size_pct": 0.0-1.0, "reason": "..." }] }',
-    },
-    {
-      presetKey: 'post_trade_analysis',
-      label: 'Post-trade Analysis',
-      defaultPrompt:
-        'You are the post-trade analysis sub-agent. Once per trading day, review that day\'s trades, equity change, and the current decision-step prompts. Identify what went wrong in those prompts (missed risk, bad signal rules, weak execution constraints). Then propose revised prompts for the upstream sub-agents so the next trading day can improve. Do not invent market facts beyond the episode context you are given.',
-      defaultOutputFormat:
-        'JSON: { "summary": "...", "prompt_problems": [{ "step_id": "...", "presetKey": "...", "issue": "..." }], "prompt_patches": [{ "step_id": "...", "presetKey": "...", "new_prompt": "...", "change_rationale": "..." }] }',
-    },
-    {
-      presetKey: 'custom',
-      label: 'Custom Sub-agent',
-      defaultPrompt: 'Describe this sub-agent\'s responsibilities and decision boundaries.',
-      defaultOutputFormat: 'JSON: { "output": "..." }',
-    },
-  ];
-
-  const presetByKey = Object.fromEntries(SUB_AGENT_PRESETS.map((p) => [p.presetKey, p]));
-
   let currentAgent = null;
   let subAgents = [];
   let saveStatusTimer = null;
   let isDirty = false;
   let savedSnapshot = '';
-  let editorMode = 'simple';
+  let financialDatasetsConfigured = false;
+
+  function isAiHedgeFundAgent(agent = currentAgent) {
+    return (agent?.runtime_type || 'pipeline') === AI_HEDGE_FUND_RUNTIME;
+  }
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -118,52 +103,16 @@
     return `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
-  function createSubAgentFromPreset(presetKey, customLabel) {
-    const preset = presetByKey[presetKey] || presetByKey.custom;
-    const label =
-      presetKey === 'custom' && customLabel
-        ? customLabel.trim()
-        : preset.label;
-    return {
-      id: newSubAgentId(),
-      presetKey,
-      label,
-      prompt: preset.defaultPrompt,
-      outputFormat: preset.defaultOutputFormat,
-    };
-  }
-
-  function defaultPipeline() {
-    return SUB_AGENT_PRESETS.filter((p) => p.presetKey !== 'custom').map((preset) => ({
-      id: newSubAgentId(),
-      presetKey: preset.presetKey,
-      label: preset.label,
-      prompt: preset.defaultPrompt,
-      outputFormat: preset.defaultOutputFormat,
-    }));
-  }
-
+  // Structural only: this screen no longer knows about sub-agent presets, it
+  // just round-trips whatever shape is already stored.
   function normalizeLoadedSubAgent(item) {
-    const presetKey = item.presetKey || 'custom';
-    const preset = presetByKey[presetKey];
-    const isCustom = presetKey === 'custom' || !preset;
     return {
       id: item.id || newSubAgentId(),
-      presetKey,
-      label: isCustom ? (item.label || 'Sub-agent') : preset.label,
-      prompt: item.prompt || (preset ? preset.defaultPrompt : ''),
-      outputFormat: item.outputFormat || (preset ? preset.defaultOutputFormat : ''),
+      presetKey: item.presetKey || 'custom',
+      label: item.label || 'Sub-agent',
+      prompt: item.prompt || '',
+      outputFormat: item.outputFormat || '',
     };
-  }
-
-  // For real agents the backend-stored pipeline is the source of truth; fall
-  // back to any locally cached / default pipeline when the agent has none yet.
-  // Demo (mock) agents have no backend row, so they always use localStorage.
-  function resolvePipeline(agent) {
-    if (!isDemoAgent(agent.agent_id) && Array.isArray(agent.pipeline) && agent.pipeline.length) {
-      return agent.pipeline.map(normalizeLoadedSubAgent);
-    }
-    return loadPipeline(agent.agent_id);
   }
 
   function isSimplePipeline(pipeline) {
@@ -174,9 +123,9 @@
     );
   }
 
-  // The pipeline the agent ACTUALLY has (backend row, then local cache) — with
-  // NO default-5-step substitution, so a fresh agent opens in Simple mode.
-  // Demo agents keep resolvePipeline's default behavior.
+  // The pipeline the agent ACTUALLY has (backend row, then local cache). Returns
+  // [] when it has none -- an empty pipeline is a supported state (the platform
+  // default), not something open() backfills any more.
   function loadStoredPipeline(agent) {
     if (Array.isArray(agent.pipeline) && agent.pipeline.length) {
       return agent.pipeline.map(normalizeLoadedSubAgent);
@@ -195,20 +144,6 @@
     return [];
   }
 
-  function loadPipeline(agentId) {
-    try {
-      const raw = localStorage.getItem(storageKey(agentId));
-      if (!raw) return defaultPipeline();
-      const parsed = JSON.parse(raw);
-      if (!Array.isArray(parsed.subAgents) || !parsed.subAgents.length) {
-        return defaultPipeline();
-      }
-      return parsed.subAgents.map(normalizeLoadedSubAgent);
-    } catch {
-      return defaultPipeline();
-    }
-  }
-
   function savePipelineLocal(agentId, agents) {
     localStorage.setItem(
       storageKey(agentId),
@@ -216,11 +151,136 @@
     );
   }
 
+  function readCsrfToken() {
+    try {
+      const raw = document.cookie || '';
+      for (const name of ['atl_csrf', '__Host-atl_csrf']) {
+        const match = raw.match(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'));
+        if (match) return decodeURIComponent(match[1]);
+      }
+    } catch (_) { /* ignore */ }
+    return null;
+  }
+
   function authHeaders() {
     const headers = { 'x-session-id': window.SESSION_ID };
-    const token = localStorage.getItem('auth-token');
-    if (token) headers.Authorization = `Bearer ${token}`;
-    return headers;
+    const csrf = (typeof window.csrfHeaders === 'function')
+      ? window.csrfHeaders()
+      : (readCsrfToken() ? { 'X-CSRF-Token': readCsrfToken() } : {});
+    return { ...headers, ...csrf };
+  }
+
+  function isEditorSignedIn() {
+    if (typeof window.getStoredAuthUser === 'function') return !!window.getStoredAuthUser();
+    try {
+      return !!JSON.parse(localStorage.getItem('auth-user') || 'null');
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function renderAiHedgeFundAnalysts(agent) {
+    const grid = document.getElementById('agentEditorAiHedgeFundAnalysts');
+    if (!grid) return;
+    const selected = new Set(agent?.runtime_config?.analysts || []);
+    grid.innerHTML = AI_HEDGE_FUND_ANALYSTS.map(([id, label]) => `
+      <label class="agent-editor-analyst-option">
+        <input type="checkbox" name="agentEditorAiHedgeFundAnalyst" value="${escapeHtml(id)}" ${selected.has(id) ? 'checked' : ''}>
+        <span>${escapeHtml(label)}</span>
+      </label>`).join('');
+  }
+
+  function selectedAiHedgeFundAnalysts() {
+    return Array.from(
+      document.querySelectorAll('input[name="agentEditorAiHedgeFundAnalyst"]:checked')
+    ).map((input) => input.value);
+  }
+
+  function setFinancialDatasetsStatus(configured, message) {
+    financialDatasetsConfigured = Boolean(configured);
+    const status = document.getElementById('agentEditorFinancialDatasetsStatus');
+    if (status) {
+      status.textContent = message || (
+        financialDatasetsConfigured
+          ? 'Credential configured — enter a new key only to replace it.'
+          : 'Credential not configured — required before Run Backtest.'
+      );
+    }
+    // Without this the DELETE route has no UI path at all: a user could store a
+    // third-party key and never remove it.
+    const removeBtn = document.getElementById('agentEditorFinancialDatasetsRemove');
+    if (removeBtn) removeBtn.hidden = !financialDatasetsConfigured;
+  }
+
+  async function removeFinancialDatasetsCredential() {
+    const agent = currentAgent;
+    if (!agent || !financialDatasetsConfigured) return;
+    const removeBtn = document.getElementById('agentEditorFinancialDatasetsRemove');
+    if (removeBtn) removeBtn.disabled = true;
+    try {
+      await credentialRequest(agent, 'DELETE');
+      if (currentAgent?.agent_id !== agent.agent_id) return;
+      const keyInput = document.getElementById('agentEditorFinancialDatasetsKey');
+      if (keyInput) keyInput.value = '';
+      setFinancialDatasetsStatus(false, 'Stored key removed.');
+    } catch (error) {
+      if (currentAgent?.agent_id !== agent.agent_id) return;
+      setFinancialDatasetsStatus(
+        financialDatasetsConfigured,
+        `Could not remove the stored key: ${error.message}`,
+      );
+    } finally {
+      if (removeBtn) removeBtn.disabled = false;
+    }
+  }
+
+  async function credentialRequest(agent, method, body) {
+    const endpoint = `${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}/credentials/financial-datasets`;
+
+    async function send(extraHeaders) {
+      const headers = {
+        'Content-Type': 'application/json',
+        ...authHeaders(),
+        ...extraHeaders,
+      };
+      const response = await fetch(endpoint, {
+        method,
+        headers,
+        credentials: 'include',
+        body: body == null ? undefined : JSON.stringify(body),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = data.detail || data.message || `HTTP ${response.status}`;
+        const error = new Error(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    }
+
+    try {
+      return await send({
+        'x-browser-id': window.BROWSER_OWNER_ID,
+        'x-session-id': agent.session_id || window.SESSION_ID,
+      });
+    } catch (error) {
+      if (error.status !== 403 || !agent?.session_id) throw error;
+      return send({ 'x-session-id': agent.session_id, 'x-browser-id': '' });
+    }
+  }
+
+  async function refreshFinancialDatasetsStatus(agent) {
+    if (!isAiHedgeFundAgent(agent)) return;
+    setFinancialDatasetsStatus(false, 'Checking credential…');
+    try {
+      const status = await credentialRequest(agent, 'GET');
+      if (currentAgent?.agent_id !== agent.agent_id) return;
+      setFinancialDatasetsStatus(status.configured);
+    } catch (error) {
+      if (currentAgent?.agent_id !== agent.agent_id) return;
+      setFinancialDatasetsStatus(false, `Credential status unavailable: ${error.message}`);
+    }
   }
 
   function formatUsd(value) {
@@ -239,7 +299,21 @@
   function fetchWithTimeout(url, options, timeoutMs) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+    return fetch(url, { credentials: 'include', ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+  }
+
+  /**
+   * Run Live is the loudest button on the screen, so it must not look ready
+   * while the broker it needs is unconnected — demote it until then.
+   */
+  function setRunLiveProminence(connected) {
+    const runLiveBtn = document.getElementById('agentEditorRunLiveBtn');
+    if (!runLiveBtn) return;
+    runLiveBtn.disabled = !connected;
+    runLiveBtn.className = connected
+      ? 'home-btn home-btn-primary'
+      : 'home-btn home-btn-secondary';
+    runLiveBtn.title = connected ? '' : 'Connect Robinhood first';
   }
 
   async function refreshRobinhoodStatus() {
@@ -248,9 +322,7 @@
     const connectBtn = document.getElementById('agentEditorConnectRobinhoodBtn');
     const disconnectBtn = document.getElementById('agentEditorDisconnectRobinhoodBtn');
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
-    const token = localStorage.getItem('auth-token');
-
-    if (!token) {
+    if (!isEditorSignedIn()) {
       if (statusEl) {
         statusEl.textContent = 'Sign in required';
         statusEl.className = 'agent-editor-broker-status agent-editor-broker-status--warn';
@@ -262,6 +334,7 @@
       }
       if (disconnectBtn) disconnectBtn.hidden = true;
       if (metaEl) metaEl.hidden = true;
+      setRunLiveProminence(false);
       setBrokerMessage('Log in to your ATL account, then click Connect Robinhood.', true);
       return;
     }
@@ -299,6 +372,7 @@
         connectBtn.textContent = 'Connect Robinhood';
       }
       if (disconnectBtn) disconnectBtn.hidden = !connected;
+      setRunLiveProminence(connected);
       if (metaEl) {
         if (connected) {
           metaEl.hidden = false;
@@ -328,6 +402,7 @@
         connectBtn.textContent = 'Connect Robinhood';
       }
       if (disconnectBtn) disconnectBtn.hidden = true;
+      setRunLiveProminence(false);
       setBrokerMessage(
         timedOut
           ? 'Status check timed out. You can still click Connect Robinhood.'
@@ -343,8 +418,7 @@
   }
 
   async function connectRobinhood() {
-    const token = localStorage.getItem('auth-token');
-    if (!token) {
+    if (!isEditorSignedIn()) {
       setBrokerMessage('Please sign in first.', true);
       if (typeof window.openAuthModal === 'function') window.openAuthModal('login');
       else alert('Please sign in to your ATL account first.');
@@ -370,6 +444,7 @@
       const response = await fetch(`${API_BASE}/api/auth/robinhood/start`, {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ agent_id: currentAgent.agent_id }),
       });
       let data = {};
@@ -415,6 +490,7 @@
       const response = await fetch(`${API_BASE}/api/v1/robinhood/disconnect`, {
         method: 'DELETE',
         headers: authHeaders(),
+        credentials: 'include',
       });
       if (!response.ok) {
         const data = await response.json();
@@ -464,6 +540,7 @@
         {
           method: 'POST',
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({ dry_run: false }),
         }
       );
@@ -492,6 +569,7 @@
   }
 
   function getEditorState() {
+    const hostedAiHedgeFund = isAiHedgeFundAgent();
     const nameInput = document.getElementById('agentEditorNameInput');
     const descInput = document.getElementById('agentEditorDescription');
     const cashInput = document.getElementById('agentEditorCashAllocation');
@@ -499,61 +577,96 @@
     if (cashInput && cashInput.value !== '') {
       const value = Number(cashInput.value);
       if (!Number.isFinite(value) || value < 0) {
-        throw new Error('Allocated capital must be zero or greater.');
+        throw new Error('Paper Trading Allocated Capital must be zero or greater.');
       }
       if (value > 3000) {
-        throw new Error('Allocated capital cannot exceed $3,000.');
+        throw new Error('Paper Trading Allocated Capital cannot exceed $3,000.');
       }
       cash_allocation = Math.round(value);
     } else {
       cash_allocation = 1000;
     }
-    const modelSelect = document.getElementById('agentEditorModelSelect');
-    let subAgentsOut;
-    let sendPipeline;
-    if (editorMode === 'simple') {
-      const instruction = (
-        document.getElementById('agentEditorSimpleInstruction')?.value || ''
-      ).trim();
-      if (instruction) {
-        const existing =
-          subAgents.length === 1 && subAgents[0].presetKey === simplePresetKey()
-            ? subAgents[0]
-            : null;
-        subAgentsOut = [
-          {
-            id: existing ? existing.id : newSubAgentId(),
-            presetKey: simplePresetKey(),
-            label: 'Trading instruction',
-            prompt: instruction,
-            outputFormat: simpleOutputFormat(),
-          },
-        ];
-        sendPipeline = true;
-      } else {
-        // Empty instruction never touches the stored pipeline: not sent to the
-        // server, not cached locally, not folded into currentAgent.
-        subAgentsOut = subAgents;
-        sendPipeline = false;
+    const backtestInput = document.getElementById('agentEditorBacktestAllocation');
+    let backtest_allocation = null;
+    if (backtestInput && backtestInput.value !== '') {
+      const value = Number(backtestInput.value);
+      if (!Number.isFinite(value) || value < 1) {
+        throw new Error('Backtest Allocated Capital must be at least $1.');
       }
+      if (value > 10000) {
+        throw new Error('Backtest Allocated Capital cannot exceed $10,000.');
+      }
+      backtest_allocation = Math.round(value);
     } else {
-      subAgentsOut = collectPipelineFromDom();
+      // Non-positive counts as absent: cash_allocation is legally 0 (a $0 paper
+      // sleeve), but backtest capital is >= 1 server-side, so 0 must fall
+      // through to the default rather than becoming an unsaveable value.
+      backtest_allocation =
+        Number.isFinite(Number(cash_allocation)) && Number(cash_allocation) > 0
+          ? Math.min(Math.round(Number(cash_allocation)), 10000)
+          : 1000;
+    }
+    const modelSelect = document.getElementById('agentEditorModelSelect');
+    const instruction = hostedAiHedgeFund ? '' : (
+      document.getElementById('agentEditorSimpleInstruction')?.value || ''
+    ).trim();
+    let subAgentsOut;
+    let sendPipeline = !hostedAiHedgeFund;
+    if (hostedAiHedgeFund) {
+      // Hosted runtimes do not consume or mutate the legacy prompt pipeline.
+      subAgentsOut = subAgents;
+    } else if (instruction) {
+      const existing =
+        subAgents.length === 1 && subAgents[0].presetKey === simplePresetKey()
+          ? subAgents[0]
+          : null;
+      subAgentsOut = [
+        {
+          id: existing ? existing.id : newSubAgentId(),
+          presetKey: simplePresetKey(),
+          label: 'Trading instruction',
+          prompt: instruction,
+          outputFormat: simpleOutputFormat(),
+        },
+      ];
+      sendPipeline = true;
+    } else {
+      // Empty means "use the platform default": clear the pipeline so the
+      // backend takes its create_prompt branch. The multi-step pipeline this
+      // screen cannot author is protected by a confirm in save(), not by
+      // silently refusing to send -- which used to make an empty save a no-op
+      // that still reported success.
+      subAgentsOut = [];
       sendPipeline = true;
     }
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
+    const credentialInput = document.getElementById('agentEditorFinancialDatasetsKey');
     return {
       name: nameInput ? nameInput.value.trim() : '',
       description: descInput ? descInput.value.trim() : '',
       cash_allocation,
-      model_name: modelSelect ? modelSelect.value : '',
+      backtest_allocation,
+      model_name: hostedAiHedgeFund
+        ? ''
+        : (modelSelect ? modelSelect.value : ''),
       live_trading_enabled: Boolean(liveToggle?.checked),
+      runtime_config: hostedAiHedgeFund
+        ? { analysts: selectedAiHedgeFundAnalysts() }
+        : null,
+      financial_datasets_api_key: hostedAiHedgeFund
+        ? (credentialInput?.value || '').trim()
+        : '',
       subAgents: subAgentsOut,
       sendPipeline,
     };
   }
 
   function snapshotState() {
-    return JSON.stringify(getEditorState());
+    const state = getEditorState();
+    // Never copy credential plaintext into snapshots or browser storage. Its
+    // presence is enough to make the editor dirty until a successful save.
+    state.financial_datasets_api_key = Boolean(state.financial_datasets_api_key);
+    return JSON.stringify(state);
   }
 
   function setDirty(dirty) {
@@ -571,26 +684,21 @@
     setDirty(false);
   }
 
-  function collectPipelineFromDom() {
-    const pipeline = document.getElementById('agentEditorPipeline');
-    if (!pipeline) return subAgents;
-
-    return subAgents.map((sub) => {
-      const card = pipeline.querySelector(`[data-sub-id="${sub.id}"]`);
-      if (!card) return sub;
-      const labelInput = card.querySelector('[data-field="label"]');
-      const promptInput = card.querySelector('[data-field="prompt"]');
-      const outputInput = card.querySelector('[data-field="outputFormat"]');
-      return {
-        ...sub,
-        label: labelInput ? labelInput.value.trim() || sub.label : sub.label,
-        prompt: promptInput ? promptInput.value : sub.prompt,
-        outputFormat: outputInput ? outputInput.value : sub.outputFormat,
-      };
-    });
-  }
-
   function showSaveStatus(message, isError) {
+    // Toast as well as write the inline note. #agentEditorSaveStatus lives at
+    // the bottom of the editor's left column, but every one of this function's
+    // callers is a click on a control in the sticky header (Save, Run Backtest,
+    // Run Live, Connect/Disconnect Robinhood). Measured live at 1440x900: the
+    // header button sits at y=14 and this element renders at y=934 -- 920px
+    // below the fold in a 900px viewport, and it carries no aria-live. So
+    // "Save changes before Run Backtest" and "Agent name is required" both
+    // landed somewhere nobody was looking, and the button read as dead.
+    // #appToast is role="status" aria-live="polite", so this reaches sighted
+    // and screen-reader users both. Done here rather than at the 16 call sites
+    // so no future message can regress to inline-only.
+    if (typeof window.showAppToast === 'function') {
+      window.showAppToast(message);
+    }
     const el = document.getElementById('agentEditorSaveStatus');
     if (!el) return;
     el.hidden = false;
@@ -602,204 +710,11 @@
     }, 3000);
   }
 
-  function updateStepCount() {
-    const el = document.getElementById('agentEditorStepCount');
-    if (!el) return;
-    const n = subAgents.length;
-    el.textContent = `${n} step${n === 1 ? '' : 's'}`;
-  }
-
-  function refreshAddSelect() {
-    const select = document.getElementById('agentEditorAddSelect');
-    const customName = document.getElementById('agentEditorCustomName');
-    if (!select) return;
-
-    const usedPresetKeys = new Set(
-      subAgents.filter((s) => s.presetKey !== 'custom').map((s) => s.presetKey)
-    );
-
-    select.innerHTML = '<option value="">— Select type —</option>';
-    SUB_AGENT_PRESETS.forEach((preset) => {
-      if (preset.presetKey !== 'custom' && usedPresetKeys.has(preset.presetKey)) return;
-      const opt = document.createElement('option');
-      opt.value = preset.presetKey;
-      opt.textContent = preset.label;
-      select.appendChild(opt);
-    });
-
-    const customOpt = document.createElement('option');
-    customOpt.value = 'custom';
-    customOpt.textContent = 'Custom Sub-agent';
-    select.appendChild(customOpt);
-
-    if (customName) {
-      customName.hidden = select.value !== 'custom';
-    }
-  }
-
-  function moveSubAgent(index, delta) {
-    const next = index + delta;
-    if (next < 0 || next >= subAgents.length) return;
-    subAgents = collectPipelineFromDom();
-    const tmp = subAgents[index];
-    subAgents[index] = subAgents[next];
-    subAgents[next] = tmp;
-    renderPipeline();
-    markDirtyFromInput();
-  }
-
-  function duplicateSubAgent(subId) {
-    subAgents = collectPipelineFromDom();
-    const idx = subAgents.findIndex((s) => s.id === subId);
-    if (idx < 0) return;
-    const src = subAgents[idx];
-    const copy = {
-      ...src,
-      id: newSubAgentId(),
-      presetKey: 'custom',
-      label: `${src.label} (copy)`,
-    };
-    subAgents.splice(idx + 1, 0, copy);
-    renderPipeline();
-    markDirtyFromInput();
-    showSaveStatus('Sub-agent duplicated');
-  }
-
-  function restoreSubAgentDefaults(subId) {
-    subAgents = collectPipelineFromDom();
-    const sub = subAgents.find((s) => s.id === subId);
-    if (!sub) return;
-    const preset = presetByKey[sub.presetKey];
-    if (!preset || sub.presetKey === 'custom') return;
-    sub.prompt = preset.defaultPrompt;
-    sub.outputFormat = preset.defaultOutputFormat;
-    renderPipeline();
-    markDirtyFromInput();
-    showSaveStatus('Restored default prompt for this step');
-  }
-
-  function renderPipeline() {
-    const pipeline = document.getElementById('agentEditorPipeline');
-    if (!pipeline) return;
-
-    pipeline.innerHTML = '';
-    updateStepCount();
-
-    subAgents.forEach((sub, index) => {
-      const card = document.createElement('article');
-      card.className = 'section-card agent-sub-card';
-      card.setAttribute('role', 'listitem');
-      card.dataset.subId = sub.id;
-
-      const isCustom = sub.presetKey === 'custom';
-      const isFirst = index === 0;
-      const isLast = index === subAgents.length - 1;
-      const canRestore = !isCustom && presetByKey[sub.presetKey];
-
-      const isPostTrade = sub.presetKey === 'post_trade_analysis';
-      const nextIsPostTrade =
-        !isLast && subAgents[index + 1] && subAgents[index + 1].presetKey === 'post_trade_analysis';
-      const labelField = isCustom
-        ? `<input class="agent-sub-label-input" type="text" data-field="label" value="${escapeHtml(sub.label)}" placeholder="Sub-agent name" aria-label="Sub-agent name">`
-        : `<span class="agent-sub-preset-label">${escapeHtml(sub.label)}${
-            isPostTrade
-              ? '<span class="agent-sub-freq-badge" title="Runs once per trading day after trades">daily after trades</span>'
-              : ''
-          }</span>`;
-
-      card.innerHTML = `
-        <div class="agent-sub-head">
-          <div class="agent-sub-head-left">
-            <span class="agent-sub-index" aria-hidden="true">${index + 1}</span>
-            ${labelField}
-          </div>
-          <div class="agent-sub-actions">
-            <div class="agent-sub-reorder" role="group" aria-label="Reorder sub-agent">
-              <button class="agent-sub-move-btn" type="button" data-action="up" data-sub-id="${escapeHtml(sub.id)}" aria-label="Move up" ${isFirst ? 'disabled' : ''}>↑</button>
-              <button class="agent-sub-move-btn" type="button" data-action="down" data-sub-id="${escapeHtml(sub.id)}" aria-label="Move down" ${isLast ? 'disabled' : ''}>↓</button>
-            </div>
-            <button class="agent-sub-icon-btn" type="button" data-action="duplicate" data-sub-id="${escapeHtml(sub.id)}" title="Duplicate">⧉</button>
-            ${canRestore ? `<button class="agent-sub-icon-btn" type="button" data-action="restore" data-sub-id="${escapeHtml(sub.id)}" title="Restore defaults">↺</button>` : ''}
-            <button class="agent-sub-remove-btn" type="button" data-action="remove" data-sub-id="${escapeHtml(sub.id)}" aria-label="Remove sub-agent">Remove</button>
-          </div>
-        </div>
-        <div class="agent-sub-fields">
-          <label class="agent-sub-field">
-            <span class="agent-sub-field-label">Task prompt</span>
-            <span class="agent-sub-field-hint">What this sub-agent should do</span>
-            <textarea data-field="prompt" rows="5" placeholder="Describe this sub-agent's role…">${escapeHtml(sub.prompt)}</textarea>
-          </label>
-          <label class="agent-sub-field">
-            <span class="agent-sub-field-label">Output format</span>
-            <span class="agent-sub-field-hint">Structure passed to the next model</span>
-            <textarea data-field="outputFormat" rows="4" placeholder="JSON or structured text…">${escapeHtml(sub.outputFormat)}</textarea>
-          </label>
-        </div>
-        ${
-          !isLast
-            ? `<div class="agent-sub-connector" aria-hidden="true"><span>${
-                nextIsPostTrade
-                  ? '↓ Then post-trade analysis (once per day)'
-                  : '↓ Output to next sub-agent'
-              }</span></div>`
-            : ''
-        }
-      `;
-
-      pipeline.appendChild(card);
-    });
-
-    pipeline.querySelectorAll('[data-action]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const action = btn.dataset.action;
-        const subId = btn.dataset.subId;
-        const idx = subAgents.findIndex((s) => s.id === subId);
-        if (action === 'up') moveSubAgent(idx, -1);
-        else if (action === 'down') moveSubAgent(idx, 1);
-        else if (action === 'duplicate') duplicateSubAgent(subId);
-        else if (action === 'restore') restoreSubAgentDefaults(subId);
-        else if (action === 'remove') {
-          if (subAgents.length <= 1) {
-            showSaveStatus('Keep at least one sub-agent', true);
-            return;
-          }
-          subAgents = collectPipelineFromDom().filter((s) => s.id !== subId);
-          renderPipeline();
-          refreshAddSelect();
-          markDirtyFromInput();
-        }
-      });
-    });
-
-    refreshAddSelect();
-  }
-
+  // Warn only when the agent holds a pipeline this screen cannot author, since
+  // saving an instruction would replace it.
   function updateSimpleReplaceNote() {
     const note = document.getElementById('agentEditorSimpleReplaceNote');
-    if (note) note.hidden = !(editorMode === 'simple' && !isSimplePipeline(subAgents));
-  }
-
-  function setEditorMode(mode) {
-    editorMode = mode === 'advanced' ? 'advanced' : 'simple';
-    const simplePanel = document.getElementById('agentEditorSimplePanel');
-    const advancedPanel = document.getElementById('agentEditorAdvancedPanel');
-    const resetBtn = document.getElementById('agentEditorResetBtn');
-    if (simplePanel) simplePanel.hidden = editorMode !== 'simple';
-    if (advancedPanel) advancedPanel.hidden = editorMode !== 'advanced';
-    if (resetBtn) resetBtn.hidden = editorMode !== 'advanced';
-    const modeSimpleBtn = document.getElementById('agentEditorModeSimple');
-    const modeAdvancedBtn = document.getElementById('agentEditorModeAdvanced');
-    modeSimpleBtn?.classList.toggle('active', editorMode === 'simple');
-    modeAdvancedBtn?.classList.toggle('active', editorMode === 'advanced');
-    modeSimpleBtn?.setAttribute('aria-pressed', editorMode === 'simple' ? 'true' : 'false');
-    modeAdvancedBtn?.setAttribute('aria-pressed', editorMode === 'advanced' ? 'true' : 'false');
-    if (editorMode === 'advanced' && subAgents.length === 0) {
-      // First look at Advanced on a fresh agent: start from the default chain.
-      subAgents = defaultPipeline();
-      renderPipeline();
-    }
-    updateSimpleReplaceNote();
-    markDirtyFromInput();
+    if (note) note.hidden = isSimplePipeline(subAgents);
   }
 
   function fillHeader(agent) {
@@ -813,11 +728,42 @@
     if (cashInput) {
       cashInput.value = agent.cash_allocation != null ? String(agent.cash_allocation) : '';
     }
+    const backtestInput = document.getElementById('agentEditorBacktestAllocation');
+    if (backtestInput) {
+      // Non-positive counts as absent: cash_allocation is legally 0 (a $0 paper
+      // sleeve), but backtest capital is >= 1 server-side, so 0 must fall
+      // through to the default rather than becoming an unsaveable value.
+      const candidates = [agent.backtest_allocation, agent.cash_allocation];
+      let resolved = 1000;
+      for (const raw of candidates) {
+        const value = Number(raw);
+        if (Number.isFinite(value) && value > 0) { resolved = value; break; }
+      }
+      backtestInput.value = String(Math.min(Math.round(resolved), 10000));
+    }
     if (meta) {
       meta.textContent = agent.agent_type === 'builtin' ? 'Built-in agent' : 'External agent';
     }
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
     if (liveToggle) liveToggle.checked = Boolean(agent.live_trading_enabled);
+  }
+
+  function configureEditorMode(agent) {
+    const hostedAiHedgeFund = isAiHedgeFundAgent(agent);
+    const modelField = document.getElementById('agentEditorModelField');
+    const managedModelField = document.getElementById('agentEditorManagedModelField');
+    const simplePanel = document.getElementById('agentEditorSimplePanel');
+    const hedgeFundPanel = document.getElementById('agentEditorAiHedgeFundPanel');
+    if (modelField) modelField.hidden = hostedAiHedgeFund;
+    if (managedModelField) managedModelField.hidden = !hostedAiHedgeFund;
+    if (simplePanel) simplePanel.hidden = hostedAiHedgeFund;
+    if (hedgeFundPanel) hedgeFundPanel.hidden = !hostedAiHedgeFund;
+    if (hostedAiHedgeFund) {
+      renderAiHedgeFundAnalysts(agent);
+      const keyInput = document.getElementById('agentEditorFinancialDatasetsKey');
+      if (keyInput) keyInput.value = '';
+      setFinancialDatasetsStatus(false, 'Checking credential…');
+    }
   }
 
   function populateModelSelect(agent) {
@@ -856,32 +802,48 @@
     }));
   }
 
-  async function patchAgent(agent, name, description, pipeline, cash_allocation, model_name, live_trading_enabled) {
+  async function patchAgent(
+    agent,
+    name,
+    description,
+    pipeline,
+    cash_allocation,
+    backtest_allocation,
+    model_name,
+    live_trading_enabled,
+    runtimeConfig,
+  ) {
     const payload = {
       name,
       description: description || null,
       cash_allocation,
+      backtest_allocation,
       live_trading_enabled: Boolean(live_trading_enabled),
     };
     if (pipeline) payload.pipeline = serializePipeline(pipeline);
     if (model_name) payload.model_name = model_name;
+    if (runtimeConfig) payload.runtime_config = runtimeConfig;
     const endpoint = `${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}`;
 
     async function requestWithHeaders(extraHeaders) {
       if (window.API?.patch) {
-        return window.API.patch(endpoint, payload, extraHeaders);
+        return window.API.patch(endpoint, payload, {
+          ...authHeaders(),
+          ...extraHeaders,
+        });
       }
+      // window.API is a const in app.js and is not on `window` unless exported —
+      // this fallback is the live prod path. It must send X-CSRF-Token whenever
+      // the session cookie is present (#285), same as Robinhood / credential calls.
       const headers = {
         'Content-Type': 'application/json',
-        'x-session-id': window.SESSION_ID,
+        ...authHeaders(),
         ...extraHeaders,
       };
-      const token = localStorage.getItem('auth-token');
-      if (token) headers.Authorization = `Bearer ${token}`;
-
       const response = await fetch(endpoint, {
         method: 'PATCH',
         headers,
+        credentials: 'include',
         body: JSON.stringify(payload),
       });
       const data = await response.json().catch(() => ({}));
@@ -993,12 +955,10 @@
 
     try {
       const headers = { 'x-session-id': window.SESSION_ID };
-      const token = localStorage.getItem('auth-token');
-      if (token) headers.Authorization = `Bearer ${token}`;
 
       const response = await fetch(
         `${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}`,
-        { headers },
+        { headers, credentials: 'include' },
       );
       if (!response.ok) return;
       const data = await response.json();
@@ -1015,25 +975,25 @@
     if (!agent || !agent.agent_id) return;
 
     currentAgent = { ...agent };
-    if (isDemoAgent(agent.agent_id)) {
-      subAgents = resolvePipeline(agent); // demo agents keep the legacy default chain
-    } else {
-      subAgents = loadStoredPipeline(agent);
-    }
+    subAgents = loadStoredPipeline(agent);
     fillHeader(agent);
     populateModelSelect(agent);
+    configureEditorMode(agent);
+
     const instructionEl = document.getElementById('agentEditorSimpleInstruction');
-    if (instructionEl) {
-      const simpleStep =
-        subAgents.length === 1 && subAgents[0].presetKey === simplePresetKey()
-          ? subAgents[0]
-          : null;
-      instructionEl.value = simpleStep ? simpleStep.prompt : '';
-    }
-    renderPipeline();
-    setEditorMode(isSimplePipeline(subAgents) ? 'simple' : 'advanced');
+    const defaultText = document.getElementById('agentEditorDefaultInstructionText');
+    if (defaultText) defaultText.textContent = defaultStarterInstruction();
+    const simpleStep =
+      subAgents.length === 1 && subAgents[0].presetKey === simplePresetKey()
+        ? subAgents[0]
+        : null;
+    if (instructionEl) instructionEl.value = simpleStep ? simpleStep.prompt : '';
+    updateSimpleReplaceNote();
     refreshRunHistory(currentAgent);
     refreshRobinhoodStatus();
+    if (isAiHedgeFundAgent(agent)) {
+      refreshFinancialDatasetsStatus(agent);
+    }
 
     const view = document.getElementById('agentEditorView');
     if (view) {
@@ -1044,7 +1004,9 @@
     const playgroundView = document.getElementById('playgroundView');
     if (playgroundView) playgroundView.setAttribute('aria-hidden', 'true');
 
+    // Baseline the stored state so the dirty badge only fires on real edits.
     captureSavedSnapshot();
+
     document.getElementById('agentEditorNameInput')?.focus();
   }
 
@@ -1052,8 +1014,6 @@
     if (!force && isDirty) {
       if (!window.confirm('Discard unsaved changes?')) return;
     }
-
-    subAgents = collectPipelineFromDom();
 
     const view = document.getElementById('agentEditorView');
     if (view) view.hidden = true;
@@ -1082,9 +1042,21 @@
       document.getElementById('agentEditorNameInput')?.focus();
       return;
     }
+    if (isAiHedgeFundAgent() && !state.runtime_config.analysts.length) {
+      showSaveStatus('Select at least one AI Hedge Fund analyst', true);
+      return;
+    }
+
+    const clearingToDefault = state.sendPipeline && state.subAgents.length === 0;
+    if (clearingToDefault && !isSimplePipeline(subAgents) && subAgents.length) {
+      const ok = window.confirm(
+        'This agent uses a custom multi-step pipeline. Saving an empty '
+        + 'instruction replaces it with the platform default. Continue?',
+      );
+      if (!ok) return;
+    }
 
     subAgents = state.subAgents;
-    renderPipeline();
     updateSimpleReplaceNote();
     const saveBtn = document.getElementById('agentEditorSaveBtn');
     if (saveBtn) {
@@ -1129,6 +1101,7 @@
       return;
     }
 
+    let credentialSavePending = false;
     try {
       const updated = await patchAgent(
         currentAgent,
@@ -1136,12 +1109,25 @@
         state.description,
         state.sendPipeline ? subAgents : null,
         state.cash_allocation,
+        state.backtest_allocation,
         state.model_name,
-        state.live_trading_enabled
+        state.live_trading_enabled,
+        state.runtime_config,
       );
       currentAgent = state.sendPipeline
         ? { ...currentAgent, ...updated, pipeline: subAgents }
         : { ...currentAgent, ...updated };
+      if (state.financial_datasets_api_key) {
+        credentialSavePending = true;
+        await credentialRequest(currentAgent, 'PUT', {
+          api_key: state.financial_datasets_api_key,
+        });
+        credentialSavePending = false;
+        const keyInput = document.getElementById('agentEditorFinancialDatasetsKey');
+        if (keyInput) keyInput.value = '';
+        setFinancialDatasetsStatus(true);
+        state.financial_datasets_api_key = '';
+      }
       if (state.sendPipeline) savePipelineLocal(currentAgent.agent_id, subAgents);
       localStorage.removeItem(`${NAME_OVERRIDE_PREFIX}${currentAgent.agent_id}`);
 
@@ -1151,11 +1137,27 @@
 
       fillHeader(currentAgent);
       captureSavedSnapshot();
-      showSaveStatus('Saved successfully');
+      showSaveStatus(
+        clearingToDefault
+          ? 'Saved — using the default trading instruction.'
+          : 'Saved successfully',
+      );
       window.dispatchEvent(
         new CustomEvent('agent-editor-saved', { detail: { agent: currentAgent } })
       );
     } catch (error) {
+      if (credentialSavePending) {
+        fillHeader(currentAgent);
+        setDirty(true);
+        showSaveStatus(
+          `Agent saved, but credential storage failed: ${error.message}`,
+          true
+        );
+        window.dispatchEvent(
+          new CustomEvent('agent-editor-saved', { detail: { agent: currentAgent } })
+        );
+        return;
+      }
       if (state.sendPipeline) savePipelineLocal(currentAgent.agent_id, subAgents);
       localStorage.setItem(
         `${NAME_OVERRIDE_PREFIX}${currentAgent.agent_id}`,
@@ -1179,69 +1181,24 @@
     }
   }
 
-  function resetPipeline() {
-    if (!window.confirm('Reset the pipeline to the default 5 sub-agents? Unsaved prompt edits will be lost.')) {
-      return;
-    }
-    subAgents = defaultPipeline();
-    renderPipeline();
-    markDirtyFromInput();
-    showSaveStatus('Pipeline reset to defaults');
-  }
-
-  function addSubAgent() {
-    const select = document.getElementById('agentEditorAddSelect');
-    const customNameEl = document.getElementById('agentEditorCustomName');
-    const presetKey = select ? select.value : '';
-    if (!presetKey) {
-      showSaveStatus('Select a sub-agent type to add', true);
-      return;
-    }
-
-    subAgents = collectPipelineFromDom();
-
-    let customLabel = null;
-    if (presetKey === 'custom' && customNameEl) {
-      customLabel = customNameEl.value.trim() || 'Custom Sub-agent';
-    }
-
-    subAgents.push(createSubAgentFromPreset(presetKey, customLabel));
-    renderPipeline();
-    markDirtyFromInput();
-    showSaveStatus('Sub-agent added');
-
-    if (select) select.value = '';
-    if (customNameEl) {
-      customNameEl.value = '';
-      customNameEl.hidden = true;
-    }
-
-    const pipeline = document.getElementById('agentEditorPipeline');
-    if (pipeline && pipeline.lastElementChild) {
-      pipeline.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    }
-  }
-
   function bindEvents() {
     document.getElementById('agentEditorBackBtn')?.addEventListener('click', () => close(false));
     document.getElementById('agentEditorSaveBtn')?.addEventListener('click', () => save());
-    document.getElementById('agentEditorAddBtn')?.addEventListener('click', addSubAgent);
-    document.getElementById('agentEditorResetBtn')?.addEventListener('click', resetPipeline);
-    document.getElementById('agentEditorModeSimple')?.addEventListener('click', () => setEditorMode('simple'));
-    document.getElementById('agentEditorModeAdvanced')?.addEventListener('click', () => setEditorMode('advanced'));
     document.getElementById('agentEditorConnectRobinhoodBtn')?.addEventListener('click', connectRobinhood);
     document.getElementById('agentEditorDisconnectRobinhoodBtn')?.addEventListener('click', disconnectRobinhood);
+    document.getElementById('agentEditorFinancialDatasetsRemove')?.addEventListener('click', removeFinancialDatasetsCredential);
     document.getElementById('agentEditorRunLiveBtn')?.addEventListener('click', runLive);
     document.getElementById('agentEditorRunBacktestBtn')?.addEventListener('click', () => {
       if (!currentAgent) return;
+      // The modal reads the last-saved agent, so an unsaved edit would run the
+      // old instruction while the preview shows the new one. Same guard as Run Live.
+      if (isDirty) {
+        showSaveStatus('Save changes before Run Backtest', true);
+        return;
+      }
       if (typeof window.openRunBacktestModal === 'function') {
         window.openRunBacktestModal(currentAgent);
       }
-    });
-
-    document.getElementById('agentEditorAddSelect')?.addEventListener('change', (e) => {
-      const customName = document.getElementById('agentEditorCustomName');
-      if (customName) customName.hidden = e.target.value !== 'custom';
     });
 
     const body = document.getElementById('agentEditorView');
@@ -1271,5 +1228,5 @@
 
   bindEvents();
 
-  window.AgentEditor = { open, close, save, loadPipeline };
+  window.AgentEditor = { open, close, save };
 })();

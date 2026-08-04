@@ -10,19 +10,16 @@ from fastapi.testclient import TestClient
 from dashboard.backend.app import app
 import dashboard.backend.users as users_module
 from dashboard.backend.api import discord_oauth
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 
 
 @pytest.fixture
 def temp_user_store(tmp_path, monkeypatch):
     store = users_module.UserStore(db_path=tmp_path / "discord_auth.db")
 
+    # Both api/auth.py and the discord router resolve users_module.user_store at
+    # call time (issue #185), so this single patch redirects every route below.
     monkeypatch.setattr(users_module, "user_store", store)
-    # discord router imports user_store at module level — re-bind it too
-    import dashboard.backend.api.routers.discord as discord_router_mod
-    import dashboard.backend.api.auth as auth_mod
-
-    monkeypatch.setattr(discord_router_mod, "user_store", store)
-    monkeypatch.setattr(auth_mod, "user_store", store)
     return store
 
 
@@ -45,7 +42,10 @@ def _signup(client, email="alice@example.com", name="Alice"):
         json={"email": email, "display_name": name, "password": "securepass1"},
     )
     assert resp.status_code == 200
-    return resp.json()
+    body = resp.json()
+    assert "token" not in body
+    body["token"] = _cookie_session_token(client)
+    return body
 
 
 def test_public_user_includes_discord_link_fields(client):

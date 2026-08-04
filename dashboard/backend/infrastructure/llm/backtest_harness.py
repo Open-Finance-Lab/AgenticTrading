@@ -45,9 +45,20 @@ from dashboard.backend.infrastructure.llm.providers import (
 # Optional: LLM integration. Mirrors the original optional-dependency behavior
 # (no API key required at import time; only the SDK presence is detected).
 try:
-    from anthropic import Anthropic
+    # Reached by attribute rather than `from anthropic import Anthropic`: the
+    # name exists here only to be re-exported (backtest_hourly_agent and the
+    # engines read it through this module), which `py/unused-import` cannot see
+    # because the rule is intra-file.
+    import anthropic
+
+    Anthropic = anthropic.Anthropic
     HAS_ANTHROPIC = True
-except ImportError:
+except (ImportError, AttributeError):
+    # AttributeError as well as ImportError: attribute access is what makes the
+    # re-export visible to `py/unused-import`, but it also moves the "SDK is
+    # unusable" signal from ImportError to AttributeError. This module is on the
+    # backend's import path, so an unhandled one would not just disable LLM
+    # trading -- it would take the app's import down with it.
     # Bind ``Anthropic`` to None (instead of leaving it undefined) so the legacy
     # script can unconditionally re-export it; consumers always guard on
     # ``HAS_ANTHROPIC`` before using the client.
@@ -61,8 +72,8 @@ LLM_MODEL_NAME = anthropic_native.DEFAULT_MODEL
 
 # Same default model, but as the CommonStack gateway slug. CommonStack expects
 # ``provider/model`` ids, so when routing through CommonStack we must send the
-# gateway slug rather than the native Anthropic id (see the integration report's
-# "slug/gateway coupling" note). Pricing in token_cost.py matches "claude-haiku-4".
+# gateway slug rather than a native Anthropic id (see the integration report's
+# "slug/gateway coupling" note). Default is DeepSeek (see commonstack.py).
 COMMONSTACK_MODEL_NAME = commonstack.DEFAULT_MODEL
 
 # CommonStack / OpenRouter base URLs (env-overridable). Re-exported for

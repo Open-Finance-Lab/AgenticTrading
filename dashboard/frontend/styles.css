@@ -9,6 +9,24 @@
     box-sizing: border-box;
 }
 
+/*
+ * Form controls do not inherit the page font: the UA stylesheet gives every
+ * `button`/`input`/`select` its own default (Arial here) and every `textarea`
+ * `monospace`. With no base rule, 15 of the 16 buttons on My Agents and the
+ * plain-English "Trading instruction" textarea painted in a different typeface
+ * than the text around them -- the single widest typographic inconsistency in
+ * the app. `font-family` only, deliberately: `font: inherit` would also reset
+ * size/weight, and the controls that set those want to keep them. The mono
+ * fields (.agent-capital-input, .date-input, .control-select, ...) declare
+ * `font-family: var(--font-mono)` on a class, so they still win over this.
+ */
+button,
+input,
+select,
+textarea {
+    font-family: inherit;
+}
+
 :root {
     /* 10jqka-inspired dark theme - professional trading */
     --bg-primary: #0a0e27;
@@ -70,7 +88,13 @@ body {
 
 .header {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    /* Content-sized, not minmax(0, 1fr) either side. Two fr tracks are forced
+       equal, so the wider group sets both: the nav side wants ~505px, which
+       reserves ~1010px for side chrome and leaves the row needing ~1480px
+       before it fits. Under that the brand was the only thing with no reserved
+       width, so it was what got covered. Sized to content, the row fits from
+       900px up and the free space is shared out instead. */
+    grid-template-columns: auto auto auto;
     align-items: center;
     background-color: var(--bg-surface);
     padding: 10px 24px;
@@ -80,15 +104,18 @@ body {
 }
 
 .header-brand {
-    /* True viewport-center rail (same trick as landing), independent of side chrome width. */
-    grid-column: 1 / -1;
+    /* Real middle track, not a full-span overlapping rail. The rail centred the
+       brand on the viewport by sharing the side chrome's grid area and
+       reserving no width of its own, which is exactly why the chrome could
+       paint over the logo and wordmark. Its own track cannot be overlapped;
+       the cost is that it now centres in the space the side groups leave
+       rather than on the viewport. See .header for why that trade is forced. */
+    grid-column: 2;
     grid-row: 1;
     justify-self: center;
-    z-index: 1;
     display: flex;
     align-items: center;
     gap: 12px;
-    min-width: 0;
     text-decoration: none;
     color: inherit;
     cursor: pointer;
@@ -103,7 +130,6 @@ body {
     display: flex;
     align-items: center;
     gap: 12px;
-    min-width: 0;
     flex-wrap: nowrap;
 }
 
@@ -286,7 +312,6 @@ a.header-brand:hover .title-section h1 {
     display: flex;
     align-items: center;
     gap: 10px;
-    min-width: 0;
     flex-wrap: nowrap;
 }
 
@@ -333,7 +358,9 @@ a.header-brand:hover .title-section h1 {
     color: inherit;
     font-size: 14px;
     font-weight: 600;
-    max-width: 140px;
+    /* The cap, not the name, is what the header has to be laid out against --
+       it is the account group's worst case at every width above 1024px. */
+    max-width: 100px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -390,6 +417,29 @@ a.header-brand:hover .title-section h1 {
     color: var(--text-secondary);
 }
 
+/* Destructive-control red. MUST stay after .auth-btn:hover above: the two
+   hover rules have identical (0,2,0) specificity, so source order is the only
+   thing making this one win. A copy of .agent-delete-btn's palette rather than
+   a reuse of it -- that class is agent-scoped, and the codebase already makes
+   this same "same look, own class" split between .account-menu-item--danger
+   and .agent-menu-item--danger. #f87171 is what every other destructive
+   control here uses (.agent-delete-btn, .agent-menu-item--danger,
+   .account-menu-item--danger), while --danger-color #ff4141 is the more
+   common choice for negative P&L -- but neither is an absolute rule and there
+   are exceptions both ways, so match the nearest precedent rather than
+   assuming a clean split. */
+.auth-btn-danger {
+    border-color: rgba(248, 113, 113, 0.55);
+    background: rgba(248, 113, 113, 0.1);
+    color: #f87171;
+}
+
+.auth-btn-danger:hover {
+    border-color: #f87171;
+    background: rgba(248, 113, 113, 0.2);
+    color: #fca5a5;
+}
+
 .auth-modal[hidden] {
     display: none !important;
 }
@@ -438,7 +488,7 @@ a.header-brand:hover .title-section h1 {
 .auth-modal-subtitle {
     margin: 0 0 18px;
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: 13px;
 }
 
 .auth-form {
@@ -464,6 +514,16 @@ a.header-brand:hover .title-section h1 {
     border-radius: 4px;
     background: var(--bg-primary);
     color: var(--text-primary);
+    /* Native <select> menus are painted from the UA's color scheme, not ours;
+       without this the inherited light text lands on a light OS panel.
+       Intentionally on the shared rule: the text inputs want dark autofill,
+       spinners and scrollbars for the same reason. */
+    color-scheme: dark;
+}
+
+.auth-field select option {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
 }
 
 .auth-error {
@@ -478,7 +538,14 @@ a.header-brand:hover .title-section h1 {
     border: none;
     border-radius: 6px;
     background: var(--info-color);
-    color: #fff;
+    /*
+     * Dark on cyan, not #fff: white on --info-color (#00bfff) measures 2.12:1,
+     * under the WCAG AA 4.5:1 floor. This rule paints the primary button of the
+     * sign-in modal, the Run Backtest modal and both create-agent modals -- i.e.
+     * the submit control at every step of this flow. #041018 measures ~9:1 and
+     * matches how the same cyan is already paired on .home-btn-primary.
+     */
+    color: #041018;
     font-weight: 700;
     font-size: 13px;
     cursor: pointer;
@@ -873,7 +940,7 @@ a.header-brand:hover .title-section h1 {
 
 .control-group label {
     display: block;
-    font-size: 11px;
+    font-size: 12.5px;
     font-weight: 700;
     color: var(--text-secondary);
     text-transform: none;
@@ -891,7 +958,7 @@ a.header-brand:hover .title-section h1 {
 .date-input-wrapper {
     position: relative;
     flex: 1;
-    max-width: 100px;
+    max-width: 122px;
     display: flex;
     align-items: center;
 }
@@ -904,10 +971,20 @@ a.header-brand:hover .title-section h1 {
     border: 1px solid var(--border-color);
     border-radius: 3px;
     color: var(--text-primary);
-    font-size: 10px;
+    font-size: 12.5px;
     font-family: var(--font-mono);
     height: 24px;
     line-height: 1;
+    /* Native <select> menus and date pickers are painted from the UA's color
+       scheme, not ours; without this the inherited light text lands on a light
+       OS panel. Applies to .date-input too -- see the picker-indicator rule
+       below, which must not re-invert the now-light glyph. */
+    color-scheme: dark;
+}
+
+.control-select option {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
 }
 
 .date-input {
@@ -920,7 +997,10 @@ a.header-brand:hover .title-section h1 {
     width: 16px;
     height: 16px;
     margin-right: 5px;
-    filter: invert(0.8);
+    /* Deliberately no invert() filter. The UA draws this glyph from the
+       element's color-scheme, so under `color-scheme: dark` above it is
+       already light; inverting would turn it near-black on --bg-input and
+       make the picker button invisible. */
 }
 
 .date-input::-webkit-calendar-picker-indicator:hover {
@@ -946,7 +1026,7 @@ a.header-brand:hover .title-section h1 {
     border-left: 2px solid var(--warning-color);
     background: rgba(245, 158, 11, 0.08);
     color: var(--text-secondary);
-    font-size: 10px;
+    font-size: 12px;
     line-height: 1.45;
 }
 
@@ -1029,7 +1109,7 @@ a.header-brand:hover .title-section h1 {
    ============================================================================ */
 
 .control-helper {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-secondary);
     margin-bottom: 12px;
     margin-top: -4px;
@@ -1109,7 +1189,7 @@ a.header-brand:hover .title-section h1 {
     border-radius: 3px;
     color: #fda4af;
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 700;
 }
 
@@ -1142,14 +1222,14 @@ a.header-brand:hover .title-section h1 {
 .ifind-symbol-item span {
     color: var(--text-primary);
     font-family: var(--font-mono);
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 700;
 }
 
 .ifind-symbol-item small {
     margin-top: 2px;
     color: var(--text-secondary);
-    font-size: 9px;
+    font-size: 10px;
 }
 
 /* Preset Cards */
@@ -1192,7 +1272,7 @@ a.header-brand:hover .title-section h1 {
 }
 
 .preset-desc {
-    font-size: 11px;
+    font-size: 12.5px;
     color: var(--text-secondary);
     margin-bottom: 12px;
 }
@@ -1203,7 +1283,7 @@ a.header-brand:hover .title-section h1 {
     border-radius: 4px;
     background-color: transparent;
     color: var(--text-secondary);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     transition: all 0.15s;
@@ -1235,7 +1315,7 @@ a.header-brand:hover .title-section h1 {
 }
 
 .custom-header {
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--text-primary);
     margin-bottom: 12px;
@@ -1338,7 +1418,7 @@ a.header-brand:hover .title-section h1 {
     background-color: var(--bg-hover);
     border: 1px solid var(--border-color);
     border-radius: 4px;
-    font-size: 11px;
+    font-size: 12.5px;
     color: var(--text-primary);
     font-weight: 500;
     white-space: nowrap;
@@ -1361,7 +1441,7 @@ a.header-brand:hover .title-section h1 {
 }
 
 .chips-helper {
-    font-size: 11px;
+    font-size: 12.5px;
     color: var(--text-muted);
 }
 
@@ -1564,7 +1644,7 @@ a.header-brand:hover .title-section h1 {
     border: none;
     border-radius: 3px;
     color: white;
-    font-size: 11px;
+    font-size: 12.5px;
     font-weight: 700;
     cursor: pointer;
     transition: all 0.15s;
@@ -1720,6 +1800,12 @@ a.header-brand:hover .title-section h1 {
     color: var(--text-primary);
     font-size: 12px;
     cursor: pointer;
+    color-scheme: dark;
+}
+
+.filter-select option {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
 }
 
 .filter-btn {
@@ -2260,11 +2346,28 @@ a.header-brand:hover .title-section h1 {
     }
 }
 
-@media (max-width: 700px) {
+/* The header is one row only down to 900px, where the nav becomes a hamburger.
+   In that band the three groups have to actually fit: everything in .header-left
+   and .header-account is flex-shrink: 0, so nothing gives way on its own and the
+   surplus lands on the brand. The labels below are dropped in the order they
+   stop earning their width, each at the measured point where the row overflows.
+
+   Staged rather than collapsed all at once because the brand centres in whatever
+   space the two side groups leave: the further apart their widths, the further
+   the brand sits from the centre. Hiding the left group in one step costs ~215px
+   of offset; hiding it in two keeps it near ~160px down to 1340px.
+
+   Each width is the measured overflow point of the *signed-in* header, which is
+   the wider one -- an avatar, a 100px-capped name and a caret where signed out
+   has just "Sign in". Sizing these to the signed-out header would leave every
+   signed-in user, i.e. every user the fix is for, still overflowing. */
+@media (max-width: 1440px) {
     .header-github-name {
         display: none;
     }
+}
 
+@media (max-width: 1340px) {
     .header-discord-btn {
         padding: 7px 10px;
         gap: 8px;
@@ -2280,6 +2383,19 @@ a.header-brand:hover .title-section h1 {
     }
 }
 
+/* Avatar only, and the row's own side padding halved. By here these are the
+   difference between the header fitting and the account controls leaving the
+   viewport -- the name is still in the account menu one click away. */
+@media (max-width: 1024px) {
+    .auth-user-label {
+        display: none;
+    }
+
+    .header {
+        padding: 10px 12px;
+    }
+}
+
 @media (max-width: 900px) {
     .header {
         grid-template-columns: 1fr;
@@ -2290,6 +2406,11 @@ a.header-brand:hover .title-section h1 {
         grid-column: 1;
         grid-row: auto;
         justify-self: center;
+        /* Safe again here, and needed: one column per group means nothing can
+           be overlapped, while the wordmark is wider than a 320px viewport --
+           left to size the track it would sit hard against the left padding
+           and overhang only to the right. */
+        min-width: 0;
     }
 
     .header-left {
@@ -4416,6 +4537,35 @@ a.header-brand:hover .title-section h1 {
     width: min(560px, calc(100vw - 32px));
     max-height: calc(100vh - 48px);
     overflow: auto;
+    /* Column layout so the submit button can be pinned to the bottom below. */
+    display: flex;
+    flex-direction: column;
+}
+
+/*
+ * Pin the primary CTA. The panel's content runs ~1080px tall, so on a 1440x900
+ * screen the "▶ Run Backtest" button rendered at y=1045 -- 145px past the fold
+ * (measured live), and worse on a 1366x768 laptop. The panel scrolls, but
+ * nothing said so, so the payoff action of the whole product was invisible on
+ * open. Sticky keeps it in view at every scroll position.
+ */
+.run-backtest-modal-panel > #runBacktestModalSubmit {
+    position: sticky;
+    bottom: 0;
+    margin-top: auto;
+    /* Opaque: the content scrolls underneath this button. Matches .auth-submit. */
+    background-color: var(--info-color);
+    box-shadow: 0 -8px 16px -8px rgba(0, 0, 0, 0.6);
+}
+
+/*
+ * Reclaim ~170px of that overflow at the source: two preset cards each
+ * reserving 180px for three short lines is what pushed the CTA off-screen.
+ * Scoped to this modal so the roomier cards elsewhere are untouched.
+ */
+.run-backtest-modal .preset-card {
+    min-height: 0;
+    padding: 12px;
 }
 
 .run-backtest-modal-body {
@@ -4430,6 +4580,27 @@ a.header-brand:hover .title-section h1 {
     font-size: 14px;
     font-weight: 600;
     color: var(--text-primary);
+}
+
+.run-backtest-capital-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.run-backtest-edit-link {
+    background: none;
+    border: none;
+    padding: 0;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--accent-cyan, #22d3ee);
+    cursor: pointer;
+}
+
+.run-backtest-edit-link:hover {
+    text-decoration: underline;
 }
 
 .run-backtest-prompt-preview {
@@ -6041,6 +6212,8 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     cursor: pointer; text-decoration: none; border: 1px solid transparent;
     transition: background-color 0.2s, border-color 0.2s, color 0.2s, box-shadow 0.2s;
 }
+.home-btn[hidden] { display: none !important; }
+.home-btn:disabled, .home-btn:disabled:hover { cursor: not-allowed; opacity: 0.5; box-shadow: none; filter: none; }
 .home-btn-primary { background: var(--home-accent-cyan); color: #041018; border-color: var(--home-accent-cyan); box-shadow: 0 6px 24px rgba(34,211,238,0.24); }
 .home-btn-primary:hover { filter: brightness(1.05); }
 .home-btn-secondary { background: rgba(8,18,40,0.55); color: var(--text-primary); border-color: rgba(148,163,184,0.22); }
@@ -6863,6 +7036,26 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     gap: 10px;
 }
 
+/* My Agents loading skeletons — shipped in app.html so the grid shows card
+   shapes pre-JS; the first agents render overwrites the grid and clears them. */
+.agent-card--skeleton {
+    min-height: 172px;
+    border: 1px solid var(--border-color);
+    background: linear-gradient(100deg,
+        var(--bg-card) 40%, var(--bg-hover) 50%, var(--bg-card) 60%);
+    background-size: 200% 100%;
+    animation: agent-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes agent-skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-card--skeleton { animation: none; }
+}
+
 .agent-card-head {
     display: flex;
     justify-content: space-between;
@@ -6881,12 +7074,12 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     display: flex;
     flex-direction: column;
     gap: 4px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-secondary);
 }
 
 .agent-discord {
-    font-size: 11px;
+    font-size: 12.5px;
     font-weight: 600;
 }
 
@@ -6938,7 +7131,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     border: 1px solid var(--border-color);
     background: var(--bg-input);
     color: var(--text-secondary);
-    font-size: 11px;
+    font-size: 12.5px;
     text-align: left;
     cursor: pointer;
     transition: border-color 0.15s, color 0.15s;
@@ -6952,7 +7145,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .agent-run-secondary {
     color: var(--text-muted);
-    font-size: 10px;
+    font-size: 12px;
     line-height: 1.3;
 }
 
@@ -6973,7 +7166,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     border: 1px solid var(--info-color);
     background: rgba(0, 191, 255, 0.12);
     color: var(--info-color);
-    font-size: 11px;
+    font-size: 12.5px;
     font-weight: 700;
     cursor: pointer;
     text-decoration: none;
@@ -7033,7 +7226,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .agent-description {
     margin: 6px 0 2px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-secondary);
     line-height: 1.4;
 }
@@ -7173,10 +7366,12 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     border: 1px solid rgba(34, 211, 238, 0.28);
 }
 
+/* Slate, matching AVAILABLE_SLICE_COLOR in portfolio.js — the donut beside this
+   card shows the same quantity, and two colours for it read as two concepts. */
 .pf-overview-pill--avail {
-    color: #f59e0b;
-    background: rgba(245, 158, 11, 0.12);
-    border: 1px solid rgba(245, 158, 11, 0.28);
+    color: #94a3b8;
+    background: rgba(100, 116, 139, 0.14);
+    border: 1px solid rgba(100, 116, 139, 0.32);
 }
 
 .pf-overview-bar {
@@ -7195,7 +7390,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .pf-overview-bar-avail {
     height: 100%;
-    background: #f59e0b;
+    background: #64748b;
 }
 
 .pf-allocation-card {
@@ -7587,7 +7782,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 /* Status-aware agent cards (PAPER / BACKTESTED / DRAFT) */
 .agents-section .agents-grid:not(.agents-grid--list) {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
     gap: 16px;
 }
 
@@ -7646,18 +7841,14 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     font-size: 16px;
     font-weight: 700;
     line-height: 1.25;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
 }
 
 .agent-card-submeta {
     margin: 3px 0 0;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
+    overflow-wrap: anywhere;
 }
 
 .agent-card-hero {
@@ -7685,7 +7876,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     align-items: center;
     padding: 2px 7px;
     border-radius: 999px;
-    font-size: 9px;
+    font-size: 10px;
     font-weight: 750;
     letter-spacing: 0.06em;
     text-transform: uppercase;
@@ -7708,7 +7899,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .agent-card-metric-label {
     display: inline;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 500;
     color: var(--text-muted);
     margin-bottom: 0;
@@ -7725,9 +7916,23 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .agent-card-capital-note {
     margin: 4px 0 0;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 500;
     color: var(--text-muted);
+}
+
+.agent-card-capitals {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.agent-card-capital {
+    min-width: 0;
+}
+
+.agent-card-capital .agent-card-metric-value {
+    font-size: 22px;
 }
 
 .agent-card-latest {
@@ -7763,15 +7968,9 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .agent-card-latest-meta {
     margin: 0;
-    font-size: 12.5px;
+    font-size: 13px;
     font-weight: 500;
     color: var(--text-secondary);
-}
-
-.agent-card-latest-note {
-    margin: 0;
-    font-size: 11.5px;
-    color: var(--text-muted);
 }
 
 .agent-card-latest .agent-card-runs-link {
@@ -7781,7 +7980,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .agent-card-change {
     margin: 6px 0 0;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
 }
 
@@ -7794,7 +7993,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .agent-card-period {
     margin: -4px 0 0;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-secondary);
 }
 
@@ -7860,7 +8059,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 }
 
 .agent-card-stat-label {
-    font-size: 11px;
+    font-size: 12.5px;
     color: var(--text-muted);
 }
 
@@ -7874,7 +8073,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     display: flex;
     align-items: flex-start;
     gap: 8px;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-secondary);
 }
 
@@ -7902,7 +8101,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 }
 
 .agent-card-activity-sub {
-    font-size: 11px;
+    font-size: 12.5px;
     color: var(--text-muted);
 }
 
@@ -7934,14 +8133,82 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .agent-card-empty strong {
     color: var(--text-secondary);
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 650;
 }
 
 .agent-card-empty span {
-    font-size: 12px;
+    font-size: 13px;
     line-height: 1.4;
-    max-width: 220px;
+    max-width: 240px;
+}
+
+.agent-card-running {
+    margin-bottom: 14px;
+}
+
+.agent-card-running-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.agent-card-running-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent-cyan, #22d3ee);
+    animation: agent-card-running-pulse 1.4s ease-in-out infinite;
+}
+
+.agent-card-running-label {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.agent-card-running-elapsed {
+    margin-left: auto;
+    font-size: 13px;
+    font-family: var(--font-mono);
+    color: var(--text-muted);
+}
+
+.agent-card-running-track {
+    height: 4px;
+    border-radius: 999px;
+    background: var(--border-color);
+    overflow: hidden;
+}
+
+.agent-card-running-bar {
+    width: 40%;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent-cyan, #22d3ee);
+    animation: agent-card-running-slide 1.6s ease-in-out infinite;
+}
+
+@keyframes agent-card-running-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.25; }
+}
+
+@keyframes agent-card-running-slide {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(250%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-card-running-dot,
+    .agent-card-running-bar {
+        animation: none;
+    }
+    .agent-card-running-bar {
+        width: 100%;
+        opacity: 0.5;
+    }
 }
 
 .agent-card-actions--status {
@@ -7978,6 +8245,26 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 .agent-card-cta--outline:hover {
     filter: none;
     background: rgba(34, 211, 238, 0.1);
+}
+
+/*
+ * A neutral treatment, not a faded primary. `opacity: 0.45` over the solid
+ * cyan fill left the permanently-disabled "Run Paper Trading" button sitting
+ * next to the real "Run Backtest" as the same shape and colour at a slightly
+ * different brightness -- the action row squint-tested as two cyan CTAs, which
+ * halved the pull of the one action this flow exists to drive. The blend also
+ * dropped the label to roughly 3:1 against its own fill.
+ */
+.agent-card-cta--disabled {
+    opacity: 1;
+    background: rgba(148, 163, 184, 0.10);
+    border-color: var(--border-color);
+    color: var(--text-muted);
+    cursor: not-allowed;
+}
+
+.agent-card-cta--disabled:hover {
+    filter: none;
 }
 
 .agent-card-menu {
@@ -8040,7 +8327,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     border-radius: 6px;
     background: transparent;
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
     text-align: left;
     cursor: pointer;
@@ -8112,7 +8399,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 }
 
 .add-agent-option span {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-secondary);
 }
 
@@ -8179,26 +8466,54 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 }
 
 .subtab-btn {
-    padding: 7px 16px;
+    /*
+     * 13px/9px, not 11px/7px: this bar is the primary navigation *inside* the
+     * product (My Agents / Backtest / Paper Trading), yet it was the smallest
+     * interactive text on the page -- 11px in a 26px-tall target, against a
+     * 14px/32px top nav. 13px + 9px padding brings it to ~32px, matching the
+     * nav above it.
+     */
+    padding: 9px 16px;
     border: none;
     background: transparent;
     color: var(--text-secondary);
     border-radius: 3px;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 700;
     cursor: pointer;
-    transition: all 0.15s;
+    /* Enumerated, not `all`: `all` also animates layout properties. */
+    transition: background-color 0.15s ease, color 0.15s ease;
     white-space: nowrap;
 }
 
 .subtab-btn.active {
     background: var(--info-color);
-    color: white;
+    /*
+     * Dark on cyan, not white: white on --info-color (#00bfff) measures 2.12:1,
+     * below the WCAG AA 4.5:1 floor, on the most-used control in the flow.
+     * #041018 measures ~9:1 and matches how the same cyan is already paired
+     * with a dark foreground on .home-btn-primary / .agent-card-cta.
+     */
+    color: #041018;
 }
 
 .subtab-btn:hover:not(.active) {
     color: var(--text-primary);
     background: var(--bg-hover);
+}
+
+/*
+ * styles.css had zero `:focus-visible` rules and eight bare `outline: none`
+ * resets, and this bar had no focus style of any kind -- keyboard users could
+ * not see which tab they were on. Scoped to the flow's controls rather than a
+ * global reset so it cannot disturb unrelated views.
+ */
+.subtab-btn:focus-visible,
+.agent-card-cta:focus-visible,
+.agent-view-btn:focus-visible,
+.home-btn:focus-visible {
+    outline: 2px solid var(--home-accent-cyan);
+    outline-offset: 2px;
 }
 
 .overview-grid {
@@ -8407,37 +8722,65 @@ body.agent-editor-open {
     border-color: rgba(34, 211, 238, 0.4);
 }
 
-.agent-editor-cash-field {
+.agent-capital-card {
+    margin-bottom: 12px;
+}
+
+/* Beat `.section-card h3 { font-size: 12px }` (higher specificity). */
+.section-card .agent-capital-title {
+    margin: 0 0 12px;
+    font-size: 17px;
+    font-weight: 700;
+    letter-spacing: normal;
+    color: var(--text-primary);
+}
+
+.agent-capital-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 18px;
+}
+
+.agent-capital-field {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-top: 10px;
-    max-width: 220px;
+    min-width: 0;
 }
 
-.agent-editor-cash-label {
-    font-size: 11px;
+.agent-capital-label {
+    font-size: 15px;
     font-weight: 600;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
+    color: var(--text-primary);
 }
 
-.agent-editor-cash-input {
+.agent-capital-max {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-muted);
+    margin-left: 6px;
+}
+
+.agent-capital-input {
     width: 100%;
     box-sizing: border-box;
-    padding: 8px 12px;
+    padding: 9px 12px;
     border: 1px solid var(--border-color);
     border-radius: 6px;
     background: var(--bg-input);
     color: var(--text-primary);
-    font-size: 14px;
+    font-size: 15px;
     font-family: var(--font-mono);
 }
 
-.agent-editor-cash-input:focus {
+.agent-capital-input:focus {
     outline: none;
     border-color: rgba(34, 211, 238, 0.4);
+}
+
+.agent-capital-note {
+    font-size: 13px;
+    color: var(--text-secondary);
 }
 
 .agent-editor-broker {
@@ -8455,7 +8798,7 @@ body.agent-editor-open {
 }
 
 .agent-editor-broker-status {
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 700;
     padding: 4px 10px;
     border-radius: 999px;
@@ -8476,7 +8819,7 @@ body.agent-editor-open {
 }
 
 .agent-editor-broker-meta {
-    font-size: 12px;
+    font-size: 13px;
     color: #94a3b8;
 }
 
@@ -8495,7 +8838,7 @@ body.agent-editor-open {
 }
 
 .agent-editor-live-result {
-    font-size: 12px;
+    font-size: 13px;
     color: #cbd5e1;
     margin: 0;
 }
@@ -8538,11 +8881,6 @@ body.agent-editor-open {
     border: 1px solid rgba(251, 191, 36, 0.35);
 }
 
-.agent-editor-reset-btn {
-    font-size: 12px;
-    padding: 8px 12px;
-}
-
 .agent-editor-title {
     margin: 0;
     font-size: 20px;
@@ -8555,7 +8893,7 @@ body.agent-editor-open {
 
 .agent-editor-meta {
     margin: 2px 0 0;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-secondary);
 }
 
@@ -8601,16 +8939,18 @@ body.agent-editor-open {
     gap: 12px;
 }
 
-.agent-editor-history-title {
+/* Beat `.section-card h3 { font-size: 12px }` (higher specificity). */
+.section-card .agent-editor-history-title {
     margin: 0;
     font-size: 15px;
     font-weight: 700;
+    letter-spacing: normal;
     color: var(--text-primary);
 }
 
 .agent-editor-run-count {
     flex-shrink: 0;
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 700;
     color: var(--home-accent-cyan, #22d3ee);
     padding: 4px 10px;
@@ -8621,7 +8961,7 @@ body.agent-editor-open {
 
 .agent-editor-history-hint {
     margin: 0;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-secondary);
     line-height: 1.45;
 }
@@ -8639,7 +8979,7 @@ body.agent-editor-open {
     padding: 12px;
     border-radius: 6px;
     border: 1px dashed var(--border-color);
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-muted);
     line-height: 1.5;
 }
@@ -8675,37 +9015,19 @@ body.agent-editor-open {
 
 .agent-editor-run-secondary {
     color: var(--text-muted);
-    font-size: 11px;
+    font-size: 12.5px;
     line-height: 1.3;
 }
 
 .agent-editor-run-meta {
     color: var(--text-secondary);
-    font-size: 10px;
-    line-height: 1.3;
-}
-
-.agent-editor-intro-head {
-    display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: 16px;
-}
-
-.agent-editor-step-count {
-    flex-shrink: 0;
     font-size: 12px;
-    font-weight: 700;
-    color: var(--home-accent-cyan, #22d3ee);
-    padding: 6px 12px;
-    border-radius: 999px;
-    background: rgba(34, 211, 238, 0.1);
-    border: 1px solid rgba(34, 211, 238, 0.25);
+    line-height: 1.3;
 }
 
 .agent-editor-hint {
     margin: 16px 0 0;
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-muted);
 }
 
@@ -8714,285 +9036,28 @@ body.agent-editor-open {
     border-radius: 4px;
     border: 1px solid var(--border-color);
     background: var(--bg-input);
-    font-size: 11px;
+    font-size: 12px;
 }
 
-.agent-editor-intro {
-    margin-bottom: 16px;
-}
-
-.agent-editor-intro-title {
+/* Beat `.section-card h3 { font-size: 12px }` (higher specificity). */
+.section-card .agent-editor-intro-title {
     margin: 0 0 6px;
     font-size: 15px;
     font-weight: 700;
+    letter-spacing: normal;
     color: var(--text-primary);
 }
 
 .agent-editor-intro-text {
     margin: 0;
-    font-size: 13px;
+    font-size: 14px;
     color: var(--text-secondary);
     line-height: 1.5;
 }
 
-.agent-editor-pipeline {
-    display: flex;
-    flex-direction: column;
-    gap: 0;
-}
-
-.agent-sub-card {
-    padding: 16px 18px;
-    margin-bottom: 0;
-    border-left: 3px solid rgba(34, 211, 238, 0.35);
-}
-
-.agent-sub-actions {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    justify-content: flex-end;
-    gap: 6px;
-    flex-shrink: 0;
-}
-
-.agent-sub-reorder {
-    display: inline-flex;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    overflow: hidden;
-}
-
-.agent-sub-move-btn {
-    width: 32px;
-    height: 30px;
-    border: none;
-    background: var(--bg-input);
-    color: var(--text-secondary);
-    font-size: 14px;
-    font-weight: 700;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s;
-}
-
-.agent-sub-move-btn + .agent-sub-move-btn {
-    border-left: 1px solid var(--border-color);
-}
-
-.agent-sub-move-btn:hover:not(:disabled) {
-    background: rgba(34, 211, 238, 0.12);
-    color: var(--home-accent-cyan, #22d3ee);
-}
-
-.agent-sub-move-btn:disabled {
-    opacity: 0.35;
-    cursor: not-allowed;
-}
-
-.agent-sub-icon-btn {
-    width: 30px;
-    height: 30px;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--text-secondary);
-    font-size: 14px;
-    cursor: pointer;
-    transition: background 0.15s, color 0.15s, border-color 0.15s;
-}
-
-.agent-sub-icon-btn:hover {
-    border-color: rgba(34, 211, 238, 0.4);
-    color: var(--home-accent-cyan, #22d3ee);
-    background: rgba(34, 211, 238, 0.08);
-}
-
-.agent-sub-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    margin-bottom: 12px;
-}
-
-.agent-sub-head-left {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    min-width: 0;
-    flex: 1;
-}
-
-.agent-sub-index {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 26px;
-    height: 26px;
-    border-radius: 50%;
-    background: rgba(34, 211, 238, 0.14);
-    color: var(--home-accent-cyan, #22d3ee);
-    font-size: 12px;
-    font-weight: 700;
-    flex-shrink: 0;
-}
-
-.agent-sub-preset-label {
-    font-size: 15px;
-    font-weight: 700;
-    color: var(--text-primary);
-    display: inline-flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-}
-
-.agent-sub-freq-badge {
-    font-size: 10px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-    color: var(--text-secondary, #64748b);
-    border: 1px solid var(--border-color, #cbd5e1);
-    border-radius: 4px;
-    padding: 2px 6px;
-}
-
-.agent-sub-label-input {
-    flex: 1;
-    min-width: 0;
-    padding: 6px 10px;
-    border: 1px solid var(--border-color);
-    border-radius: 4px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    font-size: 14px;
-    font-weight: 600;
-}
-
-.agent-sub-remove-btn {
-    padding: 5px 10px;
-    border: 1px solid rgba(239, 68, 68, 0.35);
-    border-radius: 4px;
-    background: transparent;
-    color: #f87171;
-    font-size: 11px;
-    font-weight: 600;
-    cursor: pointer;
-    flex-shrink: 0;
-    transition: background 0.15s;
-}
-
-.agent-sub-remove-btn:hover {
-    background: rgba(239, 68, 68, 0.12);
-}
-
-.agent-sub-fields {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
-}
-
-.agent-sub-field {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-}
-
-.agent-sub-field-label {
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--text-primary);
-}
-
-.agent-sub-field-hint {
-    font-size: 11px;
-    color: var(--text-muted);
-    margin-bottom: 2px;
-}
-
-.agent-sub-field textarea {
-    width: 100%;
-    box-sizing: border-box;
-    padding: 10px 12px;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    font-size: 13px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    line-height: 1.45;
-    resize: vertical;
-    min-height: 72px;
-}
-
-.agent-sub-field textarea:focus {
-    outline: none;
-    border-color: rgba(34, 211, 238, 0.5);
-    box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.12);
-}
-
-.agent-sub-connector {
-    display: flex;
-    justify-content: center;
-    padding: 8px 0 12px;
-    color: var(--text-muted);
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-}
-
-.agent-sub-connector span {
-    padding: 4px 12px;
-    border-radius: 999px;
-    background: rgba(148, 163, 184, 0.08);
-    border: 1px dashed rgba(148, 163, 184, 0.2);
-}
-
-.agent-editor-add-row {
-    margin-top: 16px;
-}
-
-.agent-editor-add-label {
-    display: block;
-    margin-bottom: 8px;
-    font-size: 12px;
-    font-weight: 700;
-    color: var(--text-primary);
-}
-
-.agent-editor-add-controls {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 10px;
-    align-items: center;
-}
-
-.agent-editor-custom-name {
-    flex: 1;
-    min-width: 160px;
-    padding: 8px 12px;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    font-size: 13px;
-}
-
-.agent-editor-add-select {
-    flex: 1;
-    min-width: 200px;
-    padding: 8px 12px;
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    background: var(--bg-input);
-    color: var(--text-primary);
-    font-size: 13px;
-}
-
 .agent-editor-save-status {
     margin: 12px 0 0;
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
     color: var(--home-accent-cyan, #22d3ee);
 }
@@ -9020,12 +9085,6 @@ body.agent-editor-open {
     }
 }
 
-@media (max-width: 900px) {
-    .agent-sub-fields {
-        grid-template-columns: 1fr;
-    }
-}
-
 @media (max-width: 640px) {
     .agent-editor-header {
         flex-wrap: wrap;
@@ -9043,24 +9102,6 @@ body.agent-editor-open {
 
     .agent-editor-body {
         padding: 12px;
-    }
-
-    .agent-editor-intro-head {
-        flex-direction: column;
-    }
-
-    .agent-editor-add-controls {
-        flex-direction: column;
-        align-items: stretch;
-    }
-
-    .agent-sub-head {
-        flex-direction: column;
-        align-items: stretch;
-    }
-
-    .agent-sub-actions {
-        justify-content: flex-start;
     }
 }
 
@@ -9179,6 +9220,15 @@ body.agent-editor-open {
     max-width: 360px;
 }
 
+/* The class is on all three account forms, but `>` is deliberate and narrows
+   this to two buttons: Save name and Update password, the only submits that are
+   direct children of a form. The email form's pair is nested in
+   .account-email-actions and sized by that rule instead -- the child combinator
+   is what keeps the two from fighting over the same buttons. */
+.account-password-form > .auth-btn {
+    width: 100%;
+}
+
 .password-policy-hints {
     margin: 4px 0 0;
     padding-left: 18px;
@@ -9189,6 +9239,27 @@ body.agent-editor-open {
 .account-success {
     font-size: 12px;
     color: #34d399;
+}
+
+.account-hint {
+    margin: 0 0 10px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+/* `1fr auto`, not a single column: Cancel is hidden in the idle state and so
+   generates no grid item, leaving "Send code" spanning the full first track.
+   Once the code step un-hides Cancel it takes the auto track beside it, instead
+   of stacking full-width underneath and reading as an equal-weight action. */
+.account-email-actions {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 8px;
+    width: 100%;
+}
+
+.account-email-actions .auth-btn {
+    width: 100%;
 }
 
 .auth-avatar--large {
@@ -9269,6 +9340,15 @@ body.agent-editor-open {
     gap: 16px;
 }
 
+/* One step down from .page-title (22px): the Community page owns the h2, the
+   marketplace is a section within it. */
+.marketplace-section-title {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
 .marketplace-section-sub {
     margin: 6px 0 0;
     color: var(--text-secondary);
@@ -9344,43 +9424,50 @@ body.agent-editor-open {
     white-space: nowrap;
 }
 
-/* Agent editor — Simple/Advanced modes (Demo 1) */
-.agent-editor-mode-toggle {
-    display: inline-flex;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    overflow: hidden;
-}
-.agent-editor-mode-btn {
-    background: transparent;
-    border: none;
-    color: var(--text-secondary);
-    font-size: 0.8rem;
-    font-weight: 600;
-    padding: 6px 14px;
-    cursor: pointer;
-}
-.agent-editor-mode-btn.active {
-    background: var(--border-color);
-    color: var(--text-primary);
-}
+/* Agent editor — model picker (Demo 1) */
 .agent-editor-model-field {
     display: flex;
     align-items: center;
     gap: 8px;
     margin-top: 6px;
 }
+.agent-editor-model-field[hidden],
+.agent-editor-managed-model-field[hidden] {
+    display: none;
+}
+.agent-editor-managed-model-field {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 6px;
+}
+.agent-editor-managed-model-value {
+    font-size: 13px;
+    color: var(--text-primary);
+}
+.agent-editor-managed-model-note {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
 .agent-editor-model-label {
-    font-size: 0.8rem;
+    font-size: 13px;
     color: var(--text-secondary);
 }
 .agent-editor-model-select {
-    background: transparent;
+    background: var(--bg-input);
     border: 1px solid var(--border-color);
     border-radius: 6px;
     color: var(--text-primary);
     font-size: 0.85rem;
     padding: 4px 8px;
+    /* Native <select> menus often paint a light OS panel; without this the
+       inherited light text becomes unreadable on white. */
+    color-scheme: dark;
+}
+.agent-editor-model-select option {
+    background-color: var(--bg-card);
+    color: var(--text-primary);
 }
 .agent-editor-simple textarea {
     width: 100%;
@@ -9389,13 +9476,212 @@ body.agent-editor-open {
     border: 1px solid var(--border-color);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 0.95rem;
+    /*
+     * 14px, not `0.95rem`: `rem` resolves against the 16px html root while the
+     * whole app is sized off the 14px body, so 0.95rem painted this field at
+     * 15.2px -- a fractional size (blurry sub-pixel text) on a different scale
+     * from every other control.
+     */
+    font-size: 14px;
     line-height: 1.5;
     padding: 10px 12px;
     margin-top: 10px;
 }
 .agent-editor-simple-note {
     margin: 10px 0 0;
-    font-size: 0.8rem;
+    font-size: 13px;
     color: #fbbf24;
+}
+
+.agent-editor-default-details {
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.agent-editor-default-details summary {
+    cursor: pointer;
+    font-weight: 600;
+    color: var(--text-secondary);
+}
+
+.agent-editor-default-text {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    border-left: 2px solid var(--border-color);
+    color: var(--text-secondary);
+}
+
+.agent-editor-analyst-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 8px;
+    margin: 16px 0 20px;
+}
+
+.agent-editor-analyst-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 10px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.agent-editor-analyst-option:has(input:checked) {
+    border-color: var(--info-color);
+    background: rgba(0, 191, 255, 0.08);
+}
+
+.agent-editor-credential-field {
+    margin-top: 6px;
+}
+
+.agent-editor-credential-remove {
+    align-self: flex-start;
+    margin-top: 4px;
+    padding: 4px 10px;
+    border: 1px solid var(--border, #d0d5dd);
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary, #667085);
+    font-size: 12px;
+    cursor: pointer;
+}
+
+.agent-editor-credential-remove:hover:not(:disabled) {
+    border-color: #d92d20;
+    color: #d92d20;
+}
+
+.agent-editor-credential-remove:disabled {
+    opacity: 0.6;
+    cursor: default;
+}
+
+/* /app toast — success confirmations. Deliberately not named .home-live-toast:
+   that selector family is a leftover with no remaining markup anywhere in
+   app.html/index.html, and reusing a dead name is how two features end up
+   sharing one rule by accident. Kept opacity-hidden rather than [hidden] so the
+   live region stays rendered (see showAppToast). */
+.app-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 32px;
+    transform: translate(-50%, 12px);
+    z-index: 9000;
+    max-width: min(420px, calc(100vw - 32px));
+    padding: 12px 18px;
+    border-radius: 10px;
+    border: 1px solid rgba(34, 197, 94, 0.45);
+    background: var(--bg-card);
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 600;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 220ms ease, transform 220ms ease;
+}
+
+.app-toast.is-visible {
+    opacity: 1;
+    transform: translate(-50%, 0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .app-toast { transition: none; transform: translate(-50%, 0); }
+}
+
+/* Pending submit buttons — disabled alone is nearly invisible in this theme. */
+.auth-submit-btn.is-pending {
+    opacity: 0.75;
+    cursor: progress;
+}
+
+.auth-submit-btn.is-pending::before {
+    content: '';
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 8px;
+    vertical-align: -1px;
+    border: 2px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: app-btn-spin 640ms linear infinite;
+}
+
+@keyframes app-btn-spin { to { transform: rotate(360deg); } }
+
+@media (prefers-reduced-motion: reduce) {
+    .auth-submit-btn.is-pending::before { animation: none; }
+}
+
+.agent-card.is-just-created {
+    animation: agent-card-flash 2.4s ease-out;
+}
+
+@keyframes agent-card-flash {
+    0%, 40% { box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.55); }
+    100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-card.is-just-created { animation: none; box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.55); }
+}
+
+.agent-card-running-step {
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+    opacity: 0.75;
+}
+
+/* Empty before the first step. The head is a flex row with an 8px gap, so an
+   empty span is not free -- it opens a visible hole between the label and the
+   elapsed timer. */
+.agent-card-running-step:empty {
+    display: none;
+}
+
+.agent-card-running-detail {
+    margin: 6px 0 0;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+    opacity: 0.7;
+}
+
+/* Empty before the first step. The node must still exist -- the per-second
+   patch targets it by attribute and only a change to the *set* of running
+   agents triggers a full re-render -- so hide it rather than omit it. */
+.agent-card-running-detail:empty {
+    display: none;
+}
+
+.agent-card-running-stale {
+    margin: 4px 0 0;
+    font-size: 12px;
+    color: #fbbf24;
+}
+
+/* Rendered on every running card and empty while progress is fresh -- same
+   reason as the detail node: the per-second patch fills this in by attribute,
+   and a node that only exists once it has content can never be filled in. */
+.agent-card-running-stale:empty {
+    display: none;
+}
+
+/* Determinate: width is data, so the indeterminate sweep must not also run. */
+.agent-card-running-bar.is-determinate {
+    animation: none;
+    transition: width 400ms ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-card-running-bar.is-determinate { transition: none; }
 }

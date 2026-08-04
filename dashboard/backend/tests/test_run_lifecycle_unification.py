@@ -26,7 +26,6 @@ import dashboard.backend.domain.runs.repository as run_store_module
 import dashboard.backend.domain.runs.service as run_service
 from dashboard.backend.app import app
 from dashboard.backend.database import db
-from dashboard.backend.domain.runs.repository import RunStore
 from dashboard.backend.execution.backtest_backend import ArchivedBacktestBackend
 from dashboard.backend.tests._v2_fakes import FakeBackend
 
@@ -325,7 +324,7 @@ def test_v2_rehydration_is_not_an_existence_oracle(monkeypatch):
 
 
 def test_create_run_stamps_instance_and_heartbeat(tmp_path):
-    store = RunStore(tmp_path / "hb.db")
+    store = run_store_module.RunStore(tmp_path / "hb.db")
     rec = store.create_run(
         agent_id="ag_hb", agent_version_id=None, session_id="sess",
         environment_id=None, environment_type="backtest", config={},
@@ -342,7 +341,7 @@ def test_create_run_stamps_instance_and_heartbeat(tmp_path):
 
 
 def test_fail_stale_runs_spares_fresh_heartbeats(tmp_path):
-    store = RunStore(tmp_path / "stale.db")
+    store = run_store_module.RunStore(tmp_path / "stale.db")
     fresh = store.create_run(
         agent_id="ag_live", agent_version_id=None, session_id="s",
         environment_id=None, environment_type="backtest", config={},
@@ -371,7 +370,7 @@ def test_fail_stale_runs_spares_fresh_heartbeats(tmp_path):
 def test_fail_stale_runs_treats_legacy_null_heartbeat_as_stale(tmp_path):
     """Rows written before the heartbeat column existed must still be
     recoverable — fall back to updated_at for staleness."""
-    store = RunStore(tmp_path / "legacy.db")
+    store = run_store_module.RunStore(tmp_path / "legacy.db")
     rec = store.create_run(
         agent_id="ag_legacy", agent_version_id=None, session_id="s",
         environment_id=None, environment_type="backtest", config={},
@@ -419,7 +418,7 @@ def test_runstore_migrates_legacy_schema(tmp_path):
     conn.commit()
     conn.close()
 
-    store = RunStore(path)  # must migrate, not crash
+    store = run_store_module.RunStore(path)  # must migrate, not crash
     conn = sqlite3.connect(str(path))
     cols = {row[1] for row in conn.execute("PRAGMA table_info(protocol_runs)")}
     conn.close()
@@ -598,7 +597,7 @@ def test_runstore_survives_partially_migrated_schema(tmp_path):
     conn.commit()
     conn.close()
 
-    RunStore(path)  # must add only heartbeat_at, without crashing
+    run_store_module.RunStore(path)  # must add only heartbeat_at, without crashing
     conn = sqlite3.connect(str(path))
     cols = {row[1] for row in conn.execute("PRAGMA table_info(protocol_runs)")}
     conn.close()
@@ -609,7 +608,7 @@ def test_runstore_migration_tolerates_losing_the_alter_race(tmp_path):
     """Two workers can both probe (columns missing) and both ALTER; the loser
     gets 'duplicate column name'. That means the column exists — the goal —
     so it must be swallowed, not crash the process at startup."""
-    store = RunStore(tmp_path / "race.db")  # columns already exist
+    store = run_store_module.RunStore(tmp_path / "race.db")  # columns already exist
     conn = sqlite3.connect(str(store.db_path))
     try:
         # Simulate the raced probe: a stale 'nothing exists yet' snapshot.

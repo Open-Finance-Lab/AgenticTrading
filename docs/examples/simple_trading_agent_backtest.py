@@ -29,7 +29,8 @@ _YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
 START, END = "2026-06-01", "2026-06-03"
 INITIAL_CASH = 100_000.0
 BASE_URL = os.getenv("COMMONSTACK_BASE_URL", "https://api.commonstack.ai/v1").rstrip("/")
-MODEL = os.getenv("COMMONSTACK_MODEL", "anthropic/claude-haiku-4-5")
+MODEL = os.getenv("COMMONSTACK_MODEL", "deepseek/deepseek-v4-pro")
+
 ET = pytz.timezone("US/Eastern")
 
 SYSTEM_PROMPT = (

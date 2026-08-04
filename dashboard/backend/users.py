@@ -1,5 +1,13 @@
 """
 User accounts and auth session storage (SQLite, same database file as backtests).
+
+Identity is ``users.id``, never ``users.email``. Email is a *mutable contact
+attribute* -- it is the login handle and nothing else, and get_user_by_email()
+exists only to resolve it back to an id at authenticate() time. Anything that
+grants or withholds something (sessions, agents, portfolios, and any future
+entitlement or billing record) must key on the id, or a user could shed or
+inherit state by editing their address. ``email_change_requests`` is kept
+append-only so that history stays auditable for exactly that reason.
 """
 
 import base64
@@ -9,17 +17,53 @@ import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import bcrypt
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
+from dashboard.backend.session_tokens import (
+    absolute_expiry,
+    hash_session_token,
+    idle_deadline,
+    new_session_token,
+    require_session_hash_secret,
+    should_touch_last_seen,
+)
 
-SESSION_TTL_DAYS = 7
+# One literal, executed both on a fresh install and after the legacy-schema
+# DROP, so the two paths cannot produce different tables. Kept as a plain
+# (non-f) string: test_store_twin_parity reads column names out of the source
+# text, and an interpolation would collapse to a placeholder there.
+AUTH_SESSIONS_DDL = """
+    CREATE TABLE IF NOT EXISTS auth_sessions (
+        token_hash TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at TIMESTAMP NOT NULL,
+        last_seen_at TIMESTAMP NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        revoked_at TIMESTAMP,
+        user_agent TEXT,
+        ip_prefix TEXT,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )
+"""
+
 BCRYPT_ROUNDS = 12
 LEGACY_PBKDF2_ITERATIONS = 100_000
 BCRYPT_MAX_BYTES = 72
+EMAIL_CHANGE_TTL_MINUTES = 15
+EMAIL_CHANGE_MAX_ATTEMPTS = 5
+# Three windows, deliberately distinct -- see api/auth.py::request_email_change.
+#   COOLDOWN   throttles one request against the next.
+#   PER_DAY    bounds the shared Brevo quota one account can consume.
+#   MIN_DAYS   is the product policy: email is a contact attribute, not a thing
+#              you churn. It is keyed on a *completed* change, not a request, so
+#              a mistyped address does not cost the user a week.
+EMAIL_CHANGE_COOLDOWN_SECONDS = 60
+EMAIL_CHANGE_MAX_REQUESTS_PER_DAY = 3
+EMAIL_CHANGE_MIN_INTERVAL_DAYS = 7
 
 
 def _utcnow() -> datetime:
@@ -27,7 +71,37 @@ def _utcnow() -> datetime:
 
 
 def _utcnow_iso() -> str:
-    return _utcnow().replace(microsecond=0).isoformat()
+    # Delegates so the write format and the format callers build bounds in
+    # (format_stored_timestamp, below) cannot drift apart.
+    return format_stored_timestamp(_utcnow())
+
+
+def parse_stored_timestamp(value: str) -> datetime:
+    """Read a timestamp written by either twin.
+
+    Both stores write _utcnow_iso() (offset-aware ISO-8601), but rows predating
+    that convention -- or written by SQLite's CURRENT_TIMESTAMP default -- come
+    back naive. Treat naive as UTC, which is what every writer here means.
+    """
+    parsed = datetime.fromisoformat(str(value))
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def format_stored_timestamp(value: datetime) -> str:
+    """Render a datetime the way every writer in this module stores one.
+
+    The inverse of parse_stored_timestamp, and public for the same reason:
+    callers that build a comparison bound (a rolling-window start, say) must
+    produce the exact form the columns hold, because those comparisons run as
+    string comparisons in SQL.
+    """
+    return value.replace(microsecond=0).isoformat()
+
+
+def is_expired(expires_at: str) -> bool:
+    return parse_stored_timestamp(expires_at) < _utcnow()
 
 
 def _bcrypt_secret(password: str) -> bytes:
@@ -101,6 +175,61 @@ def verify_password(password: str, password_hash: str) -> bool:
     return _verify_legacy_pbkdf2(password, password_hash)
 
 
+def _best_effort_write(conn, cursor, sql: str, params: tuple) -> bool:
+    """Run a housekeeping write that must never fail its caller.
+
+    get_user_for_token runs on every authenticated request and was read-only
+    until sessions were hashed; it now touches last_seen_at and reaps rows it
+    finds dead. None of that is what the caller asked for, so losing it to a
+    lost race for the write lock is free -- while letting sqlite3's
+    OperationalError escape turns a valid session into a 500, and an expired
+    one into a 500 instead of a 401.
+    """
+    try:
+        cursor.execute(sql, params)
+        conn.commit()
+        return True
+    except sqlite3.OperationalError:
+        conn.rollback()
+        return False
+
+
+_DUMMY_PASSWORD_HASH: Optional[str] = None
+
+
+def _dummy_password_hash() -> str:
+    """A bcrypt hash of a value nobody can present, built on first use.
+
+    Lazily, because generating it costs a full bcrypt round (~190 ms at
+    ``BCRYPT_ROUNDS=12``) and every CLI script and test collection imports this
+    module. The cost of that is one skewed sample: the first unknown-email
+    login after a restart pays the hash *and* the compare. An attacker would
+    have to already be probing at that exact moment to see it.
+    """
+    global _DUMMY_PASSWORD_HASH
+    if _DUMMY_PASSWORD_HASH is None:
+        _DUMMY_PASSWORD_HASH = hash_password(secrets.token_urlsafe(32))
+    return _DUMMY_PASSWORD_HASH
+
+
+def verify_password_for_account(password: str, password_hash: Optional[str]) -> bool:
+    """``verify_password`` that costs the same whether or not the account exists.
+
+    Returning early when the email matches no row makes a miss ~3000x faster
+    than a wrong password (measured: 0.06 ms vs 182 ms), so response *time*
+    answers "is this address registered?" no matter how carefully the response
+    *body* is made uniform. Hashing against a throwaway hash on that path puts
+    both branches through the same single bcrypt compare.
+
+    Callers must still discard the result for a missing account -- this only
+    equalises the clock, it never authenticates one.
+    """
+    if password_hash is None:
+        verify_password(password, _dummy_password_hash())
+        return False
+    return verify_password(password, password_hash)
+
+
 def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
     data = dict(row)
     discord_user_id = data.get("discord_user_id")
@@ -144,21 +273,38 @@ class UserStore:
             )
             """
         )
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS auth_sessions (
-                token TEXT PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP NOT NULL,
-                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        cursor.execute(AUTH_SESSIONS_DDL)
+        # Pre-hash plaintext-token schema: wipe and rebuild. Existing sessions
+        # cannot be re-hashed without the raw token; users must sign in again.
+        cursor.execute("PRAGMA table_info(auth_sessions)")
+        session_columns = {row[1] for row in cursor.fetchall()}
+        if session_columns and "token_hash" not in session_columns:
+            cursor.execute("DROP TABLE auth_sessions")
+            # Same DDL: the table is gone, so IF NOT EXISTS creates it. Reusing
+            # the one literal is what keeps the migrated schema from drifting
+            # away from the fresh-install schema.
+            cursor.execute(AUTH_SESSIONS_DDL)
+            # print(), not logger: see _build_user_store() below. Dropping every
+            # live login is not something to do silently -- otherwise the only
+            # symptom is a wave of users being signed out with nothing in the
+            # deploy log tying it to the release.
+            print(
+                "auth_sessions: migrated from plaintext tokens to hashed "
+                "tokens; all existing sessions were dropped and users must "
+                "sign in again"
             )
-            """
-        )
         cursor.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_auth_sessions_user_id
             ON auth_sessions(user_id)
+            """
+        )
+        # Supports purge_expired_sessions(); without it the sweep is a full scan
+        # of a table whose whole purpose here is to keep growing.
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_auth_sessions_expires_at
+            ON auth_sessions(expires_at)
             """
         )
         # Lazy migration: Discord OAuth link column (nullable unique).
@@ -175,6 +321,38 @@ class UserStore:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_user_id
             ON users(discord_user_id)
             WHERE discord_user_id IS NOT NULL
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS email_change_requests (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                new_email TEXT NOT NULL,
+                stage TEXT NOT NULL,
+                code_hash TEXT NOT NULL,
+                attempts INTEGER NOT NULL DEFAULT 0,
+                created_at TIMESTAMP NOT NULL,
+                expires_at TIMESTAMP NOT NULL,
+                used_at TIMESTAMP,
+                cancelled_at TIMESTAMP,
+                -- Declared but not enforced: SQLite disables FK checks per
+                -- connection unless PRAGMA foreign_keys = ON is issued, and
+                -- _get_connection() never issues it (turning it on would change
+                -- deletion semantics for every table in this store, well beyond
+                -- this task). Deleting a user therefore leaves this row orphaned
+                -- rather than cascaded away -- tolerable because users.id is
+                -- AUTOINCREMENT and ids are never reused, so an orphaned row can
+                -- never be misattributed to a different user. The Postgres twin
+                -- declares the same constraint and does enforce it.
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+            """
+        )
+        cursor.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_email_change_requests_user_id
+            ON email_change_requests(user_id)
             """
         )
         conn.commit()
@@ -223,69 +401,165 @@ class UserStore:
         return dict(row) if row else None
 
     def authenticate(self, email: str, password: str) -> Optional[Dict[str, Any]]:
+        # One bcrypt compare on both branches -- see verify_password_for_account.
         user = self.get_user_by_email(email)
-        if not user:
-            return None
-        if not verify_password(password, user["password_hash"]):
+        if not verify_password_for_account(
+            password, user["password_hash"] if user else None
+        ):
             return None
         return user
 
-    def create_session(self, user_id: int) -> str:
-        token = secrets.token_urlsafe(32)
-        expires_at = (_utcnow() + timedelta(days=SESSION_TTL_DAYS)).replace(microsecond=0).isoformat()
+    def create_session(
+        self,
+        user_id: int,
+        *,
+        user_agent: Optional[str] = None,
+        ip_prefix: Optional[str] = None,
+    ) -> str:
+        raw_token = new_session_token()
+        token_hash = hash_session_token(raw_token)
+        now = _utcnow().replace(microsecond=0)
+        created_at = format_stored_timestamp(now)
+        expires_at = format_stored_timestamp(absolute_expiry(now))
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO auth_sessions (token, user_id, expires_at)
-            VALUES (?, ?, ?)
+            INSERT INTO auth_sessions (
+                token_hash, user_id, created_at, last_seen_at, expires_at,
+                user_agent, ip_prefix
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            (token, user_id, expires_at),
+            (
+                token_hash,
+                user_id,
+                created_at,
+                created_at,
+                expires_at,
+                (user_agent or None),
+                (ip_prefix or None),
+            ),
         )
         conn.commit()
+        # Commit the login first, then reap. Sweeping inside the same
+        # transaction would let a failed housekeeping DELETE take the INSERT
+        # down with it -- losing the session the user just asked for.
+        _best_effort_write(
+            conn,
+            cursor,
+            "DELETE FROM auth_sessions WHERE expires_at < ?",
+            (format_stored_timestamp(now),),
+        )
         conn.close()
-        return token
+        return raw_token
+
+    def purge_expired_sessions(self) -> int:
+        """Delete session rows past their absolute expiry. Returns the count.
+
+        Revocation is a soft UPDATE and get_user_for_token returns at the
+        revoked check before any cleanup, so without this a revoked row lives
+        forever; expired rows are only deleted when someone re-presents the
+        dead token, which nobody does. Keying the sweep on expires_at collects
+        both, and bounds the table at "sessions created in the last
+        SESSION_TTL_DAYS" -- the same bound it had before hashing, when logout
+        was a DELETE.
+
+        Run from create_session (logins are rare next to reads, and it is the
+        moment the table grows) rather than from the read path, which must stay
+        free of writes it does not need.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM auth_sessions WHERE expires_at < ?",
+            (format_stored_timestamp(_utcnow()),),
+        )
+        removed = cursor.rowcount
+        conn.commit()
+        conn.close()
+        return max(removed, 0)
 
     def get_user_for_token(self, token: str) -> Optional[Dict[str, Any]]:
+        if not token or not str(token).strip():
+            return None
+        token_hash = hash_session_token(token.strip())
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
-            SELECT users.*
+            SELECT
+                users.*,
+                auth_sessions.created_at AS session_created_at,
+                auth_sessions.last_seen_at AS session_last_seen_at,
+                auth_sessions.expires_at AS session_expires_at,
+                auth_sessions.revoked_at AS session_revoked_at
             FROM auth_sessions
             JOIN users ON users.id = auth_sessions.user_id
-            WHERE auth_sessions.token = ?
+            WHERE auth_sessions.token_hash = ?
             """,
-            (token,),
+            (token_hash,),
         )
         row = cursor.fetchone()
         if not row:
             conn.close()
             return None
 
-        cursor.execute(
-            "SELECT expires_at FROM auth_sessions WHERE token = ?",
-            (token,),
+        data = dict(row)
+        revoked_at = data.pop("session_revoked_at")
+        created_at = parse_stored_timestamp(data.pop("session_created_at"))
+        last_seen_at = parse_stored_timestamp(
+            data.pop("session_last_seen_at") or format_stored_timestamp(created_at)
         )
-        session_row = cursor.fetchone()
+        expires_at = parse_stored_timestamp(data.pop("session_expires_at"))
+        now = _utcnow()
+
+        if revoked_at:
+            conn.close()
+            return None
+        if expires_at < now:
+            _best_effort_write(
+                conn,
+                cursor,
+                "DELETE FROM auth_sessions WHERE token_hash = ?",
+                (token_hash,),
+            )
+            conn.close()
+            return None
+        if idle_deadline(last_seen_at) < now:
+            _best_effort_write(
+                conn,
+                cursor,
+                "DELETE FROM auth_sessions WHERE token_hash = ?",
+                (token_hash,),
+            )
+            conn.close()
+            return None
+
+        if should_touch_last_seen(last_seen_at, now):
+            _best_effort_write(
+                conn,
+                cursor,
+                "UPDATE auth_sessions SET last_seen_at = ? WHERE token_hash = ?",
+                (format_stored_timestamp(now.replace(microsecond=0)), token_hash),
+            )
         conn.close()
-
-        if not session_row:
-            return None
-
-        expires_at = datetime.fromisoformat(session_row["expires_at"])
-        if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(tzinfo=timezone.utc)
-        if expires_at < _utcnow():
-            self.delete_session(token)
-            return None
-
-        return dict(row)
+        return data
 
     def delete_session(self, token: str) -> None:
+        if not token or not str(token).strip():
+            return
+        token_hash = hash_session_token(token.strip())
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("DELETE FROM auth_sessions WHERE token = ?", (token,))
+        cursor.execute(
+            """
+            UPDATE auth_sessions
+            SET revoked_at = ?
+            WHERE token_hash = ? AND revoked_at IS NULL
+            """,
+            (format_stored_timestamp(_utcnow().replace(microsecond=0)), token_hash),
+        )
         conn.commit()
         conn.close()
 
@@ -303,13 +577,26 @@ class UserStore:
         """Revoke every session for the user except keep_token (None = all)."""
         conn = self._get_connection()
         cursor = conn.cursor()
+        now = format_stored_timestamp(_utcnow().replace(microsecond=0))
         if keep_token:
+            keep_hash = hash_session_token(keep_token.strip())
             cursor.execute(
-                "DELETE FROM auth_sessions WHERE user_id = ? AND token != ?",
-                (user_id, keep_token),
+                """
+                UPDATE auth_sessions
+                SET revoked_at = ?
+                WHERE user_id = ? AND token_hash != ? AND revoked_at IS NULL
+                """,
+                (now, user_id, keep_hash),
             )
         else:
-            cursor.execute("DELETE FROM auth_sessions WHERE user_id = ?", (user_id,))
+            cursor.execute(
+                """
+                UPDATE auth_sessions
+                SET revoked_at = ?
+                WHERE user_id = ? AND revoked_at IS NULL
+                """,
+                (now, user_id),
+            )
         conn.commit()
         conn.close()
 
@@ -318,6 +605,257 @@ class UserStore:
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET avatar = ? WHERE id = ?", (avatar, user_id))
         conn.commit()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def update_display_name(self, user_id: int, display_name: str) -> Dict[str, Any]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET display_name = ? WHERE id = ?",
+            (display_name.strip(), user_id),
+        )
+        conn.commit()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def _email_change_expiry(self) -> str:
+        return (
+            (_utcnow() + timedelta(minutes=EMAIL_CHANGE_TTL_MINUTES))
+            .replace(microsecond=0)
+            .isoformat()
+        )
+
+    def create_email_change_request(
+        self, user_id: int, new_email: str, code_hash: str
+    ) -> Dict[str, Any]:
+        """Supersede any in-flight request for this user with a fresh stage-'old' one.
+
+        Supersede, not DELETE: this table is an append-only log. Deleting would
+        erase the used_at that EMAIL_CHANGE_MIN_INTERVAL_DAYS reads and the
+        created_at rows EMAIL_CHANGE_MAX_REQUESTS_PER_DAY counts, so the very
+        act of making another request would clear both limits.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE email_change_requests SET cancelled_at = ?
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            """,
+            (_utcnow_iso(), user_id),
+        )
+        cursor.execute(
+            """
+            INSERT INTO email_change_requests
+                (user_id, new_email, stage, code_hash, created_at, expires_at)
+            VALUES (?, ?, 'old', ?, ?, ?)
+            """,
+            (
+                user_id,
+                new_email.strip().lower(),
+                code_hash,
+                _utcnow_iso(),
+                self._email_change_expiry(),
+            ),
+        )
+        conn.commit()
+        request_id = cursor.lastrowid
+        cursor.execute(
+            "SELECT * FROM email_change_requests WHERE id = ?", (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return dict(row)
+
+    def get_active_email_change(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """The user's in-flight request, or None if absent, used, cancelled, or expired."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT * FROM email_change_requests
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row or is_expired(row["expires_at"]):
+            return None
+        return dict(row)
+
+    def advance_email_change(self, request_id: int, code_hash: str) -> Dict[str, Any]:
+        """Move a verified stage-'old' request to stage 'new' with a fresh code."""
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE email_change_requests
+            SET stage = 'new', code_hash = ?, attempts = 0, expires_at = ?
+            WHERE id = ?
+            """,
+            (code_hash, self._email_change_expiry(), request_id),
+        )
+        conn.commit()
+        cursor.execute(
+            "SELECT * FROM email_change_requests WHERE id = ?", (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return dict(row)
+
+    def record_email_change_attempt(self, request_id: int) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE email_change_requests SET attempts = attempts + 1 WHERE id = ?",
+            (request_id,),
+        )
+        conn.commit()
+        cursor.execute(
+            "SELECT attempts FROM email_change_requests WHERE id = ?", (request_id,)
+        )
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("email_change_request_not_found")
+        return int(row["attempts"])
+
+    def mark_email_change_used(self, request_id: int) -> None:
+        """Retire a completed request without deleting it.
+
+        used_at makes get_active_email_change skip the row while
+        last_email_change_request_at still sees it, so the cooldown applies to a
+        change that just succeeded as well as one still in flight.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE email_change_requests SET used_at = ? WHERE id = ?",
+            (_utcnow_iso(), request_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def cancel_email_change(self, user_id: int) -> None:
+        """Deactivate the user's request without deleting it.
+
+        Mirrors mark_email_change_used: cancelled_at makes get_active_email_change
+        skip the row while last_email_change_request_at still sees it. Deleting
+        instead would let an authenticated caller who knows the password loop
+        request/cancel/request with the 60-second cooldown never enforced --
+        mail-bombing the account and burning the shared Brevo quota.
+
+        Scoped to rows that are still active. Stamping cancelled_at over an
+        already-used row would claim a change that actually completed had been
+        cancelled, which is wrong in a log that is now kept for audit.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE email_change_requests SET cancelled_at = ?
+            WHERE user_id = ? AND used_at IS NULL AND cancelled_at IS NULL
+            """,
+            (_utcnow_iso(), user_id),
+        )
+        conn.commit()
+        conn.close()
+
+    def last_email_change_request_at(self, user_id: int) -> Optional[str]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT created_at FROM email_change_requests
+            WHERE user_id = ? ORDER BY id DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return str(row["created_at"]) if row else None
+
+    def last_email_change_completed_at(self, user_id: int) -> Optional[str]:
+        """When this user's email last actually changed, or None if it never has.
+
+        Ordered by used_at rather than id: a request created earlier can be
+        completed later, so row order is not completion order.
+
+        Set by mark_email_change_used in a separate transaction from the
+        update_email that precedes it. A crash between the two leaves the email
+        changed with the clock unstarted -- accepted, because this is a churn
+        policy rather than a security boundary, and the 24-hour and 60-second
+        limits both still apply. Making it atomic would mean a column on
+        ``users``, i.e. an ALTER on the live accounts table, for a window of a
+        few milliseconds.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT used_at FROM email_change_requests
+            WHERE user_id = ? AND used_at IS NOT NULL
+            ORDER BY used_at DESC LIMIT 1
+            """,
+            (user_id,),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return str(row["used_at"]) if row else None
+
+    def email_change_request_times_since(self, user_id: int, since: str) -> List[str]:
+        """created_at of every request made at or after `since`, oldest first.
+
+        Returns the timestamps rather than a bare count so the caller can say
+        *when* the rolling window frees up -- the answer is the oldest entry
+        plus the window, which a COUNT(*) cannot supply.
+
+        String comparison, not date arithmetic: both twins write
+        _utcnow_iso(), a fixed-width offset-aware ISO-8601 form that sorts
+        lexicographically. parse_stored_timestamp tolerates naive legacy rows on
+        read, but none can exist here -- this table has only ever been written
+        by the code above it.
+        """
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT created_at FROM email_change_requests
+            WHERE user_id = ? AND created_at >= ?
+            ORDER BY created_at ASC
+            """,
+            (user_id, since),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        return [str(row["created_at"]) for row in rows]
+
+    def update_email(self, user_id: int, new_email: str) -> Dict[str, Any]:
+        normalized_email = new_email.strip().lower()
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "UPDATE users SET email = ? WHERE id = ?",
+                (normalized_email, user_id),
+            )
+            conn.commit()
+        except sqlite3.IntegrityError as exc:
+            conn.close()
+            raise ValueError("email_already_registered") from exc
         cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
         row = cursor.fetchone()
         conn.close()
@@ -388,6 +926,13 @@ class UserStore:
 
 
 def _build_user_store():
+    # Resolve the session HMAC key before anything can serve a request. It is
+    # only read on the session paths, so without this a prod deploy missing
+    # SESSION_HASH_SECRET boots clean, answers /health 200, and then 500s every
+    # login and every authenticated request. Failing the boot instead leaves
+    # the previous Render version live.
+    require_session_hash_secret()
+
     # USERS_DATABASE_URL only, deliberately: CONTENT_DATABASE_URL is scoped to
     # agents/versions/strategies and must not select the account database
     # (spec, Decision 2). Do not "simplify" this into a fallback chain.

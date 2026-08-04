@@ -13,6 +13,7 @@ from agentictrading import (
     ATLTimeoutError,
     RunResult,
 )
+from agentictrading.runner import wait_for_poll
 
 API_KEY = "ag_secret_should_never_leak"
 
@@ -178,6 +179,47 @@ def test_runner_max_wait_timeout(fake_http):
     fake_http(backend)
     with pytest.raises(ATLTimeoutError):
         _run(AgentRunner(_client(), Agent()), max_wait_seconds=0)
+
+
+class _RecordingClient:
+    """Captures each sleep instead of performing it."""
+
+    def __init__(self) -> None:
+        self.sleeps = []
+
+    def wait(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+
+
+def test_wait_for_poll_spends_the_idle_budget_and_then_times_out():
+    """The cumulative idle time must advance on every poll.
+
+    ``AgentRunner`` and the TradingAgents replay runner share this helper, so a
+    regression that stopped accumulating would disable the timeout on *both*
+    surfaces and leave a stuck run polling forever. ``max_wait_seconds=0``
+    (covered above) raises on the first call and never reaches this path.
+    """
+    client = _RecordingClient()
+    waited = 0.0
+    for _ in range(3):
+        waited = wait_for_poll(client, 2.0, waited, 5.0, "loading")
+
+    # The final poll is clamped so the run never sleeps past its budget.
+    assert client.sleeps == [2.0, 2.0, 1.0]
+    assert waited == 5.0
+
+    with pytest.raises(ATLTimeoutError):
+        wait_for_poll(client, 2.0, waited, 5.0, "loading")
+    assert client.sleeps == [2.0, 2.0, 1.0]  # the timeout must not sleep again
+
+
+def test_wait_for_poll_without_a_budget_never_times_out():
+    client = _RecordingClient()
+    waited = 0.0
+    for _ in range(4):
+        waited = wait_for_poll(client, 1.5, waited, None, "loading")
+    assert client.sleeps == [1.5, 1.5, 1.5, 1.5]
+    assert waited == 6.0
 
 
 def test_runner_unexpected_status_raises(fake_http):

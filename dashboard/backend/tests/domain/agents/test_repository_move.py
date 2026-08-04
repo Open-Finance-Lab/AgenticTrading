@@ -71,7 +71,9 @@ def test_create_agent_schema(store):
     agent = store.create_agent(name="My Agent", model_name="gpt-x", owner_user_id=7)
     assert set(agent.keys()) == {
         "agent_id", "name", "session_id", "model_name", "agent_type",
-        "description", "pipeline", "cash_allocation", "api_key_prefix", "owner_user_id", "scopes",
+        "runtime_type", "runtime_config",
+        "description", "pipeline", "cash_allocation", "backtest_allocation",
+        "api_key_prefix", "owner_user_id", "scopes",
         "created_at", "last_used_at", "api_key", "live_trading_enabled",
     }
     assert agent["name"] == "My Agent"
@@ -82,6 +84,45 @@ def test_create_agent_schema(store):
     assert agent["api_key_prefix"] == agent["api_key"][:12]
     # api_key_hash must never leak in the public dict.
     assert "api_key_hash" not in agent
+    assert agent["runtime_type"] == "pipeline"
+    assert agent["runtime_config"] == {}
+
+
+def test_legacy_agent_schema_migrates_runtime_defaults(tmp_path):
+    import sqlite3
+
+    db_path = tmp_path / "legacy-agents.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE external_agents (
+            agent_id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            session_id TEXT NOT NULL UNIQUE,
+            api_key_hash TEXT NOT NULL UNIQUE,
+            api_key_prefix TEXT NOT NULL,
+            model_name TEXT NOT NULL DEFAULT 'local-model',
+            owner_user_id INTEGER,
+            owner_browser_session TEXT,
+            created_at TEXT,
+            last_used_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO external_agents (
+            agent_id, name, session_id, api_key_hash, api_key_prefix
+        ) VALUES ('agent_legacy', 'Legacy', 'legacy-session', 'hash', 'ag_legacy')
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    migrated = AgentStore(db_path=db_path).get_agent("agent_legacy")
+
+    assert migrated["runtime_type"] == "pipeline"
+    assert migrated["runtime_config"] == {}
 
 
 def test_get_agent_and_missing(store):
@@ -131,6 +172,48 @@ def test_list_agents_owner_filters(store):
     assert [a["agent_id"] for a in by_session] == [a_user["agent_id"]]
 
     assert store.list_agents() == []
+
+
+def test_list_agents_signed_in_includes_unclaimed_browser_agents(store):
+    """Signed-in listing must not hide guest-provisioned agents awaiting claim."""
+    owned = store.create_agent(name="Owned", owner_user_id=7, owner_browser_session="b1")
+    unclaimed = store.create_agent(name="Guest", owner_browser_session="b1")
+    other_user = store.create_agent(
+        name="Other", owner_user_id=99, owner_browser_session="b1"
+    )
+    other_browser = store.create_agent(name="Elsewhere", owner_browser_session="b2")
+
+    listed = store.list_agents(owner_user_id=7, owner_browser_session="b1")
+    ids = {a["agent_id"] for a in listed}
+    assert owned["agent_id"] in ids
+    assert unclaimed["agent_id"] in ids
+    assert other_user["agent_id"] not in ids
+    assert other_browser["agent_id"] not in ids
+
+
+def test_list_agents_merges_owned_and_unclaimed_by_recency(store, monkeypatch):
+    """The owned-rows and unclaimed-browser-rows groups must merge into one
+    global ORDER BY, not just be independently sorted within each group.
+
+    Without the merge, a browser agent created after every owned agent would
+    still sort last, because list_agents appends the unclaimed-browser group
+    only after the owned group is fully built.
+    """
+    import itertools
+
+    day = itertools.count(1)
+    monkeypatch.setattr(
+        repository, "_utcnow_iso", lambda: f"2020-01-{next(day):02d}T00:00:00+00:00"
+    )
+
+    older_owned = store.create_agent(name="Older Owned", owner_user_id=7, owner_browser_session="b1")
+    newer_unclaimed = store.create_agent(name="Newer Guest", owner_browser_session="b1")
+
+    listed = store.list_agents(owner_user_id=7, owner_browser_session="b1")
+    assert [a["agent_id"] for a in listed] == [
+        newer_unclaimed["agent_id"],
+        older_owned["agent_id"],
+    ]
 
 
 def test_rotate_api_key(store):

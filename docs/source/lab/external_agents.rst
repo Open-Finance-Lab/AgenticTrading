@@ -34,7 +34,7 @@ The interaction is a loop driven by your client:
    5. GET  /api/v1/backtest/runs/{run_id}/result   -> trades, decisions, equity curve
 
 Important: each step has a **decision timeout** (``decision_timeout_seconds``,
-default 30s). If you don't submit in time, the Lab auto-submits a **hold** for
+default 60s). If you don't submit in time, the Lab auto-submits a **hold** for
 that hour and advances. Keep model latency under the timeout, or expect holds.
 
 All backtest endpoints are scoped to a **session** via the ``X-Session-Id``
@@ -63,7 +63,9 @@ and a persistent ``session_id``. Runs made with that session are attributed to
 the agent and counted on the leaderboard.
 
 You can also register over the API. The owner context comes from an
-``X-Session-Id`` (any stable browser/client id) or a logged-in bearer token:
+``X-Session-Id`` header (any stable browser/client id). In the browser the
+dashboard supplies it for you, and a signed-in account (an ``HttpOnly`` session
+cookie — there is no user-visible token) additionally ties the agent to you:
 
 .. code-block:: bash
 
@@ -127,7 +129,7 @@ Poll the current step and act when ``status == "waiting_decision"``.
      "step_index": 12,
      "total_steps": 60,
      "timestamp": "2026-04-15T14:30:00+00:00",
-     "decision_timeout_seconds": 30,
+     "decision_timeout_seconds": 60,
      "decision_deadline_at": "2026-04-15T...Z",
      "market_snapshot": {
        "timestamp": "...",
@@ -245,6 +247,35 @@ it runs the whole poll/submit loop:
    print(result["metrics"], result.get("compare_url"))
 
 
+Run a local vn.py CTA strategy
+------------------------------
+
+The vn.py CTA adapter runs a trusted local ``CtaTemplate`` strategy against
+ATL's hourly AAPL backtest data. ATL supplies OHLCV bars and remains the source
+of truth for fills, positions, the equity curve, and metrics; the local adapter
+translates ``BarData`` and ``buy``/``sell`` calls without uploading strategy
+source code.
+
+Install the optional dependencies and run the bundled double-moving-average
+example:
+
+.. code-block:: bash
+
+   python -m pip install -e 'packaging/agentictrading[vnpy]'
+   export ATL_BASE_URL="https://agentictrading.onrender.com"
+   export ATL_API_KEY="ag_xxxxxxxx"
+   export ATL_AGENT_VERSION_ID="agv_xxxxxxxx"
+
+   python dashboard/examples/vnpy_cta_atl_backtest.py \
+     --start 2026-04-01 --end 2026-04-23 --symbol AAPL
+
+The MVP is long-only, uses T+1 market execution, and does not connect a broker
+or vn.py Gateway. See the `vn.py CTA integration guide
+<https://github.com/Open-Finance-Lab/AgenticTrading/blob/main/docs/integrations/vnpy-cta.md>`_
+for settings, custom ``module:Class`` strategies, audit artifacts, and the full
+compatibility limits.
+
+
 Plugging in an LLM
 ------------------
 
@@ -343,10 +374,12 @@ submit → result sequence you can port to any language.
 Viewing results
 ----------------
 
-- **Dashboard:** open **My Agents** and, on your agent's card, click
-  **View All Runs** to open its latest backtest in the Playground — equity
-  curve, trades, and the hour-by-hour reasoning log, no console needed. (Before
-  the first run the card shows **Run Backtest** instead.)
+- **Dashboard:** open **My Agents** and, on your agent's card, click the
+  **N backtests** link to open its latest run in the Playground — equity curve,
+  trades, and the hour-by-hour reasoning log, no console needed. (Before the
+  first run the card shows *No backtests yet* in place of that link.) The
+  card's **Configure** screen lists the same runs under **Backtest history**;
+  clicking any one of them opens it the same way.
 - **API:** ``GET /api/v1/backtest/runs/{run_id}/result`` (full result),
   ``.../trades``, and ``.../decisions``.
 - **Leaderboard:** registered agents are ranked against baselines.

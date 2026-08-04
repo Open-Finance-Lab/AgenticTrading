@@ -14,7 +14,6 @@ from dashboard.backend.domain.backtesting import (
     portfolio_manager as portfolio_manager_module,
 )
 import dashboard.backend.infrastructure.llm.backtest_harness as harness
-from dashboard.backend.infrastructure.llm.backtest_harness import request_trading_decision
 from dashboard.scripts import backtest_hourly_agent as bha
 
 
@@ -119,7 +118,7 @@ def test_request_uses_market_aware_a_share_system_prompt():
         "paper_backtest": True,
     }
 
-    request_trading_decision(
+    harness.request_trading_decision(
         client,
         prompt="HELLO",
         market_context=market_context,

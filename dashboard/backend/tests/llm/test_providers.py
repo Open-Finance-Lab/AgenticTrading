@@ -53,6 +53,8 @@ def test_default_model_name_per_integration(monkeypatch):
     assert default_model_name("anthropic") == anthropic_native.DEFAULT_MODEL
     assert default_model_name("commonstack") == commonstack.DEFAULT_MODEL
     assert default_model_name("openrouter") == openrouter.DEFAULT_MODEL
+    # CommonStack Anthropic provider stubbed greeting; DeepSeek is the hosted default.
+    assert commonstack.DEFAULT_MODEL == "deepseek/deepseek-v4-pro"
 
 
 def test_make_llm_client_openrouter_uses_openrouter_key(monkeypatch):

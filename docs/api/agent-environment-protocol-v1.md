@@ -81,7 +81,10 @@ GET /api/v1/environments/{environment_id}
 }
 ```
 
-The current universe is the DJIA 30 with an initial cash of `100000`.
+The current universe is the DJIA 30 with a default initial cash of `1000`.
+Callers may override it via `config.initial_cash` on `POST /api/v1/runs`, up to
+a `10000` cap — a request above the cap gets a 400 `invalid_config` error, not
+a silent clamp.
 
 ---
 
@@ -316,9 +319,14 @@ GET /api/v1/runs/{run_id}/result
   "llm_calls": 22,
   "input_tokens": 14200,
   "output_tokens": 1800,
-  "est_cost_usd": 0.0
+  "est_cost_usd": 0.0,
+  "timeout_holds": 0
 }
 ```
+
+`timeout_holds` counts the steps the backend auto-held because no decision
+arrived before the deadline, each recorded with `status: "timed_out"` (see §9).
+It is `null` for runs recorded before the counter existed.
 
 `result` is available only once the run is `completed`; otherwise it returns
 `409 run_not_completed`.

@@ -43,6 +43,21 @@ EXPECTED_AGENT_ROUTES = {
     ("GET", "/v1/agents/{agent_id}/runs", "list_agent_runs"),
     ("GET", "/v1/agents/{agent_id}", "get_agent"),
     ("PATCH", "/v1/agents/{agent_id}", "update_agent"),
+    (
+        "GET",
+        "/v1/agents/{agent_id}/credentials/financial-datasets",
+        "get_financial_datasets_credential_status",
+    ),
+    (
+        "PUT",
+        "/v1/agents/{agent_id}/credentials/financial-datasets",
+        "set_financial_datasets_credential",
+    ),
+    (
+        "DELETE",
+        "/v1/agents/{agent_id}/credentials/financial-datasets",
+        "delete_financial_datasets_credential",
+    ),
     ("DELETE", "/v1/agents/{agent_id}", "delete_agent"),
     ("POST", "/v1/agents/{agent_id}/rotate-api-key", "rotate_agent_api_key"),
     ("POST", "/v1/agents/{agent_id}/activate", "activate_agent"),

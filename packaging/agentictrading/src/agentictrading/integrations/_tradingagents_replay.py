@@ -112,16 +112,27 @@ class TradingAgentsReplayPlanner:
         self.artifact = artifact
         self.artifact_sha256 = artifact_sha256.lower()
         self.symbol = str(artifact.manifest["symbol"]).upper()
+        # An analysis_date never changes, but decision_for_step runs once per
+        # hourly ATL step and would otherwise re-parse every record's date on
+        # each one. Parse them all exactly once, here.
+        self._dated_records = tuple(
+            (record, date.fromisoformat(record.analysis_date))
+            for record in artifact.decisions
+        )
         self._processed = set()
         self._decision_cache: Dict[str, Decision] = {}
         self._pending: Dict[str, _PendingPlan] = {}
-        self._buy_orders = 0
-        self._sell_orders = 0
-        self._model_holds = 0
-        self._error_holds = 0
-        self._passive_holds = 0
-        self._constraint_holds = 0
-        self._price_too_high_holds = 0
+        # Keyed by TradingAgentsReplayDiagnostics field name so finalize() can
+        # splat them; a plain dict keeps a bad key failing loudly (KeyError).
+        self._counts: Dict[str, int] = {
+            "buy_orders": 0,
+            "sell_orders": 0,
+            "model_holds": 0,
+            "error_holds": 0,
+            "passive_holds": 0,
+            "constraint_holds": 0,
+            "price_too_high_holds": 0,
+        }
         self._superseded = 0
         self._autoheld_steps = 0
 
@@ -145,9 +156,9 @@ class TradingAgentsReplayPlanner:
         trading_date = self._trading_date(step)
         eligible = [
             record
-            for record in self.artifact.decisions
+            for record, analysis_date in self._dated_records
             if record.analysis_date not in self._processed
-            and date.fromisoformat(record.analysis_date) < trading_date
+            and analysis_date < trading_date
         ]
         if not eligible:
             plan = _PendingPlan(
@@ -158,7 +169,7 @@ class TradingAgentsReplayPlanner:
                         f"{trading_date.isoformat()}"
                     ),
                 ),
-                counter="_passive_holds",
+                counter="passive_holds",
                 consumed_dates=(),
                 superseded=0,
             )
@@ -183,7 +194,7 @@ class TradingAgentsReplayPlanner:
             return
         self._processed.update(plan.consumed_dates)
         self._superseded += plan.superseded
-        setattr(self, plan.counter, getattr(self, plan.counter) + 1)
+        self._counts[plan.counter] += 1
         self._decision_cache[cache_key] = plan.decision
 
     def discard(self, step: Step) -> None:
@@ -209,15 +220,9 @@ class TradingAgentsReplayPlanner:
             unprocessed_dates=tuple(
                 value for value in ordered_dates if value not in self._processed
             ),
-            buy_orders=self._buy_orders,
-            sell_orders=self._sell_orders,
-            model_holds=self._model_holds,
-            error_holds=self._error_holds,
-            passive_holds=self._passive_holds,
-            constraint_holds=self._constraint_holds,
             superseded=self._superseded,
-            price_too_high_holds=self._price_too_high_holds,
             autoheld_steps=self._autoheld_steps,
+            **self._counts,
         )
 
     @staticmethod
@@ -260,17 +265,11 @@ class TradingAgentsReplayPlanner:
                         f"{record.error_message}"
                     )[:500],
                 ),
-                "_error_holds",
+                "error_holds",
             )
 
         if record.atl_action == "HOLD":
-            return (
-                Decision(
-                    orders=[],
-                    rationale=f"{prefix} rating={record.rating}; model_hold",
-                ),
-                "_model_holds",
-            )
+            return self._hold(prefix, record, "model_hold"), "model_holds"
 
         constraints = step.constraints or {}
         allowed = constraints.get("allowed_symbols")
@@ -297,51 +296,26 @@ class TradingAgentsReplayPlanner:
         if record.atl_action == "SELL":
             if held <= 0:
                 return (
-                    Decision(
-                        orders=[],
-                        rationale=(
-                            f"{prefix} rating={record.rating}; "
-                            "sell_without_position"
-                        ),
-                    ),
-                    "_constraint_holds",
+                    self._hold(prefix, record, "sell_without_position"),
+                    "constraint_holds",
                 )
             return (
                 Decision(
-                    orders=[
-                        Order(
-                            symbol=self.symbol,
-                            side="sell",
-                            quantity=held,
-                            quantity_type="shares",
-                            order_type="market",
-                        )
-                    ],
+                    orders=self._market_order("sell", held),
                     rationale=f"{prefix} rating={record.rating}; close_position",
                 ),
-                "_sell_orders",
+                "sell_orders",
             )
 
         features = observation.features
         symbol_features = features.get(self.symbol) if isinstance(features, dict) else None
         price_value = symbol_features.get("price") if isinstance(symbol_features, dict) else None
-        if price_value is None:
-            return (
-                Decision(
-                    orders=[],
-                    rationale=f"{prefix} rating={record.rating}; missing_price",
-                ),
-                "_constraint_holds",
-            )
+        # A missing key and an unusable value (None, NaN, <= 0) are the same
+        # outcome here, and _positive_number already folds the first into the
+        # second, so one check covers both.
         price = self._positive_number(price_value, field="price", hold_on_error=True)
         if price is None:
-            return (
-                Decision(
-                    orders=[],
-                    rationale=f"{prefix} rating={record.rating}; missing_price",
-                ),
-                "_constraint_holds",
-            )
+            return self._hold(prefix, record, "missing_price"), "constraint_holds"
         equity = self._positive_number(
             observation.portfolio.get("equity"), field="portfolio.equity"
         )
@@ -352,40 +326,47 @@ class TradingAgentsReplayPlanner:
             # unexecutable by arithmetic, not by market conditions. Name both
             # numbers: otherwise it is indistinguishable from a model HOLD.
             return (
-                Decision(
-                    orders=[],
-                    rationale=(
-                        f"{prefix} rating={record.rating}; "
-                        f"price_too_high_for_target price={price:.2f} "
-                        f"max_position_budget={budget:.2f}"
-                    ),
+                self._hold(
+                    prefix,
+                    record,
+                    f"price_too_high_for_target price={price:.2f} "
+                    f"max_position_budget={budget:.2f}",
                 ),
-                "_price_too_high_holds",
+                "price_too_high_holds",
             )
         buy_shares = target_shares - held
         if buy_shares <= 0:
             return (
-                Decision(
-                    orders=[],
-                    rationale=f"{prefix} rating={record.rating}; already_at_target",
-                ),
-                "_constraint_holds",
+                self._hold(prefix, record, "already_at_target"),
+                "constraint_holds",
             )
         return (
             Decision(
-                orders=[
-                    Order(
-                        symbol=self.symbol,
-                        side="buy",
-                        quantity=buy_shares,
-                        quantity_type="shares",
-                        order_type="market",
-                    )
-                ],
+                orders=self._market_order("buy", buy_shares),
                 rationale=f"{prefix} rating={record.rating}; target_weight={weight:g}",
             ),
-            "_buy_orders",
+            "buy_orders",
         )
+
+    @staticmethod
+    def _hold(
+        prefix: str, record: TradingAgentsDecisionRecord, reason: str
+    ) -> Decision:
+        """Build the empty-order Decision that names why nothing was traded."""
+        return Decision(
+            orders=[], rationale=f"{prefix} rating={record.rating}; {reason}"
+        )
+
+    def _market_order(self, side: str, quantity: int) -> list:
+        return [
+            Order(
+                symbol=self.symbol,
+                side=side,
+                quantity=quantity,
+                quantity_type="shares",
+                order_type="market",
+            )
+        ]
 
     def _held_shares(self, positions: Sequence[Mapping[str, Any]]) -> int:
         held = 0

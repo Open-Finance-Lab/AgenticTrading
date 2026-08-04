@@ -18,7 +18,7 @@ from dashboard.backend.api.routers import config as config_canon
 from dashboard.backend.api.routers import health as health_canon
 from dashboard.backend.api.routers import market as market_canon
 from dashboard.backend import middleware as middleware_mod
-from dashboard.backend.app import app
+from dashboard.backend.app import app, _cors_allow_origins
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _APP_FILE = _BACKEND / "app.py"
@@ -29,8 +29,10 @@ EXPECTED_CONFIG_ROUTES = {
     ("GET", "/config/defaults", "get_defaults"),
     ("GET", "/config/features", "get_features"),
 }
+# ``/admin/clear`` is absent on purpose: an unauthenticated DELETE that called
+# db.clear_all() became unrecoverable once AGENT_RUNS_DATABASE_URL made run
+# history durable, and nothing called it. See api/routers/admin.py's docstring.
 EXPECTED_ADMIN_ROUTES = {
-    ("DELETE", "/admin/clear", "admin_clear_all"),
     ("DELETE", "/admin/runs/{run_id}", "admin_delete_run"),
 }
 EXPECTED_BACKTESTS_ROUTES = {
@@ -45,6 +47,7 @@ EXPECTED_BACKTESTS_ROUTES = {
     ("GET", "/runs/{run_id}", "get_run"),
     ("GET", "/runs/{run_id}/equity", "get_equity_curve"),
     ("GET", "/runs/{run_id}/trades", "get_run_trades"),
+    ("GET", "/runs/{run_id}/rejected-orders", "get_run_rejected_orders"),
     ("GET", "/runs/{run_id}/plot.png", "get_run_plot"),
     ("GET", "/compare", "compare_runs"),
 }
@@ -57,7 +60,6 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/app"),
     ("GET", "/app/"),
     ("GET", "/assets/{file_name}"),
-    ("DELETE", "/admin/clear"),
     ("DELETE", "/admin/runs/{run_id}"),
     ("POST", "/api/algo/chat"),
     ("GET", "/api/algo/defaults"),
@@ -67,9 +69,15 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/algo/submissions"),
     ("POST", "/api/auth/login"),
     ("POST", "/api/auth/logout"),
+    ("POST", "/api/auth/logout-all"),
     ("GET", "/api/auth/me"),
     ("POST", "/api/auth/signup"),
     ("POST", "/api/auth/change-password"),
+    ("PUT", "/api/auth/display-name"),
+    ("POST", "/api/auth/email-change"),
+    ("GET", "/api/auth/email-change"),
+    ("DELETE", "/api/auth/email-change"),
+    ("POST", "/api/auth/email-change/verify"),
     ("PUT", "/api/auth/avatar"),
     ("DELETE", "/api/auth/avatar"),
     ("GET", "/api/auth/discord/callback"),
@@ -96,6 +104,9 @@ EXPECTED_FULL_CONTRACT = {
     ("DELETE", "/api/v1/agents/{agent_id}"),
     ("GET", "/api/v1/agents/{agent_id}"),
     ("PATCH", "/api/v1/agents/{agent_id}"),
+    ("DELETE", "/api/v1/agents/{agent_id}/credentials/financial-datasets"),
+    ("GET", "/api/v1/agents/{agent_id}/credentials/financial-datasets"),
+    ("PUT", "/api/v1/agents/{agent_id}/credentials/financial-datasets"),
     ("POST", "/api/v1/agents/{agent_id}/activate"),
     ("POST", "/api/v1/agents/{agent_id}/rotate-api-key"),
     ("GET", "/api/v1/agents/{agent_id}/runs"),
@@ -167,6 +178,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/runs/{run_id}"),
     ("GET", "/runs/{run_id}/equity"),
     ("GET", "/runs/{run_id}/plot.png"),
+    ("GET", "/runs/{run_id}/rejected-orders"),
     ("GET", "/runs/{run_id}/trades"),
     ("GET", "/strategy"),
     ("GET", "/styles.css"),
@@ -316,9 +328,63 @@ def test_csp_middleware_lives_in_middleware_module():
     assert app_csp is middleware_mod.CSPHeaderMiddleware
 
 
+def test_csp_header_omits_unsafe_eval():
+    from fastapi.testclient import TestClient
+    from dashboard.backend.app import app
+
+    response = TestClient(app).get("/api/health")
+    csp = response.headers.get("content-security-policy", "")
+    assert "script-src" in csp
+    assert "unsafe-eval" not in csp
+
+
 def test_middleware_order_preserved():
     names = [m.cls.__name__ for m in app.user_middleware]
-    assert names == ["CSPHeaderMiddleware", "SessionMiddleware", "CORSMiddleware"]
+    # Outermost first. GZipMiddleware must stay LAST: as the innermost layer it
+    # sees the router's single-shot response, which is the only way its
+    # minimum_size is honoured. Above SessionMiddleware (a BaseHTTPMiddleware,
+    # which re-streams every response) it silently compresses everything.
+    assert names == [
+        "CSPHeaderMiddleware",
+        "CsrfMiddleware",
+        "SessionMiddleware",
+        "CORSMiddleware",
+        "GZipMiddleware",
+    ]
+
+
+def test_cors_preflight_allows_every_routed_method():
+    """A routed method missing from ``allow_methods`` is unreachable in prod.
+
+    The frontend (Vercel) and the API (Render) are separate origins, so any
+    request the browser preflights -- PATCH among them -- dies at the preflight
+    when the method is absent, even though the route exists and answers fine to
+    curl. ``PATCH /api/v1/agents/{id}`` shipped that way: the only PATCH route
+    in the app, and the one behind the agent Configure screen's Save.
+    """
+    from fastapi.testclient import TestClient
+
+    routed = {
+        method
+        for route in app.routes
+        for method in (getattr(route, "methods", None) or set())
+    } - {"HEAD", "OPTIONS"}
+    assert "PATCH" in routed, "guard the guard: the PATCH route must still exist"
+
+    client = TestClient(app)
+    for method in sorted(routed):
+        response = client.options(
+            "/api/v1/agents/some-agent",
+            headers={
+                "Origin": "https://agentic-trading-lab.vercel.app",
+                "Access-Control-Request-Method": method,
+            },
+        )
+        assert response.status_code == 200, (
+            f"{method} preflight rejected ({response.status_code}): {response.text}"
+        )
+        allowed = response.headers.get("access-control-allow-methods", "")
+        assert method in allowed, f"{method} missing from allow_methods: {allowed!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -352,3 +418,63 @@ def test_app_first_party_imports_are_canonical():
     first_party = {m for m in modules if "backend" in m or m.startswith("dashboard")}
     for m in first_party:
         assert m.startswith("dashboard.backend"), m
+
+
+# ---------------------------------------------------------------------------
+# CORS allowlist resolution (same-origin migration)
+# ---------------------------------------------------------------------------
+
+def test_cors_allow_origins_defaults_to_wildcard_when_unset(monkeypatch):
+    """Unset must reproduce the pre-migration default exactly.
+
+    Same-origin Vercel traffic goes through the ``vercel.json`` rewrites and
+    never preflights, so the allowlist exists for the split-origin callers that
+    remain. Anything other than ``["*"]`` here silently 403s them at the
+    preflight on a deploy where the env var was never set -- which is the
+    default state of the Render dashboard.
+    """
+    monkeypatch.delenv("ATL_FRONTEND_ORIGINS", raising=False)
+    assert _cors_allow_origins() == ["*"]
+
+    monkeypatch.setenv("ATL_FRONTEND_ORIGINS", "   ")
+    assert _cors_allow_origins() == ["*"]
+
+
+def test_cors_allow_origins_parses_allowlist_and_adds_local_hosts(monkeypatch):
+    monkeypatch.setenv(
+        "ATL_FRONTEND_ORIGINS",
+        "https://example.vercel.app/, , https://second.example",
+    )
+    origins = _cors_allow_origins()
+
+    # Compared as a whole list, not with ``in``: membership on a list is exact,
+    # but CodeQL reads ``"https://host" in x`` as a substring URL check and
+    # raises py/incomplete-url-substring-sanitization. An exact list comparison
+    # is both alert-free and the stronger assertion -- it pins order and
+    # rejects extra entries.
+    #
+    # The trailing slash must be stripped: a browser's Origin header never
+    # carries one, so an unstripped entry never matches and the allowlist
+    # silently fails shut. The blank segment from the doubled comma must not
+    # survive as an origin.
+    assert origins == [
+        "https://example.vercel.app",
+        "https://second.example",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+
+
+def test_cors_wildcard_is_never_mixed_into_an_explicit_allowlist(monkeypatch):
+    """``*`` plus a real allowlist is the shape that becomes unsafe.
+
+    Starlette rejects ``allow_origins=["*"]`` combined with
+    ``allow_credentials=True``, but only when the wildcard is the *whole* list.
+    A list that merely contains ``"*"`` alongside named origins matches every
+    origin while looking restricted, so a later flip of ``allow_credentials``
+    would hand credentialed responses to any site.
+    """
+    monkeypatch.setenv("ATL_FRONTEND_ORIGINS", "https://example.vercel.app")
+    assert "*" not in _cors_allow_origins()
