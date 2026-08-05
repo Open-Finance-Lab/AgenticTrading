@@ -214,8 +214,12 @@ def test_join_discord_expands_on_home_community_and_competition():
     the final-review pass on PR C completed the same expansion on the
     Competition/Leaderboard page's Discord link, so no bare "Join Discord"
     survives anywhere in app.html.
+
+    `>= 3` rather than `== 3`: the ban on the bare form below is what actually
+    enforces the rule, and a fourth Discord CTA somewhere else is a routine
+    addition that should not redden this suite.
     """
-    assert _HTML.count("Join our Discord community") == 3
+    assert _HTML.count("Join our Discord community") >= 3
     assert ">Join Discord<" not in _HTML
 
 
