@@ -467,8 +467,34 @@ const MOCK_AGENTS = [
 let allAgents = [];
 let agentViewMode = 'grid';
 const AGENT_GRID_PAGE_SIZE = 5;
-/** Per-category page index (0-based). Reset on search change. */
-let agentGridPage = { builtin: 0, external: 0 };
+
+// My Agents' four sections. Predicates are mutually exclusive by
+// construction, so every agent renders on exactly one shelf. A NULL/unknown
+// `category` (all pre-this-change rows, and anything from an old backend
+// that doesn't send the field) falls through to Prompting LLMs rather than
+// being dropped -- that shelf is also the onboarding surface, so a legacy
+// agent staying visible there is the correct fallback, not a bug.
+const AGENT_SHELVES = [
+  { key: 'prompting_llms', title: 'Prompting LLMs',
+    match: (a) => a.agent_type === 'builtin' && (!a.category || a.category === 'prompting_llms') },
+  { key: 'us_stocks', title: 'U.S. Stock Trading',
+    match: (a) => a.agent_type === 'builtin' && a.category === 'us_stocks' },
+  { key: 'cn_ashares', title: 'China A-Share Trading',
+    match: (a) => a.agent_type === 'builtin' && a.category === 'cn_ashares' },
+  { key: 'external', title: 'For Developers: Connected Agents',
+    match: (a) => a.agent_type !== 'builtin' },
+];
+
+/** 'us_stocks' -> 'UsStocks' -- app.html's per-shelf element id suffix (agentsGrid<Suffix> etc). */
+function shelfIdSuffix(shelfKey) {
+  return String(shelfKey)
+    .split('_')
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join('');
+}
+
+/** Per-shelf page index (0-based), keyed by AGENT_SHELVES' `key`. Reset on search change. */
+let agentGridPage = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
 
 function agentGridPageCount(total) {
   return Math.max(1, Math.ceil(total / AGENT_GRID_PAGE_SIZE));
@@ -1018,7 +1044,7 @@ function getFilteredAgents() {
 
 function applyAgentFilters(resetPagination = true) {
   if (resetPagination) {
-    agentGridPage = { builtin: 0, external: 0 };
+    agentGridPage = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
   }
   renderAgentCategories(getFilteredAgents());
 }
@@ -1077,17 +1103,16 @@ function renderAgentsError() {
   document.querySelectorAll('.agents-section .agents-grid').forEach((grid) => {
     grid.innerHTML = '';
   });
-  ['agentsGridFooterBuiltin', 'agentsGridFooterExternal'].forEach((id) => {
-    const footer = document.getElementById(id);
+  AGENT_SHELVES.forEach((shelf) => {
+    const suffix = shelfIdSuffix(shelf.key);
+    const footer = document.getElementById(`agentsGridFooter${suffix}`);
     if (footer) {
       footer.hidden = true;
       footer.innerHTML = '';
     }
+    const emptyEl = document.getElementById(`agentsEmpty${suffix}`);
+    if (emptyEl) emptyEl.hidden = true;
   });
-  const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
-  if (builtinEmpty) builtinEmpty.hidden = true;
-  const externalEmpty = document.getElementById('agentsEmptyExternal');
-  if (externalEmpty) externalEmpty.hidden = true;
   if (errorEl) errorEl.hidden = false;
 }
 
@@ -1144,7 +1169,7 @@ function bindAgentCardMenus(grid) {
 }
 
 function renderAgentGridFooter(categoryKey, total, page, pageCount) {
-  const footerId = categoryKey === 'builtin' ? 'agentsGridFooterBuiltin' : 'agentsGridFooterExternal';
+  const footerId = `agentsGridFooter${shelfIdSuffix(categoryKey)}`;
   const footer = document.getElementById(footerId);
   if (!footer) return;
   if (pageCount <= 1) {
@@ -1295,11 +1320,41 @@ function renderAgentCards(grid, agents, categoryKey) {
   });
 }
 
+// Empty-state HTML shown when a shelf has zero agents and no search is active
+// (the "true empty" / onboarding case). External renders a placeholder CARD
+// instead (see renderExternalPlaceholderCard) so it has no entry here.
+function shelfOnboardingEmptyHtml(shelfKey) {
+  if (shelfKey === 'prompting_llms') {
+    return "You don't have any agents yet. Create one and test your first trading idea.";
+  }
+  if (shelfKey === 'us_stocks') {
+    return `Nothing here yet. Add a ready-made U.S. stock strategy from ${communityShelfLinkHtml('us_stocks')}.`;
+  }
+  if (shelfKey === 'cn_ashares') {
+    return `Nothing here yet. Add an A-share strategy from ${communityShelfLinkHtml('cn_ashares')}.`;
+  }
+  return '';
+}
+
+// C4 hook: reads data-community-category to pre-select the matching chip on
+// the Community page once that chip UI exists (see the delegated click
+// handler in initNavigation, which today only calls navigateToPage('community')
+// and ignores the category).
+function communityShelfLinkHtml(category) {
+  return `<a href="#" class="agents-empty-community-link" data-community-category="${escapeHtml(category)}">Community</a>`;
+}
+
 function renderAgentCategories(agents) {
-  const builtinGrid = document.getElementById('agentsGridBuiltin');
-  const externalGrid = document.getElementById('agentsGridExternal');
   const errorEl = document.getElementById('agentsErrorState');
-  if (!builtinGrid || !externalGrid) return;
+  const shelves = AGENT_SHELVES.map((shelf) => {
+    const suffix = shelfIdSuffix(shelf.key);
+    return {
+      shelf,
+      grid: document.getElementById(`agentsGrid${suffix}`),
+      emptyEl: document.getElementById(`agentsEmpty${suffix}`),
+    };
+  });
+  if (shelves.some(({ grid }) => !grid)) return;
 
   if (errorEl) errorEl.hidden = true; // a successful render clears any prior error
 
@@ -1307,36 +1362,37 @@ function renderAgentCategories(agents) {
   const pinDefaultFirst = (list) =>
     [...list].sort((a, b) => (b.agent_id === defaultId) - (a.agent_id === defaultId));
 
-  // A live search narrows the list: distinguish "no agents at all" (onboarding)
-  // from "none match your search" so we neither mis-say "No foundation agents
-  // yet" nor surface the External onboarding card as if it were a search result.
+  // A live search narrows every shelf: distinguish "no agents at all"
+  // (onboarding / Community upsell) from "none match your search" so we
+  // never mis-say a shelf is empty when a search term is just hiding its
+  // agents, and never surface the External onboarding card as a search result.
   const searching = !!(document.getElementById('agentSearchInput')?.value || '').trim();
 
-  const builtin = pinDefaultFirst(agents.filter((a) => a.agent_type === 'builtin'));
-  const external = pinDefaultFirst(agents.filter((a) => a.agent_type !== 'builtin'));
+  shelves.forEach(({ shelf, grid, emptyEl }) => {
+    const matched = pinDefaultFirst(agents.filter(shelf.match));
+    renderAgentCards(grid, matched, shelf.key);
 
-  renderAgentCards(builtinGrid, builtin, 'builtin');
-  renderAgentCards(externalGrid, external, 'external');
+    if (shelf.key === 'external') {
+      if (matched.length > 0) {
+        if (emptyEl) emptyEl.hidden = true;
+      } else if (searching) {
+        if (emptyEl) {
+          emptyEl.hidden = false;
+          emptyEl.textContent = 'No agents match your search.';
+        }
+      } else {
+        if (emptyEl) emptyEl.hidden = true;
+        renderExternalPlaceholderCard(grid);
+      }
+      return;
+    }
 
-  const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
-  if (builtinEmpty) {
-    builtinEmpty.hidden = builtin.length > 0;
-    builtinEmpty.innerHTML = searching
-      ? 'No foundation agents match your search.'
-      : 'No foundation agents yet. Click <strong>Add Agent</strong> to create one.';
-  }
-
-  const externalEmpty = document.getElementById('agentsEmptyExternal');
-  if (external.length > 0) {
-    if (externalEmpty) externalEmpty.hidden = true;
-  } else if (searching) {
-    // A search that matched no external agents — show a no-match note, not the
-    // "Connect your own agent" onboarding card.
-    if (externalEmpty) externalEmpty.hidden = false;
-  } else {
-    if (externalEmpty) externalEmpty.hidden = true;
-    renderExternalPlaceholderCard(externalGrid);
-  }
+    if (!emptyEl) return;
+    emptyEl.hidden = matched.length > 0;
+    if (matched.length === 0) {
+      emptyEl.innerHTML = searching ? 'No agents match your search.' : shelfOnboardingEmptyHtml(shelf.key);
+    }
+  });
 }
 
 // Reserved entry point for connect-your-own agents: the connection mechanism
@@ -1346,8 +1402,8 @@ function renderExternalPlaceholderCard(grid) {
   card.className = 'section-card agent-card agent-card--placeholder';
   card.innerHTML = `
     <div class="agent-card-identity-text">
-      <h3 class="agent-name">Connect your own agent</h3>
-      <p class="agent-card-submeta">Run your own trading agent against our backtests via an API key.</p>
+      <h3 class="agent-name">Connect your own trading program</h3>
+      <p class="agent-card-submeta">For developers: run your own trading program against our backtests using an access key.</p>
     </div>
     <button class="agent-card-cta agent-card-cta--outline" type="button">Connect agent</button>`;
   card.querySelector('button')?.addEventListener('click', openCreateExternalAgentModal);
@@ -1563,7 +1619,7 @@ async function ensureDefaultFoundationAgent(agents) {
   defaultAgentProvisionInFlight = (async () => {
     try {
       const data = await API.post(`${API_BASE}/api/v1/agents`, {
-        name: 'My Foundation Agent',
+        name: 'My Trading Agent',
         model_name: DEFAULT_FOUNDATION_MODEL,
         agent_type: 'builtin',
         description: 'Your starter agent — configure it and run a backtest.',
@@ -6728,6 +6784,15 @@ function initNavigation() {
     document.getElementById('agentSearchInput')?.addEventListener('input', applyAgentFilters);
     document.getElementById('marketplaceSearchInput')?.addEventListener('input', renderMarketplaceGrid);
     document.getElementById('agentsCategories')?.addEventListener('click', (event) => {
+      const communityLink = event.target.closest('[data-community-category]');
+      if (communityLink) {
+        // C4 hook: pre-select the Community chip matching
+        // communityLink.dataset.communityCategory once C4 builds the chips.
+        // For now this only opens the Community page.
+        event.preventDefault();
+        navigateToPage('community');
+        return;
+      }
       const prevBtn = event.target.closest('[data-agent-grid-prev]');
       const nextBtn = event.target.closest('[data-agent-grid-next]');
       const key = prevBtn?.dataset.agentGridPrev || nextBtn?.dataset.agentGridNext;
