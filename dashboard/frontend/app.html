@@ -896,12 +896,12 @@
                     </div>
                 </div>
                 <div id="agentsCategories">
-                    <section class="agents-category" data-category="builtin">
+                    <section class="agents-category" data-category="prompting_llms">
                         <div class="agents-category-head">
-                            <h3 class="agents-category-title">Foundation Agents</h3>
-                            <p class="agents-category-sub">A prompting game — give it money, an instruction, and a model, then backtest.</p>
+                            <h3 class="agents-category-title">Prompting LLMs</h3>
+                            <p class="agents-category-sub">Prompt state-of-the-art LLMs to backtest on real market data.</p>
                         </div>
-                        <div id="agentsGridBuiltin" class="agents-grid">
+                        <div id="agentsGridPromptingLlms" class="agents-grid">
                             <!-- Loading skeletons: visible pre-JS and while the first
                                  agents fetch runs. No removal code needed — every render
                                  path overwrites this grid's innerHTML (pinned by
@@ -910,13 +910,36 @@
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                         </div>
-                        <div id="agentsGridFooterBuiltin" class="agents-grid-footer" hidden></div>
-                        <p id="agentsEmptyBuiltin" class="control-helper" hidden>No foundation agents yet. Click <strong>Add Agent</strong> to create one.</p>
+                        <div id="agentsGridFooterPromptingLlms" class="agents-grid-footer" hidden></div>
+                        <p id="agentsEmptyPromptingLlms" class="control-helper" hidden>No prompting agents yet. Click <strong>Add Agent</strong> to create one.</p>
+                    </section>
+                    <section class="agents-category" data-category="us_stocks">
+                        <div class="agents-category-head">
+                            <h3 class="agents-category-title">U.S. Stock Trading</h3>
+                            <p class="agents-category-sub">Ready-made strategies for U.S. blue-chip stocks, tested hour by hour on real market data.</p>
+                        </div>
+                        <div id="agentsGridUsStocks" class="agents-grid">
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                        </div>
+                        <div id="agentsGridFooterUsStocks" class="agents-grid-footer" hidden></div>
+                        <p id="agentsEmptyUsStocks" class="control-helper" hidden>No U.S. stock agents yet. Click <strong>Add Agent</strong> to create one.</p>
+                    </section>
+                    <section class="agents-category" data-category="cn_ashares">
+                        <div class="agents-category-head">
+                            <h3 class="agents-category-title">China A-Share Trading</h3>
+                            <p class="agents-category-sub">Strategies for Chinese A-share stocks, following that market's own next-day (T+1) trading rules.</p>
+                        </div>
+                        <div id="agentsGridCnAshares" class="agents-grid">
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                        </div>
+                        <div id="agentsGridFooterCnAshares" class="agents-grid-footer" hidden></div>
+                        <p id="agentsEmptyCnAshares" class="control-helper" hidden>No China A-share agents yet. Click <strong>Add Agent</strong> to create one.</p>
                     </section>
                     <section class="agents-category" data-category="external">
                         <div class="agents-category-head">
-                            <h3 class="agents-category-title">External Agents</h3>
-                            <p class="agents-category-sub">Bring your own agent and connect it with an API key.</p>
+                            <h3 class="agents-category-title">For Developers: Connected Agents</h3>
+                            <p class="agents-category-sub">Run your own trading program against our backtests. Requires an access key.</p>
                         </div>
                         <div id="agentsGridExternal" class="agents-grid">
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
@@ -992,6 +1015,7 @@
                                 <span class="agent-capital-note">Simulated only. Never spends real cash.</span>
                             </label>
                         </div>
+                        <p id="agentCapitalRealMoneyNote" class="control-helper">Every test here uses simulated money. Real money is involved only if you explicitly connect a brokerage account and turn on live trading.</p>
                     </div>
                     <div id="agentEditorSimplePanel" class="agent-editor-simple section-card compact">
                         <h3 class="agent-editor-intro-title">Trading instruction</h3>
