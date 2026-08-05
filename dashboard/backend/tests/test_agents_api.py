@@ -605,6 +605,7 @@ def test_marketplace_listing_and_clone(client):
     assert hedge_fund_card["runtime_type"] == "ai_hedge_fund"
     assert hedge_fund_card["mode"] == "runtime"
     assert hedge_fund_card["model_name"] == "nvidia/nemotron-3-nano-30b-a3b"
+    assert hedge_fund_card["repo_url"] == "https://github.com/virattt/ai-hedge-fund"
 
     browser_session = str(uuid.uuid4())
     headers = {"X-Session-Id": browser_session}

@@ -76,6 +76,7 @@
       "category": "Hosted",
       "tags": ["multi-agent", "fundamentals", "first-party"],
       "author": "virattt / Agentic Trading Lab",
+      "repo_url": "https://github.com/virattt/ai-hedge-fund",
       "runtime_type": "ai_hedge_fund",
       "runtime_config": {
         "analysts": [

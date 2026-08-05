@@ -140,11 +140,13 @@ def test_scripts_are_deferred():
 def test_agents_grid_ships_loading_skeleton():
     # Pre-JS, My Agents must show placeholder cards instead of a blank panel.
     builtin_grid_at = APP_HTML.index('id="agentsGridBuiltin"')
+    open_grid_at = APP_HTML.index('id="agentsGridOpen"')
     external_grid_at = APP_HTML.index('id="agentsGridExternal"')
     skeletons = [
         m for m in range(len(APP_HTML)) if APP_HTML.startswith("agent-card--skeleton", m)
     ]
     assert any(builtin_grid_at < at < builtin_grid_at + 2000 for at in skeletons)
+    assert any(open_grid_at < at < open_grid_at + 2000 for at in skeletons)
     assert any(external_grid_at < at < external_grid_at + 2000 for at in skeletons)
     assert ".agent-card--skeleton" in STYLES
 
@@ -172,6 +174,6 @@ def test_slow_boot_notice_is_wired():
 # ---------------------------------------------------------------------------
 
 def test_cache_busters_bumped():
-    # v=61: bumped when the HttpOnly-cookie auth migration (#284) changed app.js
-    assert "app.js?v=63" in APP_HTML
-    assert "styles.css?v=79" in APP_HTML
+    # Floor advances whenever app.js/styles.css change and their ?v= must ship.
+    assert "app.js?v=67" in APP_HTML
+    assert "styles.css?v=80" in APP_HTML
