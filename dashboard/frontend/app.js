@@ -468,61 +468,79 @@ let allAgents = [];
 let agentViewMode = 'grid';
 const AGENT_GRID_PAGE_SIZE = 5;
 
-// Shelf to use for an uncategorized agent whose runtime already implies one.
-// Every agent cloned before shelving shipped carries `category: null`, and the
-// hosted AI Hedge Fund runtime is a U.S. stock strategy -- without this it
-// would land on Prompting LLMs, which is the one place the shelving is
-// explicitly meant to keep hosted runtimes out of. Keyed on `runtime_type`
-// rather than backfilled in SQL because the fallback also covers rows written
-// by an older backend that doesn't send `category` at all, which a one-shot
-// migration cannot. New clones stamp the column and never reach this table.
-const LEGACY_RUNTIME_SHELF = { ai_hedge_fund: 'us_stocks' };
+// Legacy runtime -> market, for an uncategorized agent whose runtime already
+// implies one. Every agent cloned before shelving shipped carries
+// `category: null`, and the hosted AI Hedge Fund runtime is a U.S. stock
+// strategy. Keyed on `runtime_type` rather than backfilled in SQL because the
+// fallback also covers rows written by an older backend that doesn't send
+// `category` at all, which a one-shot migration cannot. New clones stamp the
+// column and never reach this table.
+const LEGACY_RUNTIME_MARKET = { ai_hedge_fund: 'us_stocks' };
 
-// My Agents' four sections, in display order. `match` delegates to
+/** Category slug -> market display name. The single place these strings are
+ * written: the Stocks shelf's market chips, the Community category chips, the
+ * agent-card submeta and the Configure picker all read this map, so renaming a
+ * market is one edit. Key order is chip order and mirrors the AgentCategory
+ * Literal's declaration order in dashboard/backend/domain/agents/taxonomy.py.
+ *
+ * Markets, not asset classes: My Agents shelves by what an agent trades, and
+ * Stocks is the only asset class the engine can backtest, so both entries here
+ * live under it. */
+const MARKET_LABELS = {
+  us_stocks: 'U.S.',
+  cn_ashares: 'China A-Share',
+};
+
+// Exported for js/agent-editor.js, which builds the Configure screen's market
+// <select> from this rather than a second hardcoded option list. agent-editor.js
+// is loaded *before* app.js, so it must read this at call time (when the editor
+// opens), never at its own module-init time -- the same rule window.API follows.
+window.AGENT_SHELF_LABELS = MARKET_LABELS;
+
+// My Agents' JS-driven sections, in display order. `match` delegates to
 // agentShelfKey so every agent resolves to exactly one shelf by construction
-// rather than by four predicates staying mutually exclusive as they're edited.
+// rather than by predicates staying mutually exclusive as they're edited.
+//
+// Crypto and Futures are deliberately NOT here. They are locked, inert rows in
+// app.html with no grid, footer or empty-state element, so nothing in this file
+// may try to address them: listing them would force a `locked` filter at every
+// site that iterates this array, and one missed filter trips
+// renderAgentCategories' "some grid is missing" guard, silently aborting the
+// entire My Agents render. Their order is their order in app.html.
 const AGENT_SHELVES = [
-  { key: 'prompting_llms', title: 'Prompting LLMs',
-    match: (a) => agentShelfKey(a) === 'prompting_llms' },
-  { key: 'us_stocks', title: 'U.S. Stock Trading',
-    match: (a) => agentShelfKey(a) === 'us_stocks' },
-  { key: 'cn_ashares', title: 'China A-Share Trading',
-    match: (a) => agentShelfKey(a) === 'cn_ashares' },
+  { key: 'stocks', title: 'Stocks',
+    match: (a) => agentShelfKey(a) === 'stocks' },
   { key: 'external', title: 'For Developers: Connected Agents',
     match: (a) => agentShelfKey(a) === 'external' },
 ];
 
-/** Category slug -> display label (e.g. 'us_stocks' -> 'U.S. Stock Trading'),
- * derived from AGENT_SHELVES' `title` field rather than hand-typed again, so
- * the marketplace card submeta and the Community category chips can never
- * drift from the My Agents shelf headers they're supposed to mirror.
- * 'external' is excluded -- it's a builtin/external axis, not a template
- * category, and never appears as a chip or a card submeta value. */
-const SHELF_LABELS = Object.fromEntries(
-  AGENT_SHELVES.filter((shelf) => shelf.key !== 'external').map((shelf) => [shelf.key, shelf.title]),
-);
-
-// Exported for js/agent-editor.js, which builds the Configure screen's shelf
-// <select> from this rather than a second hardcoded option list. agent-editor.js
-// is loaded *before* app.js, so it must read this at call time (when the editor
-// opens), never at its own module-init time -- the same rule window.API follows.
-window.AGENT_SHELF_LABELS = SHELF_LABELS;
-
-/** The single shelf an agent renders under. Exactly one value per agent, so
- * no agent can be double-counted or dropped off every shelf.
+/** The single shelf an agent renders under. Exactly one value per agent, so no
+ * agent can be double-counted or dropped off every shelf.
  *
- * Resolution order: connected agents are shelved by `agent_type` (they have no
- * market category); a built-in with a category this frontend knows uses it;
- * anything else -- NULL, blank, or a slug from a newer/older backend -- falls
- * back to LEGACY_RUNTIME_SHELF and finally to Prompting LLMs. Falling back
- * rather than dropping matters: Prompting LLMs is also the onboarding surface,
- * so a legacy agent staying visible there is the correct outcome. */
+ * Stocks is the only asset class the backtest engine supports (every entry in
+ * the backend's _MARKET_PROFILES is equities), so every built-in lands there
+ * regardless of category, and connected agents split off by `agent_type`. The
+ * market an agent trades is a separate axis -- see agentMarketKey. */
 function agentShelfKey(agent) {
   if (!agent || agent.agent_type !== 'builtin') return 'external';
-  const slug = String(agent.category || '').trim().toLowerCase();
-  if (SHELF_LABELS[slug]) return slug;
-  return LEGACY_RUNTIME_SHELF[String(agent.runtime_type || '').trim().toLowerCase()] || 'prompting_llms';
+  return 'stocks';
 }
+
+/** Market a built-in agent trades, or '' when the platform genuinely doesn't
+ * know -- a NULL/blank category, or a slug from a newer or older backend.
+ *
+ * '' is not a bug and must never hide the agent: those agents stay on Stocks
+ * under the All chip and are excluded only by an explicit market filter, which
+ * is the honest outcome when the market is unknown. */
+function agentMarketKey(agent) {
+  const slug = String(agent?.category || '').trim().toLowerCase();
+  if (MARKET_LABELS[slug]) return slug;
+  return LEGACY_RUNTIME_MARKET[String(agent?.runtime_type || '').trim().toLowerCase()] || '';
+}
+
+/** 'all' or one of MARKET_LABELS' keys. Narrows the Stocks shelf's grid only --
+ * never its count pill, which reports what the shelf holds. */
+let agentMarketFilter = 'all';
 
 /** 'us_stocks' -> 'UsStocks' -- app.html's per-shelf element id suffix (agentsGrid<Suffix> etc). */
 function shelfIdSuffix(shelfKey) {
@@ -709,8 +727,12 @@ function renderAgentSparkline(agent, positive = true, metrics = {}) {
   return renderAgentSparklineFromValues(values, positive, seed);
 }
 
+/** How the agent decides, shown on the card submeta. This is the axis the
+ * retired "Prompting LLMs" section used to carry: the platform runs hosted
+ * models for built-ins, while a connected agent runs the user's own program.
+ * 'Built-in'/'External' named the plumbing; these name what the user gets. */
 function agentTypeLabel(agent) {
-  return agent.agent_type === 'builtin' ? 'Built-in' : 'External';
+  return agent.agent_type === 'builtin' ? 'Hosted AI' : 'Your own code';
 }
 
 /** Human-readable model label from provider paths like anthropic/claude-haiku-4-5. */
@@ -1802,8 +1824,8 @@ async function loadAgentsNow() {
 let marketplaceTemplates = [];
 let marketplaceCloneInFlight = false;
 let marketplaceLoadInFlight = null;
-/** 'all' or one of SHELF_LABELS' keys. Set by the chip row and by C3's My
- * Agents empty-shelf "Community" links (setMarketplaceCategoryFilter). */
+/** 'all' or one of MARKET_LABELS' keys. Set by the chip row and by the Stocks
+ * shelf's empty-state Community button (via navigateToPage's options). */
 let marketplaceCategoryFilter = 'all';
 
 /** Model slug prefix -> "Powered by <provider>" label for the marketplace
@@ -1842,23 +1864,21 @@ function formatModelProviderLabel(modelName) {
  * overwrote it back to 'all'.) An unrecognized category falls back to 'all'
  * rather than filtering to a chip that doesn't exist. */
 function setMarketplaceCategoryFilter(category) {
-  marketplaceCategoryFilter = SHELF_LABELS[category] ? category : 'all';
+  marketplaceCategoryFilter = MARKET_LABELS[category] ? category : 'all';
   renderMarketplaceGrid();
 }
 
-/** Chip row above the marketplace grid: 'All' plus one chip per template
- * category, built from AGENT_SHELVES/SHELF_LABELS rather than a second
- * hardcoded list. 'external' is excluded -- connected agents aren't added
- * from Community, so it was never a template category to filter by. */
+/** Chip row above the marketplace grid: 'All' plus one chip per market, built
+ * from MARKET_LABELS rather than a second hardcoded list. Built from the label
+ * map rather than AGENT_SHELVES because Community filters templates by
+ * *market*, and there is now one Stocks shelf holding both markets -- the shelf
+ * list and the chip list are different things. */
 function renderMarketplaceCategoryChips() {
   const container = document.getElementById('marketplaceCategoryChips');
   if (!container) return;
   const chips = [
     { key: 'all', label: 'All' },
-    ...AGENT_SHELVES.filter((shelf) => shelf.key !== 'external').map((shelf) => ({
-      key: shelf.key,
-      label: SHELF_LABELS[shelf.key],
-    })),
+    ...Object.entries(MARKET_LABELS).map(([key, label]) => ({ key, label })),
   ];
   // Build once, then only toggle state. This runs from renderMarketplaceGrid,
   // which is bound to the search box's `input` event -- rebuilding innerHTML
@@ -1928,7 +1948,7 @@ function renderMarketplaceGrid() {
       ? 'Hosted'
       : (template.mode === 'pipeline' ? 'Multi-step strategy' : 'Simple instruction');
     const cloneLabel = 'Add to My Agents';
-    const categoryLabel = SHELF_LABELS[String(template.category || '').toLowerCase()] || 'General';
+    const categoryLabel = MARKET_LABELS[String(template.category || '').toLowerCase()] || 'General';
     const modelLabel = formatModelProviderLabel(template.model_name);
     const tags = (template.tags || [])
       .slice(0, 3)
@@ -6825,7 +6845,7 @@ function navigateToPage(page, options = {}) {
             // My Agents empty-shelf "Community" links) -- otherwise a category
             // set on one visit would leak into the next, unrelated visit made
             // through the plain nav tab, the most common entry path.
-            marketplaceCategoryFilter = SHELF_LABELS[options.communityCategory] ? options.communityCategory : 'all';
+            marketplaceCategoryFilter = MARKET_LABELS[options.communityCategory] ? options.communityCategory : 'all';
             if (communityView) communityView.style.display = 'block';
             loadMarketplace();
         } else if (page === 'account') {

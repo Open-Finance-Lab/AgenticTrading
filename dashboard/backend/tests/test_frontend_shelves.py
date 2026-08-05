@@ -131,13 +131,79 @@ def _strip_js_comments(source: str) -> str:
     return re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL))
 
 
-def test_agent_shelves_config_has_the_four_shelf_keys():
-    """`AGENT_SHELVES` is the declarative config the render loop iterates --
-    each of the four shelves must be represented by its exact key.
+def test_agent_shelves_config_holds_only_the_two_live_shelves():
+    """`AGENT_SHELVES` drives rendering, so it lists only shelves that have a
+    grid to render into. Crypto and Futures are locked, inert rows in app.html
+    with no grid/footer/empty element -- listing them here would force a
+    `locked` filter at all five iteration sites, and one missed filter trips
+    renderAgentCategories' "some grid is missing" guard, silently aborting the
+    whole My Agents render.
     """
     config = js_const("AGENT_SHELVES")
-    for key in ("prompting_llms", "us_stocks", "cn_ashares", "external"):
+    for key in ("stocks", "external"):
         assert f"key: '{key}'" in config, key
+    for absent in ("crypto", "futures", "prompting_llms", "us_stocks", "cn_ashares"):
+        assert f"key: '{absent}'" not in config, absent
+
+
+def test_market_labels_is_the_only_declaration_of_the_market_names():
+    """One map, four consumers: the Stocks market chips, the Community category
+    chips, the agent-card submeta, and the Configure picker. A second hand-typed
+    copy would let one surface drift from the others -- which is exactly what
+    the retired SHELF_LABELS existed to prevent, so its name must be gone too,
+    not merely unused.
+    """
+    decl = js_const("MARKET_LABELS")
+    assert "us_stocks: 'U.S.'" in decl
+    assert "cn_ashares: 'China A-Share'" in decl
+    # The bare identifier only. `window.AGENT_SHELF_LABELS` -- the export name
+    # agent-editor.js reads, deliberately unchanged so the editor needs no
+    # rewiring -- contains "SHELF_LABELS" as a substring, so a plain `not in`
+    # here could never pass.
+    assert not re.search(r"(?<![A-Z_])SHELF_LABELS", _strip_js_comments(APP_JS))
+
+
+def test_card_submeta_carries_the_decision_axis_the_retired_shelf_used_to():
+    """"Prompting LLMs" is gone as a section, so the how-does-it-decide axis it
+    carried moves onto the card. 'Built-in'/'External' named the plumbing;
+    'Hosted AI'/'Your own code' names what the user actually gets.
+    """
+    body = _strip_js_comments(fn_body("function agentTypeLabel("))
+    assert "'Hosted AI'" in body
+    assert "'Your own code'" in body
+    assert "'Built-in'" not in body
+
+
+def test_render_marketplace_category_chips_is_built_from_the_shared_label_map():
+    """The chip row is built from MARKET_LABELS rather than a second hardcoded
+    list, plus an 'all' chip that isn't a category at all. It is no longer built
+    from AGENT_SHELVES: Community filters templates by *market*, and there is
+    now one Stocks shelf holding both markets, so the shelf list and the chip
+    list are different things -- built from AGENT_SHELVES this row would emit a
+    single, meaningless "Stocks" chip that matches no template.
+    """
+    body = _strip_js_comments(fn_body("function renderMarketplaceCategoryChips()"))
+    assert "MARKET_LABELS" in body
+    assert "'all'" in body
+    for label in ("U.S.", "China A-Share"):
+        assert label not in body, f"{label!r} hardcoded instead of read from MARKET_LABELS"
+
+
+def test_navigate_to_page_resets_chip_filter_on_plain_community_entry():
+    """A category set by one Community visit must not leak into a later,
+    unrelated visit made through the plain nav tab -- the most common entry
+    path. navigateToPage is the one choke point every Community entry funnels
+    through, so the reset belongs there: 'all' unless an explicit
+    `communityCategory` option says otherwise. Signature passed to fn_body stops
+    at the opening paren, not `(page, options = {})` -- that default value's own
+    `{}` would otherwise be mistaken for the function body by fn_body's brace
+    matcher.
+    """
+    body = _strip_js_comments(fn_body("function navigateToPage("))
+    assert (
+        "marketplaceCategoryFilter = MARKET_LABELS[options.communityCategory] "
+        "? options.communityCategory : 'all';"
+    ) in body
 
 
 def test_no_foundation_agents_copy_is_gone_from_the_render_loop():
@@ -218,17 +284,6 @@ def test_add_to_my_agents_cta_is_a_single_unconditional_string():
     assert "isAiHedgeFundTemplate" not in body
 
 
-def test_shelf_labels_map_is_derived_from_agent_shelves_not_duplicated():
-    """SHELF_LABELS must be *built from* AGENT_SHELVES' `title` field, not a
-    second hand-typed copy of the same three strings -- a hand-typed copy can
-    silently drift from the shelf headers it's supposed to mirror.
-    """
-    decl = js_const("SHELF_LABELS")
-    assert "AGENT_SHELVES" in decl
-    for title in ("Prompting LLMs", "U.S. Stock Trading", "China A-Share Trading"):
-        assert title not in decl, f"{title!r} is hardcoded in SHELF_LABELS instead of derived"
-
-
 def test_marketplace_submeta_never_renders_a_raw_category_or_model_slug():
     """The card submeta line must route the category and model name through
     shared label tables, never `template.category`/`template.model_name`
@@ -248,17 +303,6 @@ def test_fallback_description_copy_is_updated():
     body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
     assert "Open agent template." not in body
     assert "No description provided yet." in body
-
-
-def test_render_marketplace_category_chips_covers_all_plus_the_three_categories():
-    """The chip row is built from AGENT_SHELVES (minus 'external', which
-    isn't a template category) rather than a second hardcoded list, plus an
-    'all' chip that isn't in AGENT_SHELVES at all.
-    """
-    body = _strip_js_comments(fn_body("function renderMarketplaceCategoryChips()"))
-    assert "AGENT_SHELVES" in body
-    assert "'external'" in body
-    assert "'all'" in body
 
 
 def test_marketplace_category_chip_container_is_present_in_community_view():
@@ -292,24 +336,6 @@ def test_community_link_hook_routes_the_category_through_navigate_to_page():
         "navigateToPage('community', { communityCategory: communityLink.dataset.communityCategory })"
         in body
     )
-
-
-def test_navigate_to_page_resets_chip_filter_on_plain_community_entry():
-    """A category set by one Community visit must not leak into a later,
-    unrelated visit made through the plain nav tab -- the most common entry
-    path. navigateToPage is the one choke point every Community entry
-    funnels through (it already redirects the retired Playground marketplace
-    subtab here), so the reset belongs there: 'all' unless an explicit
-    `communityCategory` option says otherwise. Signature passed to fn_body
-    stops at the opening paren, not `(page, options = {})` -- that default
-    value's own `{}` would otherwise be mistaken for the function body by
-    fn_body's brace matcher (its docstring calls out this exact pattern).
-    """
-    body = _strip_js_comments(fn_body("function navigateToPage("))
-    assert (
-        "marketplaceCategoryFilter = SHELF_LABELS[options.communityCategory] "
-        "? options.communityCategory : 'all';"
-    ) in body
 
 
 def test_community_page_carries_the_no_real_money_sentence_once():
@@ -351,11 +377,14 @@ def test_configure_can_move_an_agent_between_shelves():
 
 
 def test_configure_shelf_options_are_not_a_second_hardcoded_list():
-    """The <select>'s options come from app.js's SHELF_LABELS, which is itself
-    derived from AGENT_SHELVES -- so renaming a shelf updates the picker, the
-    chips, the card submeta and the section headers from one edit. The literal
-    in agent-editor.js is a load-failure floor, not the source of truth."""
-    assert "window.AGENT_SHELF_LABELS = SHELF_LABELS;" in APP_JS
+    """The <select>'s options come from app.js's MARKET_LABELS -- so renaming a
+    market updates the picker, the Community chips, the My Agents market chips
+    and the card submeta from one edit. The literal in agent-editor.js is a
+    load-failure floor, not the source of truth.
+
+    The exported NAME is deliberately still AGENT_SHELF_LABELS: only what it
+    points at changed, so agent-editor.js needed no rewiring."""
+    assert "window.AGENT_SHELF_LABELS = MARKET_LABELS;" in APP_JS
     assert "window.AGENT_SHELF_LABELS" in _EDITOR_JS
     assert "SHELF_LABELS_FALLBACK" in _EDITOR_JS
 
