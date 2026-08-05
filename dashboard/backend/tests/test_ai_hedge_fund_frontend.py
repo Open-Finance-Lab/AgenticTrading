@@ -25,7 +25,7 @@ def test_hosted_editor_replaces_model_picker_with_managed_metadata():
     assert 'id="agentEditorModelField"' in _APP_HTML
     assert 'id="agentEditorManagedModelField"' in _APP_HTML
     assert "OpenRouter · nvidia/nemotron-3-nano-30b-a3b" in _APP_HTML
-    assert "hosted OpenRouter model" in _APP_HTML
+    assert "hosted and managed by Agentic Trading Lab" in _APP_HTML
 
     configure = _slice(
         _EDITOR_JS,

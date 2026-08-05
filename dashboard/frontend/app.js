@@ -993,7 +993,7 @@ function renderAgentCardActions(agent, statusKey) {
   const rotate =
     agent.agent_type === 'builtin'
       ? ''
-      : `<button class="agent-menu-item agent-rotate-key-btn" type="button" data-agent-id="${id}">New API key</button>`;
+      : `<button class="agent-menu-item agent-rotate-key-btn" type="button" data-agent-id="${id}">New access key</button>`;
   return `
     <div class="agent-card-actions agent-card-actions--status">
       ${configure}
@@ -1289,14 +1289,14 @@ function renderAgentCards(grid, agents, categoryKey) {
     btn.addEventListener('click', async () => {
       const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       if (!agent) return;
-      if (!confirm(`Create a new API key for "${agent.name}"? The current key will stop working immediately.`)) {
+      if (!confirm(`Create a new access key for "${agent.name}"? The current key stops working right away — any connected program must switch to the new key.`)) {
         return;
       }
       btn.disabled = true;
       try {
         await rotateAgentApiKey(agent);
       } catch (error) {
-        alert(error.message || 'Failed to create new API key');
+        alert(error.message || `Couldn't create a new access key. Please try again.`);
       } finally {
         btn.disabled = false;
       }
@@ -1324,7 +1324,7 @@ function renderAgentCards(grid, agents, categoryKey) {
         }
         await loadAgents();
       } catch (error) {
-        alert(error.message || 'Failed to delete agent');
+        alert(error.message || `Couldn't delete the agent. Please try again.`);
       }
     });
   });
@@ -1924,7 +1924,7 @@ function renderMarketplaceGrid() {
       try {
         await cloneMarketplaceTemplate(template);
       } catch (error) {
-        alert(error.message || 'Failed to add template');
+        alert(error.message || `Couldn't add this template. Please try again.`);
       } finally {
         marketplaceCloneInFlight = false;
         btn.disabled = false;
@@ -2145,8 +2145,8 @@ async function rotateAgentApiKey(agent) {
   );
   await loadAgents();
   showAgentCredentials(data.api_key, {
-    title: 'New API key created',
-    subtitle: `A new key was issued for "${agent.name}". Update your client — the old key no longer works.`,
+    title: 'New access key created',
+    subtitle: `A new key was issued for "${agent.name}". Update your program — the old key no longer works.`,
   });
   return data;
 }
@@ -3260,7 +3260,7 @@ async function openDiscordWithAccount(event) {
     window.open(discordUrl, '_blank', 'noopener,noreferrer');
   } catch (error) {
     console.warn('Discord link start failed:', error.message);
-    alert(error.message || 'Could not start Discord linking. Are you signed in?');
+    alert(error.message || `Couldn't start Discord linking. Please sign in and try again.`);
   }
 }
 
@@ -3291,7 +3291,6 @@ async function handleRobinhoodOAuthReturn() {
   if (!robinhood) return;
 
   const agentId = params.get('agent_id');
-  const reason = params.get('reason');
   const linkCode = params.get('link_code');
   params.delete('robinhood');
   params.delete('agent_id');
@@ -3341,7 +3340,7 @@ async function handleRobinhoodOAuthReturn() {
   }
 
   if (robinhood === 'error') {
-    alert(`Robinhood connection failed (${reason || 'oauth_failed'}). Use localhost and a desktop browser.`);
+    alert('Robinhood connection failed. Please try again on a desktop computer.');
   }
 }
 
