@@ -11,7 +11,7 @@ from dashboard.backend.domain.agents.taxonomy import (
 
 
 def test_categories_whitelist():
-    assert AGENT_CATEGORIES == {"prompting_llms", "us_stocks", "cn_ashares"}
+    assert AGENT_CATEGORIES == {"us_stocks", "cn_ashares"}
 
 
 def test_whitelist_is_derived_from_the_literal():
@@ -71,7 +71,9 @@ def test_coerce_passes_none_through():
     assert coerce_category(None) is None
 
 
-@pytest.mark.parametrize("bad", ["crypto", "futures", "Foundation", "us stocks"])
+@pytest.mark.parametrize(
+    "bad", ["crypto", "futures", "prompting_llms", "Foundation", "us stocks"]
+)
 def test_coerce_rejects_unknown(bad):
     with pytest.raises(ValueError, match="unknown category"):
         coerce_category(bad)
@@ -95,3 +97,33 @@ def test_coerce_error_does_not_echo_an_unbounded_value():
     with pytest.raises(ValueError) as excinfo:
         coerce_category("z" * 100_000)
     assert len(str(excinfo.value)) < 200
+
+
+# --- locked shelves + catalog migration ------------------------------------
+
+
+@pytest.mark.parametrize("locked", ["crypto", "futures"])
+def test_locked_shelves_have_no_category_slug(locked):
+    """Crypto and Futures are inert rows in the frontend only.
+
+    Nothing can be assigned to them -- no bar source, no MarketProfile, no
+    engine support -- so they deliberately get no slug. A member here would
+    make them selectable in Configure and cloneable from Community while no
+    backtest could ever run.
+    """
+    assert locked not in AGENT_CATEGORIES
+    with pytest.raises(ValueError, match="unknown category"):
+        coerce_category(locked)
+
+
+def test_no_template_is_left_on_the_retired_prompting_llms_slug():
+    """A template stranded on the retired slug would 422 on any later PATCH and
+    render under Community's "General" fallback label rather than a market chip.
+    The catalog is `lru_cache`d, so this reloads it before reading.
+    """
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+
+    marketplace_mod.reload_marketplace_catalog()
+    slugs = {t.get("category") for t in marketplace_mod.list_marketplace_templates()}
+    assert "prompting_llms" not in slugs
+    assert slugs <= AGENT_CATEGORIES

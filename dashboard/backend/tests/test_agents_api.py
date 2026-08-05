@@ -696,14 +696,14 @@ def test_marketplace_catalog_shape():
 
 
 def test_marketplace_listing_is_ordered_by_shelf_not_by_slug():
-    """Community cards group by shelf in *shelf* order, not slug order.
+    """Community cards group by market in *declaration* order, not slug order.
 
     The recategorization onto slugs quietly changed which card leads the page:
-    ``sorted`` on the raw value orders cn_ashares < prompting_llms < us_stocks,
-    so the A-share template became card #1 on a U.S.-focused product. Nothing
-    caught it because no test asserted order. ``category_sort_rank`` keys on the
-    AgentCategory Literal's declaration order instead, which is also the order
-    AGENT_SHELVES renders My Agents in, so the two surfaces agree.
+    ``sorted`` on the raw value orders cn_ashares < us_stocks, so the A-share
+    template became card #1 on a U.S.-focused product. Nothing caught it because
+    no test asserted order. ``category_sort_rank`` keys on the AgentCategory
+    Literal's declaration order instead, which is also the order MARKET_LABELS
+    renders the market chips in, so the two surfaces agree.
     """
     import dashboard.backend.domain.agents.marketplace as marketplace_mod
     from dashboard.backend.domain.agents.taxonomy import (
@@ -717,8 +717,8 @@ def test_marketplace_listing_is_ordered_by_shelf_not_by_slug():
     ranks = [category_sort_rank(t.get("category")) for t in templates]
     assert ranks == sorted(ranks), "templates are not grouped in shelf order"
 
-    # The onboarding shelf leads; uncategorized templates never do.
-    assert templates[0]["category"] == AGENT_CATEGORY_ORDER[0] == "prompting_llms"
+    # The U.S. market leads; uncategorized templates never do.
+    assert templates[0]["category"] == AGENT_CATEGORY_ORDER[0] == "us_stocks"
     assert templates[-1]["category"] == "cn_ashares"
 
     # Within a shelf, still by name.
