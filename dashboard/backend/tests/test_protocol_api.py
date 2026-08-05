@@ -534,7 +534,7 @@ def test_create_run_accepts_independent_initial_cash(client):
                 "start_date": "2026-04-15",
                 "end_date": "2026-04-16",
                 "symbols": ["AAPL", "MSFT"],
-                "initial_cash": 5000,
+                "initial_cash": 2500,
             },
         },
         headers={"X-API-Key": key},

@@ -593,8 +593,8 @@
       if (!Number.isFinite(value) || value < 1) {
         throw new Error('Backtest Allocated Capital must be at least $1.');
       }
-      if (value > 10000) {
-        throw new Error('Backtest Allocated Capital cannot exceed $10,000.');
+      if (value > 3000) {
+        throw new Error('Backtest Allocated Capital cannot exceed $3,000.');
       }
       backtest_allocation = Math.round(value);
     } else {
@@ -603,7 +603,7 @@
       // through to the default rather than becoming an unsaveable value.
       backtest_allocation =
         Number.isFinite(Number(cash_allocation)) && Number(cash_allocation) > 0
-          ? Math.min(Math.round(Number(cash_allocation)), 10000)
+          ? Math.min(Math.round(Number(cash_allocation)), 3000)
           : 1000;
     }
     const modelSelect = document.getElementById('agentEditorModelSelect');
@@ -739,7 +739,7 @@
         const value = Number(raw);
         if (Number.isFinite(value) && value > 0) { resolved = value; break; }
       }
-      backtestInput.value = String(Math.min(Math.round(resolved), 10000));
+      backtestInput.value = String(Math.min(Math.round(resolved), 3000));
     }
     if (meta) {
       meta.textContent = agent.agent_type === 'builtin' ? 'Built-in agent' : 'External agent';

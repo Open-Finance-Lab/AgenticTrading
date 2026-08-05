@@ -46,7 +46,7 @@ const MESSAGES: Msg[] = [
     author: "you",
     name: "you",
     time: "Today at 2:14 PM",
-    body: "Summarize this into a precise strategy prompt I can reuse.",
+    body: "Summarize this into a precise trading instruction I can reuse.",
   },
   {
     id: "6",
@@ -55,7 +55,7 @@ const MESSAGES: Msg[] = [
     time: "Today at 2:14 PM",
     body: (
       <>
-        <div>Strategy prompt:</div>
+        <div>Trading instruction:</div>
         <div className="discord-prompt-block">{STORY_PROMPT}</div>
         <div className="discord-msg-followup">
           Shall I run the historical backtest with these specifications?

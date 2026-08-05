@@ -65,11 +65,21 @@ def test_robinhood_editor_behavior_is_shared_by_both_runtimes():
     assert "live_trading_enabled: Boolean(liveToggle?.checked)" in editor_state
 
 
-def test_marketplace_copy_label_is_scoped_to_ai_hedge_fund():
-    assert (
-        "const cloneLabel = isAiHedgeFundTemplate "
-        "? 'Copy to My Agents' : 'Add to My Agents';"
-    ) in _APP_JS
+def test_marketplace_cta_label_is_unified():
+    """All marketplace cards share one CTA — no special-case Copy label."""
+    assert "Copy to My Agents" not in _APP_JS
+    assert "const cloneLabel = 'Add to My Agents';" in _APP_JS
+
+
+def test_my_agents_splits_prompting_llms_and_open_agents():
+    """Prompt builtins and AI Hedge Fund agents land on separate shelves."""
+    assert "Foundation Agents" not in _APP_HTML
+    assert "Prompting LLMs" in _APP_HTML
+    assert "Open Agents" in _APP_HTML
+    assert 'id="agentsGridOpen"' in _APP_HTML
+    assert "function isOpenAgent(agent)" in _APP_JS
+    assert "agentsGridOpen" in _APP_JS
+    assert "renderAgentCards(openGrid, openAgents, 'open')" in _APP_JS
 
 
 def test_stored_credential_can_be_removed_from_the_editor():
