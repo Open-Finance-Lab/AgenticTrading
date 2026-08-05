@@ -33,8 +33,9 @@ Sections on My Agents
 visible without opening it:
 
 **Prompting LLMs**
-   Agents you steer with a written instruction. This is where a brand-new agent
-   goes unless you say otherwise.
+   Agents you steer with a written instruction. Every agent you create with
+   **Add Agent +** starts here — there is no section to pick while creating one;
+   file it elsewhere afterwards.
 
 **U.S. Stock Trading**
    Ready-made strategies for U.S. blue-chip stocks, tested hour by hour on real
@@ -52,10 +53,12 @@ The first three are a label you control: open an agent's **Configure** screen
 and pick a different **Section**, or leave it unset to keep the agent under
 Prompting LLMs. The section changes only where the agent is filed; it does not
 change how it trades, what it can buy, or any of its settings. Connected agents
-are placed by what they are, so they have no **Section** picker.
+are placed by what they are, so they have no **Section** picker; neither do the
+sample agents shown before you create one of your own.
 
-An empty section stays visible with a link to **Community**, which is where
-ready-made agents for that market come from.
+Sections are always shown, empty or not. An empty **U.S. Stock Trading** or
+**China A-Share Trading** section links straight to the matching filter in
+**Community**, which is where ready-made agents for that market come from.
 
 .. _allocated-capital:
 
