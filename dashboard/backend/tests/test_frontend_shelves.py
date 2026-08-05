@@ -169,3 +169,118 @@ def test_default_agent_provision_guard_prefix_is_byte_identical():
     stored), so this pins the literal rather than merely checking presence.
     """
     assert js_string_const("DEFAULT_AGENT_PROVISION_GUARD_PREFIX") == "default-agent-provisioned:"
+
+
+# --- C4: Community category chips + CTA verb + label map --------------------
+#
+# C1 categorized the marketplace catalog; C3 built the four My Agents shelves
+# and left a data-community-category hook on two of their empty-state links
+# that, until this task, only opened Community without reading the category.
+# This task adds the chip row that filters Community by that same taxonomy,
+# unifies the "Add to My Agents" CTA (PR #253 already made it canonical
+# everywhere except one AI-Hedge-Fund-scoped ternary), routes the card
+# submeta through shared label tables instead of raw slugs, and finishes
+# wiring C3's hook.
+
+_MARKETPLACE_RENDER_FN = "function renderMarketplaceGrid()"
+
+
+def _community_view_html() -> str:
+    """The `communityView` page's markup, isolated from the rest of app.html.
+
+    `id="accountView"` is the next page-view div after it in source order
+    (same marker `test_frontend_marketplace_placement.py` uses), so this is a
+    safe end bound without a full HTML parser.
+    """
+    start = _HTML.index('id="communityView"')
+    end = _HTML.index('id="accountView"', start)
+    return _HTML[start:end]
+
+
+def test_copy_to_my_agents_cta_is_gone():
+    """"Copy to My Agents" was scoped to the AI Hedge Fund template only.
+    PR #253 made "Add to My Agents" canonical everywhere else, so this one
+    holdout ternary must go, not gain a permanent sibling.
+    """
+    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    assert "Copy to My Agents" not in body
+
+
+def test_add_to_my_agents_cta_is_a_single_unconditional_string():
+    """The CTA must not branch per-template -- a ternary whose two branches
+    happen to read the same today is still two code paths that can drift
+    apart again tomorrow. Assert the direct, unconditional assignment and
+    that the now-dead branch variable is gone with it.
+    """
+    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    assert "cloneLabel = 'Add to My Agents'" in body
+    assert "isAiHedgeFundTemplate" not in body
+
+
+def test_shelf_labels_map_is_derived_from_agent_shelves_not_duplicated():
+    """SHELF_LABELS must be *built from* AGENT_SHELVES' `title` field, not a
+    second hand-typed copy of the same three strings -- a hand-typed copy can
+    silently drift from the shelf headers it's supposed to mirror.
+    """
+    decl = js_const("SHELF_LABELS")
+    assert "AGENT_SHELVES" in decl
+    for title in ("Prompting LLMs", "U.S. Stock Trading", "China A-Share Trading"):
+        assert title not in decl, f"{title!r} is hardcoded in SHELF_LABELS instead of derived"
+
+
+def test_marketplace_submeta_never_renders_a_raw_category_or_model_slug():
+    """The card submeta line must route the category and model name through
+    shared label tables, never `template.category`/`template.model_name`
+    raw. Scoped to just the submeta template-literal line -- the
+    provider-label lookup table legitimately contains the same
+    'anthropic/'/'nvidia/' prefix strings elsewhere in the function, so a
+    whole-function check would false-positive on the table doing its job.
+    """
+    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    submeta_line = next(line for line in body.splitlines() if "agent-card-submeta" in line)
+    assert "template.category" not in submeta_line
+    assert "template.model_name" not in submeta_line
+    assert not re.search(r"nvidia/|anthropic/", submeta_line)
+
+
+def test_fallback_description_copy_is_updated():
+    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    assert "Open agent template." not in body
+    assert "No description provided yet." in body
+
+
+def test_render_marketplace_category_chips_covers_all_plus_the_three_categories():
+    """The chip row is built from AGENT_SHELVES (minus 'external', which
+    isn't a template category) rather than a second hardcoded list, plus an
+    'all' chip that isn't in AGENT_SHELVES at all.
+    """
+    body = _strip_js_comments(fn_body("function renderMarketplaceCategoryChips()"))
+    assert "AGENT_SHELVES" in body
+    assert "'external'" in body
+    assert "'all'" in body
+
+
+def test_marketplace_category_chip_container_is_present_in_community_view():
+    assert 'id="marketplaceCategoryChips"' in _community_view_html()
+
+
+def test_community_link_hook_reads_the_dataset_category():
+    """C3 left this handler only opening Community; the category it read off
+    the clicked link's dataset was unused. Comments already named the two
+    identifiers this test checks for (as a note-to-self for this task), so
+    the assertion runs on the comment-stripped body -- otherwise it would
+    pass against the leftover comment instead of real code.
+    """
+    body = _strip_js_comments(fn_body("function initNavigation()"))
+    assert "communityLink.dataset.communityCategory" in body
+    assert "setMarketplaceCategoryFilter" in body
+
+
+def test_community_page_carries_the_no_real_money_sentence_once():
+    """C3 already put this sentence on My Agents' capital controls -- a
+    separate, unrelated instance. This checks Community gets its own, and
+    exactly one (a second copy on the same page would be visual noise, and
+    the brief says "once per page").
+    """
+    community_html = _community_view_html()
+    assert community_html.count(_CANONICAL_NO_REAL_MONEY_SENTENCE) == 1

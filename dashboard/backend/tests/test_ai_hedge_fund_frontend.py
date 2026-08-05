@@ -65,11 +65,15 @@ def test_robinhood_editor_behavior_is_shared_by_both_runtimes():
     assert "live_trading_enabled: Boolean(liveToggle?.checked)" in editor_state
 
 
-def test_marketplace_copy_label_is_scoped_to_ai_hedge_fund():
-    assert (
-        "const cloneLabel = isAiHedgeFundTemplate "
-        "? 'Copy to My Agents' : 'Add to My Agents';"
-    ) in _APP_JS
+def test_marketplace_cta_is_unified_add_to_my_agents():
+    """Superseded 2026-08-05 (Task C4): "Copy to My Agents" was scoped to the
+    AI Hedge Fund template by an `isAiHedgeFundTemplate` ternary; PR #253's
+    canonical CTA is "Add to My Agents" everywhere, so the ternary is gone
+    and every card -- AI Hedge Fund included -- renders the one string.
+    """
+    assert "const cloneLabel = 'Add to My Agents';" in _APP_JS
+    assert "isAiHedgeFundTemplate" not in _APP_JS
+    assert "Copy to My Agents" not in _APP_JS
 
 
 def test_stored_credential_can_be_removed_from_the_editor():

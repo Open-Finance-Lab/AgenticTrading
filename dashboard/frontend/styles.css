@@ -9424,6 +9424,38 @@ body.agent-editor-open {
     white-space: nowrap;
 }
 
+.marketplace-category-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 4px 0 16px;
+}
+
+.marketplace-category-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: rgba(148, 163, 184, 0.12);
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.marketplace-category-chip:hover {
+    color: var(--text-primary);
+    border-color: var(--info-color);
+}
+
+.marketplace-category-chip.active {
+    color: #0a0e27;
+    background-color: var(--info-color);
+    border-color: var(--info-color);
+}
+
 /* Agent editor — model picker (Demo 1) */
 .agent-editor-model-field {
     display: flex;

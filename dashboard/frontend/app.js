@@ -485,6 +485,16 @@ const AGENT_SHELVES = [
     match: (a) => a.agent_type !== 'builtin' },
 ];
 
+/** Category slug -> display label (e.g. 'us_stocks' -> 'U.S. Stock Trading'),
+ * derived from AGENT_SHELVES' `title` field rather than hand-typed again, so
+ * the marketplace card submeta and the Community category chips can never
+ * drift from the My Agents shelf headers they're supposed to mirror.
+ * 'external' is excluded -- it's a builtin/external axis, not a template
+ * category, and never appears as a chip or a card submeta value. */
+const SHELF_LABELS = Object.fromEntries(
+  AGENT_SHELVES.filter((shelf) => shelf.key !== 'external').map((shelf) => [shelf.key, shelf.title]),
+);
+
 /** 'us_stocks' -> 'UsStocks' -- app.html's per-shelf element id suffix (agentsGrid<Suffix> etc). */
 function shelfIdSuffix(shelfKey) {
   return String(shelfKey)
@@ -1336,10 +1346,9 @@ function shelfOnboardingEmptyHtml(shelfKey) {
   return '';
 }
 
-// C4 hook: reads data-community-category to pre-select the matching chip on
-// the Community page once that chip UI exists (see the delegated click
-// handler in initNavigation, which today only calls navigateToPage('community')
-// and ignores the category).
+// data-community-category is read by initNavigation's delegated click handler,
+// which pre-selects the matching Community chip (setMarketplaceCategoryFilter)
+// before navigating there.
 function communityShelfLinkHtml(category) {
   return `<a href="#" class="agents-empty-community-link" data-community-category="${escapeHtml(category)}">Community</a>`;
 }
@@ -1764,10 +1773,67 @@ async function loadAgentsNow() {
 let marketplaceTemplates = [];
 let marketplaceCloneInFlight = false;
 let marketplaceLoadInFlight = null;
+/** 'all' or one of SHELF_LABELS' keys. Set by the chip row and by C3's My
+ * Agents empty-shelf "Community" links (setMarketplaceCategoryFilter). */
+let marketplaceCategoryFilter = 'all';
+
+/** Model slug prefix -> "Powered by <provider>" label for the marketplace
+ * card submeta. Matched by prefix, not exact slug, so a new model version
+ * under an already-known provider doesn't need a new table entry. The raw
+ * slug itself never renders on the card -- an unmatched prefix falls back to
+ * the glossary's generic "AI-powered" rather than leaking it. */
+const MODEL_PROVIDER_LABELS = [
+  { prefix: 'anthropic/', label: 'Powered by Claude' },
+  { prefix: 'nvidia/nemotron', label: 'Powered by NVIDIA Nemotron' },
+  { prefix: 'deepseek/', label: 'Powered by DeepSeek' },
+  { prefix: 'openai/', label: 'Powered by GPT' },
+];
+
+function formatModelProviderLabel(modelName) {
+  const raw = String(modelName || '').trim().toLowerCase();
+  const match = MODEL_PROVIDER_LABELS.find((entry) => raw.startsWith(entry.prefix));
+  return match ? match.label : 'AI-powered';
+}
+
+/** Pre-select a Community category chip and re-render, without a route or
+ * API change -- this is in-memory UI state, not navigation. Called both by
+ * the chip row's own click handler and by C3's My Agents empty-shelf
+ * "Community" links (which pass a shelf key from `data-community-category`
+ * before navigating). An unrecognized category falls back to 'all' rather
+ * than filtering to a chip that doesn't exist. */
+function setMarketplaceCategoryFilter(category) {
+  marketplaceCategoryFilter = SHELF_LABELS[category] ? category : 'all';
+  renderMarketplaceGrid();
+}
+
+/** Chip row above the marketplace grid: 'All' plus one chip per template
+ * category, built from AGENT_SHELVES/SHELF_LABELS rather than a second
+ * hardcoded list. 'external' is excluded -- connected agents aren't added
+ * from Community, so it was never a template category to filter by. */
+function renderMarketplaceCategoryChips() {
+  const container = document.getElementById('marketplaceCategoryChips');
+  if (!container) return;
+  const chips = [
+    { key: 'all', label: 'All' },
+    ...AGENT_SHELVES.filter((shelf) => shelf.key !== 'external').map((shelf) => ({
+      key: shelf.key,
+      label: SHELF_LABELS[shelf.key],
+    })),
+  ];
+  container.innerHTML = chips
+    .map((chip) => {
+      const active = chip.key === marketplaceCategoryFilter;
+      return `<button type="button" class="marketplace-category-chip${active ? ' active' : ''}" data-marketplace-category="${escapeHtml(chip.key)}" aria-pressed="${active}">${escapeHtml(chip.label)}</button>`;
+    })
+    .join('');
+}
 
 function getFilteredMarketplaceTemplates() {
   const query = (document.getElementById('marketplaceSearchInput')?.value || '').trim().toLowerCase();
   let list = marketplaceTemplates.slice();
+  if (marketplaceCategoryFilter !== 'all') {
+    list = list.filter((template) => String(template.category || '').toLowerCase() === marketplaceCategoryFilter);
+  }
   if (query) {
     list = list.filter((template) => {
       const haystack = [
@@ -1793,6 +1859,7 @@ function renderMarketplaceGrid() {
   const errorEl = document.getElementById('marketplaceErrorState');
   if (!grid) return;
 
+  renderMarketplaceCategoryChips();
   if (errorEl) errorEl.hidden = true;
   const templates = getFilteredMarketplaceTemplates();
   grid.innerHTML = '';
@@ -1806,11 +1873,12 @@ function renderMarketplaceGrid() {
   templates.forEach((template) => {
     const card = document.createElement('div');
     card.className = 'section-card agent-card marketplace-card';
-    const isAiHedgeFundTemplate = template.runtime_type === 'ai_hedge_fund';
     const modeLabel = template.mode === 'runtime'
       ? 'Hosted runtime'
       : (template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction');
-    const cloneLabel = isAiHedgeFundTemplate ? 'Copy to My Agents' : 'Add to My Agents';
+    const cloneLabel = 'Add to My Agents';
+    const categoryLabel = SHELF_LABELS[String(template.category || '').toLowerCase()] || 'General';
+    const modelLabel = formatModelProviderLabel(template.model_name);
     const tags = (template.tags || [])
       .slice(0, 3)
       .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
@@ -1821,13 +1889,13 @@ function renderMarketplaceGrid() {
           ${agentRobotIcon()}
           <div class="agent-card-identity-text">
             <h3 class="agent-name">${escapeHtml(template.name)}</h3>
-            <p class="agent-card-submeta">${escapeHtml(template.model_name || 'local-model')} · ${escapeHtml(template.category || 'General')}</p>
+            <p class="agent-card-submeta">${escapeHtml(modelLabel)} · ${escapeHtml(categoryLabel)}</p>
           </div>
         </div>
         <span class="marketplace-mode-chip">${escapeHtml(modeLabel)}</span>
       </div>
       <div class="marketplace-card-body">
-        <p class="marketplace-card-description">${escapeHtml(template.description || 'Open agent template.')}</p>
+        <p class="marketplace-card-description">${escapeHtml(template.description || 'No description provided yet.')}</p>
         <div class="marketplace-card-meta">
           <span>By ${escapeHtml(template.author || 'Community')}</span>
           ${template.step_count ? `<span>${template.step_count} step${template.step_count === 1 ? '' : 's'}</span>` : ''}
@@ -6783,13 +6851,16 @@ function initNavigation() {
 
     document.getElementById('agentSearchInput')?.addEventListener('input', applyAgentFilters);
     document.getElementById('marketplaceSearchInput')?.addEventListener('input', renderMarketplaceGrid);
+    document.getElementById('marketplaceCategoryChips')?.addEventListener('click', (event) => {
+      const chipBtn = event.target.closest('[data-marketplace-category]');
+      if (!chipBtn) return;
+      setMarketplaceCategoryFilter(chipBtn.dataset.marketplaceCategory);
+    });
     document.getElementById('agentsCategories')?.addEventListener('click', (event) => {
       const communityLink = event.target.closest('[data-community-category]');
       if (communityLink) {
-        // C4 hook: pre-select the Community chip matching
-        // communityLink.dataset.communityCategory once C4 builds the chips.
-        // For now this only opens the Community page.
         event.preventDefault();
+        setMarketplaceCategoryFilter(communityLink.dataset.communityCategory);
         navigateToPage('community');
         return;
       }
