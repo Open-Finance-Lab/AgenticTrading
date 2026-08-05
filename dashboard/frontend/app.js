@@ -182,7 +182,7 @@ function showAppToast(message) {
 const MAX_AGENT_CASH_ALLOCATION = 3000;
 const DEFAULT_AGENT_CASH_ALLOCATION = 1000;
 /** Simulated cash ceiling for a single backtest run — unrelated to the paper sleeve above. */
-const MAX_BACKTEST_ALLOCATED_CAPITAL = 10000;
+const MAX_BACKTEST_ALLOCATED_CAPITAL = 3000;
 const DEFAULT_PORTFOLIO_EQUITY = 10000;
 const AGENT_CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
 
@@ -1890,6 +1890,21 @@ function renderMarketplaceGrid() {
       .slice(0, 3)
       .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
       .join('');
+    const repoLabel = (() => {
+      if (!template.repo_url) return '';
+      try {
+        const path = new URL(template.repo_url).pathname.replace(/^\/+|\/+$/g, '');
+        return path || template.author || 'GitHub';
+      } catch {
+        return template.author || 'GitHub';
+      }
+    })();
+    const authorMeta = template.repo_url
+      ? `<a class="marketplace-repo-btn" href="${escapeHtml(template.repo_url)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(repoLabel)} on GitHub">
+            <svg class="ui-icon marketplace-repo-icon" aria-hidden="true"><use href="#icon-github"></use></svg>
+            <span>${escapeHtml(repoLabel)}</span>
+          </a>`
+      : `<span>By ${escapeHtml(template.author || 'Community')}</span>`;
     card.innerHTML = `
       <div class="agent-card-top">
         <div class="agent-card-identity">
@@ -1904,7 +1919,7 @@ function renderMarketplaceGrid() {
       <div class="marketplace-card-body">
         <p class="marketplace-card-description">${escapeHtml(template.description || 'No description provided yet.')}</p>
         <div class="marketplace-card-meta">
-          <span>By ${escapeHtml(template.author || 'Community')}</span>
+          ${authorMeta}
           ${template.step_count ? `<span>${template.step_count} step${template.step_count === 1 ? '' : 's'}</span>` : ''}
         </div>
         ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}

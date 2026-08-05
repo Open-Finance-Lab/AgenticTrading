@@ -76,6 +76,32 @@ def test_marketplace_cta_is_unified_add_to_my_agents():
     assert "Copy to My Agents" not in _APP_JS
 
 
+def test_hosted_agents_shelve_by_market_not_by_runtime():
+    """The hosted AI Hedge Fund agent shares a shelf with the other U.S. stock
+    strategies rather than getting a runtime-flavoured section of its own.
+
+    #309 briefly split My Agents on `runtime_type === 'ai_hedge_fund'` into an
+    "Open Agents" section. The shelves are market-based instead: the template
+    carries `category: "us_stocks"` (marketplace.json), the clone stamps that
+    onto the agent, and AGENT_SHELVES routes it to U.S. Stock Trading. The
+    separation the runtime split was after still holds -- a hosted agent never
+    lands on Prompting LLMs -- but it comes from the category, so a hosted
+    A-share agent would shelve correctly too, which the runtime test could not.
+    """
+    assert "Foundation Agents" not in _APP_HTML
+    assert "Prompting LLMs" in _APP_HTML
+    assert "U.S. Stock Trading" in _APP_HTML
+    assert "Open Agents" not in _APP_HTML
+    assert 'id="agentsGridPromptingLlms"' in _APP_HTML
+    assert 'id="agentsGridUsStocks"' in _APP_HTML
+
+    # No runtime-keyed shelving survives in app.js: shelves match on `category`.
+    assert "isOpenAgent" not in _APP_JS
+    assert "agentsGridOpen" not in _APP_JS
+    assert "const AGENT_SHELVES = [" in _APP_JS
+    assert "a.category === 'us_stocks'" in _APP_JS
+
+
 def test_stored_credential_can_be_removed_from_the_editor():
     """The DELETE credential route needs a UI path.
 

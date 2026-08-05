@@ -486,11 +486,11 @@ def test_cash_allocation_cap_is_three_thousand(client):
     )
 
     assert MAX_AGENT_CASH_ALLOCATION == 3_000
-    assert MAX_BACKTEST_INITIAL_CAPITAL == 10_000
+    assert MAX_BACKTEST_INITIAL_CAPITAL == 3_000
     # Clamp behavior follows the backtest capital constant (not the sleeve max).
     assert resolve_initial_capital(3_000) == 3_000.0
-    assert resolve_initial_capital(10_000) == 10_000.0
-    assert resolve_initial_capital(50_000) == 10_000.0
+    assert resolve_initial_capital(10_000) == 3_000.0
+    assert resolve_initial_capital(50_000) == 3_000.0
     assert resolve_initial_capital(None) == 1_000.0
 
     browser_session = str(uuid.uuid4())
@@ -605,6 +605,10 @@ def test_marketplace_listing_and_clone(client):
     assert hedge_fund_card["runtime_type"] == "ai_hedge_fund"
     assert hedge_fund_card["mode"] == "runtime"
     assert hedge_fund_card["model_name"] == "nvidia/nemotron-3-nano-30b-a3b"
+    assert hedge_fund_card["repo_url"] == "https://github.com/virattt/ai-hedge-fund"
+    # The hosted template shelves by market, not by runtime: it is a U.S. stock
+    # strategy, so the card and (below) its clone both carry that category.
+    assert hedge_fund_card["category"] == "us_stocks"
 
     browser_session = str(uuid.uuid4())
     headers = {"X-Session-Id": browser_session}
@@ -646,6 +650,9 @@ def test_marketplace_listing_and_clone(client):
         ]
     }
     assert ai_agent["pipeline"] is None
+    # ...so it renders on My Agents' U.S. Stock Trading shelf, never alongside
+    # the prompt-and-model builtins on Prompting LLMs.
+    assert ai_agent["category"] == "us_stocks"
 
 
 def test_marketplace_catalog_shape():

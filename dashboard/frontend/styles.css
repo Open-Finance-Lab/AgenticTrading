@@ -9389,8 +9389,36 @@ body.agent-editor-open {
     display: flex;
     flex-wrap: wrap;
     gap: 10px 16px;
+    align-items: center;
     color: var(--text-secondary);
     font-size: 0.82rem;
+}
+
+.marketplace-repo-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px 4px 8px;
+    border-radius: 8px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    background: rgba(15, 23, 42, 0.85);
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.78rem;
+    font-weight: 600;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.marketplace-repo-btn:hover {
+    color: #e2e8f0;
+    border-color: rgba(226, 232, 240, 0.45);
+    background: rgba(30, 41, 59, 0.95);
+}
+
+.marketplace-repo-icon {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
 }
 
 .marketplace-tag-row {
