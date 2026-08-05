@@ -454,6 +454,7 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
         "live_trading_enabled",
         "runtime_type",
         "runtime_config",
+        "category",
     } <= columns
     # The pre-existing row was backfilled with the column defaults, not NULL.
     assert legacy["agent_type"] == "external"

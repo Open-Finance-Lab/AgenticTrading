@@ -63,7 +63,7 @@ class CreateAgentBody(BaseModel):
         ge=MIN_BACKTEST_INITIAL_CAPITAL,
         le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
-    category: Optional[str] = None
+    category: Optional[str] = Field(default=None, max_length=50)
 
 
 class PipelineStep(BaseModel):
@@ -96,7 +96,7 @@ class UpdateAgentBody(BaseModel):
         le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
     live_trading_enabled: Optional[bool] = None
-    category: Optional[str] = None
+    category: Optional[str] = Field(default=None, max_length=50)
 
     @field_validator("name", "model_name")
     @classmethod
