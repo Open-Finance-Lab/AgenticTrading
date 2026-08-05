@@ -52,7 +52,7 @@ def _run_node(script: str) -> str:
 def _harness(body: str) -> str:
     """Real functions lifted from app.js, with their few dependencies stubbed."""
     return f"""
-const MAX_BACKTEST_ALLOCATED_CAPITAL = 10000;
+const MAX_BACKTEST_ALLOCATED_CAPITAL = 3000;
 const DEFAULT_AGENT_CASH_ALLOCATION = 1000;
 function escapeHtml(s) {{ return String(s); }}
 function formatAgentCashAllocation(v) {{ return '$' + Number(v).toLocaleString(); }}
@@ -66,13 +66,13 @@ def test_card_shows_both_capitals():
     out = _run_node(
         _harness(
             "console.log(renderAgentAllocatedCapitalHero("
-            "{cash_allocation: 1000, backtest_allocation: 5000}));"
+            "{cash_allocation: 1000, backtest_allocation: 2500}));"
         )
     )
     assert "Paper Trading" in out
     assert "Backtesting" in out
     assert "$1,000" in out
-    assert "$5,000" in out
+    assert "$2,500" in out
 
 
 def test_card_backtest_capital_falls_back_to_the_sleeve():

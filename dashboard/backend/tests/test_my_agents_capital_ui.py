@@ -38,8 +38,8 @@ def test_capital_inputs_are_no_longer_in_the_editor_header():
 
 
 def test_capital_limits_are_stated_next_to_each_field():
-    assert "max $3,000" in _APP_HTML
-    assert "max $10,000" in _APP_HTML
+    assert _APP_HTML.count("max $3,000") >= 2
+    assert "max $10,000" not in _APP_HTML
 
 
 def test_editor_state_carries_backtest_allocation():

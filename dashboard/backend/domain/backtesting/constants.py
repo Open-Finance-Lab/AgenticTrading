@@ -18,7 +18,7 @@ Capital scale (product):
   backtests must not read or write this field.
 - Backtest / protocol simulation capital: floor ``MIN_BACKTEST_INITIAL_CAPITAL``
   ($1), default ``INITIAL_CAPITAL`` ($1,000), max
-  ``MAX_BACKTEST_INITIAL_CAPITAL`` ($10,000). Chosen per run via
+  ``MAX_BACKTEST_INITIAL_CAPITAL`` ($3,000). Chosen per run via
   ``config.initial_cash`` / ``--initial-capital``, resolved by
   ``resolve_initial_capital()`` below, which only ever looks at the value
   passed in for *that* run — it does not read the agent row. The per-agent
@@ -40,7 +40,7 @@ INITIAL_CAPITAL = 1000
 MIN_BACKTEST_INITIAL_CAPITAL = 1
 
 # Hard cap on simulation capital for a single backtest / protocol run.
-MAX_BACKTEST_INITIAL_CAPITAL = 10_000
+MAX_BACKTEST_INITIAL_CAPITAL = 3_000
 
 # Account portfolio equity ($10k). Real ledger budget for signed-in users.
 DEFAULT_PORTFOLIO_EQUITY = 10_000
