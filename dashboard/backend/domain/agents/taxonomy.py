@@ -14,15 +14,23 @@ alongside it: the ``Literal`` is what Pydantic validates against and what FastAP
 publishes into ``openapi.json``, so making it the single source keeps the runtime
 whitelist and the published contract from drifting apart.
 
-The ``Literal``'s *declaration order* is load-bearing too: it is the shelf order,
-mirroring ``AGENT_SHELVES`` in ``dashboard/frontend/app.js``. Reorder the members
-and the Community listing reorders with it (see :func:`category_sort_rank`).
+The ``Literal``'s *declaration order* is load-bearing too: it is the market
+order inside My Agents' Stocks shelf, mirroring ``MARKET_LABELS`` in
+``dashboard/frontend/app.js``. Reorder the members and the Community listing
+reorders with it (see :func:`category_sort_rank`).
+
+These are *markets*, not asset classes. My Agents shelves by what an agent
+trades (Stocks, Crypto, Futures) and only Stocks is live, so "crypto" and
+"futures" are deliberately absent here: those shelves are locked, inert rows in
+the frontend with nothing assignable to them. Adding a member would make them
+selectable in Configure and cloneable from Community while no bar source,
+``MarketProfile`` or engine support exists behind either.
 """
 from typing import Literal, Optional, Tuple, get_args
 
-AgentCategory = Literal["prompting_llms", "us_stocks", "cn_ashares"]
+AgentCategory = Literal["us_stocks", "cn_ashares"]
 
-#: Shelf display order. ``get_args`` preserves the ``Literal``'s declaration
+#: Market display order. ``get_args`` preserves the ``Literal``'s declaration
 #: order, so this is the one place the ordering is stated -- alphabetical slug
 #: order is *not* the intended order ("cn_ashares" would lead).
 AGENT_CATEGORY_ORDER: Tuple[str, ...] = get_args(AgentCategory)

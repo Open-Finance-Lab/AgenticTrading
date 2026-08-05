@@ -5,7 +5,7 @@
       "name": "Balanced Starter",
       "model_name": "anthropic/claude-haiku-4-5",
       "description": "A simple starter agent that diversifies across strong stocks, buys dips, and takes profits after run-ups.",
-      "category": "prompting_llms",
+      "category": "us_stocks",
       "tags": ["starter", "diversified"],
       "author": "Agentic Trading Lab",
       "pipeline": [
@@ -23,7 +23,7 @@
       "name": "Momentum Scout",
       "model_name": "anthropic/claude-haiku-4-5",
       "description": "Focus on recent price strength and volume. Favor leaders with positive momentum and trim laggards quickly.",
-      "category": "prompting_llms",
+      "category": "us_stocks",
       "tags": ["momentum", "trend"],
       "author": "Agentic Trading Lab",
       "pipeline": [

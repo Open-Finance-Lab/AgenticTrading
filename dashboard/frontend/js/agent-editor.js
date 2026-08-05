@@ -574,9 +574,8 @@
   // floor for the case where app.js failed to load -- agent-editor.js is loaded
   // first, so this must never be read at module-init time.
   const SHELF_LABELS_FALLBACK = {
-    prompting_llms: 'Prompting LLMs',
-    us_stocks: 'U.S. Stock Trading',
-    cn_ashares: 'China A-Share Trading',
+    us_stocks: 'U.S.',
+    cn_ashares: 'China A-Share',
   };
 
   function shelfLabels() {
