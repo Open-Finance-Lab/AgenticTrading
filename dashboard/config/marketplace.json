@@ -38,7 +38,7 @@
     },
     {
       "template_id": "pipeline-analyst",
-      "name": "Pipeline Analyst",
+      "name": "Three-Step Analyst",
       "model_name": "anthropic/claude-sonnet-4-6",
       "description": "A three-step strategy: gather market facts, convert them into signals, then produce executable orders.",
       "category": "us_stocks",

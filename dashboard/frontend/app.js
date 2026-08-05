@@ -1869,7 +1869,10 @@ function renderMarketplaceGrid() {
   grid.innerHTML = '';
 
   if (!templates.length) {
-    if (emptyEl) emptyEl.hidden = marketplaceTemplates.length > 0;
+    // Show the empty message once the catalog has actually loaded and the
+    // filter narrowed it to zero; keep it hidden before the first load so
+    // it doesn't flash while marketplaceTemplates is still empty.
+    if (emptyEl) emptyEl.hidden = marketplaceTemplates.length === 0;
     return;
   }
   if (emptyEl) emptyEl.hidden = true;
@@ -1878,8 +1881,8 @@ function renderMarketplaceGrid() {
     const card = document.createElement('div');
     card.className = 'section-card agent-card marketplace-card';
     const modeLabel = template.mode === 'runtime'
-      ? 'Hosted runtime'
-      : (template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction');
+      ? 'Hosted'
+      : (template.mode === 'pipeline' ? 'Multi-step strategy' : 'Simple instruction');
     const cloneLabel = 'Add to My Agents';
     const categoryLabel = SHELF_LABELS[String(template.category || '').toLowerCase()] || 'General';
     const modelLabel = formatModelProviderLabel(template.model_name);
@@ -2113,7 +2116,7 @@ function showAgentCredentials(apiKey, options = {}) {
   if (subtitleEl) {
     subtitleEl.textContent =
       options.subtitle ||
-      'Your agent is ready. Use the API key below to connect your trading client to Agentic Trading Lab.';
+      'Your agent is ready. Use the access key below to connect your own program to Agentic Trading Lab. (This is the API key in the SDK and docs.)';
   }
   if (apiInput) apiInput.value = apiKey;
   if (copyBtn) {

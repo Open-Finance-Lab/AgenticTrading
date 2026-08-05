@@ -675,6 +675,14 @@ def test_marketplace_catalog_shape():
             f"{template_id!r} has an unrecognized category: {category!r}"
         )
 
+    # "Pipeline" is banned product-copy vocabulary (glossary: pipeline ->
+    # "multi-step strategy"); the template_id stays "pipeline-analyst" since
+    # it's an API identifier baked into clone URLs, but the display name --
+    # the card's largest text -- must not carry the word.
+    names = {t["template_id"]: t["name"] for t in templates}
+    assert names["pipeline-analyst"] == "Three-Step Analyst"
+    assert "Pipeline Analyst" not in names.values()
+
 
 def test_ai_hedge_fund_analysts_are_editable_but_infrastructure_is_not(client):
     owner = str(uuid.uuid4())

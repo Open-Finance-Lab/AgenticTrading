@@ -761,7 +761,7 @@
         <div class="auth-modal-panel" role="dialog" aria-labelledby="createExternalAgentModalTitle">
             <button id="createExternalAgentModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
             <h2 id="createExternalAgentModalTitle" class="auth-modal-title">Register External Agent</h2>
-            <p class="auth-modal-subtitle">Each agent gets its own trading session. Backtest results appear automatically when you select the agent.</p>
+            <p class="auth-modal-subtitle">Each agent keeps its own trading history. Backtest results appear automatically when you select the agent.</p>
             <form id="createExternalAgentForm" class="auth-form">
                 <label class="auth-field">
                     <span>Agent name</span>
@@ -946,7 +946,7 @@
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                         </div>
                         <div id="agentsGridFooterExternal" class="agents-grid-footer" hidden></div>
-                        <p id="agentsEmptyExternal" class="control-helper" hidden>No external agents match your search.</p>
+                        <p id="agentsEmptyExternal" class="control-helper" hidden>No agents match your search.</p>
                     </section>
                 </div>
                 <p id="agentsErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't reach the server to load agents. Check your connection and try again.</p>
@@ -968,7 +968,7 @@
                     <span class="agent-editor-model-label">Model</span>
                     <select id="agentEditorModelSelect" class="agent-editor-model-select" aria-label="Agent model"></select>
                 </label>
-                <div id="agentEditorManagedModelField" class="agent-editor-managed-model-field" aria-label="Managed model provider" hidden>
+                <div id="agentEditorManagedModelField" class="agent-editor-managed-model-field" aria-label="Hosted AI model" hidden>
                     <span class="agent-editor-model-label">Hosted AI model</span>
                     <strong id="agentEditorManagedModelValue" class="agent-editor-managed-model-value">OpenRouter · nvidia/nemotron-3-nano-30b-a3b</strong>
                     <span class="agent-editor-managed-model-note">Managed for you by Agentic Trading Lab</span>
@@ -1449,7 +1449,7 @@
                 </div>
                 <div class="contest-actions">
                     <button id="competitionRulesBtn" class="agent-action-btn agent-action-secondary contest-action-btn" type="button">Rules</button>
-                    <a class="discord-nav-btn discord-nav-btn-sm" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join Discord</a>
+                    <a class="discord-nav-btn discord-nav-btn-sm" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                 </div>
             </div>
             <!-- Combined Header with Stats + Controls -->

@@ -190,14 +190,14 @@ def test_home_leaderboard_column_says_ai_model():
     assert "<span>AI Model</span>" in region
 
 
-def test_join_discord_expands_on_home_and_community_not_competition():
-    """The row scopes this to "app.html home + community surfaces"; the
-    Competition/Leaderboard page's own Discord link is a different surface
-    and must stay bare, per this row's own precedent (leave what's out of
-    scope alone rather than expand every occurrence blindly).
+def test_join_discord_expands_on_home_community_and_competition():
+    """Home and community were expanded to "our Discord community" first;
+    the final-review pass on PR C completed the same expansion on the
+    Competition/Leaderboard page's Discord link, so no bare "Join Discord"
+    survives anywhere in app.html.
     """
-    assert _HTML.count("Join our Discord community") == 2
-    assert ">Join Discord<" in _HTML  # the untouched Competition instance
+    assert _HTML.count("Join our Discord community") == 3
+    assert ">Join Discord<" not in _HTML
 
 
 def test_playground_home_preview_title_is_plain_language():
@@ -326,3 +326,43 @@ def test_decision_source_fallback_label_says_ai_not_llm():
 def test_algo_submit_status_says_ai_not_llm():
     assert "Submitting backtest — real market data + AI…" in _JS
     assert "Submitting real backtest (Alpaca + LLM)…" not in _JS
+
+
+# --- Final-review fix wave (2026-08-05) -------------------------------------
+
+
+def test_agent_credentials_fallback_subtitle_matches_app_html_copy():
+    """`showAgentCredentials()` sets `subtitleEl.textContent` unconditionally,
+    so its hardcoded no-override fallback string overrides whatever copy
+    app.html ships in `#agentCredentialsModalSubtitle` -- app.html's static
+    text (asserted in `test_access_key_label_replaces_api_key_in_agent_credentials_modal`)
+    is invisible on the external-create path, which calls
+    `showAgentCredentials(data.api_key)` with no options. This checks the
+    JS fallback directly, since an HTML-only guard is blind to a JS
+    textContent override.
+    """
+    assert (
+        "Your agent is ready. Use the access key below to connect your own "
+        "program to Agentic Trading Lab. (This is the API key in the SDK "
+        "and docs.)"
+    ) in _JS
+    assert "Use the API key below to connect your trading client" not in _JS
+
+
+def test_marketplace_mode_chip_labels_avoid_banned_words():
+    """"Runtime" and "pipeline" are banned product-copy vocabulary (glossary:
+    pipeline -> "multi-step strategy"); scoped to the mode-label branch in
+    `renderMarketplaceGrid` so this doesn't over-match an unrelated string
+    elsewhere in app.js.
+    """
+    body = fn_body("function renderMarketplaceGrid")
+    assert "'Hosted runtime'" not in body
+    assert "'Multi-step pipeline'" not in body
+    assert "'Hosted'" in body
+    assert "'Multi-step strategy'" in body
+    assert "'Simple instruction'" in body
+
+
+def test_each_agent_gets_its_own_trading_session_is_gone():
+    assert "Each agent gets its own trading session." not in _HTML
+    assert "Each agent keeps its own trading history." in _HTML
