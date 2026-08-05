@@ -17,6 +17,15 @@ _MARKETPLACE_PATH = CONFIG_DIR / "marketplace.json"
 
 
 def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
+    # NOTE: this "category" and an agent's "category" are two different
+    # vocabularies under one key name, on one route prefix. Templates carry
+    # display strings ("Foundation"/"Advanced"/"Hosted", defaulted to "General"
+    # below); agents carry ``taxonomy.AgentCategory`` slugs or NULL. A frontend
+    # mapping both through one label table will mis-render one of them. When the
+    # catalog is recategorized onto slugs, drop the "General" default too -- it
+    # would become a fourth out-of-vocabulary value that ``normalize_category``
+    # silently maps to None -- and re-check ``list_marketplace_templates``, which
+    # sorts on this field, so the rename reorders the listing.
     pipeline = raw.get("pipeline")
     step_count = len(pipeline) if isinstance(pipeline, list) else 0
     runtime_type = str(raw.get("runtime_type") or "pipeline")

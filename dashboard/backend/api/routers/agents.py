@@ -7,10 +7,17 @@ exception messages, ownership/auth behavior, and ``AgentService`` calls are
 unchanged; only the module location moved.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+)
 
 from dashboard.backend.domain.backtesting.constants import (
     DEFAULT_AGENT_CASH_ALLOCATION,
@@ -19,6 +26,7 @@ from dashboard.backend.domain.backtesting.constants import (
     MIN_BACKTEST_INITIAL_CAPITAL,
 )
 from dashboard.backend.domain.agents.repository import _UNSET
+from dashboard.backend.domain.agents.taxonomy import AgentCategory, coerce_category
 from dashboard.backend.domain.agents.credential_store import (
     FINANCIAL_DATASETS_CREDENTIAL,
     agent_credential_store,
@@ -45,6 +53,18 @@ from dashboard.backend.domain.portfolios.service import portfolio_service
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
 
+# The ``Literal`` (not a bare ``str`` plus a hand-rolled check) is what puts the
+# allowed slugs into ``openapi.json``, which is how the frontend PR probes that a
+# deploy carrying this vocabulary is actually live. ``BeforeValidator`` folds
+# case/whitespace and maps "" to None ahead of that check.
+CategoryField = Annotated[Optional[AgentCategory], BeforeValidator(coerce_category)]
+
+_CATEGORY_DESCRIPTION = (
+    'Shelf slug, or null/"" for unshelved. Case and surrounding whitespace are '
+    "folded; unknown values are rejected with 422."
+)
+
+
 class CreateAgentBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     model_name: str = Field(default="local-model", max_length=100)
@@ -62,6 +82,7 @@ class CreateAgentBody(BaseModel):
         ge=MIN_BACKTEST_INITIAL_CAPITAL,
         le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
+    category: CategoryField = Field(default=None, description=_CATEGORY_DESCRIPTION)
 
 
 class PipelineStep(BaseModel):
@@ -94,6 +115,7 @@ class UpdateAgentBody(BaseModel):
         le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
     live_trading_enabled: Optional[bool] = None
+    category: CategoryField = Field(default=None, description=_CATEGORY_DESCRIPTION)
 
     @field_validator("name", "model_name")
     @classmethod
@@ -171,6 +193,7 @@ def create_agent(
         runtime_config=runtime_config,
         cash_allocation=cash,
         backtest_allocation=body.backtest_allocation,
+        category=body.category,
     )
     if ctx["user_id"]:
         portfolio_service.get_or_create_portfolio(ctx["user_id"])
@@ -264,6 +287,7 @@ def list_builtin_agents():
                 "name": agent["name"],
                 "model_name": agent.get("model_name") or "local-model",
                 "description": agent.get("description"),
+                "category": agent.get("category"),
                 "run_count": agent.get("run_count", 0),
                 "latest_return": latest.get("total_return"),
                 "latest_sharpe": latest.get("sharpe_ratio"),
@@ -375,6 +399,7 @@ def update_agent(
     live_trading_provided = "live_trading_enabled" in fields_set
     runtime_type_provided = "runtime_type" in fields_set
     runtime_config_provided = "runtime_config" in fields_set
+    category_provided = "category" in fields_set
     if (
         body.name is None
         and body.model_name is None
@@ -385,8 +410,14 @@ def update_agent(
         and not live_trading_provided
         and not runtime_type_provided
         and not runtime_config_provided
+        and not category_provided
     ):
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    # ``category_provided`` (not ``body.category is not None``) is what separates
+    # "clear the shelf" from "leave it alone" -- ``{"category": null}`` and
+    # ``{"category": ""}`` both arrive here as None with the key in ``fields_set``.
+    category_arg = body.category if category_provided else _UNSET
 
     if pipeline_provided:
         pipeline_arg = (
@@ -439,6 +470,7 @@ def update_agent(
             cash_allocation=cash_allocation_arg,
             backtest_allocation=backtest_allocation_arg,
             live_trading_enabled=live_trading_arg,
+            category=category_arg,
         )
     except AgentNotFoundError:
         raise HTTPException(status_code=404, detail="Agent not found")

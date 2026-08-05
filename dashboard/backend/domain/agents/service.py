@@ -20,6 +20,7 @@ from dashboard.backend.domain.agents.repository import agent_store, _UNSET
 from dashboard.backend.domain.agents import auth_cache
 from dashboard.backend.domain.agents.credential_store import agent_credential_store
 from dashboard.backend.domain.agents.defaults import default_starter_pipeline
+from dashboard.backend.domain.agents.taxonomy import coerce_category, normalize_category
 from dashboard.backend.domain.agents.runtime import (
     DEFAULT_RUNTIME_TYPE,
     PIPELINE_RUNTIME_TYPE,
@@ -265,10 +266,17 @@ class AgentService:
         cash_allocation: Any = _UNSET,
         backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
+        category: Any = _UNSET,
     ) -> Dict[str, Any]:
         current = self.agents.get_agent(agent_id)
         if not current:
             raise AgentNotFoundError()
+        # Enforced here as well as in the route body so the column's invariant --
+        # a whitelisted slug or NULL -- holds by construction for every caller,
+        # not by the discipline of whoever writes the next one. The value is read
+        # back out on the unauthenticated /api/v1/agents/builtin listing.
+        if category is not _UNSET:
+            category = coerce_category(category)
         resolved_runtime_type = (
             normalize_runtime_type(runtime_type)
             if runtime_type is not _UNSET
@@ -301,6 +309,7 @@ class AgentService:
             cash_allocation=cash_allocation,
             backtest_allocation=backtest_allocation,
             live_trading_enabled=live_trading_enabled,
+            category=category,
         )
         if not agent:
             raise AgentNotFoundError()
@@ -327,6 +336,7 @@ class AgentService:
         cash_allocation: Optional[float] = None,
         backtest_allocation: Optional[float] = None,
         seed_default_pipeline: bool = True,
+        category: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Register an agent.
 
@@ -343,6 +353,7 @@ class AgentService:
 
         runtime_type = normalize_runtime_type(runtime_type)
         runtime_config = normalize_runtime_config(runtime_type, runtime_config or {})
+        category = coerce_category(category)  # see update_agent for why
         if cash_allocation is None:
             cash_allocation = float(DEFAULT_AGENT_CASH_ALLOCATION)
         agent = self.agents.create_agent(
@@ -356,6 +367,7 @@ class AgentService:
             runtime_config=runtime_config,
             cash_allocation=cash_allocation,
             backtest_allocation=backtest_allocation,
+            category=category,
         )
         if (
             seed_default_pipeline
@@ -407,6 +419,10 @@ class AgentService:
             seed_default_pipeline=(
                 runtime_type == PIPELINE_RUNTIME_TYPE and not has_own_pipeline
             ),
+            # Lenient on purpose: the live catalog still carries legacy values
+            # ("Foundation", "Advanced", "Hosted") until they're recategorized,
+            # and those must stamp None rather than reject the clone.
+            category=normalize_category(template.get("category")),
         )
         if has_own_pipeline:
             agent = self.agents.update_agent(agent["agent_id"], pipeline=pipeline) or agent
