@@ -266,14 +266,49 @@ def test_marketplace_category_chip_container_is_present_in_community_view():
 
 def test_community_link_hook_reads_the_dataset_category():
     """C3 left this handler only opening Community; the category it read off
-    the clicked link's dataset was unused. Comments already named the two
-    identifiers this test checks for (as a note-to-self for this task), so
+    the clicked link's dataset was unused. Comments already named the
+    identifier this test checks for (as a note-to-self for this task), so
     the assertion runs on the comment-stripped body -- otherwise it would
     pass against the leftover comment instead of real code.
     """
     body = _strip_js_comments(fn_body("function initNavigation()"))
     assert "communityLink.dataset.communityCategory" in body
-    assert "setMarketplaceCategoryFilter" in body
+
+
+def test_community_link_hook_routes_the_category_through_navigate_to_page():
+    """Fixed 2026-08-05 (review round 1): the hook originally called
+    setMarketplaceCategoryFilter directly, then navigateToPage('community')
+    with no options. That worked for the one visit it fired on, but left
+    marketplaceCategoryFilter sticky module state -- a later, unrelated
+    Community visit through the plain nav tab silently inherited whatever
+    category a previous empty-shelf link had set. navigateToPage is now the
+    one place that resets the filter on entry (see the next test), so the
+    category must ride the same call as an option rather than be set
+    beforehand and immediately overwritten.
+    """
+    body = _strip_js_comments(fn_body("function initNavigation()"))
+    assert (
+        "navigateToPage('community', { communityCategory: communityLink.dataset.communityCategory })"
+        in body
+    )
+
+
+def test_navigate_to_page_resets_chip_filter_on_plain_community_entry():
+    """A category set by one Community visit must not leak into a later,
+    unrelated visit made through the plain nav tab -- the most common entry
+    path. navigateToPage is the one choke point every Community entry
+    funnels through (it already redirects the retired Playground marketplace
+    subtab here), so the reset belongs there: 'all' unless an explicit
+    `communityCategory` option says otherwise. Signature passed to fn_body
+    stops at the opening paren, not `(page, options = {})` -- that default
+    value's own `{}` would otherwise be mistaken for the function body by
+    fn_body's brace matcher (its docstring calls out this exact pattern).
+    """
+    body = _strip_js_comments(fn_body("function navigateToPage("))
+    assert (
+        "marketplaceCategoryFilter = SHELF_LABELS[options.communityCategory] "
+        "? options.communityCategory : 'all';"
+    ) in body
 
 
 def test_community_page_carries_the_no_real_money_sentence_once():

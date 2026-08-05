@@ -1795,12 +1795,16 @@ function formatModelProviderLabel(modelName) {
   return match ? match.label : 'AI-powered';
 }
 
-/** Pre-select a Community category chip and re-render, without a route or
- * API change -- this is in-memory UI state, not navigation. Called both by
- * the chip row's own click handler and by C3's My Agents empty-shelf
- * "Community" links (which pass a shelf key from `data-community-category`
- * before navigating). An unrecognized category falls back to 'all' rather
- * than filtering to a chip that doesn't exist. */
+/** Select a Community category chip and re-render, without a route or API
+ * change -- this is in-memory UI state, not navigation. Used by the chip
+ * row's own click handler for in-page filtering while already on Community.
+ * (Pre-selecting a chip on *entry* to Community -- e.g. from C3's My Agents
+ * empty-shelf links -- goes through navigateToPage's `communityCategory`
+ * option instead, which is also the one place that resets the filter to
+ * 'all' on a plain Community nav-tab entry; calling this function directly
+ * from a pre-navigation hook would set the filter just before that reset
+ * overwrote it back to 'all'.) An unrecognized category falls back to 'all'
+ * rather than filtering to a chip that doesn't exist. */
 function setMarketplaceCategoryFilter(category) {
   marketplaceCategoryFilter = SHELF_LABELS[category] ? category : 'all';
   renderMarketplaceGrid();
@@ -6743,6 +6747,12 @@ function navigateToPage(page, options = {}) {
             showCompetitionPanel(competitionTab);
         } else if (page === 'community') {
             currentMode = 'community';
+            // Every entry to Community resets the chip filter to 'all' unless
+            // an explicit category rides in via options.communityCategory (the
+            // My Agents empty-shelf "Community" links) -- otherwise a category
+            // set on one visit would leak into the next, unrelated visit made
+            // through the plain nav tab, the most common entry path.
+            marketplaceCategoryFilter = SHELF_LABELS[options.communityCategory] ? options.communityCategory : 'all';
             if (communityView) communityView.style.display = 'block';
             loadMarketplace();
         } else if (page === 'account') {
@@ -6860,8 +6870,11 @@ function initNavigation() {
       const communityLink = event.target.closest('[data-community-category]');
       if (communityLink) {
         event.preventDefault();
-        setMarketplaceCategoryFilter(communityLink.dataset.communityCategory);
-        navigateToPage('community');
+        // Routed through navigateToPage's options rather than a separate
+        // setMarketplaceCategoryFilter call -- navigateToPage is the one
+        // place that resets the filter to 'all' on a plain Community entry,
+        // so the explicit category has to ride the same call to survive it.
+        navigateToPage('community', { communityCategory: communityLink.dataset.communityCategory });
         return;
       }
       const prevBtn = event.target.closest('[data-agent-grid-prev]');
