@@ -99,7 +99,7 @@ export function Hero() {
               <HeadlineWords words={HEADLINE_LINE_2} startDelay={line2Delay} />
             </span>
           </h1>
-          <p className="max-w-xl mx-auto lg:mx-0 mb-8 text-sm text-foreground/60">
+          <p className="max-w-xl mx-auto lg:mx-0 mb-8 text-sm text-foreground/75">
             Every test here uses simulated money. Real money is involved only if you explicitly
             connect a brokerage account and turn on live trading.
           </p>

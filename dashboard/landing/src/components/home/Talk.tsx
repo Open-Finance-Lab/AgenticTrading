@@ -21,7 +21,7 @@ export function Talk() {
               </li>
               <li className="flex items-start gap-3">
                 <Bot className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-                <span><span className="text-foreground font-medium">2.</span> Pick a model and how much simulated cash it gets</span>
+                <span><span className="text-foreground font-medium">2.</span> Pick an AI model and how much simulated cash it gets</span>
               </li>
               <li className="flex items-start gap-3">
                 <Hash className="w-4 h-4 text-primary mt-0.5 shrink-0" />

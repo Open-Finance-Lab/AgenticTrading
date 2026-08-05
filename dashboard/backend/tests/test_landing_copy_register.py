@@ -98,6 +98,10 @@ _BANNED_FRAGMENTS = (
     "just chat",
     "Talk to it on Discord",
     "412k in",
+    "Test AI trading agents",
+    "strategy prompt",
+    "Strategy prompt",
+    "Pick a model",
 )
 
 
@@ -111,6 +115,57 @@ def test_final_review_fix_wave_fragments_are_gone():
 
 def test_discord_first_mention_uses_the_community_phrase():
     assert "our Discord community" in _shipped_text()
+
+
+_META_DESCRIPTION = (
+    "Talk to agents. Test trading ideas. Try AI trading agents on real market "
+    "data — no code required."
+)
+
+
+def test_meta_description_reads_cleanly_in_all_three_tags():
+    """The previous description opened two consecutive sentences with "Test"
+    ("Test trading ideas. Test AI trading agents…") — and this is the page's most
+    externally visible copy (search snippets, og/twitter cards). Tag-scoped on
+    purpose: a raw ``count(...) == 3`` can be satisfied by the right string in
+    the wrong tags (shown by fault injection during review), so each of the
+    three description tags is located and compared individually."""
+    html = _index_html()
+    for pattern in (
+        r'<meta name="description" content="([^"]*)"',
+        r'<meta property="og:description" content="([^"]*)"',
+        r'<meta name="twitter:description" content="([^"]*)"',
+    ):
+        m = re.search(pattern, html)
+        assert m, f"missing description tag: {pattern}"
+        assert m.group(1) == _META_DESCRIPTION, f"{pattern} carries {m.group(1)!r}"
+
+
+def test_settings_label_uses_the_ai_model_glossary_term():
+    """The experiment-settings panel said bare "Model"; the plan's glossary maps
+    bare "model" -> "AI model" for every user-facing label. Asserting the compiled
+    ``label:"..."`` form is minifier-stable: esbuild never rewrites string
+    literals and leaves identifier-valid object keys unquoted."""
+    text = _shipped_text()
+    assert 'label:"AI model"' in text
+    assert 'label:"Model"' not in text
+
+
+def test_race_sample_cards_have_no_live_pulse():
+    """Race's Standings/Leaderboard cards carry "Illustrative example" tags, yet a
+    pulsing green "Live" badge sat beside both — animating exactly the claim the
+    label disclaims. The badge's ping dot was the landing's only use of Tailwind's
+    ``animate-ping``, so its absence from the shipped text means the badge (not
+    merely its caption) is gone. The surrounding prose may still say "live" —
+    live *market prices* are a real product property; the badge on sample data
+    was the contradiction. The positive assertions pin that the cards themselves
+    still ship AND that the bundle text was actually read: "Standings" and
+    "Leaderboard" live only in the JS bundle, so a broken entry-bundle reference
+    cannot turn the negative check vacuous (shown by fault injection during
+    review)."""
+    text = _shipped_text()
+    assert "Standings" in text and "Leaderboard" in text
+    assert "animate-ping" not in text
 
 
 def test_auth_error_gives_a_next_step():

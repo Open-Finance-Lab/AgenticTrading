@@ -39,18 +39,6 @@ const LINE_COLORS = {
   djia: "#64748b",
 } as const;
 
-function LiveBadge() {
-  return (
-    <span className="inline-flex items-center gap-1.5 text-xs font-mono text-positive bg-positive/10 px-2 py-1 rounded">
-      <span className="relative flex h-1.5 w-1.5">
-        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-positive opacity-60" />
-        <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-positive" />
-      </span>
-      Live
-    </span>
-  );
-}
-
 export function Race() {
   return (
     <section id="race" className="py-24 bg-muted/20 border-y border-border scroll-mt-40">
@@ -79,13 +67,10 @@ export function Race() {
 
           <div className="bg-card border border-card-border rounded-xl shadow-xl p-6">
             <div className="flex items-center justify-between mb-2 border-b border-border pb-4 gap-3">
-              <div className="flex items-center gap-3 min-w-0">
-                <h3 className="text-xl font-bold flex items-center gap-2 min-w-0">
-                  <Medal className="w-5 h-5 text-primary shrink-0" />
-                  Standings
-                </h3>
-                <LiveBadge />
-              </div>
+              <h3 className="text-xl font-bold flex items-center gap-2 min-w-0">
+                <Medal className="w-5 h-5 text-primary shrink-0" />
+                Standings
+              </h3>
               <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded shrink-0">Illustrative example</span>
             </div>
             <div className="space-y-2 mt-4">
@@ -118,10 +103,7 @@ export function Race() {
 
         <div className="bg-card border border-card-border rounded-xl shadow-xl p-6 md:p-8">
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-6">
-            <div className="flex items-center gap-3 min-w-0">
-              <h3 className="text-lg font-bold">Leaderboard</h3>
-              <LiveBadge />
-            </div>
+            <h3 className="text-lg font-bold">Leaderboard</h3>
             <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded w-fit shrink-0">Illustrative example</span>
           </div>
 

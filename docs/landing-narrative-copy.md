@@ -1,5 +1,14 @@
 # Landing narrative — copy + build checklist
 
+> **Status (2026-08):** this is the original design checklist for the
+> Talk → Test → Race narrative, kept for the rationale and the kill-list. The
+> shipped copy has since evolved past it (the Talk act now leads with
+> "describe your idea" — the Discord mock survives as its secondary visual —
+> and the 2026-08-04 audience-language pass rewrote the register throughout). For what the live
+> page actually says, the source of truth is `dashboard/landing/src` plus the
+> guards in `dashboard/backend/tests/test_landing_copy_register.py` — update
+> those, not this file, when copy changes.
+
 Story arc: **Talk (Discord) → Test (backtest) → Race (contest)**  
 Tone: short lines, one job per section. No feature dumps.
 
@@ -39,7 +48,7 @@ Scroll target `#landing-stats` is preserved as a hidden anchor inside Talk.
 | H2 | Test your trading idea |
 | Body (1 line) | Full agent run with fixed experiment settings + baselines. |
 | Figure | Equity: Alpha vs DJIA / S&P 500 / Buy & Hold |
-| Experiment settings | Initial capital · Time period (1 month) · Universe (DJIA 30) · Baselines · Model · Est. AI cost (dollar figure only, no raw token counts) — **no prompt field** |
+| Experiment settings | Initial capital · Time period (1 month) · Universe (DJIA 30) · Baselines · AI model · Est. AI cost (dollar figure only, no raw token counts) — **no prompt field** |
 | Metrics | Return · Sharpe · Max DD · vs Buy & Hold · trades / avg hold |
 | Log | Decision log with step, size, rationale |
 | Primary CTA | Race this agent ↓ |
@@ -50,7 +59,7 @@ Scroll target `#landing-stats` is preserved as a hidden anchor inside Talk.
 | Label | 03 — Race |
 | H2 | Race your agent in community contests |
 | Body (1 line) | Same window. Same rules. Ranked vs baselines. |
-| Rules (3 bullets max) | Fixed contest window · Shared market context · Published only if the model drove the run |
+| Rules (3 bullets max) | Fixed contest window · Shared market context · Published only if the AI model drove the run |
 | Board meta | Contest: {start} → {end} |
 | Primary CTA | View live leaderboard |
 | Secondary CTA | Enter via Discord |
