@@ -249,11 +249,17 @@ def test_account_description_is_plain_language():
 def test_home_mock_chat_gloss_matches_landing():
     """The row names "Paper Trading tab first mention," but the tab's own
     content (`#paperTradingView`) has no bare "paper trading" prose -- only
-    metric labels ("Portfolio Value", "Cash Available", ...). The real first
-    bare mention, and the one this row's "gloss identical to landing" phrase
-    points at, is the home page's mock chat demo: the same chat-bubble
-    sentence PR A1 already glossed on the landing page's Hero.tsx. Applying
-    it here mirrors that precedent rather than inventing a new location.
+    metric labels ("Portfolio Value", "Cash Available", ...). An earlier bare
+    mention exists in document order (the auth modal subtitle, "Optional --
+    backtest and paper trading work without an account."), but that's a
+    compact overlay shown only on user action, outside the page's normal
+    reading flow -- the term there is incidental to the sentence's point
+    ("works without an account"), and splicing in the long landing gloss
+    would bloat a small dialog. The one this row's "gloss identical to
+    landing" phrase actually points at is the home page's mock chat demo:
+    the same chat-bubble sentence PR A1 already glossed on the landing
+    page's Hero.tsx. Applying it here mirrors that precedent rather than
+    inventing a new location.
     """
     start = _HTML.index('id="homePlaygroundChat"')
     end = _HTML.index("</section>", start)
@@ -268,3 +274,55 @@ def test_home_mock_chat_gloss_matches_landing():
 def test_builtin_agent_placeholder_asks_what_makes_it_different():
     assert 'placeholder="What makes this agent different?"' in _HTML
     assert "What is this agent's edge?" not in _HTML
+
+
+# --- Fix round 1 (2026-08-05): six visible "LLM" strings left in app.js -----
+#
+# Review found six more user-visible strings using developer-register "LLM"
+# that the first pass missed (they don't contain any of the ★ row phrases, so
+# the original sweep's targeted greps didn't surface them). Curated exact
+# strings, not a blanket "LLM absent from app.js" assertion -- app.js
+# legitimately keeps "Prompting LLMs" (the glossary's one named exception,
+# read off `AGENT_SHELVES`) and internal identifiers like
+# `LLM_DECISION_SOURCE`/`allowsLLM`, and a blanket check would false-positive
+# on both.
+
+
+def test_token_cost_label_says_ai_not_llm():
+    assert "est. AI cost" in _JS
+    assert "est. LLM cost" not in _JS
+
+
+def test_vnpy_readonly_label_says_no_ai_not_no_llm_calls():
+    assert "Rule-based — simulated practice data, no AI involved" in _JS
+    assert "vn.py simulation makes no LLM calls" not in _JS
+
+
+def test_model_select_hint_is_glossary_compliant():
+    assert (
+        "Uses this agent's AI model by default. Choose Rule-based for "
+        "repeatable decisions without AI."
+    ) in _JS
+    assert "deterministic decisions without LLM calls" not in _JS
+
+
+def test_provider_not_configured_error_says_ai_not_llm():
+    assert (
+        "The selected AI provider is not configured. Configure the "
+        "provider or choose Rule-based."
+    ) in _JS
+    assert "The selected LLM provider is not configured." not in _JS
+
+
+def test_decision_source_fallback_label_says_ai_not_llm():
+    """Rendered directly under the "Decision method" label (row 23's
+    rename) -- the old fallback value would have contradicted that rename
+    in the same panel.
+    """
+    assert "'AI / Rule-based'" in _JS
+    assert "'LLM / Rule-based'" not in _JS
+
+
+def test_algo_submit_status_says_ai_not_llm():
+    assert "Submitting backtest — real market data + AI…" in _JS
+    assert "Submitting real backtest (Alpaca + LLM)…" not in _JS

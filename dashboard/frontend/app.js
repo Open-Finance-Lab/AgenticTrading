@@ -1442,7 +1442,7 @@ function renderAgentTokenCost(agent) {
     Number(agent.total_input_tokens || 0) + Number(agent.total_output_tokens || 0);
   if (!totalTokens) return '';
   const cost = formatUsd(agent.total_est_cost_usd);
-  const costLabel = cost ? `${cost} est. LLM cost` : '';
+  const costLabel = cost ? `${cost} est. AI cost` : '';
   return `<span title="Estimated from market context served and decisions returned">${formatTokenCount(totalTokens)} tokens${costLabel ? ` · ${costLabel}` : ''}</span>`;
 }
 
@@ -1546,7 +1546,7 @@ function syncBacktestModelFieldMode() {
   readonly.textContent = (runBacktestModalAgent?.runtime_type || 'pipeline') !== 'pipeline'
     ? 'AI Hedge Fund — hosted runtime'
     : (source === 'vnpy_simulation'
-      ? 'Rule-based — vn.py simulation makes no LLM calls'
+      ? 'Rule-based — simulated practice data, no AI involved'
       : formatAgentModelLabel(runBacktestModalAgent?.model_name));
 }
 
@@ -4618,7 +4618,7 @@ function syncIFindModelControl({ resetDecisionSource = false } = {}) {
     modelSelect.setAttribute('aria-disabled', String(!allowsLLM));
     if (modelSelectHint) {
         modelSelectHint.textContent = allowsLLM
-            ? "Uses this agent's model by default. Choose Rule-based for deterministic decisions without LLM calls."
+            ? "Uses this agent's AI model by default. Choose Rule-based for repeatable decisions without AI."
             : 'This universe supports rule-based decisions only.';
     }
 }
@@ -4924,7 +4924,7 @@ function formatBacktestError(error, dataSource = null) {
     const lower = raw.toLowerCase();
     if (status === 403) return 'iFinD A-share access is disabled (403). Ask the server operator to enable it.';
     if (lower.includes('llm provider client is unavailable') || lower.includes('llm client is unavailable')) {
-        return 'The selected LLM provider is not configured. Configure the provider or choose Rule-based.';
+        return 'The selected AI provider is not configured. Configure the provider or choose Rule-based.';
     }
     if (status === 503) return 'iFinD A-share access is not configured (503). Ask the server operator to finish API setup.';
     if (status === 429 || lower.includes('429')) return 'iFinD is rate limited (429). Wait briefly, then run again.';
@@ -5859,7 +5859,7 @@ function renderBacktestRunConfig(
         ? formatAgentModelLabel(model)
         : (decisionSource === RULE_BASED_DECISION_SOURCE
             ? 'Rule-based'
-            : (decisionSource || 'LLM / Rule-based'));
+            : (decisionSource || 'AI / Rule-based'));
     const marketData = cfg?.marketDataLabel
         || (dataSource === IFIND_ASHARE_SOURCE
             ? 'iFinD A-Share'
@@ -8089,7 +8089,7 @@ async function executeMyTradingAlgo() {
     if (statusEl) {
         statusEl.hidden = false;
         statusEl.className = 'algo-execute-status';
-        statusEl.textContent = 'Submitting real backtest (Alpaca + LLM)…';
+        statusEl.textContent = 'Submitting backtest — real market data + AI…';
     }
 
     try {
