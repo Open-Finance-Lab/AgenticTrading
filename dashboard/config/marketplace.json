@@ -4,8 +4,8 @@
       "template_id": "balanced-starter",
       "name": "Balanced Starter",
       "model_name": "anthropic/claude-haiku-4-5",
-      "description": "A simple foundation agent that diversifies across strong stocks, buys dips, and takes profits after run-ups.",
-      "category": "Foundation",
+      "description": "A simple starter agent that diversifies across strong stocks, buys dips, and takes profits after run-ups.",
+      "category": "prompting_llms",
       "tags": ["starter", "diversified"],
       "author": "Agentic Trading Lab",
       "pipeline": [
@@ -23,7 +23,7 @@
       "name": "Momentum Scout",
       "model_name": "anthropic/claude-haiku-4-5",
       "description": "Focus on recent price strength and volume. Favor leaders with positive momentum and trim laggards quickly.",
-      "category": "Foundation",
+      "category": "prompting_llms",
       "tags": ["momentum", "trend"],
       "author": "Agentic Trading Lab",
       "pipeline": [
@@ -40,9 +40,9 @@
       "template_id": "pipeline-analyst",
       "name": "Pipeline Analyst",
       "model_name": "anthropic/claude-sonnet-4-6",
-      "description": "A three-step pipeline: gather market facts, convert them into signals, then produce executable orders.",
-      "category": "Advanced",
-      "tags": ["pipeline", "multi-step"],
+      "description": "A three-step strategy: gather market facts, convert them into signals, then produce executable orders.",
+      "category": "us_stocks",
+      "tags": ["multi-step strategy", "official template"],
       "author": "Agentic Trading Lab",
       "pipeline": [
         {
@@ -72,9 +72,9 @@
       "template_id": "ai-hedge-fund",
       "name": "AI Hedge Fund",
       "model_name": "nvidia/nemotron-3-nano-30b-a3b",
-      "description": "A hosted multi-analyst investment committee powered by virattt/ai-hedge-fund and executed through Agentic Trading Lab's long-only backtest engine.",
-      "category": "Hosted",
-      "tags": ["multi-agent", "fundamentals", "first-party"],
+      "description": "A hosted panel of AI analysts that weigh in on every trade, run through Agentic Trading Lab's long-only backtest engine. Based on the open-source AI Hedge Fund project by virattt.",
+      "category": "us_stocks",
+      "tags": ["analyst team", "fundamentals", "official template"],
       "author": "virattt / Agentic Trading Lab",
       "runtime_type": "ai_hedge_fund",
       "runtime_config": {
@@ -85,6 +85,60 @@
           "valuation_analyst"
         ]
       }
+    },
+    {
+      "template_id": "blue-chip-steady",
+      "name": "Blue-Chip Steady",
+      "model_name": "anthropic/claude-haiku-4-5",
+      "description": "Buy and hold a handful of the strongest Dow companies, selling only when a position deteriorates badly. Mirrors the buy-and-hold benchmark on our leaderboard.",
+      "category": "us_stocks",
+      "tags": ["buy and hold", "blue chips"],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_blue_chip_steady",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Buy and hold a handful of the strongest Dow companies. Sell only if a company's position deteriorates badly. Do not chase short-term moves.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "even-split-dow",
+      "name": "Even-Split Dow",
+      "model_name": "anthropic/claude-haiku-4-5",
+      "description": "Spread the money evenly across all available Dow stocks and keep the split even. Mirrors the equal-weight benchmark on our leaderboard.",
+      "category": "us_stocks",
+      "tags": ["equal weight", "diversified"],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_even_split_dow",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Spread the money evenly across all available Dow stocks and keep the split even, rebalancing when any position drifts far from its equal share.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "ashare-steady-t1",
+      "name": "A-Share Steady (T+1)",
+      "model_name": "anthropic/claude-haiku-4-5",
+      "description": "A patient strategy for Chinese A-shares, built for that market's rule that shares bought today cannot be sold until the next trading day.",
+      "category": "cn_ashares",
+      "tags": ["a-shares", "patient"],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_ashare_steady",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Trade the available Chinese A-share stocks patiently. Because shares bought today cannot be sold until the next trading day, avoid quick in-and-out trades; build positions you are willing to hold overnight.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
     }
   ]
 }

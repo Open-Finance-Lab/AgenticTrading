@@ -648,6 +648,34 @@ def test_marketplace_listing_and_clone(client):
     assert ai_agent["pipeline"] is None
 
 
+def test_marketplace_catalog_shape():
+    """The live catalog must be well-formed: unique ids, valid categories, 7 templates.
+
+    Guards the Task C1 recategorization of marketplace.json and its three new
+    seed templates -- a malformed edit here would silently corrupt what ships
+    in the Community catalog.
+    """
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+    from dashboard.backend.domain.agents.taxonomy import AGENT_CATEGORIES
+
+    marketplace_mod.reload_marketplace_catalog()
+    templates = marketplace_mod.list_marketplace_templates()
+    assert len(templates) == 7
+
+    template_ids = [t["template_id"] for t in templates]
+    assert len(template_ids) == len(set(template_ids)), (
+        "duplicate template_id in marketplace.json"
+    )
+
+    for template_id in template_ids:
+        raw = marketplace_mod.get_marketplace_template(template_id)
+        assert raw is not None
+        category = raw.get("category")
+        assert category in AGENT_CATEGORIES or category is None, (
+            f"{template_id!r} has an unrecognized category: {category!r}"
+        )
+
+
 def test_ai_hedge_fund_analysts_are_editable_but_infrastructure_is_not(client):
     owner = str(uuid.uuid4())
     headers = {"X-Session-Id": owner}
@@ -909,26 +937,26 @@ def test_clone_stamps_normalized_category(client, monkeypatch):
     assert cloned.json()["agent"]["category"] == "us_stocks"
 
 
-def test_clone_legacy_category_stamps_none(client):
-    """Live catalog entries still carry legacy category strings (e.g. "Foundation")
-    until PR C recategorizes marketplace.json; those must stamp None, not 422.
-
-    NOTE: once PR C's Task C1 lands, repoint this at a monkeypatched legacy
-    fixture (the live catalog will no longer carry legacy values by then).
+def test_clone_legacy_category_stamps_none(client, monkeypatch):
+    """A template carrying a legacy (pre-taxonomy) category string stamps
+    None, not 422 -- covers agents cloned before the category taxonomy shipped.
     """
     import dashboard.backend.domain.agents.marketplace as marketplace_mod
 
-    marketplace_mod.reload_marketplace_catalog()
-    template = marketplace_mod.get_marketplace_template("momentum-scout")
-    assert template is not None, "fixture assumption: momentum-scout must exist in marketplace.json"
-    assert template.get("category") == "Foundation", (
-        "fixture assumption: momentum-scout's live category is still the legacy "
-        "'Foundation' string -- if this changed, PR C already recategorized the "
-        "catalog and this test should switch to a monkeypatched legacy fixture"
+    fake_template = {
+        "template_id": "legacy-template",
+        "name": "Legacy Template",
+        "model_name": "local-model",
+        "description": "A template with a legacy category string.",
+        "category": "Foundation",
+    }
+    monkeypatch.setattr(
+        marketplace_mod,
+        "get_marketplace_template",
+        lambda template_id: fake_template if template_id == "legacy-template" else None,
     )
-
     cloned = client.post(
-        "/api/v1/agents/marketplace/momentum-scout/clone",
+        "/api/v1/agents/marketplace/legacy-template/clone",
         json={},
         headers={"X-Session-Id": str(uuid.uuid4())},
     )
