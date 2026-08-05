@@ -180,5 +180,5 @@ def test_slow_boot_notice_is_wired():
 
 def test_cache_busters_bumped():
     # v=61: bumped when the HttpOnly-cookie auth migration (#284) changed app.js
-    assert "app.js?v=63" in APP_HTML
-    assert "styles.css?v=79" in APP_HTML
+    assert "app.js?v=64" in APP_HTML
+    assert "styles.css?v=80" in APP_HTML
