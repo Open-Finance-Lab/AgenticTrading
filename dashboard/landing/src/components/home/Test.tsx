@@ -127,8 +127,8 @@ const SETTINGS: { label: string; value: string }[] = [
   { label: "Time period", value: `${STORY_SPECS.timePeriodLabel} · ${STORY_SPECS.timePeriod}` },
   { label: "Universe", value: STORY_SPECS.universe },
   { label: "Baselines", value: STORY_SPECS.baselines.join(" · ") },
-  { label: "Model", value: STORY_SPECS.model },
-  { label: "Est. token cost", value: `${STORY_SPECS.estTokenCost} · ${STORY_SPECS.estTokens}` },
+  { label: "AI model", value: STORY_SPECS.model },
+  { label: "Est. AI cost", value: STORY_SPECS.estTokenCost },
 ];
 
 function money(v: number) {
