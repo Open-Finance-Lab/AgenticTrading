@@ -85,8 +85,13 @@ def test_coerce_rejects_non_strings():
 
 
 def test_coerce_error_does_not_echo_an_unbounded_value():
-    """The rejected value lands in a 422 body and the request log. A caller can
-    post a megabyte here; only a bounded prefix may be reflected."""
+    """This module's own error text stays bounded, so the log line does.
+
+    Scope note: the 422 *body* is still unbounded, because Pydantic attaches the
+    raw input under ``detail[].input`` for every validation error app-wide (same
+    for `description`, and for /api/auth/login). Bounding that is a change to the
+    RequestValidationError handler and does not belong to this field.
+    """
     with pytest.raises(ValueError) as excinfo:
         coerce_category("z" * 100_000)
     assert len(str(excinfo.value)) < 200

@@ -20,9 +20,11 @@ AgentCategory = Literal["prompting_llms", "us_stocks", "cn_ashares"]
 
 AGENT_CATEGORIES = frozenset(get_args(AgentCategory))
 
-# Bounds the value echoed back in the 422 detail. A caller can post a megabyte
-# here; reflecting it verbatim would put that megabyte in the error body and the
-# request log.
+# Bounds the value this module echoes into its own error text, which is what
+# reaches the log. It does NOT bound the whole 422 body: Pydantic attaches the
+# raw input to every validation error under ``detail[].input``, so a caller that
+# posts a megabyte still gets a megabyte back. That is app-wide behaviour of the
+# default RequestValidationError handler, not specific to this field.
 _MAX_ECHO_LENGTH = 50
 
 
