@@ -139,12 +139,11 @@ def test_scripts_are_deferred():
 
 def test_agents_grid_ships_loading_skeleton():
     # Pre-JS, My Agents must show placeholder cards instead of a blank panel,
-    # in every shelf (My Agents shelved out of the old builtin/external split
-    # into four sections: prompting_llms, us_stocks, cn_ashares, external).
+    # in every shelf that renders agents. Only two do: Stocks (the one live
+    # asset class) and External. The Crypto/Futures rows are locked and have no
+    # grid at all, so there is nothing to skeleton there.
     grid_ids = (
-        "agentsGridPromptingLlms",
-        "agentsGridUsStocks",
-        "agentsGridCnAshares",
+        "agentsGridStocks",
         "agentsGridExternal",
     )
     skeletons = [
@@ -180,5 +179,5 @@ def test_slow_boot_notice_is_wired():
 
 def test_cache_busters_bumped():
     # Floor advances whenever app.js/styles.css change and their ?v= must ship.
-    assert "app.js?v=70" in APP_HTML
-    assert "styles.css?v=82" in APP_HTML
+    assert "app.js?v=71" in APP_HTML
+    assert "styles.css?v=83" in APP_HTML

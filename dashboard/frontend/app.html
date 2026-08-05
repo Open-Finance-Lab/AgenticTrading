@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=82">
+    <link rel="stylesheet" href="styles.css?v=83">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -897,12 +897,21 @@
                     </div>
                 </div>
                 <div id="agentsCategories">
-                    <section class="agents-category" data-category="prompting_llms">
+                    <section class="agents-category" data-category="stocks">
                         <div class="agents-category-head">
-                            <h3 class="agents-category-title">Prompting LLMs</h3>
-                            <p class="agents-category-sub">Prompt state-of-the-art LLMs to backtest on real market data.</p>
+                            <div class="agents-category-heading">
+                                <span class="agents-category-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+                                </span>
+                                <h3 class="agents-category-title">Stocks</h3>
+                                <span id="agentsCountStocks" class="agents-category-count" hidden></span>
+                            </div>
+                            <p class="agents-category-sub">Trade U.S. blue-chip and Chinese A-share stocks, tested hour by hour on real market data.</p>
+                            <!-- Filled by renderAgentMarketChips(); the chips ride
+                                 #agentsCategories' delegated click handler. -->
+                            <div id="agentsMarketChips" class="marketplace-category-chips agents-market-chips" role="group" aria-label="Filter by market"></div>
                         </div>
-                        <div id="agentsGridPromptingLlms" class="agents-grid">
+                        <div id="agentsGridStocks" class="agents-grid">
                             <!-- Loading skeletons: visible pre-JS and while the first
                                  agents fetch runs. No removal code needed — every render
                                  path overwrites this grid's innerHTML (pinned by
@@ -911,35 +920,49 @@
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                         </div>
-                        <div id="agentsGridFooterPromptingLlms" class="agents-grid-footer" hidden></div>
-                        <p id="agentsEmptyPromptingLlms" class="control-helper" hidden>You don't have any agents yet. Create one and test your first trading idea.</p>
+                        <div id="agentsGridFooterStocks" class="agents-grid-footer" hidden></div>
+                        <p id="agentsEmptyStocks" class="control-helper" hidden>You don't have any agents yet. Create one and test your first trading idea.</p>
                     </section>
-                    <section class="agents-category" data-category="us_stocks">
+                    <!-- Locked shelves. Crypto is a display-only price ticker
+                         (quotes.py, never wired to the engine) and futures exist
+                         nowhere in the repo, so these rows are inert on purpose:
+                         no grid, no chips, no focus stop, nothing clickable. They
+                         must read as "not built yet", never as "built and broken".
+                         Adding a category slug for either would make them
+                         selectable in Configure and cloneable from Community. -->
+                    <section class="agents-category agents-category--locked" data-category="crypto" aria-disabled="true">
                         <div class="agents-category-head">
-                            <h3 class="agents-category-title">U.S. Stock Trading</h3>
-                            <p class="agents-category-sub">Ready-made strategies for U.S. blue-chip stocks, tested hour by hour on real market data.</p>
+                            <div class="agents-category-heading">
+                                <span class="agents-category-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                                </span>
+                                <h3 class="agents-category-title">Crypto</h3>
+                                <span class="agents-category-tag">Not yet available</span>
+                            </div>
+                            <p class="agents-category-sub">Round-the-clock crypto backtesting isn't built yet. Nothing here can be run.</p>
                         </div>
-                        <div id="agentsGridUsStocks" class="agents-grid">
-                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
-                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
-                        </div>
-                        <div id="agentsGridFooterUsStocks" class="agents-grid-footer" hidden></div>
-                        <p id="agentsEmptyUsStocks" class="control-helper" hidden>Nothing here yet. Add a ready-made U.S. stock strategy from <a href="#" class="agents-empty-community-link" data-community-category="us_stocks">Community</a>.</p>
                     </section>
-                    <section class="agents-category" data-category="cn_ashares">
+                    <section class="agents-category agents-category--locked" data-category="futures" aria-disabled="true">
                         <div class="agents-category-head">
-                            <h3 class="agents-category-title">China A-Share Trading</h3>
-                            <p class="agents-category-sub">Strategies for Chinese A-share stocks, following that market's own next-day (T+1) trading rules.</p>
+                            <div class="agents-category-heading">
+                                <span class="agents-category-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                                </span>
+                                <h3 class="agents-category-title">Futures</h3>
+                                <span class="agents-category-tag">Not yet available</span>
+                            </div>
+                            <p class="agents-category-sub">Futures contracts aren't built yet. Nothing here can be run.</p>
                         </div>
-                        <div id="agentsGridCnAshares" class="agents-grid">
-                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
-                        </div>
-                        <div id="agentsGridFooterCnAshares" class="agents-grid-footer" hidden></div>
-                        <p id="agentsEmptyCnAshares" class="control-helper" hidden>Nothing here yet. Add an A-share strategy from <a href="#" class="agents-empty-community-link" data-community-category="cn_ashares">Community</a>.</p>
                     </section>
                     <section class="agents-category" data-category="external">
                         <div class="agents-category-head">
-                            <h3 class="agents-category-title">For Developers: Connected Agents</h3>
+                            <div class="agents-category-heading">
+                                <span class="agents-category-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m16 18 6-6-6-6"/><path d="m8 6-6 6 6 6"/></svg>
+                                </span>
+                                <h3 class="agents-category-title">For Developers: Connected Agents</h3>
+                                <span id="agentsCountExternal" class="agents-category-count" hidden></span>
+                            </div>
                             <p class="agents-category-sub">Run your own trading program against our backtests. Requires an access key.</p>
                         </div>
                         <div id="agentsGridExternal" class="agents-grid">
@@ -974,8 +997,8 @@
                     <span class="agent-editor-managed-model-note">Managed for you by Agentic Trading Lab</span>
                 </div>
                 <label id="agentEditorCategoryField" class="agent-editor-model-field" for="agentEditorCategorySelect">
-                    <span class="agent-editor-model-label">Section</span>
-                    <select id="agentEditorCategorySelect" class="agent-editor-model-select" aria-label="Which section of My Agents this agent appears in"></select>
+                    <span class="agent-editor-model-label">Market</span>
+                    <select id="agentEditorCategorySelect" class="agent-editor-model-select" aria-label="Which market this agent trades"></select>
                 </label>
                 <textarea id="agentEditorDescription" class="agent-editor-description" rows="2" maxlength="280" placeholder="Optional description for this agent…" aria-label="Agent description"></textarea>
                 <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
@@ -1704,8 +1727,8 @@
     <script src="market-events/MarketEventCard.js" defer></script>
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
-    <script src="js/agent-editor.js?v=25" defer></script>
-    <script src="app.js?v=70" defer></script>
+    <script src="js/agent-editor.js?v=26" defer></script>
+    <script src="app.js?v=71" defer></script>
     <script src="js/leaderboard.js?v=16" defer></script>
     <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

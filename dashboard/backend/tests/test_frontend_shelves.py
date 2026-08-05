@@ -30,18 +30,10 @@ def _strip_html_comments(html: str) -> str:
 
 _HTML = _strip_html_comments(APP_HTML)
 
-_HEADERS_AND_SUBTITLES = [
+_LIVE_SHELVES = [
     (
-        "Prompting LLMs",
-        "Prompt state-of-the-art LLMs to backtest on real market data.",
-    ),
-    (
-        "U.S. Stock Trading",
-        "Ready-made strategies for U.S. blue-chip stocks, tested hour by hour on real market data.",
-    ),
-    (
-        "China A-Share Trading",
-        "Strategies for Chinese A-share stocks, following that market's own next-day (T+1) trading rules.",
+        "Stocks",
+        "Trade U.S. blue-chip and Chinese A-share stocks, tested hour by hour on real market data.",
     ),
     (
         "For Developers: Connected Agents",
@@ -49,26 +41,48 @@ _HEADERS_AND_SUBTITLES = [
     ),
 ]
 
+_LOCKED_SHELVES = [
+    (
+        "crypto",
+        "Crypto",
+        "Round-the-clock crypto backtesting isn't built yet. Nothing here can be run.",
+    ),
+    (
+        "futures",
+        "Futures",
+        "Futures contracts aren't built yet. Nothing here can be run.",
+    ),
+]
+
+_RETIRED_SECTION_HEADERS = (
+    "Prompting LLMs",
+    "U.S. Stock Trading",
+    "China A-Share Trading",
+)
+
 _CANONICAL_NO_REAL_MONEY_SENTENCE = (
     "Every test here uses simulated money. Real money is involved only if "
     "you explicitly connect a brokerage account and turn on live trading."
 )
 
-# Shelf id suffix -> the backend category slug it corresponds to. The
-# external bucket isn't in AGENT_CATEGORIES (it's a separate builtin/external
-# axis, not a trading-domain category) but rides the same id convention.
-_SHELF_SUFFIX_TO_CATEGORY_SLUG = {
-    "PromptingLlms": "prompting_llms",
-    "UsStocks": "us_stocks",
-    "CnAshares": "cn_ashares",
-    "External": "external",
-}
+# Live shelf id suffix -> the AGENT_SHELVES key it corresponds to. Only these
+# two are addressed from JS; the locked rows have no ids at all.
+_SHELF_SUFFIX_TO_KEY = {"Stocks": "stocks", "External": "external"}
 
 
-def test_all_four_shelf_headers_and_subtitles_are_present():
-    for header, subtitle in _HEADERS_AND_SUBTITLES:
+def test_live_shelf_headers_and_subtitles_are_present():
+    for header, subtitle in _LIVE_SHELVES:
         assert header in _HTML, f"missing shelf header: {header!r}"
         assert subtitle in _HTML, f"missing shelf subtitle: {subtitle!r}"
+
+
+def test_geographic_section_headers_are_retired():
+    """The taxonomy is asset class now. These three named the old axes -- two
+    geographic, one about how the agent decides -- and must not survive as
+    section headers anywhere on the page.
+    """
+    for header in _RETIRED_SECTION_HEADERS:
+        assert f">{header}</h3>" not in _HTML, header
 
 
 def test_foundation_agents_heading_is_gone():
@@ -83,30 +97,61 @@ def test_canonical_no_real_money_sentence_is_present_verbatim():
     assert _CANONICAL_NO_REAL_MONEY_SENTENCE in _HTML
 
 
-def test_four_agents_category_sections_with_distinct_shelf_ids():
-    """Each shelf gets its own grid/empty-state/footer id so C3's render loop
-    can address them uniformly: `agentsGrid<Shelf>` / `agentsGridFooter<Shelf>`
-    / `agentsEmpty<Shelf>`, where `<Shelf>` is the PascalCase form of the
-    backend category slug (`prompting_llms` -> `PromptingLlms`, etc.); the
-    untouched `external` bucket keeps its pre-existing `External` suffix.
+def test_two_live_sections_with_distinct_shelf_ids():
+    """Each live shelf gets its own grid/footer/empty/count id so the render
+    loop can address them uniformly: `agentsGrid<Shelf>` /
+    `agentsGridFooter<Shelf>` / `agentsEmpty<Shelf>` / `agentsCount<Shelf>`,
+    where `<Shelf>` is shelfIdSuffix's PascalCase form of the AGENT_SHELVES key.
     """
-    assert _HTML.count('class="agents-category"') == 4
+    for suffix, key in _SHELF_SUFFIX_TO_KEY.items():
+        assert f'data-category="{key}"' in _HTML, key
+        assert f'id="agentsGrid{suffix}"' in _HTML, suffix
+        assert f'id="agentsGridFooter{suffix}"' in _HTML, suffix
+        assert f'id="agentsEmpty{suffix}"' in _HTML, suffix
+        assert f'id="agentsCount{suffix}"' in _HTML, suffix
 
-    for shelf_suffix, category_slug in _SHELF_SUFFIX_TO_CATEGORY_SLUG.items():
-        assert f'data-category="{category_slug}"' in _HTML, category_slug
-        assert f'id="agentsGrid{shelf_suffix}"' in _HTML, shelf_suffix
-        assert f'id="agentsGridFooter{shelf_suffix}"' in _HTML, shelf_suffix
-        assert f'id="agentsEmpty{shelf_suffix}"' in _HTML, shelf_suffix
 
-
-def test_no_leftover_single_builtin_bucket_ids():
-    """The old single 'builtin' bucket is gone, not just renamed -- a
-    leftover id would silently double-register an element C3's loop no
-    longer expects to find.
+def test_retired_shelf_ids_are_gone():
+    """A leftover id would silently double-register an element the render loop
+    no longer expects to find.
     """
-    assert 'id="agentsGridBuiltin"' not in _HTML
-    assert 'id="agentsGridFooterBuiltin"' not in _HTML
-    assert 'id="agentsEmptyBuiltin"' not in _HTML
+    for suffix in ("Builtin", "PromptingLlms", "UsStocks", "CnAshares"):
+        assert f'id="agentsGrid{suffix}"' not in _HTML, suffix
+        assert f'id="agentsGridFooter{suffix}"' not in _HTML, suffix
+        assert f'id="agentsEmpty{suffix}"' not in _HTML, suffix
+
+
+def test_locked_shelves_are_rendered_inert_not_empty():
+    """Crypto and Futures have no bar source, no MarketProfile and no engine
+    support. They must read as "not built yet", never as "built and broken", so
+    they carry aria-disabled and the locked class -- and, critically, none of
+    the grid/footer/empty/count/chip elements the render loop addresses. A grid
+    element here would make renderAgentCategories' missing-grid guard the only
+    thing standing between a stray id and a page that renders nothing.
+    """
+    for slug, title, subtitle in _LOCKED_SHELVES:
+        section_at = _HTML.index(f'data-category="{slug}"')
+        section = _HTML[section_at : _HTML.index("</section>", section_at)]
+        open_tag = _HTML[max(0, section_at - 120) : section_at + 120]
+        assert 'class="agents-category agents-category--locked"' in open_tag, slug
+        assert 'aria-disabled="true"' in open_tag, slug
+        assert f">{title}</h3>" in section, title
+        assert subtitle in section, subtitle
+        assert "Not yet available" in section, slug
+        assert "agents-grid" not in section, slug
+        assert "agentsCount" not in section, slug
+        assert "agentsEmpty" not in section, slug
+
+
+def test_market_chip_container_is_inside_the_stocks_shelf():
+    """The chips filter the Stocks shelf, and they ride #agentsCategories'
+    existing delegated click handler -- so they must live inside that container,
+    not in the page toolbar above it.
+    """
+    stocks_at = _HTML.index('data-category="stocks"')
+    stocks = _HTML[stocks_at : _HTML.index("</section>", stocks_at)]
+    assert 'id="agentsMarketChips"' in stocks
+    assert _HTML.index('id="agentsCategories"') < stocks_at
 
 
 # --- C3: shelf rendering (app.js) -------------------------------------------
