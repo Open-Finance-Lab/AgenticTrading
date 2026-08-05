@@ -149,7 +149,7 @@ def test_ifind_profiles_declare_llm_capability_and_sync_model_control(js):
         js,
         re.S,
     )
-    assert "Uses this agent's model by default" in js
+    assert "Uses this agent's AI model by default" in js
     assert re.search(r"function\s+normalizeBacktestModelId\s*\(", js)
     assert re.search(r"function\s+findBacktestModelOption\s*\(", js)
     assert re.search(
@@ -308,7 +308,7 @@ def test_ifind_errors_are_mapped_to_short_actionable_messages(js):
     ):
         assert marker in js
     assert re.search(r"formatBacktestError\(\s*error", js)
-    assert "The selected LLM provider is not configured" in js
+    assert "The selected AI provider is not configured" in js
     assert js.index("llm provider client is unavailable") < js.index("status === 503")
 
 

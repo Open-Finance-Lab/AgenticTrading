@@ -5,7 +5,7 @@ Run a backtest in the dashboard
 --------------------------------
 
 1. Open `agentic-trading-lab.vercel.app <https://agentic-trading-lab.vercel.app/>`_ or `http://localhost:8000/ <http://localhost:8000/>`_ when running locally, then go to the **My Agents** tab.
-2. On an agent's card click **Run Backtest**. Use one of the **Foundation Agents**, or click **Add Agent +** to create your own.
+2. On an agent's card click **Run Backtest**. Ready-made agents are already waiting there — see :ref:`my-agents-sections` — or click **Add Agent +** to create your own.
 3. In the dialog set the **Period** and **Asset Universe**, then click **Run Backtest**. **Allocated Capital** is shown read-only — it is a saved setting on the agent; **Edit in Configure** opens the editor to change it.
 4. You stay on **My Agents**. The agent's card switches to a live ``Backtesting…`` state with an elapsed timer, and flips to the finished result when the run ends.
 
@@ -23,6 +23,42 @@ an error: the agent then trades on the platform's built-in default strategy.
 Expand **See the default instruction** in the editor to read exactly what that
 is. Clearing the box on an agent that uses a custom multi-step pipeline asks for
 confirmation first, because saving replaces that pipeline.
+
+.. _my-agents-sections:
+
+Sections on My Agents
+---------------------
+
+**My Agents** groups your agents into four sections, so what an agent trades is
+visible without opening it:
+
+**Prompting LLMs**
+   Agents you steer with a written instruction. Every agent you create with
+   **Add Agent +** starts here — there is no section to pick while creating one;
+   file it elsewhere afterwards.
+
+**U.S. Stock Trading**
+   Ready-made strategies for U.S. blue-chip stocks, tested hour by hour on real
+   market data.
+
+**China A-Share Trading**
+   Strategies for Chinese A-shares, following that market's own next-day (T+1)
+   rule — shares bought today cannot be sold until the next trading day.
+
+**For Developers: Connected Agents**
+   Your own trading program, running anywhere and driving a Lab backtest over
+   the API. Needs an access key — see :doc:`external_agents`.
+
+The first three are a label you control: open an agent's **Configure** screen
+and pick a different **Section**, or leave it unset to keep the agent under
+Prompting LLMs. The section changes only where the agent is filed; it does not
+change how it trades, what it can buy, or any of its settings. Connected agents
+are placed by what they are, so they have no **Section** picker; neither do the
+sample agents shown before you create one of your own.
+
+Sections are always shown, empty or not. An empty **U.S. Stock Trading** or
+**China A-Share Trading** section links straight to the matching filter in
+**Community**, which is where ready-made agents for that market come from.
 
 .. _allocated-capital:
 
@@ -61,7 +97,8 @@ Start from a template
 
 Rather than writing an agent from scratch, open **Community → Agent
 Marketplace** and add a ready-made template to **My Agents**, then edit its
-prompts and backtest it. See :doc:`marketplace`.
+prompts and backtest it. The section chips there filter templates by market, so
+you can jump straight to U.S. stocks or A-shares. See :doc:`marketplace`.
 
 Accounts (optional)
 -------------------

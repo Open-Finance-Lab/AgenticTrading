@@ -25,7 +25,7 @@ def test_hosted_editor_replaces_model_picker_with_managed_metadata():
     assert 'id="agentEditorModelField"' in _APP_HTML
     assert 'id="agentEditorManagedModelField"' in _APP_HTML
     assert "OpenRouter · nvidia/nemotron-3-nano-30b-a3b" in _APP_HTML
-    assert "hosted OpenRouter model" in _APP_HTML
+    assert "hosted and managed by Agentic Trading Lab" in _APP_HTML
 
     configure = _slice(
         _EDITOR_JS,
@@ -65,21 +65,60 @@ def test_robinhood_editor_behavior_is_shared_by_both_runtimes():
     assert "live_trading_enabled: Boolean(liveToggle?.checked)" in editor_state
 
 
-def test_marketplace_cta_label_is_unified():
-    """All marketplace cards share one CTA — no special-case Copy label."""
-    assert "Copy to My Agents" not in _APP_JS
+def test_marketplace_cta_is_unified_add_to_my_agents():
+    """Superseded 2026-08-05 (Task C4): "Copy to My Agents" was scoped to the
+    AI Hedge Fund template by an `isAiHedgeFundTemplate` ternary; PR #253's
+    canonical CTA is "Add to My Agents" everywhere, so the ternary is gone
+    and every card -- AI Hedge Fund included -- renders the one string.
+    """
     assert "const cloneLabel = 'Add to My Agents';" in _APP_JS
+    assert "isAiHedgeFundTemplate" not in _APP_JS
+    assert "Copy to My Agents" not in _APP_JS
 
 
-def test_my_agents_splits_prompting_llms_and_open_agents():
-    """Prompt builtins and AI Hedge Fund agents land on separate shelves."""
+def test_hosted_agents_shelve_by_market_not_by_runtime():
+    """The hosted AI Hedge Fund agent shares a shelf with the other U.S. stock
+    strategies rather than getting a runtime-flavoured section of its own.
+
+    #309 briefly split My Agents on `runtime_type === 'ai_hedge_fund'` into an
+    "Open Agents" section. The shelves are market-based instead: the template
+    carries `category: "us_stocks"` (marketplace.json), the clone stamps that
+    onto the agent, and AGENT_SHELVES routes it to U.S. Stock Trading. The
+    separation the runtime split was after still holds -- a hosted agent never
+    lands on Prompting LLMs -- but it comes from the category, so a hosted
+    A-share agent would shelve correctly too, which the runtime test could not.
+    """
     assert "Foundation Agents" not in _APP_HTML
     assert "Prompting LLMs" in _APP_HTML
-    assert "Open Agents" in _APP_HTML
-    assert 'id="agentsGridOpen"' in _APP_HTML
-    assert "function isOpenAgent(agent)" in _APP_JS
-    assert "agentsGridOpen" in _APP_JS
-    assert "renderAgentCards(openGrid, openAgents, 'open')" in _APP_JS
+    assert "U.S. Stock Trading" in _APP_HTML
+    assert "Open Agents" not in _APP_HTML
+    assert 'id="agentsGridPromptingLlms"' in _APP_HTML
+    assert 'id="agentsGridUsStocks"' in _APP_HTML
+
+    # The runtime-keyed *sections* are gone: shelves resolve through one
+    # function keyed on `category`, so no predicate can double-count or drop.
+    assert "isOpenAgent" not in _APP_JS
+    assert "agentsGridOpen" not in _APP_JS
+    assert "const AGENT_SHELVES = [" in _APP_JS
+    assert "function agentShelfKey(agent)" in _APP_JS
+    assert "agentShelfKey(a) === 'us_stocks'" in _APP_JS
+
+
+def test_uncategorized_hosted_agents_fall_back_to_the_us_stock_shelf():
+    """Every AI Hedge Fund agent cloned before shelving shipped carries
+    `category: null`, and those rows are durable (CONTENT_DATABASE_URL).
+
+    Without a runtime fallback the generic NULL branch sends them to Prompting
+    LLMs -- the one shelf the market-based split exists to keep hosted runtimes
+    off. This is deliberately not a SQL backfill: the fallback also covers rows
+    served by a backend that predates the column and sends no `category` field
+    at all, which a one-shot migration cannot reach.
+    """
+    assert "const LEGACY_RUNTIME_SHELF = { ai_hedge_fund: 'us_stocks' }" in _APP_JS
+    # ...and it must be consulted only after a real category, so a hosted agent
+    # explicitly filed on another shelf stays where the user put it.
+    key_fn = _APP_JS.split("function agentShelfKey(agent)", 1)[1].split("\n}", 1)[0]
+    assert key_fn.index("SHELF_LABELS[slug]") < key_fn.index("LEGACY_RUNTIME_SHELF")
 
 
 def test_stored_credential_can_be_removed_from_the_editor():

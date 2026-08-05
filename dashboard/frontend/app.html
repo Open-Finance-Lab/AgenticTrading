@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=80">
+    <link rel="stylesheet" href="styles.css?v=82">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -281,7 +281,7 @@
                         <option value="alpaca" selected>Alpaca market data</option>
                     </select>
                     <p id="vnpySimulationNotice" class="market-data-notice" hidden>
-                        vn.py simulated bars · deterministic · no LLM calls
+                        Simulated practice data — repeatable results, rule-based decisions only (no AI)
                     </p>
                     <p id="ifindAshareNotice" class="market-data-notice is-ifind" hidden>
                         Historical iFinD A-share data for paper backtesting; not real-time and no real orders.
@@ -409,7 +409,7 @@
                             </h1>
                             <div class="home-landing-ctas">
                                 <button id="homeGetStartedBtn" class="home-btn home-btn-primary home-landing-cta" type="button">Get Started</button>
-                                <a class="home-btn home-btn-secondary home-landing-cta" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join Discord</a>
+                                <a class="home-btn home-btn-secondary home-landing-cta" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                             </div>
                         </div>
                         <div class="home-landing-playground" aria-label="Agent playground preview">
@@ -420,7 +420,7 @@
                                     <span class="home-playground-dot home-playground-dot--green" aria-hidden="true"></span>
                                     <span class="home-playground-title">
                                         <svg class="ui-icon ui-icon--inline" aria-hidden="true"><use href="#icon-terminal"/></svg>
-                                        agent-playground.exe
+                                        Example: a conversation with your agent
                                     </span>
                                 </div>
                                 <div id="homePlaygroundChat" class="home-playground-chat" data-step="0">
@@ -498,6 +498,7 @@
                                             <p class="home-chat-prompt-text">
                                                 Looks solid. Want me to run this in
                                                 <span class="home-headline-accent">paper trading</span>
+                                                — practice trading with simulated money at live market prices —
                                                 and alert you when Berkshire's next 13F drops?
                                             </p>
                                             <div class="home-chat-actions">
@@ -582,7 +583,7 @@
                                 <span>Models only · ranked by return</span>
                             </div>
                             <div class="hm-rank-table-head" aria-hidden="true">
-                                <span>#</span><span>Model</span><span>Value</span><span>Return</span><span>Sharpe</span>
+                                <span>#</span><span>AI Model</span><span>Value</span><span>Return</span><span>Sharpe</span>
                             </div>
                             <ol class="home-module-rank-list" id="homeModuleRankList">
                                 <li class="home-module-rank-empty">Loading rankings…</li>
@@ -644,7 +645,7 @@
                                 <li><span class="hm-act-dot"></span><span>QuantNova completed a backtest</span><time class="tabular-nums">18m ago</time></li>
                                 <li><span class="hm-act-dot"></span><span>Momentum Scout moved to #3</span><time class="tabular-nums">31m ago</time></li>
                             </ul>
-                            <button class="hm-footer-btn" id="homeModuleCommunityBtn" type="button">Join Discord</button>
+                            <button class="hm-footer-btn" id="homeModuleCommunityBtn" type="button">Join our Discord community</button>
                         </article>
                         </div>
                     </div>
@@ -701,7 +702,7 @@
                             <span class="icon-shell icon-shell--sm icon-shell--muted"><svg class="ui-icon"><use href="#icon-github"/></svg></span>
                             <span class="home-resource-copy">
                                 <span class="home-resource-title">GitHub</span>
-                                <span class="home-resource-subtitle">Open source and examples</span>
+                                <span class="home-resource-subtitle">Source code and worked examples</span>
                             </span>
                             <svg class="ui-icon home-resource-arrow" aria-hidden="true"><use href="#icon-external-link"/></svg>
                         </a>
@@ -709,7 +710,7 @@
                             <span class="icon-shell icon-shell--sm icon-shell--discord"><svg class="ui-icon"><use href="#icon-discord"/></svg></span>
                             <span class="home-resource-copy">
                                 <span class="home-resource-title">Discord Community</span>
-                                <span class="home-resource-subtitle">Chat with other builders</span>
+                                <span class="home-resource-subtitle">Talk strategy with other members</span>
                             </span>
                             <svg class="ui-icon home-resource-arrow" aria-hidden="true"><use href="#icon-external-link"/></svg>
                         </a>
@@ -725,7 +726,7 @@
                             <span class="icon-shell icon-shell--sm"><svg class="ui-icon"><use href="#icon-book"/></svg></span>
                             <span class="home-resource-copy">
                                 <span class="home-resource-title">Documentation</span>
-                                <span class="home-resource-subtitle">Guides and API reference</span>
+                                <span class="home-resource-subtitle">Guides and reference documentation</span>
                             </span>
                             <svg class="ui-icon home-resource-arrow" aria-hidden="true"><use href="#icon-external-link"/></svg>
                         </a>
@@ -741,15 +742,15 @@
         <div class="auth-modal-panel" role="dialog" aria-labelledby="addAgentModalTitle">
             <button id="addAgentModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
             <h2 id="addAgentModalTitle" class="auth-modal-title">Add Agent</h2>
-            <p class="auth-modal-subtitle">Register an external agent to get a persistent session and API key. Log in to keep agents across devices and sessions.</p>
+            <p class="auth-modal-subtitle">Register your own agent and receive a secure access key. Sign in to keep your agents across devices.</p>
             <div class="add-agent-options">
                 <button id="createBuiltinAgentBtn" class="add-agent-option" type="button">
                     <strong>Create a Built-in Agent</strong>
-                    <span>Hosted agent powered by a frontier model — chat with it on Discord</span>
+                    <span>Hosted agent powered by a leading AI model — you can also chat with it in our Discord community</span>
                 </button>
                 <button id="connectExternalAgentBtn" class="add-agent-option" type="button">
                     <strong>Connect an External Agent</strong>
-                    <span>Get an API key and session for your backtest client</span>
+                    <span>For developers: get an access key to connect your own program</span>
                 </button>
             </div>
         </div>
@@ -760,7 +761,7 @@
         <div class="auth-modal-panel" role="dialog" aria-labelledby="createExternalAgentModalTitle">
             <button id="createExternalAgentModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
             <h2 id="createExternalAgentModalTitle" class="auth-modal-title">Register External Agent</h2>
-            <p class="auth-modal-subtitle">Each agent gets its own trading session. Backtest results appear automatically when you select the agent.</p>
+            <p class="auth-modal-subtitle">Each agent keeps its own trading history. Backtest results appear automatically when you select the agent.</p>
             <form id="createExternalAgentForm" class="auth-form">
                 <label class="auth-field">
                     <span>Agent name</span>
@@ -786,7 +787,7 @@
         <div class="auth-modal-panel" role="dialog" aria-labelledby="createBuiltinAgentModalTitle">
             <button id="createBuiltinAgentModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
             <h2 id="createBuiltinAgentModalTitle" class="auth-modal-title">Create a Built-in Agent</h2>
-            <p class="auth-modal-subtitle">A hosted agent powered by a frontier model. It appears on your agent cards here and becomes selectable from the Agentic Trading Discord server with <code>/agent</code>.</p>
+            <p class="auth-modal-subtitle">A hosted agent powered by a leading AI model. It appears on your agent cards here and can also be used from our Discord community with <code>/agent</code>.</p>
             <form id="createBuiltinAgentForm" class="auth-form">
                 <label class="auth-field">
                     <span>Agent name</span>
@@ -805,7 +806,7 @@
                 </label>
                 <label class="auth-field">
                     <span>Description (optional)</span>
-                    <input id="builtinAgentDescription" type="text" maxlength="280" placeholder="What is this agent's edge?" autocomplete="off">
+                    <input id="builtinAgentDescription" type="text" maxlength="280" placeholder="What makes this agent different?" autocomplete="off">
                 </label>
                 <label class="auth-field">
                     <span>Paper Trading Allocated Capital (max $3,000)</span>
@@ -823,13 +824,13 @@
         <div class="auth-modal-panel" role="dialog" aria-labelledby="agentCredentialsModalTitle">
             <button id="agentCredentialsModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
             <h2 id="agentCredentialsModalTitle" class="auth-modal-title">Agent created</h2>
-            <p id="agentCredentialsModalSubtitle" class="auth-modal-subtitle">Your agent is ready. Use the API key below to connect your trading client to Agentic Trading Lab.</p>
+            <p id="agentCredentialsModalSubtitle" class="auth-modal-subtitle">Your agent is ready. Use the access key below to connect your own program to Agentic Trading Lab. (This is the API key in the SDK and docs.)</p>
             <p class="credential-warning">One-time key — copy and save it before closing this window. You won't be able to view the full key again.</p>
             <div class="auth-form">
                 <label class="auth-field">
-                    <span>API key</span>
+                    <span>Access key</span>
                     <div class="credential-copy-row">
-                        <input id="agentCredentialApiKey" type="text" readonly aria-label="API key">
+                        <input id="agentCredentialApiKey" type="text" readonly aria-label="Access key">
                         <button id="agentCredentialCopyBtn" class="credential-copy-btn" type="button">Copy</button>
                     </div>
                 </label>
@@ -896,12 +897,12 @@
                     </div>
                 </div>
                 <div id="agentsCategories">
-                    <section class="agents-category" data-category="builtin">
+                    <section class="agents-category" data-category="prompting_llms">
                         <div class="agents-category-head">
                             <h3 class="agents-category-title">Prompting LLMs</h3>
-                            <p class="agents-category-sub">Prompt a LLM with a trading instruction, configure its initial capital, and test in the market.</p>
+                            <p class="agents-category-sub">Prompt state-of-the-art LLMs to backtest on real market data.</p>
                         </div>
-                        <div id="agentsGridBuiltin" class="agents-grid">
+                        <div id="agentsGridPromptingLlms" class="agents-grid">
                             <!-- Loading skeletons: visible pre-JS and while the first
                                  agents fetch runs. No removal code needed — every render
                                  path overwrites this grid's innerHTML (pinned by
@@ -910,30 +911,42 @@
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                         </div>
-                        <div id="agentsGridFooterBuiltin" class="agents-grid-footer" hidden></div>
-                        <p id="agentsEmptyBuiltin" class="control-helper" hidden>No prompting LLMs yet. Click <strong>Add Agent</strong> to create one.</p>
+                        <div id="agentsGridFooterPromptingLlms" class="agents-grid-footer" hidden></div>
+                        <p id="agentsEmptyPromptingLlms" class="control-helper" hidden>You don't have any agents yet. Create one and test your first trading idea.</p>
                     </section>
-                    <section class="agents-category" data-category="open">
+                    <section class="agents-category" data-category="us_stocks">
                         <div class="agents-category-head">
-                            <h3 class="agents-category-title">Open Agents</h3>
-                            <p class="agents-category-sub">Open-source trading agents.</p>
+                            <h3 class="agents-category-title">U.S. Stock Trading</h3>
+                            <p class="agents-category-sub">Ready-made strategies for U.S. blue-chip stocks, tested hour by hour on real market data.</p>
                         </div>
-                        <div id="agentsGridOpen" class="agents-grid">
+                        <div id="agentsGridUsStocks" class="agents-grid">
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                         </div>
-                        <div id="agentsGridFooterOpen" class="agents-grid-footer" hidden></div>
-                        <p id="agentsEmptyOpen" class="control-helper" hidden>No open agents yet. Add one from Community.</p>
+                        <div id="agentsGridFooterUsStocks" class="agents-grid-footer" hidden></div>
+                        <p id="agentsEmptyUsStocks" class="control-helper" hidden>Nothing here yet. Add a ready-made U.S. stock strategy from <a href="#" class="agents-empty-community-link" data-community-category="us_stocks">Community</a>.</p>
+                    </section>
+                    <section class="agents-category" data-category="cn_ashares">
+                        <div class="agents-category-head">
+                            <h3 class="agents-category-title">China A-Share Trading</h3>
+                            <p class="agents-category-sub">Strategies for Chinese A-share stocks, following that market's own next-day (T+1) trading rules.</p>
+                        </div>
+                        <div id="agentsGridCnAshares" class="agents-grid">
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                        </div>
+                        <div id="agentsGridFooterCnAshares" class="agents-grid-footer" hidden></div>
+                        <p id="agentsEmptyCnAshares" class="control-helper" hidden>Nothing here yet. Add an A-share strategy from <a href="#" class="agents-empty-community-link" data-community-category="cn_ashares">Community</a>.</p>
                     </section>
                     <section class="agents-category" data-category="external">
                         <div class="agents-category-head">
-                            <h3 class="agents-category-title">External Agents</h3>
-                            <p class="agents-category-sub">Bring your own agent and connect it with an API key.</p>
+                            <h3 class="agents-category-title">For Developers: Connected Agents</h3>
+                            <p class="agents-category-sub">Run your own trading program against our backtests. Requires an access key.</p>
                         </div>
                         <div id="agentsGridExternal" class="agents-grid">
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                         </div>
                         <div id="agentsGridFooterExternal" class="agents-grid-footer" hidden></div>
-                        <p id="agentsEmptyExternal" class="control-helper" hidden>No external agents match your search.</p>
+                        <p id="agentsEmptyExternal" class="control-helper" hidden>No agents match your search.</p>
                     </section>
                 </div>
                 <p id="agentsErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't reach the server to load agents. Check your connection and try again.</p>
@@ -955,11 +968,15 @@
                     <span class="agent-editor-model-label">Model</span>
                     <select id="agentEditorModelSelect" class="agent-editor-model-select" aria-label="Agent model"></select>
                 </label>
-                <div id="agentEditorManagedModelField" class="agent-editor-managed-model-field" aria-label="Managed model provider" hidden>
-                    <span class="agent-editor-model-label">Managed provider / model</span>
+                <div id="agentEditorManagedModelField" class="agent-editor-managed-model-field" aria-label="Hosted AI model" hidden>
+                    <span class="agent-editor-model-label">Hosted AI model</span>
                     <strong id="agentEditorManagedModelValue" class="agent-editor-managed-model-value">OpenRouter · nvidia/nemotron-3-nano-30b-a3b</strong>
-                    <span class="agent-editor-managed-model-note">Managed by Agentic Trading Lab</span>
+                    <span class="agent-editor-managed-model-note">Managed for you by Agentic Trading Lab</span>
                 </div>
+                <label id="agentEditorCategoryField" class="agent-editor-model-field" for="agentEditorCategorySelect">
+                    <span class="agent-editor-model-label">Section</span>
+                    <select id="agentEditorCategorySelect" class="agent-editor-model-select" aria-label="Which section of My Agents this agent appears in"></select>
+                </label>
                 <textarea id="agentEditorDescription" class="agent-editor-description" rows="2" maxlength="280" placeholder="Optional description for this agent…" aria-label="Agent description"></textarea>
                 <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
                     <div class="agent-editor-broker-head">
@@ -995,7 +1012,7 @@
                             <label class="agent-capital-field" for="agentEditorCashAllocation">
                                 <span class="agent-capital-label">Paper Trading <span class="agent-capital-max">max $3,000</span></span>
                                 <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital">
-                                <span class="agent-capital-note">Reserved from My Portfolio. Real sleeve.</span>
+                                <span class="agent-capital-note">Reserved from your My Portfolio balance while this agent paper-trades. Backtests use a separate simulated amount and never touch it.</span>
                             </label>
                             <label class="agent-capital-field" for="agentEditorBacktestAllocation">
                                 <span class="agent-capital-label">Backtesting <span class="agent-capital-max">max $3,000</span></span>
@@ -1003,6 +1020,7 @@
                                 <span class="agent-capital-note">Simulated only. Never spends real cash.</span>
                             </label>
                         </div>
+                        <p id="agentCapitalRealMoneyNote" class="control-helper">Every test here uses simulated money. Real money is involved only if you explicitly connect a brokerage account and turn on live trading.</p>
                     </div>
                     <div id="agentEditorSimplePanel" class="agent-editor-simple section-card compact">
                         <h3 class="agent-editor-intro-title">Trading instruction</h3>
@@ -1013,19 +1031,19 @@
                             <summary>See the default instruction</summary>
                             <p id="agentEditorDefaultInstructionText" class="agent-editor-default-text"></p>
                         </details>
-                        <p id="agentEditorSimpleReplaceNote" class="agent-editor-simple-note" hidden>This agent currently uses a custom multi-step pipeline. Saving this instruction replaces it.</p>
+                        <p id="agentEditorSimpleReplaceNote" class="agent-editor-simple-note" hidden>This agent currently uses a custom multi-step strategy. Saving this instruction replaces it.</p>
                     </div>
                     <div id="agentEditorAiHedgeFundPanel" class="agent-editor-simple section-card compact" hidden>
-                        <h3 class="agent-editor-intro-title">AI Hedge Fund analyst committee</h3>
-                        <p class="agent-editor-intro-text">Choose the upstream analysts that compose this agent's strategy. The hosted OpenRouter model and runtime controls are managed by Agentic Trading Lab.</p>
+                        <h3 class="agent-editor-intro-title">AI Hedge Fund analyst panel</h3>
+                        <p class="agent-editor-intro-text">Choose the analysts that shape this agent's strategy. The AI model and its settings are hosted and managed by Agentic Trading Lab.</p>
                         <div id="agentEditorAiHedgeFundAnalysts" class="agent-editor-analyst-grid" role="group" aria-label="AI Hedge Fund analysts"></div>
                         <label class="auth-field agent-editor-credential-field" for="agentEditorFinancialDatasetsKey">
-                            <span>Financial Datasets API key</span>
+                            <span>Financial Datasets access key (from financialdatasets.ai)</span>
                             <input id="agentEditorFinancialDatasetsKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep the stored key" aria-describedby="agentEditorFinancialDatasetsStatus">
                         </label>
                         <p id="agentEditorFinancialDatasetsStatus" class="agent-editor-simple-note">Checking credential…</p>
                         <button id="agentEditorFinancialDatasetsRemove" class="agent-editor-credential-remove" type="button" hidden>Remove stored key</button>
-                        <p class="agent-editor-simple-note">Encrypted in credential storage. The value is never returned to this browser after saving.</p>
+                        <p class="agent-editor-simple-note">Encrypted and stored securely. For your protection, it is never shown again after you save.</p>
                     </div>
                     <p id="agentEditorSaveStatus" class="agent-editor-save-status" hidden></p>
                     <p class="agent-editor-hint">Tip: press <kbd>Ctrl</kbd>+<kbd>S</kbd> to save.</p>
@@ -1061,7 +1079,7 @@
                         <dd id="backtestConfigModel">—</dd>
                     </div>
                     <div class="backtest-config-row" id="backtestConfigPromptRow" hidden>
-                        <dt>Prompt</dt>
+                        <dt>Instruction</dt>
                         <dd id="backtestConfigPrompt" class="backtest-config-prompt">—</dd>
                     </div>
                     <div class="backtest-config-row">
@@ -1101,7 +1119,7 @@
                         <dd id="backtestConfigTimeframe">—</dd>
                     </div>
                     <div class="backtest-config-row">
-                        <dt>Decision source</dt>
+                        <dt>Decision method</dt>
                         <dd id="backtestConfigDecisionSource">—</dd>
                     </div>
                     <div class="backtest-config-row">
@@ -1123,7 +1141,7 @@
                         <div id="backtestRunProgressBar" class="backtest-run-progress-bar"></div>
                     </div>
                     <p id="backtestRunProgressMessage" class="backtest-run-progress-message">Starting…</p>
-                    <p class="backtest-run-progress-hint">Multi-step agent pipelines can take several minutes (timeout: 10 min).</p>
+                    <p class="backtest-run-progress-hint">Multi-step strategies can take several minutes (limit: 10 minutes).</p>
                 </div>
             </section>
         </aside>
@@ -1210,7 +1228,7 @@
                 </div>
                 <div class="metric-row">
                     <span class="metric-label">Sharpe Ratio</span>
-                    <span class="metric-value" data-metric="sharpe" title="Annualized for hourly data (sqrt(252*6.5))">--</span>
+                    <span class="metric-value" data-metric="sharpe" title="Risk-adjusted return, annualized from hourly results.">--</span>
                 </div>
                 
             </div>
@@ -1361,7 +1379,7 @@
             <div class="participants-empty-wrap">
                 <div class="participants-empty" id="participantsEmptyState">
                     <p class="participants-empty-title">Season hasn't started yet</p>
-                    <p class="participants-empty-text">Participating teams will appear here when the contest season opens. The Ranking board shows models and baselines only.</p>
+                    <p class="participants-empty-text">Participating teams will appear here when the contest season opens. The Ranking board shows AI models and baseline strategies only.</p>
                 </div>
             </div>
             <div class="participants-grid" id="participantsGrid" hidden></div>
@@ -1370,15 +1388,15 @@
             <div class="about-grid">
                 <div class="section-card">
                     <h3 class="section-title">Competition Overview</h3>
-                    <p class="about-text">SecureFinAI Contest 2026 is a paper-trading competition for LLM-powered agents. The contest is currently in <strong>Preseason</strong>. Participating teams join when the season starts (registration Aug 2026).</p>
+                    <p class="about-text">SecureFinAI Contest 2026 is a paper-trading competition for AI-powered agents. The contest is currently in <strong>Preseason</strong>. Participating teams join when the season starts (registration Aug 2026).</p>
                 </div>
                 <div class="section-card">
                     <h3 class="section-title">Daily Leaderboard</h3>
-                    <p class="about-text">The Daily Leaderboard is the same chart + standings UI as Competition, but each entry is an hourly backtest over the <strong>last completed US weekday</strong>. Baseline and index lines refresh automatically on load. LLM entries are added when the daily deploy job runs.</p>
+                    <p class="about-text">The Daily Leaderboard is the same chart + standings UI as Competition, but each entry is an hourly backtest over the <strong>last completed US weekday</strong>. Baseline and index lines refresh automatically on load. New AI entries appear when the leaderboard next updates.</p>
                 </div>
                 <div class="section-card">
                     <h3 class="section-title">Competition Leaderboard</h3>
-                    <p class="about-text">Ranking is a <strong>backtest leaderboard</strong>, not live trading. Each entry is an hourly backtest over <strong>2026-04-15 → 2026-05-15</strong> (one-month window), comparing provided LLM models, baseline strategies, and market indices. Official rank is by final portfolio value.</p>
+                    <p class="about-text">Ranking is a <strong>backtest leaderboard</strong>, not live trading. Each entry is an hourly backtest over <strong>2026-04-15 → 2026-05-15</strong> (one-month window), comparing leading AI models, baseline strategies, and market indices. Official rank is by final portfolio value.</p>
                 </div>
                 <div class="section-card compact">
                     <h3 class="section-title">Schedule</h3>
@@ -1431,10 +1449,11 @@
                         <span class="status-badge upcoming contest-live-badge">Upcoming</span>
                     </div>
                     <p class="contest-subtitle">Sep 1 – Oct 30, 2026</p>
+                    <p class="contest-subtitle">Organized by SecureFinAI Lab with Agentic Trading Lab.</p>
                 </div>
                 <div class="contest-actions">
                     <button id="competitionRulesBtn" class="agent-action-btn agent-action-secondary contest-action-btn" type="button">Rules</button>
-                    <a class="discord-nav-btn discord-nav-btn-sm" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join Discord</a>
+                    <a class="discord-nav-btn discord-nav-btn-sm" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                 </div>
             </div>
             <!-- Combined Header with Stats + Controls -->
@@ -1568,6 +1587,8 @@
                     <input id="marketplaceSearchInput" type="search" placeholder="Search templates..." aria-label="Search marketplace templates">
                 </div>
             </div>
+            <p class="control-helper">Every test here uses simulated money. Real money is involved only if you explicitly connect a brokerage account and turn on live trading.</p>
+            <div id="marketplaceCategoryChips" class="marketplace-category-chips" role="group" aria-label="Filter templates by category"></div>
             <div id="marketplaceGrid" class="agents-grid marketplace-grid"></div>
             <p id="marketplaceEmptyState" class="control-helper" hidden>No templates match your search.</p>
             <p id="marketplaceErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't load the marketplace. Check your connection and try again.</p>
@@ -1578,7 +1599,7 @@
         <div class="page-header">
             <div>
                 <h2 class="page-title">Account</h2>
-                <p class="page-description">Signed-in profile and session.</p>
+                <p class="page-description">Your profile and sign-in details.</p>
             </div>
         </div>
         <div id="accountSignedIn" class="account-card" hidden>
@@ -1683,8 +1704,8 @@
     <script src="market-events/MarketEventCard.js" defer></script>
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
-    <script src="js/agent-editor.js?v=24" defer></script>
-    <script src="app.js?v=68" defer></script>
+    <script src="js/agent-editor.js?v=25" defer></script>
+    <script src="app.js?v=70" defer></script>
     <script src="js/leaderboard.js?v=16" defer></script>
     <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
