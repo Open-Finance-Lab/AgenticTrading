@@ -439,3 +439,53 @@ def test_clearing_the_shelf_is_saveable_not_a_no_op():
     would silently drop it and make "Not set" unselectable once a shelf had
     been picked. Only null/undefined may mean "leave the field alone"."""
     assert "if (category !== null && category !== undefined) payload.category = category;" in _EDITOR_JS
+
+
+# --- render loop: market chips, count pill, Community button ----------------
+
+
+def test_empty_shelf_community_cta_is_a_button_not_a_bare_anchor():
+    """This is the primary path off an empty shelf, and it shipped as
+    `<a href="#">` against a class with no CSS rule anywhere -- so it inherited
+    plain link styling and did not read as actionable. The dataset hook the
+    delegated handler reads is unchanged; only the element and its class are.
+    """
+    body = _strip_js_comments(fn_body("function communityShelfButtonHtml("))
+    assert '<button type="button"' in body
+    assert "agents-empty-community-btn" in body
+    assert "data-community-category=" in body
+    assert 'href="#"' not in body
+    assert "agents-empty-community-link" not in _strip_js_comments(APP_JS)
+
+
+def test_market_chips_filter_the_grid_but_never_the_count_pill():
+    """The pill reports what the shelf HOLDS, read from the unfiltered roster
+    (`allAgents`), not what is on screen. A number that moved while you typed in
+    the search box or clicked a chip would read as agents disappearing.
+    """
+    body = _strip_js_comments(fn_body("function renderAgentCategories("))
+    assert "allAgents.filter(shelf.match).length" in body
+    assert "agentMarketKey(a) === agentMarketFilter" in body
+
+
+def test_market_chip_selection_resets_pagination():
+    """The page index is per-shelf, so a page-3 position under 'All' would land
+    past the end of a narrower market's single page -- an empty grid with a
+    "Page 3 of 1" footer. applyAgentFilters() resets it; applyAgentFilters(false)
+    would not.
+    """
+    body = _strip_js_comments(fn_body("function setAgentMarketFilter("))
+    assert "applyAgentFilters()" in body
+
+
+def test_stocks_empty_state_distinguishes_search_chip_and_truly_empty():
+    """Three distinct cases, deliberately worded apart. Collapsing them would
+    tell a user who is mid-search, or who clicked a market chip, that they own
+    no agents at all -- and Stocks is the onboarding surface now (it inherited
+    that role from the retired Prompting LLMs shelf), so its true-empty copy is
+    the create-your-first voice, not the add-from-Community voice.
+    """
+    body = _strip_js_comments(fn_body("function stocksEmptyHtml("))
+    assert "No agents match your search." in body
+    assert "You don't have any agents yet." in body
+    assert "communityShelfButtonHtml" in body

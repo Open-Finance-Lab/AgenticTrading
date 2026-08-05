@@ -1265,6 +1265,9 @@ function renderAgentCards(grid, agents, categoryKey) {
     card.setAttribute('data-agent-id', agent.agent_id);
     const model = escapeHtml(formatAgentModelLabel(agent.model_name));
     const type = escapeHtml(agentTypeLabel(agent));
+    // Under the All chip the Stocks shelf mixes markets, so the card has to
+    // say which. Omitted rather than guessed when agentMarketKey returns ''.
+    const market = MARKET_LABELS[agentMarketKey(agent)];
     const running = getAgentBacktestRunning(agent.agent_id);
     if (running) card.classList.add('agent-card--running');
 
@@ -1274,7 +1277,7 @@ function renderAgentCards(grid, agents, categoryKey) {
           ${agentRobotIcon()}
           <div class="agent-card-identity-text">
             <h3 class="agent-name">${escapeHtml(agent.name)}${agent.agent_id === defaultId ? ' <span class="agent-default-badge">Default</span>' : ''}</h3>
-            <p class="agent-card-submeta">${model} · ${type}</p>
+            <p class="agent-card-submeta">${model} · ${type}${market ? ` · ${escapeHtml(market)}` : ''}</p>
           </div>
         </div>
         <span class="status-badge ${statusBadge.className}"><span class="status-badge-dot" aria-hidden="true"></span>${statusBadge.label}</span>
@@ -1381,27 +1384,72 @@ function renderAgentCards(grid, agents, categoryKey) {
   });
 }
 
-// Empty-state HTML shown when a shelf has zero agents and no search is active
-// (the "true empty" / onboarding case). External renders a placeholder CARD
-// instead (see renderExternalPlaceholderCard) so it has no entry here.
-function shelfOnboardingEmptyHtml(shelfKey) {
-  if (shelfKey === 'prompting_llms') {
-    return "You don't have any agents yet. Create one and test your first trading idea.";
+// Empty-state HTML for the Stocks shelf. Three cases, deliberately worded
+// apart: a live search hiding everything, a market chip with nothing on it yet,
+// and a genuinely empty shelf. Collapsing them would tell a searching or
+// filtering user they own no agents. Stocks is also the onboarding surface (it
+// inherited that role from the retired Prompting LLMs shelf), so the true-empty
+// case keeps the create-your-first voice rather than the Community-upsell voice
+// the old market shelves used.
+//
+// External renders a placeholder CARD instead (renderExternalPlaceholderCard),
+// so it has no entry here.
+function stocksEmptyHtml({ searching, marketFilter }) {
+  if (searching) return 'No agents match your search.';
+  if (marketFilter !== 'all') {
+    const label = escapeHtml(MARKET_LABELS[marketFilter] || '');
+    return `No ${label} agents yet. Add a ready-made ${label} strategy from ${communityShelfButtonHtml(marketFilter)}.`;
   }
-  if (shelfKey === 'us_stocks') {
-    return `Nothing here yet. Add a ready-made U.S. stock strategy from ${communityShelfLinkHtml('us_stocks')}.`;
-  }
-  if (shelfKey === 'cn_ashares') {
-    return `Nothing here yet. Add an A-share strategy from ${communityShelfLinkHtml('cn_ashares')}.`;
-  }
-  return '';
+  return `You don't have any agents yet. Create one and test your first trading idea, or browse ready-made strategies in ${communityShelfButtonHtml('all')}.`;
 }
 
-// data-community-category is read by initNavigation's delegated click handler,
-// which pre-selects the matching Community chip (setMarketplaceCategoryFilter)
-// before navigating there.
-function communityShelfLinkHtml(category) {
-  return `<a href="#" class="agents-empty-community-link" data-community-category="${escapeHtml(category)}">Community</a>`;
+// A real <button>, not an <a href="#">: this is the primary path off an empty
+// shelf, and as an anchor it matched no CSS rule anywhere in styles.css, so it
+// inherited plain link styling and did not read as actionable.
+//
+// data-community-category is read by #agentsCategories' delegated click
+// handler, which routes it through navigateToPage's options so the matching
+// Community chip is pre-selected. 'all' is a valid value there -- navigateToPage
+// falls it back to 'all' because it isn't a MARKET_LABELS key.
+function communityShelfButtonHtml(category) {
+  return `<button type="button" class="agents-empty-community-btn" data-community-category="${escapeHtml(category)}">Community</button>`;
+}
+
+/** The Stocks shelf's market filter row: 'All' plus one chip per MARKET_LABELS
+ * entry, reusing the Community chip classes so the same taxonomy looks the same
+ * on both surfaces.
+ *
+ * Built once, then only toggled. This runs from renderAgentCategories, which is
+ * bound to the search box's `input` event -- rebuilding innerHTML per keystroke
+ * would blow away the focused chip on every character typed. */
+function renderAgentMarketChips() {
+  const container = document.getElementById('agentsMarketChips');
+  if (!container) return;
+  const chips = [
+    { key: 'all', label: 'All' },
+    ...Object.entries(MARKET_LABELS).map(([key, label]) => ({ key, label })),
+  ];
+  const existing = container.querySelectorAll('[data-agent-market]');
+  if (existing.length !== chips.length) {
+    container.innerHTML = chips
+      .map((chip) => `<button type="button" class="marketplace-category-chip" data-agent-market="${escapeHtml(chip.key)}" aria-pressed="false">${escapeHtml(chip.label)}</button>`)
+      .join('');
+  }
+  container.querySelectorAll('[data-agent-market]').forEach((button) => {
+    const active = button.dataset.agentMarket === agentMarketFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+/** Select a market chip and re-render. Resets pagination: the page index is
+ * per-shelf, so a page-3 position under 'All' would land past the end of a
+ * narrower market's single page -- an empty grid under a "Page 3 of 1" footer.
+ * An unrecognized market falls back to 'all' rather than filtering to a chip
+ * that doesn't exist. */
+function setAgentMarketFilter(market) {
+  agentMarketFilter = MARKET_LABELS[market] ? market : 'all';
+  applyAgentFilters();
 }
 
 function renderAgentCategories(agents) {
@@ -1412,11 +1460,14 @@ function renderAgentCategories(agents) {
       shelf,
       grid: document.getElementById(`agentsGrid${suffix}`),
       emptyEl: document.getElementById(`agentsEmpty${suffix}`),
+      countEl: document.getElementById(`agentsCount${suffix}`),
     };
   });
   if (shelves.some(({ grid }) => !grid)) return;
 
   if (errorEl) errorEl.hidden = true; // a successful render clears any prior error
+
+  renderAgentMarketChips();
 
   const defaultId = getDefaultAgentId();
   const pinDefaultFirst = (list) =>
@@ -1428,8 +1479,23 @@ function renderAgentCategories(agents) {
   // agents, and never surface the External onboarding card as a search result.
   const searching = !!(document.getElementById('agentSearchInput')?.value || '').trim();
 
-  shelves.forEach(({ shelf, grid, emptyEl }) => {
-    const matched = pinDefaultFirst(agents.filter(shelf.match));
+  shelves.forEach(({ shelf, grid, emptyEl, countEl }) => {
+    // The pill counts what the shelf HOLDS, read from the unfiltered roster --
+    // not what is currently on screen. A number that moved while you typed or
+    // clicked a chip would read as agents disappearing.
+    if (countEl) {
+      const held = allAgents.filter(shelf.match).length;
+      countEl.hidden = held === 0;
+      countEl.textContent = `${held} agent${held === 1 ? '' : 's'}`;
+    }
+
+    let matched = pinDefaultFirst(agents.filter(shelf.match));
+    if (shelf.key === 'stocks' && agentMarketFilter !== 'all') {
+      // agentMarketKey returns '' for a NULL/blank/unknown category, so those
+      // agents match no chip and appear under All only -- visible, but never
+      // filed under a market the platform can't actually vouch for.
+      matched = matched.filter((a) => agentMarketKey(a) === agentMarketFilter);
+    }
     renderAgentCards(grid, matched, shelf.key);
 
     if (shelf.key === 'external') {
@@ -1450,7 +1516,7 @@ function renderAgentCategories(agents) {
     if (!emptyEl) return;
     emptyEl.hidden = matched.length > 0;
     if (matched.length === 0) {
-      emptyEl.innerHTML = searching ? 'No agents match your search.' : shelfOnboardingEmptyHtml(shelf.key);
+      emptyEl.innerHTML = stocksEmptyHtml({ searching, marketFilter: agentMarketFilter });
     }
   });
 }
@@ -6960,6 +7026,11 @@ function initNavigation() {
       setMarketplaceCategoryFilter(chipBtn.dataset.marketplaceCategory);
     });
     document.getElementById('agentsCategories')?.addEventListener('click', (event) => {
+      const marketChip = event.target.closest('[data-agent-market]');
+      if (marketChip) {
+        setAgentMarketFilter(marketChip.dataset.agentMarket);
+        return;
+      }
       const communityLink = event.target.closest('[data-community-category]');
       if (communityLink) {
         event.preventDefault();
