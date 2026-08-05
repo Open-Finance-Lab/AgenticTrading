@@ -137,13 +137,29 @@ def test_error_alert_strings_are_plain_language():
     assert "Couldn't start Discord linking. Please sign in and try again." in _JS
     assert "Couldn't add this template. Please try again." in _JS
     assert "Couldn't delete the agent. Please try again." in _JS
-    assert "Robinhood connection failed. Please try again on a desktop computer." in _JS
+    assert (
+        "Robinhood connection failed. Connecting only works on a desktop "
+        "computer, on the address you started from."
+    ) in _JS
     # The old developer-register alerts must not survive alongside the new ones.
     assert "Failed to create new API key" not in _JS
     assert "Could not start Discord linking. Are you signed in?" not in _JS
     assert "Failed to add template" not in _JS
     assert "Failed to delete agent" not in _JS
     assert "Use localhost and a desktop browser." not in _JS
+
+
+def test_oauth_failure_reason_still_reaches_the_console():
+    """Plain-language alerts must not cost the only diagnostic signal.
+
+    `reason` is an upstream error code -- rightly kept out of the alert -- but
+    it is the sole thing separating one Robinhood failure mode from another,
+    and this deployment's server-side logging is not visible (logger.info emits
+    nothing under deployed uvicorn), so the browser console is where support
+    has to be able to read it.
+    """
+    assert "const failureReason = params.get('reason')" in _JS
+    assert "console.warn('Robinhood OAuth failed:', failureReason)" in _JS
 
 
 def test_managed_model_field_is_hosted_ai_model():

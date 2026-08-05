@@ -95,11 +95,30 @@ def test_hosted_agents_shelve_by_market_not_by_runtime():
     assert 'id="agentsGridPromptingLlms"' in _APP_HTML
     assert 'id="agentsGridUsStocks"' in _APP_HTML
 
-    # No runtime-keyed shelving survives in app.js: shelves match on `category`.
+    # The runtime-keyed *sections* are gone: shelves resolve through one
+    # function keyed on `category`, so no predicate can double-count or drop.
     assert "isOpenAgent" not in _APP_JS
     assert "agentsGridOpen" not in _APP_JS
     assert "const AGENT_SHELVES = [" in _APP_JS
-    assert "a.category === 'us_stocks'" in _APP_JS
+    assert "function agentShelfKey(agent)" in _APP_JS
+    assert "agentShelfKey(a) === 'us_stocks'" in _APP_JS
+
+
+def test_uncategorized_hosted_agents_fall_back_to_the_us_stock_shelf():
+    """Every AI Hedge Fund agent cloned before shelving shipped carries
+    `category: null`, and those rows are durable (CONTENT_DATABASE_URL).
+
+    Without a runtime fallback the generic NULL branch sends them to Prompting
+    LLMs -- the one shelf the market-based split exists to keep hosted runtimes
+    off. This is deliberately not a SQL backfill: the fallback also covers rows
+    served by a backend that predates the column and sends no `category` field
+    at all, which a one-shot migration cannot reach.
+    """
+    assert "const LEGACY_RUNTIME_SHELF = { ai_hedge_fund: 'us_stocks' }" in _APP_JS
+    # ...and it must be consulted only after a real category, so a hosted agent
+    # explicitly filed on another shelf stays where the user put it.
+    key_fn = _APP_JS.split("function agentShelfKey(agent)", 1)[1].split("\n}", 1)[0]
+    assert key_fn.index("SHELF_LABELS[slug]") < key_fn.index("LEGACY_RUNTIME_SHELF")
 
 
 def test_stored_credential_can_be_removed_from_the_editor():

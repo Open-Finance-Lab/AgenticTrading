@@ -12,6 +12,7 @@ has no JS test harness -- so, per this suite's frontend convention
 """
 
 import re
+from pathlib import Path
 
 from dashboard.backend.tests._frontend_source import APP_HTML, APP_JS, fn_body, js_const, js_string_const
 
@@ -319,3 +320,49 @@ def test_community_page_carries_the_no_real_money_sentence_once():
     """
     community_html = _community_view_html()
     assert community_html.count(_CANONICAL_NO_REAL_MONEY_SENTENCE) == 1
+
+
+def _strip_js_comments_from(source: str) -> str:
+    """`_strip_js_comments`, but for a file other than app.js."""
+    without_block = re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL)
+    return re.sub(r"^\s*//.*$", "", without_block, flags=re.MULTILINE)
+
+
+_EDITOR_JS_PATH = (
+    Path(__file__).resolve().parents[2] / "frontend" / "js" / "agent-editor.js"
+)
+_EDITOR_JS = _strip_js_comments_from(_EDITOR_JS_PATH.read_text(encoding="utf-8"))
+
+
+def test_configure_can_move_an_agent_between_shelves():
+    """Shelving is only usable if something can set the column.
+
+    Cloning from Community stamps a category, but an agent created directly
+    with Add Agent gets NULL and would be pinned to Prompting LLMs forever --
+    two of the four shelves unreachable, which reads as broken rather than
+    empty. The backend PATCH support exists; this is its caller.
+    """
+    assert 'id="agentEditorCategorySelect"' in _HTML
+    assert 'id="agentEditorCategoryField"' in _HTML
+    assert "function fillCategorySelect(agent)" in _EDITOR_JS
+    # Sent on save, and reachable from the state object the save path reads.
+    assert "payload.category = category" in _EDITOR_JS
+    assert "state.category," in _EDITOR_JS
+
+
+def test_configure_shelf_options_are_not_a_second_hardcoded_list():
+    """The <select>'s options come from app.js's SHELF_LABELS, which is itself
+    derived from AGENT_SHELVES -- so renaming a shelf updates the picker, the
+    chips, the card submeta and the section headers from one edit. The literal
+    in agent-editor.js is a load-failure floor, not the source of truth."""
+    assert "window.AGENT_SHELF_LABELS = SHELF_LABELS;" in APP_JS
+    assert "window.AGENT_SHELF_LABELS" in _EDITOR_JS
+    body = _strip_js_comments_from(_EDITOR_JS)
+    assert "SHELF_LABELS_FALLBACK" in body
+
+
+def test_clearing_the_shelf_is_saveable_not_a_no_op():
+    """"" is a real choice (the backend folds it to NULL), so a falsy check
+    would silently drop it and make "Not set" unselectable once a shelf had
+    been picked. Only null/undefined may mean "leave the field alone"."""
+    assert "if (category !== null && category !== undefined) payload.category = category;" in _EDITOR_JS

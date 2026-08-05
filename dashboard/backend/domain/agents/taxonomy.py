@@ -13,12 +13,21 @@ Two coercers, deliberately asymmetric, because they guard different boundaries:
 alongside it: the ``Literal`` is what Pydantic validates against and what FastAPI
 publishes into ``openapi.json``, so making it the single source keeps the runtime
 whitelist and the published contract from drifting apart.
+
+The ``Literal``'s *declaration order* is load-bearing too: it is the shelf order,
+mirroring ``AGENT_SHELVES`` in ``dashboard/frontend/app.js``. Reorder the members
+and the Community listing reorders with it (see :func:`category_sort_rank`).
 """
-from typing import Literal, Optional, get_args
+from typing import Literal, Optional, Tuple, get_args
 
 AgentCategory = Literal["prompting_llms", "us_stocks", "cn_ashares"]
 
-AGENT_CATEGORIES = frozenset(get_args(AgentCategory))
+#: Shelf display order. ``get_args`` preserves the ``Literal``'s declaration
+#: order, so this is the one place the ordering is stated -- alphabetical slug
+#: order is *not* the intended order ("cn_ashares" would lead).
+AGENT_CATEGORY_ORDER: Tuple[str, ...] = get_args(AgentCategory)
+
+AGENT_CATEGORIES = frozenset(AGENT_CATEGORY_ORDER)
 
 # Bounds the value this module echoes into its own error text, which is what
 # reaches the log. It does NOT bound the whole 422 body: Pydantic attaches the
@@ -59,3 +68,17 @@ def normalize_category(value: object) -> Optional[str]:
         return coerce_category(value)
     except ValueError:
         return None
+
+
+def category_sort_rank(value: object) -> int:
+    """Display rank for a category, for ordering shelves and shelved listings.
+
+    Sorting on the raw slug is wrong: the slugs are not alphabetical in shelf
+    order, so ``sorted(...)`` would put the A-share shelf first. Unshelved
+    (``None``) and unrecognized values rank last rather than first, so a
+    template that has not been categorized yet never leads the listing.
+    """
+    slug = normalize_category(value)
+    if slug is None:
+        return len(AGENT_CATEGORY_ORDER)
+    return AGENT_CATEGORY_ORDER.index(slug)

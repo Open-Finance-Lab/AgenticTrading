@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=81">
+    <link rel="stylesheet" href="styles.css?v=82">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -973,6 +973,10 @@
                     <strong id="agentEditorManagedModelValue" class="agent-editor-managed-model-value">OpenRouter · nvidia/nemotron-3-nano-30b-a3b</strong>
                     <span class="agent-editor-managed-model-note">Managed for you by Agentic Trading Lab</span>
                 </div>
+                <label id="agentEditorCategoryField" class="agent-editor-model-field" for="agentEditorCategorySelect">
+                    <span class="agent-editor-model-label">Section</span>
+                    <select id="agentEditorCategorySelect" class="agent-editor-model-select" aria-label="Which section of My Agents this agent appears in"></select>
+                </label>
                 <textarea id="agentEditorDescription" class="agent-editor-description" rows="2" maxlength="280" placeholder="Optional description for this agent…" aria-label="Agent description"></textarea>
                 <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
                     <div class="agent-editor-broker-head">
@@ -1700,8 +1704,8 @@
     <script src="market-events/MarketEventCard.js" defer></script>
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
-    <script src="js/agent-editor.js?v=24" defer></script>
-    <script src="app.js?v=69" defer></script>
+    <script src="js/agent-editor.js?v=25" defer></script>
+    <script src="app.js?v=70" defer></script>
     <script src="js/leaderboard.js?v=16" defer></script>
     <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

@@ -656,18 +656,22 @@ def test_marketplace_listing_and_clone(client):
 
 
 def test_marketplace_catalog_shape():
-    """The live catalog must be well-formed: unique ids, valid categories, 7 templates.
+    """The live catalog must be well-formed: unique ids, valid categories.
 
     Guards the Task C1 recategorization of marketplace.json and its three new
     seed templates -- a malformed edit here would silently corrupt what ships
     in the Community catalog.
+
+    Deliberately no exact count: adding a template is a routine, non-regressive
+    edit, and pinning the total only reddens this suite on every future PR that
+    ships one. The invariants below are what actually break the catalog.
     """
     import dashboard.backend.domain.agents.marketplace as marketplace_mod
     from dashboard.backend.domain.agents.taxonomy import AGENT_CATEGORIES
 
     marketplace_mod.reload_marketplace_catalog()
     templates = marketplace_mod.list_marketplace_templates()
-    assert len(templates) == 7
+    assert len(templates) >= 7, "the shipped seed catalog lost templates"
 
     template_ids = [t["template_id"] for t in templates]
     assert len(template_ids) == len(set(template_ids)), (
@@ -689,6 +693,61 @@ def test_marketplace_catalog_shape():
     names = {t["template_id"]: t["name"] for t in templates}
     assert names["pipeline-analyst"] == "Three-Step Analyst"
     assert "Pipeline Analyst" not in names.values()
+
+
+def test_marketplace_listing_is_ordered_by_shelf_not_by_slug():
+    """Community cards group by shelf in *shelf* order, not slug order.
+
+    The recategorization onto slugs quietly changed which card leads the page:
+    ``sorted`` on the raw value orders cn_ashares < prompting_llms < us_stocks,
+    so the A-share template became card #1 on a U.S.-focused product. Nothing
+    caught it because no test asserted order. ``category_sort_rank`` keys on the
+    AgentCategory Literal's declaration order instead, which is also the order
+    AGENT_SHELVES renders My Agents in, so the two surfaces agree.
+    """
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+    from dashboard.backend.domain.agents.taxonomy import (
+        AGENT_CATEGORY_ORDER,
+        category_sort_rank,
+    )
+
+    marketplace_mod.reload_marketplace_catalog()
+    templates = marketplace_mod.list_marketplace_templates()
+
+    ranks = [category_sort_rank(t.get("category")) for t in templates]
+    assert ranks == sorted(ranks), "templates are not grouped in shelf order"
+
+    # The onboarding shelf leads; uncategorized templates never do.
+    assert templates[0]["category"] == AGENT_CATEGORY_ORDER[0] == "prompting_llms"
+    assert templates[-1]["category"] == "cn_ashares"
+
+    # Within a shelf, still by name.
+    us_stocks = [t["name"] for t in templates if t["category"] == "us_stocks"]
+    assert us_stocks == sorted(us_stocks)
+
+
+def test_uncategorized_templates_sort_last_and_carry_no_fake_shelf():
+    """A template with no category must not be labelled onto a shelf.
+
+    ``_public_template`` used to default the field to "General" -- a value
+    outside the taxonomy that reads as a real shelf on the card but filters as
+    unshelved, and that sorted *first* alphabetically. None is the honest shape,
+    and ``category_sort_rank`` ranks it last so an uncategorized template can
+    never lead the listing.
+    """
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+    from dashboard.backend.domain.agents.taxonomy import category_sort_rank
+
+    projected = marketplace_mod._public_template(
+        {"template_id": "t", "name": "T", "category": "Foundation"}
+    )
+    assert projected["category"] is None
+
+    unlabelled = marketplace_mod._public_template({"template_id": "u", "name": "U"})
+    assert unlabelled["category"] is None
+
+    assert category_sort_rank(None) > category_sort_rank("cn_ashares")
+    assert category_sort_rank("General") == category_sort_rank(None)
 
 
 def test_ai_hedge_fund_analysts_are_editable_but_infrastructure_is_not(client):

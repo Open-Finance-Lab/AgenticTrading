@@ -468,21 +468,28 @@ let allAgents = [];
 let agentViewMode = 'grid';
 const AGENT_GRID_PAGE_SIZE = 5;
 
-// My Agents' four sections. Predicates are mutually exclusive by
-// construction, so every agent renders on exactly one shelf. A NULL/unknown
-// `category` (all pre-this-change rows, and anything from an old backend
-// that doesn't send the field) falls through to Prompting LLMs rather than
-// being dropped -- that shelf is also the onboarding surface, so a legacy
-// agent staying visible there is the correct fallback, not a bug.
+// Shelf to use for an uncategorized agent whose runtime already implies one.
+// Every agent cloned before shelving shipped carries `category: null`, and the
+// hosted AI Hedge Fund runtime is a U.S. stock strategy -- without this it
+// would land on Prompting LLMs, which is the one place the shelving is
+// explicitly meant to keep hosted runtimes out of. Keyed on `runtime_type`
+// rather than backfilled in SQL because the fallback also covers rows written
+// by an older backend that doesn't send `category` at all, which a one-shot
+// migration cannot. New clones stamp the column and never reach this table.
+const LEGACY_RUNTIME_SHELF = { ai_hedge_fund: 'us_stocks' };
+
+// My Agents' four sections, in display order. `match` delegates to
+// agentShelfKey so every agent resolves to exactly one shelf by construction
+// rather than by four predicates staying mutually exclusive as they're edited.
 const AGENT_SHELVES = [
   { key: 'prompting_llms', title: 'Prompting LLMs',
-    match: (a) => a.agent_type === 'builtin' && (!a.category || a.category === 'prompting_llms') },
+    match: (a) => agentShelfKey(a) === 'prompting_llms' },
   { key: 'us_stocks', title: 'U.S. Stock Trading',
-    match: (a) => a.agent_type === 'builtin' && a.category === 'us_stocks' },
+    match: (a) => agentShelfKey(a) === 'us_stocks' },
   { key: 'cn_ashares', title: 'China A-Share Trading',
-    match: (a) => a.agent_type === 'builtin' && a.category === 'cn_ashares' },
+    match: (a) => agentShelfKey(a) === 'cn_ashares' },
   { key: 'external', title: 'For Developers: Connected Agents',
-    match: (a) => a.agent_type !== 'builtin' },
+    match: (a) => agentShelfKey(a) === 'external' },
 ];
 
 /** Category slug -> display label (e.g. 'us_stocks' -> 'U.S. Stock Trading'),
@@ -494,6 +501,28 @@ const AGENT_SHELVES = [
 const SHELF_LABELS = Object.fromEntries(
   AGENT_SHELVES.filter((shelf) => shelf.key !== 'external').map((shelf) => [shelf.key, shelf.title]),
 );
+
+// Exported for js/agent-editor.js, which builds the Configure screen's shelf
+// <select> from this rather than a second hardcoded option list. agent-editor.js
+// is loaded *before* app.js, so it must read this at call time (when the editor
+// opens), never at its own module-init time -- the same rule window.API follows.
+window.AGENT_SHELF_LABELS = SHELF_LABELS;
+
+/** The single shelf an agent renders under. Exactly one value per agent, so
+ * no agent can be double-counted or dropped off every shelf.
+ *
+ * Resolution order: connected agents are shelved by `agent_type` (they have no
+ * market category); a built-in with a category this frontend knows uses it;
+ * anything else -- NULL, blank, or a slug from a newer/older backend -- falls
+ * back to LEGACY_RUNTIME_SHELF and finally to Prompting LLMs. Falling back
+ * rather than dropping matters: Prompting LLMs is also the onboarding surface,
+ * so a legacy agent staying visible there is the correct outcome. */
+function agentShelfKey(agent) {
+  if (!agent || agent.agent_type !== 'builtin') return 'external';
+  const slug = String(agent.category || '').trim().toLowerCase();
+  if (SHELF_LABELS[slug]) return slug;
+  return LEGACY_RUNTIME_SHELF[String(agent.runtime_type || '').trim().toLowerCase()] || 'prompting_llms';
+}
 
 /** 'us_stocks' -> 'UsStocks' -- app.html's per-shelf element id suffix (agentsGrid<Suffix> etc). */
 function shelfIdSuffix(shelfKey) {
@@ -1787,6 +1816,13 @@ const MODEL_PROVIDER_LABELS = [
   { prefix: 'nvidia/nemotron', label: 'Powered by NVIDIA Nemotron' },
   { prefix: 'deepseek/', label: 'Powered by DeepSeek' },
   { prefix: 'openai/', label: 'Powered by GPT' },
+  // Not in today's catalog, but all four are already on the leaderboard, so a
+  // template using one is a config change away -- cheaper to cover the whole
+  // set now than to notice a card reading "AI-powered" after the fact.
+  { prefix: 'google/', label: 'Powered by Gemini' },
+  { prefix: 'qwen/', label: 'Powered by Qwen' },
+  { prefix: 'x-ai/', label: 'Powered by Grok' },
+  { prefix: 'meta-llama/', label: 'Powered by Llama' },
 ];
 
 function formatModelProviderLabel(modelName) {
@@ -1824,12 +1860,20 @@ function renderMarketplaceCategoryChips() {
       label: SHELF_LABELS[shelf.key],
     })),
   ];
-  container.innerHTML = chips
-    .map((chip) => {
-      const active = chip.key === marketplaceCategoryFilter;
-      return `<button type="button" class="marketplace-category-chip${active ? ' active' : ''}" data-marketplace-category="${escapeHtml(chip.key)}" aria-pressed="${active}">${escapeHtml(chip.label)}</button>`;
-    })
-    .join('');
+  // Build once, then only toggle state. This runs from renderMarketplaceGrid,
+  // which is bound to the search box's `input` event -- rebuilding innerHTML
+  // per keystroke would blow away the focused chip on every character typed.
+  const existing = container.querySelectorAll('[data-marketplace-category]');
+  if (existing.length !== chips.length) {
+    container.innerHTML = chips
+      .map((chip) => `<button type="button" class="marketplace-category-chip" data-marketplace-category="${escapeHtml(chip.key)}" aria-pressed="false">${escapeHtml(chip.label)}</button>`)
+      .join('');
+  }
+  container.querySelectorAll('[data-marketplace-category]').forEach((button) => {
+    const active = button.dataset.marketplaceCategory === marketplaceCategoryFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
 }
 
 function getFilteredMarketplaceTemplates() {
@@ -3310,6 +3354,12 @@ async function handleRobinhoodOAuthReturn() {
 
   const agentId = params.get('agent_id');
   const linkCode = params.get('link_code');
+  // Read before the delete below strips it. The alert deliberately says nothing
+  // about `reason` -- it's an upstream error code, not something a user can act
+  // on -- but it's the only signal that separates one failure mode from
+  // another, and backend logging is not visible in this deployment, so the
+  // console is where support has to be able to find it.
+  const failureReason = params.get('reason') || 'oauth_failed';
   params.delete('robinhood');
   params.delete('agent_id');
   params.delete('reason');
@@ -3358,7 +3408,8 @@ async function handleRobinhoodOAuthReturn() {
   }
 
   if (robinhood === 'error') {
-    alert('Robinhood connection failed. Please try again on a desktop computer.');
+    console.warn('Robinhood OAuth failed:', failureReason);
+    alert('Robinhood connection failed. Connecting only works on a desktop computer, on the address you started from.');
   }
 }
 
