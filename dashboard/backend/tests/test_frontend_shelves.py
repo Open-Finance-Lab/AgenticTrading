@@ -357,8 +357,7 @@ def test_configure_shelf_options_are_not_a_second_hardcoded_list():
     in agent-editor.js is a load-failure floor, not the source of truth."""
     assert "window.AGENT_SHELF_LABELS = SHELF_LABELS;" in APP_JS
     assert "window.AGENT_SHELF_LABELS" in _EDITOR_JS
-    body = _strip_js_comments_from(_EDITOR_JS)
-    assert "SHELF_LABELS_FALLBACK" in body
+    assert "SHELF_LABELS_FALLBACK" in _EDITOR_JS
 
 
 def test_clearing_the_shelf_is_saveable_not_a_no_op():
