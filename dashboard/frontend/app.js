@@ -182,7 +182,7 @@ function showAppToast(message) {
 const MAX_AGENT_CASH_ALLOCATION = 3000;
 const DEFAULT_AGENT_CASH_ALLOCATION = 1000;
 /** Simulated cash ceiling for a single backtest run — unrelated to the paper sleeve above. */
-const MAX_BACKTEST_ALLOCATED_CAPITAL = 10000;
+const MAX_BACKTEST_ALLOCATED_CAPITAL = 3000;
 const DEFAULT_PORTFOLIO_EQUITY = 10000;
 const AGENT_CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
 

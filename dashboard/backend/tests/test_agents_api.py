@@ -486,11 +486,11 @@ def test_cash_allocation_cap_is_three_thousand(client):
     )
 
     assert MAX_AGENT_CASH_ALLOCATION == 3_000
-    assert MAX_BACKTEST_INITIAL_CAPITAL == 10_000
+    assert MAX_BACKTEST_INITIAL_CAPITAL == 3_000
     # Clamp behavior follows the backtest capital constant (not the sleeve max).
     assert resolve_initial_capital(3_000) == 3_000.0
-    assert resolve_initial_capital(10_000) == 10_000.0
-    assert resolve_initial_capital(50_000) == 10_000.0
+    assert resolve_initial_capital(10_000) == 3_000.0
+    assert resolve_initial_capital(50_000) == 3_000.0
     assert resolve_initial_capital(None) == 1_000.0
 
     browser_session = str(uuid.uuid4())
