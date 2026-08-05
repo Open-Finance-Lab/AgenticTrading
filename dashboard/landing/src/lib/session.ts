@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
 
-const AUTH_TOKEN_KEY = "auth-token";
+const AUTH_USER_KEY = "auth-user";
 
-/** True when the dashboard session token is present in localStorage. */
+/** True when a cached auth-user profile is present (session cookie is HttpOnly). */
 export function hasAuthToken(): boolean {
   try {
-    return Boolean(localStorage.getItem(AUTH_TOKEN_KEY));
+    return Boolean(localStorage.getItem(AUTH_USER_KEY));
   } catch {
     return false;
   }

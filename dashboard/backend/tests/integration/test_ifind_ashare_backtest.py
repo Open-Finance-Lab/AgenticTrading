@@ -171,7 +171,7 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
     session_id = str(uuid.uuid4())
     monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
     monkeypatch.setenv("IFIND_ACCESS_TOKEN", secret)
-    monkeypatch.setattr(backtests_router.threading, "Thread", _CapturingThread)
+    monkeypatch.setattr(backtests_router, "_BackgroundThread", _CapturingThread)
     backtests_router._backtest_rate_limiter.reset()
     backtests_router.backtest_status.update(
         {
@@ -274,7 +274,7 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
 
     monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
     monkeypatch.setenv("IFIND_ACCESS_TOKEN", secret)
-    monkeypatch.setattr(backtests_router.threading, "Thread", _CapturingThread)
+    monkeypatch.setattr(backtests_router, "_BackgroundThread", _CapturingThread)
     monkeypatch.setattr(
         backtests_router,
         "ensure_llm_client_available",

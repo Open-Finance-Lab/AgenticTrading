@@ -1,175 +1,220 @@
-# iFinD A 股整手交易与资金适配设计
+# iFinD A-Share Lot Execution and Capital Design
 
-## 1. 背景
+## 1. Background
 
-ATL 已经可以通过 iFinD 获取 A 股历史行情，并按历史 USD/CNY 汇率运行人民币原生账本回测。PR #272 进一步为两个 iFinD A 股股票池增加了 T+1 模拟执行语义：
+ATL can load historical A-share bars from iFinD and run a native-CNY ledger
+reported in USD through historical USD/CNY rates. PR #272 added T+1 execution
+semantics to both registered iFinD universes:
 
 - `A-Share Demo 6`
-- `CSI 300 Sample 20`
+- `CSI 300 Sample 20 (2026 H2)`
 
-当前订单执行器尚未模拟 A 股买卖数量必须为 100 股整数倍的整手规则。Rule-based Agent 仍按组合权益比例计算股数，可能产生 1 股、2 股等不符合本项目 A 股模拟规则的订单；Trading Log 也只展示成交，用户无法从页面直接看到订单因整手、现金或 T+1 限制未成交。
+The shared executor does not yet model this project's uniform A-share rule that
+buy and sell quantities must be positive multiples of 100 shares. The
+rule-based Agent can therefore request one or two shares, and the Trading Log
+shows fills without explaining attempts rejected by lot, cash, position, or
+T+1 constraints.
 
-本设计在 PR #272 合并后，为上述两个股票池补充统一的整手校验、资金不足拒单和订单执行日志。ATL 仍然只做回测和模拟交易，不接真实券商账户或真实资金。
+This design adds market-configured lot validation, auditable insufficient-cash
+rejections, and one canonical outcome per attempted order. ATL remains a
+historical backtest and simulation platform; it does not connect an A-share
+broker or submit real orders.
 
-## 2. 前置条件与分支策略
+## 2. Prerequisite and Branch Strategy
 
-实现以 PR #272 合并后的最新 `main` 为基础，因为本设计复用该 PR 引入的 T+1 状态和 `rejected_orders` 审计能力。
+Implementation starts from `main` after PR #272 because it reuses the T+1
+position state and `rejected_orders` audit contract.
 
-- 不向 PR #272 追加本功能；
-- 不创建依赖未合并 PR #272 的叠加 PR；
-- PR #272 合并后同步最新 `main`，再创建独立功能分支；
-- 本设计文档可以先保存在独立本地分支，但代码实现必须等待前置 PR 合并。
+- Do not append this feature to PR #272.
+- Do not open a stacked code PR against an unmerged T+1 branch.
+- After PR #272 merges, create a separate feature branch from the latest
+  `main`.
+- Keep this design and its implementation plan with that independent feature.
 
-## 3. 目标与非目标
+## 3. Goals and Non-Goals
 
-### 3.1 目标
+### 3.1 Goals
 
-1. 两个 iFinD A 股股票池的买入和卖出数量必须是 100 股的整数倍。
-2. 非整手订单整笔拒绝，不自动向下取整，也不改变 Agent 的原始决策。
-3. Rule-based Agent 出现 A 股买入信号时固定申请买入一手，即 100 股。
-4. 按用户选择的回测本金和历史汇率判断人民币账本是否有足够现金。
-5. 一手都买不起时回测继续运行，允许最终 0 笔成交。
-6. Trading Log 同时展示全部成交、部分成交和拒单。
-7. Rule-based 和 LLM 回测共用同一执行规则。
-8. 保持 Alpaca 美股、vn.py 和现有成交/收益 API 的行为兼容。
+1. Require buy and sell quantities in both iFinD universes to be positive
+   multiples of 100 shares.
+2. Reject invalid lots in full without rounding or rewriting the Agent's
+   original request.
+3. Make a rule-based A-share buy signal request exactly one 100-share lot.
+4. Evaluate lot affordability in the native-CNY ledger using the selected
+   backtest capital and historical FX rate.
+5. Let a backtest complete successfully with zero fills when no lot is
+   affordable.
+6. Show filled, partially filled, and rejected attempts in the Trading Log.
+7. Apply the same executor rules to rule-based and LLM backtests.
+8. Preserve Alpaca, vn.py, and existing trade/return API behavior.
 
-### 3.2 非目标
+### 3.2 Non-Goals
 
-本轮不实现：
+This iteration does not implement:
 
-- 自动把非整手数量改成最近的 100 股倍数；
-- 现金不足时自动增加本金；
-- 现金不足时对买单做部分成交；
-- A 股零股卖出等特殊券商场景；
-- 涨跌停、停牌、佣金、印花税或滑点；
-- A 股实时模拟盘、真实券商下单或实盘交易；
-- 修改 Alpaca 或 vn.py 的订单数量规则；
-- 提高现有回测本金上限。
+- automatic rounding to the nearest lot;
+- automatic capital increases;
+- partial BUY execution when cash cannot cover the full request;
+- odd-lot sell exceptions;
+- board-specific STAR Market quantity rules;
+- price limits, suspensions, commissions, stamp duty, or slippage;
+- live A-share paper trading, broker orders, or real-money trading;
+- changes to Alpaca or vn.py quantity rules; or
+- a higher backtest-capital limit.
 
-## 4. 选择的架构
+## 4. Architecture
 
-采用“市场规则配置 + 统一执行器”方案。
+Use a market-rule configuration plus one shared executor.
 
-`MarketProfile` 增加市场整手配置：
-
-```text
-lot_size = 100  # 两个 iFinD A 股股票池
-lot_size = 1    # Alpaca、vn.py 和其他现有市场
-```
-
-订单数量规则由市场配置决定，Rule-based、LLM 和后续外部 Agent 不各自复制校验逻辑。执行器只在 `lot_size > 1` 时启用本设计新增的整手拒单门禁；`lot_size=1` 表示沿用该市场已有数量语义，包括已有的小数数量行为。非 iFinD A 股市场不启用新的 A 股拒单行为。
-
-选择理由：
-
-- 市场规则有明确归属，不把 `if data_source == "ifind"` 分散到多个 Agent 和页面；
-- 所有决策来源经过同一个校验入口，结果一致；
-- 未来增加其他市场整手规则时只需增加配置；
-- 可以独立测试市场配置、订单校验、组合记账和界面展示。
-
-## 5. 本金和计价语义
-
-回测本金保持 ATL 现有选择范围：
-
-- 最低 `$1`；
-- 默认 `$1,000`；
-- 最高 `$10,000`；
-- 用户可以为每次回测选择大于 `$1,000` 的金额。
-
-iFinD A 股回测继续使用 `CurrencyContext`：
-
-1. 用户提交的是美元报告本金；
-2. 回测开始时按对应历史 USD/CNY 汇率换算为人民币原生本金；
-3. 买入成本、现金余额和是否买得起一手均在人民币原生账本判断；
-4. API 和页面保留美元报告值，同时显示人民币原生值与汇率审计信息。
-
-例如 `$1,000` 按 7.2 换算后是约 `¥7,200`。价格为 `¥50` 的股票，一手成本 `¥5,000`，可以买入；价格为 `¥180` 的股票，一手成本 `¥18,000`，买单被拒绝。系统不会把 `$1,000` 当作 `¥1,000`，也不会自动提高本金。
-
-## 6. 订单执行流程
-
-每个被识别的 BUY/SELL 指令按以下顺序处理：
+`MarketProfile` gains a lot-size setting:
 
 ```text
-Agent 产生订单
-  -> 读取 MarketProfile
-  -> 基础字段校验
-  -> 整手校验
-  -> BUY 现金校验，或 SELL 持仓/T+1 校验
-  -> 成交、部分成交或拒单
-  -> 同步写入组合账本和订单事件
+lot_size = 100  # both registered iFinD A-share universes
+lot_size = 1    # Alpaca, vn.py, and existing markets
 ```
 
-### 6.1 整手校验
+The market profile owns quantity rules. Rule-based, LLM, and future external
+Agents must not copy their own final validation. The executor activates the new
+lot gate only when `lot_size > 1`. A value of `1` preserves the market's
+existing quantity semantics, including existing fractional behavior.
 
-iFinD A 股订单必须同时满足：
+This boundary:
 
-- 数量是正整数；
-- `shares % 100 == 0`。
+- keeps the rule with its market;
+- routes every decision source through one validator;
+- supports later market-specific configuration without scattered
+  `data_source == "ifind"` branches; and
+- allows profile, execution, ledger, API, and UI tests to remain independent.
 
-50、150、250.5 股均整笔拒绝，原因代码为 `invalid_lot_size`。校验不会把数量改成 0、100 或 200。
+## 5. Capital and Currency Semantics
 
-整手校验优先于现金和 T+1 校验。例如一个 50 股买单同时存在现金不足时，只记录 `invalid_lot_size`，避免同一订单出现多个不稳定的主要原因。
+The synchronized product limits are:
+
+- minimum: `$1`;
+- default: `$1,000`;
+- maximum: `$3,000`.
+
+iFinD backtests continue to use `CurrencyContext`:
+
+1. The request supplies reporting capital in USD.
+2. The backtest converts it to native CNY using the historical rate at the
+   start of the run.
+3. Buy cost, available cash, and lot affordability are evaluated in CNY.
+4. APIs and the UI retain USD reporting values plus native-CNY and FX audit
+   fields.
+
+For example, `$1,000` at 7.2 becomes approximately `CNY 7,200`. A 100-share lot
+at `CNY 50` costs `CNY 5,000` and is affordable. A lot at `CNY 180` costs
+`CNY 18,000` and is rejected. The system must not treat `$1,000` as
+`CNY 1,000` or raise the capital automatically.
+
+## 6. Order Execution Flow
+
+Each recognized BUY or SELL passes through:
+
+```text
+Agent order
+  -> MarketProfile
+  -> base field validation
+  -> lot validation
+  -> BUY cash validation or SELL position/T+1 validation
+  -> filled, partial, or rejected outcome
+  -> ledger mutation for fills and one order event for the attempt
+```
+
+### 6.1 Lot Validation
+
+An iFinD quantity must be:
+
+- a positive finite integer; and
+- divisible by 100.
+
+Quantities such as 50, 150, and 250.5 are rejected in full with
+`invalid_lot_size`. Validation does not convert them to 0, 100, or 200.
+
+Lot validation has precedence over cash and T+1 checks. For example, a 50-share
+BUY with insufficient cash records `invalid_lot_size`, avoiding unstable
+multiple primary reasons for one order.
 
 ### 6.2 BUY
 
-Rule-based Agent 在 A 股出现买入信号时申请 100 股，不再使用 `total_equity * 0.02 / price` 产生零散股数。现金足够则正常成交；现金不足则不买。
+When the rule-based Agent sees an A-share BUY signal, it requests 100 shares
+instead of deriving a fractional-market position from
+`total_equity * 0.02 / price`. The shared executor owns the cash gate so an
+unaffordable signal remains auditable.
 
-LLM Agent 可以申请一个或多个整手，执行器不会替 Agent 改数量。买单保持 ATL 当前的全成或全拒语义：只有现金足以支付完整申请数量时才成交，否则整笔拒绝并记录 `insufficient_cash_for_lot`。即使 200 股买单的现金只够 100 股，也不自动部分成交。
+An LLM may request one or more full lots. The executor does not alter the
+quantity. BUY remains all-or-none: cash must cover the complete request or the
+order is rejected with `insufficient_cash_for_lot`. A 200-share request is not
+partially filled when cash covers only 100 shares.
 
-资金不足不会抛出终止回测的异常，不改变现金、持仓、收益或权益曲线。整段回测可以成功结束且成交数为 0。
+Insufficient cash is not a backtest exception. It changes no cash, position,
+return, or equity state, and the full run may finish with zero trades.
 
 ### 6.3 SELL
 
-卖单先通过整手校验，再使用 PR #272 的 T+1 可卖数量：
+A SELL passes lot validation before PR #272's available-position and T+1
+checks:
 
-- 请求数量全部可卖时，状态为 `filled`；
-- 请求数量只有一部分可卖时，成交可卖部分，状态为 `partial`；
-- 当天买入数量全部冻结时，状态为 `rejected`，原因为 `t1_frozen`；
-- 请求量超过总持仓的剩余部分沿用 `insufficient_position`。
+- fully sellable quantity: `filled`;
+- only part of the request sellable: `partial`;
+- all requested shares frozen by same-day buys: `rejected / t1_frozen`; and
+- request beyond total position: remaining quantity uses
+  `insufficient_position`.
 
-由于正常 A 股买入、卖出和解冻数量均为 100 的倍数，T+1 部分成交数量也保持整手。拒单数量不写入 `trades`，不增加交易数。
+Normal buys, releases, and sells are multiples of 100, so a T+1 partial fill
+also remains a full lot. Unfilled quantities do not enter `trades` or increase
+the trade count.
 
-一个卖单可能同时包含冻结数量和超过总持仓的数量。此时 `rejected_orders` 继续按 PR #272 的语义分别保存两个原因；单行 `order_event` 以 `t1_frozen` 作为主要原因，确保 Trading Log 状态稳定，完整原因拆分仍可从拒单审计读取。若没有冻结数量，主要原因才是 `insufficient_position`。
+One SELL can include both frozen and nonexistent shares. `rejected_orders`
+retains the detailed reason components. The single `order_event` uses
+`t1_frozen` as its primary reason when any requested shares are frozen, and
+uses `insufficient_position` otherwise.
 
-## 7. 状态和原因合同
+## 7. Status and Reason Contract
 
-领域层和 API 使用稳定的机器值：
+### 7.1 Status Values
 
-### 7.1 状态
+The domain and API use:
 
 - `filled`
 - `partial`
 - `rejected`
 
-前端分别显示：
+The frontend displays:
 
 - `FILLED`
 - `PARTIAL`
 - `REJECTED`
 
-### 7.2 原因
+### 7.2 Reason Values
 
-| 机器值 | 前端英文文案 |
+| Machine value | English UI label |
 |---|---|
 | `invalid_lot_size` | `Invalid lot size` |
 | `insufficient_cash_for_lot` | `Insufficient cash for one lot` |
 | `t1_frozen` | `T+1 frozen` |
 | `insufficient_position` | `Insufficient position` |
 
-`filled` 订单的拒单原因为空。Agent 给出的策略解释单独保留为 `strategy_reason`，不能和执行拒单原因共用同一个字段。
+A filled order has no rejection reason. The Agent's explanation remains in
+`strategy_reason`; it must not share the executor's reason field.
 
-## 8. 成交、拒单和订单事件
+## 8. Trades, Rejections, and Order Events
 
-现有数据语义保持不变：
+Existing semantics remain:
 
-- `trades` 只保存实际成交，用于现金、持仓、收益、交易数和权益曲线；
-- `rejected_orders` 保存完全或部分未成交的审计，兼容 PR #272；
-- 新增 `order_events` 作为 Trading Log 的规范数据源，每个订单尝试恰好对应一条事件。
+- `trades` stores actual fills used by cash, positions, returns, trade count,
+  and the equity curve;
+- `rejected_orders` stores detailed unfilled audit records compatible with
+  PR #272; and
+- `order_events` becomes the Trading Log's canonical source, with exactly one
+  event per attempted order.
 
-`order_events` 至少包含：
+An order event contains at least:
 
 ```json
 {
-  "timestamp": "2026-04-01T10:00:00",
+  "timestamp": "2026-04-01T10:00:00+08:00",
   "symbol": "600519.SH",
   "side": "BUY",
   "requested_shares": 100,
@@ -186,110 +231,134 @@ LLM Agent 可以申请一个或多个整手，执行器不会替 Agent 改数量
 }
 ```
 
-`price` 和 `executed_value` 使用报告币种。跨币种回测的订单事件同时携带 `native_price`、`native_value` 和 `fx_rate`，沿用现有成交审计方向；完全拒单的两种成交金额均为 0。
+`price` and `executed_value` use the reporting currency. Cross-currency events
+also carry `native_price`, `native_value`, and `fx_rate`. A fully rejected
+order has zero executed value in both currencies.
 
-部分卖出同时产生真实 `trade`、未成交审计和一条 `partial` 订单事件，但 Trading Log 只消费 `order_events`，不会把同一订单重复显示成两行。订单事件在执行器处理订单时直接产生，不由前端按时间和股票猜测合并。
+A partial SELL creates one real trade, one detailed unfilled audit, and one
+`partial` order event. The Trading Log consumes only `order_events`, so the
+attempt is not shown twice. The executor creates the event directly; the
+frontend does not infer order identity by matching timestamps and symbols.
 
-`order_events` 写入最终回测结果、运行元数据和 live progress。旧客户端可以忽略新字段；现有 `/runs/{run_id}/trades` 继续只返回真实成交。
+Final results, run metadata, and live progress expose bounded order-event data.
+Old clients may ignore new fields. The existing trades endpoint retains
+`trades` and its original `count` meaning while adding separate order-event
+fields.
 
-## 9. Trading Log 设计
+## 9. Trading Log
 
-保留现有 Trading Log 区域，表格调整为：
+Keep the existing Trading Log section and use these eight columns:
 
 | Time | Action | Company / Asset | Quantity | Price | Total Value | Status | Reason |
 |---|---|---|---|---|---|---|---|
 
-数量显示“实际成交 / 请求数量”：
+Quantity displays actual fill over request:
 
-- `100 / 100 shares`：全部成交；
-- `100 / 200 shares`：部分成交；
-- `0 / 50 shares`：整笔拒绝。
+- `100 / 100 shares`: filled;
+- `100 / 200 shares`: partial; and
+- `0 / 50 shares`: rejected.
 
-`Total Value` 只表示实际成交金额。完全拒单没有资金变化，显示 `--`，不能展示成已经花费的申请金额。跨币种成交继续显示美元报告值和人民币原生审计值。
+`Total Value` represents the actual fill only. A full rejection displays `--`
+because no cash moved. Cross-currency fills continue to show USD reporting and
+native-CNY audit values.
 
-筛选项 `All Trades` 改为 `All Orders`，现有 `Buys Only` 和 `Sells Only` 保留。所有新增可见文案使用英文。
+Rename `All Trades` to `All Orders`; keep `Buys Only` and `Sells Only`. All new
+visible copy is English.
 
-## 10. 错误处理与兼容性
+## 10. Error Handling and Compatibility
 
-1. 非整手和资金不足是正常的模拟执行结果，不是 HTTP 500 或回测失败。
-2. 拒单不修改现金、持仓、收益、交易数或权益曲线。
-3. 0 笔成交是合法的成功回测，页面显示水平权益曲线和拒单日志。
-4. 历史运行缺少 `order_events` 时，前端继续使用现有 `trades` 展示，不要求数据库迁移。
-5. `lot_size=1` 的现有市场保持原有行为，不引入 A 股专属拒单原因。
-6. API、日志、测试夹具和页面均不得输出 iFinD、Alpaca 或 LLM 凭证。
+1. Invalid lots and insufficient cash are normal simulated outcomes, not HTTP
+   500 errors or failed runs.
+2. Rejections do not mutate cash, positions, returns, trade count, or equity.
+3. Zero fills is a valid successful backtest with a flat equity curve and
+   auditable order outcomes.
+4. Historical runs without `order_events` fall back to existing `trades`; no
+   database migration is required.
+5. Existing `lot_size=1` markets retain their current behavior and do not emit
+   A-share-specific rejection reasons.
+6. APIs, logs, fixtures, and pages must never expose iFinD, Alpaca, or LLM
+   credentials.
 
-## 11. 测试方案
+## 11. Test Plan
 
-### 11.1 市场配置和执行器单元测试
+### 11.1 Profile and Executor Unit Tests
 
-覆盖：
+Cover:
 
-1. 两个 iFinD A 股配置的 `lot_size` 为 100；
-2. Alpaca 和 vn.py 不启用 A 股整手行为；
-3. 100、200 股通过整手校验；
-4. 50、150 和小数股被 `invalid_lot_size` 拒绝；
-5. 同时存在数量和资金问题时优先返回 `invalid_lot_size`；
-6. 有足够现金的 100 股买单成交；
-7. 买不起一手时记录 `insufficient_cash_for_lot` 且账本不变；
-8. 200 股买单只够 100 股时整笔拒绝，不发生现金部分成交；
-9. Rule-based A 股买入信号固定申请 100 股；
-10. LLM 的非整手订单经过相同执行器拒绝。
+1. Both iFinD profiles use `lot_size=100`.
+2. Alpaca and vn.py do not enable the A-share lot gate.
+3. Quantities 100 and 200 pass.
+4. Quantities 50, 150, fractional, malformed, and non-finite fail with
+   `invalid_lot_size`.
+5. Lot failure takes precedence over cash failure.
+6. An affordable 100-share BUY fills.
+7. An unaffordable lot records `insufficient_cash_for_lot` without ledger
+   mutation.
+8. A 200-share request affordable only at 100 shares is rejected in full.
+9. A rule-based A-share BUY requests 100 shares.
+10. An invalid LLM quantity reaches and is rejected by the same executor.
 
-### 11.2 T+1 组合测试
+### 11.2 T+1 Composition Tests
 
-覆盖：
+Cover:
 
-1. 当天买入 100 股后卖出 100 股，结果为 `REJECTED / T+1 frozen`；
-2. 请求卖出 200 股、只有 100 股可卖时，结果为 `PARTIAL / T+1 frozen`；
-3. 下一个实际回测交易日解冻后卖出 100 股，结果为 `FILLED`；
-4. 部分成交数量进入 `trades`，冻结数量只进入拒单审计；
-5. 拒单不影响现金、收益和权益曲线。
+1. Buy 100 and sell 100 on the same day: `REJECTED / T+1 frozen`.
+2. Request 200 with only 100 sellable: `PARTIAL / T+1 frozen`.
+3. Sell 100 after the next actual trading-day release: `FILLED`.
+4. Filled shares enter `trades`; frozen shares enter only audit data.
+5. A rejection does not alter cash, return, or equity.
 
-### 11.3 API 和前端测试
+### 11.3 API and Frontend Tests
 
-覆盖：
+Cover:
 
-1. 最终结果、运行元数据和 live progress 都返回 `order_events`；
-2. 每个订单尝试在 Trading Log 恰好显示一次；
-3. `FILLED`、`PARTIAL`、`REJECTED` 及英文原因映射正确；
-4. Quantity 显示实际成交量和申请量；
-5. 完全拒单的 Total Value 显示 `--`；
-6. `All Orders`、买入和卖出筛选正确；
-7. 历史运行没有 `order_events` 时仍能显示成交。
+1. Final results, metadata, and live progress expose order events.
+2. Each attempted order appears exactly once in the Trading Log.
+3. Status and English reason mappings are stable.
+4. Quantity shows executed and requested shares.
+5. A fully rejected Total Value displays `--`.
+6. All Orders, BUY, and SELL filters work.
+7. Historical runs without events still display fills.
 
-### 11.4 本金、汇率和真实数据验收
+### 11.4 Capital, FX, and Real-Data Acceptance
 
-使用确定性 iFinD/FX 测试夹具自动验证：
+Deterministic fixtures verify:
 
-- `$1,000` 按历史汇率转换后能买入低价股票的一手；
-- 买不起高价股票时回测成功且 0 笔成交；
-- 用户选择大于 `$1,000` 的本金时使用该金额，最高仍为 `$10,000`；
-- 人民币现金判断和美元报告结果一致。
+- `$1,000` converts at the historical rate and can buy a low-price lot;
+- an unaffordable high-price lot yields a successful zero-fill run;
+- a user-selected amount above `$1,000`, up to `$3,000`, is honored; and
+- native-CNY cash checks match USD reporting results.
 
-自动化测试不得依赖真实凭证。开发者本地可以使用已有 iFinD 凭证运行一次真实 A 股历史回测，检查曲线、Trading Log、本金、汇率和拒单显示；不得把凭证写入仓库、测试输出或 PR。
+Automated tests do not use real credentials. A local developer may run one real
+iFinD historical backtest to inspect the curve, Trading Log, capital, FX, and
+rejection display. Credentials must never enter the repository, test output,
+screenshots, or PR.
 
-### 11.5 回归测试
+### 11.5 Regression
 
-运行完整后端测试、vn.py 测试以及相关前端测试，确认：
+Run the full backend and packaging suites plus relevant vn.py and frontend
+tests. Confirm:
 
-- Alpaca 美股和 vn.py 的成交行为不变；
-- 现有 `trades` 和 `rejected_orders` 合同兼容；
-- Rule-based 和 LLM 两条 A 股路径均使用同一市场规则；
-- 拒单不被统计为成交。
+- Alpaca and vn.py fills do not change;
+- existing `trades` and `rejected_orders` contracts stay compatible;
+- rule-based and LLM A-share paths share one market rule; and
+- rejected attempts are never counted as trades.
 
-## 12. 验收标准
+## 12. Acceptance Criteria
 
-功能完成必须同时满足：
+The feature is complete only when:
 
-1. 两个 iFinD A 股股票池只成交 100 股整数倍订单；
-2. Rule-based A 股买入信号固定申请一手；
-3. 非整手订单不自动取整，并显示 `Invalid lot size`；
-4. 现金不足不终止回测，并显示 `Insufficient cash for one lot`；
-5. T+1 的完全拒绝和部分成交继续正确工作；
-6. Trading Log 每个订单只显示一次，并区分三种状态；
-7. 默认 `$1,000` 和用户选择的更高本金都按历史汇率正确运行；
-8. 0 笔成交仍返回成功结果和有效权益曲线；
-9. 拒单不改变交易数、收益、现金和权益；
-10. Alpaca 美股、vn.py 和历史运行保持兼容；
-11. 自动化测试和一次本地真实 iFinD 页面验收通过；
-12. 仓库和输出不包含任何凭证。
+1. Both iFinD universes execute only positive 100-share multiples.
+2. A rule-based A-share BUY requests one lot.
+3. Invalid lots are not rounded and display `Invalid lot size`.
+4. Insufficient cash does not fail the run and displays
+   `Insufficient cash for one lot`.
+5. T+1 full rejection and partial execution remain correct.
+6. Each attempted order appears once with one stable status.
+7. Default `$1,000` and selected higher capital up to `$3,000` use historical
+   FX correctly.
+8. A zero-fill run returns a valid result and equity curve.
+9. Rejections do not change trade count, return, cash, or equity.
+10. Alpaca, vn.py, and historical runs remain compatible.
+11. Automated tests and one local real-iFinD browser acceptance pass.
+12. No repository content or output contains credentials.

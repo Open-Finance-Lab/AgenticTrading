@@ -1,18 +1,30 @@
 import asyncio
 import base64
 import hmac
+import ipaddress
 import logging
 import math
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import urlencode
 
-from fastapi import APIRouter, Depends, Header, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from dashboard.backend.api import discord_oauth
+from dashboard.backend.auth_cookies import (
+    clear_session_cookie,
+    read_session_token,
+    set_session_cookie,
+)
+from dashboard.backend.api.rate_limit import (
+    FixedWindowRateLimiter,
+    client_ip,
+    client_key,
+)
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
 from dashboard.backend.infrastructure.email import sender as email_sender
@@ -29,6 +41,105 @@ from dashboard.backend.verification_codes import generate_code, hash_code
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Generic copy for failed logins — never reveal whether the email is registered.
+LOGIN_FAILURE_DETAIL = "Invalid email or password."
+RATE_LIMIT_DETAIL = "Too many login attempts; please try again later."
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    """Read an int override from the environment, or return ``default``.
+
+    ``minimum=0`` for counts, because 0 is a real value meaning "switch this
+    budget off" — the convention ``MAX_ACTIVE_RUNS_GLOBAL`` already uses — so an
+    operator can disable a limit from the Render dashboard without a deploy.
+    Windows pass ``minimum=1`` (a zero-width window is not a setting anyone
+    means).
+
+    Anything unparseable or out of range falls back to the default *and says so
+    on stdout*. Silently honouring a typo is how the limit that is running stops
+    being the limit everyone believes is running.
+    """
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        print(f"WARNING: {name}={raw!r} is not an integer; using default {default}")
+        return default
+    if value < minimum:
+        print(f"WARNING: {name}={value} is below the minimum {minimum}; using default {default}")
+        return default
+    return value
+
+
+def _build_limiter(prefix: str, max_default: int, window_default: int) -> FixedWindowRateLimiter:
+    """Best-effort in-process limit (see rate_limit.py), tunable via env.
+
+    Reports the effective setting at startup, following the same rule as the
+    ``*_DATABASE_URL`` backends: a limit nobody can read is a limit nobody can
+    verify, and these are exactly the knobs an operator reaches for while
+    something is already going wrong.
+    """
+    max_events = _env_int(f"{prefix}_MAX", max_default)
+    window = _env_int(f"{prefix}_WINDOW_SECONDS", window_default, minimum=1)
+    effective = "disabled" if max_events == 0 else f"{max_events} per {window}s"
+    print(f"auth rate limit {prefix}: {effective}")
+    return FixedWindowRateLimiter(max_events=max_events, window_seconds=float(window))
+
+
+# Per-client budgets are deliberately loose: they are keyed on headers the
+# caller controls, so they bound naive abuse and cap queued bcrypt work rather
+# than stopping an attacker, and a tight value costs a shared address (one
+# office, one classroom, one NAT) far more than it costs anyone hostile. The
+# per-email failure budget is the control that actually holds; see the
+# rate_limit module docstring.
+_LOGIN_IP_LIMITER = _build_limiter("AUTH_LOGIN_IP", 60, 900)
+_LOGIN_EMAIL_LIMITER = _build_limiter("AUTH_LOGIN_EMAIL", 10, 900)
+_SIGNUP_IP_LIMITER = _build_limiter("AUTH_SIGNUP_IP", 60, 3600)
+_SIGNUP_EMAIL_LIMITER = _build_limiter("AUTH_SIGNUP_EMAIL", 5, 3600)
+
+
+# Leading run of characters a hostname may contain. Anchored and non-greedy
+# about nothing: it stops at the first byte a domain cannot hold, so injected
+# text is cut off rather than folded into the value.
+_DOMAIN_PREFIX = re.compile(r"[a-z0-9.\-]*")
+
+
+def _email_domain(email: str) -> str:
+    """Domain only: enough to spot a scripted sweep, never the address itself.
+
+    Filtered, not just split. ``_normalize_email`` strips the *ends* of the
+    address, so ``"victim@example.com\\nauth.login_failed domain=attacker.test"``
+    validates -- it has an ``@`` and a dotted right-hand side -- and would let an
+    unauthenticated caller write whole forged lines into the log an operator
+    reads while deciding whether they are under attack. CodeQL caught this as
+    py/log-injection while these were ``logger`` calls and stops reporting it at
+    a ``print`` sink it does not model, so the guard has to be the code, not the
+    alert. Truncating at the first character a domain cannot hold, rather than
+    filtering them out: dropping them would splice the injected text onto the
+    real domain instead of discarding it, and nothing downstream needs to
+    reverse this.
+    """
+    domain = email.rsplit("@", 1)[-1].lower()
+    return _DOMAIN_PREFIX.match(domain).group()[:64] or "?"
+
+
+def _auth_rate_limited(limiter: FixedWindowRateLimiter, key: str, detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=429,
+        detail=detail,
+        headers={"Retry-After": str(limiter.retry_after_seconds(key))},
+    )
+
+
+def _login_ip_key(request: Request) -> str:
+    return f"login:{client_key(request)}"
+
+
+def _signup_ip_key(request: Request) -> str:
+    return f"signup:{client_key(request)}"
 
 
 def _app_redirect(query: dict[str, str]) -> RedirectResponse:
@@ -136,7 +247,39 @@ def _validate_avatar_data_uri(value: str) -> str:
 
 class AuthResponse(BaseModel):
     user: dict
-    token: str
+
+
+_MAX_STORED_USER_AGENT = 200
+
+
+def _session_client_context(request: Request) -> dict:
+    """What auth_sessions records about the client a session was issued to.
+
+    ``ip_prefix``, deliberately, not the address: this row outlives the request
+    and is meant to answer "was that me?" on a signed-in-devices list. Keeping
+    the exact address would turn the session table into a location log for
+    every user, which is a different product with different obligations. /24
+    and /48 are coarse enough to be that, and no coarser.
+
+    Both values come from headers the caller controls, so neither is a security
+    control -- see rate_limit's module docstring. They are display data.
+    """
+    raw_ip = client_ip(request)
+    try:
+        address = ipaddress.ip_address(raw_ip)
+    except ValueError:
+        prefix = None
+    else:
+        prefix = str(
+            ipaddress.ip_network(
+                f"{address}/{24 if address.version == 4 else 48}", strict=False
+            )
+        )
+    agent = (request.headers.get("user-agent") or "").strip()
+    return {
+        "user_agent": agent[:_MAX_STORED_USER_AGENT] or None,
+        "ip_prefix": prefix,
+    }
 
 
 def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
@@ -148,8 +291,23 @@ def _extract_bearer_token(authorization: Optional[str]) -> Optional[str]:
     return token.strip()
 
 
-def get_current_user(authorization: Optional[str] = Header(default=None)) -> dict:
-    token = _extract_bearer_token(authorization)
+def _session_token(
+    request: Request,
+    authorization: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve the raw session token for this request.
+
+    Explicit ``Authorization: Bearer`` wins when present (scripts / TestClient);
+    browsers after the HttpOnly migration send only the cookie.
+    """
+    return _extract_bearer_token(authorization) or read_session_token(request)
+
+
+def get_current_user(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    token = _session_token(request, authorization)
     if not token:
         raise HTTPException(status_code=401, detail="Not authenticated")
     user = users_module.user_store.get_user_for_token(token)
@@ -158,53 +316,165 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> dic
     return user
 
 
+def _auth_json(user: dict, raw_token: str) -> JSONResponse:
+    from dashboard.backend.csrf import set_csrf_cookie
+
+    response = JSONResponse({"user": user})
+    set_session_cookie(response, raw_token)
+    set_csrf_cookie(response)
+    return response
+
+
 @router.post("/signup", response_model=AuthResponse)
-async def signup(payload: SignupRequest):
+async def signup(payload: SignupRequest, request: Request):
+    # Password policy first, budgets second. A rejected password creates
+    # nothing and costs nothing, so charging for it would let someone spend
+    # their whole signup allowance discovering the strength rules and end up
+    # rate-limited out of the account they were being careful about.
     violations = validate_new_password(payload.password, payload.email)
     if violations:
         raise HTTPException(status_code=400, detail=" ".join(violations))
 
+    # allow(), not the check/record split login uses: here both outcomes are
+    # worth metering. A success spends a bcrypt hash and a durable row; a 409 is
+    # an account-existence probe (see below).
+    ip_key = _signup_ip_key(request)
+    if not _SIGNUP_IP_LIMITER.allow(ip_key):
+        raise _auth_rate_limited(
+            _SIGNUP_IP_LIMITER,
+            ip_key,
+            "Too many signup attempts from this network; please try again later.",
+        )
+    email_key = f"signup:email:{payload.email}"
+    if not _SIGNUP_EMAIL_LIMITER.allow(email_key):
+        raise _auth_rate_limited(
+            _SIGNUP_EMAIL_LIMITER,
+            email_key,
+            "Too many signup attempts for this email; please try again later.",
+        )
+
     try:
-        user = users_module.user_store.create_user(
+        # Threaded for the same reason as login's authenticate(): create_user
+        # hashes with bcrypt (~190 ms), and this route is unauthenticated.
+        user = await asyncio.to_thread(
+            users_module.user_store.create_user,
             email=payload.email,
             display_name=payload.display_name,
             password=payload.password,
         )
     except ValueError as exc:
         if str(exc) == "email_already_registered":
+            # This 409 tells an anonymous caller that an address has an account,
+            # which /login deliberately no longer does. Kept anyway, and kept
+            # honestly: the alternative that actually closes it is confirm-by-
+            # email signup (accept every attempt, reveal nothing, mail the
+            # address), which is a product change, not a copy change. Nothing
+            # here bounds it either -- one request per address answers the
+            # question, and the budgets above are keyed on headers the caller
+            # rotates for free. Documented as a known gap rather than papered
+            # over, so nobody reads the /login fix as covering both routes.
+            print(f"auth.signup_conflict domain={_email_domain(payload.email)}")
             raise HTTPException(status_code=409, detail="Email is already registered") from exc
         raise
 
-    token = users_module.user_store.create_session(user["id"])
-    return {"user": user, "token": token}
+    token = users_module.user_store.create_session(
+        user["id"], **_session_client_context(request)
+    )
+    return _auth_json(user, token)
 
 
 @router.post("/login", response_model=AuthResponse)
-async def login(payload: LoginRequest):
-    user = users_module.user_store.authenticate(payload.email, payload.password)
-    if not user:
-        raise HTTPException(status_code=401, detail="Invalid email or password")
+async def login(payload: LoginRequest, request: Request):
+    ip_key = _login_ip_key(request)
+    # check(), not allow(): both budgets here meter *failures* only. Charging a
+    # correct password would make a busy shared address lock its own users out
+    # of an endpoint they are using correctly -- and every landing-page visitor
+    # shares one key whenever no forwarded address is available at all, which is
+    # what client_ip() in rate_limit.py exists to avoid. The check still runs
+    # before authenticate(), so an over-budget caller is refused without
+    # spending a bcrypt round on them.
+    if not _LOGIN_IP_LIMITER.check(ip_key):
+        print("auth.login_rate_limited scope=ip")
+        raise _auth_rate_limited(_LOGIN_IP_LIMITER, ip_key, RATE_LIMIT_DETAIL)
 
-    token = users_module.user_store.create_session(user["id"])
-    return {"user": public_user(user), "token": token}
+    # Off the event loop: authenticate() now runs one bcrypt compare on *both*
+    # branches (see users.verify_password_for_account), so an unknown email
+    # costs ~190 ms of CPU where it used to cost ~0. Inline, that is a
+    # single-threaded stall any unauthenticated caller can drive, and the
+    # limiters above cannot close it -- rotating X-Browser-Id buys a fresh
+    # budget. Matches how the OAuth calls further down already offload.
+    user = await asyncio.to_thread(
+        users_module.user_store.authenticate, payload.email, payload.password
+    )
+    if not user:
+        _LOGIN_IP_LIMITER.record(ip_key)
+        email_key = f"login:email:{payload.email}"
+        # Count only failures against the per-email budget so a successful
+        # login is not blocked by an attacker's prior guesses — but repeated
+        # failures still earn a temporary cooldown (not a permanent lockout).
+        # This is the budget that actually bounds guessing: it is keyed on the
+        # account under attack, not on anything the attacker chooses.
+        if not _LOGIN_EMAIL_LIMITER.allow(email_key):
+            print(f"auth.login_rate_limited scope=email domain={_email_domain(payload.email)}")
+            raise _auth_rate_limited(_LOGIN_EMAIL_LIMITER, email_key, RATE_LIMIT_DETAIL)
+        print(f"auth.login_failed domain={_email_domain(payload.email)}")
+        raise HTTPException(status_code=401, detail=LOGIN_FAILURE_DETAIL)
+
+    token = users_module.user_store.create_session(
+        user["id"], **_session_client_context(request)
+    )
+    return _auth_json(public_user(user), token)
 
 
 @router.get("/me")
-async def me(current_user: dict = Depends(get_current_user)):
-    return {"user": public_user(current_user)}
+async def me(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+    current_user: dict = Depends(get_current_user),
+):
+    response = JSONResponse({"user": public_user(current_user)})
+    # Migration bridge: a browser signed in before the HttpOnly-cookie change
+    # holds a valid session only in localStorage. app.js sends it once as
+    # Bearer on the boot /me probe; upgrading it to a cookie here keeps that
+    # session alive instead of force-logging every user out on deploy.
+    if not read_session_token(request):
+        token = _extract_bearer_token(authorization)
+        if token:
+            set_session_cookie(response, token)
+    return response
 
 
 @router.post("/logout")
-async def logout(authorization: Optional[str] = Header(default=None)):
-    token = _extract_bearer_token(authorization)
+def logout(
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    token = _session_token(request, authorization)
     if token:
         users_module.user_store.delete_session(token)
-    return {"status": "ok"}
+    response = JSONResponse({"status": "ok"})
+    clear_session_cookie(response)
+    from dashboard.backend.csrf import clear_csrf_cookie
+
+    clear_csrf_cookie(response)
+    return response
+
+
+@router.post("/logout-all")
+async def logout_all(request: Request, current_user: dict = Depends(get_current_user)):
+    users_module.user_store.delete_other_sessions(current_user["id"], keep_token=None)
+    response = JSONResponse({"status": "ok"})
+    clear_session_cookie(response)
+    from dashboard.backend.csrf import clear_csrf_cookie
+
+    clear_csrf_cookie(response)
+    return response
 
 
 @router.post("/change-password")
 async def change_password(
     payload: ChangePasswordRequest,
+    request: Request,
     current_user: dict = Depends(get_current_user),
     authorization: Optional[str] = Header(default=None),
 ):
@@ -224,7 +494,7 @@ async def change_password(
     # return ok. Revocation is defence-in-depth, not a hard guarantee.
     try:
         users_module.user_store.delete_other_sessions(
-            current_user["id"], keep_token=_extract_bearer_token(authorization)
+            current_user["id"], keep_token=_session_token(request, authorization)
         )
     except Exception as exc:  # noqa: BLE001 -- password change already committed
         print(
@@ -451,6 +721,7 @@ async def cancel_email_change(current_user: dict = Depends(get_current_user)):
 @router.post("/email-change/verify")
 async def verify_email_change(
     payload: EmailChangeVerifyRequest,
+    request: Request,
     current_user: dict = Depends(get_current_user),
     authorization: Optional[str] = Header(default=None),
 ):
@@ -520,7 +791,7 @@ async def verify_email_change(
     # failures above, where the user genuinely gets nothing.
     try:
         store.delete_other_sessions(
-            current_user["id"], keep_token=_extract_bearer_token(authorization)
+            current_user["id"], keep_token=_session_token(request, authorization)
         )
     except Exception as exc:  # noqa: BLE001 -- email change already committed
         print(

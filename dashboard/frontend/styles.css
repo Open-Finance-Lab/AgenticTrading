@@ -9,6 +9,24 @@
     box-sizing: border-box;
 }
 
+/*
+ * Form controls do not inherit the page font: the UA stylesheet gives every
+ * `button`/`input`/`select` its own default (Arial here) and every `textarea`
+ * `monospace`. With no base rule, 15 of the 16 buttons on My Agents and the
+ * plain-English "Trading instruction" textarea painted in a different typeface
+ * than the text around them -- the single widest typographic inconsistency in
+ * the app. `font-family` only, deliberately: `font: inherit` would also reset
+ * size/weight, and the controls that set those want to keep them. The mono
+ * fields (.agent-capital-input, .date-input, .control-select, ...) declare
+ * `font-family: var(--font-mono)` on a class, so they still win over this.
+ */
+button,
+input,
+select,
+textarea {
+    font-family: inherit;
+}
+
 :root {
     /* 10jqka-inspired dark theme - professional trading */
     --bg-primary: #0a0e27;
@@ -70,7 +88,13 @@ body {
 
 .header {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    /* Content-sized, not minmax(0, 1fr) either side. Two fr tracks are forced
+       equal, so the wider group sets both: the nav side wants ~505px, which
+       reserves ~1010px for side chrome and leaves the row needing ~1480px
+       before it fits. Under that the brand was the only thing with no reserved
+       width, so it was what got covered. Sized to content, the row fits from
+       900px up and the free space is shared out instead. */
+    grid-template-columns: auto auto auto;
     align-items: center;
     background-color: var(--bg-surface);
     padding: 10px 24px;
@@ -80,15 +104,18 @@ body {
 }
 
 .header-brand {
-    /* True viewport-center rail (same trick as landing), independent of side chrome width. */
-    grid-column: 1 / -1;
+    /* Real middle track, not a full-span overlapping rail. The rail centred the
+       brand on the viewport by sharing the side chrome's grid area and
+       reserving no width of its own, which is exactly why the chrome could
+       paint over the logo and wordmark. Its own track cannot be overlapped;
+       the cost is that it now centres in the space the side groups leave
+       rather than on the viewport. See .header for why that trade is forced. */
+    grid-column: 2;
     grid-row: 1;
     justify-self: center;
-    z-index: 1;
     display: flex;
     align-items: center;
     gap: 12px;
-    min-width: 0;
     text-decoration: none;
     color: inherit;
     cursor: pointer;
@@ -103,7 +130,6 @@ body {
     display: flex;
     align-items: center;
     gap: 12px;
-    min-width: 0;
     flex-wrap: nowrap;
 }
 
@@ -286,7 +312,6 @@ a.header-brand:hover .title-section h1 {
     display: flex;
     align-items: center;
     gap: 10px;
-    min-width: 0;
     flex-wrap: nowrap;
 }
 
@@ -333,7 +358,9 @@ a.header-brand:hover .title-section h1 {
     color: inherit;
     font-size: 14px;
     font-weight: 600;
-    max-width: 140px;
+    /* The cap, not the name, is what the header has to be laid out against --
+       it is the account group's worst case at every width above 1024px. */
+    max-width: 100px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -511,7 +538,14 @@ a.header-brand:hover .title-section h1 {
     border: none;
     border-radius: 6px;
     background: var(--info-color);
-    color: #fff;
+    /*
+     * Dark on cyan, not #fff: white on --info-color (#00bfff) measures 2.12:1,
+     * under the WCAG AA 4.5:1 floor. This rule paints the primary button of the
+     * sign-in modal, the Run Backtest modal and both create-agent modals -- i.e.
+     * the submit control at every step of this flow. #041018 measures ~9:1 and
+     * matches how the same cyan is already paired on .home-btn-primary.
+     */
+    color: #041018;
     font-weight: 700;
     font-size: 13px;
     cursor: pointer;
@@ -1879,37 +1913,37 @@ a.header-brand:hover .title-section h1 {
     white-space: nowrap;
 }
 
-.trading-log-asset {
+.trading-log-scroll .trading-log-asset {
     display: flex;
     flex-direction: column;
     gap: 2px;
     min-width: 116px;
 }
 
-.trading-log-asset strong {
+.trading-log-scroll .trading-log-asset strong {
     font-size: 11px;
     line-height: 1.2;
 }
 
-.trading-log-asset small,
-.trading-log-reason {
+.trading-log-scroll .trading-log-asset small,
+.trading-log-scroll .trading-log-reason {
     color: var(--text-secondary);
     font-size: 10px;
     line-height: 1.3;
 }
 
-.trading-log-quantity {
+.trading-log-scroll .trading-log-quantity {
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
 }
 
-.trading-log-reason {
+.trading-log-scroll .trading-log-reason {
     min-width: 116px;
     max-width: 180px;
     white-space: normal;
 }
 
-.order-status {
+.trading-log-scroll .order-status {
     display: inline-flex;
     align-items: center;
     min-height: 20px;
@@ -1923,19 +1957,19 @@ a.header-brand:hover .title-section h1 {
     white-space: nowrap;
 }
 
-.order-status-filled {
+.trading-log-scroll .order-status-filled {
     color: #6ee7a0;
     background: rgba(34, 197, 94, 0.1);
     border-color: rgba(34, 197, 94, 0.22);
 }
 
-.order-status-partial {
+.trading-log-scroll .order-status-partial {
     color: #fbbf24;
     background: rgba(245, 158, 11, 0.1);
     border-color: rgba(245, 158, 11, 0.24);
 }
 
-.order-status-rejected {
+.trading-log-scroll .order-status-rejected {
     color: #fca5a5;
     background: rgba(239, 68, 68, 0.1);
     border-color: rgba(239, 68, 68, 0.22);
@@ -2375,11 +2409,28 @@ a.header-brand:hover .title-section h1 {
     }
 }
 
-@media (max-width: 700px) {
+/* The header is one row only down to 900px, where the nav becomes a hamburger.
+   In that band the three groups have to actually fit: everything in .header-left
+   and .header-account is flex-shrink: 0, so nothing gives way on its own and the
+   surplus lands on the brand. The labels below are dropped in the order they
+   stop earning their width, each at the measured point where the row overflows.
+
+   Staged rather than collapsed all at once because the brand centres in whatever
+   space the two side groups leave: the further apart their widths, the further
+   the brand sits from the centre. Hiding the left group in one step costs ~215px
+   of offset; hiding it in two keeps it near ~160px down to 1340px.
+
+   Each width is the measured overflow point of the *signed-in* header, which is
+   the wider one -- an avatar, a 100px-capped name and a caret where signed out
+   has just "Sign in". Sizing these to the signed-out header would leave every
+   signed-in user, i.e. every user the fix is for, still overflowing. */
+@media (max-width: 1440px) {
     .header-github-name {
         display: none;
     }
+}
 
+@media (max-width: 1340px) {
     .header-discord-btn {
         padding: 7px 10px;
         gap: 8px;
@@ -2395,6 +2446,19 @@ a.header-brand:hover .title-section h1 {
     }
 }
 
+/* Avatar only, and the row's own side padding halved. By here these are the
+   difference between the header fitting and the account controls leaving the
+   viewport -- the name is still in the account menu one click away. */
+@media (max-width: 1024px) {
+    .auth-user-label {
+        display: none;
+    }
+
+    .header {
+        padding: 10px 12px;
+    }
+}
+
 @media (max-width: 900px) {
     .header {
         grid-template-columns: 1fr;
@@ -2405,6 +2469,11 @@ a.header-brand:hover .title-section h1 {
         grid-column: 1;
         grid-row: auto;
         justify-self: center;
+        /* Safe again here, and needed: one column per group means nothing can
+           be overlapped, while the wordmark is wider than a 320px viewport --
+           left to size the track it would sit hard against the left padding
+           and overhang only to the right. */
+        min-width: 0;
     }
 
     .header-left {
@@ -4531,6 +4600,35 @@ a.header-brand:hover .title-section h1 {
     width: min(560px, calc(100vw - 32px));
     max-height: calc(100vh - 48px);
     overflow: auto;
+    /* Column layout so the submit button can be pinned to the bottom below. */
+    display: flex;
+    flex-direction: column;
+}
+
+/*
+ * Pin the primary CTA. The panel's content runs ~1080px tall, so on a 1440x900
+ * screen the "▶ Run Backtest" button rendered at y=1045 -- 145px past the fold
+ * (measured live), and worse on a 1366x768 laptop. The panel scrolls, but
+ * nothing said so, so the payoff action of the whole product was invisible on
+ * open. Sticky keeps it in view at every scroll position.
+ */
+.run-backtest-modal-panel > #runBacktestModalSubmit {
+    position: sticky;
+    bottom: 0;
+    margin-top: auto;
+    /* Opaque: the content scrolls underneath this button. Matches .auth-submit. */
+    background-color: var(--info-color);
+    box-shadow: 0 -8px 16px -8px rgba(0, 0, 0, 0.6);
+}
+
+/*
+ * Reclaim ~170px of that overflow at the source: two preset cards each
+ * reserving 180px for three short lines is what pushed the CTA off-screen.
+ * Scoped to this modal so the roomier cards elsewhere are untouched.
+ */
+.run-backtest-modal .preset-card {
+    min-height: 0;
+    padding: 12px;
 }
 
 .run-backtest-modal-body {
@@ -7001,6 +7099,26 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     gap: 10px;
 }
 
+/* My Agents loading skeletons — shipped in app.html so the grid shows card
+   shapes pre-JS; the first agents render overwrites the grid and clears them. */
+.agent-card--skeleton {
+    min-height: 172px;
+    border: 1px solid var(--border-color);
+    background: linear-gradient(100deg,
+        var(--bg-card) 40%, var(--bg-hover) 50%, var(--bg-card) 60%);
+    background-size: 200% 100%;
+    animation: agent-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes agent-skeleton-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-card--skeleton { animation: none; }
+}
+
 .agent-card-head {
     display: flex;
     justify-content: space-between;
@@ -8192,8 +8310,19 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     background: rgba(34, 211, 238, 0.1);
 }
 
+/*
+ * A neutral treatment, not a faded primary. `opacity: 0.45` over the solid
+ * cyan fill left the permanently-disabled "Run Paper Trading" button sitting
+ * next to the real "Run Backtest" as the same shape and colour at a slightly
+ * different brightness -- the action row squint-tested as two cyan CTAs, which
+ * halved the pull of the one action this flow exists to drive. The blend also
+ * dropped the label to roughly 3:1 against its own fill.
+ */
 .agent-card-cta--disabled {
-    opacity: 0.45;
+    opacity: 1;
+    background: rgba(148, 163, 184, 0.10);
+    border-color: var(--border-color);
+    color: var(--text-muted);
     cursor: not-allowed;
 }
 
@@ -8400,26 +8529,54 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 }
 
 .subtab-btn {
-    padding: 7px 16px;
+    /*
+     * 13px/9px, not 11px/7px: this bar is the primary navigation *inside* the
+     * product (My Agents / Backtest / Paper Trading), yet it was the smallest
+     * interactive text on the page -- 11px in a 26px-tall target, against a
+     * 14px/32px top nav. 13px + 9px padding brings it to ~32px, matching the
+     * nav above it.
+     */
+    padding: 9px 16px;
     border: none;
     background: transparent;
     color: var(--text-secondary);
     border-radius: 3px;
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 700;
     cursor: pointer;
-    transition: all 0.15s;
+    /* Enumerated, not `all`: `all` also animates layout properties. */
+    transition: background-color 0.15s ease, color 0.15s ease;
     white-space: nowrap;
 }
 
 .subtab-btn.active {
     background: var(--info-color);
-    color: white;
+    /*
+     * Dark on cyan, not white: white on --info-color (#00bfff) measures 2.12:1,
+     * below the WCAG AA 4.5:1 floor, on the most-used control in the flow.
+     * #041018 measures ~9:1 and matches how the same cyan is already paired
+     * with a dark foreground on .home-btn-primary / .agent-card-cta.
+     */
+    color: #041018;
 }
 
 .subtab-btn:hover:not(.active) {
     color: var(--text-primary);
     background: var(--bg-hover);
+}
+
+/*
+ * styles.css had zero `:focus-visible` rules and eight bare `outline: none`
+ * resets, and this bar had no focus style of any kind -- keyboard users could
+ * not see which tab they were on. Scoped to the flow's controls rather than a
+ * global reset so it cannot disturb unrelated views.
+ */
+.subtab-btn:focus-visible,
+.agent-card-cta:focus-visible,
+.agent-view-btn:focus-visible,
+.home-btn:focus-visible {
+    outline: 2px solid var(--home-accent-cyan);
+    outline-offset: 2px;
 }
 
 .overview-grid {
@@ -8632,10 +8789,12 @@ body.agent-editor-open {
     margin-bottom: 12px;
 }
 
-.agent-capital-title {
+/* Beat `.section-card h3 { font-size: 12px }` (higher specificity). */
+.section-card .agent-capital-title {
     margin: 0 0 12px;
     font-size: 17px;
     font-weight: 700;
+    letter-spacing: normal;
     color: var(--text-primary);
 }
 
@@ -8843,10 +9002,12 @@ body.agent-editor-open {
     gap: 12px;
 }
 
-.agent-editor-history-title {
+/* Beat `.section-card h3 { font-size: 12px }` (higher specificity). */
+.section-card .agent-editor-history-title {
     margin: 0;
     font-size: 15px;
     font-weight: 700;
+    letter-spacing: normal;
     color: var(--text-primary);
 }
 
@@ -8941,10 +9102,12 @@ body.agent-editor-open {
     font-size: 12px;
 }
 
-.agent-editor-intro-title {
+/* Beat `.section-card h3 { font-size: 12px }` (higher specificity). */
+.section-card .agent-editor-intro-title {
     margin: 0 0 6px;
     font-size: 15px;
     font-weight: 700;
+    letter-spacing: normal;
     color: var(--text-primary);
 }
 
@@ -9289,8 +9452,36 @@ body.agent-editor-open {
     display: flex;
     flex-wrap: wrap;
     gap: 10px 16px;
+    align-items: center;
     color: var(--text-secondary);
     font-size: 0.82rem;
+}
+
+.marketplace-repo-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px 4px 8px;
+    border-radius: 8px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    background: rgba(15, 23, 42, 0.85);
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.78rem;
+    font-weight: 600;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.marketplace-repo-btn:hover {
+    color: #e2e8f0;
+    border-color: rgba(226, 232, 240, 0.45);
+    background: rgba(30, 41, 59, 0.95);
+}
+
+.marketplace-repo-icon {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
 }
 
 .marketplace-tag-row {
@@ -9376,7 +9567,13 @@ body.agent-editor-open {
     border: 1px solid var(--border-color);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 0.95rem;
+    /*
+     * 14px, not `0.95rem`: `rem` resolves against the 16px html root while the
+     * whole app is sized off the 14px body, so 0.95rem painted this field at
+     * 15.2px -- a fractional size (blurry sub-pixel text) on a different scale
+     * from every other control.
+     */
+    font-size: 14px;
     line-height: 1.5;
     padding: 10px 12px;
     margin-top: 10px;

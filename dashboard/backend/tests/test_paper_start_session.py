@@ -7,13 +7,16 @@ never have succeeded; it only ever ran with live Alpaca credentials, which is
 why nothing caught it.
 """
 
+import tempfile
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
+import dashboard.backend.users as users_module
 from dashboard.backend.app import app
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 from dashboard.backend.api.routers import paper_trading as paper_mod
 from dashboard.backend.database import db
-
-client = TestClient(app)
 
 
 class _FakeAlpacaClient:
@@ -23,9 +26,25 @@ class _FakeAlpacaClient:
 
 def test_start_session_succeeds_and_records_run(monkeypatch):
     monkeypatch.setattr(paper_mod, "AlpacaPaperTradingClient", _FakeAlpacaClient)
-    data = client.post(
-        "/paper/start-session", params={"agent_name": "guard-test"}
-    ).json()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = users_module.UserStore(db_path=Path(tmpdir) / "users.db")
+        monkeypatch.setattr(users_module, "user_store", store)
+        client = TestClient(app)
+        signup = client.post(
+            "/api/auth/signup",
+            json={
+                "email": "paper-start@example.com",
+                "display_name": "Paper",
+                "password": "securepass1",
+            },
+        )
+        assert signup.status_code == 200
+        token = _cookie_session_token(client)
+        data = client.post(
+            "/paper/start-session",
+            params={"agent_name": "guard-test"},
+            headers={"Authorization": f"Bearer {token}"},
+        ).json()
     assert data["success"] is True, data
     assert data["initial_equity"] == 55555.0
     run = db.get_run(data["run_id"])

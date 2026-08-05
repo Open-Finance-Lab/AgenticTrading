@@ -138,6 +138,10 @@ let appToastTimer = null;
 
 const APP_TOAST_VISIBLE_MS = 4000;
 const APP_TOAST_FADE_MS = 240;
+// How long the head boot script's /health warmup may stay pending before the
+// boot handler tells the user the free-tier server is waking up. A warm
+// server answers well under this; a cold start takes 30-60s.
+const SLOW_BOOT_NOTICE_MS = 3000;
 
 /**
  * Non-blocking confirmation channel for /app.
@@ -178,7 +182,7 @@ function showAppToast(message) {
 const MAX_AGENT_CASH_ALLOCATION = 3000;
 const DEFAULT_AGENT_CASH_ALLOCATION = 1000;
 /** Simulated cash ceiling for a single backtest run — unrelated to the paper sleeve above. */
-const MAX_BACKTEST_ALLOCATED_CAPITAL = 10000;
+const MAX_BACKTEST_ALLOCATED_CAPITAL = 3000;
 const DEFAULT_PORTFOLIO_EQUITY = 10000;
 const AGENT_CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
 
@@ -464,7 +468,17 @@ let allAgents = [];
 let agentViewMode = 'grid';
 const AGENT_GRID_PAGE_SIZE = 5;
 /** Per-category page index (0-based). Reset on search change. */
-let agentGridPage = { builtin: 0, external: 0 };
+let agentGridPage = { builtin: 0, open: 0, external: 0 };
+
+const AGENT_GRID_FOOTER_IDS = {
+  builtin: 'agentsGridFooterBuiltin',
+  open: 'agentsGridFooterOpen',
+  external: 'agentsGridFooterExternal',
+};
+
+function isOpenAgent(agent) {
+  return (agent?.runtime_type || 'pipeline') === 'ai_hedge_fund';
+}
 
 function agentGridPageCount(total) {
   return Math.max(1, Math.ceil(total / AGENT_GRID_PAGE_SIZE));
@@ -1014,7 +1028,7 @@ function getFilteredAgents() {
 
 function applyAgentFilters(resetPagination = true) {
   if (resetPagination) {
-    agentGridPage = { builtin: 0, external: 0 };
+    agentGridPage = { builtin: 0, open: 0, external: 0 };
   }
   renderAgentCategories(getFilteredAgents());
 }
@@ -1073,17 +1087,17 @@ function renderAgentsError() {
   document.querySelectorAll('.agents-section .agents-grid').forEach((grid) => {
     grid.innerHTML = '';
   });
-  ['agentsGridFooterBuiltin', 'agentsGridFooterExternal'].forEach((id) => {
+  Object.values(AGENT_GRID_FOOTER_IDS).forEach((id) => {
     const footer = document.getElementById(id);
     if (footer) {
       footer.hidden = true;
       footer.innerHTML = '';
     }
   });
-  const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
-  if (builtinEmpty) builtinEmpty.hidden = true;
-  const externalEmpty = document.getElementById('agentsEmptyExternal');
-  if (externalEmpty) externalEmpty.hidden = true;
+  ['agentsEmptyBuiltin', 'agentsEmptyOpen', 'agentsEmptyExternal'].forEach((id) => {
+    const empty = document.getElementById(id);
+    if (empty) empty.hidden = true;
+  });
   if (errorEl) errorEl.hidden = false;
 }
 
@@ -1140,7 +1154,7 @@ function bindAgentCardMenus(grid) {
 }
 
 function renderAgentGridFooter(categoryKey, total, page, pageCount) {
-  const footerId = categoryKey === 'builtin' ? 'agentsGridFooterBuiltin' : 'agentsGridFooterExternal';
+  const footerId = AGENT_GRID_FOOTER_IDS[categoryKey];
   const footer = document.getElementById(footerId);
   if (!footer) return;
   if (pageCount <= 1) {
@@ -1152,9 +1166,9 @@ function renderAgentGridFooter(categoryKey, total, page, pageCount) {
   const atStart = page <= 0;
   const atEnd = page >= pageCount - 1;
   footer.innerHTML = `
-    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="上一页" ${atStart ? 'disabled' : ''}>←</button>
-    <span class="agents-grid-footer-count">第 ${page + 1} / ${pageCount} 页 · 共 ${total} 个</span>
-    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="下一页" ${atEnd ? 'disabled' : ''}>→</button>`;
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-prev="${categoryKey}" aria-label="Previous page" ${atStart ? 'disabled' : ''}>←</button>
+    <span class="agents-grid-footer-count">Page ${page + 1} of ${pageCount} · ${total} total</span>
+    <button type="button" class="agents-grid-footer-btn agents-grid-footer-btn--nav" data-agent-grid-next="${categoryKey}" aria-label="Next page" ${atEnd ? 'disabled' : ''}>→</button>`;
 }
 
 function renderAgentCards(grid, agents, categoryKey) {
@@ -1293,9 +1307,10 @@ function renderAgentCards(grid, agents, categoryKey) {
 
 function renderAgentCategories(agents) {
   const builtinGrid = document.getElementById('agentsGridBuiltin');
+  const openGrid = document.getElementById('agentsGridOpen');
   const externalGrid = document.getElementById('agentsGridExternal');
   const errorEl = document.getElementById('agentsErrorState');
-  if (!builtinGrid || !externalGrid) return;
+  if (!builtinGrid || !openGrid || !externalGrid) return;
 
   if (errorEl) errorEl.hidden = true; // a successful render clears any prior error
 
@@ -1304,22 +1319,38 @@ function renderAgentCategories(agents) {
     [...list].sort((a, b) => (b.agent_id === defaultId) - (a.agent_id === defaultId));
 
   // A live search narrows the list: distinguish "no agents at all" (onboarding)
-  // from "none match your search" so we neither mis-say "No foundation agents
-  // yet" nor surface the External onboarding card as if it were a search result.
+  // from "none match your search" so we neither mis-say empty onboarding copy
+  // nor surface the External onboarding card as if it were a search result.
   const searching = !!(document.getElementById('agentSearchInput')?.value || '').trim();
 
-  const builtin = pinDefaultFirst(agents.filter((a) => a.agent_type === 'builtin'));
+  // Prompting LLMs = instruction + model builtins. Open Agents = hosted
+  // runtimes such as AI Hedge Fund (still agent_type=builtin, different shelf).
+  const builtin = pinDefaultFirst(
+    agents.filter((a) => a.agent_type === 'builtin' && !isOpenAgent(a)),
+  );
+  const openAgents = pinDefaultFirst(
+    agents.filter((a) => a.agent_type === 'builtin' && isOpenAgent(a)),
+  );
   const external = pinDefaultFirst(agents.filter((a) => a.agent_type !== 'builtin'));
 
   renderAgentCards(builtinGrid, builtin, 'builtin');
+  renderAgentCards(openGrid, openAgents, 'open');
   renderAgentCards(externalGrid, external, 'external');
 
   const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
   if (builtinEmpty) {
     builtinEmpty.hidden = builtin.length > 0;
     builtinEmpty.innerHTML = searching
-      ? 'No foundation agents match your search.'
-      : 'No foundation agents yet. Click <strong>Add Agent</strong> to create one.';
+      ? 'No prompting LLMs match your search.'
+      : 'No prompting LLMs yet. Click <strong>Add Agent</strong> to create one.';
+  }
+
+  const openEmpty = document.getElementById('agentsEmptyOpen');
+  if (openEmpty) {
+    openEmpty.hidden = openAgents.length > 0;
+    openEmpty.innerHTML = searching
+      ? 'No open agents match your search.'
+      : 'No open agents yet. Add one from Community.';
   }
 
   const externalEmpty = document.getElementById('agentsEmptyExternal');
@@ -1589,7 +1620,38 @@ async function ensureDefaultFoundationAgent(agents) {
   }
 }
 
+// Auth boot gate: nav goes live before the boot's auth awaits, so a My Agents
+// click can arrive while refreshAuthUser → claimAgentsForUser is still in
+// flight. Fetching agents at that moment misses the guest Foundation agent a
+// landing signup is about to claim, and ensureDefaultFoundationAgent would
+// provision a duplicate starter. Every external caller therefore waits here;
+// the DOMContentLoaded handler opens the gate once the claim phase settles.
+let openAuthBootGate;
+const authBootGate = new Promise((resolve) => {
+  openAuthBootGate = resolve;
+});
+let agentsLoadInFlight = null;
+
 async function loadAgents() {
+  // Coalesce concurrent callers: several early clicks during a cold boot must
+  // share one fetch, not stack identical requests behind the gate. Sequential
+  // calls still refetch (re-clicking the subtab is the user's refresh).
+  if (agentsLoadInFlight) return agentsLoadInFlight;
+  agentsLoadInFlight = (async () => {
+    try {
+      await authBootGate;
+      return await loadAgentsNow();
+    } finally {
+      agentsLoadInFlight = null;
+    }
+  })();
+  return agentsLoadInFlight;
+}
+
+// The ungated loader: only for callers already ordered after the account
+// claim (claimAgentsForUser itself, which runs inside the gated section and
+// would deadlock on the gate above).
+async function loadAgentsNow() {
   try {
     let data = await API.get(`${API_BASE}/api/v1/agents`);
     let agents = data.agents || [];
@@ -1715,15 +1777,29 @@ function renderMarketplaceGrid() {
   templates.forEach((template) => {
     const card = document.createElement('div');
     card.className = 'section-card agent-card marketplace-card';
-    const isAiHedgeFundTemplate = template.runtime_type === 'ai_hedge_fund';
     const modeLabel = template.mode === 'runtime'
       ? 'Hosted runtime'
       : (template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction');
-    const cloneLabel = isAiHedgeFundTemplate ? 'Copy to My Agents' : 'Add to My Agents';
+    const cloneLabel = 'Add to My Agents';
     const tags = (template.tags || [])
       .slice(0, 3)
       .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
       .join('');
+    const repoLabel = (() => {
+      if (!template.repo_url) return '';
+      try {
+        const path = new URL(template.repo_url).pathname.replace(/^\/+|\/+$/g, '');
+        return path || template.author || 'GitHub';
+      } catch {
+        return template.author || 'GitHub';
+      }
+    })();
+    const authorMeta = template.repo_url
+      ? `<a class="marketplace-repo-btn" href="${escapeHtml(template.repo_url)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(repoLabel)} on GitHub">
+            <svg class="ui-icon marketplace-repo-icon" aria-hidden="true"><use href="#icon-github"></use></svg>
+            <span>${escapeHtml(repoLabel)}</span>
+          </a>`
+      : `<span>By ${escapeHtml(template.author || 'Community')}</span>`;
     card.innerHTML = `
       <div class="agent-card-top">
         <div class="agent-card-identity">
@@ -1738,7 +1814,7 @@ function renderMarketplaceGrid() {
       <div class="marketplace-card-body">
         <p class="marketplace-card-description">${escapeHtml(template.description || 'Open agent template.')}</p>
         <div class="marketplace-card-meta">
-          <span>By ${escapeHtml(template.author || 'Community')}</span>
+          ${authorMeta}
           ${template.step_count ? `<span>${template.step_count} step${template.step_count === 1 ? '' : 's'}</span>` : ''}
         </div>
         ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
@@ -2275,17 +2351,14 @@ const API = {
       'Content-Type': 'application/json',
       'x-session-id': window.SESSION_ID,
       'x-browser-id': window.BROWSER_OWNER_ID,
+      ...csrfHeaders(),
       ...options.headers,
     };
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-    
     try {
       const response = await fetch(endpoint, { 
         ...options, 
         headers,
+        credentials: 'include',
       });
       
       const contentType = response.headers.get('content-type');
@@ -2338,25 +2411,53 @@ const API = {
 
 const API_BASE = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? window.location.origin
-    : 'https://agentictrading.onrender.com';
+    : '';
 
+// Legacy localStorage key — cleared on sign-in/out; never written for new sessions.
+// Session identity lives in an HttpOnly cookie (credentials: 'include').
 const AUTH_TOKEN_KEY = 'auth-token';
 const AUTH_USER_KEY = 'auth-user';
+
+function isSignedIn() {
+  return !!getStoredAuthUser();
+}
+
+function clearLegacyAuthToken() {
+  try { localStorage.removeItem(AUTH_TOKEN_KEY); } catch (_) { /* ignore */ }
+}
+
+function readCsrfToken() {
+  try {
+    const raw = document.cookie || '';
+    for (const name of ['atl_csrf', '__Host-atl_csrf']) {
+      const match = raw.match(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'));
+      if (match) return decodeURIComponent(match[1]);
+    }
+  } catch (_) { /* ignore */ }
+  return null;
+}
+
+function csrfHeaders() {
+  const token = readCsrfToken();
+  return token ? { 'X-CSRF-Token': token } : {};
+}
+window.csrfHeaders = csrfHeaders;
+// Classic-script `const API` is not a window property; agent-editor and others
+// look up window.API.patch for credentialed mutating calls.
+window.API = API;
+
 
 const AuthAPI = {
   async request(path, options = {}) {
     const headers = {
       'Content-Type': 'application/json',
+      ...csrfHeaders(),
       ...options.headers,
     };
-    const token = localStorage.getItem(AUTH_TOKEN_KEY);
-    if (token) {
-      headers.Authorization = `Bearer ${token}`;
-    }
-
     const response = await fetch(`${API_BASE}${path}`, {
       ...options,
       headers,
+      credentials: 'include',
     });
 
     const contentType = response.headers.get('content-type');
@@ -2387,7 +2488,14 @@ const AuthAPI = {
   },
 
   me() {
-    return this.request('/api/auth/me', { method: 'GET' });
+    // Migration bridge: a session issued before the HttpOnly-cookie change
+    // exists only in localStorage. Send it once as Bearer; the backend
+    // answers with Set-Cookie, and refreshAuthUser then clears the legacy key.
+    const legacyToken = localStorage.getItem(AUTH_TOKEN_KEY);
+    return this.request('/api/auth/me', {
+      method: 'GET',
+      ...(legacyToken ? { headers: { Authorization: `Bearer ${legacyToken}` } } : {}),
+    });
   },
 
   logout() {
@@ -2457,29 +2565,31 @@ function getStoredAuthUser() {
     return null;
   }
 }
+window.getStoredAuthUser = getStoredAuthUser;
 
-function setAuthState(user, token) {
-  localStorage.setItem(AUTH_TOKEN_KEY, token);
+function setAuthState(user) {
+  clearLegacyAuthToken();
   localStorage.setItem(AUTH_USER_KEY, JSON.stringify(user));
   window.AUTH_USER = user;
   updateAuthUI();
 }
 
 async function claimAgentsForUser({ reload = true } = {}) {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token) return;
+  if (!getStoredAuthUser()) return;
   try {
     await API.post(`${API_BASE}/api/v1/agents/claim-account`, {});
   } catch (error) {
     console.warn('Agent account claim skipped:', error.message);
   }
   if (reload) {
-    await loadAgents();
+    // Ungated on purpose: this call IS the claim-then-load ordering the auth
+    // boot gate exists to protect, and it runs before the gate opens.
+    await loadAgentsNow();
   }
 }
 
 function clearAuthState() {
-  localStorage.removeItem(AUTH_TOKEN_KEY);
+  clearLegacyAuthToken();
   localStorage.removeItem(AUTH_USER_KEY);
   window.AUTH_USER = null;
   // The email-change form keeps its stage in a closure keyed to nobody: left
@@ -3007,7 +3117,7 @@ function openAuthFromUrl() {
   if (auth !== 'login' && auth !== 'signup') return;
 
   // Already signed in — stay on the dashboard, no modal.
-  if (localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser()) {
+  if (isSignedIn()) {
     params.delete('auth');
     const clean = params.toString();
     const next = `${window.location.pathname}${clean ? `?${clean}` : ''}${window.location.hash}`;
@@ -3044,8 +3154,7 @@ async function openDiscordWithAccount(event) {
     event.stopPropagation();
   }
 
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token || !getStoredAuthUser()) {
+  if (!isSignedIn()) {
     openAuthModal('login');
     return;
   }
@@ -3072,10 +3181,11 @@ async function openDiscordWithAccount(event) {
 async function finishRobinhoodLinkSuccess(agentId) {
   if (agentId && window.AgentEditor?.open) {
     try {
-      const headers = { 'x-session-id': SESSION_ID };
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, { headers });
+      const headers = { 'x-session-id': SESSION_ID, ...csrfHeaders() };
+      const response = await fetch(`${API_BASE}/api/v1/agents/${encodeURIComponent(agentId)}`, {
+        headers,
+        credentials: 'include',
+      });
       if (response.ok) {
         const data = await response.json();
         if (data.agent) window.AgentEditor.open(data.agent);
@@ -3111,12 +3221,11 @@ async function handleRobinhoodOAuthReturn() {
 
   if (robinhood === 'pending') {
     try {
-      const headers = { 'Content-Type': 'application/json', 'x-session-id': SESSION_ID };
-      const token = localStorage.getItem(AUTH_TOKEN_KEY);
-      if (token) headers.Authorization = `Bearer ${token}`;
+      const headers = { 'Content-Type': 'application/json', 'x-session-id': SESSION_ID, ...csrfHeaders() };
       const response = await fetch(`${API_BASE}/api/auth/robinhood/complete`, {
         method: 'POST',
         headers,
+        credentials: 'include',
         body: JSON.stringify({ link_code: linkCode }),
       });
       if (response.ok) {
@@ -3199,20 +3308,19 @@ function wireDiscordAccountButtons() {
 }
 
 async function refreshAuthUser() {
-  const token = localStorage.getItem(AUTH_TOKEN_KEY);
-  if (!token) {
-    clearAuthState();
-    return;
-  }
-
+  // Probe the cookie session. Guests get 401; signed-in users refresh the
+  // cached auth-user profile. A stale auth-user alone must not skip this.
   try {
     const data = await AuthAPI.me();
+    clearLegacyAuthToken();
     localStorage.setItem(AUTH_USER_KEY, JSON.stringify(data.user));
     window.AUTH_USER = data.user;
     updateAuthUI();
     await claimAgentsForUser();
   } catch (error) {
-    console.warn('Auth session expired:', error.message);
+    if (getStoredAuthUser()) {
+      console.warn('Auth session expired:', error.message);
+    }
     clearAuthState();
   }
 }
@@ -3307,16 +3415,19 @@ function initAuthUI(options = {}) {
       const data = authMode === 'signup'
         ? await AuthAPI.signup(email, displayName, password)
         : await AuthAPI.login(email, password);
-      setAuthState(data.user, data.token);
+      setAuthState(data.user);
       // Authentication is complete here, so dismiss now. Everything below is
       // post-sign-in housekeeping and must not hold the modal open — a slow or
       // hung backend used to leave the popup up over an already-signed-in UI.
       closeAuthModal();
-      // First-time accounts should greet on Home, not a leftover My Agents tab
-      // from browsing while logged out (nav-state restore).
-      if (authMode === 'signup') {
-        navigateToPage('home');
-      }
+      // Land on My Agents after either sign-up or sign-in, matching the landing
+      // page's goToDashboardLoggedIn. Sign-up used to go to Home (a second
+      // marketing hero); sign-in used to navigate nowhere at all, so the only
+      // confirmation it had worked was the header avatar swapping in, and the
+      // user was left on whatever page they happened to be reading.
+      // navigateToPage maps 'agents' → playground + the 'agents' subtab itself.
+      navigateToPage('agents');
+      showAppToast(`Signed in as ${data.user?.display_name || data.user?.email || 'your account'}`);
       claimAgentsForUser()
         .then(() => {
           // If we arrived here from a Discord deep link that needed this account
@@ -3567,6 +3678,11 @@ let currentMode = "home";
 let currentPage = "home";
 let playgroundTab = "agents";
 let competitionTab = "daily";
+// True once the user explicitly navigates (any history:'push' navigation).
+// Nav is wired before boot's auth awaits, so applyInitialNavigation may run
+// AFTER a real click — restoring the saved page then would yank the page out
+// from under the user.
+let userHasNavigated = false;
 let allRuns = [];
 let comparisonData = null;
 let backtestChartData = null;
@@ -3580,86 +3696,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     // landing signup → /app handoff does not miss the guest Foundation agent.
     initAuthUI({ refresh: false });
     bindCashStepInputs();
-    await restoreActiveAgentSession();
-    if (localStorage.getItem(AUTH_TOKEN_KEY)) {
-        try {
-            await refreshAuthUser();
-        } catch (error) {
-            console.warn('Boot refreshAuthUser failed:', error?.message || error);
-        }
-    }
-    // Portfolio overview must not wait on the agents waterfall. Paint any
-    // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
-    // then show the page while loadAgents continues in the background.
-    if (typeof window.paintPortfolioBoot === 'function') {
-        try {
-            window.paintPortfolioBoot(
-                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
-            );
-        } catch (error) {
-            console.warn('Portfolio boot paint failed:', error?.message || error);
-        }
-    }
-    if (typeof window.prefetchPortfolio === 'function') {
-        Promise.resolve(
-            window.prefetchPortfolio(
-                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
-            ),
-        ).catch((error) => {
-            console.warn('Portfolio prefetch failed:', error?.message || error);
-        });
-    }
-    // refreshAuthUser → claimAgentsForUser already loadAgents when signed in.
-    const agentsReady = localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser()
-        ? Promise.resolve()
-        : loadAgents().catch((error) => {
-            console.warn('Initial loadAgents failed:', error.message);
-        });
-    applyInitialNavigation();
-    // Home modules / agent cards catch up once the list lands; do not block
-    // first navigation on that wait.
-    await agentsReady;
-    window.addEventListener('agent-editor-saved', async (event) => {
-        const agent = event.detail?.agent;
-        if (agent?.agent_id) {
-            const idx = allAgents.findIndex((a) => a.agent_id === agent.agent_id);
-            if (idx >= 0) {
-                allAgents[idx] = { ...allAgents[idx], ...agent };
-            }
-            applyAgentFilters();
-        }
-        if (agent?.agent_id === localStorage.getItem(ACTIVE_AGENT_KEY)) {
-            localStorage.setItem(ACTIVE_AGENT_NAME_KEY, agent.name || '');
-            const nameEl = document.getElementById('playgroundAgentName');
-            if (nameEl) nameEl.textContent = agent.name || 'Agent';
-        }
-        await loadAgents();
-    });
-    window.addEventListener('agent-editor-open-run', async (event) => {
-        const { agent, runId } = event.detail || {};
-        if (!agent || !runId) return;
-        if (window.AgentEditor) window.AgentEditor.close(true);
-        await activateAgent(agent);
-        localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
-        navigateToPage('playground', { playgroundTab: 'backtest' });
-        currentMode = 'backtest';
-        await loadData();
-    });
-    // Guarded: this awaits loadData() internally, and an unhandled rejection here
-    // used to abort the rest of boot — including initNavigation(), which wires
-    // every nav button. A failed deep link must not cost the user navigation.
-    try {
-        await applyAgentRunDeepLink();
-    } catch (error) {
-        console.warn('Deep link failed:', error.message);
-    }
-    const config = loadConfigFromURL();
-    window.CURRENT_CONFIG = config;
-    console.log('⚙️ Experiment config:', config);
-    console.log('Session ID:', window.SESSION_ID);
-    
-    console.log('Dashboard initializing...');
 
+    // ---- Pure-DOM wiring before ANY network await. On a cold backend start
+    // every fetch below this block can hang for tens of seconds, and nothing
+    // here needs one: nav must respond to clicks immediately. Data loads an
+    // early click triggers are held by authBootGate until the account-claim
+    // phase settles, so wiring early cannot reorder the claim invariant. ----
+    initNavigation();
     setupTickerResizeHandler();
     setupTickerScrollControls();
 
@@ -3734,46 +3777,147 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.querySelectorAll('.universe-tab').forEach(tab => {
         tab.addEventListener('click', (e) => handleUniverseTabSwitch(e.target));
     });
-    
+
     // Setup preset cards
     document.getElementById('djiaCard')?.addEventListener('click', () => selectPreset('djia'));
     document.getElementById('mag7Card')?.addEventListener('click', () => selectPreset('mag7'));
-    
+
     // Setup custom universe builder
     setupAssetSearch();
-    
+
     const addAssetBtn = document.querySelector('.add-asset-btn');
     if (addAssetBtn) {
         addAssetBtn.addEventListener('click', handleAddAsset);
     }
-    
+
     const searchInput = document.getElementById('assetSearchInput');
     if (searchInput) {
         searchInput.addEventListener('keypress', (e) => {
             if (e.key === 'Enter') handleAddAsset();
         });
     }
-    
+
     // Setup chip removal
     document.querySelectorAll('.chip-remove').forEach(btn => {
         btn.addEventListener('click', (e) => removeChip(e.target.closest('.chip')));
     });
 
-    // Load default configuration if available (after DOM is ready)
-    try {
-      await loadDefaults();
-    } catch (error) {
-      console.warn('Failed to load defaults:', error);
-    }
-    await loadMarketDataFeatures();
-
-    initNavigation();
-
-    // Load ticker without blocking the rest of the page
+    // Ticker immediately: it is the page's de-facto liveness signal and
+    // depends on nothing above.
     loadMarketTicker();
     setInterval(loadMarketTicker, 30000);
     updateMarketsOpenStatus();
     setInterval(updateMarketsOpenStatus, 60000);
+
+    // Config fetches in parallel, off the boot critical path; awaited at the
+    // end of boot so "Dashboard ready" still means fully configured.
+    const configReady = Promise.all([
+        loadDefaults().catch((error) => {
+            console.warn('Failed to load defaults:', error);
+        }),
+        loadMarketDataFeatures(),
+    ]);
+
+    // If the head boot script's warmup ping is still pending after a beat,
+    // say so — a free-tier cold start otherwise looks like a broken page.
+    if (window.API_WARMUP) {
+        let warmupSettled = false;
+        window.API_WARMUP.then(() => { warmupSettled = true; });
+        setTimeout(() => {
+            if (!warmupSettled) {
+                showAppToast('Waking up the server — the first load can take up to a minute on our free hosting.');
+            }
+        }, SLOW_BOOT_NOTICE_MS);
+    }
+
+    await restoreActiveAgentSession();
+    // The HttpOnly session cookie is invisible to JS, so the boot signal is
+    // the cached auth-user (written on every cookie sign-in) or a pre-cookie
+    // legacy localStorage token (upgraded to a cookie by the /me bridge).
+    if (localStorage.getItem(AUTH_TOKEN_KEY) || getStoredAuthUser()) {
+        try {
+            await refreshAuthUser();
+        } catch (error) {
+            console.warn('Boot refreshAuthUser failed:', error?.message || error);
+        }
+    }
+    // Claim phase settled (or there was nothing to claim): gated loadAgents
+    // callers queued by early clicks may fetch now.
+    openAuthBootGate();
+    // Portfolio overview must not wait on the agents waterfall. Paint any
+    // sessionStorage snapshot immediately, kick GET /portfolio in parallel,
+    // then show the page while loadAgents continues in the background.
+    if (typeof window.paintPortfolioBoot === 'function') {
+        try {
+            window.paintPortfolioBoot(
+                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
+            );
+        } catch (error) {
+            console.warn('Portfolio boot paint failed:', error?.message || error);
+        }
+    }
+    if (typeof window.prefetchPortfolio === 'function') {
+        Promise.resolve(
+            window.prefetchPortfolio(
+                Array.isArray(allAgents) ? allAgents.map(decorateAgent) : [],
+            ),
+        ).catch((error) => {
+            console.warn('Portfolio prefetch failed:', error?.message || error);
+        });
+    }
+    // refreshAuthUser → claimAgentsForUser already loadAgents when signed in.
+    const agentsReady = isSignedIn()
+        ? Promise.resolve()
+        : loadAgents().catch((error) => {
+            console.warn('Initial loadAgents failed:', error.message);
+        });
+    applyInitialNavigation();
+    // Home modules / agent cards catch up once the list lands; do not block
+    // first navigation on that wait.
+    await agentsReady;
+    window.addEventListener('agent-editor-saved', async (event) => {
+        const agent = event.detail?.agent;
+        if (agent?.agent_id) {
+            const idx = allAgents.findIndex((a) => a.agent_id === agent.agent_id);
+            if (idx >= 0) {
+                allAgents[idx] = { ...allAgents[idx], ...agent };
+            }
+            applyAgentFilters();
+        }
+        if (agent?.agent_id === localStorage.getItem(ACTIVE_AGENT_KEY)) {
+            localStorage.setItem(ACTIVE_AGENT_NAME_KEY, agent.name || '');
+            const nameEl = document.getElementById('playgroundAgentName');
+            if (nameEl) nameEl.textContent = agent.name || 'Agent';
+        }
+        await loadAgents();
+    });
+    window.addEventListener('agent-editor-open-run', async (event) => {
+        const { agent, runId } = event.detail || {};
+        if (!agent || !runId) return;
+        if (window.AgentEditor) window.AgentEditor.close(true);
+        await activateAgent(agent);
+        localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, runId);
+        navigateToPage('playground', { playgroundTab: 'backtest' });
+        currentMode = 'backtest';
+        await loadData();
+    });
+    // Guarded: this awaits loadData() internally, and an unhandled rejection here
+    // used to abort the rest of boot — including initNavigation(), which wires
+    // every nav button. A failed deep link must not cost the user navigation.
+    try {
+        await applyAgentRunDeepLink();
+    } catch (error) {
+        console.warn('Deep link failed:', error.message);
+    }
+    const config = loadConfigFromURL();
+    window.CURRENT_CONFIG = config;
+    console.log('⚙️ Experiment config:', config);
+    console.log('Session ID:', window.SESSION_ID);
+    
+    console.log('Dashboard initializing...');
+
+    // Kicked off before the auth awaits; settled before boot reports ready.
+    await configReady;
 
     console.log('🎯 Dashboard ready. Default runs:', window.DEFAULT_RUNS || 'None configured');
 });
@@ -5402,8 +5546,10 @@ function updateLiveBacktestChart(progress) {
 }
 
 function resolveTradingLogRecords(payload) {
-    if (Array.isArray(payload?.order_events)) return payload.order_events;
-    return Array.isArray(payload?.trades) ? payload.trades : [];
+    const orderEvents = payload?.order_events;
+    if (Array.isArray(orderEvents) && orderEvents.length > 0) return orderEvents;
+    if (Array.isArray(payload?.trades)) return payload.trades;
+    return Array.isArray(orderEvents) ? orderEvents : [];
 }
 
 function resolveTradingAssetName(symbol) {
@@ -5857,8 +6003,7 @@ async function runBacktest() {
     const startDate = startDateInput.value;
     const endDate = endDateInput.value;
     
-    if (!startDate || !endDate) {
-        const msg = 'Please select both start and end dates.';
+    const showModalError = (msg) => {
         const err = document.getElementById('runBacktestModalError');
         if (err && !document.getElementById('runBacktestModal')?.hidden) {
             err.textContent = msg;
@@ -5866,6 +6011,30 @@ async function runBacktest() {
         } else {
             console.warn(msg);
         }
+    };
+
+    if (!startDate || !endDate) {
+        showModalError('Please select both start and end dates.');
+        return;
+    }
+
+    // Mirror the server's MAX_BACKTEST_DAYS (api/routers/backtests.py) here so an
+    // over-long window is caught while the modal is still open and the dates are
+    // still on screen. Without this the only feedback is a 422 that arrives after
+    // the modal has closed, and the helper copy used to actively invite the
+    // mistake ("Change it to any range you have data for").
+    const MAX_BACKTEST_DAYS = 31;
+    const spanDays = Math.round(
+        (Date.parse(`${endDate}T00:00:00Z`) - Date.parse(`${startDate}T00:00:00Z`)) / 86400000,
+    );
+    if (Number.isFinite(spanDays) && spanDays < 0) {
+        showModalError('The end date must be on or after the start date.');
+        return;
+    }
+    if (Number.isFinite(spanDays) && spanDays > MAX_BACKTEST_DAYS) {
+        showModalError(
+            `Pick a window of ${MAX_BACKTEST_DAYS} days or fewer — that range is ${spanDays} days.`,
+        );
         return;
     }
 
@@ -6199,12 +6368,17 @@ function applyInitialNavigation() {
     // single point of failure when the listener is free and order-independent.
     window.addEventListener('popstate', onNavigationPopState);
 
-    const initial = resolveInitialNavigation();
-    navigateToPage(initial.page, {
-        playgroundTab: initial.playgroundTab || 'agents',
-        competitionTab: initial.competitionTab || 'daily',
-        history: 'replace',
-    });
+    // Skip the restore once the user has already clicked somewhere: nav is
+    // live during boot's auth awaits, and stomping an explicit navigation
+    // with the saved page reads as the app fighting the user.
+    if (!userHasNavigated) {
+        const initial = resolveInitialNavigation();
+        navigateToPage(initial.page, {
+            playgroundTab: initial.playgroundTab || 'agents',
+            competitionTab: initial.competitionTab || 'daily',
+            history: 'replace',
+        });
+    }
     if (typeof initHomePage === 'function') {
         initHomePage();
     }
@@ -6348,7 +6522,7 @@ async function applyAgentRunDeepLink() {
     }
 
     if (agentId && !agent && agentAuthError) {
-        const signedIn = !!(localStorage.getItem(AUTH_TOKEN_KEY) && getStoredAuthUser());
+        const signedIn = isSignedIn();
         if (!signedIn) {
             // Park it so a successful sign-in retries — see PENDING_DEEP_LINK_KEY.
             savePendingDeepLink({ agentId, runId });
@@ -6484,6 +6658,7 @@ function navigateToPage(page, options = {}) {
     }
 
     const historyMode = options.history || 'push';
+    if (historyMode === 'push') userHasNavigated = true;
     const prevState = getNavigationState();
 
     currentPage = page;

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from dashboard.backend.app import app
 import dashboard.backend.users as users_module
 from dashboard.backend.api import discord_oauth
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 
 
 @pytest.fixture
@@ -41,7 +42,10 @@ def _signup(client, email="alice@example.com", name="Alice"):
         json={"email": email, "display_name": name, "password": "securepass1"},
     )
     assert resp.status_code == 200
-    return resp.json()
+    body = resp.json()
+    assert "token" not in body
+    body["token"] = _cookie_session_token(client)
+    return body
 
 
 def test_public_user_includes_discord_link_fields(client):

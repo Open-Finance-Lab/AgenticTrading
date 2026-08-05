@@ -36,7 +36,7 @@ class CreateVersionBody(BaseModel):
 
 
 @router.post("/agents/{agent_id}/versions")
-async def create_agent_version(
+def create_agent_version(
     agent_id: str,
     body: CreateVersionBody,
     request: Request,
@@ -68,7 +68,7 @@ async def create_agent_version(
 
 
 @router.get("/agents/{agent_id}/versions")
-async def list_agent_versions(
+def list_agent_versions(
     agent_id: str,
     request: Request,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
@@ -82,7 +82,7 @@ async def list_agent_versions(
 
 
 @router.get("/agent-versions/{agent_version_id}")
-async def get_agent_version(
+def get_agent_version(
     agent_version_id: str,
     request: Request,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),

@@ -63,7 +63,9 @@ and a persistent ``session_id``. Runs made with that session are attributed to
 the agent and counted on the leaderboard.
 
 You can also register over the API. The owner context comes from an
-``X-Session-Id`` (any stable browser/client id) or a logged-in bearer token:
+``X-Session-Id`` header (any stable browser/client id). In the browser the
+dashboard supplies it for you, and a signed-in account (an ``HttpOnly`` session
+cookie — there is no user-visible token) additionally ties the agent to you:
 
 .. code-block:: bash
 

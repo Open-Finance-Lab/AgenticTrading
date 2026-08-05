@@ -13,6 +13,13 @@ from dashboard.backend import db_pool
 class _FakePool:
     instances = []
 
+    # Mirrors psycopg_pool.ConnectionPool.check_connection: production passes
+    # ``check=ConnectionPool.check_connection`` and resolves it off whatever
+    # class the module holds, so the fake must expose one too.
+    @staticmethod
+    def check_connection(conn):
+        raise AssertionError("not used in dispatch tests")
+
     def __init__(self, url, **kwargs):
         self.url = url
         self.kwargs = kwargs
@@ -50,7 +57,14 @@ def test_pool_configured_for_neon_and_dict_rows():
     db_pool.get_pool("postgresql://u@h/db")
     kwargs = _FakePool.instances[0].kwargs
     assert kwargs["max_size"] == 5
-    assert kwargs["max_idle"] == 300          # < Neon scale-to-zero idle window
+    # Well below Neon's ~300s scale-to-zero suspend. At exactly 300 the pool
+    # and Neon race: whichever side's timer fires first decides whether the
+    # next caller gets a live socket or a dead one.
+    assert kwargs["max_idle"] == 120
+    # Pre-ping at checkout: a connection Neon killed during suspend costs one
+    # silent reconnect instead of a user-visible 500 on the first request
+    # after idle.
+    assert kwargs["check"] is _FakePool.check_connection
     assert kwargs["kwargs"] == {"row_factory": dict_row}
 
 

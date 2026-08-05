@@ -15,6 +15,8 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 
+from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
+
 from dashboard.backend.app import app
 import dashboard.backend.domain.agents.repository as agent_store_module
 import dashboard.backend.database as db_module
@@ -77,11 +79,11 @@ def test_create_accepts_backtest_allocation(client):
     headers = _headers()
     resp = client.post(
         "/api/v1/agents",
-        json={"name": "alpha", "agent_type": "builtin", "backtest_allocation": 5000},
+        json={"name": "alpha", "agent_type": "builtin", "backtest_allocation": 2500},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["agent"]["backtest_allocation"] == 5000
+    assert resp.json()["agent"]["backtest_allocation"] == 2500
 
 
 def test_patch_updates_backtest_allocation(client):
@@ -92,11 +94,11 @@ def test_patch_updates_backtest_allocation(client):
 
     resp = client.patch(
         f"/api/v1/agents/{created['agent_id']}",
-        json={"backtest_allocation": 7500},
+        json={"backtest_allocation": 2500},
         headers=headers,
     )
     assert resp.status_code == 200, resp.text
-    assert resp.json()["agent"]["backtest_allocation"] == 7500
+    assert resp.json()["agent"]["backtest_allocation"] == 2500
 
 
 def test_patch_backtest_allocation_alone_is_not_no_fields_to_update(client):
@@ -114,7 +116,7 @@ def test_patch_backtest_allocation_alone_is_not_no_fields_to_update(client):
     assert resp.status_code != 400
 
 
-@pytest.mark.parametrize("bad", [0, -100, 10001])
+@pytest.mark.parametrize("bad", [0, -100, 3001])
 def test_backtest_allocation_out_of_range_is_rejected(client, bad):
     headers = _headers()
     resp = client.post(
@@ -136,12 +138,12 @@ def test_backtest_allocation_does_not_change_the_paper_sleeve(client):
 
     updated = client.patch(
         f"/api/v1/agents/{created['agent_id']}",
-        json={"backtest_allocation": 9000},
+        json={"backtest_allocation": 2500},
         headers=headers,
     ).json()["agent"]
 
     assert updated["cash_allocation"] == 1000
-    assert updated["backtest_allocation"] == 9000
+    assert updated["backtest_allocation"] == 2500
 
 
 @pytest.fixture
@@ -184,7 +186,8 @@ def _signup(client, email="backtest-alloc@example.com"):
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
-    return data["token"], data["user"]
+    assert "token" not in data
+    return _cookie_session_token(client), data["user"]
 
 
 def _auth_headers(token, browser="browser-backtest-alloc-1"):
@@ -220,12 +223,12 @@ def test_signed_in_combined_patch_moves_only_the_real_sleeve(authed_client):
     updated = authed_client.patch(
         f"/api/v1/agents/{agent_id}",
         headers=headers,
-        json={"cash_allocation": 2500, "backtest_allocation": 6000},
+        json={"cash_allocation": 2500, "backtest_allocation": 2000},
     )
     assert updated.status_code == 200, updated.text
     agent = updated.json()["agent"]
     assert agent["cash_allocation"] == 2500
-    assert agent["backtest_allocation"] == 6000
+    assert agent["backtest_allocation"] == 2000
 
     after = authed_client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
     assert after["cash_available"] == before["cash_available"] - 1500

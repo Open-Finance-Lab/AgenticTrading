@@ -69,9 +69,11 @@ def test_order_events_take_priority_and_legacy_trades_fall_back_as_filled():
         "const trade = { symbol: 'AAPL', side: 'BUY', quantity: 2, price: 100, value: 200 };",
         "const preferred = resolveTradingLogRecords({ order_events: [rejected], trades: [trade] });",
         "const fallback = resolveTradingLogRecords({ trades: [trade] });",
+        "const emptyEventsFallback = resolveTradingLogRecords({ order_events: [], trades: [trade] });",
         "console.log(JSON.stringify({",
         "  preferred: normalizeOrderRecord(preferred[0]),",
         "  fallback: normalizeOrderRecord(fallback[0]),",
+        "  emptyEventsFallback: normalizeOrderRecord(emptyEventsFallback[0]),",
         "}));",
     ])
 
@@ -84,6 +86,7 @@ def test_order_events_take_priority_and_legacy_trades_fall_back_as_filled():
     assert result["fallback"]["requestedShares"] == 2
     assert result["fallback"]["executedShares"] == 2
     assert result["fallback"]["status"] == "filled"
+    assert result["emptyEventsFallback"] == result["fallback"]
 
 
 def _render_harness(source: str):

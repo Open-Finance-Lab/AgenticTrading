@@ -69,7 +69,7 @@ def _require_backtest(backtest_id: str, session_id: str):
 
 
 @router.get("/schema")
-async def api_decision_schema():
+def api_decision_schema():
     """
     Decision JSON schema for external agents.
 
@@ -89,7 +89,7 @@ async def api_decision_schema():
 
 
 @router.post("/start")
-async def api_start_backtest(
+def api_start_backtest(
     body: StartBacktestRequest,
     x_session_id: Optional[str] = Header(None),
 ):
@@ -114,7 +114,7 @@ async def api_start_backtest(
 
 
 @router.get("/runs/{run_id}/result")
-async def api_run_result(run_id: str, x_session_id: Optional[str] = Header(None)):
+def api_run_result(run_id: str, x_session_id: Optional[str] = Header(None)):
     """Full result for a completed run: metadata, equity curve, trades, decisions."""
     session_id = _require_session(x_session_id)
     result = get_run_result(run_id, session_id)
@@ -124,7 +124,7 @@ async def api_run_result(run_id: str, x_session_id: Optional[str] = Header(None)
 
 
 @router.get("/runs/{run_id}/trades")
-async def api_run_trades(run_id: str, x_session_id: Optional[str] = Header(None)):
+def api_run_trades(run_id: str, x_session_id: Optional[str] = Header(None)):
     """Trade log for a completed external-agent backtest run."""
     session_id = _require_session(x_session_id)
     trades = get_run_trades(run_id, session_id)
@@ -134,7 +134,7 @@ async def api_run_trades(run_id: str, x_session_id: Optional[str] = Header(None)
 
 
 @router.get("/runs/{run_id}/decisions")
-async def api_run_decisions(run_id: str, x_session_id: Optional[str] = Header(None)):
+def api_run_decisions(run_id: str, x_session_id: Optional[str] = Header(None)):
     """Hourly decision log for a completed external-agent backtest run."""
     session_id = _require_session(x_session_id)
     decisions = get_run_decisions(run_id, session_id)
@@ -144,7 +144,7 @@ async def api_run_decisions(run_id: str, x_session_id: Optional[str] = Header(No
 
 
 @router.get("/{backtest_id}/status")
-async def api_backtest_status(
+def api_backtest_status(
     backtest_id: str,
     x_session_id: Optional[str] = Header(None),
 ):
@@ -155,7 +155,7 @@ async def api_backtest_status(
 
 
 @router.get("/{backtest_id}/decisions")
-async def api_backtest_decisions(
+def api_backtest_decisions(
     backtest_id: str,
     x_session_id: Optional[str] = Header(None),
 ):
@@ -167,7 +167,7 @@ async def api_backtest_decisions(
 
 
 @router.get("/{backtest_id}/steps/current")
-async def api_get_current_step(
+def api_get_current_step(
     backtest_id: str,
     x_session_id: Optional[str] = Header(None),
 ):
@@ -178,7 +178,7 @@ async def api_get_current_step(
 
 
 @router.post("/{backtest_id}/steps/current/decisions")
-async def api_submit_decisions(
+def api_submit_decisions(
     backtest_id: str,
     body: SubmitDecisionsRequest,
     x_session_id: Optional[str] = Header(None),

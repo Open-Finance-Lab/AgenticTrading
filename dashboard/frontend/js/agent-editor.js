@@ -42,13 +42,12 @@
     ['valuation_analyst', 'Valuation'],
   ];
   // Match app.js: same-origin locally, hosted backend everywhere else. In
-  // production the static frontend (Vercel) and the API (Render) are different
-  // origins, so a bare location.origin sends every /api call to the static host
-  // -- which answers with an HTML 404 page, not JSON.
+  // Same-origin API base. Local uvicorn serves the backend; production Vercel
+  // rewrites API paths to Render (see vercel.json). Empty string = root-relative.
   const API_BASE =
     window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
       ? window.location.origin
-      : 'https://agentictrading.onrender.com';
+      : '';
 
   // The simple-instruction contract (preset key + trading-actions output format)
   // has a single source of truth in app.js, published on `window`. app.js loads
@@ -152,11 +151,32 @@
     );
   }
 
+  function readCsrfToken() {
+    try {
+      const raw = document.cookie || '';
+      for (const name of ['atl_csrf', '__Host-atl_csrf']) {
+        const match = raw.match(new RegExp('(?:^|; )' + name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'));
+        if (match) return decodeURIComponent(match[1]);
+      }
+    } catch (_) { /* ignore */ }
+    return null;
+  }
+
   function authHeaders() {
     const headers = { 'x-session-id': window.SESSION_ID };
-    const token = localStorage.getItem('auth-token');
-    if (token) headers.Authorization = `Bearer ${token}`;
-    return headers;
+    const csrf = (typeof window.csrfHeaders === 'function')
+      ? window.csrfHeaders()
+      : (readCsrfToken() ? { 'X-CSRF-Token': readCsrfToken() } : {});
+    return { ...headers, ...csrf };
+  }
+
+  function isEditorSignedIn() {
+    if (typeof window.getStoredAuthUser === 'function') return !!window.getStoredAuthUser();
+    try {
+      return !!JSON.parse(localStorage.getItem('auth-user') || 'null');
+    } catch (_) {
+      return false;
+    }
   }
 
   function renderAiHedgeFundAnalysts(agent) {
@@ -226,6 +246,7 @@
       const response = await fetch(endpoint, {
         method,
         headers,
+        credentials: 'include',
         body: body == null ? undefined : JSON.stringify(body),
       });
       const data = await response.json().catch(() => ({}));
@@ -278,7 +299,7 @@
   function fetchWithTimeout(url, options, timeoutMs) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
-    return fetch(url, { ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
+    return fetch(url, { credentials: 'include', ...options, signal: controller.signal }).finally(() => clearTimeout(timer));
   }
 
   /**
@@ -301,9 +322,7 @@
     const connectBtn = document.getElementById('agentEditorConnectRobinhoodBtn');
     const disconnectBtn = document.getElementById('agentEditorDisconnectRobinhoodBtn');
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
-    const token = localStorage.getItem('auth-token');
-
-    if (!token) {
+    if (!isEditorSignedIn()) {
       if (statusEl) {
         statusEl.textContent = 'Sign in required';
         statusEl.className = 'agent-editor-broker-status agent-editor-broker-status--warn';
@@ -399,8 +418,7 @@
   }
 
   async function connectRobinhood() {
-    const token = localStorage.getItem('auth-token');
-    if (!token) {
+    if (!isEditorSignedIn()) {
       setBrokerMessage('Please sign in first.', true);
       if (typeof window.openAuthModal === 'function') window.openAuthModal('login');
       else alert('Please sign in to your ATL account first.');
@@ -426,6 +444,7 @@
       const response = await fetch(`${API_BASE}/api/auth/robinhood/start`, {
         method: 'POST',
         headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+        credentials: 'include',
         body: JSON.stringify({ agent_id: currentAgent.agent_id }),
       });
       let data = {};
@@ -471,6 +490,7 @@
       const response = await fetch(`${API_BASE}/api/v1/robinhood/disconnect`, {
         method: 'DELETE',
         headers: authHeaders(),
+        credentials: 'include',
       });
       if (!response.ok) {
         const data = await response.json();
@@ -520,6 +540,7 @@
         {
           method: 'POST',
           headers: { ...authHeaders(), 'Content-Type': 'application/json' },
+          credentials: 'include',
           body: JSON.stringify({ dry_run: false }),
         }
       );
@@ -572,8 +593,8 @@
       if (!Number.isFinite(value) || value < 1) {
         throw new Error('Backtest Allocated Capital must be at least $1.');
       }
-      if (value > 10000) {
-        throw new Error('Backtest Allocated Capital cannot exceed $10,000.');
+      if (value > 3000) {
+        throw new Error('Backtest Allocated Capital cannot exceed $3,000.');
       }
       backtest_allocation = Math.round(value);
     } else {
@@ -582,7 +603,7 @@
       // through to the default rather than becoming an unsaveable value.
       backtest_allocation =
         Number.isFinite(Number(cash_allocation)) && Number(cash_allocation) > 0
-          ? Math.min(Math.round(Number(cash_allocation)), 10000)
+          ? Math.min(Math.round(Number(cash_allocation)), 3000)
           : 1000;
     }
     const modelSelect = document.getElementById('agentEditorModelSelect');
@@ -664,6 +685,20 @@
   }
 
   function showSaveStatus(message, isError) {
+    // Toast as well as write the inline note. #agentEditorSaveStatus lives at
+    // the bottom of the editor's left column, but every one of this function's
+    // callers is a click on a control in the sticky header (Save, Run Backtest,
+    // Run Live, Connect/Disconnect Robinhood). Measured live at 1440x900: the
+    // header button sits at y=14 and this element renders at y=934 -- 920px
+    // below the fold in a 900px viewport, and it carries no aria-live. So
+    // "Save changes before Run Backtest" and "Agent name is required" both
+    // landed somewhere nobody was looking, and the button read as dead.
+    // #appToast is role="status" aria-live="polite", so this reaches sighted
+    // and screen-reader users both. Done here rather than at the 16 call sites
+    // so no future message can regress to inline-only.
+    if (typeof window.showAppToast === 'function') {
+      window.showAppToast(message);
+    }
     const el = document.getElementById('agentEditorSaveStatus');
     if (!el) return;
     el.hidden = false;
@@ -704,7 +739,7 @@
         const value = Number(raw);
         if (Number.isFinite(value) && value > 0) { resolved = value; break; }
       }
-      backtestInput.value = String(Math.min(Math.round(resolved), 10000));
+      backtestInput.value = String(Math.min(Math.round(resolved), 3000));
     }
     if (meta) {
       meta.textContent = agent.agent_type === 'builtin' ? 'Built-in agent' : 'External agent';
@@ -792,19 +827,23 @@
 
     async function requestWithHeaders(extraHeaders) {
       if (window.API?.patch) {
-        return window.API.patch(endpoint, payload, extraHeaders);
+        return window.API.patch(endpoint, payload, {
+          ...authHeaders(),
+          ...extraHeaders,
+        });
       }
+      // window.API is a const in app.js and is not on `window` unless exported —
+      // this fallback is the live prod path. It must send X-CSRF-Token whenever
+      // the session cookie is present (#285), same as Robinhood / credential calls.
       const headers = {
         'Content-Type': 'application/json',
-        'x-session-id': window.SESSION_ID,
+        ...authHeaders(),
         ...extraHeaders,
       };
-      const token = localStorage.getItem('auth-token');
-      if (token) headers.Authorization = `Bearer ${token}`;
-
       const response = await fetch(endpoint, {
         method: 'PATCH',
         headers,
+        credentials: 'include',
         body: JSON.stringify(payload),
       });
       const data = await response.json().catch(() => ({}));
@@ -916,12 +955,10 @@
 
     try {
       const headers = { 'x-session-id': window.SESSION_ID };
-      const token = localStorage.getItem('auth-token');
-      if (token) headers.Authorization = `Bearer ${token}`;
 
       const response = await fetch(
         `${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}`,
-        { headers },
+        { headers, credentials: 'include' },
       );
       if (!response.ok) return;
       const data = await response.json();

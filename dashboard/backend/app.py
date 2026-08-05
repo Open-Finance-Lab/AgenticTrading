@@ -10,12 +10,15 @@ frontend. Backend API route bodies live in ``dashboard.backend.api.routers.*``.
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from pathlib import Path
+import os
 
 import dashboard.backend.database as _database
 from dashboard.backend.paths import FRONTEND_DIR
 from dashboard.backend.middleware import SessionMiddleware, CSPHeaderMiddleware
+from dashboard.backend.csrf import CsrfMiddleware
 from dashboard.backend.api.router import api_router
 from dashboard.backend.api.routers.paper_trading import router as paper_trading_router
 from dashboard.backend.api.routers.health import router as health_router
@@ -57,16 +60,68 @@ app = FastAPI(
 app.add_exception_handler(ApiError, api_error_handler)
 app.add_exception_handler(RequestValidationError, validation_error_handler)
 
+
+def _cors_allow_origins() -> list[str]:
+    """Browser origins allowed to call this API cross-origin.
+
+    Same-origin Vercel→rewrite traffic does not need CORS. External agent
+    browsers and legacy split-origin frontends still do. When
+    ``ATL_FRONTEND_ORIGINS`` is unset we keep ``*`` (credentials remain
+    disabled). When set, only that allowlist (+ local dev hosts) is used —
+    never combine ``*`` with ``allow_credentials=True``.
+    """
+    raw = (os.getenv("ATL_FRONTEND_ORIGINS") or "").strip()
+    locals_ = [
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ]
+    if not raw:
+        return ["*"]
+    origins = [part.strip().rstrip("/") for part in raw.split(",") if part.strip()]
+    for host in locals_:
+        if host not in origins:
+            origins.append(host)
+    return origins
+
+
+_CORS_ORIGINS = _cors_allow_origins()
+# Browsers refuse credentials with Access-Control-Allow-Origin: *. Only enable
+# credentialed CORS when ATL_FRONTEND_ORIGINS pins an explicit allowlist
+# (same-origin Vercel rewrites do not need CORS at all).
+_CORS_ALLOW_CREDENTIALS = _CORS_ORIGINS != ["*"]
+
+# Compress JSON responses when the client accepts it. Equity curves and agent
+# lists run to hundreds of KB uncompressed; minimum_size skips tiny payloads
+# where the gzip header would cost more than it saves.
+#
+# Added FIRST on purpose, which makes it the INNERMOST layer. add_middleware
+# prepends, so the last one added wraps everything. GZip must sit below
+# SessionMiddleware because that is a BaseHTTPMiddleware: it re-emits every
+# response as a stream, and GZip only honours minimum_size on the non-streaming
+# branch. Stacked above Session it therefore compressed *every* response
+# including a 15-byte {"status": "ok"} -- inflating it and burning event-loop
+# CPU -- with minimum_size silently inert (test_small_response_is_not_gzipped).
+#
+# compresslevel=6, not Starlette's default of 9: Starlette compresses inline on
+# the event loop (no threadpool hop), so the cost is paid by every concurrent
+# request. Measured on a 462 KB equity curve, level 9 costs 25.0 ms for 20.1%
+# of original while level 6 costs 6.4 ms for 20.8% -- 4x the event-loop stall
+# to save 0.7 percentage points, on a free-tier CPU that is slower still.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
+
 # Enable CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
-    # PATCH backs the agent Configure screen's Save. Frontend and API are
-    # separate origins in prod, so a method absent here fails at the preflight
-    # even though the route exists (test_cors_preflight_allows_every_routed_method).
+    allow_origins=_CORS_ORIGINS,
+    allow_credentials=_CORS_ALLOW_CREDENTIALS,
+    # PATCH backs the agent Configure screen's Save. Cross-origin callers
+    # (and pre-proxy split-origin frontends) need the method listed here or
+    # the browser fails at preflight even though the route exists
+    # (test_cors_preflight_allows_every_routed_method).
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["content-type", "authorization", "x-session-id", "x-browser-id", "x-api-key", "accept"],
+    allow_headers=["content-type", "authorization", "x-session-id", "x-browser-id", "x-api-key", "x-csrf-token", "accept"],
     # x-ratelimit-*/retry-after: the v2 spec promises these to agent clients;
     # browsers strip headers absent from Access-Control-Expose-Headers.
     expose_headers=["content-type", "cache-control", "etag", "x-session-id",
@@ -77,6 +132,9 @@ app.add_middleware(
 
 # Add session middleware (selective: backtest routes only)
 app.add_middleware(SessionMiddleware)
+
+# Cookie-session CSRF (session cookie ⇒ double-submit; API-key-only skips)
+app.add_middleware(CsrfMiddleware)
 
 # Versioned REST API (auth, future teams/contest/config)
 app.include_router(api_router)
