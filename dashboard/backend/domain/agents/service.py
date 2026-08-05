@@ -20,7 +20,7 @@ from dashboard.backend.domain.agents.repository import agent_store, _UNSET
 from dashboard.backend.domain.agents import auth_cache
 from dashboard.backend.domain.agents.credential_store import agent_credential_store
 from dashboard.backend.domain.agents.defaults import default_starter_pipeline
-from dashboard.backend.domain.agents.taxonomy import normalize_category
+from dashboard.backend.domain.agents.taxonomy import coerce_category, normalize_category
 from dashboard.backend.domain.agents.runtime import (
     DEFAULT_RUNTIME_TYPE,
     PIPELINE_RUNTIME_TYPE,
@@ -271,6 +271,12 @@ class AgentService:
         current = self.agents.get_agent(agent_id)
         if not current:
             raise AgentNotFoundError()
+        # Enforced here as well as in the route body so the column's invariant --
+        # a whitelisted slug or NULL -- holds by construction for every caller,
+        # not by the discipline of whoever writes the next one. The value is read
+        # back out on the unauthenticated /api/v1/agents/builtin listing.
+        if category is not _UNSET:
+            category = coerce_category(category)
         resolved_runtime_type = (
             normalize_runtime_type(runtime_type)
             if runtime_type is not _UNSET
@@ -347,6 +353,7 @@ class AgentService:
 
         runtime_type = normalize_runtime_type(runtime_type)
         runtime_config = normalize_runtime_config(runtime_type, runtime_config or {})
+        category = coerce_category(category)  # see update_agent for why
         if cash_allocation is None:
             cash_allocation = float(DEFAULT_AGENT_CASH_ALLOCATION)
         agent = self.agents.create_agent(

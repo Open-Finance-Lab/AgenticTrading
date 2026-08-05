@@ -57,8 +57,8 @@ def test_band_covers_the_three_acts():
 def test_band_names_the_uncovered_capabilities():
     """Model choice and external agents are real and were absent from the landing."""
     body = _BAND.read_text(encoding="utf-8")
-    assert "Pick the model" in body
-    assert "Bring your own agent" in body
+    assert "Pick the AI model" in body
+    assert "For developers: bring your own agent" in body
 
 
 def test_band_makes_no_paper_trading_claim():
