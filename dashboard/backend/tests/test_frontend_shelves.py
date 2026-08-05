@@ -489,3 +489,71 @@ def test_stocks_empty_state_distinguishes_search_chip_and_truly_empty():
     assert "No agents match your search." in body
     assert "You don't have any agents yet." in body
     assert "communityShelfButtonHtml" in body
+
+
+# --- shelf visual treatment (styles.css) ------------------------------------
+
+_STYLES_PATH = Path(__file__).resolve().parents[2] / "frontend" / "styles.css"
+_STYLES = re.sub(
+    r"/\*.*?\*/", "", _STYLES_PATH.read_text(encoding="utf-8"), flags=re.DOTALL
+)
+
+
+def _rule(selector: str) -> str:
+    """The declaration block for `selector`'s first rule, comments stripped.
+
+    Scoped to one block so a check for "this shelf has a border" cannot be
+    satisfied by an unrelated rule elsewhere in a 9,000-line stylesheet.
+    """
+    at = _STYLES.index(selector + " {")
+    return _STYLES[at : _STYLES.index("}", at)]
+
+
+def test_shelf_sections_are_real_panels_not_loose_prose():
+    """The shipped shelves were five declarations -- a margin, an <h3>, a <p> --
+    sitting above bordered cards, so the headers read as page copy rather than
+    as a container the cards belong to. A panel needs all of a border, a radius,
+    a background and padding to separate from the page beneath it.
+    """
+    rule = _rule(".agents-category")
+    assert "border:" in rule
+    assert "border-radius:" in rule
+    assert "background:" in rule
+    assert "padding:" in rule
+
+
+def test_locked_shelves_are_visually_disabled_not_just_empty():
+    """Dashed and muted, so the row reads as "not built yet" rather than as a
+    live shelf that failed to load its cards.
+    """
+    rule = _rule(".agents-category--locked")
+    assert "border-style: dashed" in rule
+    assert "opacity:" in rule
+
+
+def test_nothing_inside_a_locked_shelf_is_clickable():
+    """A hover or pointer affordance on a row with nothing behind it converts
+    caution into distrust -- the exact failure the locked treatment exists to
+    avoid.
+    """
+    assert ".agents-category--locked * { pointer-events: none; }" in _STYLES
+
+
+def test_community_cta_button_has_a_rule_of_its_own():
+    """The class it replaces (`agents-empty-community-link`) had no rule
+    anywhere in this file, which is why the CTA rendered as a plain hyperlink.
+    A hover state is what makes it read as pressable.
+    """
+    assert ".agents-empty-community-btn {" in _STYLES
+    assert ".agents-empty-community-btn:hover {" in _STYLES
+    assert "agents-empty-community-link" not in _STYLES
+
+
+def test_market_chips_reuse_the_community_chip_rules():
+    """The same taxonomy must look the same on both surfaces, so the chips share
+    `.marketplace-category-chip` rather than getting a forked copy that can
+    drift. `.agents-market-chips` exists only to space the row inside the shelf
+    head.
+    """
+    assert ".marketplace-category-chip {" in _STYLES
+    assert not re.search(r"\.agents-market-chip\s*\{", _STYLES)

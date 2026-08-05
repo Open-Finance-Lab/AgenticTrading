@@ -9285,20 +9285,123 @@ body.agent-editor-open {
     gap: 8px;
 }
 
-/* My Agents — category rows (Demo 1) */
-.agents-category { margin-top: 28px; }
+/* My Agents — asset-class shelves. A real panel, not loose prose: these sections
+   sit directly above bordered cards, so an unframed <h3>/<p> pair read as page
+   copy rather than as a container the cards belong to. The page is --bg-primary,
+   the panel --bg-surface, the cards --bg-card: each step lighter than the one
+   beneath, so no shadow is needed to separate them. */
+.agents-category {
+    margin-top: 24px;
+    padding: 18px 18px 20px;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: var(--bg-surface);
+}
 .agents-category:first-child { margin-top: 8px; }
-.agents-category-head { margin-bottom: 14px; }
+.agents-category-head {
+    margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border-color);
+}
+.agents-category-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+}
+.agents-category-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    color: var(--info-color);
+}
+.agents-category-icon svg { width: 100%; height: 100%; }
 .agents-category-title {
     font-size: 1.05rem;
     font-weight: 600;
     color: var(--text-primary);
-    margin: 0 0 2px;
+    margin: 0;
+}
+/* Reports what the shelf holds, not what is on screen — see
+   renderAgentCategories. `margin-left: auto` parks it at the right edge of the
+   heading row without a spacer element. */
+.agents-category-count {
+    margin-left: auto;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: rgba(148, 163, 184, 0.12);
+    border: 1px solid var(--border-color);
+    white-space: nowrap;
 }
 .agents-category-sub {
     font-size: 0.85rem;
     color: var(--text-secondary);
     margin: 0;
+}
+/* The chips themselves are .marketplace-category-chip — shared with Community
+   on purpose, so the same taxonomy looks the same on both surfaces. This rule
+   only spaces the row inside the shelf head. */
+.agents-market-chips { margin: 12px 0 0; }
+
+/* Locked shelves (Crypto, Futures). Neither asset class has a bar source, a
+   MarketProfile or any engine support, so the row must read as "not built yet",
+   never as "built and broken": dashed and muted, with no grid, no chips and
+   nothing clickable inside it. */
+.agents-category--locked {
+    border-style: dashed;
+    background: transparent;
+    opacity: 0.62;
+}
+.agents-category--locked .agents-category-head {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+.agents-category--locked .agents-category-icon,
+.agents-category--locked .agents-category-title {
+    color: var(--text-secondary);
+}
+/* Belt and braces with aria-disabled: no hover, no cursor change, no focus
+   stop, even if a future edit puts an interactive element in one of these rows. */
+.agents-category--locked * { pointer-events: none; }
+.agents-category-tag {
+    margin-left: auto;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    border: 1px dashed var(--border-color);
+    white-space: nowrap;
+}
+
+/* Empty-shelf Community call to action. This shipped as an <a href="#"> whose
+   class matched no rule in this file, so the primary path off an empty shelf
+   inherited plain link styling and did not read as actionable. */
+.agents-empty-community-btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
+    margin: 0 2px;
+    border-radius: 999px;
+    font-family: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: rgba(0, 191, 255, 0.12);
+    border: 1px solid var(--info-color);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.agents-empty-community-btn:hover {
+    color: var(--text-on-accent);
+    background-color: var(--info-color);
 }
 .agent-card--placeholder {
     border-style: dashed;
