@@ -158,8 +158,11 @@ def test_oauth_failure_reason_still_reaches_the_console():
     nothing under deployed uvicorn), so the browser console is where support
     has to be able to read it.
     """
-    assert "const failureReason = params.get('reason')" in _JS
     assert "console.warn('Robinhood OAuth failed:', failureReason)" in _JS
+    # ...but the value reaches a log sink from the query string, so it is
+    # narrowed to the shape an error code has first -- an unfiltered one could
+    # forge console lines with embedded newlines.
+    assert "(params.get('reason') || '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 64)" in _JS
 
 
 def test_managed_model_field_is_hosted_ai_model():

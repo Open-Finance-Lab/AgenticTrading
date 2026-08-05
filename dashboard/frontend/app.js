@@ -3359,7 +3359,12 @@ async function handleRobinhoodOAuthReturn() {
   // on -- but it's the only signal that separates one failure mode from
   // another, and backend logging is not visible in this deployment, so the
   // console is where support has to be able to find it.
-  const failureReason = params.get('reason') || 'oauth_failed';
+  //
+  // Narrowed to the shape an error code actually has before it reaches a log
+  // sink: this value arrives on the query string, so anyone can choose it, and
+  // an unfiltered one could forge console lines with embedded newlines.
+  const failureReason =
+    (params.get('reason') || '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 64) || 'oauth_failed';
   params.delete('robinhood');
   params.delete('agent_id');
   params.delete('reason');
