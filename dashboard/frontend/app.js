@@ -1956,29 +1956,62 @@ let marketplaceLoadInFlight = null;
  * shelf's empty-state Community button (via navigateToPage's options). */
 let marketplaceCategoryFilter = 'all';
 
-/** Model slug prefix -> "Powered by <provider>" label for the marketplace
- * card submeta. Matched by prefix, not exact slug, so a new model version
- * under an already-known provider doesn't need a new table entry. The raw
- * slug itself never renders on the card -- an unmatched prefix falls back to
- * the glossary's generic "AI-powered" rather than leaking it. */
-const MODEL_PROVIDER_LABELS = [
-  { prefix: 'anthropic/', label: 'Powered by Claude' },
-  { prefix: 'nvidia/nemotron', label: 'Powered by NVIDIA Nemotron' },
-  { prefix: 'deepseek/', label: 'Powered by DeepSeek' },
-  { prefix: 'openai/', label: 'Powered by GPT' },
-  // Not in today's catalog, but all four are already on the leaderboard, so a
-  // template using one is a config change away -- cheaper to cover the whole
-  // set now than to notice a card reading "AI-powered" after the fact.
-  { prefix: 'google/', label: 'Powered by Gemini' },
-  { prefix: 'qwen/', label: 'Powered by Qwen' },
-  { prefix: 'x-ai/', label: 'Powered by Grok' },
-  { prefix: 'meta-llama/', label: 'Powered by Llama' },
+/** The model-vendor axis: who makes a model, and how it is licensed.
+ *
+ * Promoted from a submeta label lookup into the source of truth for the whole
+ * axis -- Community's vendor chips, the open-source badge and the card submeta
+ * all derive from this one table, so a badge cannot drift from the vendor it
+ * describes. A wrong badge is a factual claim about someone else's product.
+ *
+ * Matched by PREFIX, not exact slug, so a new model version under a known
+ * vendor needs no entry here. Declaration order is chip order, mirroring how
+ * MARKET_LABELS' key order mirrors the AgentCategory Literal.
+ *
+ * All eight are listed even though only six are pickable: a card whose model
+ * matches nothing renders as the generic "AI-powered" with no chip and no
+ * badge, which is invisible until someone notices. The chip ROW is still
+ * derived from what the loaded catalog actually contains (see
+ * renderMarketplaceVendorChips), so listing a vendor here never ships an
+ * empty chip. */
+const MODEL_VENDORS = [
+  { key: 'anthropic', prefix: 'anthropic/', label: 'Claude', licence: 'closed' },
+  { key: 'openai', prefix: 'openai/', label: 'GPT', licence: 'closed' },
+  { key: 'google', prefix: 'google/', label: 'Gemini', licence: 'closed' },
+  { key: 'deepseek', prefix: 'deepseek/', label: 'DeepSeek', licence: 'open' },
+  { key: 'qwen', prefix: 'qwen/', label: 'Qwen', licence: 'open' },
+  // "NVIDIA Nemotron", not "Nemotron": this label also feeds
+  // formatModelProviderLabel, whose shipped output must not change.
+  { key: 'nvidia', prefix: 'nvidia/nemotron', label: 'NVIDIA Nemotron', licence: 'open' },
+  { key: 'meta', prefix: 'meta-llama/', label: 'Llama', licence: 'open' },
+  { key: 'xai', prefix: 'x-ai/', label: 'Grok', licence: 'closed' },
 ];
 
-function formatModelProviderLabel(modelName) {
+/** Vendor key for a model slug, or '' when the platform genuinely doesn't know.
+ *
+ * '' is not a bug and must never hide the template: it stays visible under the
+ * All chip and is excluded only by an explicit vendor chip -- the same contract
+ * agentMarketKey documents for markets. */
+function modelVendorKey(modelName) {
   const raw = String(modelName || '').trim().toLowerCase();
-  const match = MODEL_PROVIDER_LABELS.find((entry) => raw.startsWith(entry.prefix));
-  return match ? match.label : 'AI-powered';
+  if (!raw) return '';
+  return (MODEL_VENDORS.find((vendor) => raw.startsWith(vendor.prefix)) || {}).key || '';
+}
+
+/** modelVendorKey for an agent record. The agent-facing twin of agentMarketKey. */
+function agentVendorKey(agent) {
+  return modelVendorKey(agent?.model_name);
+}
+
+/** 'open' | 'closed' | '' -- '' when the vendor is unknown. */
+function modelVendorLicence(modelName) {
+  const key = modelVendorKey(modelName);
+  return (MODEL_VENDORS.find((vendor) => vendor.key === key) || {}).licence || '';
+}
+
+function formatModelProviderLabel(modelName) {
+  const key = modelVendorKey(modelName);
+  const vendor = MODEL_VENDORS.find((entry) => entry.key === key);
+  return vendor ? `Powered by ${vendor.label}` : 'AI-powered';
 }
 
 /** Select a Community category chip and re-render, without a route or API
