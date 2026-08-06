@@ -7,12 +7,14 @@ import pytest
 from dashboard.backend.infrastructure.market_data.profiles import (
     ALPACA,
     A_SHARE_DEMO_6,
+    ASHARE_TRANSACTION_COST_PROFILE,
     CSI300_SAMPLE_20_2026H2,
     CSI300_SAMPLE_20_2026H2_SYMBOLS,
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
     RULE_BASED_DECISION_SOURCE,
     VNPY_SIMULATION,
+    TransactionCostProfile,
     get_market_profile,
     resolve_decision_source,
 )
@@ -146,6 +148,45 @@ def test_lot_size_is_100_only_for_ifind_ashares():
         get_market_profile(IFIND_ASHARE, CSI300_SAMPLE_20_2026H2).lot_size
         == 100
     )
+
+
+def test_a_share_profiles_share_the_deterministic_transaction_cost_profile():
+    demo = get_market_profile(IFIND_ASHARE, A_SHARE_DEMO_6)
+    csi300 = get_market_profile(IFIND_ASHARE, CSI300_SAMPLE_20_2026H2)
+
+    assert demo.transaction_cost_profile is ASHARE_TRANSACTION_COST_PROFILE
+    assert csi300.transaction_cost_profile is ASHARE_TRANSACTION_COST_PROFILE
+    assert demo.transaction_cost_profile.to_metadata() == {
+        "version": "cn-ashare-default-2026-08",
+        "currency": "CNY",
+        "commission_rate": 0.00025,
+        "minimum_commission": 5.0,
+        "stamp_duty_sell_rate": 0.0005,
+        "transfer_fee_rate": 0.00001,
+        "buy_slippage_rate": 0.0005,
+        "sell_slippage_rate": 0.0005,
+        "price_tick": 0.01,
+    }
+
+
+def test_us_profiles_keep_legacy_no_cost_behavior():
+    assert get_market_profile(ALPACA).transaction_cost_profile is None
+    assert get_market_profile(VNPY_SIMULATION).transaction_cost_profile is None
+
+
+def test_transaction_cost_profile_rejects_invalid_values():
+    with pytest.raises(ValueError, match="price_tick"):
+        TransactionCostProfile(
+            version="invalid",
+            currency="CNY",
+            commission_rate=0.0,
+            minimum_commission=0.0,
+            stamp_duty_sell_rate=0.0,
+            transfer_fee_rate=0.0,
+            buy_slippage_rate=0.0,
+            sell_slippage_rate=0.0,
+            price_tick=0.0,
+        )
 
 
 @pytest.mark.parametrize(
