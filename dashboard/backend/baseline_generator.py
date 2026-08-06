@@ -21,6 +21,7 @@ from datetime import datetime, time
 from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.domain.backtesting.currency import CurrencyContext
+from dashboard.backend.domain.trading.execution import calculate_transaction_costs
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
 )
@@ -218,6 +219,8 @@ class BaselineGenerator:
         symbols_to_buy: Optional[List[str]] = None,
         market_timezone: str = "US/Eastern",
         currency_context: CurrencyContext | None = None,
+        transaction_cost_profile=None,
+        transaction_cost_totals: Optional[Dict[str, float]] = None,
     ) -> List[Dict]:
         """
         Generate Buy & Hold baseline curve.
@@ -294,10 +297,42 @@ class BaselineGenerator:
             price = df.loc[first_ts, "close"]
             allocation = native_initial_capital / num_symbols
             shares = int(allocation / price)
-            
+            if transaction_cost_profile is not None:
+                lot_size = 100
+                shares = (shares // lot_size) * lot_size
+                while shares > 0:
+                    costs = calculate_transaction_costs(
+                        side="buy",
+                        reference_price=price,
+                        shares=shares,
+                        transaction_cost_profile=transaction_cost_profile,
+                    )
+                    if -costs["net_cash_impact"] <= cash:
+                        break
+                    shares -= lot_size
+
             if shares > 0:
+                costs = calculate_transaction_costs(
+                    side="buy",
+                    reference_price=price,
+                    shares=shares,
+                    transaction_cost_profile=transaction_cost_profile,
+                )
                 positions[symbol] = shares
-                cash -= shares * price
+                cash += costs["net_cash_impact"]
+                if transaction_cost_totals is not None:
+                    for field in (
+                        "gross_value",
+                        "slippage_amount",
+                        "commission",
+                        "stamp_duty",
+                        "transfer_fee",
+                        "total_fees",
+                    ):
+                        transaction_cost_totals[field] = (
+                            transaction_cost_totals.get(field, 0.0)
+                            + costs[field]
+                        )
         
         print(f"      Stocks bought: {len(positions)} ({', '.join(sorted(positions.keys())[:10])}{'...' if len(positions) > 10 else ''})")
         print(f"      Total invested: {native_symbol}{native_initial_capital - cash:,.0f}")
@@ -482,6 +517,8 @@ def generate_baselines(
     symbols_list: Optional[List[str]] = None,
     market_timezone: str = "US/Eastern",
     currency_context: CurrencyContext | None = None,
+    transaction_cost_profile=None,
+    transaction_cost_totals: Optional[Dict[str, float]] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Generate both baselines (Buy & Hold, Index).
@@ -506,6 +543,8 @@ def generate_baselines(
         symbols_list,
         market_timezone,
         currency_context,
+        transaction_cost_profile,
+        transaction_cost_totals,
     )
     
     index_curve = generator.generate_index_baseline(

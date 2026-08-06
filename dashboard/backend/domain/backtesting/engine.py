@@ -642,7 +642,7 @@ class HourlyBacktester:
             return profile
         return get_market_profile(self.data_source)
 
-    def _run_metadata(self) -> Dict:
+    def _run_metadata(self, transaction_cost_totals: Optional[Dict] = None) -> Dict:
         """Data provenance recorded on EVERY run row, agent and baseline alike.
 
         Provenance is the only thing the baselines share with the agent: they
@@ -660,6 +660,10 @@ class HourlyBacktester:
             metadata["transaction_cost_profile"] = (
                 profile.transaction_cost_profile.to_metadata()
             )
+            if transaction_cost_totals and any(
+                float(value or 0) != 0 for value in transaction_cost_totals.values()
+            ):
+                metadata["transaction_cost_totals"] = dict(transaction_cost_totals)
         if self.data_source == IFIND_ASHARE:
             metadata.update(
                 {
@@ -725,7 +729,9 @@ class HourlyBacktester:
             meta["final_pipeline"] = self.pipeline
         if self.data_source == IFIND_ASHARE:
             cost_totals = dict(getattr(self, "transaction_cost_totals", {}) or {})
-            if cost_totals:
+            if cost_totals and any(
+                float(value or 0) != 0 for value in cost_totals.values()
+            ):
                 meta["transaction_cost_totals"] = cost_totals
             rejected = list(getattr(self, "rejected_orders", []) or [])
             if rejected:
@@ -1235,6 +1241,7 @@ class HourlyBacktester:
                 for symbol in self.symbols
             }
 
+        baseline_cost_totals: Dict[str, float] = {}
         equity_history, _ = generate_baselines(
             bars_by_symbol=bars,
             start_date=self.start_date,
@@ -1243,6 +1250,8 @@ class HourlyBacktester:
             symbols_list=bh_symbols,
             market_timezone=self._effective_profile().timezone,
             currency_context=self._require_currency_context(),
+            transaction_cost_profile=self.profile.transaction_cost_profile,
+            transaction_cost_totals=baseline_cost_totals,
         )
         
         if not equity_history:
@@ -1267,7 +1276,7 @@ class HourlyBacktester:
             sharpe_ratio=self._calc_sharpe(equity_history),
             max_drawdown=self._calc_max_dd(equity_history),
             num_trades=1,
-            metadata=self._run_metadata(),
+            metadata=self._run_metadata(baseline_cost_totals),
         )
         
         db.insert_equity_points(run_id, equity_history)

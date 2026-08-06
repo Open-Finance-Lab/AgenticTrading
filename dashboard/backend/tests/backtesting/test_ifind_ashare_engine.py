@@ -21,6 +21,7 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     ALPACA,
     A_SHARE_DEMO_6,
     A_SHARE_DEMO_6_SYMBOLS,
+    ASHARE_TRANSACTION_COST_PROFILE,
     CSI300_SAMPLE_20_2026H2,
     CSI300_SAMPLE_20_2026H2_SYMBOLS,
     IFIND_ASHARE,
@@ -363,6 +364,7 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "fx_observation_start_date": "2026-03-31",
         "fx_observation_end_date": "2026-04-15",
         "native_initial_capital": 7_000.0,
+        "transaction_cost_profile": ASHARE_TRANSACTION_COST_PROFILE.to_metadata(),
         # No rejected_orders* keys at all: a clean run writes nothing rather
         # than an empty array on every A-share row.
     }
@@ -428,6 +430,7 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "fx_observation_start_date": "2026-03-31",
         "fx_observation_end_date": "2026-04-15",
         "native_initial_capital": 7_000.0,
+        "transaction_cost_profile": ASHARE_TRANSACTION_COST_PROFILE.to_metadata(),
     }
 
 

@@ -204,7 +204,6 @@ class CurrencyContext:
         monetary_fields = (
             "price",
             "reference_price",
-            "executed_value",
             "gross_value",
             "slippage_amount",
             "commission",

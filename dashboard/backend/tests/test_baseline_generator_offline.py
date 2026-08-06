@@ -11,6 +11,9 @@ from dashboard.backend.baseline_generator import BaselineGenerator
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
 )
+from dashboard.backend.infrastructure.market_data.profiles import (
+    ASHARE_TRANSACTION_COST_PROFILE,
+)
 
 
 def sample_bars() -> dict[str, pd.DataFrame]:
@@ -123,3 +126,26 @@ def test_cn_baselines_keep_shanghai_session_timestamps():
     assert index
     assert buyhold[0]["timestamp"].startswith("2026-04-01T10:30:00+08:00")
     assert index[0]["timestamp"].startswith("2026-04-01T10:30:00+08:00")
+
+
+def test_a_share_buyhold_baseline_accounts_for_initial_buy_costs():
+    bars = sample_cn_bars()
+    totals = {}
+    curve = BaselineGenerator().generate_buyhold_baseline(
+        bars,
+        "2026-04-01",
+        "2026-04-02",
+        initial_capital=100_000,
+        symbols_to_buy=list(bars),
+        market_timezone="Asia/Shanghai",
+        transaction_cost_profile=ASHARE_TRANSACTION_COST_PROFILE,
+        transaction_cost_totals=totals,
+    )
+
+    assert curve
+    assert totals["commission"] > 0
+    assert totals["transfer_fee"] > 0
+    assert totals["total_fees"] == pytest.approx(
+        totals["commission"] + totals["transfer_fee"]
+    )
+    assert curve[0]["cash"] < 100_000
