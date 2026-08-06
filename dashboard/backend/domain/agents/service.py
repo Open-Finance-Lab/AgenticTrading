@@ -156,6 +156,14 @@ class AgentService:
         if ext_runs:
             latest = sorted(ext_runs, key=lambda r: r.get("created_at") or "", reverse=True)[0]
         result = dict(agent)
+        # repository.create_agent() returns the plaintext api_key on every agent
+        # it mints (any type, not just external), attached directly on the dict
+        # this method receives -- so the shallow copy above would otherwise carry
+        # it into every enriched listing. A route that wants to surface the key
+        # once (create, import-session) pops it off the *raw* agent dict itself,
+        # which this copy does not disturb -- it never removes it from the
+        # source object, only omits it from the enriched copy returned here.
+        result.pop("api_key", None)
         result["run_count"] = len(ext_runs)
         result["latest_run"] = latest
         result["runs"] = sorted(

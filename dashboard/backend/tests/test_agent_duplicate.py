@@ -168,3 +168,64 @@ def test_duplicate_requires_a_model_name(client, body):
         f"/api/v1/agents/{source['agent_id']}/duplicate", json=body, headers=headers
     )
     assert response.status_code == 422, response.text
+
+
+def test_duplicate_does_not_leak_the_plaintext_api_key(client):
+    """repository.create_agent() mints a plaintext api_key on EVERY agent it
+    creates, built-in included, and attaches it directly on the dict it
+    returns. duplicate_agent only sheds that key on the has_own_pipeline
+    branch, because that branch reassigns ``agent`` from update_agent()'s
+    return value (which never carries the key). A built-in agent with no
+    pipeline of its own -- e.g. one on the ai_hedge_fund runtime -- takes the
+    other branch, and the raw dict (key attached) used to flow straight
+    through agent_with_stats's shallow copy into the response."""
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    source = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Hedge Fund Source",
+            "model_name": "anthropic/claude-haiku-4-5",
+            "agent_type": "builtin",
+            "runtime_type": "ai_hedge_fund",
+        },
+        headers=headers,
+    )
+    assert source.status_code == 200, source.text
+
+    response = client.post(
+        f"/api/v1/agents/{source.json()['agent']['agent_id']}/duplicate",
+        json={"model_name": "openai/gpt-5.5"},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert "api_key" not in response.json()["agent"]
+
+
+def test_create_agent_still_returns_the_one_time_api_key(client):
+    """Guard for the fix above: agent_with_stats now strips api_key from the
+    enriched copy it returns, but POST /api/v1/agents's top-level api_key
+    field pops the key off the *original*, un-enriched dict -- a separate
+    object -- so the one-time reveal must be unaffected."""
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Keyed", "model_name": "local-model", "agent_type": "external"},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["api_key"].startswith("ag_")
+
+
+def test_marketplace_clone_does_not_leak_the_plaintext_api_key(client):
+    """Pre-existing leak, not introduced by this PR: clone_marketplace_template
+    has the identical has_own_pipeline branch as duplicate_agent, and the
+    ``ai-hedge-fund`` template carries no pipeline of its own, so cloning it
+    takes the leaking branch today. Closed by the same agent_with_stats fix."""
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    cloned = client.post(
+        "/api/v1/agents/marketplace/ai-hedge-fund/clone",
+        json={},
+        headers=headers,
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert "api_key" not in cloned.json()["agent"]
