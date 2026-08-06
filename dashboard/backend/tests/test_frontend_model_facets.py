@@ -211,3 +211,120 @@ console.log(JSON.stringify([visible('all'), visible('qwen')]));
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == [["a", "b"], ["a"]]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_shipped_filter_ands_market_and_vendor_not_or():
+    """Lifts the REAL getFilteredMarketplaceTemplates (not a reimplementation) --
+    the six chip/empty-state tests above never execute this function, so a
+    regression that drops the vendor filter or ORs it with the market filter
+    passed the whole suite until this test existed."""
+    script = f"""
+{js_const("MODEL_VENDORS")}
+{fn_body("function modelVendorKey")}
+const document = {{ getElementById: () => null }};
+const marketplaceTemplates = [
+  {{ template_id: 't1', category: 'us_stocks', model_name: 'anthropic/claude-haiku-4-5' }},
+  {{ template_id: 't2', category: 'us_stocks', model_name: 'qwen/qwen3.7-plus' }},
+  {{ template_id: 't3', category: 'cn_ashares', model_name: 'anthropic/claude-haiku-4-5' }},
+  {{ template_id: 't4', category: 'cn_ashares', model_name: 'qwen/qwen3.7-plus' }},
+  {{ template_id: 't5', category: 'us_stocks', model_name: 'totally/unknown' }},
+];
+let marketplaceCategoryFilter = 'all';
+let marketplaceVendorFilter = 'all';
+
+{fn_body("function getFilteredMarketplaceTemplates")}
+
+function ids() {{ return getFilteredMarketplaceTemplates().map((t) => t.template_id); }}
+
+const results = {{}};
+marketplaceCategoryFilter = 'us_stocks'; marketplaceVendorFilter = 'all';
+results.marketOnly = ids();
+
+marketplaceCategoryFilter = 'all'; marketplaceVendorFilter = 'qwen';
+results.vendorOnly = ids();
+
+marketplaceCategoryFilter = 'us_stocks'; marketplaceVendorFilter = 'qwen';
+results.both = ids();
+
+marketplaceCategoryFilter = 'all'; marketplaceVendorFilter = 'anthropic';
+results.vendorExplicit = ids();
+
+console.log(JSON.stringify(results));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    # Market filter alone: both known-vendor templates plus the unknown-vendor
+    # one -- unknown must stay visible when no vendor chip narrows it.
+    assert set(data["marketOnly"]) == {"t1", "t2", "t5"}
+    # Vendor filter alone: both markets, only the matching vendor.
+    assert set(data["vendorOnly"]) == {"t2", "t4"}
+    # Both together must be the INTERSECTION (t2 only), not the union
+    # (which would also include t1, t4, t5).
+    assert data["both"] == ["t2"], "market+vendor must AND, not OR"
+    # An explicit vendor chip excludes the unknown-vendor template -- it is
+    # visible only under vendor 'all'.
+    assert set(data["vendorExplicit"]) == {"t1", "t3"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_shipped_vendor_chip_order_follows_model_vendors_not_catalog_order():
+    """Lifts the REAL renderMarketplaceVendorChips against a synthetic DOM and a
+    catalog whose insertion order is deliberately scrambled relative to
+    MODEL_VENDORS. test_vendor_chips_are_derived_not_hardcoded only substring
+    -checks the function's source text, so it never actually executes this and
+    can't tell catalog order from MODEL_VENDORS order."""
+    script = f"""
+function escapeHtml(s) {{ return String(s); }}
+{js_const("MODEL_VENDORS")}
+{fn_body("function modelVendorKey")}
+
+function makeContainer() {{
+  let buttons = [];
+  return {{
+    querySelectorAll() {{ return buttons; }},
+    set innerHTML(html) {{
+      buttons = [];
+      const re = /data-marketplace-vendor="([^"]*)"/g;
+      let m;
+      while ((m = re.exec(html))) {{
+        buttons.push({{
+          dataset: {{ marketplaceVendor: m[1] }},
+          classList: {{ toggle() {{}} }},
+          setAttribute() {{}},
+        }});
+      }}
+    }},
+  }};
+}}
+const container = makeContainer();
+const document = {{ getElementById: (id) => (id === 'marketplaceVendorChips' ? container : null) }};
+
+// MODEL_VENDORS order is anthropic, openai, google, deepseek, qwen, nvidia,
+// meta, xai. This catalog is inserted qwen, anthropic, deepseek -- scrambled
+// on purpose -- plus one unknown-vendor template and no openai template.
+const marketplaceTemplates = [
+  {{ template_id: 'a', model_name: 'qwen/qwen3.7-plus' }},
+  {{ template_id: 'b', model_name: 'anthropic/claude-haiku-4-5' }},
+  {{ template_id: 'c', model_name: 'deepseek/deepseek-v4-pro' }},
+  {{ template_id: 'd', model_name: 'totally/unknown' }},
+];
+let marketplaceVendorFilter = 'all';
+
+{fn_body("function renderMarketplaceVendorChips")}
+renderMarketplaceVendorChips();
+
+console.log(JSON.stringify(container.querySelectorAll().map((b) => b.dataset.marketplaceVendor)));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    keys = json.loads(result.stdout)
+    # 'openai' has no template so it must not get a chip; order must follow
+    # MODEL_VENDORS (anthropic, deepseek, qwen), not the catalog's insertion
+    # order (qwen, anthropic, deepseek).
+    assert keys == ["all", "anthropic", "deepseek", "qwen"]
