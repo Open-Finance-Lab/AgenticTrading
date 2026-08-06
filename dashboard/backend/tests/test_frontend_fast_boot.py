@@ -138,16 +138,20 @@ def test_scripts_are_deferred():
 # ---------------------------------------------------------------------------
 
 def test_agents_grid_ships_loading_skeleton():
-    # Pre-JS, My Agents must show placeholder cards instead of a blank panel.
-    builtin_grid_at = APP_HTML.index('id="agentsGridBuiltin"')
-    open_grid_at = APP_HTML.index('id="agentsGridOpen"')
-    external_grid_at = APP_HTML.index('id="agentsGridExternal"')
+    # Pre-JS, My Agents must show placeholder cards instead of a blank panel,
+    # in every shelf that renders agents. Only two do: Stocks (the one live
+    # asset class) and External. The Crypto/Futures rows are locked and have no
+    # grid at all, so there is nothing to skeleton there.
+    grid_ids = (
+        "agentsGridStocks",
+        "agentsGridExternal",
+    )
     skeletons = [
         m for m in range(len(APP_HTML)) if APP_HTML.startswith("agent-card--skeleton", m)
     ]
-    assert any(builtin_grid_at < at < builtin_grid_at + 2000 for at in skeletons)
-    assert any(open_grid_at < at < open_grid_at + 2000 for at in skeletons)
-    assert any(external_grid_at < at < external_grid_at + 2000 for at in skeletons)
+    for grid_id in grid_ids:
+        grid_at = APP_HTML.index(f'id="{grid_id}"')
+        assert any(grid_at < at < grid_at + 2000 for at in skeletons), grid_id
     assert ".agent-card--skeleton" in STYLES
 
 
@@ -175,5 +179,5 @@ def test_slow_boot_notice_is_wired():
 
 def test_cache_busters_bumped():
     # Floor advances whenever app.js/styles.css change and their ?v= must ship.
-    assert "app.js?v=69" in APP_HTML
-    assert "styles.css?v=81" in APP_HTML
+    assert "app.js?v=72" in APP_HTML
+    assert "styles.css?v=84" in APP_HTML

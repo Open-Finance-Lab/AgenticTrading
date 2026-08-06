@@ -2,8 +2,8 @@ Agent Marketplace
 =================
 
 The **Agent Marketplace** is a catalog of ready-made agent templates. Add one to
-:doc:`My Agents <external_agents>`, then edit, backtest, or run it like any
-agent you built yourself.
+**My Agents** (see :ref:`my-agents-sections`), then edit, backtest, or run it
+like any agent you built yourself.
 
 Open the dashboard, go to **Community**, and use the **Agent Marketplace**.
 Browsing needs no account.
@@ -14,37 +14,62 @@ Browse the catalog
 
 Each card shows what you are adding:
 
-- **Category** — ``Foundation`` for single-instruction agents, ``Advanced`` for
-  multi-step pipelines.
-- **Model** — the LLM the template is tuned for (you can change it afterwards).
-- **Simple** or **Multi-step pipeline**, with the step count.
-- **Tags** and the template author.
+- **Model and section** — the AI model the template is tuned for (shown by
+  provider, such as *Claude* or *Gemini*; you can change it afterwards), then
+  the **My Agents** section the template lands in.
+- **Hosted**, **Multi-step strategy**, or **Simple instruction**, with the step
+  count for multi-step templates.
+- **Tags**, and either the template author or a link to its GitHub repository.
 
-Use the search box to filter by name, description, or tag.
+Filter with the section chips above the grid — **All**, **Prompting LLMs**,
+**U.S. Stock Trading**, **China A-Share Trading** — and narrow further with the
+search box, which matches name, description, section, author, tags, and model.
+The two compose.
 
 Templates shipped today:
 
 .. list-table::
    :header-rows: 1
-   :widths: 22 16 22 40
+   :widths: 20 20 22 38
 
    * - Template
-     - Category
+     - Section
      - Model
      - What it does
    * - **Balanced Starter**
-     - Foundation
+     - Prompting LLMs
      - ``anthropic/claude-haiku-4-5``
      - Diversifies across strong stocks, buys dips, takes profits after run-ups.
    * - **Momentum Scout**
-     - Foundation
+     - Prompting LLMs
      - ``anthropic/claude-haiku-4-5``
      - Follows recent price strength and volume; trims laggards quickly.
-   * - **Pipeline Analyst**
-     - Advanced
+   * - **Three-Step Analyst**
+     - U.S. Stock Trading
      - ``anthropic/claude-sonnet-4-6``
      - Three steps — gather market facts, convert them into signals, then
        produce executable orders.
+   * - **AI Hedge Fund**
+     - U.S. Stock Trading
+     - ``nvidia/nemotron-3-nano-30b-a3b``
+     - A hosted panel of AI analysts that weigh in on every trade. Based on the
+       open-source `AI Hedge Fund <https://github.com/virattt/ai-hedge-fund>`_
+       project by virattt.
+   * - **Blue-Chip Steady**
+     - U.S. Stock Trading
+     - ``anthropic/claude-haiku-4-5``
+     - Buys and holds a handful of the strongest Dow companies. Mirrors the
+       buy-and-hold benchmark on the leaderboard.
+   * - **Even-Split Dow**
+     - U.S. Stock Trading
+     - ``anthropic/claude-haiku-4-5``
+     - Spreads the money evenly across all available Dow stocks and keeps the
+       split even. Mirrors the equal-weight benchmark on the leaderboard.
+   * - **A-Share Steady (T+1)**
+     - China A-Share Trading
+     - ``anthropic/claude-haiku-4-5``
+     - A patient strategy for Chinese A-shares, built for that market's rule
+       that shares bought today cannot be sold until the next trading day.
 
 
 Add one to My Agents
@@ -55,9 +80,11 @@ Add one to My Agents
    screen opens straight away — owned by you, with the template's prompt
    pipeline already filled in.
 3. Rename it, change the model, set its capital, or rewrite the instruction,
-   then close the editor to find the agent waiting on your **My Agents** grid.
-   Your agent is an independent copy — later edits to the template do not touch
-   it, and your edits never affect anyone else's.
+   then close the editor to find the agent waiting on your **My Agents** grid,
+   under the section the template came from. Your agent is an independent copy —
+   later edits to the template do not touch it, and your edits never affect
+   anyone else's. The template's section is only a starting point: **Configure →
+   Section** moves the agent to a different one at any time.
 
 New agents get the default **Paper Trading Allocated Capital** ($1,000), and
 backtests start from that amount until you set a separate **Backtesting** amount
@@ -81,5 +108,13 @@ database change. Add an entry with a unique ``template_id``, a ``name``,
 ``description``, ``category``, ``model_name``, ``tags``, and the ``pipeline``
 steps, then open a pull request. Entries missing ``template_id`` or ``name`` are
 skipped.
+
+``category`` must be one of ``prompting_llms``, ``us_stocks``, or
+``cn_ashares`` — the same three values the section chips and the **My Agents**
+sections use. Anything else is treated as uncategorized: the template still
+appears under **All** and in search results, but no section chip finds it, and
+it sorts to the end of the listing. Cards are grouped by section first (in the
+order above) and by name within a section, so the value also decides where a
+new template appears.
 
 The catalog is cached in-process, so a running server picks up edits on restart.

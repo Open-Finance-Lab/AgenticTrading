@@ -85,7 +85,8 @@ class PostgresAgentStore:
                         backtest_allocation DOUBLE PRECISION,
                         live_trading_enabled BOOLEAN NOT NULL DEFAULT FALSE,
                         runtime_type TEXT NOT NULL DEFAULT 'pipeline',
-                        runtime_config TEXT NOT NULL DEFAULT '{{}}'
+                        runtime_config TEXT NOT NULL DEFAULT '{{}}',
+                        category TEXT
                     )
                     """
                 )
@@ -130,6 +131,9 @@ class PostgresAgentStore:
                     "ADD COLUMN IF NOT EXISTS runtime_config TEXT NOT NULL DEFAULT '{}'"
                 )
                 cur.execute(
+                    "ALTER TABLE external_agents ADD COLUMN IF NOT EXISTS category TEXT"
+                )
+                cur.execute(
                     """
                     CREATE INDEX IF NOT EXISTS idx_external_agents_owner_user
                     ON external_agents(owner_user_id)
@@ -162,6 +166,7 @@ class PostgresAgentStore:
         runtime_config: Optional[Dict[str, Any]] = None,
         cash_allocation: Optional[float] = None,
         backtest_allocation: Optional[float] = None,
+        category: Optional[str] = None,
     ) -> Dict[str, Any]:
         agent_id = f"agent_{uuid.uuid4().hex[:12]}"
         session_id = session_id or str(uuid.uuid4())
@@ -177,9 +182,9 @@ class PostgresAgentStore:
                     INSERT INTO external_agents (
                         agent_id, name, session_id, api_key_hash, api_key_prefix,
                         model_name, agent_type, description, cash_allocation,
-                        backtest_allocation, runtime_type, runtime_config,
+                        backtest_allocation, runtime_type, runtime_config, category,
                         owner_user_id, owner_browser_session, created_at, last_used_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
                     (
@@ -195,6 +200,7 @@ class PostgresAgentStore:
                         backtest_allocation,
                         (runtime_type or DEFAULT_RUNTIME_TYPE).strip() or DEFAULT_RUNTIME_TYPE,
                         json.dumps(runtime_config or {}),
+                        category,
                         owner_user_id,
                         owner_browser_session,
                         now,
@@ -469,6 +475,7 @@ class PostgresAgentStore:
         cash_allocation: Any = _UNSET,
         backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
+        category: Any = _UNSET,
     ) -> Optional[Dict[str, Any]]:
         """Update display fields for an agent. Returns the updated record or None.
 
@@ -507,6 +514,9 @@ class PostgresAgentStore:
         if live_trading_enabled is not _UNSET:
             sets.append("live_trading_enabled = %s")
             params.append(bool(live_trading_enabled))
+        if category is not _UNSET:
+            sets.append("category = %s")
+            params.append(category)
         if not sets:
             return self.get_agent(agent_id)
         sets.append("last_used_at = %s")

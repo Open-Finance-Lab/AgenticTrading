@@ -304,6 +304,33 @@ def test_update_agent_live_trading_enabled_postgres(pg_agent_store):
 
 
 @pg_only
+def test_update_agent_category_postgres(pg_agent_store):
+    """Same shape as the #227 regression above, for the shelf slug.
+
+    Postgres is what prod runs, and the twin's ``update_agent`` builds its SET
+    clause independently of the SQLite one -- a category branch that exists only
+    on the SQLite side would pass every default-tier test and then drop every
+    shelf change in production. Round-trip: default NULL, set, untouched by an
+    unrelated update, cleared.
+    """
+    created = pg_agent_store.create_agent(name="Shelved PG", category="us_stocks")
+    assert created["category"] == "us_stocks"
+
+    moved = pg_agent_store.update_agent(created["agent_id"], category="cn_ashares")
+    assert moved["category"] == "cn_ashares"
+
+    # Omitting the kwarg (service sends _UNSET) leaves the stored shelf alone.
+    renamed = pg_agent_store.update_agent(created["agent_id"], name="Renamed Shelved")
+    assert renamed["category"] == "cn_ashares"
+
+    cleared = pg_agent_store.update_agent(created["agent_id"], category=None)
+    assert cleared["category"] is None
+
+    unshelved = pg_agent_store.create_agent(name="Unshelved PG")
+    assert unshelved["category"] is None
+
+
+@pg_only
 def test_update_agent_model_name_postgres(pg_agent_store):
     created = pg_agent_store.create_agent(
         name="Model Swap PG",
@@ -454,6 +481,7 @@ def test_agent_schema_lazily_migrates_an_old_table_postgres(pg_agent_store):
         "live_trading_enabled",
         "runtime_type",
         "runtime_config",
+        "category",
     } <= columns
     # The pre-existing row was backfilled with the column defaults, not NULL.
     assert legacy["agent_type"] == "external"

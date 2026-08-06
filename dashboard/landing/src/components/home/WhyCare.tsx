@@ -25,18 +25,18 @@ const ACTS = [
 const EXTRAS = [
   {
     icon: Cpu,
-    title: "Pick the model",
-    body: "Same idea, different brains: Claude, GPT, Gemini, DeepSeek, Qwen.",
+    title: "Pick the AI model",
+    body: "Same idea, different AI models — Claude, GPT, Gemini, and more, all available to try.",
   },
   {
     icon: Code2,
-    title: "Bring your own agent",
-    body: "A Python SDK and an API, if you would rather write the code.",
+    title: "For developers: bring your own agent",
+    body: "A Python toolkit (SDK), if you would rather write the code.",
   },
   {
     icon: Hash,
-    title: "Talk to it on Discord",
-    body: "If you would rather just chat.",
+    title: "Talk to it in our Discord community",
+    body: "If you would rather have a conversation.",
   },
 ] as const;
 
@@ -61,7 +61,8 @@ export function WhyCare() {
           </h2>
           <p className="text-foreground/80 text-lg">
             Normally that means writing code, buying data, and waiting months to find out you
-            were wrong. Here it costs one sentence and a few minutes.
+            were wrong. Here you get a rigorous, data-backed test in minutes — no code, no data
+            subscription, no waiting months.
           </p>
         </div>
 

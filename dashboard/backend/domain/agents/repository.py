@@ -83,6 +83,7 @@ def _public_agent(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         "cash_allocation": data.get("cash_allocation"),
         "backtest_allocation": data.get("backtest_allocation"),
         "live_trading_enabled": bool(data.get("live_trading_enabled")),
+        "category": data.get("category"),
         "api_key_prefix": data.get("api_key_prefix") or "",
         "owner_user_id": data.get("owner_user_id"),
         "scopes": [s for s in str(raw_scopes).split(",") if s],
@@ -123,6 +124,7 @@ class AgentStore:
                 last_used_at TIMESTAMP,
                 runtime_type TEXT NOT NULL DEFAULT 'pipeline',
                 runtime_config TEXT NOT NULL DEFAULT '{}',
+                category TEXT,
                 FOREIGN KEY (owner_user_id) REFERENCES users(id) ON DELETE SET NULL
             )
             """
@@ -184,6 +186,10 @@ class AgentStore:
                 "ALTER TABLE external_agents "
                 "ADD COLUMN runtime_config TEXT NOT NULL DEFAULT '{}'"
             )
+        if "category" not in existing_columns:
+            cursor.execute(
+                "ALTER TABLE external_agents ADD COLUMN category TEXT"
+            )
         cursor.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_external_agents_type
@@ -208,6 +214,7 @@ class AgentStore:
         runtime_config: Optional[Dict[str, Any]] = None,
         cash_allocation: Optional[float] = None,
         backtest_allocation: Optional[float] = None,
+        category: Optional[str] = None,
     ) -> Dict[str, Any]:
         agent_id = f"agent_{uuid.uuid4().hex[:12]}"
         session_id = session_id or str(uuid.uuid4())
@@ -223,9 +230,9 @@ class AgentStore:
             INSERT INTO external_agents (
                 agent_id, name, session_id, api_key_hash, api_key_prefix,
                 model_name, agent_type, description, cash_allocation,
-                backtest_allocation, runtime_type, runtime_config,
+                backtest_allocation, runtime_type, runtime_config, category,
                 owner_user_id, owner_browser_session, created_at, last_used_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 agent_id,
@@ -240,6 +247,7 @@ class AgentStore:
                 backtest_allocation,
                 (runtime_type or DEFAULT_RUNTIME_TYPE).strip() or DEFAULT_RUNTIME_TYPE,
                 json.dumps(runtime_config or {}),
+                category,
                 owner_user_id,
                 owner_browser_session,
                 now,
@@ -530,6 +538,7 @@ class AgentStore:
         cash_allocation: Any = _UNSET,
         backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
+        category: Any = _UNSET,
     ) -> Optional[Dict[str, Any]]:
         """Update display fields for an agent. Returns the updated record or None.
 
@@ -568,6 +577,9 @@ class AgentStore:
         if live_trading_enabled is not _UNSET:
             sets.append("live_trading_enabled = ?")
             params.append(1 if live_trading_enabled else 0)
+        if category is not _UNSET:
+            sets.append("category = ?")
+            params.append(category)
         if not sets:
             return self.get_agent(agent_id)
         sets.append("last_used_at = ?")
