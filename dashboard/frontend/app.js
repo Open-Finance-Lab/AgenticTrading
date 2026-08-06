@@ -5883,6 +5883,11 @@ function formatOrderExecutionReason(reason, strategyReason = '') {
 }
 
 function normalizeOrderRecord(record) {
+    const optionalNumber = (value) => {
+        if (value == null || value === '') return null;
+        const number = Number(value);
+        return Number.isFinite(number) ? number : null;
+    };
     const side = String(record?.side || record?.action || '').toUpperCase();
     const legacyQuantity = Number(record?.quantity ?? record?.shares ?? 0);
     const requestedValue = Number(record?.requested_shares ?? legacyQuantity);
@@ -5915,13 +5920,71 @@ function normalizeOrderRecord(record) {
         price,
         value,
         status,
-        reason: record?.reason || '',
-        strategyReason: record?.strategy_reason || '',
+        reason: status === 'filled' ? '' : (record?.reason || ''),
+        strategyReason: record?.strategy_reason
+            || (status === 'filled' ? (record?.reason || '') : ''),
         repeatCount: Math.max(Math.trunc(Number(record?.repeat_count) || 1), 1),
         nativePrice: record?.native_price == null ? null : Number(record.native_price),
         nativeValue: record?.native_value == null ? null : Number(record.native_value),
         fxRate: record?.fx_rate == null ? null : Number(record.fx_rate),
+        referencePrice: optionalNumber(record?.reference_price),
+        grossValue: optionalNumber(record?.gross_value),
+        slippageAmount: optionalNumber(record?.slippage_amount),
+        commission: optionalNumber(record?.commission),
+        stampDuty: optionalNumber(record?.stamp_duty),
+        transferFee: optionalNumber(record?.transfer_fee),
+        totalFees: optionalNumber(record?.total_fees),
+        netCashImpact: optionalNumber(record?.net_cash_impact),
+        nativeReferencePrice: optionalNumber(record?.native_reference_price),
+        nativeGrossValue: optionalNumber(record?.native_gross_value),
+        nativeSlippageAmount: optionalNumber(record?.native_slippage_amount),
+        nativeCommission: optionalNumber(record?.native_commission),
+        nativeStampDuty: optionalNumber(record?.native_stamp_duty),
+        nativeTransferFee: optionalNumber(record?.native_transfer_fee),
+        nativeTotalFees: optionalNumber(record?.native_total_fees),
+        nativeNetCashImpact: optionalNumber(record?.native_net_cash_impact),
     };
+}
+
+function formatTradingMoney(value, symbol) {
+    const amount = Number(value);
+    if (!Number.isFinite(amount)) return '--';
+    const sign = amount < 0 ? '-' : '';
+    return `${sign}${symbol}${Math.abs(amount).toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+    })}`;
+}
+
+function renderOrderCostAudit(order) {
+    if (order.status === 'rejected' || order.executedShares <= 0) return '';
+    const reportingCosts = [
+        ['Commission', order.commission],
+        ['Stamp duty', order.stampDuty],
+        ['Transfer fee', order.transferFee],
+        ['Slippage', order.slippageAmount],
+        ['Net cash', order.netCashImpact],
+    ];
+    if (!reportingCosts.some(([, value]) => Number.isFinite(value))) return '';
+
+    const reportingLine = reportingCosts
+        .filter(([, value]) => Number.isFinite(value))
+        .map(([label, value]) => `<span>${label} ${formatTradingMoney(value, '$')}</span>`)
+        .join('');
+    const nativeCosts = [
+        ['Commission', order.nativeCommission],
+        ['Stamp duty', order.nativeStampDuty],
+        ['Transfer fee', order.nativeTransferFee],
+        ['Slippage', order.nativeSlippageAmount],
+        ['Net cash', order.nativeNetCashImpact],
+    ];
+    const nativeLine = nativeCosts.some(([, value]) => Number.isFinite(value))
+        ? `<div class="trading-log-native trading-log-native-costs"><strong>CNY native</strong>${nativeCosts
+            .filter(([, value]) => Number.isFinite(value))
+            .map(([label, value]) => `<span>${label} ${formatTradingMoney(value, '¥')}</span>`)
+            .join('')}</div>`
+        : '';
+    return `<div class="trading-log-costs">${reportingLine}</div>${nativeLine}`;
 }
 
 function formatTradeTimestamp(ts) {
@@ -5972,10 +6035,6 @@ function paintTradingLog(normalizedRecords, options) {
         const actionClass = order.side === 'SELL' ? 'action-sell' : 'action-buy';
         const actionLabel = order.side === 'SELL' ? 'SELL' : 'BUY';
         const statusLabel = order.status.toUpperCase();
-        const totalValue = order.value.toLocaleString('en-US', {
-            minimumFractionDigits: 2,
-            maximumFractionDigits: 2,
-        });
         const hasNativeAudit = Number.isFinite(order.nativePrice)
             && Number.isFinite(order.nativeValue)
             && Number.isFinite(order.fxRate);
@@ -5985,6 +6044,7 @@ function paintTradingLog(normalizedRecords, options) {
         const valueAudit = hasNativeAudit && order.executedShares > 0
             ? `<div class="trading-log-native">¥${order.nativeValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · FX ${order.fxRate.toFixed(4)}</div>`
             : '';
+        const costAudit = renderOrderCostAudit(order);
         const assetName = resolveTradingAssetName(order.symbol);
         const quantity = `${order.executedShares.toLocaleString('en-US')} / ${order.requestedShares.toLocaleString('en-US')} shares`;
         const reason = formatOrderExecutionReason(order.reason, order.strategyReason);
@@ -6000,7 +6060,7 @@ function paintTradingLog(normalizedRecords, options) {
             <td><div class="trading-log-asset"><strong>${escapeHtml(order.symbol)}</strong>${assetName ? `<small>${escapeHtml(assetName)}</small>` : ''}</div></td>
             <td class="trading-log-quantity">${escapeHtml(quantity)}</td>
             <td>$${order.price.toFixed(2)}${priceAudit}</td>
-            <td>${order.executedShares > 0 ? `$${totalValue}${valueAudit}` : '--'}</td>
+            <td class="trading-log-value">${order.executedShares > 0 ? `${formatTradingMoney(order.value, '$')}${valueAudit}${costAudit}` : '--'}</td>
             <td><span class="order-status order-status-${order.status}" title="Order status: ${statusLabel}" aria-label="Order status: ${statusLabel}">${statusLabel}</span></td>
             <td class="trading-log-reason">${escapeHtml(reason)}${repeatNote}</td>
         </tr>`;
@@ -6127,6 +6187,37 @@ function setBacktestConfigText(id, value) {
     if (el) el.textContent = value;
 }
 
+function formatTransactionCostProfile(profile) {
+    if (!profile || typeof profile !== 'object') return '—';
+    const percentage = (value) => `${(Number(value) * 100).toLocaleString('en-US', {
+        maximumFractionDigits: 4,
+    })}%`;
+    const minimumCommission = Number(profile.minimum_commission);
+    const priceTick = Number(profile.price_tick);
+    return [
+        `Commission ${percentage(profile.commission_rate)}`
+            + (Number.isFinite(minimumCommission) ? ` (min ¥${minimumCommission.toFixed(2)})` : ''),
+        `Sell stamp duty ${percentage(profile.stamp_duty_sell_rate)}`,
+        `Transfer fee ${percentage(profile.transfer_fee_rate)}`,
+        `Slippage ${percentage(profile.buy_slippage_rate)} each side`,
+        Number.isFinite(priceTick) ? `Price tick ¥${priceTick.toFixed(2)}` : null,
+    ].filter(Boolean).join(' · ');
+}
+
+function formatTransactionCostTotals(totals) {
+    if (!totals || typeof totals !== 'object') return 'No filled orders';
+    const totalFees = Number(totals.total_fees);
+    const slippage = Number(totals.slippage_amount);
+    if (!Number.isFinite(totalFees) && !Number.isFinite(slippage)) {
+        return 'No filled orders';
+    }
+    return [
+        Number.isFinite(totalFees) ? `Fees ${formatTradingMoney(totalFees, '¥')}` : null,
+        Number.isFinite(slippage) ? `Slippage ${formatTradingMoney(slippage, '¥')}` : null,
+        'CNY native',
+    ].filter(Boolean).join(' · ');
+}
+
 function renderBacktestRunConfig(
     run,
     { running = false, launchConfig = null, statusLabel = null } = {},
@@ -6161,6 +6252,10 @@ function renderBacktestRunConfig(
         ?? run?.native_initial_capital;
     const startFxRate = metadata.fx_start_rate ?? run?.fx_start_rate;
     const rawFxSource = metadata.fx_source ?? run?.fx_source;
+    const transactionCostProfile = metadata.transaction_cost_profile
+        ?? run?.transaction_cost_profile;
+    const transactionCostTotals = metadata.transaction_cost_totals
+        ?? run?.transaction_cost_totals;
     const start = cfg?.startDate || run?.start_date;
     const end = cfg?.endDate || run?.end_date;
     const universe = cfg?.universeLabel
@@ -6220,6 +6315,25 @@ function renderBacktestRunConfig(
                 : (rawFxSource || 'iFinD Historical Conversion Rate'),
         );
         setBacktestConfigText('backtestConfigFxRate', Number(startFxRate).toFixed(4));
+    }
+    const showTransactionCosts = transactionCostProfile
+        && typeof transactionCostProfile === 'object';
+    const transactionCostRow = document.getElementById('backtestConfigTransactionCostsRow');
+    const costProfileRow = document.getElementById('backtestConfigCostProfileRow');
+    const totalCostsRow = document.getElementById('backtestConfigTotalCostsRow');
+    if (transactionCostRow) transactionCostRow.hidden = !showTransactionCosts;
+    if (costProfileRow) costProfileRow.hidden = !showTransactionCosts;
+    if (totalCostsRow) totalCostsRow.hidden = !showTransactionCosts;
+    if (showTransactionCosts) {
+        setBacktestConfigText('backtestConfigTransactionCosts', 'Enabled · CNY native ledger');
+        setBacktestConfigText(
+            'backtestConfigCostProfile',
+            formatTransactionCostProfile(transactionCostProfile),
+        );
+        setBacktestConfigText(
+            'backtestConfigTotalCosts',
+            formatTransactionCostTotals(transactionCostTotals),
+        );
     }
     setBacktestConfigText('backtestConfigUniverse', universe);
     setBacktestConfigText(

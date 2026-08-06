@@ -164,6 +164,8 @@ def _render_harness(source: str):
         _extract_function(source, "resolveTradingAssetName"),
         _extract_function(source, "formatOrderExecutionReason"),
         _extract_function(source, "normalizeOrderRecord"),
+        _extract_function(source, "formatTradingMoney"),
+        _extract_function(source, "renderOrderCostAudit"),
         _extract_function(source, "formatTradeTimestamp"),
         _extract_function(source, "paintTradingLog"),
         _extract_function(source, "renderTradingLog"),
@@ -236,6 +238,48 @@ def test_capped_sample_says_so_instead_of_ending_early():
     assert "Insufficient cash" in result["shown"]
     # No cap applied => no notice at all, so the row count is the whole story.
     assert "not shown" not in result["complete"]
+
+
+def test_rendered_a_share_fill_shows_reporting_and_native_cost_breakdown():
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_render_harness(source) + [
+        "renderTradingLog([{ timestamp: '2026-04-01T10:00:00Z', symbol: '600519.SH',",
+        "  side: 'BUY', requested_shares: 100, executed_shares: 100, price: 14.2929,",
+        "  executed_value: 204.14, gross_value: 204.14, status: 'filled', reason: 'Momentum entry',",
+        "  commission: 0.7143, stamp_duty: 0, transfer_fee: 0.0143,",
+        "  slippage_amount: 0.7143, total_fees: 0.7286, net_cash_impact: -204.8686,",
+        "  native_price: 100.05, native_value: 10005, native_commission: 5,",
+        "  native_stamp_duty: 0, native_transfer_fee: 0.1,",
+        "  native_slippage_amount: 5, native_total_fees: 5.1,",
+        "  native_net_cash_impact: -10010.1, fx_rate: 7 }]);",
+        "console.log(JSON.stringify(tbody.innerHTML));",
+    ])
+
+    assert "Commission $0.71" in result
+    assert "Stamp duty $0.00" in result
+    assert "Transfer fee $0.01" in result
+    assert "Slippage $0.71" in result
+    assert "Net cash -$204.87" in result
+    assert "CNY native" in result
+    assert "Commission ¥5.00" in result
+    assert "Net cash -¥10,010.10" in result
+    assert "Momentum entry" in result
+    assert "Order not executed" not in result
+
+
+def test_rejected_a_share_order_does_not_render_zero_costs_as_a_charge():
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_render_harness(source) + [
+        "renderTradingLog([{ symbol: '600519.SH', side: 'BUY', requested_shares: 50,",
+        "  executed_shares: 0, price: 100, executed_value: 0, status: 'rejected',",
+        "  commission: 0, stamp_duty: 0, transfer_fee: 0, slippage_amount: 0,",
+        "  total_fees: 0, net_cash_impact: 0, reason: 'invalid_lot_size' }]);",
+        "console.log(JSON.stringify(tbody.innerHTML));",
+    ])
+
+    assert "Commission" not in result
+    assert "Net cash" not in result
+    assert "Invalid lot size" in result
 
 
 def test_filtering_preserves_quantities_and_the_truncation_notice():

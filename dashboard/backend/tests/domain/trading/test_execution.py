@@ -167,6 +167,9 @@ def test_ashare_t1_partial_fill_charges_only_filled_quantity():
     assert result["trades"][0]["total_fees"] == 10.1
     assert result["cash"] == pytest.approx(9984.9)
     assert result["order_events"][-1]["status"] == "partial"
+    assert result["order_events"][-1]["price"] == 99.95
+    assert result["order_events"][-1]["gross_value"] == 9995.0
+    assert result["order_events"][-1]["total_fees"] == 10.1
 
 
 def test_portfolio_manager_accumulates_native_transaction_cost_totals():

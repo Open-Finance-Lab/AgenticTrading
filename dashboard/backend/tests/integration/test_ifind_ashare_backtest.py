@@ -28,6 +28,7 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     CSI300_SAMPLE_20_2026H2,
     CSI300_SAMPLE_20_2026H2_SYMBOLS,
     IFIND_ASHARE,
+    ASHARE_TRANSACTION_COST_PROFILE,
     get_market_profile,
 )
 from dashboard.scripts import backtest_hourly_agent
@@ -529,11 +530,19 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
         "fx_observation_start_date": "2026-03-31",
         "fx_observation_end_date": "2026-03-31",
         "native_initial_capital": 7_000.0,
+        "transaction_cost_profile": ASHARE_TRANSACTION_COST_PROFILE.to_metadata(),
     }
-    # A run with nothing rejected writes no rejected_orders* keys at all, so the
-    # agent row matches the baseline row exactly.
+    # A run with no fills writes no cost totals. The baseline may have initial
+    # fills, so its totals are asserted separately below.
     assert agent_run["metadata"] == expected_metadata
-    assert buyhold_run["metadata"] == expected_metadata
+    assert buyhold_run["metadata"]["transaction_cost_profile"] == (
+        ASHARE_TRANSACTION_COST_PROFILE.to_metadata()
+    )
+    baseline_totals = buyhold_run["metadata"].get("transaction_cost_totals")
+    if universe == A_SHARE_DEMO_6:
+        assert baseline_totals["total_fees"] > 0
+    else:
+        assert baseline_totals is None
     assert agent_run["llm_calls"] == 0
     assert agent_run["baseline_djia_run_id"] is None
     assert agent_run["baseline_buyhold_run_id"] == buyhold_run["run_id"]

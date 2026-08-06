@@ -631,10 +631,19 @@ def execute_actions(
                 side="SELL",
                 requested_shares=shares,
                 executed_shares=sell_shares,
-                price=price,
+                price=(
+                    calculated_costs["price"]
+                    if sell_shares > 0
+                    else price
+                ),
                 status="partial" if sell_shares > 0 else "rejected",
                 reason=primary_reason,
                 strategy_reason=reason,
+                costs=(
+                    calculated_costs
+                    if costs_enabled and sell_shares > 0
+                    else (_zero_transaction_costs(price) if costs_enabled else None)
+                ),
             )
 
         elif action_type == "sell":

@@ -771,8 +771,24 @@ def test_insert_trades_and_get_trades_round_trip_postgres(pg_backtest_db):
                 "price": 150.0,
                 "value": 1500.0,
                 "reason": "signal",
+                "reference_price": 149.9,
+                "gross_value": 1500.0,
+                "slippage_amount": 1.0,
+                "commission": 0.4,
+                "stamp_duty": 0.0,
+                "transfer_fee": 0.02,
+                "total_fees": 0.42,
+                "net_cash_impact": -1500.42,
                 "native_price": 1080.0,
                 "native_value": 10800.0,
+                "native_reference_price": 1079.28,
+                "native_gross_value": 10800.0,
+                "native_slippage_amount": 7.2,
+                "native_commission": 2.88,
+                "native_stamp_duty": 0.0,
+                "native_transfer_fee": 0.144,
+                "native_total_fees": 3.024,
+                "native_net_cash_impact": -10803.024,
                 "fx_rate": 7.2,
             },
             {
@@ -798,6 +814,9 @@ def test_insert_trades_and_get_trades_round_trip_postgres(pg_backtest_db):
     assert first["side"] == "BUY"
     assert first["quantity"] == 10
     assert first["fx_rate"] == 7.2
+    assert first["total_fees"] == 0.42
+    assert first["native_total_fees"] == 3.024
+    assert first["native_net_cash_impact"] == -10803.024
 
     assert second["symbol"] == "MSFT"
     assert second["quantity"] == 5
@@ -806,6 +825,9 @@ def test_insert_trades_and_get_trades_round_trip_postgres(pg_backtest_db):
     assert "fx_rate" not in second
     assert "native_price" not in second
     assert "native_value" not in second
+    assert "commission" not in second
+    assert "total_fees" not in second
+    assert "native_total_fees" not in second
 
 
 @pg_only

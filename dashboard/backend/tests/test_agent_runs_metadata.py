@@ -205,4 +205,5 @@ def test_engine_agent_run_wires_the_metadata():
         / "domain" / "backtesting" / "engine.py"
     ).read_text(encoding="utf-8")
     assert "metadata=self._agent_run_metadata()" in engine_src
-    assert engine_src.count("metadata=self._run_metadata()") == 2
+    assert engine_src.count("metadata=self._run_metadata()") == 1
+    assert "metadata=self._run_metadata(baseline_cost_totals)" in engine_src

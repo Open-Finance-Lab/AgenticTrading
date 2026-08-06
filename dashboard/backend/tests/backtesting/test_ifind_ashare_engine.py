@@ -154,9 +154,10 @@ def test_order_event_serializer_converts_currency_and_preserves_fractional_reque
         "executed_value": 0.0,
         "status": "rejected",
         "reason": "invalid_lot_size",
-        "strategy_reason": "Model request",
-        "native_price": 700.0,
-        "native_value": 0.0,
+            "strategy_reason": "Model request",
+            "native_price": 700.0,
+            "native_executed_value": 0.0,
+            "native_value": 0.0,
         "fx_rate": 7.0,
     }]
     json.dumps(serialized)

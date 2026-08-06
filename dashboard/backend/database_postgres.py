@@ -44,7 +44,11 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
-from dashboard.backend.database import BacktestDatabase, as_timestamp_text
+from dashboard.backend.database import (
+    BacktestDatabase,
+    TRADE_OPTIONAL_AUDIT_FIELDS,
+    as_timestamp_text,
+)
 from dashboard.backend.db_url import require_postgres_url
 
 
@@ -163,8 +167,24 @@ class PostgresBacktestDatabase:
                         price DOUBLE PRECISION NOT NULL,
                         value DOUBLE PRECISION NOT NULL,
                         reason TEXT,
+                        reference_price DOUBLE PRECISION,
+                        gross_value DOUBLE PRECISION,
+                        slippage_amount DOUBLE PRECISION,
+                        commission DOUBLE PRECISION,
+                        stamp_duty DOUBLE PRECISION,
+                        transfer_fee DOUBLE PRECISION,
+                        total_fees DOUBLE PRECISION,
+                        net_cash_impact DOUBLE PRECISION,
                         native_price DOUBLE PRECISION,
                         native_value DOUBLE PRECISION,
+                        native_reference_price DOUBLE PRECISION,
+                        native_gross_value DOUBLE PRECISION,
+                        native_slippage_amount DOUBLE PRECISION,
+                        native_commission DOUBLE PRECISION,
+                        native_stamp_duty DOUBLE PRECISION,
+                        native_transfer_fee DOUBLE PRECISION,
+                        native_total_fees DOUBLE PRECISION,
+                        native_net_cash_impact DOUBLE PRECISION,
                         fx_rate DOUBLE PRECISION,
                         created_at TEXT NOT NULL {created_at_default}
                     )
@@ -306,11 +326,75 @@ class PostgresBacktestDatabase:
 
                 cur.execute(
                     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "reference_price DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "gross_value DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "slippage_amount DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "commission DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "stamp_duty DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "transfer_fee DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "total_fees DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "net_cash_impact DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
                     "native_price DOUBLE PRECISION"
                 )
                 cur.execute(
                     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
                     "native_value DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "native_reference_price DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "native_gross_value DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "native_slippage_amount DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "native_commission DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "native_stamp_duty DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "native_transfer_fee DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "native_total_fees DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "native_net_cash_impact DOUBLE PRECISION"
                 )
                 cur.execute(
                     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
@@ -593,8 +677,16 @@ class PostgresBacktestDatabase:
                         """
                         INSERT INTO trades
                         (run_id, timestamp, symbol, quantity, side, price, value,
-                         reason, native_price, native_value, fx_rate)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                         reason, reference_price, gross_value, slippage_amount,
+                         commission, stamp_duty, transfer_fee, total_fees,
+                         net_cash_impact, native_price, native_value,
+                         native_reference_price, native_gross_value,
+                         native_slippage_amount, native_commission,
+                         native_stamp_duty, native_transfer_fee,
+                         native_total_fees, native_net_cash_impact, fx_rate)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (
                             run_id,
@@ -605,8 +697,24 @@ class PostgresBacktestDatabase:
                             price,
                             value,
                             trade.get("reason"),
+                            trade.get("reference_price"),
+                            trade.get("gross_value"),
+                            trade.get("slippage_amount"),
+                            trade.get("commission"),
+                            trade.get("stamp_duty"),
+                            trade.get("transfer_fee"),
+                            trade.get("total_fees"),
+                            trade.get("net_cash_impact"),
                             trade.get("native_price"),
                             trade.get("native_value"),
+                            trade.get("native_reference_price"),
+                            trade.get("native_gross_value"),
+                            trade.get("native_slippage_amount"),
+                            trade.get("native_commission"),
+                            trade.get("native_stamp_duty"),
+                            trade.get("native_transfer_fee"),
+                            trade.get("native_total_fees"),
+                            trade.get("native_net_cash_impact"),
                             trade.get("fx_rate"),
                         ),
                     )
@@ -866,7 +974,13 @@ class PostgresBacktestDatabase:
                 cur.execute(
                     """
                     SELECT timestamp, symbol, quantity, side, price, value, reason,
-                           native_price, native_value, fx_rate
+                           reference_price, gross_value, slippage_amount,
+                           commission, stamp_duty, transfer_fee, total_fees,
+                           net_cash_impact, native_price, native_value,
+                           native_reference_price, native_gross_value,
+                           native_slippage_amount, native_commission,
+                           native_stamp_duty, native_transfer_fee,
+                           native_total_fees, native_net_cash_impact, fx_rate
                     FROM trades WHERE run_id = %s
                     ORDER BY timestamp ASC, id ASC
                     """,
@@ -874,7 +988,7 @@ class PostgresBacktestDatabase:
                 )
                 rows = cur.fetchall()
         for row in rows:
-            for field in ("native_price", "native_value", "fx_rate"):
+            for field in TRADE_OPTIONAL_AUDIT_FIELDS:
                 if row.get(field) is None:
                     row.pop(field, None)
         return rows

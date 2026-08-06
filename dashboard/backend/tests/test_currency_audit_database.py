@@ -58,8 +58,24 @@ def test_currency_audit_fields_round_trip_and_usd_rows_remain_nullable(tmp_path)
                 "quantity": 1,
                 "price": 200,
                 "value": 200,
+                "reference_price": 199.9,
+                "gross_value": 200,
+                "slippage_amount": 0.1,
+                "commission": 0.1,
+                "stamp_duty": 0,
+                "transfer_fee": 0.01,
+                "total_fees": 0.11,
+                "net_cash_impact": -200.11,
                 "native_price": 1_400,
                 "native_value": 1_400,
+                "native_reference_price": 1_399.3,
+                "native_gross_value": 1_400,
+                "native_slippage_amount": 0.7,
+                "native_commission": 0.7,
+                "native_stamp_duty": 0,
+                "native_transfer_fee": 0.07,
+                "native_total_fees": 0.77,
+                "native_net_cash_impact": -1_400.77,
                 "fx_rate": 7.0,
             }
         ],
@@ -75,6 +91,12 @@ def test_currency_audit_fields_round_trip_and_usd_rows_remain_nullable(tmp_path)
     assert trade["price"] == 200
     assert trade["native_price"] == 1_400
     assert trade["native_value"] == 1_400
+    assert trade["commission"] == 0.1
+    assert trade["total_fees"] == 0.11
+    assert trade["net_cash_impact"] == -200.11
+    assert trade["native_commission"] == 0.7
+    assert trade["native_total_fees"] == 0.77
+    assert trade["native_net_cash_impact"] == -1_400.77
     assert trade["fx_rate"] == 7.0
 
 
@@ -118,4 +140,24 @@ def test_existing_schema_is_idempotently_migrated_with_nullable_audit_fields(tmp
         "native_positions_value",
         "fx_rate",
     } <= equity_columns
-    assert {"native_price", "native_value", "fx_rate"} <= trade_columns
+    assert {
+        "reference_price",
+        "gross_value",
+        "slippage_amount",
+        "commission",
+        "stamp_duty",
+        "transfer_fee",
+        "total_fees",
+        "net_cash_impact",
+        "native_price",
+        "native_value",
+        "native_reference_price",
+        "native_gross_value",
+        "native_slippage_amount",
+        "native_commission",
+        "native_stamp_duty",
+        "native_transfer_fee",
+        "native_total_fees",
+        "native_net_cash_impact",
+        "fx_rate",
+    } <= trade_columns
