@@ -28,8 +28,26 @@ def _cache_control(source: str):
 
 
 def test_app_html_routes_must_revalidate():
+    # /app.html is belt-and-braces: `cleanUrls: true` turns it into a 308 to
+    # /app that already carries must-revalidate, so the rule only becomes
+    # load-bearing if cleanUrls is ever switched off. /app is the real fix.
     for source in ("/app", "/app.html"):
         assert _cache_control(source) == "public, max-age=0, must-revalidate", source
+
+
+def test_catch_all_precedes_the_cache_control_overrides():
+    """Order is the whole mechanism — assert it, don't assume it.
+
+    Every rule whose source matches is applied and the *last* one wins per
+    key, so an override only overrides while it sits after the catch-all.
+    Moving /(.*) to the end of the array would silently restore max-age=3600
+    on every one of these routes while each _cache_control() assertion above
+    still passed, because those match on the source string alone.
+    """
+    order = [entry["source"] for entry in VERCEL["headers"]]
+    catch_all = order.index("/(.*)")
+    for source in ("/", "/app", "/app.html", "/app.js", "/styles.css", "/assets/(.*)"):
+        assert catch_all < order.index(source), source
 
 
 def test_existing_overrides_unchanged():
