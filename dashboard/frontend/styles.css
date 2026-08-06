@@ -9631,6 +9631,12 @@ body.agent-editor-open {
     margin: 4px 0 16px;
 }
 
+/* Second facet row (model vendor). Pulled up under the market row so the two
+   read as one stacked filter block rather than two unrelated controls. */
+.marketplace-vendor-chips {
+    margin-top: -8px;
+}
+
 .marketplace-category-chip {
     display: inline-flex;
     align-items: center;

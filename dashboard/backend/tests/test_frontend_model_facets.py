@@ -126,3 +126,88 @@ console.log(JSON.stringify([
     )
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == ["", "", "", "qwen", "", "open", "closed", ""]
+
+
+def test_vendor_chip_container_exists_in_the_community_view():
+    community = APP_HTML[
+        APP_HTML.index('<div id="communityView"') : APP_HTML.index('<div id="accountView"')
+    ]
+    assert 'id="marketplaceVendorChips"' in community
+    assert 'id="marketplaceCategoryChips"' in community
+    assert community.index('id="marketplaceCategoryChips"') < community.index(
+        'id="marketplaceVendorChips"'
+    ), "market row must render above the vendor row"
+
+
+def test_vendor_chips_are_derived_not_hardcoded():
+    """Chips come from MODEL_VENDORS intersected with the loaded catalog, so a
+    vendor with no templates never ships an empty chip."""
+    body = fn_body("function renderMarketplaceVendorChips")
+    assert "MODEL_VENDORS" in body
+    assert "marketplaceTemplates" in body
+    for literal in ("'anthropic'", "'openai'", "'deepseek'", "'qwen'"):
+        assert literal not in body, f"{literal} hardcoded in the chip builder"
+
+
+def test_vendor_chips_are_built_once_then_toggled():
+    """renderMarketplaceGrid runs on every search keystroke; rebuilding innerHTML
+    per keystroke would blow away the focused chip."""
+    body = fn_body("function renderMarketplaceVendorChips")
+    assert "existing.length !== chips.length" in body
+
+
+def test_three_empty_states_stay_distinguishable():
+    body = fn_body("function marketplaceEmptyHtml")
+    assert "No templates match your search." in body
+    assert "No templates match both filters" in body
+    assert "marketplace-clear-filters" in body
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_empty_state_precedence():
+    script = f"""
+function escapeHtml(s) {{ return String(s); }}
+const MARKET_LABELS = {{ us_stocks: 'U.S.', cn_ashares: 'China A-Share' }};
+{js_const("MODEL_VENDORS")}
+{fn_body("function marketplaceEmptyHtml")}
+const out = [
+  marketplaceEmptyHtml({{searching: true, categoryFilter: 'us_stocks', vendorFilter: 'qwen'}}),
+  marketplaceEmptyHtml({{searching: false, categoryFilter: 'us_stocks', vendorFilter: 'qwen'}}),
+  marketplaceEmptyHtml({{searching: false, categoryFilter: 'us_stocks', vendorFilter: 'all'}}),
+  marketplaceEmptyHtml({{searching: false, categoryFilter: 'all', vendorFilter: 'all'}}),
+];
+console.log(JSON.stringify(out));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    search_empty, both, one_chip, none_at_all = json.loads(result.stdout)
+    # A typed query wins: clearing the chips would not bring anything back.
+    assert search_empty == "No templates match your search."
+    assert "both filters" in both and "marketplace-clear-filters" in both
+    assert "U.S." in one_chip and "both filters" not in one_chip
+    assert none_at_all == "No templates match your search."
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_unknown_vendor_survives_the_all_chip_and_only_that_chip():
+    script = f"""
+{js_const("MODEL_VENDORS")}
+{fn_body("function modelVendorKey")}
+const templates = [
+  {{template_id: 'a', model_name: 'qwen/qwen3.7-plus'}},
+  {{template_id: 'b', model_name: 'totally/unknown'}},
+];
+function visible(filter) {{
+  return templates
+    .filter((t) => filter === 'all' || modelVendorKey(t.model_name) === filter)
+    .map((t) => t.template_id);
+}}
+console.log(JSON.stringify([visible('all'), visible('qwen')]));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [["a", "b"], ["a"]]

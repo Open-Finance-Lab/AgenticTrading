@@ -1956,6 +1956,9 @@ let marketplaceLoadInFlight = null;
  * shelf's empty-state Community button (via navigateToPage's options). */
 let marketplaceCategoryFilter = 'all';
 
+/** 'all' or one of MODEL_VENDORS' keys. ANDs with marketplaceCategoryFilter. */
+let marketplaceVendorFilter = 'all';
+
 /** The model-vendor axis: who makes a model, and how it is licensed.
  *
  * Promoted from a submeta label lookup into the source of truth for the whole
@@ -2029,6 +2032,15 @@ function setMarketplaceCategoryFilter(category) {
   renderMarketplaceGrid();
 }
 
+/** Select a vendor chip and re-render. Mirrors setMarketplaceCategoryFilter,
+ * including the reset-to-'all' fallback for an unrecognized key. */
+function setMarketplaceVendorFilter(vendorKey) {
+  marketplaceVendorFilter = MODEL_VENDORS.some((vendor) => vendor.key === vendorKey)
+    ? vendorKey
+    : 'all';
+  renderMarketplaceGrid();
+}
+
 /** Chip row above the marketplace grid: 'All' plus one chip per market, built
  * from MARKET_LABELS rather than a second hardcoded list. Built from the label
  * map rather than AGENT_SHELVES because Community filters templates by
@@ -2057,11 +2069,67 @@ function renderMarketplaceCategoryChips() {
   });
 }
 
+/** Second chip row: 'All' plus one chip per vendor PRESENT IN THE CATALOG.
+ *
+ * Deliberately asymmetric with the market row, which is hardcoded from
+ * MARKET_LABELS: markets are a closed, backend-validated enum, vendors are
+ * open-ended. Hardcoding all of MODEL_VENDORS would ship chips that can never
+ * match anything. Order still comes from MODEL_VENDORS, not from catalog order,
+ * so the row does not reshuffle when a template is added. */
+function renderMarketplaceVendorChips() {
+  const container = document.getElementById('marketplaceVendorChips');
+  if (!container) return;
+  const present = new Set(marketplaceTemplates.map((t) => modelVendorKey(t.model_name)));
+  const chips = [
+    { key: 'all', label: 'All models' },
+    ...MODEL_VENDORS.filter((vendor) => present.has(vendor.key)).map((vendor) => ({
+      key: vendor.key,
+      label: vendor.label,
+    })),
+  ];
+  // Build once, then only toggle state -- same reason as the market row: this
+  // runs from renderMarketplaceGrid, which is bound to the search box's `input`.
+  const existing = container.querySelectorAll('[data-marketplace-vendor]');
+  if (existing.length !== chips.length) {
+    container.innerHTML = chips
+      .map((chip) => `<button type="button" class="marketplace-category-chip" data-marketplace-vendor="${escapeHtml(chip.key)}" aria-pressed="false">${escapeHtml(chip.label)}</button>`)
+      .join('');
+  }
+  container.querySelectorAll('[data-marketplace-vendor]').forEach((button) => {
+    const active = button.dataset.marketplaceVendor === marketplaceVendorFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+/** Empty-state copy. Three cases, deliberately worded apart -- the same concern
+ * stocksEmptyHtml records for My Agents.
+ *
+ * A typed query wins over the facet case: when a search is what emptied the
+ * grid, offering "Clear filters" sends the user to fix the wrong thing. */
+function marketplaceEmptyHtml({ searching, categoryFilter, vendorFilter }) {
+  if (searching) return 'No templates match your search.';
+  if (categoryFilter !== 'all' && vendorFilter !== 'all') {
+    return `No templates match both filters. <button type="button" class="marketplace-clear-filters">Clear filters</button>`;
+  }
+  if (categoryFilter !== 'all') {
+    return `No ${escapeHtml(MARKET_LABELS[categoryFilter] || '')} templates yet.`;
+  }
+  if (vendorFilter !== 'all') {
+    const vendor = MODEL_VENDORS.find((entry) => entry.key === vendorFilter);
+    return `No ${escapeHtml(vendor?.label || '')} templates yet.`;
+  }
+  return 'No templates match your search.';
+}
+
 function getFilteredMarketplaceTemplates() {
   const query = (document.getElementById('marketplaceSearchInput')?.value || '').trim().toLowerCase();
   let list = marketplaceTemplates.slice();
   if (marketplaceCategoryFilter !== 'all') {
     list = list.filter((template) => String(template.category || '').toLowerCase() === marketplaceCategoryFilter);
+  }
+  if (marketplaceVendorFilter !== 'all') {
+    list = list.filter((template) => modelVendorKey(template.model_name) === marketplaceVendorFilter);
   }
   if (query) {
     list = list.filter((template) => {
@@ -2089,15 +2157,27 @@ function renderMarketplaceGrid() {
   if (!grid) return;
 
   renderMarketplaceCategoryChips();
+  renderMarketplaceVendorChips();
   if (errorEl) errorEl.hidden = true;
   const templates = getFilteredMarketplaceTemplates();
   grid.innerHTML = '';
 
   if (!templates.length) {
-    // Show the empty message once the catalog has actually loaded and the
-    // filter narrowed it to zero; keep it hidden before the first load so
-    // it doesn't flash while marketplaceTemplates is still empty.
-    if (emptyEl) emptyEl.hidden = marketplaceTemplates.length === 0;
+    // Keep it hidden before the first load, so it doesn't flash while
+    // marketplaceTemplates is still empty.
+    if (emptyEl) {
+      emptyEl.hidden = marketplaceTemplates.length === 0;
+      emptyEl.innerHTML = marketplaceEmptyHtml({
+        searching: Boolean((document.getElementById('marketplaceSearchInput')?.value || '').trim()),
+        categoryFilter: marketplaceCategoryFilter,
+        vendorFilter: marketplaceVendorFilter,
+      });
+      emptyEl.querySelector('.marketplace-clear-filters')?.addEventListener('click', () => {
+        marketplaceCategoryFilter = 'all';
+        marketplaceVendorFilter = 'all';
+        renderMarketplaceGrid();
+      });
+    }
     return;
   }
   if (emptyEl) emptyEl.hidden = true;
@@ -7289,6 +7369,11 @@ function initNavigation() {
       const chipBtn = event.target.closest('[data-marketplace-category]');
       if (!chipBtn) return;
       setMarketplaceCategoryFilter(chipBtn.dataset.marketplaceCategory);
+    });
+    document.getElementById('marketplaceVendorChips')?.addEventListener('click', (event) => {
+        const chip = event.target.closest('[data-marketplace-vendor]');
+        if (!chip) return;
+        setMarketplaceVendorFilter(chip.dataset.marketplaceVendor);
     });
     document.getElementById('agentsCategories')?.addEventListener('click', (event) => {
       const marketChip = event.target.closest('[data-agent-market]');
