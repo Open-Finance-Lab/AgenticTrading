@@ -218,22 +218,24 @@ def test_backtest_capital_input_stays_removed_default_unchanged(html, js):
     assert re.search(r"DEFAULT_AGENT_CASH_ALLOCATION\s*=\s*1000", js)
 
 
-def test_ifind_model_dropdown_keeps_all_nine_models_available(html):
-    model_options = re.findall(
-        r'<option\s+value="([^"]+)">[^<]+</option>',
-        re.search(r'<select[^>]+id="modelSelect"[^>]*>(.*?)</select>', html, re.S).group(1),
+def test_ifind_model_dropdown_is_populated_from_supported_models(html, js):
+    """This used to pin nine hardcoded <option>s here -- six models the platform
+    cannot run, in a bare-slug format ('gpt-5.2') the rest of the app does not
+    use, while #builtinAgentModel used namespaced slugs. Both pickers now build
+    from SUPPORTED_MODELS in app.js; the vocabulary itself is pinned by
+    test_frontend_model_vocabulary.py.
+
+    What still matters *here* is that the picker is never left empty: on the
+    iFinD A-share path it is the live rule-based-vs-LLM decision-source control,
+    so the populator has to be wired into boot, not merely defined.
+    """
+    assert re.search(r'<select[^>]*id="modelSelect"[^>]*>\s*</select>', html)
+    assert "function populateSupportedModelSelects" in js
+    assert js.count("populateSupportedModelSelects()") >= 1
+    # Wired into the pure-DOM boot block, not left merely defined.
+    assert js.index("setupTickerScrollControls();") < js.index(
+        "populateSupportedModelSelects();"
     )
-    assert model_options == [
-        "claude-haiku-4.5",
-        "claude-sonnet-4.6",
-        "claude-opus-4.7",
-        "gpt-5.2",
-        "gpt-5-mini",
-        "deepseek-v4-flash",
-        "deepseek-v4-pro",
-        "gemini-3.5-flash",
-        "gemini-2.5-pro",
-    ]
 
 
 def test_run_config_shows_ifind_source_universe_count_timeframe_and_decision(html, js):
