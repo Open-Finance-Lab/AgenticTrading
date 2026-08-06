@@ -14,7 +14,7 @@ import subprocess
 
 import pytest
 
-from dashboard.backend.tests._frontend_source import APP_HTML, APP_JS, fn_body, js_const
+from dashboard.backend.tests._frontend_source import APP_HTML, fn_body, js_const
 
 EXPECTED_MODELS = [
     ("anthropic/claude-haiku-4-5", "Claude Haiku 4.5", "anthropic"),
@@ -40,6 +40,18 @@ def test_model_selects_carry_no_hardcoded_options(select_id):
     assert "<option" not in _select_markup(select_id), (
         f"#{select_id} still hardcodes options; build it from SUPPORTED_MODELS"
     )
+
+
+def test_the_populator_fills_both_pickers():
+    """populateSupportedModelSelects must write into #modelSelect AND
+    #builtinAgentModel -- dropping either line ships an empty picker silently.
+    For #builtinAgentModel specifically, an empty select means
+    submitCreateBuiltinAgent's `|| 'anthropic/claude-haiku-4-5'` fallback puts
+    every new built-in agent on Haiku with no error.
+    """
+    body = fn_body("function populateSupportedModelSelects")
+    for select_id in ("modelSelect", "builtinAgentModel"):
+        assert f"getElementById('{select_id}')" in body
 
 
 def test_supported_models_are_the_six_runnable_models():
