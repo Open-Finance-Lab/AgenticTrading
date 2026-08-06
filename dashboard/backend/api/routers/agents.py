@@ -238,6 +238,8 @@ def list_marketplace_agents():
 
 class CloneMarketplaceBody(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    # Deliberately unvalidated beyond length -- see clone_marketplace_template.
+    model_name: Optional[str] = Field(default=None, max_length=100)
 
 
 @router.post("/marketplace/{template_id}/clone")
@@ -261,6 +263,7 @@ def clone_marketplace_agent(
             owner_user_id=ctx["user_id"],
             owner_browser_session=ctx["browser_session"],
             name=body.name.strip() if body.name else None,
+            model_name=body.model_name,
         )
     except MarketplaceTemplateNotFoundError:
         raise HTTPException(status_code=404, detail="Marketplace template not found")

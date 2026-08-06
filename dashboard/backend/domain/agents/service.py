@@ -389,6 +389,7 @@ class AgentService:
         owner_user_id: Optional[int],
         owner_browser_session: Optional[str],
         name: Optional[str] = None,
+        model_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Copy a marketplace template into the caller's My Agents list."""
         from dashboard.backend.domain.agents import marketplace as marketplace_mod
@@ -404,9 +405,16 @@ class AgentService:
         runtime_config = normalize_runtime_config(
             runtime_type, template.get("runtime_config") or {}
         )
+        # No whitelist, on purpose: create_agent doesn't validate model_name
+        # either, so rejecting here would be inconsistent, and a Literal would
+        # publish an openapi enum -- the deploy gate #313 had to discharge.
+        # Blank/omitted means "the template's own model".
+        resolved_model = (model_name or "").strip() or str(
+            template.get("model_name") or "local-model"
+        ).strip() or "local-model"
         agent = self.create_agent(
             name=resolved_name,
-            model_name=str(template.get("model_name") or "local-model").strip() or "local-model",
+            model_name=resolved_model,
             owner_user_id=owner_user_id,
             owner_browser_session=owner_browser_session,
             agent_type="builtin",
