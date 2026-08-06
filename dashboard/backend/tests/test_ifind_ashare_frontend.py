@@ -231,7 +231,6 @@ def test_ifind_model_dropdown_is_populated_from_supported_models(html, js):
     """
     assert re.search(r'<select[^>]*id="modelSelect"[^>]*>\s*</select>', html)
     assert "function populateSupportedModelSelects" in js
-    assert js.count("populateSupportedModelSelects()") >= 1
     # Wired into the pure-DOM boot block, not left merely defined.
     assert js.index("setupTickerScrollControls();") < js.index(
         "populateSupportedModelSelects();"

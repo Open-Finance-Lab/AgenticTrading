@@ -78,3 +78,82 @@ console.log(modelOptionsHtml(SUPPORTED_MODELS));
     html = result.stdout
     for slug, label, _vendor in EXPECTED_MODELS:
         assert f'<option value="{slug}">{label}</option>' in html
+
+
+_FAKE_SELECT = """
+class FakeOption {
+  constructor(value, text) { this.value = value; this.textContent = text; this.dataset = {}; }
+}
+class FakeSelect {
+  constructor(values) {
+    this.options = values.map((v) => new FakeOption(v, v));
+    this.value = values[0] || '';
+  }
+  appendChild(option) { this.options.push(option); }
+  querySelectorAll(selector) {
+    if (selector !== 'option[data-injected-model]') throw new Error('unexpected: ' + selector);
+    const self = this;
+    const matches = this.options.filter((o) => o.dataset.injectedModel);
+    matches.forEach((o) => { o.remove = () => {
+      self.options = self.options.filter((x) => x !== o);
+    }; });
+    return matches;
+  }
+}
+"""
+
+
+def _run_sync_harness(body: str) -> str:
+    script = f"""
+{_FAKE_SELECT}
+let SELECT = null;
+const document = {{
+  getElementById: (id) => (id === 'modelSelect' ? SELECT : null),
+  createElement: () => new FakeOption('', ''),
+}};
+function formatAgentModelLabel(m) {{ return String(m); }}
+{fn_body("function normalizeBacktestModelId")}
+{fn_body("function findBacktestModelOption")}
+{fn_body("function syncModelSelectFromAgent")}
+{body}
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_unrepresentable_model_is_injected_not_left_stale():
+    """The regression: agent B's run must never submit agent A's model."""
+    out = _run_sync_harness(
+        # Agent A leaves qwen in the select; agent B runs a legacy model.
+        "SELECT = new FakeSelect(['anthropic/claude-haiku-4-5', 'qwen/qwen3.7-plus']);"
+        "SELECT.value = 'qwen/qwen3.7-plus';"
+        "syncModelSelectFromAgent({model_name: 'gpt-5.2'});"
+        "console.log(SELECT.value);"
+    )
+    assert out == "gpt-5.2"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_injected_options_do_not_accumulate():
+    out = _run_sync_harness(
+        "SELECT = new FakeSelect(['anthropic/claude-haiku-4-5']);"
+        "syncModelSelectFromAgent({model_name: 'gpt-5.2'});"
+        "syncModelSelectFromAgent({model_name: 'local-model'});"
+        "console.log(SELECT.options.map((o) => o.value).join(','));"
+    )
+    assert out == "anthropic/claude-haiku-4-5,local-model"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_representable_model_selects_its_own_option():
+    out = _run_sync_harness(
+        "SELECT = new FakeSelect(['anthropic/claude-haiku-4-5', 'qwen/qwen3.7-plus']);"
+        "SELECT.value = 'qwen/qwen3.7-plus';"
+        "syncModelSelectFromAgent({model_name: 'anthropic/claude-haiku-4-5'});"
+        "console.log(SELECT.value + '|' + SELECT.options.length);"
+    )
+    assert out == "anthropic/claude-haiku-4-5|2"

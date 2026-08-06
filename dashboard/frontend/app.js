@@ -1683,8 +1683,9 @@ function resolveBacktestModelRequest(modelSelect, agent) {
   if (agentOption?.value === selectedModel && agent?.model_name) {
     return agent.model_name;
   }
-  // A model the nine-option list cannot represent still belongs to the agent:
-  // without this the run submits whatever value a previous agent left behind.
+  // Belt-and-braces since syncModelSelectFromAgent started injecting an option
+  // for unrepresentable models: on the hidden path the agent's saved model wins
+  // outright, whatever the select happens to hold.
   if (agent?.model_name && !backtestModelPickerIsLiveControl()) {
     return agent.model_name;
   }
@@ -1707,13 +1708,34 @@ function syncBacktestModelFieldMode() {
       : formatAgentModelLabel(runBacktestModalAgent?.model_name));
 }
 
+/**
+ * Point the picker at this agent's model.
+ *
+ * A model the curated list cannot represent (a legacy value like 'gpt-5.2' or
+ * 'local-model') is INJECTED as its own option rather than left unmatched.
+ * Leaving it unmatched is a silent-wrong-value bug, not a cosmetic one: on the
+ * live iFinD path resolveBacktestModelRequest returns the select's current
+ * value, so the run would submit whatever the previously-selected agent left
+ * there, recorded under this agent's name. js/agent-editor.js does the same
+ * thing for the Configure picker.
+ */
 function syncModelSelectFromAgent(agent) {
   const modelSelect = document.getElementById('modelSelect');
   if (!modelSelect || !agent?.model_name) return;
+  // Drop the previous agent's injected option first, so injections cannot pile
+  // up across agent switches and cannot be matched as if they were curated.
+  modelSelect.querySelectorAll('option[data-injected-model]').forEach((option) => option.remove());
   const option = findBacktestModelOption(modelSelect, agent.model_name);
   if (option) {
     modelSelect.value = option.value;
+    return;
   }
+  const injected = document.createElement('option');
+  injected.value = agent.model_name;
+  injected.textContent = formatAgentModelLabel(agent.model_name);
+  injected.dataset.injectedModel = 'true';
+  modelSelect.appendChild(injected);
+  modelSelect.value = agent.model_name;
 }
 
 function getSelectedBacktestAgent() {
