@@ -359,7 +359,7 @@ def test_legacy_plaintext_session_table_is_migrated_postgres(temp_postgres_store
 def test_expired_sessions_are_reclaimed_postgres(temp_postgres_store):
     """Twin of the SQLite sweep tests -- see test_auth.py for the rationale."""
     from dashboard.backend.session_tokens import hash_session_token
-    from dashboard.backend.users import _utcnow, format_stored_timestamp
+    import dashboard.backend.users as users_module
 
     user = temp_postgres_store.create_user("sweep@example.com", "Sweep", "securepass1")
     dead = temp_postgres_store.create_session(user["id"])
@@ -369,7 +369,9 @@ def test_expired_sessions_are_reclaimed_postgres(temp_postgres_store):
             cur.execute(
                 "UPDATE auth_sessions SET expires_at = %s WHERE token_hash = %s",
                 (
-                    format_stored_timestamp(_utcnow() - timedelta(days=1)),
+                    users_module.format_stored_timestamp(
+                        users_module._utcnow() - timedelta(days=1)
+                    ),
                     hash_session_token(dead),
                 ),
             )

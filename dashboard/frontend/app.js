@@ -6874,7 +6874,12 @@ async function applyAgentRunDeepLink() {
         }
     }
 
-    if (agentId && !agent && agentAuthError) {
+    // agentAuthError can only be set inside the `!agent && agentId` branch above,
+    // and only from the catch — where the `agent = …` assignment never ran. So it
+    // already implies both operands; re-testing them added nothing but made the
+    // guard read as if the URL-supplied agentId decided the outcome. The access
+    // decision is the server's 401/403, not this condition.
+    if (agentAuthError) {
         const signedIn = isSignedIn();
         if (!signedIn) {
             // Park it so a successful sign-in retries — see PENDING_DEEP_LINK_KEY.
