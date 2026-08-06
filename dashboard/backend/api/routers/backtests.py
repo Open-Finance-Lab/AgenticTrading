@@ -19,6 +19,10 @@ import time
 import uuid
 from functools import lru_cache
 from pathlib import Path
+# Module-local alias, not `import threading`, so a test can monkeypatch the
+# thread factory HERE. Patching `backtests_router.threading.Thread` reaches
+# through to the shared stdlib module object and swaps Thread process-wide,
+# which leaks into every later test in the session.
 from threading import Thread as _BackgroundThread
 from typing import Any, Dict, List, Literal, Optional
 
@@ -1580,7 +1584,16 @@ def get_equity_curve(run_id: str, request: Request):
 
 @router.get("/runs/{run_id}/trades")
 def get_run_trades(run_id: str, request: Request):
-    """Trades and the bounded order-outcome sample for an owned run."""
+    """Trades plus the orders that did *not* fill, for an owned run.
+
+    The two lists are complementary, not overlapping: ``trades`` is the
+    complete, uncapped fill history straight out of the trades table, and
+    ``order_events`` carries only the rejected and partially-filled orders,
+    which are the outcomes a trade row cannot express. Clients reassemble the
+    full order history by merging them. That split is what keeps the metadata
+    sample from having to hold a copy of every fill -- see
+    ``engine._unfilled_order_events``.
+    """
     session_id = request.state.session_id
     run = db.get_run_with_session(run_id, session_id)
     if not run:

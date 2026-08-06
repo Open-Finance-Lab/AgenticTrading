@@ -102,6 +102,33 @@ LIVE_PROGRESS_REJECTED_ORDER_LIMIT = 50
 LIVE_PROGRESS_ORDER_EVENT_LIMIT = 50
 
 
+def _unfilled_order_events(order_events) -> List[Dict]:
+    """Return only the order outcomes ``trades`` cannot already reconstruct.
+
+    The executor keeps a complete order ledger, but a *fully filled* order is
+    byte-for-byte recoverable from the trade it produced -- which is already
+    persisted, relationally and without a cap, in the ``trades`` table. Copying
+    fills into ``agent_runs.metadata`` as well would duplicate the run's single
+    largest table into one JSON cell on free-tier Postgres, carrying the whole
+    ``[LLM] <reasoning>`` prose a second time.
+
+    Worse, it would make the cap *lossy*: the sample is bounded at
+    ``REJECTED_ORDER_SAMPLE_LIMIT``, so a busy run's fills would push its
+    rejections out of the persisted window entirely, and the Trading Log would
+    silently show the oldest 200 orders of a run that placed thousands.
+
+    Keeping only the non-filled outcomes makes the stored set small, bounded in
+    practice, and strictly additive to ``trades``: the UI reassembles the full
+    order history by merging the two, so nothing is hidden. Partial fills stay
+    here because their shortfall (``unfilled_shares`` + ``reason``) is exactly
+    the part no trade row records.
+    """
+    return [
+        event for event in (order_events or [])
+        if event.get("status") != "filled"
+    ]
+
+
 def _prior_market_date_by_decision_date(
     timestamps,
 ) -> Dict[date, Optional[date]]:
@@ -416,6 +443,9 @@ class HourlyBacktester:
                     },
                 }
             )
+        unfilled_order_events = _unfilled_order_events(
+            getattr(manager, "order_events", [])
+        )
         payload = {
             "run_id": self.live_run_id,
             "step": step,
@@ -426,12 +456,14 @@ class HourlyBacktester:
                 manager.rejected_orders[-LIVE_PROGRESS_REJECTED_ORDER_LIMIT:]
             ),
             "rejected_orders_count": len(manager.rejected_orders),
+            # Non-filled outcomes only; the complete `trades` list above already
+            # carries every fill, and the frontend merges the two. Tail window
+            # for the same reason rejected_orders uses one -- this file is
+            # rewritten whole on every step.
             "order_events": self._serialize_order_events(
-                getattr(manager, "order_events", [])[
-                    -LIVE_PROGRESS_ORDER_EVENT_LIMIT:
-                ]
+                unfilled_order_events[-LIVE_PROGRESS_ORDER_EVENT_LIMIT:]
             ),
-            "order_events_count": len(getattr(manager, "order_events", [])),
+            "order_events_count": len(unfilled_order_events),
         }
         try:
             Path(self.progress_file).write_text(json.dumps(payload), encoding="utf-8")
@@ -703,8 +735,19 @@ class HourlyBacktester:
             "paper_backtest": True,
             "native_currency": self.profile.native_currency,
             "reporting_currency": self.profile.reporting_currency,
-            "lot_size": self.profile.lot_size,
         }
+        if self.profile.lot_size > 1:
+            # Conditional for the same reason `settlement` below is: this dict
+            # is serialized straight into the LLM prompt, so an unconditional
+            # key changes every DJIA prompt and makes new runs non-comparable
+            # with the historical ones on the leaderboard. A market that trades
+            # in single shares has no lot rule to state.
+            result["lot_size"] = self.profile.lot_size
+            result["lot_size_note"] = (
+                "Order quantities must be positive whole multiples of "
+                f"{self.profile.lot_size} shares; any other size is rejected "
+                "in full rather than rounded."
+            )
         if self.profile.t_plus_one_enabled:
             # A bare `sellable_shares` number in each holding is not
             # self-explanatory. Name the rule that produces it, or the model has
@@ -1062,7 +1105,9 @@ class HourlyBacktester:
         self.rejected_orders = self._serialize_rejected_orders(
             manager.rejected_orders
         )
-        self.order_events = self._serialize_order_events(manager.order_events)
+        self.order_events = self._serialize_order_events(
+            _unfilled_order_events(manager.order_events)
+        )
         db.insert_run(
             run_id=run_id,
             session_id=self.session_id,

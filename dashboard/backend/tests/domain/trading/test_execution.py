@@ -11,6 +11,7 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from dashboard.backend.domain.trading import execution as execution_module
 from dashboard.backend.domain.trading.execution import execute_actions
 from dashboard.scripts import backtest_hourly_agent as bha
 
@@ -515,6 +516,152 @@ def test_ashare_hold_does_not_record_order_event():
     )
 
     assert pm.order_events == []
+
+
+# ---------------------------------------------------------------------------
+# Order outcomes are recorded for every market, and repeats are collapsed
+# ---------------------------------------------------------------------------
+
+def test_single_share_market_records_an_unaffordable_buy():
+    """DJIA must not drop an unfillable order the "All Orders" log promises.
+
+    Execution behaviour is unchanged -- the buy still does not happen -- but it
+    now leaves a trace, which is what the log needs to be honest.
+    """
+    pm = bha.PortfolioManager(500)
+
+    pm.execute_actions(
+        [{"symbol": "AAPL", "action": "buy", "shares": 10}],
+        {"AAPL": _row(100.0)},
+        datetime(2026, 4, 1, 10),
+    )
+
+    assert pm.cash == 500
+    assert pm.positions == {}
+    assert pm.trades == []
+    # `rejected_orders` is the T+1 audit trail and stays A-share-only.
+    assert pm.rejected_orders == []
+    assert pm.order_events[-1]["status"] == "rejected"
+    assert pm.order_events[-1]["reason"] == "insufficient_cash"
+    assert pm.order_events[-1]["side"] == "BUY"
+
+
+def test_single_share_market_records_a_sell_of_an_unheld_symbol():
+    pm = bha.PortfolioManager(1000)
+
+    pm.execute_actions(
+        [{"symbol": "AAPL", "action": "sell", "shares": 5}],
+        {"AAPL": _row(100.0)},
+        datetime(2026, 4, 1, 10),
+    )
+
+    assert pm.cash == 1000
+    assert pm.trades == []
+    assert pm.rejected_orders == []
+    assert pm.order_events[-1]["reason"] == "insufficient_position"
+
+
+def test_a_zero_share_order_records_nothing():
+    """The new every-market branch must not mint events for non-orders."""
+    pm = bha.PortfolioManager(1000)
+
+    pm.execute_actions(
+        [
+            {"symbol": "AAPL", "action": "buy", "shares": 0},
+            {"symbol": "AAPL", "action": "sell", "shares": 0},
+        ],
+        {"AAPL": _row(100.0)},
+        datetime(2026, 4, 1, 10),
+    )
+
+    assert pm.order_events == []
+
+
+def test_repeated_rejection_collapses_per_symbol_trading_day():
+    """A signal the agent cannot act on re-fires every bar.
+
+    Without collapsing, those duplicates fill the persisted head sample end to
+    end, so the audit is least useful exactly when the constraint bound
+    hardest -- the failure `t1_deferrals` already had to solve.
+    """
+    pm = _ashare_manager(cash=1000)
+    md = {"600519.SH": _row(100.0)}
+
+    for hour in (10, 11, 13, 14):
+        pm.execute_actions(
+            [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+            md,
+            datetime(2026, 4, 1, hour),
+        )
+
+    assert len(pm.order_events) == 1
+    assert pm.order_events[0]["reason"] == "insufficient_cash_for_lot"
+    assert pm.order_events[0]["repeat_count"] == 4
+    # The T+1 audit list keeps its own per-bar records; only the UI-facing
+    # order ledger collapses.
+    assert len(pm.rejected_orders) == 4
+
+
+def test_repeat_collapse_separates_days_symbols_and_reasons():
+    pm = _ashare_manager(cash=1000)
+    md = {"600519.SH": _row(100.0), "601318.SH": _row(100.0)}
+
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+        md,
+        datetime(2026, 4, 1, 10),
+    )
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+        md,
+        datetime(2026, 4, 2, 10),
+    )
+    pm.execute_actions(
+        [{"symbol": "601318.SH", "action": "buy", "shares": 100}],
+        md,
+        datetime(2026, 4, 2, 10),
+    )
+    pm.execute_actions(
+        [{"symbol": "601318.SH", "action": "buy", "shares": 50}],
+        md,
+        datetime(2026, 4, 2, 10),
+    )
+
+    keys = [
+        (event["symbol"], event["reason"]) for event in pm.order_events
+    ]
+    assert keys == [
+        ("600519.SH", "insufficient_cash_for_lot"),
+        ("600519.SH", "insufficient_cash_for_lot"),
+        ("601318.SH", "insufficient_cash_for_lot"),
+        ("601318.SH", "invalid_lot_size"),
+    ]
+    assert all("repeat_count" not in event for event in pm.order_events)
+
+
+def test_fills_never_collapse_however_alike_they_look():
+    """Two identical fills are two ledger movements, not one repeated refusal."""
+    pm = _ashare_manager(cash=100000)
+    md = {"600519.SH": _row(100.0)}
+
+    for hour in (10, 11):
+        pm.execute_actions(
+            [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+            md,
+            datetime(2026, 4, 1, hour),
+        )
+
+    assert [event["status"] for event in pm.order_events] == [
+        "filled",
+        "filled",
+    ]
+    assert pm.positions == {"600519.SH": 200}
+
+
+@pytest.mark.parametrize("shares", ["100", "abc", None, True, False])
+def test_lot_validation_rejects_non_numeric_quantities(shares):
+    """`float("100")` would pass every lot check, then crash at shares * price."""
+    assert execution_module._is_valid_lot_quantity(shares, 100) is False
 
 
 def test_t1_same_day_buy_then_sell_records_rejection_without_zero_trade():

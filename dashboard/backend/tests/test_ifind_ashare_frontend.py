@@ -79,15 +79,15 @@ def test_registered_a_share_universes_are_visible_and_complete(html, js):
 
 def test_ifind_user_facing_copy_contains_no_chinese(html, js):
     for text in (
-        "iFinD A\u80a1\uff0860\u5206\u949f\uff09",
-        "iFinD A\u80a1 \u00b7 60m",
-        "A\u80a1\u4ee3\u88686\u53ea",
-        "\u8d35\u5dde\u8305\u53f0",
-        "\u4e2d\u56fd\u5e73\u5b89",
-        "\u62db\u5546\u94f6\u884c",
-        "\u5e73\u5b89\u94f6\u884c",
-        "\u4e94\u7cae\u6db2",
-        "\u5b81\u5fb7\u65f6\u4ee3",
+        "iFinD A股（60分钟）",
+        "iFinD A股 · 60m",
+        "A股代表6只",
+        "贵州茅台",
+        "中国平安",
+        "招商银行",
+        "平安银行",
+        "五粮液",
+        "宁德时代",
     ):
         assert text not in html
         assert text not in js

@@ -3920,6 +3920,9 @@ let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
 let tradingLogFilter = 'all';
 let tradingLogEmptyMessage = 'No orders yet.';
+// Survives filter re-renders: the "N more not shown" notice must not disappear
+// just because the user switched to BUY-only.
+let tradingLogTruncatedCount = 0;
 let currentMode = "home";
 let currentPage = "home";
 let playgroundTab = "agents";
@@ -3995,10 +3998,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (tradingLogFilterSelect) {
         tradingLogFilterSelect.addEventListener('change', () => {
             tradingLogFilter = tradingLogFilterSelect.value || 'all';
-            renderTradingLog(tradingLogCache, {
+            paintTradingLog(tradingLogCache, {
                 emptyMessage: tradingLogCache.length
                     ? 'No orders match this filter.'
                     : tradingLogEmptyMessage,
+                truncatedCount: tradingLogTruncatedCount,
             });
         });
     }
@@ -5791,11 +5795,69 @@ function updateLiveBacktestChart(progress) {
     chartInstance.update('none');
 }
 
+function orderEventMatchKey(record) {
+    const side = String(record?.side || record?.action || '').toUpperCase();
+    return `${record?.timestamp ?? ''}|${record?.symbol ?? ''}|${side}`;
+}
+
+/**
+ * Reassemble the run's full order history from the two complementary lists.
+ *
+ * `trades` is every fill, uncapped, straight from the trades table.
+ * `order_events` carries only the orders that did NOT fill cleanly, because
+ * duplicating fills into the bounded metadata sample is what would make that
+ * sample lossy (see `engine._unfilled_order_events`). Preferring one list over
+ * the other — as this function first did — therefore hides real rows either
+ * way: take `order_events` alone and every fill disappears; take `trades`
+ * alone and every rejection does.
+ *
+ * A partial fill is the one order that appears in both: the trade row records
+ * what executed, the order event records the shortfall and its reason. The
+ * event is a strict superset, so it replaces its trade rather than adding a
+ * second row for the same order.
+ */
 function resolveTradingLogRecords(payload) {
-    const orderEvents = payload?.order_events;
-    if (Array.isArray(orderEvents) && orderEvents.length > 0) return orderEvents;
-    if (Array.isArray(payload?.trades)) return payload.trades;
-    return Array.isArray(orderEvents) ? orderEvents : [];
+    const trades = Array.isArray(payload?.trades) ? payload.trades : [];
+    const orderEvents = Array.isArray(payload?.order_events) ? payload.order_events : [];
+    if (orderEvents.length === 0) return trades;
+
+    const partialsByKey = new Map();
+    const standalone = [];
+    for (const event of orderEvents) {
+        // Executed nothing => no trade row exists to merge with.
+        if (Number(event?.executed_shares ?? 0) > 0) {
+            const key = orderEventMatchKey(event);
+            if (!partialsByKey.has(key)) partialsByKey.set(key, []);
+            partialsByKey.get(key).push(event);
+        } else {
+            standalone.push(event);
+        }
+    }
+
+    const merged = trades.map((trade) => {
+        const queue = partialsByKey.get(orderEventMatchKey(trade));
+        return queue && queue.length ? queue.shift() : trade;
+    });
+    // Any partial with no matching trade still belongs in the log — dropping it
+    // would be the same silent loss this merge exists to prevent.
+    for (const queue of partialsByKey.values()) merged.push(...queue);
+    merged.push(...standalone);
+
+    return merged.sort((a, b) => {
+        const left = Date.parse(a?.timestamp) || 0;
+        const right = Date.parse(b?.timestamp) || 0;
+        return left - right;
+    });
+}
+
+/** How many non-filled orders the server had to drop from its bounded sample. */
+function resolveTradingLogTruncation(payload) {
+    const returned = Array.isArray(payload?.order_events) ? payload.order_events.length : 0;
+    const explicit = Number(payload?.order_events_truncated);
+    if (Number.isFinite(explicit) && explicit > 0) return Math.trunc(explicit);
+    const total = Number(payload?.order_events_count ?? payload?.order_event_count);
+    if (Number.isFinite(total) && total > returned) return Math.trunc(total - returned);
+    return 0;
 }
 
 function resolveTradingAssetName(symbol) {
@@ -5810,6 +5872,7 @@ function formatOrderExecutionReason(reason, strategyReason = '') {
     const labels = {
         invalid_lot_size: 'Invalid lot size',
         insufficient_cash_for_lot: 'Insufficient cash for one lot',
+        insufficient_cash: 'Insufficient cash',
         t1_frozen: 'T+1 frozen',
         insufficient_position: 'Insufficient position',
     };
@@ -5854,6 +5917,7 @@ function normalizeOrderRecord(record) {
         status,
         reason: record?.reason || '',
         strategyReason: record?.strategy_reason || '',
+        repeatCount: Math.max(Math.trunc(Number(record?.repeat_count) || 1), 1),
         nativePrice: record?.native_price == null ? null : Number(record.native_price),
         nativeValue: record?.native_value == null ? null : Number(record.native_value),
         fxRate: record?.fx_rate == null ? null : Number(record.fx_rate),
@@ -5877,19 +5941,26 @@ function formatTradeTimestamp(ts) {
     }
 }
 
-function renderTradingLog(records, options) {
+/**
+ * Render already-normalized rows.
+ *
+ * Split out from `renderTradingLog` because the filter control re-renders from
+ * `tradingLogCache`, which holds normalized records. Feeding those back through
+ * `normalizeOrderRecord` would re-read wire-format keys (`requested_shares`,
+ * `native_price`, …) that a normalized record does not carry, silently zeroing
+ * every quantity and dropping the currency audit the moment a user filters.
+ */
+function paintTradingLog(normalizedRecords, options) {
     const tbody = document.getElementById('tradingLogBody');
     if (!tbody) return;
     options = options || {};
     const emptyMessage = options.emptyMessage || 'No orders yet.';
 
-    tradingLogCache = Array.isArray(records) ? records.map(normalizeOrderRecord) : [];
-    tradingLogEmptyMessage = emptyMessage;
-    let filtered = tradingLogCache;
+    let filtered = normalizedRecords;
     if (tradingLogFilter === 'buy') {
-        filtered = tradingLogCache.filter((trade) => trade.side === 'BUY');
+        filtered = normalizedRecords.filter((trade) => trade.side === 'BUY');
     } else if (tradingLogFilter === 'sell') {
-        filtered = tradingLogCache.filter((trade) => trade.side === 'SELL');
+        filtered = normalizedRecords.filter((trade) => trade.side === 'SELL');
     }
 
     if (filtered.length === 0) {
@@ -5917,6 +5988,12 @@ function renderTradingLog(records, options) {
         const assetName = resolveTradingAssetName(order.symbol);
         const quantity = `${order.executedShares.toLocaleString('en-US')} / ${order.requestedShares.toLocaleString('en-US')} shares`;
         const reason = formatOrderExecutionReason(order.reason, order.strategyReason);
+        // A rejection the agent re-issued on every bar of a day is stored once,
+        // with its tally. Showing the tally is the difference between "this
+        // blocked one order" and "this blocked the strategy all day".
+        const repeatNote = order.repeatCount > 1
+            ? `<div class="trading-log-native">×${order.repeatCount} that day</div>`
+            : '';
         return `<tr>
             <td>${escapeHtml(formatTradeTimestamp(order.timestamp))}</td>
             <td><span class="${actionClass}">${actionLabel}</span></td>
@@ -5925,19 +6002,44 @@ function renderTradingLog(records, options) {
             <td>$${order.price.toFixed(2)}${priceAudit}</td>
             <td>${order.executedShares > 0 ? `$${totalValue}${valueAudit}` : '--'}</td>
             <td><span class="order-status order-status-${order.status}" title="Order status: ${statusLabel}" aria-label="Order status: ${statusLabel}">${statusLabel}</span></td>
-            <td class="trading-log-reason">${escapeHtml(reason)}</td>
+            <td class="trading-log-reason">${escapeHtml(reason)}${repeatNote}</td>
         </tr>`;
     }).join('');
+
+    // Never let a capped list read like a complete one. The server bounds the
+    // non-filled sample, so when it drops records the table must say so rather
+    // than quietly ending early.
+    const truncated = Math.max(Math.trunc(Number(options.truncatedCount) || 0), 0);
+    if (truncated > 0) {
+        const note = `${truncated.toLocaleString('en-US')} more unfilled `
+            + `${truncated === 1 ? 'order is' : 'orders are'} not shown `
+            + '(audit sample capped).';
+        tbody.innerHTML += `<tr><td colspan="8" class="trading-log-empty">${escapeHtml(note)}</td></tr>`;
+    }
+}
+
+function renderTradingLog(records, options) {
+    options = options || {};
+    tradingLogCache = Array.isArray(records) ? records.map(normalizeOrderRecord) : [];
+    tradingLogEmptyMessage = options.emptyMessage || 'No orders yet.';
+    tradingLogTruncatedCount = Math.max(
+        Math.trunc(Number(options.truncatedCount) || 0), 0
+    );
+    paintTradingLog(tradingLogCache, {
+        emptyMessage: tradingLogEmptyMessage,
+        truncatedCount: tradingLogTruncatedCount,
+    });
 }
 
 function clearTradingLog(message = 'Waiting for orders…') {
-    tradingLogCache = [];
     renderTradingLog([], { emptyMessage: message });
 }
 
 function updateLiveTradingLog(progress) {
     if (!Array.isArray(progress?.order_events) && !Array.isArray(progress?.trades)) return;
-    renderTradingLog(resolveTradingLogRecords(progress));
+    renderTradingLog(resolveTradingLogRecords(progress), {
+        truncatedCount: resolveTradingLogTruncation(progress),
+    });
 }
 
 async function loadTradingLogForRun(runId) {
@@ -5949,6 +6051,7 @@ async function loadTradingLogForRun(runId) {
         const data = await API.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/trades?t=${Date.now()}`);
         renderTradingLog(resolveTradingLogRecords(data), {
             emptyMessage: 'No orders were submitted by the selected strategy.',
+            truncatedCount: resolveTradingLogTruncation(data),
         });
     } catch (error) {
         console.warn('Could not load orders:', error.message);

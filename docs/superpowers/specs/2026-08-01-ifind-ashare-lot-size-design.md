@@ -207,8 +207,25 @@ Existing semantics remain:
   and the equity curve;
 - `rejected_orders` stores detailed unfilled audit records compatible with
   PR #272; and
-- `order_events` becomes the Trading Log's canonical source, with exactly one
-  event per attempted order.
+- `order_events` records order outcomes, with exactly one event per attempted
+  order in memory.
+
+**Only the non-filled events are persisted or published.** The executor's
+in-memory ledger is complete, but `engine._unfilled_order_events` drops
+`status == "filled"` at the persistence boundary, because a fill is already a
+row in the uncapped `trades` table and copying it into the bounded
+`agent_runs.metadata` sample would (a) duplicate the run's largest table into
+one JSON cell on free-tier Postgres, carrying the `[LLM] <reasoning>` prose a
+second time, and (b) make the cap *lossy* — a busy run's fills would push its
+own rejections out of the persisted window, and the Trading Log would silently
+show the oldest 200 orders of a run that placed thousands.
+
+A repeated rejection is collapsed per `(symbol, side, reason, trading_date)`
+and carries `repeat_count`. An unaffordable signal re-fires on every bar for as
+long as the indicator holds; without collapsing, those duplicates fill the head
+sample end to end, so the audit is least informative exactly when the
+constraint bound hardest. This is the same bound `t1_deferrals` uses. Fills and
+partial fills never collapse — each moved the ledger.
 
 An order event contains at least:
 
@@ -236,9 +253,13 @@ also carry `native_price`, `native_value`, and `fx_rate`. A fully rejected
 order has zero executed value in both currencies.
 
 A partial SELL creates one real trade, one detailed unfilled audit, and one
-`partial` order event. The Trading Log consumes only `order_events`, so the
-attempt is not shown twice. The executor creates the event directly; the
-frontend does not infer order identity by matching timestamps and symbols.
+`partial` order event. The Trading Log **merges** `trades` with `order_events`
+rather than consuming either alone: preferring one wholesale hides real rows
+either way — take `order_events` alone and every fill disappears, take `trades`
+alone and every rejection does. The partial is the one order present in both,
+so its event (a strict superset of the trade row) replaces the trade rather
+than adding a second row, matched on `(timestamp, symbol, side)`. A rejection
+executed nothing and therefore has no trade row to collide with.
 
 Final results, run metadata, and live progress expose bounded order-event data.
 Old clients may ignore new fields. The existing trades endpoint retains
@@ -274,9 +295,16 @@ visible copy is English.
    auditable order outcomes.
 4. Historical runs without `order_events` fall back to existing `trades`; no
    database migration is required.
-5. Existing `lot_size=1` markets retain their current behavior and do not emit
-   A-share-specific rejection reasons.
-6. APIs, logs, fixtures, and pages must never expose iFinD, Alpaca, or LLM
+5. Existing `lot_size=1` markets retain their current *execution* behavior and
+   do not emit A-share-specific rejection reasons (`insufficient_cash_for_lot`
+   stays A-share-only; single-share markets use `insufficient_cash`). They do
+   now emit order events for unfilled orders: an "All Orders" log that silently
+   drops DJIA's unaffordable buys is the same fail-closed-but-invisible gap the
+   A-share path exists to close. `rejected_orders` remains A-share-only.
+6. When the persisted sample is capped, the Trading Log renders an explicit
+   "N more unfilled orders are not shown" row. A truncated log that reads as a
+   complete one is the failure mode; the cap itself is not.
+7. APIs, logs, fixtures, and pages must never expose iFinD, Alpaca, or LLM
    credentials.
 
 ## 11. Test Plan

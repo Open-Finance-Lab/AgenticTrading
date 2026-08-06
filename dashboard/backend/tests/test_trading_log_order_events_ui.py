@@ -58,35 +58,94 @@ def test_trading_log_markup_uses_order_language_and_eight_columns():
     assert 'colspan="8"' in html
 
 
-def test_order_events_take_priority_and_legacy_trades_fall_back_as_filled():
-    source = _APP_JS.read_text(encoding="utf-8")
-    result = _run_node([
+def _merge_harness(source: str):
+    return [
+        _extract_function(source, "orderEventMatchKey"),
         _extract_function(source, "resolveTradingLogRecords"),
+        _extract_function(source, "resolveTradingLogTruncation"),
         _extract_function(source, "normalizeOrderRecord"),
-        "const rejected = { symbol: '600519.SH', side: 'BUY',",
-        "  requested_shares: 100.5, executed_shares: 0, unfilled_shares: 100.5,",
-        "  price: 250, executed_value: 0, status: 'rejected', reason: 'invalid_lot_size' };",
-        "const trade = { symbol: 'AAPL', side: 'BUY', quantity: 2, price: 100, value: 200 };",
-        "const preferred = resolveTradingLogRecords({ order_events: [rejected], trades: [trade] });",
-        "const fallback = resolveTradingLogRecords({ trades: [trade] });",
-        "const emptyEventsFallback = resolveTradingLogRecords({ order_events: [], trades: [trade] });",
+    ]
+
+
+def test_rejections_are_added_to_the_complete_trade_list_not_substituted_for_it():
+    """The two server lists are complementary, so neither may shadow the other.
+
+    ``trades`` is every fill and is uncapped; ``order_events`` is only what did
+    not fill and is capped. Preferring one wholesale hides real rows either
+    way -- and preferring the capped one silently truncated the log.
+    """
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_merge_harness(source) + [
+        "const rejected = { timestamp: '2026-04-01T11:00:00Z', symbol: '600519.SH',",
+        "  side: 'BUY', requested_shares: 100.5, executed_shares: 0,",
+        "  unfilled_shares: 100.5, price: 250, executed_value: 0,",
+        "  status: 'rejected', reason: 'invalid_lot_size' };",
+        "const trade = { timestamp: '2026-04-01T10:00:00Z', symbol: 'AAPL',",
+        "  side: 'BUY', quantity: 2, price: 100, value: 200 };",
+        "const merged = resolveTradingLogRecords({ order_events: [rejected], trades: [trade] });",
+        "const tradesOnly = resolveTradingLogRecords({ trades: [trade] });",
+        "const emptyEvents = resolveTradingLogRecords({ order_events: [], trades: [trade] });",
         "console.log(JSON.stringify({",
-        "  preferred: normalizeOrderRecord(preferred[0]),",
-        "  fallback: normalizeOrderRecord(fallback[0]),",
-        "  emptyEventsFallback: normalizeOrderRecord(emptyEventsFallback[0]),",
+        "  merged: merged.map(normalizeOrderRecord),",
+        "  tradesOnly: tradesOnly.map(normalizeOrderRecord),",
+        "  emptyEvents: emptyEvents.map(normalizeOrderRecord),",
         "}));",
     ])
 
-    assert result["preferred"]["symbol"] == "600519.SH"
-    assert result["preferred"]["requestedShares"] == 100.5
-    assert result["preferred"]["executedShares"] == 0
-    assert result["preferred"]["value"] == 0
-    assert result["preferred"]["status"] == "rejected"
-    assert result["fallback"]["symbol"] == "AAPL"
-    assert result["fallback"]["requestedShares"] == 2
-    assert result["fallback"]["executedShares"] == 2
-    assert result["fallback"]["status"] == "filled"
-    assert result["emptyEventsFallback"] == result["fallback"]
+    merged = result["merged"]
+    assert len(merged) == 2, "the fill must survive alongside the rejection"
+    # Sorted by timestamp, so the 10:00 fill precedes the 11:00 rejection.
+    assert merged[0]["symbol"] == "AAPL"
+    assert merged[0]["status"] == "filled"
+    assert merged[0]["executedShares"] == 2
+    assert merged[1]["symbol"] == "600519.SH"
+    assert merged[1]["status"] == "rejected"
+    assert merged[1]["requestedShares"] == 100.5
+    assert merged[1]["executedShares"] == 0
+    assert merged[1]["value"] == 0
+    assert result["tradesOnly"] == [merged[0]]
+    assert result["emptyEvents"] == [merged[0]]
+
+
+def test_partial_fill_replaces_its_trade_row_instead_of_duplicating_it():
+    """A partial appears in both lists; the event is the superset, so it wins."""
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_merge_harness(source) + [
+        "const trade = { timestamp: '2026-04-01T10:00:00Z', symbol: '600519.SH',",
+        "  side: 'SELL', shares: 100, price: 20, proceeds: 2000 };",
+        "const partial = { timestamp: '2026-04-01T10:00:00Z', symbol: '600519.SH',",
+        "  side: 'SELL', requested_shares: 200, executed_shares: 100,",
+        "  unfilled_shares: 100, price: 20, executed_value: 2000,",
+        "  status: 'partial', reason: 't1_frozen' };",
+        "const merged = resolveTradingLogRecords({ order_events: [partial], trades: [trade] });",
+        "console.log(JSON.stringify(merged.map(normalizeOrderRecord)));",
+    ])
+
+    assert len(result) == 1, "one order must not render as two rows"
+    assert result[0]["status"] == "partial"
+    assert result[0]["requestedShares"] == 200
+    assert result[0]["executedShares"] == 100
+    assert result[0]["reason"] == "t1_frozen"
+
+
+def test_truncation_is_derived_from_either_signal():
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_merge_harness(source) + [
+        "const events = [{ status: 'rejected', executed_shares: 0 }];",
+        "console.log(JSON.stringify({",
+        "  explicit: resolveTradingLogTruncation({ order_events: events, order_events_truncated: 47 }),",
+        "  derivedLive: resolveTradingLogTruncation({ order_events: events, order_events_count: 12 }),",
+        "  derivedRun: resolveTradingLogTruncation({ order_events: events, order_event_count: 9 }),",
+        "  none: resolveTradingLogTruncation({ order_events: events, order_events_count: 1 }),",
+        "  legacy: resolveTradingLogTruncation({ trades: [] }),",
+        "}));",
+    ])
+
+    assert result["explicit"] == 47
+    assert result["derivedLive"] == 11
+    assert result["derivedRun"] == 8
+    assert result["none"] == 0
+    assert result["legacy"] == 0
 
 
 def _render_harness(source: str):
@@ -100,11 +159,13 @@ def _render_harness(source: str):
         "let tradingLogCache = [];",
         "let tradingLogFilter = 'all';",
         "let tradingLogEmptyMessage = 'No orders yet.';",
+        "let tradingLogTruncatedCount = 0;",
         _extract_function(source, "escapeHtml"),
         _extract_function(source, "resolveTradingAssetName"),
         _extract_function(source, "formatOrderExecutionReason"),
         _extract_function(source, "normalizeOrderRecord"),
         _extract_function(source, "formatTradeTimestamp"),
+        _extract_function(source, "paintTradingLog"),
         _extract_function(source, "renderTradingLog"),
     ]
 
@@ -154,3 +215,65 @@ def test_rendered_partial_uses_actual_value_and_side_filter():
     assert "$2,000.00" in result
     assert "T+1 frozen" in result
     assert "Apple Inc." not in result
+
+
+def test_capped_sample_says_so_instead_of_ending_early():
+    """A truncated log that looks complete is the failure mode, not the cap."""
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_render_harness(source) + [
+        "renderTradingLog([{ timestamp: '2026-04-01T10:00:00Z', symbol: 'AAPL',",
+        "  side: 'BUY', requested_shares: 5, executed_shares: 0, price: 10,",
+        "  executed_value: 0, status: 'rejected', reason: 'insufficient_cash' }],",
+        "  { truncatedCount: 312 });",
+        "const shown = tbody.innerHTML;",
+        "renderTradingLog([{ timestamp: '2026-04-01T10:00:00Z', symbol: 'AAPL',",
+        "  side: 'BUY', requested_shares: 5, executed_shares: 5, price: 10,",
+        "  executed_value: 50, status: 'filled', reason: '' }]);",
+        "console.log(JSON.stringify({ shown, complete: tbody.innerHTML }));",
+    ])
+
+    assert "312 more unfilled orders are not shown" in result["shown"]
+    assert "Insufficient cash" in result["shown"]
+    # No cap applied => no notice at all, so the row count is the whole story.
+    assert "not shown" not in result["complete"]
+
+
+def test_filtering_preserves_quantities_and_the_truncation_notice():
+    """Re-rendering must not push normalized rows back through the normalizer.
+
+    ``tradingLogCache`` holds normalized records (``requestedShares``), not wire
+    records (``requested_shares``). Feeding it to the normalizer a second time
+    reads keys that are not there and zeroes every quantity -- so the log would
+    silently blank out the moment a user touched the filter.
+    """
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_render_harness(source) + [
+        "renderTradingLog([{ timestamp: '2026-04-01T10:00:00Z', symbol: 'AAPL',",
+        "  side: 'BUY', requested_shares: 200, executed_shares: 150, price: 10,",
+        "  executed_value: 1500, status: 'partial', reason: 'insufficient_cash' }],",
+        "  { truncatedCount: 4 });",
+        "tradingLogFilter = 'buy';",
+        "paintTradingLog(tradingLogCache, {",
+        "  emptyMessage: tradingLogEmptyMessage,",
+        "  truncatedCount: tradingLogTruncatedCount,",
+        "});",
+        "console.log(JSON.stringify(tbody.innerHTML));",
+    ])
+
+    assert "150 / 200 shares" in result
+    assert "$1,500.00" in result
+    assert "4 more unfilled orders are not shown" in result
+
+
+def test_repeated_rejection_reports_how_many_times_it_fired():
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_render_harness(source) + [
+        "renderTradingLog([{ timestamp: '2026-04-01T10:00:00Z', symbol: '600519.SH',",
+        "  side: 'BUY', requested_shares: 100, executed_shares: 0, price: 250,",
+        "  executed_value: 0, status: 'rejected',",
+        "  reason: 'insufficient_cash_for_lot', repeat_count: 47 }]);",
+        "console.log(JSON.stringify(tbody.innerHTML));",
+    ])
+
+    assert "Insufficient cash for one lot" in result
+    assert "×47 that day" in result

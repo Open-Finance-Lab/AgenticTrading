@@ -89,6 +89,11 @@ class PortfolioManager:
         self.entry_prices = {}  # {symbol: entry_price}
         self.trades = []
         self.order_events = []
+        # {(symbol, side, reason, trading_date): record} — the same
+        # bounded-by-construction shape as t1_deferrals below, pointing at the
+        # order_events entry to bump instead of re-appending. Owned here, not
+        # by the executor, because it must survive across per-step calls.
+        self._order_event_repeats = {}
         self.t_plus_one_enabled = t_plus_one_enabled
         self.lot_size = lot_size
         self.available_positions = {}
@@ -621,11 +626,23 @@ class PortfolioManager:
                         risk_amount = base_risk * confidence
                         if price > 0:
                             calculated = risk_amount / price
-                            shares = (
-                                calculated
-                                if self.lot_size > 1
-                                else int(calculated)
-                            )
+                            if self.lot_size > 1:
+                                # This size is ours, not the model's: rounding
+                                # it down to a whole lot is not the silent
+                                # correction the executor refuses to make. A
+                                # raw risk budget is essentially never a lot
+                                # multiple, so submitting it unrounded would
+                                # mint a guaranteed `invalid_lot_size`
+                                # rejection on every fallback -- punishing the
+                                # agent for the harness's own arithmetic. A
+                                # quantity the LLM *did* request still passes
+                                # through untouched above, so a genuinely
+                                # invalid request stays visible as a rejection.
+                                shares = (
+                                    int(calculated) // self.lot_size
+                                ) * self.lot_size
+                            else:
+                                shares = int(calculated)
                         else:
                             shares = 0
 
@@ -752,6 +769,7 @@ class PortfolioManager:
             rejected_orders=self.rejected_orders,
             lot_size=self.lot_size,
             order_events=self.order_events,
+            order_event_repeats=self._order_event_repeats,
         )
     
     def update_equity(self, market_data: Dict, price_cache: Dict = None, timestamp = None):

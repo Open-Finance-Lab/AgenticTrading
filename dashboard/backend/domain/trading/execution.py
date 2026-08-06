@@ -37,16 +37,23 @@ neither can reach a run with ``t_plus_one_enabled=False``:
   ``-5`` evaluates ``min(-5, 100) == -5``, which *adds* 5 shares to the position
   and *subtracts* the "proceeds" from cash. That is a latent bug, kept only
   because the legacy path is frozen;
-* a sell of a symbol that is not held emits an ``insufficient_position`` audit
-  record, where the legacy branch skips silently. The audit trail is the point
-  of the T+1 path, so "the agent asked for something impossible" is recorded
-  rather than dropped.
+* a sell of a symbol that is not held emits an ``insufficient_position``
+  ``rejected_orders`` record, where the legacy branch does not. That list is
+  the T+1 audit trail and stays A-share-only.
+
+``order_events`` is the exception to "legacy behaviour is byte-identical": it
+is populated for *every* market, including unfilled orders on the legacy
+branches. Nothing about execution changes -- cash, positions, and ``trades``
+are untouched -- but an order that could not fill now leaves a trace instead of
+vanishing, because the UI built on this list claims to show all orders and a
+DJIA run that silently drops its unaffordable buys makes that claim false.
 
 This module is domain-only: it must not import FastAPI, Anthropic, Alpaca
 clients, the database singleton, API routers, or scripts.
 """
 
 import math
+import numbers
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 
@@ -121,8 +128,17 @@ def _append_rejection(
 
 
 def _is_valid_lot_quantity(shares: Any, lot_size: int) -> bool:
-    """Return whether an A-share quantity is a positive whole lot."""
-    if isinstance(shares, bool):
+    """Return whether an A-share quantity is a positive whole lot.
+
+    Rejects non-numeric types outright rather than coercing them. ``float()``
+    would happily accept the string ``"100"``, which passes every lot check and
+    then raises ``TypeError`` downstream at ``shares * price`` -- so a guard
+    that coerced would *look* like validation while letting the one input it
+    should have caught reach the arithmetic.
+    """
+    # ``numbers.Real`` rather than ``(int, float)``: numpy registers its scalar
+    # types with the numeric ABCs, and ``np.int64`` is not an ``int`` subclass.
+    if isinstance(shares, bool) or not isinstance(shares, numbers.Real):
         return False
     try:
         numeric_shares = float(shares)
@@ -134,6 +150,22 @@ def _is_valid_lot_quantity(shares: Any, lot_size: int) -> bool:
         and numeric_shares.is_integer()
         and int(numeric_shares) % lot_size == 0
     )
+
+
+def _repeat_key(
+    *, timestamp: Any, symbol: str, side: str, reason: str
+) -> Optional[tuple]:
+    """Identity of a rejection that repeating bars would re-emit verbatim.
+
+    ``None`` when no market date can be read off the timestamp, in which case
+    the caller must record the event rather than risk collapsing two genuinely
+    distinct rejections into one.
+    """
+    try:
+        trading_date = _trading_date(timestamp)
+    except TypeError:
+        return None
+    return (symbol, side, reason, trading_date)
 
 
 def _append_order_event(
@@ -148,12 +180,37 @@ def _append_order_event(
     status: str,
     reason: str,
     strategy_reason: str,
+    repeat_index: Optional[Dict] = None,
 ) -> None:
     if order_events is None:
         return
     unfilled_shares = requested_shares - executed_shares
     if abs(unfilled_shares) <= _SHARE_EPSILON:
         unfilled_shares = 0
+
+    # A signal the agent cannot act on does not go away: an unaffordable BUY
+    # re-fires on every bar for as long as the indicator holds, and each bar
+    # would otherwise mint an identical rejection. Left unchecked those
+    # duplicates fill the persisted head sample end to end, so the audit is
+    # least informative exactly when the constraint bound hardest -- the same
+    # failure `t1_deferrals` was added to avoid, and it is deduped the same
+    # way, per symbol-trading-day.
+    #
+    # Only *pure* rejections collapse. A fill or partial fill moved the ledger,
+    # so it is a distinct event however much it looks like the last one.
+    repeat_key = None
+    if repeat_index is not None and executed_shares == 0:
+        repeat_key = _repeat_key(
+            timestamp=timestamp, symbol=symbol, side=side, reason=reason
+        )
+    if repeat_key is not None:
+        existing = repeat_index.get(repeat_key)
+        if existing is not None:
+            # Carry the scale rather than dropping it: "this happened 47 times
+            # today" is the part a reader of a collapsed record needs.
+            existing["repeat_count"] = existing.get("repeat_count", 1) + 1
+            return
+
     order_events.append({
         "timestamp": timestamp,
         "symbol": symbol,
@@ -167,6 +224,8 @@ def _append_order_event(
         "reason": reason,
         "strategy_reason": strategy_reason,
     })
+    if repeat_key is not None:
+        repeat_index[repeat_key] = order_events[-1]
 
 
 def execute_actions(
@@ -184,6 +243,7 @@ def execute_actions(
     rejected_orders: Optional[List[Dict]] = None,
     lot_size: int = 1,
     order_events: Optional[List[Dict]] = None,
+    order_event_repeats: Optional[Dict] = None,
 ) -> float:
     """Apply ``actions`` to the given portfolio state in place.
 
@@ -191,7 +251,17 @@ def execute_actions(
     is a scalar and the (possibly updated) value is returned; callers must
     reassign it. The return value is the new cash balance, matching the original
     method's mutation of ``self.cash``.
+
+    ``order_event_repeats`` is the caller-owned index that lets a repeating
+    rejection collapse across calls (see ``_append_order_event``). Omitting it
+    keeps every event, which is what a single-call unit test wants; the
+    ``PortfolioManager`` owns one for the lifetime of a run.
     """
+    def _record_order_event(**fields) -> None:
+        _append_order_event(
+            order_events, repeat_index=order_event_repeats, **fields
+        )
+
     current_date = None
     if t_plus_one_enabled:
         if (
@@ -237,8 +307,7 @@ def execute_actions(
                     unfilled_shares=shares,
                     reason="invalid_lot_size",
                 )
-            _append_order_event(
-                order_events,
+            _record_order_event(
                 timestamp=timestamp,
                 symbol=symbol,
                 side=action_type.upper(),
@@ -271,8 +340,7 @@ def execute_actions(
                     "cost": cost,
                     "reason": reason
                 })
-                _append_order_event(
-                    order_events,
+                _record_order_event(
                     timestamp=timestamp,
                     symbol=symbol,
                     side="BUY",
@@ -283,20 +351,27 @@ def execute_actions(
                     reason="",
                     strategy_reason=reason,
                 )
-            elif lot_size > 1:
-                if rejected_orders is not None:
-                    _append_rejection(
-                        rejected_orders,
-                        timestamp=timestamp,
-                        symbol=symbol,
-                        action="buy",
-                        requested_shares=shares,
-                        executed_shares=0,
-                        unfilled_shares=shares,
-                        reason="insufficient_cash_for_lot",
-                    )
-                _append_order_event(
-                    order_events,
+            elif shares > 0:
+                # The order-event ledger records this for every market, not
+                # just A-shares: a buy the portfolio could not afford is an
+                # outcome the "All Orders" log promises to show, and dropping
+                # it silently on DJIA is the same fail-closed-but-invisible
+                # gap the A-share path was built to close. `rejected_orders`
+                # stays A-share-only -- it is the T+1 audit trail, and the
+                # legacy single-share branch's semantics are frozen.
+                if lot_size > 1:
+                    if rejected_orders is not None:
+                        _append_rejection(
+                            rejected_orders,
+                            timestamp=timestamp,
+                            symbol=symbol,
+                            action="buy",
+                            requested_shares=shares,
+                            executed_shares=0,
+                            unfilled_shares=shares,
+                            reason="insufficient_cash_for_lot",
+                        )
+                _record_order_event(
                     timestamp=timestamp,
                     symbol=symbol,
                     side="BUY",
@@ -304,7 +379,11 @@ def execute_actions(
                     executed_shares=0,
                     price=price,
                     status="rejected",
-                    reason="insufficient_cash_for_lot",
+                    reason=(
+                        "insufficient_cash_for_lot"
+                        if lot_size > 1
+                        else "insufficient_cash"
+                    ),
                     strategy_reason=reason,
                 )
 
@@ -340,8 +419,7 @@ def execute_actions(
 
             unfilled_shares = shares - sell_shares
             if unfilled_shares <= _SHARE_EPSILON:
-                _append_order_event(
-                    order_events,
+                _record_order_event(
                     timestamp=timestamp,
                     symbol=symbol,
                     side="SELL",
@@ -383,8 +461,7 @@ def execute_actions(
                 if t1_unfilled > _SHARE_EPSILON
                 else "insufficient_position"
             )
-            _append_order_event(
-                order_events,
+            _record_order_event(
                 timestamp=timestamp,
                 symbol=symbol,
                 side="SELL",
@@ -416,8 +493,7 @@ def execute_actions(
                     "reason": reason
                 })
                 unfilled_shares = shares - sell_shares
-                _append_order_event(
-                    order_events,
+                _record_order_event(
                     timestamp=timestamp,
                     symbol=symbol,
                     side="SELL",
@@ -436,8 +512,12 @@ def execute_actions(
                     ),
                     strategy_reason=reason,
                 )
-            elif lot_size > 1:
-                if rejected_orders is not None:
+            elif shares > 0:
+                # Recorded for every market, for the reason given on the BUY
+                # branch above. Execution behaviour is unchanged: the legacy
+                # branch still skips silently, it just no longer skips
+                # *invisibly*.
+                if lot_size > 1 and rejected_orders is not None:
                     _append_rejection(
                         rejected_orders,
                         timestamp=timestamp,
@@ -448,8 +528,7 @@ def execute_actions(
                         unfilled_shares=shares,
                         reason="insufficient_position",
                     )
-                _append_order_event(
-                    order_events,
+                _record_order_event(
                     timestamp=timestamp,
                     symbol=symbol,
                     side="SELL",

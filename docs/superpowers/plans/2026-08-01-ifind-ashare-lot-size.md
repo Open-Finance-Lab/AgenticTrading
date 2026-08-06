@@ -83,7 +83,12 @@ Steps:
    Alpaca and vn.py.
 2. Assert `HourlyBacktester` injects the profile lot size into
    `PortfolioManager`.
-3. Assert `_llm_market_context()` exposes structured `lot_size` provenance.
+3. Assert `_llm_market_context()` exposes structured `lot_size` provenance
+   **only when `lot_size > 1`**, and assert a DJIA/Alpaca context carries
+   neither `lot_size` nor `lot_size_note`. This dict is serialized straight
+   into the LLM prompt, so an unconditional key changes every single-share
+   market's prompt and makes new runs non-comparable with the historical ones
+   already on the leaderboard — the same reason `settlement` is conditional.
 4. Assert legacy `PortfolioManager()` construction defaults to `lot_size=1`.
 5. Add `lot_size: int = 1` at the end of `MarketProfile` and set 100 only on
    the two iFinD profiles.
@@ -136,8 +141,15 @@ Steps:
 5. Preserve an A-share LLM quantity such as 100.5 until executor validation;
    do not coerce it with `int()`.
 6. Let a valid but unaffordable A-share LLM request reach the executor.
-7. Do not round a calculated missing `position_size` to a lot in the Agent
-   layer.
+7. **Do** floor a *calculated* missing `position_size` to a whole lot in the
+   Agent layer, while still passing a quantity the model actually requested
+   through untouched (step 5). The distinction is whose number it is: rounding
+   the model's request would be the silent correction the executor refuses to
+   make, but the fallback size is the harness's own risk-budget arithmetic, and
+   a raw risk budget is essentially never a 100-multiple — submitting it raw
+   mints a guaranteed `invalid_lot_size` rejection on every fallback and
+   punishes the agent for our arithmetic. Below one lot the correct outcome is
+   no order at all.
 8. Preserve symbol allow-lists, action limits, confidence thresholds, and the
    existing maximum-share safety cap.
 
@@ -239,7 +251,11 @@ Steps:
 4. Add engine serialization for JSON-safe timestamps and numeric values.
 5. Publish bounded `trades`, `rejected_orders`, and `order_events` in live
    progress.
-6. Persist `lot_size`, event counts, and a bounded event sample in run metadata.
+6. Persist `lot_size`, event counts, and a bounded sample of the **non-filled**
+   events in run metadata (`engine._unfilled_order_events`). Fills are already
+   uncapped rows in `trades`; copying them here duplicates the run's largest
+   table into one JSON cell and lets a busy run's fills evict its own
+   rejections from the sample.
 7. Keep `num_trades == len(manager.trades)`.
 8. Add separate order-event fields to the trades endpoint without changing
    the existing `count == len(trades)` contract.
@@ -284,9 +300,21 @@ Steps:
 2. Keep eight columns: Time, Action, Company / Asset, Quantity, Price, Total
    Value, Status, and Reason.
 3. Rename `All Trades` to `All Orders`; retain BUY and SELL filters.
-4. Prefer nonempty `order_events`; fall back to `trades` for historical runs,
-   including responses that contain an empty event array.
+4. **Merge** `trades` with `order_events` rather than preferring either:
+   `trades` is every fill and uncapped, `order_events` is only what did not
+   fill and is capped, so preferring one wholesale hides real rows either way.
+   Match a `partial` event to its trade on `(timestamp, symbol, side)` and let
+   the event replace it — one order must not render as two rows. Historical
+   runs carry no events and fall through to `trades` unchanged.
 5. Derive `FILLED` for legacy trades.
+5b. Render an explicit "N more unfilled orders are not shown" row whenever the
+   server reports truncation, and keep that notice across filter changes.
+5c. Re-render from the normalized cache via `paintTradingLog`, never by feeding
+   normalized records back through `normalizeOrderRecord` — the normalized
+   shape uses `requestedShares`, not the wire's `requested_shares`, so a second
+   pass zeroes every quantity.
+5d. Show `repeat_count` when a rejection was collapsed, so a reader can tell
+   "blocked one order" from "blocked the strategy all day".
 6. Display Quantity as `executed / requested shares`.
 7. Display `--` for a fully rejected executed value and the actual value for a
    partial fill.

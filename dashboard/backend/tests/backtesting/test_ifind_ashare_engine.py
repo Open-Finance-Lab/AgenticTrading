@@ -18,6 +18,7 @@ from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 from dashboard.backend.domain.backtesting.currency import CurrencyContext
 from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
 from dashboard.backend.infrastructure.market_data.profiles import (
+    ALPACA,
     A_SHARE_DEMO_6,
     A_SHARE_DEMO_6_SYMBOLS,
     CSI300_SAMPLE_20_2026H2,
@@ -25,6 +26,7 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     IFIND_ASHARE,
     LLM_DECISION_SOURCE,
     RULE_BASED_DECISION_SOURCE,
+    get_market_profile,
 )
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
@@ -164,23 +166,31 @@ def test_live_progress_keeps_bounded_order_event_tail(tmp_path):
     backtester.progress_file = str(tmp_path / "progress.json")
     backtester.live_run_id = "agent_order_events"
     backtester.currency_context = CurrencyContext.identity("USD", "US/Eastern")
-    manager = SimpleNamespace(
-        get_equity_curve=lambda: [],
-        trades=[],
-        rejected_orders=[],
-        order_events=[{
+    def _event(seq, status):
+        return {
             "timestamp": datetime(2026, 4, 1, 10),
             "symbol": "AAPL",
             "side": "BUY",
             "requested_shares": 1,
-            "executed_shares": 1,
-            "unfilled_shares": 0,
+            "executed_shares": 1 if status == "filled" else 0,
+            "unfilled_shares": 0 if status == "filled" else 1,
             "price": 100,
-            "executed_value": 100,
-            "status": "filled",
-            "reason": "",
+            "executed_value": 100 if status == "filled" else 0,
+            "status": status,
+            "reason": "" if status == "filled" else "insufficient_cash",
             "strategy_reason": str(seq),
-        } for seq in range(60)],
+        }
+
+    manager = SimpleNamespace(
+        get_equity_curve=lambda: [],
+        trades=[],
+        rejected_orders=[],
+        # Fills are interleaved to prove they are dropped by content, not by
+        # position: the live payload's own `trades` list already carries them.
+        order_events=(
+            [_event(seq, "rejected") for seq in range(60)]
+            + [_event(900 + seq, "filled") for seq in range(25)]
+        ),
     )
 
     backtester._publish_live_progress(3, 10, manager)
@@ -189,6 +199,9 @@ def test_live_progress_keeps_bounded_order_event_tail(tmp_path):
     assert payload["order_events_count"] == 60
     assert len(payload["order_events"]) == 50
     assert payload["order_events"][0]["strategy_reason"] == "10"
+    assert all(
+        event["status"] != "filled" for event in payload["order_events"]
+    )
 
 
 @pytest.mark.parametrize(
@@ -270,11 +283,14 @@ def test_ifind_rule_and_llm_paths_share_t1_execution(
         "rejected",
     ]
     assert recording_db.runs[0]["num_trades"] == 1
-    assert recording_db.runs[0]["metadata"]["order_events_count"] == 2
+    # The in-memory ledger above holds both outcomes; only the non-filled one
+    # is persisted, because the filled one is already a row in `trades` and
+    # copying it here is what would push real rejections out of the sample.
+    assert recording_db.runs[0]["metadata"]["order_events_count"] == 1
     assert [
         event["status"]
         for event in recording_db.runs[0]["metadata"]["order_events"]
-    ] == ["filled", "rejected"]
+    ] == ["rejected"]
     assert recording_db.runs[0]["metadata"]["rejected_orders"][0][
         "reason"
     ] == "t1_frozen"
@@ -333,9 +349,9 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "t_plus_one_enabled": True,
         "symbols": list(A_SHARE_DEMO_6_SYMBOLS),
         "native_currency": "CNY",
-            "reporting_currency": "USD",
-            "lot_size": 100,
-            "fx_pair": "USD/CNY",
+        "reporting_currency": "USD",
+        "lot_size": 100,
+        "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",
         "fx_symbols": list(A_SHARE_DEMO_6_SYMBOLS),
@@ -398,9 +414,9 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "t_plus_one_enabled": True,
         "symbols": list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
         "native_currency": "CNY",
-            "reporting_currency": "USD",
-            "lot_size": 100,
-            "fx_pair": "USD/CNY",
+        "reporting_currency": "USD",
+        "lot_size": 100,
+        "fx_pair": "USD/CNY",
         "fx_source": "ifind_history_currency_conversion",
         "fx_policy": "daily_implied_median_forward_fill",
         "fx_symbols": list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
@@ -494,6 +510,14 @@ def test_ifind_registered_universe_runs_explicit_llm_with_strict_market_context(
             "native_currency": "CNY",
             "reporting_currency": "USD",
             "lot_size": 100,
+            # Same reasoning as settlement_note below: a bare `100` does not
+            # tell the model that an off-lot size is rejected outright rather
+            # than rounded down.
+            "lot_size_note": (
+                "Order quantities must be positive whole multiples of 100 "
+                "shares; any other size is rejected in full rather than "
+                "rounded."
+            ),
             # A_share profiles settle T+1, and the model is told so in words —
             # a bare sellable_shares integer in each holding is not
             # self-describing.
@@ -837,9 +861,48 @@ def test_agent_metadata_skips_rejected_orders_for_non_ashare_sources(monkeypatch
     assert "rejected_orders_count" not in meta
 
 
+def test_djia_market_context_carries_no_lot_size_key(monkeypatch):
+    """A single-share market's prompt must be byte-identical to before.
+
+    `_llm_market_context` is serialized straight into the LLM prompt, so any
+    unconditional key changes every DJIA prompt and makes new runs
+    non-comparable with the historical ones already on the leaderboard. The
+    A-share side asserts the key IS present; this is the other half.
+    """
+    backtester = object.__new__(HourlyBacktester)
+    backtester.profile = get_market_profile(ALPACA)
+    backtester.symbols = ("AAPL", "MSFT")
+    backtester.currency_context = CurrencyContext.identity("USD", "US/Eastern")
+
+    context = backtester._llm_market_context()
+
+    assert backtester.profile.lot_size == 1
+    assert "lot_size" not in context
+    assert "lot_size_note" not in context
+    # The keys that must still be there, so this cannot pass by returning {}.
+    assert context["market"] == "US"
+    assert context["paper_backtest"] is True
+
+
+def test_fills_are_not_persisted_because_trades_already_holds_them(monkeypatch):
+    """Copying fills into the capped sample is what made the cap lossy."""
+    events = [
+        {"status": "filled", "seq": 0},
+        {"status": "rejected", "seq": 1},
+        {"status": "partial", "seq": 2},
+        {"status": "filled", "seq": 3},
+    ]
+
+    kept = engine_module._unfilled_order_events(events)
+
+    assert [event["seq"] for event in kept] == [1, 2]
+    assert engine_module._unfilled_order_events([]) == []
+    assert engine_module._unfilled_order_events(None) == []
+
+
 def test_agent_metadata_caps_order_events_for_every_market(monkeypatch):
     limit = engine_module.REJECTED_ORDER_SAMPLE_LIMIT
-    records = [{"status": "filled", "seq": i} for i in range(limit + 25)]
+    records = [{"status": "rejected", "seq": i} for i in range(limit + 25)]
 
     meta = _metadata_stub(
         [],

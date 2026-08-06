@@ -193,6 +193,59 @@ def test_make_trading_decision_with_llm_buy_and_tokens():
     assert pm.llm_calls == 1
 
 
+def test_llm_omitting_position_size_yields_a_whole_lot_on_ashares():
+    """The harness must not size an order the executor is certain to reject.
+
+    With no `position_size` the manager derives one from the risk budget. That
+    number is essentially never a 100-multiple, so submitting it raw minted a
+    guaranteed `invalid_lot_size` rejection on every fallback -- punishing the
+    agent for our own arithmetic. 2% of $100k at $100 is 20 shares, which is
+    below one lot, so the correct outcome is no order at all.
+    """
+    pm = CanonicalPortfolioManager(100000, lot_size=100)
+    resp_text = json.dumps({"actions": [
+        {"symbol": "AAPL", "action": "buy", "confidence": 1.0,
+         "reasoning": "x"},
+    ]})
+    client = _FakeClient(_FakeResp(resp_text, _FakeUsage(1, 1)))
+
+    out = pm.make_trading_decision_with_llm(_llm_state(), client)
+
+    assert out["actions"] == []
+
+
+def test_llm_fallback_size_is_floored_to_whole_lots_not_truncated_to_shares():
+    state = _llm_state()
+    state["cash"] = 10_000_000
+    state["total_equity"] = 10_000_000
+    pm = CanonicalPortfolioManager(10_000_000, lot_size=100)
+    resp_text = json.dumps({"actions": [
+        {"symbol": "AAPL", "action": "buy", "confidence": 1.0,
+         "reasoning": "x"},
+    ]})
+    client = _FakeClient(_FakeResp(resp_text, _FakeUsage(1, 1)))
+
+    out = pm.make_trading_decision_with_llm(state, client)
+
+    # 2% of $10M at $100 = 2000 shares, already a whole lot.
+    assert [action["shares"] for action in out["actions"]] == [2000]
+    assert out["actions"][0]["shares"] % 100 == 0
+
+
+def test_llm_requested_size_is_still_passed_through_unrounded():
+    """Only *our* derived size is rounded; a bad request stays visible."""
+    pm = CanonicalPortfolioManager(100000, lot_size=100)
+    resp_text = json.dumps({"actions": [
+        {"symbol": "AAPL", "action": "buy", "confidence": 0.9,
+         "reasoning": "x", "position_size": 150},
+    ]})
+    client = _FakeClient(_FakeResp(resp_text, _FakeUsage(1, 1)))
+
+    out = pm.make_trading_decision_with_llm(_llm_state(), client)
+
+    assert [action["shares"] for action in out["actions"]] == [150]
+
+
 def test_strict_llm_rejects_missing_client_without_rule_fallback(monkeypatch):
     pm = CanonicalPortfolioManager(100000)
     fallback_calls = []
