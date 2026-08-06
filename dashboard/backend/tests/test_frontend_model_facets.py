@@ -328,3 +328,78 @@ console.log(JSON.stringify(container.querySelectorAll().map((b) => b.dataset.mar
     # MODEL_VENDORS (anthropic, deepseek, qwen), not the catalog's insertion
     # order (qwen, anthropic, deepseek).
     assert keys == ["all", "anthropic", "deepseek", "qwen"]
+
+
+def test_only_open_weight_models_get_a_badge():
+    """Closed models get NOTHING. A "Closed" label reads as a warning about
+    someone else's product; absence is not a negative claim."""
+    grid = fn_body("function renderMarketplaceGrid")
+    assert "modelVendorLicence" in grid
+    assert "Open-source model" in grid
+    assert "Closed-source" not in APP_JS
+    assert "Proprietary" not in APP_JS
+
+
+def test_licence_badge_has_a_style_rule():
+    from dashboard.backend.tests._frontend_source import css_blocks
+
+    assert css_blocks(".marketplace-licence-badge"), "badge has no styles.css rule"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_shipped_grid_badges_only_open_weight_cards():
+    """Lifts the REAL renderMarketplaceGrid (not a reimplementation) against a
+    synthetic catalog with one open-weight, one closed-weight and one
+    unknown-vendor template. The two tests above only substring-check
+    renderMarketplaceGrid's source text, so a polarity bug (badging closed
+    models instead of open ones) or a "computed but never rendered" bug
+    (licenceBadge assigned but not interpolated into the tag row) would both
+    pass them silently. This test executes the shipped card template and
+    checks the actual HTML each template produces."""
+    script = f"""
+{fn_body("function escapeHtml")}
+{fn_body("function agentRobotIcon")}
+const MARKET_LABELS = {{ us_stocks: 'U.S.', cn_ashares: 'China A-Share' }};
+{js_const("MODEL_VENDORS")}
+{fn_body("function modelVendorKey")}
+{fn_body("function modelVendorLicence")}
+{fn_body("function formatModelProviderLabel")}
+
+// Collaborators renderMarketplaceGrid calls that render other UI regions --
+// stubbed as no-ops so this test stays scoped to the card template.
+function renderMarketplaceCategoryChips() {{}}
+function renderMarketplaceVendorChips() {{}}
+
+function getFilteredMarketplaceTemplates() {{
+  return [
+    {{ template_id: 'open1', category: 'us_stocks', name: 'Open Template',
+       model_name: 'deepseek/deepseek-v4-pro', tags: [], author: 'Community' }},
+    {{ template_id: 'closed1', category: 'us_stocks', name: 'Closed Template',
+       model_name: 'anthropic/claude-haiku-4-5', tags: [], author: 'Community' }},
+    {{ template_id: 'unknown1', category: 'us_stocks', name: 'Unknown Template',
+       model_name: 'totally/unknown', tags: [], author: 'Community' }},
+  ];
+}}
+
+const cardHtml = [];
+const grid = {{
+  innerHTML: '',
+  appendChild(card) {{ cardHtml.push(card.innerHTML); }},
+  querySelectorAll() {{ return []; }},
+}};
+const document = {{
+  getElementById(id) {{ return id === 'marketplaceGrid' ? grid : null; }},
+  createElement() {{ return {{ className: '', innerHTML: '' }}; }},
+}};
+
+{fn_body("function renderMarketplaceGrid")}
+renderMarketplaceGrid();
+
+console.log(JSON.stringify(cardHtml.map((html) => html.includes('marketplace-licence-badge'))));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    # In catalog order: open-weight DeepSeek, closed-weight Claude, unknown vendor.
+    assert json.loads(result.stdout) == [True, False, False]

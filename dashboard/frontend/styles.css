@@ -9637,6 +9637,20 @@ body.agent-editor-open {
     margin-top: -8px;
 }
 
+/* Open-weight marker. Sits in the tag row so it wraps with the tags rather
+   than competing with the mode chip for the card's top-right corner. */
+.marketplace-licence-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--success-color);
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
 .marketplace-category-chip {
     display: inline-flex;
     align-items: center;

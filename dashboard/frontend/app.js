@@ -2191,6 +2191,11 @@ function renderMarketplaceGrid() {
     const cloneLabel = 'Add to My Agents';
     const categoryLabel = MARKET_LABELS[String(template.category || '').toLowerCase()] || 'General';
     const modelLabel = formatModelProviderLabel(template.model_name);
+    // Open weights get a badge; closed models get nothing. Licence comes from
+    // MODEL_VENDORS so it cannot drift from the vendor it describes.
+    const licenceBadge = modelVendorLicence(template.model_name) === 'open'
+      ? '<span class="marketplace-licence-badge">Open-source model</span>'
+      : '';
     const tags = (template.tags || [])
       .slice(0, 3)
       .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
@@ -2227,7 +2232,7 @@ function renderMarketplaceGrid() {
           ${authorMeta}
           ${template.step_count ? `<span>${template.step_count} step${template.step_count === 1 ? '' : 's'}</span>` : ''}
         </div>
-        ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
+        ${(licenceBadge || tags) ? `<div class="marketplace-tag-row">${licenceBadge}${tags}</div>` : ''}
       </div>
       <div class="agent-card-actions agent-card-actions--status">
         <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
