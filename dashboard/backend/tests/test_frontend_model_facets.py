@@ -495,3 +495,157 @@ console.log(JSON.stringify({{
         "(modulo the model label) -- any other marker on the closed card is a "
         "negative claim about someone else's product"
     )
+
+
+def test_primary_clone_cta_is_unchanged():
+    """The conversion click keeps its label and its one-click behaviour."""
+    grid = fn_body("function renderMarketplaceGrid")
+    assert "const cloneLabel = 'Add to My Agents';" in grid
+    assert "marketplace-clone-btn" in grid
+
+
+def test_model_choice_is_a_secondary_affordance():
+    grid = fn_body("function renderMarketplaceGrid")
+    assert "marketplace-clone-model-btn" in grid
+    assert "Choose model" in grid
+    assert "SUPPORTED_MODELS" in grid
+
+
+def test_clone_sends_the_chosen_model():
+    body = fn_body("async function cloneMarketplaceTemplate")
+    assert "model_name" in body
+
+
+def test_clone_menu_changes_only_the_model():
+    """A second half-Configure inside a clone menu is how two editing surfaces
+    start drifting apart. Name, capital and pipeline stay in Configure."""
+    grid = fn_body("function renderMarketplaceGrid")
+    menu_start = grid.index("marketplace-model-menu")
+    menu = grid[menu_start : menu_start + 800]
+    for forbidden in ("cash_allocation", "backtest_allocation", "pipeline", "rename"):
+        assert forbidden not in menu
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_model_picker_gated_on_runtime_type_not_truthiness():
+    """`runtime_type` is always present and always truthy -- server-defaulted
+    to 'pipeline' for every ordinary template (marketplace.py:
+    `str(raw.get("runtime_type") or "pipeline")`). A gate written as
+    `template.runtime_type ? '' : (...)` is therefore false for EVERY
+    template and would hide the picker everywhere while looking correct on a
+    substring-only test. The AI Hedge Fund runtime hardcodes its own model
+    (infrastructure/ai_hedge_fund/adapter.py) and never reads the stored
+    value, so offering a picker there would let a user "choose" a model that
+    is silently ignored.
+
+    This executes the REAL renderMarketplaceGrid over one ordinary
+    (runtime_type: 'pipeline') template and one hosted (runtime_type:
+    'ai_hedge_fund') template and checks which cards actually get a picker."""
+    script = f"""
+{fn_body("function escapeHtml")}
+{fn_body("function agentRobotIcon")}
+const MARKET_LABELS = {{ us_stocks: 'U.S.' }};
+{js_const("MODEL_VENDORS")}
+{js_const("SUPPORTED_MODELS")}
+{fn_body("function modelVendorKey")}
+{fn_body("function modelVendorLicence")}
+{fn_body("function formatModelProviderLabel")}
+{fn_body("function normalizeBacktestModelId")}
+
+function renderMarketplaceCategoryChips() {{}}
+function renderMarketplaceVendorChips() {{}}
+
+const marketplaceTemplates = [
+  {{ template_id: 'ordinary', category: 'us_stocks', name: 'Ordinary Template',
+     model_name: 'anthropic/claude-haiku-4-5', tags: [], author: 'Community',
+     runtime_type: 'pipeline' }},
+  {{ template_id: 'hosted', category: 'us_stocks', name: 'Hosted Template',
+     model_name: 'nvidia/nemotron-3-nano-30b-a3b', tags: [], author: 'Community',
+     runtime_type: 'ai_hedge_fund' }},
+];
+function getFilteredMarketplaceTemplates() {{ return marketplaceTemplates; }}
+let marketplaceCloneInFlight = false;
+
+const cardHtml = [];
+const grid = {{
+  innerHTML: '',
+  appendChild(card) {{ cardHtml.push(card.innerHTML); }},
+  querySelectorAll() {{ return []; }},
+}};
+const document = {{
+  getElementById(id) {{ return id === 'marketplaceGrid' ? grid : null; }},
+  createElement() {{ return {{ className: '', innerHTML: '' }}; }},
+}};
+
+{fn_body("function renderMarketplaceGrid")}
+renderMarketplaceGrid();
+
+console.log(JSON.stringify(cardHtml.map((html) => ({{
+  hasModelBtn: html.includes('marketplace-clone-model-btn'),
+  hasModelMenu: html.includes('marketplace-model-menu'),
+  hasPrimaryBtn: html.includes('marketplace-clone-btn'),
+}}))));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    ordinary, hosted = json.loads(result.stdout)
+    # Ordinary template: both the picker button AND its menu render.
+    assert ordinary["hasModelBtn"] is True
+    assert ordinary["hasModelMenu"] is True
+    assert ordinary["hasPrimaryBtn"] is True
+    # Hosted template: the primary "Add to My Agents" CTA still renders, but
+    # neither the picker button nor its menu markup does -- a hidden button
+    # with live menu markup is dead weight, not a fix.
+    assert hosted["hasModelBtn"] is False
+    assert hosted["hasModelMenu"] is False
+    assert hosted["hasPrimaryBtn"] is True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_clone_posts_the_chosen_model_and_omits_it_by_default():
+    """Executes the REAL cloneMarketplaceTemplate (not a reimplementation).
+    test_clone_sends_the_chosen_model only checks that the string
+    "model_name" appears somewhere in the function's source -- that would
+    pass even if the value were read but never sent, or appeared only in a
+    comment. This captures the actual POST body under a stubbed API.post for
+    both call shapes: a chosen model (the secondary menu's path) and the
+    parameter omitted (the primary CTA's path, whose behaviour must be
+    byte-for-byte unchanged: `{{}}`, never a model_name)."""
+    script = f"""
+const posted = [];
+const API = {{
+  post: async (url, body) => {{
+    posted.push(body);
+    return {{ agent: {{ agent_id: 'a1' }} }};
+  }},
+}};
+const API_BASE = '';
+function applyActiveAgent(agent) {{}}
+async function loadAgents() {{}}
+function switchPlaygroundTab(tab) {{}}
+const window = {{}};
+
+{fn_body("async function cloneMarketplaceTemplate")}
+
+(async () => {{
+  // Real templates always carry a model_name (marketplace.py defaults it to
+  // "local-model"), so it is present here too -- a mutation that falls back
+  // to template.model_name instead of truly omitting the key must produce a
+  // visibly wrong body, not one that happens to serialize the same as {{}}.
+  await cloneMarketplaceTemplate({{ template_id: 't1', model_name: 'anthropic/claude-haiku-4-5' }}, 'openai/gpt-5.5');
+  await cloneMarketplaceTemplate({{ template_id: 't1', model_name: 'anthropic/claude-haiku-4-5' }});
+  console.log(JSON.stringify(posted));
+}})();
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    posted = json.loads(result.stdout)
+    assert posted == [{"model_name": "openai/gpt-5.5"}, {}], (
+        "a chosen model must be sent as {model_name: ...}; an omitted model "
+        "must post an empty body exactly as before -- the primary CTA's "
+        "one-click behaviour must not change"
+    )

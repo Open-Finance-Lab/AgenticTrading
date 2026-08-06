@@ -2235,7 +2235,14 @@ function renderMarketplaceGrid() {
         ${(licenceBadge || tags) ? `<div class="marketplace-tag-row">${licenceBadge}${tags}</div>` : ''}
       </div>
       <div class="agent-card-actions agent-card-actions--status">
-        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
+        <div class="marketplace-clone-split">
+          <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
+          ${template.runtime_type === 'pipeline' ? `
+          <button class="agent-card-cta marketplace-clone-model-btn" type="button" data-template-id="${escapeHtml(template.template_id)}" aria-haspopup="true" aria-expanded="false" aria-label="Add on a different model">Choose model ▾</button>
+          <div class="marketplace-model-menu" hidden>
+            ${SUPPORTED_MODELS.map((model) => `<button type="button" class="agent-menu-item marketplace-model-option" data-template-id="${escapeHtml(template.template_id)}" data-model-slug="${escapeHtml(model.slug)}"${normalizeBacktestModelId(model.slug) === normalizeBacktestModelId(template.model_name) ? ' aria-current="true"' : ''}>${escapeHtml(model.label)}</button>`).join('')}
+          </div>` : ''}
+        </div>
       </div>`;
     grid.appendChild(card);
   });
@@ -2257,6 +2264,37 @@ function renderMarketplaceGrid() {
         marketplaceCloneInFlight = false;
         btn.disabled = false;
         btn.textContent = prevLabel;
+      }
+    });
+  });
+
+  grid.querySelectorAll('.marketplace-clone-model-btn').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const menu = btn.parentElement?.querySelector('.marketplace-model-menu');
+      if (!menu) return;
+      const opening = menu.hidden;
+      // Close every other card's menu first: two open menus overlap.
+      grid.querySelectorAll('.marketplace-model-menu').forEach((el) => { el.hidden = true; });
+      grid.querySelectorAll('.marketplace-clone-model-btn').forEach((el) => el.setAttribute('aria-expanded', 'false'));
+      menu.hidden = !opening;
+      btn.setAttribute('aria-expanded', String(opening));
+    });
+  });
+
+  grid.querySelectorAll('.marketplace-model-option').forEach((option) => {
+    option.addEventListener('click', async () => {
+      const template = marketplaceTemplates.find((item) => item.template_id === option.dataset.templateId);
+      if (!template || marketplaceCloneInFlight) return;
+      marketplaceCloneInFlight = true;
+      option.disabled = true;
+      try {
+        await cloneMarketplaceTemplate(template, option.dataset.modelSlug);
+      } catch (error) {
+        alert(error.message || `Couldn't add this template. Please try again.`);
+      } finally {
+        marketplaceCloneInFlight = false;
+        option.disabled = false;
       }
     });
   });
@@ -2304,10 +2342,12 @@ async function loadMarketplace() {
   return marketplaceLoadInFlight;
 }
 
-async function cloneMarketplaceTemplate(template) {
+/** `modelName` omitted means the template's own model -- the primary CTA's
+ * path, whose behaviour is deliberately unchanged. */
+async function cloneMarketplaceTemplate(template, modelName) {
   const data = await API.post(
     `${API_BASE}/api/v1/agents/marketplace/${encodeURIComponent(template.template_id)}/clone`,
-    {},
+    modelName ? { model_name: modelName } : {},
   );
   const agent = data?.agent;
   if (!agent?.agent_id) {

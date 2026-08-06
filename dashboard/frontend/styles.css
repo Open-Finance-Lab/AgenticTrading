@@ -9651,6 +9651,48 @@ body.agent-editor-open {
     border: 1px solid rgba(34, 197, 94, 0.35);
 }
 
+/* Split CTA: the primary Add button keeps its weight; the model picker is a
+   quieter sibling so it cannot compete with the conversion click. */
+.marketplace-clone-split {
+    position: relative;
+    display: flex;
+    gap: 6px;
+    width: 100%;
+}
+
+.marketplace-clone-split .marketplace-clone-btn {
+    flex: 1 1 auto;
+}
+
+.marketplace-clone-model-btn {
+    flex: 0 0 auto;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+
+.marketplace-clone-model-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--info-color);
+}
+
+.marketplace-model-menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 6px);
+    z-index: 20;
+    min-width: 200px;
+    padding: 6px;
+    border-radius: 10px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.marketplace-model-menu[hidden] {
+    display: none !important;
+}
+
 .marketplace-category-chip {
     display: inline-flex;
     align-items: center;
