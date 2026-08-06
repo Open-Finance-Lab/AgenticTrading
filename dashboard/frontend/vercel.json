@@ -52,6 +52,24 @@
       ]
     },
     {
+      "source": "/app",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
+      "source": "/app.html",
+      "headers": [
+        {
+          "key": "Cache-Control",
+          "value": "public, max-age=0, must-revalidate"
+        }
+      ]
+    },
+    {
       "source": "/(api|paper|backtest|runs|config|admin|ticker|health|compare)(/.*)?",
       "headers": [
         {
