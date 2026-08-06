@@ -403,3 +403,95 @@ console.log(JSON.stringify(cardHtml.map((html) => html.includes('marketplace-lic
     assert result.returncode == 0, result.stderr
     # In catalog order: open-weight DeepSeek, closed-weight Claude, unknown vendor.
     assert json.loads(result.stdout) == [True, False, False]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_closed_card_differs_from_open_card_by_exactly_the_badge():
+    """"Absence is not a negative claim" is a stronger promise than "no badge
+    with this exact class and text" -- the two tests above enumerate two
+    guessed forbidden strings ("Closed-source", "Proprietary"), which cannot
+    rule out a differently-worded, differently-classed marker on closed cards
+    (e.g. a `.marketplace-vendor-note` span reading "Vendor-locked model").
+
+    This renders the REAL renderMarketplaceGrid twice, over two templates that
+    are identical except for `model_name` (one open-weight, one closed-weight),
+    and diffs the emitted HTML directly: stripping the open-source badge out of
+    the open card's HTML must yield the closed card's HTML exactly, modulo the
+    one legitimately-differing "Powered by X" label. Any extra marker on the
+    closed card -- of any name or wording -- breaks that equality.
+    """
+    script = f"""
+{fn_body("function escapeHtml")}
+{fn_body("function agentRobotIcon")}
+const MARKET_LABELS = {{ us_stocks: 'U.S.', cn_ashares: 'China A-Share' }};
+{js_const("MODEL_VENDORS")}
+{fn_body("function modelVendorKey")}
+{fn_body("function modelVendorLicence")}
+{fn_body("function formatModelProviderLabel")}
+
+function renderMarketplaceCategoryChips() {{}}
+function renderMarketplaceVendorChips() {{}}
+
+let currentTemplates;
+function getFilteredMarketplaceTemplates() {{ return currentTemplates; }}
+let document;
+
+{fn_body("function renderMarketplaceGrid")}
+
+function renderOneCard(modelName) {{
+  const cardHtml = [];
+  const grid = {{
+    innerHTML: '',
+    appendChild(card) {{ cardHtml.push(card.innerHTML); }},
+    querySelectorAll() {{ return []; }},
+  }};
+  document = {{
+    getElementById(id) {{ return id === 'marketplaceGrid' ? grid : null; }},
+    createElement() {{ return {{ className: '', innerHTML: '' }}; }},
+  }};
+  // Identical in every field except model_name -- the only legitimate
+  // difference between the two cards is the licence and the model label.
+  // A shared tag keeps the tag-row wrapper div present on BOTH cards, so the
+  // only thing that can differ inside it is the badge span itself -- with no
+  // tags, the wrapper disappears entirely on the closed card (no badge, no
+  // tags -> nothing to wrap) and that wrapper's absence would itself count as
+  // a "difference", masking whether an extra marker was also added.
+  currentTemplates = [
+    {{ template_id: 'x', category: 'us_stocks', name: 'Same Template',
+       model_name: modelName, tags: ['sample'], author: 'Community' }},
+  ];
+  renderMarketplaceGrid();
+  return cardHtml[0];
+}}
+
+const openHtml = renderOneCard('deepseek/deepseek-v4-pro');
+const closedHtml = renderOneCard('anthropic/claude-haiku-4-5');
+
+const BADGE = '<span class="marketplace-licence-badge">Open-source model</span>';
+const openHasBadge = openHtml.includes(BADGE);
+const closedHasBadge = closedHtml.includes('marketplace-licence-badge');
+// Strip only the exact badge span (proves it was actually there) and
+// normalise only the one known-legitimate difference (the model label) --
+// a blanket strip would hide any other marker instead of catching it.
+const openWithoutBadge = openHtml.split(BADGE).join('')
+  .replace('Powered by DeepSeek', 'POWERED_BY_MODEL');
+const closedNormalized = closedHtml.replace('Powered by Claude', 'POWERED_BY_MODEL');
+
+console.log(JSON.stringify({{
+  openHasBadge,
+  closedHasBadge,
+  equalAfterNormalizing: openWithoutBadge === closedNormalized,
+}}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["openHasBadge"] is True
+    assert data["closedHasBadge"] is False
+    assert data["equalAfterNormalizing"] is True, (
+        "closed card must be byte-identical to the open card minus the badge "
+        "(modulo the model label) -- any other marker on the closed card is a "
+        "negative claim about someone else's product"
+    )
