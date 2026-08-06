@@ -497,6 +497,46 @@ const MARKET_LABELS = {
 // opens), never at its own module-init time -- the same rule window.API follows.
 window.AGENT_SHELF_LABELS = MARKET_LABELS;
 
+/** Every model a user can actually pick and run here. The single source for
+ * both model <select> elements: the Run Backtest picker (#modelSelect, live
+ * only on the iFinD A-share path) and the Create Built-in picker
+ * (#builtinAgentModel, which the Configure editor clones its own options from).
+ *
+ * These lists were hand-maintained separately and drifted: the backtest picker
+ * offered six models this platform does not run and omitted four it does, and
+ * an agent on an unlisted model silently submitted the *previous* agent's
+ * selection (see syncModelSelectFromAgent). Declaration order is display order.
+ *
+ * The AI Hedge Fund runtime's Nemotron is deliberately absent: it is a property
+ * of a hosted runtime, not a user choice, and syncBacktestModelFieldMode
+ * already renders that case as "AI Hedge Fund — hosted runtime". */
+const SUPPORTED_MODELS = [
+  { slug: 'anthropic/claude-haiku-4-5', label: 'Claude Haiku 4.5', vendor: 'anthropic' },
+  { slug: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', vendor: 'anthropic' },
+  { slug: 'openai/gpt-5.5', label: 'GPT-5.5', vendor: 'openai' },
+  { slug: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', vendor: 'google' },
+  { slug: 'deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', vendor: 'deepseek' },
+  { slug: 'qwen/qwen3.7-plus', label: 'Qwen3.7 Plus', vendor: 'qwen' },
+];
+
+/** Pure: no DOM, so the guards can run it under node. */
+function modelOptionsHtml(models) {
+  return models
+    .map((model) => `<option value="${escapeHtml(model.slug)}">${escapeHtml(model.label)}</option>`)
+    .join('');
+}
+
+/** Fill both model pickers. Runs once, in the pure-DOM boot block, which is
+ * before syncIFindModelControl can prepend #modelSelect's "Rule-based" option
+ * -- calling this again later would wipe that option out. */
+function populateSupportedModelSelects() {
+  const html = modelOptionsHtml(SUPPORTED_MODELS);
+  const backtestPicker = document.getElementById('modelSelect');
+  if (backtestPicker) backtestPicker.innerHTML = html;
+  const createPicker = document.getElementById('builtinAgentModel');
+  if (createPicker) createPicker.innerHTML = html;
+}
+
 // My Agents' JS-driven sections, in display order. `match` delegates to
 // agentShelfKey so every agent resolves to exactly one shelf by construction
 // rather than by predicates staying mutually exclusive as they're edited.
@@ -1643,8 +1683,9 @@ function resolveBacktestModelRequest(modelSelect, agent) {
   if (agentOption?.value === selectedModel && agent?.model_name) {
     return agent.model_name;
   }
-  // A model the nine-option list cannot represent still belongs to the agent:
-  // without this the run submits whatever value a previous agent left behind.
+  // Belt-and-braces since syncModelSelectFromAgent started injecting an option
+  // for unrepresentable models: on the hidden path the agent's saved model wins
+  // outright, whatever the select happens to hold.
   if (agent?.model_name && !backtestModelPickerIsLiveControl()) {
     return agent.model_name;
   }
@@ -1667,13 +1708,34 @@ function syncBacktestModelFieldMode() {
       : formatAgentModelLabel(runBacktestModalAgent?.model_name));
 }
 
+/**
+ * Point the picker at this agent's model.
+ *
+ * A model the curated list cannot represent (a legacy value like 'gpt-5.2' or
+ * 'local-model') is INJECTED as its own option rather than left unmatched.
+ * Leaving it unmatched is a silent-wrong-value bug, not a cosmetic one: on the
+ * live iFinD path resolveBacktestModelRequest returns the select's current
+ * value, so the run would submit whatever the previously-selected agent left
+ * there, recorded under this agent's name. js/agent-editor.js does the same
+ * thing for the Configure picker.
+ */
 function syncModelSelectFromAgent(agent) {
   const modelSelect = document.getElementById('modelSelect');
   if (!modelSelect || !agent?.model_name) return;
+  // Drop the previous agent's injected option first, so injections cannot pile
+  // up across agent switches and cannot be matched as if they were curated.
+  modelSelect.querySelectorAll('option[data-injected-model]').forEach((option) => option.remove());
   const option = findBacktestModelOption(modelSelect, agent.model_name);
   if (option) {
     modelSelect.value = option.value;
+    return;
   }
+  const injected = document.createElement('option');
+  injected.value = agent.model_name;
+  injected.textContent = formatAgentModelLabel(agent.model_name);
+  injected.dataset.injectedModel = 'true';
+  modelSelect.appendChild(injected);
+  modelSelect.value = agent.model_name;
 }
 
 function getSelectedBacktestAgent() {
@@ -3954,6 +4016,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initNavigation();
     setupTickerResizeHandler();
     setupTickerScrollControls();
+    populateSupportedModelSelects();
 
     // Setup time period buttons
     document.querySelectorAll('.time-btn').forEach(btn => {
