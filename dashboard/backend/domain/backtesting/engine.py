@@ -702,6 +702,14 @@ class HourlyBacktester:
                 deferrals_truncated = len(deferrals) - REJECTED_ORDER_SAMPLE_LIMIT
                 if deferrals_truncated > 0:
                     meta["t1_deferrals_truncated"] = deferrals_truncated
+        # Already filtered to non-filled outcomes by run_agent_backtest, so this
+        # list is small: fills live in `trades`, and repeated rejections were
+        # collapsed per symbol-trading-day. Head sample, matching
+        # rejected_orders -- the earliest outcomes characterise the run, and the
+        # count carries scale. That is deliberately the opposite end from the
+        # live tail window: a live viewer wants the latest activity, a reader
+        # of a finished run wants the start of the story. The Trading Log
+        # labels whichever end it is showing, so neither reads as complete.
         order_events = list(getattr(self, "order_events", []) or [])
         if order_events:
             meta["order_events_count"] = len(order_events)
