@@ -34,6 +34,18 @@ def _select_markup(select_id: str) -> str:
     return APP_HTML[open_tag:close]
 
 
+def _strip_js_comments(source: str) -> str:
+    """`source` with `//` and `/* */` comments removed.
+
+    A comment can restate the very code it defers ("// TODO: wire up
+    createPicker.innerHTML = html later"), so a raw `in`/`re.search` over the
+    function body would be satisfied by the comment instead of live code and
+    pass against a picker that ships empty. Matches this suite's convention
+    (see test_frontend_shelves.py / test_app_copy_register.py).
+    """
+    return re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL))
+
+
 @pytest.mark.parametrize("select_id", ["modelSelect", "builtinAgentModel"])
 def test_model_selects_carry_no_hardcoded_options(select_id):
     """Neither picker may hold its own option list -- that is how they drifted."""
@@ -44,14 +56,23 @@ def test_model_selects_carry_no_hardcoded_options(select_id):
 
 def test_the_populator_fills_both_pickers():
     """populateSupportedModelSelects must write into #modelSelect AND
-    #builtinAgentModel -- dropping either line ships an empty picker silently.
+    #builtinAgentModel -- both looked up AND assigned. Two ways this ships an
+    empty picker silently: the lookup+assignment lines being deleted outright,
+    or the lookup surviving while its .innerHTML assignment is dropped (e.g.
+    left as a TODO) -- a bare substring check on the id would miss the second,
+    and even the assignment check alone is fooled by a comment that names the
+    deferred code, so comments are stripped first.
     For #builtinAgentModel specifically, an empty select means
     submitCreateBuiltinAgent's `|| 'anthropic/claude-haiku-4-5'` fallback puts
     every new built-in agent on Haiku with no error.
     """
-    body = fn_body("function populateSupportedModelSelects")
+    body = _strip_js_comments(fn_body("function populateSupportedModelSelects"))
     for select_id in ("modelSelect", "builtinAgentModel"):
-        assert f"getElementById('{select_id}')" in body
+        bound = re.search(rf"(\w+)\s*=\s*document\.getElementById\('{select_id}'\)", body)
+        assert bound, f"{select_id} is never looked up in the populator"
+        assert re.search(rf"{bound.group(1)}\.innerHTML\s*=", body), (
+            f"{select_id} is looked up but never written to -- it would ship empty"
+        )
 
 
 def test_supported_models_are_the_six_runnable_models():
