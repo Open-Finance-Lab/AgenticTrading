@@ -1133,7 +1133,16 @@ function duplicateModelChoices(agent) {
  * de-duplicating would mean a lookup for a cosmetic gain. */
 function duplicateAgentName(agent, modelSlug) {
   const vendor = MODEL_VENDORS.find((entry) => entry.key === modelVendorKey(modelSlug));
-  return `${agent?.name || 'Agent'} (${vendor?.label || 'new model'})`;
+  const suffix = ` (${vendor?.label || 'new model'})`;
+  // 100 mirrors DuplicateAgentBody.name's max_length and both name inputs'
+  // maxlength. A 95-char agent would otherwise generate an over-length copy,
+  // and API.request JSON.stringify's the non-string 422 `detail`, so the raw
+  // Pydantic array renders in the modal's error line. Inlined rather than a
+  // module constant because the guards lift this function body into node on
+  // its own -- an outside reference would be undefined there.
+  // Trim the base, never the suffix: the vendor is the point of the name.
+  const base = String(agent?.name || 'Agent').slice(0, 100 - suffix.length).trimEnd();
+  return `${base}${suffix}`;
 }
 
 let duplicateAgentSource = null;
@@ -2333,7 +2342,7 @@ function renderMarketplaceGrid() {
         <div class="marketplace-clone-split">
           <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
           ${template.runtime_type === 'pipeline' ? `
-          <button class="agent-card-cta marketplace-clone-model-btn" type="button" data-template-id="${escapeHtml(template.template_id)}" aria-haspopup="true" aria-expanded="false" aria-label="Add on a different model">Choose model ▾</button>
+          <button class="agent-card-cta marketplace-clone-model-btn" type="button" data-template-id="${escapeHtml(template.template_id)}" aria-haspopup="true" aria-expanded="false" aria-label="Choose model — add this template on a different model">Choose model ▾</button>
           <div class="marketplace-model-menu" hidden>
             ${SUPPORTED_MODELS.map((model) => `<button type="button" class="agent-menu-item marketplace-model-option" data-template-id="${escapeHtml(template.template_id)}" data-model-slug="${escapeHtml(model.slug)}"${normalizeBacktestModelId(model.slug) === normalizeBacktestModelId(template.model_name) ? ' aria-current="true"' : ''}>${escapeHtml(model.label)}</button>`).join('')}
           </div>` : ''}

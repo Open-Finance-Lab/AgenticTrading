@@ -786,3 +786,39 @@ def test_entering_community_resets_the_vendor_filter():
         "without it the vendor chip leaks across visits and strands the "
         "empty-shelf deep links on an empty grid"
     )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_duplicate_name_never_exceeds_the_backend_cap():
+    """DuplicateAgentBody.name is max_length=100. An over-long generated name
+    fails validation, and API.request JSON.stringify's the non-string `detail`,
+    so the raw Pydantic array -- including the user's own agent name -- renders
+    in the modal's error line. Trim the base, never the vendor suffix."""
+    script = f"""
+{js_const("MODEL_VENDORS")}
+{fn_body("function modelVendorKey")}
+{fn_body("function duplicateAgentName")}
+const long = 'Q'.repeat(95);
+const out = [
+  duplicateAgentName({{name: long}}, 'deepseek/deepseek-v4-pro'),
+  duplicateAgentName({{name: 'Momentum Alpha'}}, 'deepseek/deepseek-v4-pro'),
+  duplicateAgentName({{name: 'Z'.repeat(200)}}, 'totally/unknown'),
+];
+console.log(JSON.stringify(out.map((s) => [s.length, s.endsWith(')')])));
+"""
+    result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    for length, ends_with_vendor in json.loads(result.stdout):
+        assert length <= 100, f"generated a {length}-char name; backend caps at 100"
+        assert ends_with_vendor, "the vendor suffix was trimmed instead of the base name"
+
+
+def test_model_picker_accessible_name_contains_its_visible_label():
+    """WCAG 2.5.3 Label in Name (Level A): a voice-control user saying
+    "click Choose model" must be able to activate the button."""
+    grid = fn_body("function renderMarketplaceGrid")
+    match = re.search(r'aria-label="([^"]*)"[^>]*>Choose model', grid)
+    assert match, "the model-picker button lost its aria-label or its visible text"
+    assert match.group(1).lower().startswith("choose model"), (
+        f"accessible name {match.group(1)!r} does not contain the visible label 'Choose model'"
+    )
