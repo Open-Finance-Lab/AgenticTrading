@@ -649,3 +649,115 @@ const window = {{}};
         "must post an empty body exactly as before -- the primary CTA's "
         "one-click behaviour must not change"
     )
+
+
+def test_duplicate_action_only_on_agents_that_have_run():
+    """"Run on another model" is a follow-on offer, not a first action."""
+    body = fn_body("function renderAgentCardActions")
+    assert "agent-duplicate-model-btn" in body
+    assert "'backtested'" in body and "'paper'" in body
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_duplicate_action_gated_on_type_status_and_runtime():
+    """test_duplicate_action_only_on_agents_that_have_run only checks that the
+    literal strings 'backtested' and 'paper' appear somewhere in the
+    function's source -- that stays green even if the gate is built wrong:
+    an inverted runtime check, a dropped status check, a dropped agent_type
+    check, or a dropped runtime check entirely all leave those substrings in
+    place. This lifts the REAL renderAgentCardActions and checks which
+    agent/status combinations actually render the button.
+
+    Must fail under each of:
+    - M1 (inverted runtime predicate): `!agent.runtime_type` instead of
+      `=== 'pipeline'`. runtime_type is always present and always truthy
+      (server-defaulted to 'pipeline' for every ordinary agent -- see
+      domain/agents/repository.py), so `!agent.runtime_type` is false for
+      EVERY ordinary agent and hides the button everywhere. A presence
+      assertion on the ordinary pipeline case is the only thing that catches
+      this -- an absence-only test cannot.
+    - M2 (runtime gate dropped): the button appears on an ai_hedge_fund agent.
+    - M3 (status gate dropped): the button appears on a draft agent.
+    - M4 (agent_type gate dropped): the button appears on an external agent.
+    """
+    script = f"""
+{fn_body("function escapeHtml")}
+{fn_body("function renderAgentCardActions")}
+
+function hasBtn(agent, statusKey) {{
+  return renderAgentCardActions(agent, statusKey).includes('agent-duplicate-model-btn');
+}}
+
+const pipeline = {{ agent_id: 'a1', agent_type: 'builtin', runtime_type: 'pipeline' }};
+const hosted = {{ agent_id: 'a2', agent_type: 'builtin', runtime_type: 'ai_hedge_fund' }};
+const external = {{ agent_id: 'a3', agent_type: 'external', runtime_type: 'pipeline' }};
+
+console.log(JSON.stringify({{
+  pipelineBacktested: hasBtn(pipeline, 'backtested'),
+  pipelinePaper: hasBtn(pipeline, 'paper'),
+  pipelineDraft: hasBtn(pipeline, 'draft'),
+  hostedBacktested: hasBtn(hosted, 'backtested'),
+  externalBacktested: hasBtn(external, 'backtested'),
+}}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    # Ordinary built-in agent that has actually run: the button must be there.
+    assert data["pipelineBacktested"] is True
+    assert data["pipelinePaper"] is True
+    # Not yet run: no follow-on offer yet.
+    assert data["pipelineDraft"] is False
+    # Hosted runtime hardcodes its own model -- offering a picker would be a
+    # false statement about which model actually runs.
+    assert data["hostedBacktested"] is False
+    # External agents authenticate via API key; duplicating one would mint a
+    # new key through a hook that has no reason to do that.
+    assert data["externalBacktested"] is False
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_duplicate_offers_every_model_except_the_current_one():
+    script = f"""
+{js_const("SUPPORTED_MODELS")}
+{js_const("MODEL_VENDORS")}
+{fn_body("function modelVendorKey")}
+{fn_body("function duplicateModelChoices")}
+console.log(JSON.stringify([
+  duplicateModelChoices({{model_name: 'qwen/qwen3.7-plus'}}).map((m) => m.slug),
+  duplicateModelChoices({{model_name: 'local-model'}}).map((m) => m.slug).length,
+]));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    without_qwen, legacy_count = json.loads(result.stdout)
+    assert "qwen/qwen3.7-plus" not in without_qwen
+    assert len(without_qwen) == 5
+    # A legacy/hosted model isn't in the list, so nothing is filtered out.
+    assert legacy_count == 6
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_duplicate_name_uses_the_vendor_label():
+    script = f"""
+{js_const("MODEL_VENDORS")}
+{fn_body("function modelVendorKey")}
+{fn_body("function duplicateAgentName")}
+console.log(duplicateAgentName({{name: 'Momentum Alpha'}}, 'deepseek/deepseek-v4-pro'));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "Momentum Alpha (DeepSeek)"
+
+
+def test_duplicate_does_not_start_a_backtest():
+    """Auto-firing spends LLM credits on a click the user did not frame as run."""
+    body = fn_body("async function submitDuplicateAgent")
+    for forbidden in ("runBacktest(", "openRunBacktestModal("):
+        assert forbidden not in body

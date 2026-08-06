@@ -808,6 +808,25 @@
         </div>
     </div>
 
+    <div id="duplicateAgentModal" class="auth-modal" hidden>
+        <div class="auth-modal-backdrop" id="duplicateAgentModalBackdrop"></div>
+        <div class="auth-modal-panel" role="dialog" aria-labelledby="duplicateAgentModalTitle">
+            <button id="duplicateAgentModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
+            <h2 id="duplicateAgentModalTitle" class="auth-modal-title">Run on another model</h2>
+            <p class="auth-modal-subtitle">Makes a copy of this agent — same strategy, same instructions — running on a different AI model, so you can compare them side by side. Nothing runs until you press Run Backtest.</p>
+            <form id="duplicateAgentForm" class="auth-form">
+                <label class="auth-field">
+                    <span>Model</span>
+                    <!-- Options are written by openDuplicateAgentModal(): the list
+                         excludes the agent's own model, so it cannot be built here. -->
+                    <select id="duplicateAgentModel"></select>
+                </label>
+                <p id="duplicateAgentError" class="auth-error" hidden></p>
+                <button id="duplicateAgentSubmit" class="auth-submit-btn" type="submit">Create the copy</button>
+            </form>
+        </div>
+    </div>
+
     <div id="agentCredentialsModal" class="auth-modal" hidden>
         <div class="auth-modal-backdrop" id="agentCredentialsModalBackdrop"></div>
         <div class="auth-modal-panel" role="dialog" aria-labelledby="agentCredentialsModalTitle">

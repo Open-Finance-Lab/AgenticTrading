@@ -1085,6 +1085,20 @@ function renderAgentCardActions(agent, statusKey) {
     agent.agent_type === 'builtin'
       ? ''
       : `<button class="agent-menu-item agent-rotate-key-btn" type="button" data-agent-id="${id}">New access key</button>`;
+  // Only once the user has actually run this agent: "try it on another model"
+  // is a follow-on offer, not a first action. Built-in only -- duplicating an
+  // external agent would mint an API key (see the backend's duplicate route).
+  // Also excludes hosted runtimes (runtime_type !== 'pipeline'): ai_hedge_fund
+  // hardcodes its own model and never reads the stored value, so duplicating
+  // it onto a chosen model would display a model that isn't actually running.
+  // runtime_type is always present and truthy (server-defaulted to
+  // 'pipeline'), so this MUST be an equality check, never a truthiness test.
+  const duplicate =
+    agent.agent_type === 'builtin' &&
+    agent.runtime_type === 'pipeline' &&
+    (statusKey === 'backtested' || statusKey === 'paper')
+      ? `<button class="agent-menu-item agent-duplicate-model-btn" type="button" data-agent-id="${id}">Run on another model</button>`
+      : '';
   return `
     <div class="agent-card-actions agent-card-actions--status">
       ${configure}
@@ -1096,10 +1110,83 @@ function renderAgentCardActions(agent, statusKey) {
         <div class="agent-menu-dropdown" hidden>
           <button class="agent-menu-item agent-set-default-btn" type="button" data-agent-id="${id}">Set as default</button>
           ${rotate}
+          ${duplicate}
           <button class="agent-menu-item agent-menu-item--danger agent-delete-btn" type="button" data-agent-id="${id}">Delete</button>
         </div>
       </div>
     </div>`;
+}
+
+/** SUPPORTED_MODELS minus the agent's current model -- an entry that duplicates
+ * an agent onto the model it already runs is a no-op the user has to reason
+ * about. A legacy or hosted-runtime model isn't in the list, so nothing is
+ * filtered out and the full six are offered. */
+function duplicateModelChoices(agent) {
+  const current = String(agent?.model_name || '').trim().toLowerCase();
+  return SUPPORTED_MODELS.filter((model) => model.slug.toLowerCase() !== current).map(
+    (model) => ({ slug: model.slug, label: model.label }),
+  );
+}
+
+/** "Momentum Alpha (DeepSeek)". Collides freely: two copies onto DeepSeek read
+ * the same. Names are not unique anywhere else in this product, and
+ * de-duplicating would mean a lookup for a cosmetic gain. */
+function duplicateAgentName(agent, modelSlug) {
+  const vendor = MODEL_VENDORS.find((entry) => entry.key === modelVendorKey(modelSlug));
+  return `${agent?.name || 'Agent'} (${vendor?.label || 'new model'})`;
+}
+
+let duplicateAgentSource = null;
+
+function openDuplicateAgentModal(agent) {
+  const modal = document.getElementById('duplicateAgentModal');
+  const select = document.getElementById('duplicateAgentModel');
+  const error = document.getElementById('duplicateAgentError');
+  if (!modal || !select || !agent) return;
+  duplicateAgentSource = agent;
+  select.innerHTML = duplicateModelChoices(agent)
+    .map((model) => `<option value="${escapeHtml(model.slug)}">${escapeHtml(model.label)}</option>`)
+    .join('');
+  if (error) { error.hidden = true; error.textContent = ''; }
+  modal.hidden = false;
+}
+
+function closeDuplicateAgentModal() {
+  const modal = document.getElementById('duplicateAgentModal');
+  if (modal) modal.hidden = true;
+  duplicateAgentSource = null;
+}
+
+/** Lands the user on the new agent with Run primed. Deliberately does NOT start
+ * a backtest: auto-firing would spend LLM credits on a click the user framed as
+ * "make a copy". */
+async function submitDuplicateAgent() {
+  const agent = duplicateAgentSource;
+  const select = document.getElementById('duplicateAgentModel');
+  const error = document.getElementById('duplicateAgentError');
+  const submit = document.getElementById('duplicateAgentSubmit');
+  if (!agent || !select?.value) return;
+  if (submit) submit.disabled = true;
+  try {
+    const data = await API.post(
+      `${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}/duplicate`,
+      { model_name: select.value, name: duplicateAgentName(agent, select.value) },
+    );
+    const created = data?.agent;
+    if (!created?.agent_id) throw new Error('Copy failed — no agent returned');
+    closeDuplicateAgentModal();
+    applyActiveAgent(created);
+    await loadAgents();
+    showAppToast(`${created.name} is ready. Press Run Backtest to compare them.`);
+    highlightAgentCard(created.agent_id);
+  } catch (err) {
+    if (error) {
+      error.textContent = err.message || `Couldn't create the copy. Please try again.`;
+      error.hidden = false;
+    }
+  } finally {
+    if (submit) submit.disabled = false;
+  }
 }
 
 function renderAgentRunningActions(agent) {
@@ -1394,6 +1481,14 @@ function renderAgentCards(grid, agents, categoryKey) {
       } finally {
         btn.disabled = false;
       }
+    });
+  });
+
+  grid.querySelectorAll('.agent-duplicate-model-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
+      if (!agent) return;
+      openDuplicateAgentModal(agent);
     });
   });
 
@@ -7458,6 +7553,12 @@ function initNavigation() {
     document.getElementById('createBuiltinAgentModalClose')?.addEventListener('click', closeCreateBuiltinAgentModal);
     document.getElementById('createBuiltinAgentModalBackdrop')?.addEventListener('click', closeCreateBuiltinAgentModal);
     document.getElementById('createBuiltinAgentForm')?.addEventListener('submit', submitCreateBuiltinAgent);
+    document.getElementById('duplicateAgentModalClose')?.addEventListener('click', closeDuplicateAgentModal);
+    document.getElementById('duplicateAgentModalBackdrop')?.addEventListener('click', closeDuplicateAgentModal);
+    document.getElementById('duplicateAgentForm')?.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submitDuplicateAgent();
+    });
     document.getElementById('agentCredentialsModalClose')?.addEventListener('click', closeAgentCredentialsModal);
     document.getElementById('agentCredentialsModalBackdrop')?.addEventListener('click', closeAgentCredentialsModal);
 
