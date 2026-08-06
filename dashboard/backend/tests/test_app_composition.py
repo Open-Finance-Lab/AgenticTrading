@@ -104,6 +104,7 @@ EXPECTED_FULL_CONTRACT = {
     ("DELETE", "/api/v1/agents/{agent_id}"),
     ("GET", "/api/v1/agents/{agent_id}"),
     ("PATCH", "/api/v1/agents/{agent_id}"),
+    ("POST", "/api/v1/agents/{agent_id}/duplicate"),
     ("DELETE", "/api/v1/agents/{agent_id}/credentials/financial-datasets"),
     ("GET", "/api/v1/agents/{agent_id}/credentials/financial-datasets"),
     ("PUT", "/api/v1/agents/{agent_id}/credentials/financial-datasets"),

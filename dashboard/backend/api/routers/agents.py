@@ -33,6 +33,7 @@ from dashboard.backend.domain.agents.credential_store import (
 )
 from dashboard.backend.domain.agents.service import (
     AgentNotFoundError,
+    AgentServiceError,
     MarketplaceTemplateNotFoundError,
     NoExternalRunsError,
     agent_service,
@@ -238,6 +239,30 @@ def list_marketplace_agents():
 
 class CloneMarketplaceBody(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    # Deliberately unvalidated beyond length -- see clone_marketplace_template.
+    model_name: Optional[str] = Field(default=None, max_length=100)
+
+
+class DuplicateAgentBody(BaseModel):
+    """``model_name`` is required here (unlike clone): the whole point of the
+    action is running the same strategy somewhere else."""
+
+    model_name: str = Field(min_length=1, max_length=100)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("model_name")
+    @classmethod
+    def _reject_blank(cls, value: str) -> str:
+        # Same trap as UpdateAgentBody._reject_blank: ``min_length=1`` counts
+        # the raw length, so a whitespace-only value ("   ") passes it. Unlike
+        # CreateAgentBody.model_name (optional, coerces blank to
+        # "local-model" on purpose), this field is required -- the service's
+        # ``.strip() or source.get("model_name")`` fallback would otherwise
+        # silently reuse the source's own model, defeating the one thing this
+        # action does. Reject it as a 422 instead.
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
 
 
 @router.post("/marketplace/{template_id}/clone")
@@ -261,6 +286,7 @@ def clone_marketplace_agent(
             owner_user_id=ctx["user_id"],
             owner_browser_session=ctx["browser_session"],
             name=body.name.strip() if body.name else None,
+            model_name=body.model_name,
         )
     except MarketplaceTemplateNotFoundError:
         raise HTTPException(status_code=404, detail="Marketplace template not found")
@@ -624,6 +650,42 @@ def rotate_agent_api_key(
         "agent": agent_service.agent_with_stats(agent),
         "api_key": api_key,
     }
+
+
+@router.post("/{agent_id}/duplicate")
+def duplicate_agent(
+    agent_id: str,
+    body: DuplicateAgentBody,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Copy a built-in agent onto a different model ("Run on another model").
+
+    Does not start a backtest: the caller lands on the new agent with Run primed.
+    """
+    ctx = _require_owner_context(request, authorization)
+    _require_agent_access(agent_id, ctx, reclaim_on_session_match=True)
+    cash = float(DEFAULT_AGENT_CASH_ALLOCATION)
+    if ctx["user_id"] and cash > 0:
+        try:
+            portfolio_service.ensure_cash_for_new_agent(ctx["user_id"], cash)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        agent = agent_service.duplicate_agent(
+            agent_id=agent_id,
+            model_name=body.model_name,
+            name=body.name.strip() if body.name else None,
+            owner_user_id=ctx["user_id"],
+            owner_browser_session=ctx["browser_session"],
+        )
+    except AgentNotFoundError:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    except AgentServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if ctx["user_id"]:
+        portfolio_service.get_or_create_portfolio(ctx["user_id"])
+    return {"agent": agent}
 
 
 @router.post("/{agent_id}/activate")
