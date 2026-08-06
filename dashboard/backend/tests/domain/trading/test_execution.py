@@ -12,7 +12,13 @@ import pandas as pd
 import pytest
 
 from dashboard.backend.domain.trading import execution as execution_module
-from dashboard.backend.domain.trading.execution import execute_actions
+from dashboard.backend.domain.trading.execution import (
+    calculate_transaction_costs,
+    execute_actions,
+)
+from dashboard.backend.infrastructure.market_data.profiles import (
+    ASHARE_TRANSACTION_COST_PROFILE,
+)
 from dashboard.scripts import backtest_hourly_agent as bha
 
 
@@ -43,6 +49,148 @@ def _run(actions, market_data, timestamp="t0", **state):
         trades=st["trades"],
     )
     return st
+
+
+def _run_ashare(actions, *, cash=100000, positions=None, available_positions=None,
+                frozen_lots=None, timestamp=None):
+    timestamp = timestamp or datetime(2026, 4, 1, 10)
+    positions = dict(positions or {})
+    entry_prices = {
+        symbol: 100.0 for symbol in positions
+    }
+    trades = []
+    order_events = []
+    rejected_orders = []
+    new_cash = execute_actions(
+        actions=actions,
+        market_data={"600519.SH": _row(100.0)},
+        timestamp=timestamp,
+        cash=cash,
+        positions=positions,
+        entry_prices=entry_prices,
+        trades=trades,
+        t_plus_one_enabled=True,
+        available_positions=dict(available_positions or {}),
+        frozen_lots=dict(frozen_lots or {}),
+        rejected_orders=rejected_orders,
+        lot_size=100,
+        order_events=order_events,
+        transaction_cost_profile=ASHARE_TRANSACTION_COST_PROFILE,
+    )
+    return {
+        "cash": new_cash,
+        "positions": positions,
+        "trades": trades,
+        "order_events": order_events,
+        "rejected_orders": rejected_orders,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Deterministic A-share transaction-cost calculation
+# ---------------------------------------------------------------------------
+
+def test_ashare_buy_costs_use_adverse_tick_rounding_and_minimum_commission():
+    costs = calculate_transaction_costs(
+        side="buy",
+        reference_price=100.0,
+        shares=100,
+        transaction_cost_profile=ASHARE_TRANSACTION_COST_PROFILE,
+    )
+
+    assert costs == {
+        "reference_price": 100.0,
+        "price": 100.05,
+        "gross_value": 10005.0,
+        "slippage_amount": 5.0,
+        "commission": 5.0,
+        "stamp_duty": 0.0,
+        "transfer_fee": 0.1,
+        "total_fees": 5.1,
+        "net_cash_impact": -10010.1,
+    }
+
+
+def test_ashare_sell_costs_include_stamp_duty_and_two_sided_transfer_fee():
+    costs = calculate_transaction_costs(
+        side="sell",
+        reference_price=100.0,
+        shares=100,
+        transaction_cost_profile=ASHARE_TRANSACTION_COST_PROFILE,
+    )
+
+    assert costs == {
+        "reference_price": 100.0,
+        "price": 99.95,
+        "gross_value": 9995.0,
+        "slippage_amount": 5.0,
+        "commission": 5.0,
+        "stamp_duty": 5.0,
+        "transfer_fee": 0.1,
+        "total_fees": 10.1,
+        "net_cash_impact": 9984.9,
+    }
+
+
+def test_ashare_costed_buy_checks_fees_before_filling():
+    rejected = _run_ashare(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+        cash=10005.0,
+    )
+    assert rejected["cash"] == 10005.0
+    assert rejected["positions"] == {}
+    assert rejected["trades"] == []
+    assert rejected["order_events"][-1]["reason"] == "insufficient_cash_for_lot"
+    assert rejected["order_events"][-1]["commission"] == 0.0
+
+    filled = _run_ashare(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+        cash=10010.1,
+    )
+    assert filled["cash"] == pytest.approx(0.0)
+    assert filled["positions"] == {"600519.SH": 100}
+    assert filled["trades"][0]["net_cash_impact"] == -10010.1
+
+
+def test_ashare_t1_partial_fill_charges_only_filled_quantity():
+    result = _run_ashare(
+        [{"symbol": "600519.SH", "action": "sell", "shares": 200}],
+        cash=0.0,
+        positions={"600519.SH": 200},
+        available_positions={"600519.SH": 100},
+        frozen_lots={
+            "600519.SH": [{"quantity": 100, "buy_date": datetime(2026, 4, 1).date()}]
+        },
+    )
+
+    assert result["trades"][0]["shares"] == 100
+    assert result["trades"][0]["total_fees"] == 10.1
+    assert result["cash"] == pytest.approx(9984.9)
+    assert result["order_events"][-1]["status"] == "partial"
+
+
+def test_portfolio_manager_accumulates_native_transaction_cost_totals():
+    pm = bha.PortfolioManager(
+        20000,
+        allowed_symbols=["600519.SH"],
+        t_plus_one_enabled=True,
+        lot_size=100,
+        transaction_cost_profile=ASHARE_TRANSACTION_COST_PROFILE,
+    )
+    pm.execute_actions(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+        {"600519.SH": _row(100.0)},
+        datetime(2026, 4, 1, 10),
+    )
+
+    assert pm.transaction_cost_totals == {
+        "gross_value": 10005.0,
+        "slippage_amount": 5.0,
+        "commission": 5.0,
+        "stamp_duty": 0.0,
+        "transfer_fee": 0.1,
+        "total_fees": 5.1,
+    }
 
 
 # ---------------------------------------------------------------------------

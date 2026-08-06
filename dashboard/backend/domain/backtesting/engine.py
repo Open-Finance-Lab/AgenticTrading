@@ -616,6 +616,10 @@ class HourlyBacktester:
             "reporting_currency": profile.reporting_currency,
             "lot_size": profile.lot_size,
         }
+        if profile.transaction_cost_profile is not None:
+            metadata["transaction_cost_profile"] = (
+                profile.transaction_cost_profile.to_metadata()
+            )
         if self.data_source == IFIND_ASHARE:
             metadata.update(
                 {
@@ -680,6 +684,9 @@ class HourlyBacktester:
         if self.pipeline is not None:
             meta["final_pipeline"] = self.pipeline
         if self.data_source == IFIND_ASHARE:
+            cost_totals = dict(getattr(self, "transaction_cost_totals", {}) or {})
+            if cost_totals:
+                meta["transaction_cost_totals"] = cost_totals
             rejected = list(getattr(self, "rejected_orders", []) or [])
             if rejected:
                 # Count first, sample second: a consumer must be able to tell
@@ -863,6 +870,7 @@ class HourlyBacktester:
             allowed_symbols=self.symbols,
             t_plus_one_enabled=self.profile.t_plus_one_enabled,
             lot_size=self.profile.lot_size,
+            transaction_cost_profile=self.profile.transaction_cost_profile,
         )
         _decision_steps, post_trade_steps = split_pipeline(self.pipeline)
         if post_trade_steps:
@@ -1116,6 +1124,7 @@ class HourlyBacktester:
         self.order_events = self._serialize_order_events(
             _unfilled_order_events(manager.order_events)
         )
+        self.transaction_cost_totals = dict(manager.transaction_cost_totals)
         db.insert_run(
             run_id=run_id,
             session_id=self.session_id,

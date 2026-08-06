@@ -82,6 +82,7 @@ class PortfolioManager:
         allowed_symbols: Optional[List[str]] = None,
         t_plus_one_enabled: bool = False,
         lot_size: int = 1,
+        transaction_cost_profile=None,
     ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
@@ -96,6 +97,15 @@ class PortfolioManager:
         self._order_event_repeats = {}
         self.t_plus_one_enabled = t_plus_one_enabled
         self.lot_size = lot_size
+        self.transaction_cost_profile = transaction_cost_profile
+        self.transaction_cost_totals = {
+            "gross_value": 0.0,
+            "slippage_amount": 0.0,
+            "commission": 0.0,
+            "stamp_duty": 0.0,
+            "transfer_fee": 0.0,
+            "total_fees": 0.0,
+        }
         self.available_positions = {}
         self.frozen_lots = {}
         self.rejected_orders = []
@@ -755,6 +765,7 @@ class PortfolioManager:
     
     def execute_actions(self, actions: List[Dict], market_data: Dict, timestamp: datetime):
         """Execute trading decisions."""
+        trades_before = len(self.trades)
         self.cash = _execute_actions(
             actions=actions,
             market_data=market_data,
@@ -770,7 +781,11 @@ class PortfolioManager:
             lot_size=self.lot_size,
             order_events=self.order_events,
             order_event_repeats=self._order_event_repeats,
+            transaction_cost_profile=self.transaction_cost_profile,
         )
+        for trade in self.trades[trades_before:]:
+            for field in self.transaction_cost_totals:
+                self.transaction_cost_totals[field] += float(trade.get(field, 0.0) or 0.0)
     
     def update_equity(self, market_data: Dict, price_cache: Dict = None, timestamp = None):
         """Update equity snapshot using real data or forward-filled prices.
