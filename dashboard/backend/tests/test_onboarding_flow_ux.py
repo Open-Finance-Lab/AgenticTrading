@@ -13,7 +13,6 @@ from pathlib import Path
 
 from dashboard.backend.api.routers.backtests import MAX_BACKTEST_DAYS
 from dashboard.backend.tests._frontend_source import (
-    APP_JS,
     STYLES,
     css_blocks,
     fn_body,

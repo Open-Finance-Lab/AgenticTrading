@@ -1202,7 +1202,13 @@ def test_service_layer_rejects_an_unwhitelisted_category():
     is read back out on the unauthenticated /api/v1/agents/builtin listing, so an
     internal caller writing junk here would publish it.
     """
-    from dashboard.backend.domain.agents.service import agent_service
+    # Module form, not ``from ... import agent_service``: line 19 already imports
+    # this module as a monkeypatch seam, and mixing the two forms is the
+    # inconsistency py/import-and-import-from flags. The alias is resolved here
+    # rather than at each call site only to keep the body below unchanged.
+    import dashboard.backend.domain.agents.service as agent_service_module
+
+    agent_service = agent_service_module.agent_service
 
     with pytest.raises(ValueError, match="unknown category"):
         agent_service.create_agent(
