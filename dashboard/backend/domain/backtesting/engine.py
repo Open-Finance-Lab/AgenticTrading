@@ -323,7 +323,31 @@ class HourlyBacktester:
                 "value": value,
                 "reason": trade.get("reason", ""),
             }
-            for field in ("native_price", "native_value", "fx_rate"):
+            for field in (
+                "reference_price",
+                "gross_value",
+                "slippage_amount",
+                "commission",
+                "stamp_duty",
+                "transfer_fee",
+                "total_fees",
+                "net_cash_impact",
+            ):
+                if field in trade:
+                    record[field] = float(trade[field])
+            for field in (
+                "native_price",
+                "native_reference_price",
+                "native_value",
+                "native_gross_value",
+                "native_slippage_amount",
+                "native_commission",
+                "native_stamp_duty",
+                "native_transfer_fee",
+                "native_total_fees",
+                "native_net_cash_impact",
+                "fx_rate",
+            ):
                 if field in trade:
                     record[field] = float(trade[field])
             serialized.append(record)
@@ -375,9 +399,25 @@ class HourlyBacktester:
                     record[field] = value.item()
             for field in (
                 "price",
+                "reference_price",
                 "executed_value",
+                "gross_value",
+                "slippage_amount",
+                "commission",
+                "stamp_duty",
+                "transfer_fee",
+                "total_fees",
+                "net_cash_impact",
                 "native_price",
+                "native_reference_price",
                 "native_value",
+                "native_gross_value",
+                "native_slippage_amount",
+                "native_commission",
+                "native_stamp_duty",
+                "native_transfer_fee",
+                "native_total_fees",
+                "native_net_cash_impact",
                 "fx_rate",
             ):
                 if field in record:

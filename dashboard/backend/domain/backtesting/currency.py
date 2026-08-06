@@ -158,6 +158,26 @@ class CurrencyContext:
             or result.get("value")
             or quantity * native_price
         )
+        monetary_fields = (
+            "price",
+            "reference_price",
+            "cost",
+            "proceeds",
+            "value",
+            "gross_value",
+            "slippage_amount",
+            "commission",
+            "stamp_duty",
+            "transfer_fee",
+            "total_fees",
+            "net_cash_impact",
+        )
+        for field in monetary_fields:
+            if field not in result:
+                continue
+            native_amount = float(result[field] or 0)
+            result[f"native_{field}"] = native_amount
+            result[field] = native_amount / rate
         reporting_value = native_value / rate
         result.update(
             {
@@ -168,10 +188,6 @@ class CurrencyContext:
                 "fx_rate": rate,
             }
         )
-        if "cost" in result:
-            result["cost"] = reporting_value
-        if "proceeds" in result:
-            result["proceeds"] = reporting_value
         return result
 
     def reporting_order_event(self, event: Mapping[str, object]) -> dict:
@@ -185,6 +201,24 @@ class CurrencyContext:
         # A rejected order executes no value. Never derive this field from the
         # requested quantity, because that would make an unfilled order look paid.
         native_value = float(result.get("executed_value") or 0)
+        monetary_fields = (
+            "price",
+            "reference_price",
+            "executed_value",
+            "gross_value",
+            "slippage_amount",
+            "commission",
+            "stamp_duty",
+            "transfer_fee",
+            "total_fees",
+            "net_cash_impact",
+        )
+        for field in monetary_fields:
+            if field not in result:
+                continue
+            native_amount = float(result[field] or 0)
+            result[f"native_{field}"] = native_amount
+            result[field] = native_amount / rate
         result.update(
             {
                 "price": native_price / rate,
