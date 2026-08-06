@@ -7397,6 +7397,11 @@ function navigateToPage(page, options = {}) {
             // set on one visit would leak into the next, unrelated visit made
             // through the plain nav tab, the most common entry path.
             marketplaceCategoryFilter = MARKET_LABELS[options.communityCategory] ? options.communityCategory : 'all';
+            // The vendor chip resets for the same reason, and nothing rides in
+            // via options: a vendor left selected on one visit would AND with an
+            // incoming category and strand the empty-shelf deep links on an
+            // empty grid.
+            marketplaceVendorFilter = 'all';
             if (communityView) communityView.style.display = 'block';
             loadMarketplace();
         } else if (page === 'account') {
