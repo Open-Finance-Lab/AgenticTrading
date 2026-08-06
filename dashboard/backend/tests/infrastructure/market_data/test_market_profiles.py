@@ -138,6 +138,16 @@ def test_t_plus_one_is_enabled_only_for_ifind_ashares():
     )
 
 
+def test_lot_size_is_100_only_for_ifind_ashares():
+    assert get_market_profile(ALPACA).lot_size == 1
+    assert get_market_profile(VNPY_SIMULATION).lot_size == 1
+    assert get_market_profile(IFIND_ASHARE, A_SHARE_DEMO_6).lot_size == 100
+    assert (
+        get_market_profile(IFIND_ASHARE, CSI300_SAMPLE_20_2026H2).lot_size
+        == 100
+    )
+
+
 @pytest.mark.parametrize(
     ("universe", "requested", "expected"),
     [

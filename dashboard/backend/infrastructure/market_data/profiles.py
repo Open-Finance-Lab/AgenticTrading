@@ -66,6 +66,7 @@ class MarketProfile:
     native_currency: str
     reporting_currency: str
     t_plus_one_enabled: bool
+    lot_size: int = 1
 
     @property
     def decision_source(self) -> str:
@@ -131,6 +132,7 @@ _MARKET_PROFILES = {
         native_currency="CNY",
         reporting_currency="USD",
         t_plus_one_enabled=True,
+        lot_size=100,
     ),
     (IFIND_ASHARE, CSI300_SAMPLE_20_2026H2): MarketProfile(
         data_source=IFIND_ASHARE,
@@ -149,6 +151,7 @@ _MARKET_PROFILES = {
         native_currency="CNY",
         reporting_currency="USD",
         t_plus_one_enabled=True,
+        lot_size=100,
     ),
 }
 

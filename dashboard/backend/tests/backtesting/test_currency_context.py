@@ -76,6 +76,42 @@ def test_reporting_records_preserve_native_equity_and_trade_values():
     assert trade["fx_rate"] == pytest.approx(7.0)
 
 
+def test_reporting_order_event_converts_only_executed_value():
+    context = make_context()
+    timestamp = datetime(2026, 4, 1, 10, 30, tzinfo=CN)
+
+    filled = context.reporting_order_event({
+        "timestamp": timestamp,
+        "symbol": "600519.SH",
+        "side": "BUY",
+        "requested_shares": 100,
+        "executed_shares": 100,
+        "price": 700,
+        "executed_value": 70_000,
+        "status": "filled",
+        "reason": "",
+    })
+    rejected = context.reporting_order_event({
+        "timestamp": timestamp,
+        "symbol": "600519.SH",
+        "side": "BUY",
+        "requested_shares": 100,
+        "executed_shares": 0,
+        "price": 700,
+        "executed_value": 0,
+        "status": "rejected",
+        "reason": "insufficient_cash_for_lot",
+    })
+
+    assert filled["price"] == pytest.approx(100)
+    assert filled["executed_value"] == pytest.approx(10_000)
+    assert filled["native_price"] == pytest.approx(700)
+    assert filled["native_value"] == pytest.approx(70_000)
+    assert filled["fx_rate"] == pytest.approx(7.0)
+    assert rejected["executed_value"] == 0
+    assert rejected["native_value"] == 0
+
+
 def test_identity_context_keeps_legacy_usd_schema():
     context = CurrencyContext.identity("USD", "US/Eastern")
     record = {
@@ -87,6 +123,13 @@ def test_identity_context_keeps_legacy_usd_schema():
 
     assert context.reporting_equity_record(record) == record
     assert context.rate_at(date(2026, 4, 1)) == 1.0
+
+    order_event = {
+        "timestamp": datetime(2026, 4, 1),
+        "price": 100,
+        "executed_value": 10_000,
+    }
+    assert context.reporting_order_event(order_event) == order_event
 
 
 def test_currency_context_is_hashable():
