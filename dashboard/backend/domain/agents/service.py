@@ -436,6 +436,61 @@ class AgentService:
             agent = self.agents.update_agent(agent["agent_id"], pipeline=pipeline) or agent
         return self.attach_equity_sparklines([self.agent_with_stats(agent)])[0]
 
+    def duplicate_agent(
+        self,
+        *,
+        agent_id: str,
+        model_name: str,
+        name: Optional[str] = None,
+        owner_user_id: Optional[int],
+        owner_browser_session: Optional[str],
+    ) -> Dict[str, Any]:
+        """Copy an existing built-in agent onto a different model.
+
+        The same two steps as ``clone_marketplace_template`` -- create, then
+        write the pipeline -- so the copy carries the strategy, not just the
+        name. Built-in only: ``create_agent`` mints a one-time plaintext API key
+        for external agents, and duplicating one would open a credential-issuing
+        path this hook has no reason to have.
+
+        The generated name collides freely (two copies onto DeepSeek both read
+        ``X copy``). Names are not unique anywhere else in this product, and
+        de-duplicating would mean a lookup for a cosmetic gain.
+        """
+        source = self.agents.get_agent(agent_id)
+        if not source:
+            raise AgentNotFoundError()
+        if (source.get("agent_type") or "builtin") != "builtin":
+            raise AgentServiceError("Only built-in agents can be duplicated")
+
+        resolved_name = (name or f"{source.get('name') or 'Agent'} copy").strip()
+        pipeline = source.get("pipeline")
+        has_own_pipeline = isinstance(pipeline, list) and bool(pipeline)
+        runtime_type = normalize_runtime_type(source.get("runtime_type"))
+        runtime_config = normalize_runtime_config(
+            runtime_type, source.get("runtime_config") or {}
+        )
+        agent = self.create_agent(
+            name=resolved_name,
+            model_name=(model_name or "").strip()
+            or str(source.get("model_name") or "local-model"),
+            owner_user_id=owner_user_id,
+            owner_browser_session=owner_browser_session,
+            agent_type="builtin",
+            description=source.get("description"),
+            runtime_type=runtime_type,
+            runtime_config=runtime_config,
+            seed_default_pipeline=(
+                runtime_type == PIPELINE_RUNTIME_TYPE and not has_own_pipeline
+            ),
+            # Lenient, matching clone_marketplace_template: a stored legacy
+            # category must stamp None rather than reject the duplicate.
+            category=normalize_category(source.get("category")),
+        )
+        if has_own_pipeline:
+            agent = self.agents.update_agent(agent["agent_id"], pipeline=pipeline) or agent
+        return self.attach_equity_sparklines([self.agent_with_stats(agent)])[0]
+
     def list_builtin_agents_with_stats(self) -> List[Dict[str, Any]]:
         """List all built-in agents (platform-wide) enriched with run stats.
 

@@ -1,0 +1,170 @@
+"""POST /api/v1/agents/{agent_id}/duplicate -- the "Run on another model" hook.
+
+Copies an existing built-in agent onto a different model, server-side so the
+pipeline copy and the ownership check are one path. It deliberately does NOT
+start a backtest: auto-firing would spend LLM credits on a click the user did
+not frame as "run".
+"""
+
+import uuid
+
+import pytest
+from cryptography.fernet import Fernet
+from fastapi.testclient import TestClient
+
+from dashboard.backend.app import app
+from dashboard.backend.domain.agents.credential_store import AgentCredentialStore
+
+
+@pytest.fixture
+def client(tmp_path, monkeypatch):
+    import dashboard.backend.domain.agents.repository as agent_store_module
+    import dashboard.backend.api.routers.agents as agents_api
+    import dashboard.backend.domain.agents.service as agent_service_module
+    import dashboard.backend.database as db_module
+    import dashboard.backend.domain.brokers.repository as broker_repository
+
+    db_path = tmp_path / "test.db"
+    test_agents = agent_store_module.AgentStore(db_path=db_path)
+    test_credentials = AgentCredentialStore(db_path=db_path)
+    test_db = db_module.BacktestDatabase(db_path=db_path)
+    monkeypatch.setenv(
+        broker_repository._KEY_ENV_VAR, Fernet.generate_key().decode()
+    )
+    monkeypatch.setattr(broker_repository, "_fernet_instance", None)
+    monkeypatch.setattr(agent_store_module, "agent_store", test_agents)
+    monkeypatch.setattr(agents_api.agent_service, "agents", test_agents)
+    monkeypatch.setattr(agents_api.agent_service, "db", test_db)
+    monkeypatch.setattr(agents_api, "agent_credential_store", test_credentials)
+    # The service retires runtime-owned credentials on a runtime switch, so it
+    # needs the same store the router writes through.
+    monkeypatch.setattr(
+        agent_service_module, "agent_credential_store", test_credentials
+    )
+    monkeypatch.setattr(db_module, "db", test_db)
+    agents_api._credential_rate_limiter.reset()
+    return TestClient(app)
+
+
+def _create_builtin(client, headers, *, model="anthropic/claude-haiku-4-5"):
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Source Agent",
+            "model_name": model,
+            "agent_type": "builtin",
+            "description": "The original.",
+        },
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    return created.json()["agent"]
+
+
+def test_duplicate_copies_the_agent_onto_a_new_model(client):
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    source = _create_builtin(client, headers)
+
+    response = client.post(
+        f"/api/v1/agents/{source['agent_id']}/duplicate",
+        json={"model_name": "deepseek/deepseek-v4-pro", "name": "Source Agent (DeepSeek)"},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    copy = response.json()["agent"]
+    assert copy["agent_id"] != source["agent_id"]
+    assert copy["model_name"] == "deepseek/deepseek-v4-pro"
+    assert copy["name"] == "Source Agent (DeepSeek)"
+    assert copy["description"] == "The original."
+
+
+def test_duplicate_copies_the_pipeline(client):
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    source = _create_builtin(client, headers)
+    pipeline = [
+        {
+            "id": "sub_custom",
+            "presetKey": "simple_instruction",
+            "label": "Trading instruction",
+            "prompt": "Buy only what you would hold for a week.",
+            "outputFormat": "JSON: { \"orders\": [] }",
+        }
+    ]
+    patched = client.patch(
+        f"/api/v1/agents/{source['agent_id']}",
+        json={"pipeline": pipeline},
+        headers=headers,
+    )
+    assert patched.status_code == 200, patched.text
+
+    response = client.post(
+        f"/api/v1/agents/{source['agent_id']}/duplicate",
+        json={"model_name": "qwen/qwen3.7-plus"},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    copy_id = response.json()["agent"]["agent_id"]
+    fetched = client.get(f"/api/v1/agents/{copy_id}", headers=headers).json()["agent"]
+    assert [step["prompt"] for step in fetched["pipeline"]] == [
+        "Buy only what you would hold for a week."
+    ]
+
+
+def test_duplicate_defaults_the_name(client):
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    source = _create_builtin(client, headers)
+    response = client.post(
+        f"/api/v1/agents/{source['agent_id']}/duplicate",
+        json={"model_name": "openai/gpt-5.5"},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["agent"]["name"] == "Source Agent copy"
+
+
+def test_duplicate_rejects_another_owners_agent(client):
+    owner = {"X-Session-Id": str(uuid.uuid4())}
+    attacker = {"X-Session-Id": str(uuid.uuid4())}
+    source = _create_builtin(client, owner)
+    response = client.post(
+        f"/api/v1/agents/{source['agent_id']}/duplicate",
+        json={"model_name": "openai/gpt-5.5"},
+        headers=attacker,
+    )
+    assert response.status_code in (403, 404), response.text
+
+
+def test_duplicate_rejects_an_unknown_agent(client):
+    response = client.post(
+        f"/api/v1/agents/{uuid.uuid4()}/duplicate",
+        json={"model_name": "openai/gpt-5.5"},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert response.status_code == 404, response.text
+
+
+def test_duplicate_rejects_an_external_agent(client):
+    """External agents mint an API key on create -- not a surface this hook opens."""
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Connected", "model_name": "local-model", "agent_type": "external"},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    response = client.post(
+        f"/api/v1/agents/{created.json()['agent']['agent_id']}/duplicate",
+        json={"model_name": "openai/gpt-5.5"},
+        headers=headers,
+    )
+    assert response.status_code == 400, response.text
+
+
+@pytest.mark.parametrize("body", [{}, {"model_name": ""}])
+def test_duplicate_requires_a_model_name(client, body):
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    source = _create_builtin(client, headers)
+    response = client.post(
+        f"/api/v1/agents/{source['agent_id']}/duplicate", json=body, headers=headers
+    )
+    assert response.status_code == 422, response.text
