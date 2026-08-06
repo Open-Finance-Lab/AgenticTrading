@@ -250,6 +250,20 @@ class DuplicateAgentBody(BaseModel):
     model_name: str = Field(min_length=1, max_length=100)
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
 
+    @field_validator("model_name")
+    @classmethod
+    def _reject_blank(cls, value: str) -> str:
+        # Same trap as UpdateAgentBody._reject_blank: ``min_length=1`` counts
+        # the raw length, so a whitespace-only value ("   ") passes it. Unlike
+        # CreateAgentBody.model_name (optional, coerces blank to
+        # "local-model" on purpose), this field is required -- the service's
+        # ``.strip() or source.get("model_name")`` fallback would otherwise
+        # silently reuse the source's own model, defeating the one thing this
+        # action does. Reject it as a 422 instead.
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
+
 
 @router.post("/marketplace/{template_id}/clone")
 def clone_marketplace_agent(

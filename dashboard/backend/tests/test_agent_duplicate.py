@@ -76,6 +76,9 @@ def test_duplicate_copies_the_agent_onto_a_new_model(client):
     assert copy["model_name"] == "deepseek/deepseek-v4-pro"
     assert copy["name"] == "Source Agent (DeepSeek)"
     assert copy["description"] == "The original."
+    # A duplicate never auto-launches a backtest -- the user lands on the copy
+    # with Run primed, not mid-run.
+    assert copy["run_count"] == 0 and copy["latest_run"] is None
 
 
 def test_duplicate_copies_the_pipeline(client):
@@ -108,6 +111,40 @@ def test_duplicate_copies_the_pipeline(client):
     assert [step["prompt"] for step in fetched["pipeline"]] == [
         "Buy only what you would hold for a week."
     ]
+
+
+def test_duplicate_copies_backtest_allocation_but_not_cash_allocation(client):
+    """The one thing a user does with a duplicate is compare its equity curve
+    against the source's -- different starting capital makes those curves
+    incomparable. ``backtest_allocation`` is simulated capital with no ledger
+    coupling, so it is safe to copy. ``cash_allocation`` IS a real ledger debit
+    (the route reserves only DEFAULT_AGENT_CASH_ALLOCATION for it) and must
+    stay un-copied."""
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={
+            "name": "Source Agent",
+            "model_name": "anthropic/claude-haiku-4-5",
+            "agent_type": "builtin",
+            "cash_allocation": 2500,
+            "backtest_allocation": 2000,
+        },
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    source = created.json()["agent"]
+    assert source["backtest_allocation"] == 2000
+
+    response = client.post(
+        f"/api/v1/agents/{source['agent_id']}/duplicate",
+        json={"model_name": "deepseek/deepseek-v4-pro"},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    copy = response.json()["agent"]
+    assert copy["backtest_allocation"] == 2000
+    assert copy["cash_allocation"] == 1000
 
 
 def test_duplicate_defaults_the_name(client):
@@ -160,7 +197,7 @@ def test_duplicate_rejects_an_external_agent(client):
     assert response.status_code == 400, response.text
 
 
-@pytest.mark.parametrize("body", [{}, {"model_name": ""}])
+@pytest.mark.parametrize("body", [{}, {"model_name": ""}, {"model_name": "   "}])
 def test_duplicate_requires_a_model_name(client, body):
     headers = {"X-Session-Id": str(uuid.uuid4())}
     source = _create_builtin(client, headers)

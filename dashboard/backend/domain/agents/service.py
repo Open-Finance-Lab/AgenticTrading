@@ -402,6 +402,7 @@ class AgentService:
         runtime_config: Dict[str, Any],
         category: Optional[str],
         pipeline: Optional[List[Dict[str, Any]]],
+        backtest_allocation: Optional[float] = None,
     ) -> Dict[str, Any]:
         """Create a built-in agent and, if the source carried its own pipeline,
         write it in -- the create-then-copy-the-pipeline-then-enrich tail shared
@@ -411,6 +412,14 @@ class AgentService:
         -- those resolutions differ genuinely (template vs. row, three-tier vs.
         two-tier model fallback, different name defaults) and stay put; only the
         mechanical creation sequence below is identical between them.
+
+        ``backtest_allocation`` is simulated capital with no ledger coupling
+        (validated only by ``ge=MIN_BACKTEST_INITIAL_CAPITAL,
+        le=MAX_BACKTEST_INITIAL_CAPITAL``), so it is safe to copy from a
+        source. ``cash_allocation`` is a real ledger debit and must NOT be
+        copied here -- ``create_agent`` below is deliberately not passed one,
+        so it falls back to ``DEFAULT_AGENT_CASH_ALLOCATION`` like any other
+        fresh agent.
         """
         has_own_pipeline = isinstance(pipeline, list) and bool(pipeline)
         agent = self.create_agent(
@@ -422,6 +431,7 @@ class AgentService:
             description=description,
             runtime_type=runtime_type,
             runtime_config=runtime_config,
+            backtest_allocation=backtest_allocation,
             # A source carrying its own pipeline overwrites the seed below, so
             # skip that write. A source WITHOUT one still needs the starter
             # instruction, or the copy lands with an empty Configure screen.
@@ -475,6 +485,8 @@ class AgentService:
             # and those must stamp None rather than reject the clone.
             category=normalize_category(template.get("category")),
             pipeline=template.get("pipeline"),
+            # A catalog template has no backtest allocation of its own.
+            backtest_allocation=None,
         )
 
     def duplicate_agent(
@@ -520,6 +532,11 @@ class AgentService:
             # category must stamp None rather than reject the duplicate.
             category=normalize_category(source.get("category")),
             pipeline=source.get("pipeline"),
+            # Copied (unlike cash_allocation -- see _create_builtin_copy's
+            # docstring) so the two agents' equity curves start from the same
+            # simulated capital and stay comparable. NULL on the source passes
+            # through as None rather than substituting a value.
+            backtest_allocation=source.get("backtest_allocation"),
         )
 
     def list_builtin_agents_with_stats(self) -> List[Dict[str, Any]]:
