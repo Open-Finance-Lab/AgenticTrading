@@ -99,6 +99,15 @@ class FakeSelect {
     }; });
     return matches;
   }
+  // A real <select>'s value setter silently resolves to '' when the assigned
+  // string matches no current <option>. Mirror that here so a future edit that
+  // sets .value before the matching option exists (e.g. reordering appendChild
+  // and the .value assignment) shows up as a blank value in this fake too,
+  // instead of the fake accepting any string unconditionally.
+  get value() { return this._value; }
+  set value(v) {
+    this._value = this.options.some((o) => o.value === v) ? v : '';
+  }
 }
 """
 
