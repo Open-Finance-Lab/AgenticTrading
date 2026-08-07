@@ -179,5 +179,5 @@ def test_slow_boot_notice_is_wired():
 
 def test_cache_busters_bumped():
     # Floor advances whenever app.js/styles.css change and their ?v= must ship.
-    assert "app.js?v=76" in APP_HTML
-    assert "styles.css?v=85" in APP_HTML
+    assert "app.js?v=77" in APP_HTML
+    assert "styles.css?v=86" in APP_HTML

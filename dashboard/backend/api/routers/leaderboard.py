@@ -8,11 +8,11 @@ module location moved.
 """
 
 from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from dashboard.backend.domain.leaderboard.service import (
-    LeaderboardFallbackError,
+    enqueue_daily_leaderboard_refresh,
     get_leaderboard,
-    refresh_daily_leaderboard,
     verify_daily_refresh_secret,
 )
 
@@ -51,15 +51,19 @@ def api_refresh_daily_leaderboard(
     force: bool = Query(default=False, description="Ignore the per-window refresh cache."),
     allow_fallback: bool = Query(
         default=False,
-        description="Allow publishing LLM entries that fell back to rule-based trading.",
+        description=(
+            "Admin-only: allow publishing LLM entries that fell back to rule-based "
+            "trading (bypasses the H6 integrity guard). Prefer leaving false."
+        ),
     ),
     x_leaderboard_refresh_secret: str | None = Header(default=None, alias="X-Leaderboard-Refresh-Secret"),
 ):
-    """Cron/admin hook: refresh the Daily Leaderboard for the last completed weekday.
+    """Cron/admin hook: enqueue a Daily Leaderboard refresh (non-blocking).
 
     Requires ``LEADERBOARD_DAILY_REFRESH_SECRET`` and the matching request header.
-    Used by ``dashboard/scripts/refresh_daily_leaderboard.py`` and the GitHub
-    Actions nightly workflow.
+    Returns **202 Accepted** immediately; model deploys run in a background
+    thread so Render/GitHub Actions HTTP timeouts cannot abort a multi-hour job.
+    Poll ``GET /api/v1/leaderboard?period=daily`` for ``daily_status``.
     """
     try:
         verify_daily_refresh_secret(x_leaderboard_refresh_secret)
@@ -69,14 +73,17 @@ def api_refresh_daily_leaderboard(
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
     try:
-        return refresh_daily_leaderboard(
+        payload = enqueue_daily_leaderboard_refresh(
             deploy_models=deploy_models,
             force_refresh=force,
             allow_fallback=allow_fallback,
         )
-    except LeaderboardFallbackError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to enqueue daily leaderboard refresh",
+        ) from None
+
+    return JSONResponse(status_code=202, content=payload)

@@ -8,7 +8,8 @@ Schedule nightly after US market close, e.g. via GitHub Actions or:
 
     python dashboard/scripts/refresh_daily_leaderboard.py --models
 
-Remote prod (Render) without shell access:
+Remote prod (Render) without shell access — enqueues a background refresh
+(HTTP 202); poll ``GET /api/v1/leaderboard?period=daily`` for progress:
 
     curl -X POST "$ATL_API/api/v1/leaderboard/daily/refresh?deploy_models=true" \\
       -H "X-Leaderboard-Refresh-Secret: $LEADERBOARD_DAILY_REFRESH_SECRET"
@@ -129,7 +130,7 @@ def _refresh_remote(*, deploy_models: bool, force: bool, allow_fallback: bool) -
             url,
             params=params,
             headers={"X-Leaderboard-Refresh-Secret": secret},
-            timeout=3600.0,
+            timeout=120.0,
         )
     except httpx.HTTPError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -138,6 +139,8 @@ def _refresh_remote(*, deploy_models: bool, force: bool, allow_fallback: bool) -
         print(f"ERROR {resp.status_code}: {resp.text}", file=sys.stderr)
         return 1
     print(resp.text)
+    if resp.status_code == 202:
+        print("Accepted (background). Poll GET /api/v1/leaderboard?period=daily")
     return 0
 
 

@@ -136,6 +136,7 @@ def _save_daily_refresh_state(state: Dict[str, Any]) -> None:
         try:
             os.unlink(tmp)
         except OSError:
+            # Best-effort cleanup of the temp file; the original error is re-raised.
             pass
         raise
 
@@ -316,6 +317,50 @@ def maybe_schedule_daily_leaderboard_refresh(
         )
         thread.start()
         return True
+
+
+def enqueue_daily_leaderboard_refresh(
+    *,
+    deploy_models: bool = True,
+    force_refresh: bool = False,
+    allow_fallback: bool = False,
+) -> Dict[str, Any]:
+    """Cron/API entrypoint: accept a refresh and run it in a background thread.
+
+    Never blocks on model deploys — callers (GitHub Actions curl, ``--remote``)
+    get an immediate acknowledgement. Progress is visible via
+    ``GET /api/v1/leaderboard?period=daily`` (``daily_status``).
+    """
+    config = resolve_leaderboard_config("daily")
+    started = maybe_schedule_daily_leaderboard_refresh(
+        deploy_models=deploy_models,
+        force_refresh=force_refresh,
+        allow_fallback=allow_fallback,
+    )
+    status = _daily_models_status(config)
+    # The worker flips the flag under the lock; treat a just-started thread as
+    # in-progress even if the status snapshot raced ahead of the assignment.
+    in_progress = bool(status.get("refresh_in_progress") or started)
+    return {
+        "accepted": True,
+        "started": started,
+        "refresh_in_progress": in_progress,
+        "window": {
+            "start_date": config["start_date"],
+            "end_date": config["end_date"],
+            "label": daily_window_label(config["start_date"], config["end_date"]),
+        },
+        "daily_status": status,
+        "message": (
+            "Daily leaderboard refresh started in the background."
+            if started
+            else (
+                "Daily leaderboard refresh already in progress."
+                if in_progress
+                else "No new daily refresh scheduled (window already satisfied)."
+            )
+        ),
+    }
 
 
 def verify_daily_refresh_secret(provided: Optional[str]) -> None:

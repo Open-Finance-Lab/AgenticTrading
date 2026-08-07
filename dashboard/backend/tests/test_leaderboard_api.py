@@ -347,15 +347,68 @@ def test_daily_refresh_endpoint_requires_secret(client, monkeypatch):
     assert resp.status_code == 401
 
     monkeypatch.setattr(
-        "dashboard.backend.api.routers.leaderboard.refresh_daily_leaderboard",
-        lambda **_: {"skipped": False, "window": {"start_date": "2026-07-14"}},
+        "dashboard.backend.api.routers.leaderboard.enqueue_daily_leaderboard_refresh",
+        lambda **_: {
+            "accepted": True,
+            "started": True,
+            "refresh_in_progress": True,
+            "window": {"start_date": "2026-07-14", "end_date": "2026-07-14", "label": "2026-07-14"},
+            "message": "Daily leaderboard refresh started in the background.",
+        },
     )
     ok = client.post(
         "/api/v1/leaderboard/daily/refresh?deploy_models=false",
         headers={"X-Leaderboard-Refresh-Secret": "cron-secret"},
     )
-    assert ok.status_code == 200
-    assert ok.json()["window"]["start_date"] == "2026-07-14"
+    assert ok.status_code == 202
+    body = ok.json()
+    assert body["accepted"] is True
+    assert body["started"] is True
+    assert body["window"]["start_date"] == "2026-07-14"
+
+
+def test_enqueue_daily_refresh_returns_immediately(monkeypatch):
+    """Cron path must schedule a thread, not block on deploy_model_run."""
+    day = "2026-07-14"
+    monkeypatch.setattr(lb_service, "daily_window_dates", lambda as_of=None: (day, day))
+    monkeypatch.setattr(lb_service, "_daily_refresh_running", False)
+    monkeypatch.setattr(
+        lb_service,
+        "_daily_models_status",
+        lambda config: {
+            "trading_date": day,
+            "models_total": 1,
+            "models_cached": 0,
+            "models_pending": 1,
+            "pending_entry_ids": ["m1"],
+            "refresh_in_progress": False,
+        },
+    )
+
+    called = {}
+
+    def _bg(**kwargs):
+        called["kwargs"] = kwargs
+
+    monkeypatch.setattr(lb_service, "_run_daily_refresh_background", _bg)
+
+    # Avoid actually starting a real Thread; invoke target inline via stub.
+    class _ImmediateThread:
+        def __init__(self, target=None, kwargs=None, **_):
+            self._target = target
+            self._kwargs = kwargs or {}
+
+        def start(self):
+            self._target(**self._kwargs)
+
+    monkeypatch.setattr(lb_service.threading, "Thread", _ImmediateThread)
+
+    payload = lb_service.enqueue_daily_leaderboard_refresh(
+        deploy_models=True, force_refresh=False, allow_fallback=False
+    )
+    assert payload["accepted"] is True
+    assert payload["started"] is True
+    assert called["kwargs"]["deploy_models"] is True
 
 
 def test_daily_window_dates_on_saturday_shows_friday():
