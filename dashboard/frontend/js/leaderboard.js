@@ -20,6 +20,10 @@ const selectedBenchmarkLabel = 'SPY';
 /** Expanded groups in the Show-on-Chart picker: model | baseline | index */
 let curvePickerExpanded = new Set();
 let curvePickerOutsideBound = false;
+// Max pixel distance from a data point before hover emphasis clears. Without
+// this, Chart.js `nearest` + `intersect:false` keeps a curve selected anywhere
+// inside the canvas — including empty plot space and the label gutter.
+const HOVER_HIT_RADIUS_PX = 16;
 
 // Stable per-series style presets. `kind` drives width/opacity hierarchy:
 //   benchmark -> neutral gray, dotted / dash-dot, understated
@@ -677,12 +681,44 @@ function selectLeaderboardTeam(entryId) {
   renderEquityCurvesChart();
 }
 
-function getEmphasisLabel(orderedEntries) {
+function getEmphasisLabel(_orderedEntries) {
+  // Only an explicit row/detail selection stays emphasized when the pointer is
+  // idle. Do not auto-emphasize the current leader — idle view shows the whole
+  // figure with every visible curve at its kind weight.
   if (selectedLeaderboardEntry) {
     return selectedLeaderboardEntry.model || selectedLeaderboardEntry.team_name;
   }
-  const leadTeam = orderedEntries.find((e) => getEntryKind(e) === 'team');
-  return leadTeam ? (leadTeam.model || leadTeam.team_name) : null;
+  return null;
+}
+
+/** Dataset under the pointer only when inside the plot and within hit radius. */
+function resolveHoveredDatasetIndex(chart, event) {
+  const x = event?.x;
+  const y = event?.y;
+  if (x == null || y == null) return null;
+  const area = chart.chartArea;
+  if (!area) return null;
+  if (x < area.left || x > area.right || y < area.top || y > area.bottom) {
+    return null;
+  }
+  const hits = chart.getElementsAtEventForMode(
+    event,
+    'nearest',
+    { intersect: false, axis: 'xy' },
+    true,
+  );
+  if (!hits.length) return null;
+  const el = hits[0].element;
+  if (!el || el.x == null || el.y == null) return null;
+  if (Math.hypot(el.x - x, el.y - y) > HOVER_HIT_RADIUS_PX) return null;
+  return hits[0].datasetIndex;
+}
+
+function clearChartHoverEmphasis() {
+  if (hoveredDatasetIndex == null || !equityCurvesChartInstance) return;
+  hoveredDatasetIndex = null;
+  styleDatasets(equityCurvesChartInstance);
+  equityCurvesChartInstance.update('none');
 }
 
 function styleDatasets(chart) {
@@ -710,7 +746,7 @@ function styleDatasets(chart) {
   });
 }
 
-// Subtle glow only on the emphasized (selected/leading) curve.
+// Subtle glow only on the explicitly selected curve (row click), not on hover.
 const selectedGlowPlugin = {
   id: 'selectedGlow',
   beforeDatasetDraw(chart, args) {
@@ -905,11 +941,11 @@ async function renderEquityCurvesChart() {
       layout: { padding: { right: 120, top: 8 } },
       // 'nearest' across BOTH axes (no axis:'x') so hover targets the single
       // line under the cursor instead of every series sharing that x-position.
-      interaction: { mode: 'nearest', intersect: false },
+      // Proximity is enforced in onHover / tooltip.filter — bare intersect:false
+      // would keep a curve selected across empty plot space.
+      interaction: { mode: 'nearest', intersect: false, axis: 'xy' },
       onHover(event, _els, chart) {
-        let idx = null;
-        const hits = chart.getElementsAtEventForMode(event, 'nearest', { intersect: false }, true);
-        if (hits.length) idx = hits[0].datasetIndex;
+        const idx = resolveHoveredDatasetIndex(chart, event);
         if (idx !== hoveredDatasetIndex) {
           hoveredDatasetIndex = idx;
           styleDatasets(chart);
@@ -921,6 +957,7 @@ async function renderEquityCurvesChart() {
         tooltip: {
           mode: 'nearest',
           intersect: false,
+          axis: 'xy',
           position: 'nearest',
           backgroundColor: 'rgba(15, 23, 42, 0.96)',
           borderColor: 'rgba(148, 163, 184, 0.25)',
@@ -929,6 +966,11 @@ async function renderEquityCurvesChart() {
           bodyColor: '#cbd5e1',
           padding: 10,
           displayColors: false,
+          // onHover runs before tooltip plugins; only show a tip while a curve
+          // is actually under the pointer (same gate as dimming).
+          filter(item) {
+            return hoveredDatasetIndex != null && item.datasetIndex === hoveredDatasetIndex;
+          },
           callbacks: {
             title(items) {
               if (!items.length) return '';
@@ -1003,13 +1045,7 @@ async function renderEquityCurvesChart() {
   equityCurvesChartInstance.update('none');
 
   if (!canvasLeaveBound) {
-    canvas.addEventListener('mouseleave', () => {
-      if (hoveredDatasetIndex != null && equityCurvesChartInstance) {
-        hoveredDatasetIndex = null;
-        styleDatasets(equityCurvesChartInstance);
-        equityCurvesChartInstance.update('none');
-      }
-    });
+    canvas.addEventListener('mouseleave', clearChartHoverEmphasis);
     canvasLeaveBound = true;
   }
 
