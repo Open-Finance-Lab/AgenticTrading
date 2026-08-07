@@ -35,9 +35,9 @@
             marketplace: { page: 'community' },
             playground: { page: 'playground', playgroundTab: 'agents' },
             'my-algo': { page: 'playground', playgroundTab: 'agents' },
-            contest: { page: 'competition', competitionTab: 'daily' },
+            contest: { page: 'competition', competitionTab: 'leaderboard' },
             daily: { page: 'competition', competitionTab: 'daily' },
-            competition: { page: 'competition', competitionTab: 'daily' },
+            competition: { page: 'competition', competitionTab: 'leaderboard' },
             leaderboard: { page: 'competition', competitionTab: 'leaderboard' },
             participants: { page: 'competition', competitionTab: 'participants' },
             about: { page: 'competition', competitionTab: 'about' },
@@ -88,7 +88,7 @@
         html.setAttribute('data-nav-boot', '');
         html.setAttribute('data-nav-page', nav.page);
         html.setAttribute('data-nav-playground-tab', nav.playgroundTab || 'agents');
-        html.setAttribute('data-nav-competition-tab', nav.competitionTab || 'daily');
+        html.setAttribute('data-nav-competition-tab', nav.competitionTab || 'leaderboard');
         // Warm the API before the JS pipeline even finishes downloading: on
         // Render's free tier the first request may pay a 30-60s cold start,
         // so every second saved here comes straight off page readiness.
@@ -1403,8 +1403,8 @@
     <!-- Competition -->
     <div id="competitionView" class="page-view competition-view" style="display: none;">
         <div class="subtab-bar competition-subtabs">
-            <button class="subtab-btn active" data-competition-tab="daily">Daily Leaderboard</button>
-            <button class="subtab-btn" data-competition-tab="leaderboard">Competition Leaderboard</button>
+            <button class="subtab-btn active" data-competition-tab="leaderboard">Competition Leaderboard</button>
+            <button class="subtab-btn" data-competition-tab="daily">Daily Leaderboard</button>
             <button class="subtab-btn" data-competition-tab="participants">Participating Teams</button>
             <button class="subtab-btn" data-competition-tab="about">About</button>
         </div>
@@ -1489,6 +1489,7 @@
                     <a class="discord-nav-btn discord-nav-btn-sm" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                 </div>
             </div>
+            <p id="leaderboardDailyNotice" class="leaderboard-daily-notice" hidden></p>
             <!-- Combined Header with Stats + Controls -->
             <div class="leaderboard-header-bar compact">
                 <!-- Left: Stats -->
@@ -1739,8 +1740,8 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=26" defer></script>
-    <script src="app.js?v=76" defer></script>
-    <script src="js/leaderboard.js?v=16" defer></script>
+    <script src="app.js?v=77" defer></script>
+    <script src="js/leaderboard.js?v=17" defer></script>
     <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),

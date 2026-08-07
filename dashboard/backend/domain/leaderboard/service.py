@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import tempfile
+import threading
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -41,6 +43,9 @@ fetch_hourly_bars = _baselines.fetch_hourly_bars
 LEADERBOARD_MODE = "leaderboard"
 VALID_PERIODS = ("contest", "daily")
 _SKIP_CACHE_PATH = DATA_DIR / "leaderboard_skip_cache.json"
+_DAILY_REFRESH_STATE_PATH = DATA_DIR / "leaderboard_daily_refresh.json"
+_daily_refresh_lock = threading.Lock()
+_daily_refresh_running = False
 
 # H6 integrity threshold: an LLM entry must have decided at least this fraction
 # of its steps with the model itself. Below it, the curve is mostly a rule-based
@@ -77,17 +82,250 @@ def _normalize_period(period: Optional[str]) -> str:
 
 
 def daily_window_dates(as_of: Optional[date] = None) -> Tuple[str, str]:
-    """Most recently completed weekday (Mon–Fri), used as the daily board window."""
-    # UTC "yesterday" is intentionally conservative: for the ~4h between a
-    # weekday's 16:00 ET close and 00:00 UTC the board still shows the prior
-    # completed session rather than a partial/in-progress one. Same-day
-    # freshness is driven by the nightly deploy job, not this boundary.
+    """Most recently completed US equity session (Mon–Fri), as the daily window.
+
+    Uses UTC calendar dates with a conservative "yesterday" anchor so the board
+    never advances to an in-progress session. On weekends (and Monday before the
+    prior week closes out in UTC terms) this rolls back to the last Friday —
+    i.e. "show yesterday's board" when today has no completed session yet.
+    """
     d = as_of or datetime.now(timezone.utc).date()
     d = d - timedelta(days=1)
     while d.weekday() >= 5:  # Sat/Sun → roll back to Friday
         d -= timedelta(days=1)
     iso = d.isoformat()
     return iso, iso
+
+
+def daily_window_label(start_date: str, end_date: str) -> str:
+    """Human-readable label for the daily board header."""
+    if start_date == end_date:
+        return start_date
+    return f"{start_date} → {end_date}"
+
+
+def llm_leaderboard_entries(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Configured competition LLM models (same roster as the contest board)."""
+    cfg = config or load_leaderboard_config()
+    return [
+        s for s in cfg.get("strategies", [])
+        if s.get("strategy") == "llm_agent"
+    ]
+
+
+def _daily_refresh_state() -> Dict[str, Any]:
+    if not _DAILY_REFRESH_STATE_PATH.exists():
+        return {}
+    try:
+        with open(_DAILY_REFRESH_STATE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_daily_refresh_state(state: Dict[str, Any]) -> None:
+    dest_dir = _DAILY_REFRESH_STATE_PATH.parent
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(dest_dir), prefix=".daily_refresh_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+        os.replace(tmp, _DAILY_REFRESH_STATE_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _daily_window_key(config: Dict[str, Any]) -> str:
+    return f"{config['session_id']}|{config['start_date']}|{config['end_date']}"
+
+
+def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
+    """How many competition LLM curves exist for the current daily window."""
+    entries = llm_leaderboard_entries(config)
+    cached = 0
+    pending_ids: List[str] = []
+    for entry in entries:
+        entry_id = entry["id"]
+        if _find_cached_run(
+            entry_id, config["start_date"], config["end_date"], config["session_id"]
+        ):
+            cached += 1
+        else:
+            pending_ids.append(entry_id)
+    total = len(entries)
+    return {
+        "trading_date": config["start_date"],
+        "models_total": total,
+        "models_cached": cached,
+        "models_pending": total - cached,
+        "pending_entry_ids": pending_ids,
+        "refresh_in_progress": _daily_refresh_running,
+    }
+
+
+def _auto_deploy_daily_models_enabled() -> bool:
+    """Whether missing daily LLM curves should backfill in a background thread."""
+    raw = (os.getenv("LEADERBOARD_DAILY_AUTO_DEPLOY") or "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    # Local dev: backfill on demand. Prod (Render) expects the nightly refresh job.
+    return not os.getenv("RENDER")
+
+
+def refresh_daily_leaderboard(
+    *,
+    deploy_models: bool = False,
+    force_refresh: bool = False,
+    allow_fallback: bool = False,
+) -> Dict[str, Any]:
+    """Recompute the rolling daily board for the last completed weekday.
+
+    Always refreshes cheap baselines/index lines. When ``deploy_models`` is
+    True, also runs every configured ``llm_agent`` entry over the daily window
+    (real LLM API calls — use the cron script or POST refresh endpoint).
+    """
+    config = resolve_leaderboard_config("daily")
+    window_key = _daily_window_key(config)
+    prior = _daily_refresh_state()
+    if (
+        not force_refresh
+        and prior.get("window_key") == window_key
+        and prior.get("baselines_refreshed")
+        and (not deploy_models or prior.get("models_deployed"))
+    ):
+        return {
+            **prior,
+            "skipped": True,
+            "window": {
+                "start_date": config["start_date"],
+                "end_date": config["end_date"],
+                "label": daily_window_label(config["start_date"], config["end_date"]),
+            },
+        }
+
+    baseline_meta = ensure_leaderboard_runs(
+        force_refresh=force_refresh, period="daily", config=config
+    )
+    result: Dict[str, Any] = {
+        "window_key": window_key,
+        "window": {
+            "start_date": config["start_date"],
+            "end_date": config["end_date"],
+            "label": daily_window_label(config["start_date"], config["end_date"]),
+        },
+        "period": "daily",
+        "baselines_refreshed": True,
+        "baselines": baseline_meta,
+        "models_deployed": False,
+        "model_results": [],
+        "model_failures": [],
+        "refreshed_at": _utcnow_iso(),
+        "skipped": False,
+    }
+
+    if deploy_models:
+        failures: List[Dict[str, str]] = []
+        successes: List[Dict[str, Any]] = []
+        for entry in llm_leaderboard_entries(config):
+            entry_id = entry["id"]
+            try:
+                row = deploy_model_run(
+                    entry_id,
+                    force_refresh=force_refresh,
+                    period="daily",
+                    allow_fallback=allow_fallback,
+                )
+                successes.append(row)
+            except (LeaderboardFallbackError, ValueError, RuntimeError) as exc:
+                failures.append({"entry_id": entry_id, "error": str(exc)})
+        # Only mark complete when every model succeeded; a partial run must not
+        # skip the remaining entries on the next cron (force=false).
+        result["models_deployed"] = not failures
+        result["model_results"] = successes
+        result["model_failures"] = failures
+
+    _save_daily_refresh_state(result)
+    return result
+
+
+def _run_daily_refresh_background(
+    *,
+    deploy_models: bool,
+    force_refresh: bool,
+    allow_fallback: bool,
+) -> None:
+    global _daily_refresh_running
+    try:
+        refresh_daily_leaderboard(
+            deploy_models=deploy_models,
+            force_refresh=force_refresh,
+            allow_fallback=allow_fallback,
+        )
+    except Exception as exc:
+        print(f"⚠️ Daily leaderboard background refresh failed: {exc}")
+    finally:
+        with _daily_refresh_lock:
+            _daily_refresh_running = False
+
+
+def maybe_schedule_daily_leaderboard_refresh(
+    *,
+    deploy_models: Optional[bool] = None,
+    force_refresh: bool = False,
+    allow_fallback: bool = False,
+) -> bool:
+    """Start a background daily refresh if one is not already running.
+
+    Returns True when a new worker thread was started.
+    """
+    global _daily_refresh_running
+    config = resolve_leaderboard_config("daily")
+    status = _daily_models_status(config)
+    should_deploy = (
+        deploy_models
+        if deploy_models is not None
+        else (_auto_deploy_daily_models_enabled() and status["models_pending"] > 0)
+    )
+    if not force_refresh and not should_deploy:
+        prior = _daily_refresh_state()
+        if prior.get("window_key") == _daily_window_key(config) and prior.get(
+            "baselines_refreshed"
+        ):
+            return False
+
+    with _daily_refresh_lock:
+        if _daily_refresh_running:
+            return False
+        _daily_refresh_running = True
+        thread = threading.Thread(
+            target=_run_daily_refresh_background,
+            kwargs={
+                "deploy_models": should_deploy,
+                "force_refresh": force_refresh,
+                "allow_fallback": allow_fallback,
+            },
+            daemon=True,
+            name="daily-leaderboard-refresh",
+        )
+        thread.start()
+        return True
+
+
+def verify_daily_refresh_secret(provided: Optional[str]) -> None:
+    """Raise ValueError when the cron secret is missing or wrong."""
+    expected = (os.getenv("LEADERBOARD_DAILY_REFRESH_SECRET") or "").strip()
+    if not expected:
+        raise ValueError("LEADERBOARD_DAILY_REFRESH_SECRET is not configured")
+    token = (provided or "").strip()
+    if not token or not secrets.compare_digest(token, expected):
+        raise PermissionError("Invalid daily leaderboard refresh secret")
 
 
 def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, Any]:
@@ -110,7 +348,8 @@ def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, A
             "reference_start_date": reference_start_date(start_date, None),
             "description": (
                 f"Daily leaderboard for {start_date} (last completed US weekday). "
-                "Baselines recompute on load; LLM entries appear once the daily deploy job runs."
+                "Baselines refresh automatically; competition models deploy via the "
+                "nightly refresh job or LEADERBOARD_DAILY_AUTO_DEPLOY locally."
             ),
             "period": "daily",
             "board_title": "Daily Leaderboard",
@@ -788,7 +1027,12 @@ def get_leaderboard(
     else:
         leader = entries[0]["team_name"] if entries else "—"
 
-    return {
+    daily_status: Optional[Dict[str, Any]] = None
+    if config.get("period") == "daily":
+        daily_status = _daily_models_status(config)
+        maybe_schedule_daily_leaderboard_refresh()
+
+    payload: Dict[str, Any] = {
         "period": config.get("period", "contest"),
         "board_title": config.get("board_title", "Competition Leaderboard"),
         "phase_label": config.get("phase_label", "Preseason"),
@@ -796,7 +1040,9 @@ def get_leaderboard(
         "window": {
             "start_date": start_date,
             "end_date": end_date,
-            "label": f"{start_date} → {end_date}" if start_date != end_date else start_date,
+            "label": daily_window_label(start_date, end_date)
+            if config.get("period") == "daily"
+            else (f"{start_date} → {end_date}" if start_date != end_date else start_date),
             "description": config.get("description", ""),
         },
         "updated_at": meta.get("refreshed_at"),
@@ -805,3 +1051,6 @@ def get_leaderboard(
         "leader": leader,
         "entries": entries,
     }
+    if daily_status is not None:
+        payload["daily_status"] = daily_status
+    return payload

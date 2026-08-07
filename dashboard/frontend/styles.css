@@ -2895,6 +2895,17 @@ a.header-brand:hover .title-section h1 {
     border-radius: 6px;
 }
 
+.leaderboard-daily-notice {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid rgba(56, 189, 248, 0.25);
+    background: rgba(56, 189, 248, 0.08);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
 .contest-identity {
     display: flex;
     flex-direction: column;

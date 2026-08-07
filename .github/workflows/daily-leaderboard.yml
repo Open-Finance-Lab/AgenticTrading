@@ -1,0 +1,44 @@
+name: Daily Leaderboard refresh
+
+# Recompute the rolling Daily Leaderboard after US cash equity close.
+# Weekends are handled server-side (window rolls back to Friday).
+#
+# Requires repository variable or secret LEADERBOARD_DAILY_REFRESH_SECRET matching
+# the value configured on the Render service.
+
+on:
+  schedule:
+    # 22:30 UTC Mon–Fri ≈ 6:30pm ET / 5:30pm ET during DST — after the cash close.
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      deploy_models:
+        description: "Deploy competition LLM models (expensive)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: daily-leaderboard
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Refresh daily board
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: POST daily refresh
+        env:
+          ATL_API: ${{ vars.ATL_API || 'https://agentictrading.onrender.com' }}
+          LEADERBOARD_DAILY_REFRESH_SECRET: ${{ secrets.LEADERBOARD_DAILY_REFRESH_SECRET }}
+          DEPLOY_MODELS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_models || 'true' }}
+        run: |
+          if [ -z "$LEADERBOARD_DAILY_REFRESH_SECRET" ]; then
+            echo "LEADERBOARD_DAILY_REFRESH_SECRET is not configured." >&2
+            exit 1
+          fi
+          curl --silent --show-error --fail \
+            --max-time 7200 \
+            --retry 2 --retry-delay 30 --retry-all-errors \
+            -X POST "${ATL_API%/}/api/v1/leaderboard/daily/refresh?deploy_models=${DEPLOY_MODELS}&force=false" \
+            -H "X-Leaderboard-Refresh-Secret: ${LEADERBOARD_DAILY_REFRESH_SECRET}"

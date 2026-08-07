@@ -4250,7 +4250,7 @@ let tradingLogTruncatedCount = 0;
 let currentMode = "home";
 let currentPage = "home";
 let playgroundTab = "agents";
-let competitionTab = "daily";
+let competitionTab = "leaderboard";
 // True once the user explicitly navigates (any history:'push' navigation).
 // Nav is wired before boot's auth awaits, so applyInitialNavigation may run
 // AFTER a real click — restoring the saved page then would yank the page out
@@ -6968,7 +6968,7 @@ function navigationStatesEqual(a, b) {
     if (!a || !b) return false;
     return a.page === b.page
         && (a.playgroundTab || 'agents') === (b.playgroundTab || 'agents')
-        && (a.competitionTab || 'daily') === (b.competitionTab || 'daily');
+        && (a.competitionTab || 'leaderboard') === (b.competitionTab || 'leaderboard');
 }
 
 /**
@@ -6996,12 +6996,10 @@ function viewParamForNavState(state) {
         return 'agents';
     }
     if (state.page === 'competition') {
-        if (state.competitionTab === 'leaderboard') return 'leaderboard';
+        if (state.competitionTab === 'daily') return 'daily';
         if (state.competitionTab === 'participants') return 'participants';
         if (state.competitionTab === 'about') return 'about';
-        // 'daily', not the legacy 'contest' alias: a copied URL should name the
-        // board the user is actually looking at, not the all-time contest.
-        return 'daily';
+        return 'leaderboard';
     }
     return state.page;
 }
@@ -7053,7 +7051,7 @@ function applyInitialNavigation() {
         const initial = resolveInitialNavigation();
         navigateToPage(initial.page, {
             playgroundTab: initial.playgroundTab || 'agents',
-            competitionTab: initial.competitionTab || 'daily',
+            competitionTab: initial.competitionTab || 'leaderboard',
             history: 'replace',
         });
     }
@@ -7106,7 +7104,7 @@ function onNavigationPopState(event) {
         : resolveInitialNavigation();
     navigateToPage(target.page, {
         playgroundTab: target.playgroundTab || 'agents',
-        competitionTab: target.competitionTab || 'daily',
+        competitionTab: target.competitionTab || 'leaderboard',
         history: 'none',
     });
 }
@@ -7470,7 +7468,12 @@ function closeAddAgentModal() {
 function initNavigation() {
     document.querySelectorAll('.primary-nav .mode-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
-            navigateToPage(e.currentTarget.dataset.mode);
+            const mode = e.currentTarget.dataset.mode;
+            if (mode === 'competition' && currentPage !== 'competition') {
+                navigateToPage('competition', { competitionTab: 'leaderboard' });
+                return;
+            }
+            navigateToPage(mode);
         });
     });
 
@@ -7491,7 +7494,7 @@ function initNavigation() {
     });
 
     document.getElementById('homeViewCompetitionBtn')?.addEventListener('click', () => {
-        navigateToPage('competition', { competitionTab: 'daily' });
+        navigateToPage('competition', { competitionTab: 'leaderboard' });
     });
 
     document.getElementById('homeViewMarketPulseBtn')?.addEventListener('click', () => {

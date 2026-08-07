@@ -313,3 +313,94 @@ def test_prune_stale_window_skips_noop_for_fixed_window(tmp_path, monkeypatch):
     )
     assert kept == cache  # unchanged
     assert not (tmp_path / "skips.json").exists()  # no write when nothing pruned
+
+
+def test_daily_leaderboard_includes_status_block(client, monkeypatch):
+    day = "2026-07-14"
+    monkeypatch.setattr(lb_service, "daily_window_dates", lambda as_of=None: (day, day))
+    monkeypatch.setattr(lb_service, "maybe_schedule_daily_leaderboard_refresh", lambda **_: False)
+    monkeypatch.setattr(
+        lb_service,
+        "ensure_leaderboard_runs",
+        lambda force_refresh=False, period="contest", config=None: {
+            "session_id": "leaderboard-daily",
+            "start_date": day,
+            "end_date": day,
+            "period": "daily",
+            "created": 0,
+            "refreshed_at": "2026-07-15T00:00:00+00:00",
+        },
+    )
+
+    resp = client.get("/api/v1/leaderboard?period=daily")
+    assert resp.status_code == 200
+    body = resp.json()
+    status = body["daily_status"]
+    assert status["trading_date"] == day
+    assert status["models_total"] >= 1
+    assert status["models_pending"] == status["models_total"]
+
+
+def test_daily_refresh_endpoint_requires_secret(client, monkeypatch):
+    monkeypatch.setenv("LEADERBOARD_DAILY_REFRESH_SECRET", "cron-secret")
+    resp = client.post("/api/v1/leaderboard/daily/refresh")
+    assert resp.status_code == 401
+
+    monkeypatch.setattr(
+        "dashboard.backend.api.routers.leaderboard.refresh_daily_leaderboard",
+        lambda **_: {"skipped": False, "window": {"start_date": "2026-07-14"}},
+    )
+    ok = client.post(
+        "/api/v1/leaderboard/daily/refresh?deploy_models=false",
+        headers={"X-Leaderboard-Refresh-Secret": "cron-secret"},
+    )
+    assert ok.status_code == 200
+    assert ok.json()["window"]["start_date"] == "2026-07-14"
+
+
+def test_daily_window_dates_on_saturday_shows_friday():
+    from datetime import date
+
+    start, end = lb_service.daily_window_dates(as_of=date(2026, 7, 18))  # Saturday
+    assert start == end == "2026-07-17"  # Friday
+
+
+def test_partial_model_deploy_does_not_mark_window_complete(tmp_path, monkeypatch):
+    """A mixed success/failure run must not skip remaining models on the next cron."""
+    day = "2026-07-14"
+    state_path = tmp_path / "daily_refresh.json"
+    monkeypatch.setattr(lb_service, "_DAILY_REFRESH_STATE_PATH", state_path)
+    monkeypatch.setattr(lb_service, "daily_window_dates", lambda as_of=None: (day, day))
+    monkeypatch.setattr(
+        lb_service,
+        "ensure_leaderboard_runs",
+        lambda force_refresh=False, period="contest", config=None: {
+            "session_id": "leaderboard-daily",
+            "start_date": day,
+            "end_date": day,
+            "period": "daily",
+            "created": 0,
+            "refreshed_at": "2026-07-15T00:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        lb_service,
+        "llm_leaderboard_entries",
+        lambda config=None: [{"id": "ok-model"}, {"id": "fail-model"}],
+    )
+
+    def _deploy(entry_id, **_kwargs):
+        if entry_id == "fail-model":
+            raise RuntimeError("boom")
+        return {"entry_id": entry_id, "run_id": f"run-{entry_id}", "total_return": 0.01}
+
+    monkeypatch.setattr(lb_service, "deploy_model_run", _deploy)
+
+    first = lb_service.refresh_daily_leaderboard(deploy_models=True, force_refresh=True)
+    assert first["models_deployed"] is False
+    assert len(first["model_failures"]) == 1
+    assert len(first["model_results"]) == 1
+
+    # Without force, a wrongly-true models_deployed flag would skip forever.
+    second = lb_service.refresh_daily_leaderboard(deploy_models=True, force_refresh=False)
+    assert second.get("skipped") is not True
