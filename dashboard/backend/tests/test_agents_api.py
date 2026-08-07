@@ -486,11 +486,11 @@ def test_cash_allocation_cap_is_three_thousand(client):
     )
 
     assert MAX_AGENT_CASH_ALLOCATION == 3_000
-    assert MAX_BACKTEST_INITIAL_CAPITAL == 10_000
+    assert MAX_BACKTEST_INITIAL_CAPITAL == 3_000
     # Clamp behavior follows the backtest capital constant (not the sleeve max).
     assert resolve_initial_capital(3_000) == 3_000.0
-    assert resolve_initial_capital(10_000) == 10_000.0
-    assert resolve_initial_capital(50_000) == 10_000.0
+    assert resolve_initial_capital(10_000) == 3_000.0
+    assert resolve_initial_capital(50_000) == 3_000.0
     assert resolve_initial_capital(None) == 1_000.0
 
     browser_session = str(uuid.uuid4())
@@ -605,6 +605,10 @@ def test_marketplace_listing_and_clone(client):
     assert hedge_fund_card["runtime_type"] == "ai_hedge_fund"
     assert hedge_fund_card["mode"] == "runtime"
     assert hedge_fund_card["model_name"] == "nvidia/nemotron-3-nano-30b-a3b"
+    assert hedge_fund_card["repo_url"] == "https://github.com/virattt/ai-hedge-fund"
+    # The hosted template shelves by market, not by runtime: it is a U.S. stock
+    # strategy, so the card and (below) its clone both carry that category.
+    assert hedge_fund_card["category"] == "us_stocks"
 
     browser_session = str(uuid.uuid4())
     headers = {"X-Session-Id": browser_session}
@@ -646,6 +650,104 @@ def test_marketplace_listing_and_clone(client):
         ]
     }
     assert ai_agent["pipeline"] is None
+    # ...so it renders on My Agents' U.S. Stock Trading shelf, never alongside
+    # the prompt-and-model builtins on Prompting LLMs.
+    assert ai_agent["category"] == "us_stocks"
+
+
+def test_marketplace_catalog_shape():
+    """The live catalog must be well-formed: unique ids, valid categories.
+
+    Guards the Task C1 recategorization of marketplace.json and its three new
+    seed templates -- a malformed edit here would silently corrupt what ships
+    in the Community catalog.
+
+    Deliberately no exact count: adding a template is a routine, non-regressive
+    edit, and pinning the total only reddens this suite on every future PR that
+    ships one. The invariants below are what actually break the catalog.
+    """
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+    from dashboard.backend.domain.agents.taxonomy import AGENT_CATEGORIES
+
+    marketplace_mod.reload_marketplace_catalog()
+    templates = marketplace_mod.list_marketplace_templates()
+    assert len(templates) >= 7, "the shipped seed catalog lost templates"
+
+    template_ids = [t["template_id"] for t in templates]
+    assert len(template_ids) == len(set(template_ids)), (
+        "duplicate template_id in marketplace.json"
+    )
+
+    for template_id in template_ids:
+        raw = marketplace_mod.get_marketplace_template(template_id)
+        assert raw is not None
+        category = raw.get("category")
+        assert category in AGENT_CATEGORIES or category is None, (
+            f"{template_id!r} has an unrecognized category: {category!r}"
+        )
+
+    # "Pipeline" is banned product-copy vocabulary (glossary: pipeline ->
+    # "multi-step strategy"); the template_id stays "pipeline-analyst" since
+    # it's an API identifier baked into clone URLs, but the display name --
+    # the card's largest text -- must not carry the word.
+    names = {t["template_id"]: t["name"] for t in templates}
+    assert names["pipeline-analyst"] == "Three-Step Analyst"
+    assert "Pipeline Analyst" not in names.values()
+
+
+def test_marketplace_listing_is_ordered_by_shelf_not_by_slug():
+    """Community cards group by market in *declaration* order, not slug order.
+
+    The recategorization onto slugs quietly changed which card leads the page:
+    ``sorted`` on the raw value orders cn_ashares < us_stocks, so the A-share
+    template became card #1 on a U.S.-focused product. Nothing caught it because
+    no test asserted order. ``category_sort_rank`` keys on the AgentCategory
+    Literal's declaration order instead, which is also the order MARKET_LABELS
+    renders the market chips in, so the two surfaces agree.
+    """
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+    from dashboard.backend.domain.agents.taxonomy import (
+        AGENT_CATEGORY_ORDER,
+        category_sort_rank,
+    )
+
+    marketplace_mod.reload_marketplace_catalog()
+    templates = marketplace_mod.list_marketplace_templates()
+
+    ranks = [category_sort_rank(t.get("category")) for t in templates]
+    assert ranks == sorted(ranks), "templates are not grouped in shelf order"
+
+    # The U.S. market leads; uncategorized templates never do.
+    assert templates[0]["category"] == AGENT_CATEGORY_ORDER[0] == "us_stocks"
+    assert templates[-1]["category"] == "cn_ashares"
+
+    # Within a shelf, still by name.
+    us_stocks = [t["name"] for t in templates if t["category"] == "us_stocks"]
+    assert us_stocks == sorted(us_stocks)
+
+
+def test_uncategorized_templates_sort_last_and_carry_no_fake_shelf():
+    """A template with no category must not be labelled onto a shelf.
+
+    ``_public_template`` used to default the field to "General" -- a value
+    outside the taxonomy that reads as a real shelf on the card but filters as
+    unshelved, and that sorted *first* alphabetically. None is the honest shape,
+    and ``category_sort_rank`` ranks it last so an uncategorized template can
+    never lead the listing.
+    """
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+    from dashboard.backend.domain.agents.taxonomy import category_sort_rank
+
+    projected = marketplace_mod._public_template(
+        {"template_id": "t", "name": "T", "category": "Foundation"}
+    )
+    assert projected["category"] is None
+
+    unlabelled = marketplace_mod._public_template({"template_id": "u", "name": "U"})
+    assert unlabelled["category"] is None
+
+    assert category_sort_rank(None) > category_sort_rank("cn_ashares")
+    assert category_sort_rank("General") == category_sort_rank(None)
 
 
 def test_ai_hedge_fund_analysts_are_editable_but_infrastructure_is_not(client):
@@ -882,3 +984,328 @@ def test_marketplace_clone_unknown_template(client):
         headers=headers,
     )
     assert resp.status_code == 404
+
+
+def test_clone_stamps_normalized_category(client, monkeypatch):
+    """A template carrying a recognized category slug stamps it onto the clone."""
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+
+    fake_template = {
+        "template_id": "categorized-template",
+        "name": "Categorized Template",
+        "model_name": "local-model",
+        "description": "A template with a normalized category.",
+        "category": "us_stocks",
+    }
+    monkeypatch.setattr(
+        marketplace_mod,
+        "get_marketplace_template",
+        lambda template_id: fake_template if template_id == "categorized-template" else None,
+    )
+    cloned = client.post(
+        "/api/v1/agents/marketplace/categorized-template/clone",
+        json={},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert cloned.json()["agent"]["category"] == "us_stocks"
+
+
+@pytest.mark.parametrize("legacy", ["Foundation", "Advanced", "Hosted", "General"])
+def test_clone_legacy_category_stamps_none(client, monkeypatch, legacy):
+    """A template carrying a legacy display string must stamp None, not 422.
+
+    Deliberately monkeypatched rather than asserting against the live catalog:
+    these four values are exactly what the shipped marketplace.json carries today,
+    but pinning the test to that file would make the frontend PR's recategorization
+    redden this suite for a change that is not a regression.
+    """
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+
+    legacy_template = {
+        "template_id": "legacy-template",
+        "name": "Legacy Template",
+        "model_name": "local-model",
+        "description": "A template still carrying a pre-taxonomy category.",
+        "category": legacy,
+    }
+    monkeypatch.setattr(
+        marketplace_mod,
+        "get_marketplace_template",
+        lambda template_id: legacy_template if template_id == "legacy-template" else None,
+    )
+    cloned = client.post(
+        "/api/v1/agents/marketplace/legacy-template/clone",
+        json={},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert cloned.json()["agent"]["category"] is None
+
+
+def test_every_shipped_template_clones_to_a_valid_shelf(client):
+    """Invariant over the live catalog, stated so it survives recategorization:
+    every shipped template must clone (no 422 from a category the catalog carries)
+    and land on either a whitelisted slug or no shelf at all."""
+    import dashboard.backend.domain.agents.marketplace as marketplace_mod
+    from dashboard.backend.domain.agents.taxonomy import AGENT_CATEGORIES
+
+    templates = marketplace_mod.list_marketplace_templates()
+    assert templates, "fixture assumption: marketplace.json ships at least one template"
+
+    for template in templates:
+        cloned = client.post(
+            f"/api/v1/agents/marketplace/{template['template_id']}/clone",
+            json={},
+            headers={"X-Session-Id": str(uuid.uuid4())},
+        )
+        assert cloned.status_code == 200, f"{template['template_id']}: {cloned.text}"
+        category = cloned.json()["agent"]["category"]
+        assert category is None or category in AGENT_CATEGORIES, (
+            f"{template['template_id']} cloned onto {category!r}, which is neither "
+            "a whitelisted slug nor unshelved"
+        )
+
+
+def test_create_agent_with_category_round_trips(client):
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Shelved", "agent_type": "builtin", "category": "us_stocks"},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["agent"]["category"] == "us_stocks"
+
+    listed = client.get("/api/v1/agents", headers=headers)
+    assert listed.status_code == 200
+    assert any(a.get("category") == "us_stocks" for a in listed.json()["agents"])
+
+
+def test_create_agent_unknown_category_422(client):
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    resp = client.post(
+        "/api/v1/agents",
+        json={"name": "Bad Shelf", "agent_type": "builtin", "category": "crypto"},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
+def test_patch_category_and_patch_to_null(client):
+    headers = {"X-Session-Id": str(uuid.uuid4()), "X-Browser-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Categorized", "agent_type": "builtin"},
+        headers=headers,
+    )
+    assert created.status_code == 200
+    agent_id = created.json()["agent"]["agent_id"]
+
+    ok = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"category": "cn_ashares"},
+        headers=headers,
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["agent"]["category"] == "cn_ashares"
+
+    cleared = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"category": None},
+        headers=headers,
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["agent"]["category"] is None
+
+
+def test_patch_agent_unknown_category_422(client):
+    headers = {"X-Session-Id": str(uuid.uuid4()), "X-Browser-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Categorized 2", "agent_type": "builtin"},
+        headers=headers,
+    )
+    assert created.status_code == 200
+    agent_id = created.json()["agent"]["agent_id"]
+
+    resp = client.patch(
+        f"/api/v1/agents/{agent_id}",
+        json={"category": "futures"},
+        headers=headers,
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize(
+    "posted,expected",
+    [
+        ("US_STOCKS", "us_stocks"),
+        ("  us_stocks  ", "us_stocks"),
+        ("", None),
+        ("   ", None),
+    ],
+)
+def test_create_agent_category_is_folded_not_rejected(client, posted, expected):
+    """An unselected <select> posts "", and a hand-typed slug may carry case or
+    padding. None of those are typos, so none of them may 422."""
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Folded", "agent_type": "builtin", "category": posted},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["agent"]["category"] == expected
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_patch_blank_category_clears_the_shelf(client, blank):
+    """The Configure form's "no shelf" option posts "" -- it must clear, and it
+    must not be mistaken for "field omitted" (which would 400 as an empty PATCH)."""
+    headers = {"X-Session-Id": str(uuid.uuid4()), "X-Browser-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Clearable", "agent_type": "builtin", "category": "us_stocks"},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    agent_id = created.json()["agent"]["agent_id"]
+
+    cleared = client.patch(
+        f"/api/v1/agents/{agent_id}", json={"category": blank}, headers=headers
+    )
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["agent"]["category"] is None
+
+
+def test_patch_category_is_folded(client):
+    headers = {"X-Session-Id": str(uuid.uuid4()), "X-Browser-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Foldable", "agent_type": "builtin"},
+        headers=headers,
+    )
+    assert created.status_code == 200
+    agent_id = created.json()["agent"]["agent_id"]
+
+    ok = client.patch(
+        f"/api/v1/agents/{agent_id}", json={"category": " CN_AShares "}, headers=headers
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["agent"]["category"] == "cn_ashares"
+
+
+def test_service_layer_rejects_an_unwhitelisted_category():
+    """The column's invariant -- a whitelisted slug or NULL -- must hold for every
+    caller, not only for the two routes that happen to validate today. The value
+    is read back out on the unauthenticated /api/v1/agents/builtin listing, so an
+    internal caller writing junk here would publish it.
+    """
+    # Module form, not ``from ... import agent_service``: line 19 already imports
+    # this module as a monkeypatch seam, and mixing the two forms is the
+    # inconsistency py/import-and-import-from flags. The alias is resolved here
+    # rather than at each call site only to keep the body below unchanged.
+    import dashboard.backend.domain.agents.service as agent_service_module
+
+    agent_service = agent_service_module.agent_service
+
+    with pytest.raises(ValueError, match="unknown category"):
+        agent_service.create_agent(
+            name="Bypass",
+            model_name="local-model",
+            owner_user_id=None,
+            owner_browser_session=str(uuid.uuid4()),
+            agent_type="builtin",
+            category="totally_made_up",
+        )
+
+    created = agent_service.create_agent(
+        name="Bypass Target",
+        model_name="local-model",
+        owner_user_id=None,
+        owner_browser_session=str(uuid.uuid4()),
+        agent_type="builtin",
+    )
+    with pytest.raises(ValueError, match="unknown category"):
+        agent_service.update_agent(created["agent_id"], category="<script>x</script>")
+
+    # ...while the same two entry points still fold the benign shapes.
+    assert agent_service.update_agent(
+        created["agent_id"], category=" US_STOCKS "
+    )["category"] == "us_stocks"
+    assert agent_service.update_agent(created["agent_id"], category="")["category"] is None
+
+
+def test_openapi_publishes_the_category_vocabulary():
+    """The frontend PR gates its merge on probing the deployed openapi.json for
+    this vocabulary. A bare ``string`` field would prove only that *a* category
+    field shipped -- not which slugs the live backend accepts."""
+    from dashboard.backend.domain.agents.taxonomy import AGENT_CATEGORIES
+
+    schema = app.openapi()
+    for model in ("CreateAgentBody", "UpdateAgentBody"):
+        prop = schema["components"]["schemas"][model]["properties"]["category"]
+        enums = [
+            frozenset(branch["enum"])
+            for branch in prop.get("anyOf", [prop])
+            if "enum" in branch
+        ]
+        assert enums == [AGENT_CATEGORIES], f"{model}.category published as {prop}"
+
+
+def test_builtin_listing_echoes_category(client):
+    """Deploy-probe mirror (B4/PR C gate): GET /api/v1/agents/builtin rows must
+    carry a "category" key. It is unauthenticated, so it is the surface the
+    frontend PR can probe without a session -- note Discord does *not* read
+    shelving from here; api/routers/discord.py builds its own projection."""
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "Shelved Builtin", "agent_type": "builtin", "category": "cn_ashares"},
+        headers=headers,
+    )
+    assert created.status_code == 200, created.text
+    agent_id = created.json()["agent"]["agent_id"]
+
+    listing = client.get("/api/v1/agents/builtin")
+    assert listing.status_code == 200
+    entry = next(a for a in listing.json()["agents"] if a["agent_id"] == agent_id)
+    assert "category" in entry
+    assert entry["category"] == "cn_ashares"
+
+
+def test_clone_honours_a_model_name_override(client):
+    """Community's "Choose model" affordance clones a template onto another model."""
+    cloned = client.post(
+        "/api/v1/agents/marketplace/balanced-starter/clone",
+        json={"model_name": "deepseek/deepseek-v4-pro"},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert cloned.json()["agent"]["model_name"] == "deepseek/deepseek-v4-pro"
+
+
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_clone_falls_back_to_the_template_model(client, blank):
+    """Omitted or blank means "use the template's model", not "use empty"."""
+    body = {} if blank is None else {"model_name": blank}
+    cloned = client.post(
+        "/api/v1/agents/marketplace/balanced-starter/clone",
+        json=body,
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert cloned.json()["agent"]["model_name"] == "anthropic/claude-haiku-4-5"
+
+
+def test_clone_does_not_validate_the_model_name(client):
+    """No whitelist here: POST /agents and PATCH /agents/{id} don't have one either,
+    and a Literal would drag in the openapi enum deploy gate #313 discharged."""
+    cloned = client.post(
+        "/api/v1/agents/marketplace/balanced-starter/clone",
+        json={"model_name": "some/unreleased-model"},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert cloned.json()["agent"]["model_name"] == "some/unreleased-model"

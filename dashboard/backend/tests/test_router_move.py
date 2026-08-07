@@ -60,6 +60,7 @@ EXPECTED_AGENT_ROUTES = {
     ),
     ("DELETE", "/v1/agents/{agent_id}", "delete_agent"),
     ("POST", "/v1/agents/{agent_id}/rotate-api-key", "rotate_agent_api_key"),
+    ("POST", "/v1/agents/{agent_id}/duplicate", "duplicate_agent"),
     ("POST", "/v1/agents/{agent_id}/activate", "activate_agent"),
 }
 

@@ -12,9 +12,11 @@ Behavior is byte-for-byte identical to the original method. In particular:
 * symbols are iterated in ``portfolio_state["market_signals"]`` insertion order;
 * a symbol is skipped when ``pd.isna([rsi, sma20]).any()`` (missing/None/NaN
   ``rsi`` or ``sma20``);
-* BUY requires no existing position, ``rsi < 30`` and ``price < sma20``; size is
-  ``int(total_equity * 0.02 / price)``, only emitted when ``shares_to_buy > 0``
-  and ``shares_to_buy * price <= cash``;
+* BUY requires no existing position, ``rsi < 30`` and ``price < sma20``. With
+  the default ``lot_size=1``, size is ``int(total_equity * 0.02 / price)`` and
+  the existing cash pre-check is unchanged. A market with ``lot_size > 1``
+  requests exactly one lot and leaves affordability to the shared executor so
+  a rejected order remains auditable;
 * SELL (an ``elif``, so mutually exclusive with BUY) requires an existing
   position and (``rsi > 70`` or (``sma50`` truthy and ``price > sma50 * 1.02``));
   it sells the full held quantity;
@@ -52,16 +54,19 @@ def make_rule_based_decision(
     positions: Dict,
     cash: float,
     available_positions: Optional[Dict] = None,
+    lot_size: int = 1,
 ) -> Dict:
     """Produce rule-based trading actions for the given portfolio state.
 
     ``portfolio_state`` must provide ``total_equity`` and ``market_signals`` (a
     mapping of symbol -> indicator dict). ``positions`` and ``cash`` reflect the
     current holdings and available cash. ``available_positions`` is the T+1
-    sellable balance, or ``None`` when settlement is immediate. Inputs are read
-    only, never mutated. Returns ``{"actions": [...]}`` with the same action
-    dictionaries the original method produced, plus a ``t1_deferrals`` key that
-    appears **only** when the T+1 cap actually shrank an intended exit.
+    sellable balance, or ``None`` when settlement is immediate. ``lot_size`` is
+    1 for legacy markets; values above 1 request exactly one market lot on a
+    BUY signal. Inputs are read only, never mutated. Returns
+    ``{"actions": [...]}`` with the same action dictionaries the original
+    method produced, plus a ``t1_deferrals`` key that appears **only** when the
+    T+1 cap actually shrank an intended exit.
     """
     actions: List[Dict] = []
     deferrals: List[Dict] = []
@@ -83,10 +88,19 @@ def make_rule_based_decision(
 
         # BUY logic: RSI < 30 (oversold)
         if not has_position and rsi < 30 and price < sma20:
-            # Size: 2% of TOTAL PORTFOLIO per trade (not just cash)
-            risk_amount = total_equity * 0.02
-            shares_to_buy = int(risk_amount / price)
-            if shares_to_buy > 0 and shares_to_buy * price <= cash:
+            if lot_size > 1:
+                # The market lot is the intended order. The executor owns the
+                # cash gate so an unaffordable A-share signal remains visible.
+                shares_to_buy = lot_size
+                should_submit = True
+            else:
+                # Preserve the legacy 2%-of-equity sizing and cash pre-check.
+                risk_amount = total_equity * 0.02
+                shares_to_buy = int(risk_amount / price)
+                should_submit = (
+                    shares_to_buy > 0 and shares_to_buy * price <= cash
+                )
+            if should_submit:
                 actions.append({
                     "symbol": symbol,
                     "action": "buy",

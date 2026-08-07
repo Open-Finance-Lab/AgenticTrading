@@ -11,21 +11,38 @@ import json
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
+from dashboard.backend.domain.agents.taxonomy import (
+    category_sort_rank,
+    normalize_category,
+)
 from dashboard.backend.paths import CONFIG_DIR
 
 _MARKETPLACE_PATH = CONFIG_DIR / "marketplace.json"
 
 
 def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
+    # This "category" and an agent's "category" used to be two different
+    # vocabularies under one key name: templates carried display strings
+    # ("Foundation"/"Advanced"/"Hosted", defaulted to "General"), agents carried
+    # ``taxonomy.AgentCategory`` slugs or NULL. The catalog has since been
+    # recategorized onto the slugs, and the projection normalizes through the
+    # taxonomy so the two are now provably one vocabulary -- the frontend can
+    # map template and agent categories through a single label table.
+    #
+    # The "General" default is gone deliberately: it would be a fourth
+    # out-of-vocabulary value that ``normalize_category`` silently maps to None,
+    # which reads as a real shelf on the card but filters as unshelved.
+    # ``None`` (rendered as a generic label by the frontend) is the honest shape.
     pipeline = raw.get("pipeline")
     step_count = len(pipeline) if isinstance(pipeline, list) else 0
     runtime_type = str(raw.get("runtime_type") or "pipeline")
-    return {
+    repo_url = str(raw.get("repo_url") or "").strip()
+    public = {
         "template_id": raw["template_id"],
         "name": raw["name"],
         "model_name": raw.get("model_name") or "local-model",
         "description": raw.get("description"),
-        "category": raw.get("category") or "General",
+        "category": normalize_category(raw.get("category")),
         "tags": list(raw.get("tags") or []),
         "author": raw.get("author") or "Community",
         "runtime_type": runtime_type,
@@ -36,6 +53,9 @@ def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
             else ("simple" if step_count <= 1 else "pipeline")
         ),
     }
+    if repo_url.startswith(("https://github.com/", "http://github.com/")):
+        public["repo_url"] = repo_url
+    return public
 
 
 @lru_cache(maxsize=1)
@@ -62,9 +82,18 @@ def _load_catalog() -> Dict[str, Dict[str, Any]]:
 
 
 def list_marketplace_templates() -> List[Dict[str, Any]]:
-    """Return public marketplace cards sorted by name."""
+    """Return public marketplace cards grouped by shelf, then sorted by name.
+
+    Ordered by ``category_sort_rank`` rather than by the slug itself: the slugs
+    are not alphabetical in shelf order, so a plain ``sorted`` on the raw value
+    leads the Community listing with the A-share shelf. Uncategorized templates
+    sort last.
+    """
     items = [_public_template(raw) for raw in _load_catalog().values()]
-    return sorted(items, key=lambda t: (str(t.get("category") or ""), str(t.get("name") or "")))
+    return sorted(
+        items,
+        key=lambda t: (category_sort_rank(t.get("category")), str(t.get("name") or "")),
+    )
 
 
 def get_marketplace_template(template_id: str) -> Optional[Dict[str, Any]]:

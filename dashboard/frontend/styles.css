@@ -50,6 +50,12 @@ textarea {
     --warning-color: #ffa500;
     --info-color: #00bfff;
     --neutral-color: #5c7cfa;
+
+    /* Ink for text sitting on a bright accent fill (--info-color and friends).
+       Same value as --bg-primary today, but a distinct token because it is a
+       *foreground* role: if the surface palette is ever retuned, this must
+       follow the fill's contrast requirement, not the page background. */
+    --text-on-accent: #0a0e27;
     
     /* Typography */
     --font-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
@@ -1299,7 +1305,7 @@ a.header-brand:hover .title-section h1 {
 .preset-card.selected .preset-btn {
     background-color: var(--info-color);
     border-color: var(--info-color);
-    color: #0a0e27;
+    color: var(--text-on-accent);
 }
 
 .preset-card.selected .preset-btn:hover {
@@ -1390,7 +1396,7 @@ a.header-brand:hover .title-section h1 {
     background-color: var(--info-color);
     border: none;
     border-radius: 4px;
-    color: #0a0e27;
+    color: var(--text-on-accent);
     font-size: 16px;
     font-weight: 600;
     cursor: pointer;
@@ -1862,7 +1868,7 @@ a.header-brand:hover .title-section h1 {
 .trading-log-scroll {
     max-height: 280px;
     overflow-y: auto;
-    overflow-x: hidden;
+    overflow-x: auto;
     border: 1px solid var(--border-color);
     border-radius: 6px;
     background: rgba(8, 18, 40, 0.35);
@@ -1870,6 +1876,7 @@ a.header-brand:hover .title-section h1 {
 
 .trading-log-scroll .decision-table {
     margin-bottom: 0;
+    min-width: 840px;
 }
 
 .trading-log-scroll .decision-table thead th {
@@ -1910,6 +1917,68 @@ a.header-brand:hover .title-section h1 {
     font-size: 11px;
     line-height: 1.3;
     white-space: nowrap;
+}
+
+.trading-log-scroll .trading-log-asset {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 116px;
+}
+
+.trading-log-scroll .trading-log-asset strong {
+    font-size: 11px;
+    line-height: 1.2;
+}
+
+.trading-log-scroll .trading-log-asset small,
+.trading-log-scroll .trading-log-reason {
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.3;
+}
+
+.trading-log-scroll .trading-log-quantity {
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+.trading-log-scroll .trading-log-reason {
+    min-width: 116px;
+    max-width: 180px;
+    white-space: normal;
+}
+
+.trading-log-scroll .order-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 2px 6px;
+    border: 1px solid transparent;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0;
+    line-height: 1;
+    white-space: nowrap;
+}
+
+.trading-log-scroll .order-status-filled {
+    color: #6ee7a0;
+    background: rgba(34, 197, 94, 0.1);
+    border-color: rgba(34, 197, 94, 0.22);
+}
+
+.trading-log-scroll .order-status-partial {
+    color: #fbbf24;
+    background: rgba(245, 158, 11, 0.1);
+    border-color: rgba(245, 158, 11, 0.24);
+}
+
+.trading-log-scroll .order-status-rejected {
+    color: #fca5a5;
+    background: rgba(239, 68, 68, 0.1);
+    border-color: rgba(239, 68, 68, 0.22);
 }
 
 .action-hold {
@@ -9279,20 +9348,123 @@ body.agent-editor-open {
     gap: 8px;
 }
 
-/* My Agents — category rows (Demo 1) */
-.agents-category { margin-top: 28px; }
+/* My Agents — asset-class shelves. A real panel, not loose prose: these sections
+   sit directly above bordered cards, so an unframed <h3>/<p> pair read as page
+   copy rather than as a container the cards belong to. The page is --bg-primary,
+   the panel --bg-surface, the cards --bg-card: each step lighter than the one
+   beneath, so no shadow is needed to separate them. */
+.agents-category {
+    margin-top: 24px;
+    padding: 18px 18px 20px;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: var(--bg-surface);
+}
 .agents-category:first-child { margin-top: 8px; }
-.agents-category-head { margin-bottom: 14px; }
+.agents-category-head {
+    margin-bottom: 16px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--border-color);
+}
+.agents-category-heading {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 4px;
+}
+.agents-category-icon {
+    display: inline-flex;
+    flex-shrink: 0;
+    width: 18px;
+    height: 18px;
+    color: var(--info-color);
+}
+.agents-category-icon svg { width: 100%; height: 100%; }
 .agents-category-title {
     font-size: 1.05rem;
     font-weight: 600;
     color: var(--text-primary);
-    margin: 0 0 2px;
+    margin: 0;
+}
+/* Reports what the shelf holds, not what is on screen — see
+   renderAgentCategories. `margin-left: auto` parks it at the right edge of the
+   heading row without a spacer element. */
+.agents-category-count {
+    margin-left: auto;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: rgba(148, 163, 184, 0.12);
+    border: 1px solid var(--border-color);
+    white-space: nowrap;
 }
 .agents-category-sub {
     font-size: 0.85rem;
     color: var(--text-secondary);
     margin: 0;
+}
+/* The chips themselves are .marketplace-category-chip — shared with Community
+   on purpose, so the same taxonomy looks the same on both surfaces. This rule
+   only spaces the row inside the shelf head. */
+.agents-market-chips { margin: 12px 0 0; }
+
+/* Locked shelves (Crypto, Futures). Neither asset class has a bar source, a
+   MarketProfile or any engine support, so the row must read as "not built yet",
+   never as "built and broken": dashed and muted, with no grid, no chips and
+   nothing clickable inside it. */
+.agents-category--locked {
+    border-style: dashed;
+    background: transparent;
+    opacity: 0.62;
+}
+.agents-category--locked .agents-category-head {
+    margin-bottom: 0;
+    padding-bottom: 0;
+    border-bottom: 0;
+}
+.agents-category--locked .agents-category-icon,
+.agents-category--locked .agents-category-title {
+    color: var(--text-secondary);
+}
+/* Belt and braces with aria-disabled: no hover, no cursor change, no focus
+   stop, even if a future edit puts an interactive element in one of these rows. */
+.agents-category--locked * { pointer-events: none; }
+.agents-category-tag {
+    margin-left: auto;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    border: 1px dashed var(--border-color);
+    white-space: nowrap;
+}
+
+/* Empty-shelf Community call to action. This shipped as an <a href="#"> whose
+   class matched no rule in this file, so the primary path off an empty shelf
+   inherited plain link styling and did not read as actionable. */
+.agents-empty-community-btn {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 12px;
+    margin: 0 2px;
+    border-radius: 999px;
+    font-family: inherit;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-primary);
+    background: rgba(0, 191, 255, 0.12);
+    border: 1px solid var(--info-color);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.agents-empty-community-btn:hover {
+    color: var(--text-on-accent);
+    background-color: var(--info-color);
 }
 .agent-card--placeholder {
     border-style: dashed;
@@ -9389,8 +9561,36 @@ body.agent-editor-open {
     display: flex;
     flex-wrap: wrap;
     gap: 10px 16px;
+    align-items: center;
     color: var(--text-secondary);
     font-size: 0.82rem;
+}
+
+.marketplace-repo-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px 4px 8px;
+    border-radius: 8px;
+    border: 1px solid rgba(148, 163, 184, 0.35);
+    background: rgba(15, 23, 42, 0.85);
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.78rem;
+    font-weight: 600;
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.marketplace-repo-btn:hover {
+    color: #e2e8f0;
+    border-color: rgba(226, 232, 240, 0.45);
+    background: rgba(30, 41, 59, 0.95);
+}
+
+.marketplace-repo-icon {
+    width: 14px;
+    height: 14px;
+    flex-shrink: 0;
 }
 
 .marketplace-tag-row {
@@ -9422,6 +9622,38 @@ body.agent-editor-open {
     background: rgba(148, 163, 184, 0.12);
     border: 1px solid var(--border-color);
     white-space: nowrap;
+}
+
+.marketplace-category-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 4px 0 16px;
+}
+
+.marketplace-category-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 6px 14px;
+    border-radius: 999px;
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: rgba(148, 163, 184, 0.12);
+    border: 1px solid var(--border-color);
+    cursor: pointer;
+    transition: all 0.15s;
+}
+
+.marketplace-category-chip:hover {
+    color: var(--text-primary);
+    border-color: var(--info-color);
+}
+
+.marketplace-category-chip.active {
+    color: var(--text-on-accent);
+    background-color: var(--info-color);
+    border-color: var(--info-color);
 }
 
 /* Agent editor — model picker (Demo 1) */

@@ -20,6 +20,7 @@ from dashboard.backend.domain.agents.repository import agent_store, _UNSET
 from dashboard.backend.domain.agents import auth_cache
 from dashboard.backend.domain.agents.credential_store import agent_credential_store
 from dashboard.backend.domain.agents.defaults import default_starter_pipeline
+from dashboard.backend.domain.agents.taxonomy import coerce_category, normalize_category
 from dashboard.backend.domain.agents.runtime import (
     DEFAULT_RUNTIME_TYPE,
     PIPELINE_RUNTIME_TYPE,
@@ -155,6 +156,14 @@ class AgentService:
         if ext_runs:
             latest = sorted(ext_runs, key=lambda r: r.get("created_at") or "", reverse=True)[0]
         result = dict(agent)
+        # repository.create_agent() returns the plaintext api_key on every agent
+        # it mints (any type, not just external), attached directly on the dict
+        # this method receives -- so the shallow copy above would otherwise carry
+        # it into every enriched listing. A route that wants to surface the key
+        # once (create, import-session) pops it off the *raw* agent dict itself,
+        # which this copy does not disturb -- it never removes it from the
+        # source object, only omits it from the enriched copy returned here.
+        result.pop("api_key", None)
         result["run_count"] = len(ext_runs)
         result["latest_run"] = latest
         result["runs"] = sorted(
@@ -265,10 +274,17 @@ class AgentService:
         cash_allocation: Any = _UNSET,
         backtest_allocation: Any = _UNSET,
         live_trading_enabled: Any = _UNSET,
+        category: Any = _UNSET,
     ) -> Dict[str, Any]:
         current = self.agents.get_agent(agent_id)
         if not current:
             raise AgentNotFoundError()
+        # Enforced here as well as in the route body so the column's invariant --
+        # a whitelisted slug or NULL -- holds by construction for every caller,
+        # not by the discipline of whoever writes the next one. The value is read
+        # back out on the unauthenticated /api/v1/agents/builtin listing.
+        if category is not _UNSET:
+            category = coerce_category(category)
         resolved_runtime_type = (
             normalize_runtime_type(runtime_type)
             if runtime_type is not _UNSET
@@ -301,6 +317,7 @@ class AgentService:
             cash_allocation=cash_allocation,
             backtest_allocation=backtest_allocation,
             live_trading_enabled=live_trading_enabled,
+            category=category,
         )
         if not agent:
             raise AgentNotFoundError()
@@ -327,6 +344,7 @@ class AgentService:
         cash_allocation: Optional[float] = None,
         backtest_allocation: Optional[float] = None,
         seed_default_pipeline: bool = True,
+        category: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Register an agent.
 
@@ -343,6 +361,7 @@ class AgentService:
 
         runtime_type = normalize_runtime_type(runtime_type)
         runtime_config = normalize_runtime_config(runtime_type, runtime_config or {})
+        category = coerce_category(category)  # see update_agent for why
         if cash_allocation is None:
             cash_allocation = float(DEFAULT_AGENT_CASH_ALLOCATION)
         agent = self.agents.create_agent(
@@ -356,6 +375,7 @@ class AgentService:
             runtime_config=runtime_config,
             cash_allocation=cash_allocation,
             backtest_allocation=backtest_allocation,
+            category=category,
         )
         if (
             seed_default_pipeline
@@ -370,6 +390,60 @@ class AgentService:
             agent["pipeline"] = pipeline
         return agent
 
+    def _create_builtin_copy(
+        self,
+        *,
+        name: str,
+        model_name: str,
+        owner_user_id: Optional[int],
+        owner_browser_session: Optional[str],
+        description: Optional[str],
+        runtime_type: str,
+        runtime_config: Dict[str, Any],
+        category: Optional[str],
+        pipeline: Optional[List[Dict[str, Any]]],
+        backtest_allocation: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Create a built-in agent and, if the source carried its own pipeline,
+        write it in -- the create-then-copy-the-pipeline-then-enrich tail shared
+        by ``clone_marketplace_template`` (source: a catalog template) and
+        ``duplicate_agent`` (source: a stored agent row). Callers resolve name,
+        model, runtime, and category from their own source *before* calling this
+        -- those resolutions differ genuinely (template vs. row, three-tier vs.
+        two-tier model fallback, different name defaults) and stay put; only the
+        mechanical creation sequence below is identical between them.
+
+        ``backtest_allocation`` is simulated capital with no ledger coupling
+        (validated only by ``ge=MIN_BACKTEST_INITIAL_CAPITAL,
+        le=MAX_BACKTEST_INITIAL_CAPITAL``), so it is safe to copy from a
+        source. ``cash_allocation`` is a real ledger debit and must NOT be
+        copied here -- ``create_agent`` below is deliberately not passed one,
+        so it falls back to ``DEFAULT_AGENT_CASH_ALLOCATION`` like any other
+        fresh agent.
+        """
+        has_own_pipeline = isinstance(pipeline, list) and bool(pipeline)
+        agent = self.create_agent(
+            name=name,
+            model_name=model_name,
+            owner_user_id=owner_user_id,
+            owner_browser_session=owner_browser_session,
+            agent_type="builtin",
+            description=description,
+            runtime_type=runtime_type,
+            runtime_config=runtime_config,
+            backtest_allocation=backtest_allocation,
+            # A source carrying its own pipeline overwrites the seed below, so
+            # skip that write. A source WITHOUT one still needs the starter
+            # instruction, or the copy lands with an empty Configure screen.
+            seed_default_pipeline=(
+                runtime_type == PIPELINE_RUNTIME_TYPE and not has_own_pipeline
+            ),
+            category=category,
+        )
+        if has_own_pipeline:
+            agent = self.agents.update_agent(agent["agent_id"], pipeline=pipeline) or agent
+        return self.attach_equity_sparklines([self.agent_with_stats(agent)])[0]
+
     def clone_marketplace_template(
         self,
         *,
@@ -377,6 +451,7 @@ class AgentService:
         owner_user_id: Optional[int],
         owner_browser_session: Optional[str],
         name: Optional[str] = None,
+        model_name: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Copy a marketplace template into the caller's My Agents list."""
         from dashboard.backend.domain.agents import marketplace as marketplace_mod
@@ -386,31 +461,83 @@ class AgentService:
             raise MarketplaceTemplateNotFoundError()
 
         resolved_name = (name or template.get("name") or "Marketplace Agent").strip()
-        pipeline = template.get("pipeline")
-        has_own_pipeline = isinstance(pipeline, list) and bool(pipeline)
         runtime_type = normalize_runtime_type(template.get("runtime_type"))
         runtime_config = normalize_runtime_config(
             runtime_type, template.get("runtime_config") or {}
         )
-        agent = self.create_agent(
+        # No whitelist, on purpose: create_agent doesn't validate model_name
+        # either, so rejecting here would be inconsistent, and a Literal would
+        # publish an openapi enum -- the deploy gate #313 had to discharge.
+        # Blank/omitted means "the template's own model".
+        resolved_model = (model_name or "").strip() or str(
+            template.get("model_name") or "local-model"
+        ).strip() or "local-model"
+        return self._create_builtin_copy(
             name=resolved_name,
-            model_name=str(template.get("model_name") or "local-model").strip() or "local-model",
+            model_name=resolved_model,
             owner_user_id=owner_user_id,
             owner_browser_session=owner_browser_session,
-            agent_type="builtin",
             description=template.get("description"),
             runtime_type=runtime_type,
             runtime_config=runtime_config,
-            # A template carrying its own pipeline overwrites the seed below, so
-            # skip that write. A template WITHOUT one still needs the starter
-            # instruction, or the clone lands with an empty Configure screen.
-            seed_default_pipeline=(
-                runtime_type == PIPELINE_RUNTIME_TYPE and not has_own_pipeline
-            ),
+            # Lenient on purpose: the live catalog still carries legacy values
+            # ("Foundation", "Advanced", "Hosted") until they're recategorized,
+            # and those must stamp None rather than reject the clone.
+            category=normalize_category(template.get("category")),
+            pipeline=template.get("pipeline"),
+            # A catalog template has no backtest allocation of its own.
+            backtest_allocation=None,
         )
-        if has_own_pipeline:
-            agent = self.agents.update_agent(agent["agent_id"], pipeline=pipeline) or agent
-        return self.attach_equity_sparklines([self.agent_with_stats(agent)])[0]
+
+    def duplicate_agent(
+        self,
+        *,
+        agent_id: str,
+        model_name: str,
+        name: Optional[str] = None,
+        owner_user_id: Optional[int],
+        owner_browser_session: Optional[str],
+    ) -> Dict[str, Any]:
+        """Copy an existing built-in agent onto a different model.
+
+        Built-in only: ``create_agent`` mints a one-time plaintext API key for
+        external agents, and duplicating one would open a credential-issuing
+        path this hook has no reason to have.
+
+        The generated name collides freely (two copies onto DeepSeek both read
+        ``X copy``). Names are not unique anywhere else in this product, and
+        de-duplicating would mean a lookup for a cosmetic gain.
+        """
+        source = self.agents.get_agent(agent_id)
+        if not source:
+            raise AgentNotFoundError()
+        if (source.get("agent_type") or "builtin") != "builtin":
+            raise AgentServiceError("Only built-in agents can be duplicated")
+
+        resolved_name = (name or f"{source.get('name') or 'Agent'} copy").strip()
+        runtime_type = normalize_runtime_type(source.get("runtime_type"))
+        runtime_config = normalize_runtime_config(
+            runtime_type, source.get("runtime_config") or {}
+        )
+        return self._create_builtin_copy(
+            name=resolved_name,
+            model_name=(model_name or "").strip()
+            or str(source.get("model_name") or "local-model"),
+            owner_user_id=owner_user_id,
+            owner_browser_session=owner_browser_session,
+            description=source.get("description"),
+            runtime_type=runtime_type,
+            runtime_config=runtime_config,
+            # Lenient, matching clone_marketplace_template: a stored legacy
+            # category must stamp None rather than reject the duplicate.
+            category=normalize_category(source.get("category")),
+            pipeline=source.get("pipeline"),
+            # Copied (unlike cash_allocation -- see _create_builtin_copy's
+            # docstring) so the two agents' equity curves start from the same
+            # simulated capital and stay comparable. NULL on the source passes
+            # through as None rather than substituting a value.
+            backtest_allocation=source.get("backtest_allocation"),
+        )
 
     def list_builtin_agents_with_stats(self) -> List[Dict[str, Any]]:
         """List all built-in agents (platform-wide) enriched with run stats.

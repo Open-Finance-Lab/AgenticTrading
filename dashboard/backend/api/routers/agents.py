@@ -7,10 +7,17 @@ exception messages, ownership/auth behavior, and ``AgentService`` calls are
 unchanged; only the module location moved.
 """
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Annotated, Any, Dict, List, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    SecretStr,
+    field_validator,
+)
 
 from dashboard.backend.domain.backtesting.constants import (
     DEFAULT_AGENT_CASH_ALLOCATION,
@@ -19,12 +26,14 @@ from dashboard.backend.domain.backtesting.constants import (
     MIN_BACKTEST_INITIAL_CAPITAL,
 )
 from dashboard.backend.domain.agents.repository import _UNSET
+from dashboard.backend.domain.agents.taxonomy import AgentCategory, coerce_category
 from dashboard.backend.domain.agents.credential_store import (
     FINANCIAL_DATASETS_CREDENTIAL,
     agent_credential_store,
 )
 from dashboard.backend.domain.agents.service import (
     AgentNotFoundError,
+    AgentServiceError,
     MarketplaceTemplateNotFoundError,
     NoExternalRunsError,
     agent_service,
@@ -45,6 +54,18 @@ from dashboard.backend.domain.portfolios.service import portfolio_service
 router = APIRouter(prefix="/v1/agents", tags=["agents"])
 
 
+# The ``Literal`` (not a bare ``str`` plus a hand-rolled check) is what puts the
+# allowed slugs into ``openapi.json``, which is how the frontend PR probes that a
+# deploy carrying this vocabulary is actually live. ``BeforeValidator`` folds
+# case/whitespace and maps "" to None ahead of that check.
+CategoryField = Annotated[Optional[AgentCategory], BeforeValidator(coerce_category)]
+
+_CATEGORY_DESCRIPTION = (
+    'Shelf slug, or null/"" for unshelved. Case and surrounding whitespace are '
+    "folded; unknown values are rejected with 422."
+)
+
+
 class CreateAgentBody(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     model_name: str = Field(default="local-model", max_length=100)
@@ -62,6 +83,7 @@ class CreateAgentBody(BaseModel):
         ge=MIN_BACKTEST_INITIAL_CAPITAL,
         le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
+    category: CategoryField = Field(default=None, description=_CATEGORY_DESCRIPTION)
 
 
 class PipelineStep(BaseModel):
@@ -94,6 +116,7 @@ class UpdateAgentBody(BaseModel):
         le=MAX_BACKTEST_INITIAL_CAPITAL,
     )
     live_trading_enabled: Optional[bool] = None
+    category: CategoryField = Field(default=None, description=_CATEGORY_DESCRIPTION)
 
     @field_validator("name", "model_name")
     @classmethod
@@ -171,6 +194,7 @@ def create_agent(
         runtime_config=runtime_config,
         cash_allocation=cash,
         backtest_allocation=body.backtest_allocation,
+        category=body.category,
     )
     if ctx["user_id"]:
         portfolio_service.get_or_create_portfolio(ctx["user_id"])
@@ -215,6 +239,30 @@ def list_marketplace_agents():
 
 class CloneMarketplaceBody(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    # Deliberately unvalidated beyond length -- see clone_marketplace_template.
+    model_name: Optional[str] = Field(default=None, max_length=100)
+
+
+class DuplicateAgentBody(BaseModel):
+    """``model_name`` is required here (unlike clone): the whole point of the
+    action is running the same strategy somewhere else."""
+
+    model_name: str = Field(min_length=1, max_length=100)
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+
+    @field_validator("model_name")
+    @classmethod
+    def _reject_blank(cls, value: str) -> str:
+        # Same trap as UpdateAgentBody._reject_blank: ``min_length=1`` counts
+        # the raw length, so a whitespace-only value ("   ") passes it. Unlike
+        # CreateAgentBody.model_name (optional, coerces blank to
+        # "local-model" on purpose), this field is required -- the service's
+        # ``.strip() or source.get("model_name")`` fallback would otherwise
+        # silently reuse the source's own model, defeating the one thing this
+        # action does. Reject it as a 422 instead.
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value
 
 
 @router.post("/marketplace/{template_id}/clone")
@@ -238,6 +286,7 @@ def clone_marketplace_agent(
             owner_user_id=ctx["user_id"],
             owner_browser_session=ctx["browser_session"],
             name=body.name.strip() if body.name else None,
+            model_name=body.model_name,
         )
     except MarketplaceTemplateNotFoundError:
         raise HTTPException(status_code=404, detail="Marketplace template not found")
@@ -264,6 +313,7 @@ def list_builtin_agents():
                 "name": agent["name"],
                 "model_name": agent.get("model_name") or "local-model",
                 "description": agent.get("description"),
+                "category": agent.get("category"),
                 "run_count": agent.get("run_count", 0),
                 "latest_return": latest.get("total_return"),
                 "latest_sharpe": latest.get("sharpe_ratio"),
@@ -375,6 +425,7 @@ def update_agent(
     live_trading_provided = "live_trading_enabled" in fields_set
     runtime_type_provided = "runtime_type" in fields_set
     runtime_config_provided = "runtime_config" in fields_set
+    category_provided = "category" in fields_set
     if (
         body.name is None
         and body.model_name is None
@@ -385,8 +436,14 @@ def update_agent(
         and not live_trading_provided
         and not runtime_type_provided
         and not runtime_config_provided
+        and not category_provided
     ):
         raise HTTPException(status_code=400, detail="No fields to update")
+
+    # ``category_provided`` (not ``body.category is not None``) is what separates
+    # "clear the shelf" from "leave it alone" -- ``{"category": null}`` and
+    # ``{"category": ""}`` both arrive here as None with the key in ``fields_set``.
+    category_arg = body.category if category_provided else _UNSET
 
     if pipeline_provided:
         pipeline_arg = (
@@ -439,6 +496,7 @@ def update_agent(
             cash_allocation=cash_allocation_arg,
             backtest_allocation=backtest_allocation_arg,
             live_trading_enabled=live_trading_arg,
+            category=category_arg,
         )
     except AgentNotFoundError:
         raise HTTPException(status_code=404, detail="Agent not found")
@@ -592,6 +650,42 @@ def rotate_agent_api_key(
         "agent": agent_service.agent_with_stats(agent),
         "api_key": api_key,
     }
+
+
+@router.post("/{agent_id}/duplicate")
+def duplicate_agent(
+    agent_id: str,
+    body: DuplicateAgentBody,
+    request: Request,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Copy a built-in agent onto a different model ("Run on another model").
+
+    Does not start a backtest: the caller lands on the new agent with Run primed.
+    """
+    ctx = _require_owner_context(request, authorization)
+    _require_agent_access(agent_id, ctx, reclaim_on_session_match=True)
+    cash = float(DEFAULT_AGENT_CASH_ALLOCATION)
+    if ctx["user_id"] and cash > 0:
+        try:
+            portfolio_service.ensure_cash_for_new_agent(ctx["user_id"], cash)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        agent = agent_service.duplicate_agent(
+            agent_id=agent_id,
+            model_name=body.model_name,
+            name=body.name.strip() if body.name else None,
+            owner_user_id=ctx["user_id"],
+            owner_browser_session=ctx["browser_session"],
+        )
+    except AgentNotFoundError:
+        raise HTTPException(status_code=404, detail="Agent not found")
+    except AgentServiceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if ctx["user_id"]:
+        portfolio_service.get_or_create_portfolio(ctx["user_id"])
+    return {"agent": agent}
 
 
 @router.post("/{agent_id}/activate")

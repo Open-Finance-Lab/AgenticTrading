@@ -25,7 +25,7 @@ def test_hosted_editor_replaces_model_picker_with_managed_metadata():
     assert 'id="agentEditorModelField"' in _APP_HTML
     assert 'id="agentEditorManagedModelField"' in _APP_HTML
     assert "OpenRouter · nvidia/nemotron-3-nano-30b-a3b" in _APP_HTML
-    assert "hosted OpenRouter model" in _APP_HTML
+    assert "hosted and managed by Agentic Trading Lab" in _APP_HTML
 
     configure = _slice(
         _EDITOR_JS,
@@ -65,11 +65,62 @@ def test_robinhood_editor_behavior_is_shared_by_both_runtimes():
     assert "live_trading_enabled: Boolean(liveToggle?.checked)" in editor_state
 
 
-def test_marketplace_copy_label_is_scoped_to_ai_hedge_fund():
-    assert (
-        "const cloneLabel = isAiHedgeFundTemplate "
-        "? 'Copy to My Agents' : 'Add to My Agents';"
-    ) in _APP_JS
+def test_marketplace_cta_is_unified_add_to_my_agents():
+    """Superseded 2026-08-05 (Task C4): "Copy to My Agents" was scoped to the
+    AI Hedge Fund template by an `isAiHedgeFundTemplate` ternary; PR #253's
+    canonical CTA is "Add to My Agents" everywhere, so the ternary is gone
+    and every card -- AI Hedge Fund included -- renders the one string.
+    """
+    assert "const cloneLabel = 'Add to My Agents';" in _APP_JS
+    assert "isAiHedgeFundTemplate" not in _APP_JS
+    assert "Copy to My Agents" not in _APP_JS
+
+
+def test_hosted_agents_are_not_given_a_runtime_flavoured_section():
+    """The hosted AI Hedge Fund agent shares a shelf with every other stock
+    strategy rather than getting a runtime-flavoured section of its own.
+
+    #309 briefly split My Agents on `runtime_type === 'ai_hedge_fund'` into an
+    "Open Agents" section. Rewritten 2026-08-05: the shelves are asset-class
+    based now (Stocks / Crypto / Futures / Connected Agents), so a hosted agent
+    lands on Stocks like everything else and its *market* -- a separate axis --
+    comes from `category`. The separation the runtime split was after still
+    holds, and it now generalizes: a hosted A-share agent shelves correctly and
+    files under the China A-Share chip, which the runtime test could not do.
+    """
+    assert "Foundation Agents" not in _APP_HTML
+    assert "Open Agents" not in _APP_HTML
+    # The retired axes: "Prompting LLMs" was how-it-decides (now a card label),
+    # "U.S. Stock Trading" was geography (now a market chip).
+    assert ">Prompting LLMs</h3>" not in _APP_HTML
+    assert ">U.S. Stock Trading</h3>" not in _APP_HTML
+    assert ">Stocks</h3>" in _APP_HTML
+    assert 'id="agentsGridStocks"' in _APP_HTML
+
+    # The runtime-keyed *sections* are gone: shelves resolve through one
+    # function, so no predicate can double-count or drop.
+    assert "isOpenAgent" not in _APP_JS
+    assert "agentsGridOpen" not in _APP_JS
+    assert "const AGENT_SHELVES = [" in _APP_JS
+    assert "function agentShelfKey(agent)" in _APP_JS
+    assert "agentShelfKey(a) === 'stocks'" in _APP_JS
+
+
+def test_uncategorized_hosted_agents_still_resolve_to_the_us_market():
+    """Every AI Hedge Fund agent cloned before shelving shipped carries
+    `category: null`, and those rows are durable (CONTENT_DATABASE_URL).
+
+    Without a runtime fallback those agents resolve to no market at all, so the
+    U.S. chip would hide the very hosted agents it exists to show. This is
+    deliberately not a SQL backfill: the fallback also covers rows served by a
+    backend that predates the column and sends no `category` field at all,
+    which a one-shot migration cannot reach.
+    """
+    assert "const LEGACY_RUNTIME_MARKET = { ai_hedge_fund: 'us_stocks' }" in _APP_JS
+    # ...and it must be consulted only after a real category, so a hosted agent
+    # explicitly filed on another market stays where the user put it.
+    key_fn = _APP_JS.split("function agentMarketKey(agent)", 1)[1].split("\n}", 1)[0]
+    assert key_fn.index("MARKET_LABELS[slug]") < key_fn.index("LEGACY_RUNTIME_MARKET")
 
 
 def test_stored_credential_can_be_removed_from_the_editor():

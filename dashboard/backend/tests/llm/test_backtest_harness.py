@@ -131,6 +131,7 @@ def test_request_uses_market_aware_a_share_system_prompt():
     assert "historical paper backtest" in system_prompt
     assert "DJIA" not in system_prompt
     assert "600519.SH" not in system_prompt
+    assert "positive multiples of 100 shares" in system_prompt
 
 
 def test_request_model_override():
@@ -700,6 +701,41 @@ def test_llm_string_position_size_is_coerced_not_fallback():
     action = out["actions"][0]
     assert action["shares"] == 5
     assert action["reason"].startswith("[LLM]")
+
+
+def test_ashare_llm_fractional_size_is_not_truncated_before_execution():
+    pm = bha.PortfolioManager(100000, lot_size=100)
+    resp_text = json.dumps({"actions": [
+        {"symbol": "AAPL", "action": "buy", "confidence": 0.9,
+         "reasoning": "r", "position_size": 100.5},
+    ]})
+
+    out = pm.make_trading_decision_with_llm(
+        _portfolio_state(),
+        _FakeClient(_FakeResponse(resp_text, _FakeUsage(1, 1))),
+        market_context={"market": "CN", "lot_size": 100},
+    )
+
+    assert out["actions"][0]["shares"] == 100.5
+
+
+def test_ashare_llm_underfunded_lot_reaches_shared_executor():
+    pm = bha.PortfolioManager(1000, lot_size=100)
+    state = _portfolio_state()
+    state["cash"] = 1000
+    state["total_equity"] = 1000
+    resp_text = json.dumps({"actions": [
+        {"symbol": "AAPL", "action": "buy", "confidence": 0.9,
+         "reasoning": "r", "position_size": 100},
+    ]})
+
+    out = pm.make_trading_decision_with_llm(
+        state,
+        _FakeClient(_FakeResponse(resp_text, _FakeUsage(1, 1))),
+        market_context={"market": "CN", "lot_size": 100},
+    )
+
+    assert out["actions"][0]["shares"] == 100
 
 
 def test_llm_nonfinite_position_size_skipped_safely(capsys):

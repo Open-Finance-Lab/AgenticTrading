@@ -156,3 +156,17 @@ def test_repeat_visits_do_not_refetch_the_catalog():
     # The cache must be cleared on failure, or one flaky GET pins the error
     # state for the rest of the session.
     assert "marketplaceTemplates = [];" in body
+
+
+def test_marketplace_repo_url_renders_as_github_button():
+    """Open-source templates link out to their GitHub repo from the card meta."""
+    js = _APP_JS.read_text(encoding="utf-8")
+    css = _STYLES_CSS.read_text(encoding="utf-8")
+    catalog = (
+        Path(__file__).resolve().parents[2] / "config" / "marketplace.json"
+    ).read_text(encoding="utf-8")
+    assert "marketplace-repo-btn" in js
+    assert "template.repo_url" in js
+    assert 'href="#icon-github"' in js
+    assert "https://github.com/virattt/ai-hedge-fund" in catalog
+    assert ".marketplace-repo-btn" in css

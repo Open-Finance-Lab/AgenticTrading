@@ -568,8 +568,60 @@
     }
   }
 
+  // My Agents' shelf slugs. Read from app.js at call time rather than copied:
+  // app.js derives SHELF_LABELS from AGENT_SHELVES, so a shelf renamed or added
+  // there reaches this <select> without a second edit. The literal is only a
+  // floor for the case where app.js failed to load -- agent-editor.js is loaded
+  // first, so this must never be read at module-init time.
+  const SHELF_LABELS_FALLBACK = {
+    us_stocks: 'U.S.',
+    cn_ashares: 'China A-Share',
+  };
+
+  function shelfLabels() {
+    const exported = window.AGENT_SHELF_LABELS;
+    return exported && Object.keys(exported).length ? exported : SHELF_LABELS_FALLBACK;
+  }
+
+  /** Only built-in agents are shelved by category; connected agents always
+   * render under "For Developers", so the picker is meaningless for them.
+   * Demo agents are excluded too -- they have no backend row, so the save path
+   * skips the PATCH entirely and the choice would silently not stick. */
+  function categoryFieldApplies(agent) {
+    const target = agent || currentAgent;
+    if (!target || target.agent_type !== 'builtin') return false;
+    return !isDemoAgent(target.agent_id);
+  }
+
+  function fillCategorySelect(agent) {
+    const select = document.getElementById('agentEditorCategorySelect');
+    if (!select) return;
+    const labels = shelfLabels();
+    // "" is a real, saveable choice, not a placeholder: the backend folds an
+    // empty string to NULL, which un-shelves the agent. It is listed first so
+    // an agent that has never been categorized shows its actual state.
+    const options = [['', 'Not set (shows under Prompting LLMs)']].concat(
+      Object.keys(labels).map((slug) => [slug, labels[slug]]),
+    );
+    select.innerHTML = '';
+    options.forEach(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      select.appendChild(option);
+    });
+    const current = String(agent?.category || '').trim().toLowerCase();
+    select.value = labels[current] ? current : '';
+  }
+
   function getEditorState() {
     const hostedAiHedgeFund = isAiHedgeFundAgent();
+    const categorySelect = document.getElementById('agentEditorCategorySelect');
+    // null means "omit the key", which the PATCH route reads as "leave alone".
+    // "" means "clear the shelf" and must still be sent.
+    const category = categoryFieldApplies() && categorySelect
+      ? String(categorySelect.value || '')
+      : null;
     const nameInput = document.getElementById('agentEditorNameInput');
     const descInput = document.getElementById('agentEditorDescription');
     const cashInput = document.getElementById('agentEditorCashAllocation');
@@ -593,8 +645,8 @@
       if (!Number.isFinite(value) || value < 1) {
         throw new Error('Backtest Allocated Capital must be at least $1.');
       }
-      if (value > 10000) {
-        throw new Error('Backtest Allocated Capital cannot exceed $10,000.');
+      if (value > 3000) {
+        throw new Error('Backtest Allocated Capital cannot exceed $3,000.');
       }
       backtest_allocation = Math.round(value);
     } else {
@@ -603,7 +655,7 @@
       // through to the default rather than becoming an unsaveable value.
       backtest_allocation =
         Number.isFinite(Number(cash_allocation)) && Number(cash_allocation) > 0
-          ? Math.min(Math.round(Number(cash_allocation)), 10000)
+          ? Math.min(Math.round(Number(cash_allocation)), 3000)
           : 1000;
     }
     const modelSelect = document.getElementById('agentEditorModelSelect');
@@ -644,6 +696,7 @@
     return {
       name: nameInput ? nameInput.value.trim() : '',
       description: descInput ? descInput.value.trim() : '',
+      category,
       cash_allocation,
       backtest_allocation,
       model_name: hostedAiHedgeFund
@@ -739,11 +792,14 @@
         const value = Number(raw);
         if (Number.isFinite(value) && value > 0) { resolved = value; break; }
       }
-      backtestInput.value = String(Math.min(Math.round(resolved), 10000));
+      backtestInput.value = String(Math.min(Math.round(resolved), 3000));
     }
     if (meta) {
       meta.textContent = agent.agent_type === 'builtin' ? 'Built-in agent' : 'External agent';
     }
+    const categoryField = document.getElementById('agentEditorCategoryField');
+    if (categoryField) categoryField.hidden = !categoryFieldApplies(agent);
+    fillCategorySelect(agent);
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
     if (liveToggle) liveToggle.checked = Boolean(agent.live_trading_enabled);
   }
@@ -812,6 +868,7 @@
     model_name,
     live_trading_enabled,
     runtimeConfig,
+    category,
   ) {
     const payload = {
       name,
@@ -820,6 +877,9 @@
       backtest_allocation,
       live_trading_enabled: Boolean(live_trading_enabled),
     };
+    // Presence of the key is the signal, so the falsy-but-meaningful "" (clear
+    // the shelf) must still be sent; only null/undefined means "leave alone".
+    if (category !== null && category !== undefined) payload.category = category;
     if (pipeline) payload.pipeline = serializePipeline(pipeline);
     if (model_name) payload.model_name = model_name;
     if (runtimeConfig) payload.runtime_config = runtimeConfig;
@@ -1113,6 +1173,7 @@
         state.model_name,
         state.live_trading_enabled,
         state.runtime_config,
+        state.category,
       );
       currentAgent = state.sendPipeline
         ? { ...currentAgent, ...updated, pipeline: subAgents }

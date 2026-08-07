@@ -182,7 +182,7 @@ function showAppToast(message) {
 const MAX_AGENT_CASH_ALLOCATION = 3000;
 const DEFAULT_AGENT_CASH_ALLOCATION = 1000;
 /** Simulated cash ceiling for a single backtest run — unrelated to the paper sleeve above. */
-const MAX_BACKTEST_ALLOCATED_CAPITAL = 10000;
+const MAX_BACKTEST_ALLOCATED_CAPITAL = 3000;
 const DEFAULT_PORTFOLIO_EQUITY = 10000;
 const AGENT_CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
 
@@ -467,8 +467,131 @@ const MOCK_AGENTS = [
 let allAgents = [];
 let agentViewMode = 'grid';
 const AGENT_GRID_PAGE_SIZE = 5;
-/** Per-category page index (0-based). Reset on search change. */
-let agentGridPage = { builtin: 0, external: 0 };
+
+// Legacy runtime -> market, for an uncategorized agent whose runtime already
+// implies one. Every agent cloned before shelving shipped carries
+// `category: null`, and the hosted AI Hedge Fund runtime is a U.S. stock
+// strategy. Keyed on `runtime_type` rather than backfilled in SQL because the
+// fallback also covers rows written by an older backend that doesn't send
+// `category` at all, which a one-shot migration cannot. New clones stamp the
+// column and never reach this table.
+const LEGACY_RUNTIME_MARKET = { ai_hedge_fund: 'us_stocks' };
+
+/** Category slug -> market display name. The single place these strings are
+ * written: the Stocks shelf's market chips, the Community category chips, the
+ * agent-card submeta and the Configure picker all read this map, so renaming a
+ * market is one edit. Key order is chip order and mirrors the AgentCategory
+ * Literal's declaration order in dashboard/backend/domain/agents/taxonomy.py.
+ *
+ * Markets, not asset classes: My Agents shelves by what an agent trades, and
+ * Stocks is the only asset class the engine can backtest, so both entries here
+ * live under it. */
+const MARKET_LABELS = {
+  us_stocks: 'U.S.',
+  cn_ashares: 'China A-Share',
+};
+
+// Exported for js/agent-editor.js, which builds the Configure screen's market
+// <select> from this rather than a second hardcoded option list. agent-editor.js
+// is loaded *before* app.js, so it must read this at call time (when the editor
+// opens), never at its own module-init time -- the same rule window.API follows.
+window.AGENT_SHELF_LABELS = MARKET_LABELS;
+
+/** Every model a user can actually pick and run here. The single source for
+ * both model <select> elements: the Run Backtest picker (#modelSelect, live
+ * only on the iFinD A-share path) and the Create Built-in picker
+ * (#builtinAgentModel, which the Configure editor clones its own options from).
+ *
+ * These lists were hand-maintained separately and drifted: the backtest picker
+ * offered six models this platform does not run and omitted four it does, and
+ * an agent on an unlisted model silently submitted the *previous* agent's
+ * selection (see syncModelSelectFromAgent). Declaration order is display order.
+ *
+ * The AI Hedge Fund runtime's Nemotron is deliberately absent: it is a property
+ * of a hosted runtime, not a user choice, and syncBacktestModelFieldMode
+ * already renders that case as "AI Hedge Fund — hosted runtime". */
+const SUPPORTED_MODELS = [
+  { slug: 'anthropic/claude-haiku-4-5', label: 'Claude Haiku 4.5', vendor: 'anthropic' },
+  { slug: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', vendor: 'anthropic' },
+  { slug: 'openai/gpt-5.5', label: 'GPT-5.5', vendor: 'openai' },
+  { slug: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', vendor: 'google' },
+  { slug: 'deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', vendor: 'deepseek' },
+  { slug: 'qwen/qwen3.7-plus', label: 'Qwen3.7 Plus', vendor: 'qwen' },
+];
+
+/** Pure: no DOM, so the guards can run it under node. */
+function modelOptionsHtml(models) {
+  return models
+    .map((model) => `<option value="${escapeHtml(model.slug)}">${escapeHtml(model.label)}</option>`)
+    .join('');
+}
+
+/** Fill both model pickers. Runs once, in the pure-DOM boot block, which is
+ * before syncIFindModelControl can prepend #modelSelect's "Rule-based" option
+ * -- calling this again later would wipe that option out. */
+function populateSupportedModelSelects() {
+  const html = modelOptionsHtml(SUPPORTED_MODELS);
+  const backtestPicker = document.getElementById('modelSelect');
+  if (backtestPicker) backtestPicker.innerHTML = html;
+  const createPicker = document.getElementById('builtinAgentModel');
+  if (createPicker) createPicker.innerHTML = html;
+}
+
+// My Agents' JS-driven sections, in display order. `match` delegates to
+// agentShelfKey so every agent resolves to exactly one shelf by construction
+// rather than by predicates staying mutually exclusive as they're edited.
+//
+// Crypto and Futures are deliberately NOT here. They are locked, inert rows in
+// app.html with no grid, footer or empty-state element, so nothing in this file
+// may try to address them: listing them would force a `locked` filter at every
+// site that iterates this array, and one missed filter trips
+// renderAgentCategories' "some grid is missing" guard, silently aborting the
+// entire My Agents render. Their order is their order in app.html.
+const AGENT_SHELVES = [
+  { key: 'stocks', title: 'Stocks',
+    match: (a) => agentShelfKey(a) === 'stocks' },
+  { key: 'external', title: 'For Developers: Connected Agents',
+    match: (a) => agentShelfKey(a) === 'external' },
+];
+
+/** The single shelf an agent renders under. Exactly one value per agent, so no
+ * agent can be double-counted or dropped off every shelf.
+ *
+ * Stocks is the only asset class the backtest engine supports (every entry in
+ * the backend's _MARKET_PROFILES is equities), so every built-in lands there
+ * regardless of category, and connected agents split off by `agent_type`. The
+ * market an agent trades is a separate axis -- see agentMarketKey. */
+function agentShelfKey(agent) {
+  if (!agent || agent.agent_type !== 'builtin') return 'external';
+  return 'stocks';
+}
+
+/** Market a built-in agent trades, or '' when the platform genuinely doesn't
+ * know -- a NULL/blank category, or a slug from a newer or older backend.
+ *
+ * '' is not a bug and must never hide the agent: those agents stay on Stocks
+ * under the All chip and are excluded only by an explicit market filter, which
+ * is the honest outcome when the market is unknown. */
+function agentMarketKey(agent) {
+  const slug = String(agent?.category || '').trim().toLowerCase();
+  if (MARKET_LABELS[slug]) return slug;
+  return LEGACY_RUNTIME_MARKET[String(agent?.runtime_type || '').trim().toLowerCase()] || '';
+}
+
+/** 'all' or one of MARKET_LABELS' keys. Narrows the Stocks shelf's grid only --
+ * never its count pill, which reports what the shelf holds. */
+let agentMarketFilter = 'all';
+
+/** 'us_stocks' -> 'UsStocks' -- app.html's per-shelf element id suffix (agentsGrid<Suffix> etc). */
+function shelfIdSuffix(shelfKey) {
+  return String(shelfKey)
+    .split('_')
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join('');
+}
+
+/** Per-shelf page index (0-based), keyed by AGENT_SHELVES' `key`. Reset on search change. */
+let agentGridPage = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
 
 function agentGridPageCount(total) {
   return Math.max(1, Math.ceil(total / AGENT_GRID_PAGE_SIZE));
@@ -644,8 +767,12 @@ function renderAgentSparkline(agent, positive = true, metrics = {}) {
   return renderAgentSparklineFromValues(values, positive, seed);
 }
 
+/** How the agent decides, shown on the card submeta. This is the axis the
+ * retired "Prompting LLMs" section used to carry: the platform runs hosted
+ * models for built-ins, while a connected agent runs the user's own program.
+ * 'Built-in'/'External' named the plumbing; these name what the user gets. */
 function agentTypeLabel(agent) {
-  return agent.agent_type === 'builtin' ? 'Built-in' : 'External';
+  return agent.agent_type === 'builtin' ? 'Hosted AI' : 'Your own code';
 }
 
 /** Human-readable model label from provider paths like anthropic/claude-haiku-4-5. */
@@ -957,7 +1084,7 @@ function renderAgentCardActions(agent, statusKey) {
   const rotate =
     agent.agent_type === 'builtin'
       ? ''
-      : `<button class="agent-menu-item agent-rotate-key-btn" type="button" data-agent-id="${id}">New API key</button>`;
+      : `<button class="agent-menu-item agent-rotate-key-btn" type="button" data-agent-id="${id}">New access key</button>`;
   return `
     <div class="agent-card-actions agent-card-actions--status">
       ${configure}
@@ -1018,7 +1145,7 @@ function getFilteredAgents() {
 
 function applyAgentFilters(resetPagination = true) {
   if (resetPagination) {
-    agentGridPage = { builtin: 0, external: 0 };
+    agentGridPage = Object.fromEntries(AGENT_SHELVES.map((shelf) => [shelf.key, 0]));
   }
   renderAgentCategories(getFilteredAgents());
 }
@@ -1077,17 +1204,16 @@ function renderAgentsError() {
   document.querySelectorAll('.agents-section .agents-grid').forEach((grid) => {
     grid.innerHTML = '';
   });
-  ['agentsGridFooterBuiltin', 'agentsGridFooterExternal'].forEach((id) => {
-    const footer = document.getElementById(id);
+  AGENT_SHELVES.forEach((shelf) => {
+    const suffix = shelfIdSuffix(shelf.key);
+    const footer = document.getElementById(`agentsGridFooter${suffix}`);
     if (footer) {
       footer.hidden = true;
       footer.innerHTML = '';
     }
+    const emptyEl = document.getElementById(`agentsEmpty${suffix}`);
+    if (emptyEl) emptyEl.hidden = true;
   });
-  const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
-  if (builtinEmpty) builtinEmpty.hidden = true;
-  const externalEmpty = document.getElementById('agentsEmptyExternal');
-  if (externalEmpty) externalEmpty.hidden = true;
   if (errorEl) errorEl.hidden = false;
 }
 
@@ -1144,7 +1270,7 @@ function bindAgentCardMenus(grid) {
 }
 
 function renderAgentGridFooter(categoryKey, total, page, pageCount) {
-  const footerId = categoryKey === 'builtin' ? 'agentsGridFooterBuiltin' : 'agentsGridFooterExternal';
+  const footerId = `agentsGridFooter${shelfIdSuffix(categoryKey)}`;
   const footer = document.getElementById(footerId);
   if (!footer) return;
   if (pageCount <= 1) {
@@ -1179,6 +1305,9 @@ function renderAgentCards(grid, agents, categoryKey) {
     card.setAttribute('data-agent-id', agent.agent_id);
     const model = escapeHtml(formatAgentModelLabel(agent.model_name));
     const type = escapeHtml(agentTypeLabel(agent));
+    // Under the All chip the Stocks shelf mixes markets, so the card has to
+    // say which. Omitted rather than guessed when agentMarketKey returns ''.
+    const market = MARKET_LABELS[agentMarketKey(agent)];
     const running = getAgentBacktestRunning(agent.agent_id);
     if (running) card.classList.add('agent-card--running');
 
@@ -1188,7 +1317,7 @@ function renderAgentCards(grid, agents, categoryKey) {
           ${agentRobotIcon()}
           <div class="agent-card-identity-text">
             <h3 class="agent-name">${escapeHtml(agent.name)}${agent.agent_id === defaultId ? ' <span class="agent-default-badge">Default</span>' : ''}</h3>
-            <p class="agent-card-submeta">${model} · ${type}</p>
+            <p class="agent-card-submeta">${model} · ${type}${market ? ` · ${escapeHtml(market)}` : ''}</p>
           </div>
         </div>
         <span class="status-badge ${statusBadge.className}"><span class="status-badge-dot" aria-hidden="true"></span>${statusBadge.label}</span>
@@ -1254,14 +1383,14 @@ function renderAgentCards(grid, agents, categoryKey) {
     btn.addEventListener('click', async () => {
       const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
       if (!agent) return;
-      if (!confirm(`Create a new API key for "${agent.name}"? The current key will stop working immediately.`)) {
+      if (!confirm(`Create a new access key for "${agent.name}"? The current key stops working right away — any connected program must switch to the new key.`)) {
         return;
       }
       btn.disabled = true;
       try {
         await rotateAgentApiKey(agent);
       } catch (error) {
-        alert(error.message || 'Failed to create new API key');
+        alert(error.message || `Couldn't create a new access key. Please try again.`);
       } finally {
         btn.disabled = false;
       }
@@ -1289,54 +1418,147 @@ function renderAgentCards(grid, agents, categoryKey) {
         }
         await loadAgents();
       } catch (error) {
-        alert(error.message || 'Failed to delete agent');
+        alert(error.message || `Couldn't delete the agent. Please try again.`);
       }
     });
   });
 }
 
+// Empty-state HTML for the Stocks shelf. Three cases, deliberately worded
+// apart: a live search hiding everything, a market chip with nothing on it yet,
+// and a genuinely empty shelf. Collapsing them would tell a searching or
+// filtering user they own no agents. Stocks is also the onboarding surface (it
+// inherited that role from the retired Prompting LLMs shelf), so the true-empty
+// case keeps the create-your-first voice rather than the Community-upsell voice
+// the old market shelves used.
+//
+// External renders a placeholder CARD instead (renderExternalPlaceholderCard),
+// so it has no entry here.
+function stocksEmptyHtml({ searching, marketFilter }) {
+  if (searching) return 'No agents match your search.';
+  if (marketFilter !== 'all') {
+    const label = escapeHtml(MARKET_LABELS[marketFilter] || '');
+    return `No ${label} agents yet. Add a ready-made ${label} strategy from ${communityShelfButtonHtml(marketFilter)}.`;
+  }
+  return `You don't have any agents yet. Create one and test your first trading idea, or browse ready-made strategies in ${communityShelfButtonHtml('all')}.`;
+}
+
+// A real <button>, not an <a href="#">: this is the primary path off an empty
+// shelf, and as an anchor it matched no CSS rule anywhere in styles.css, so it
+// inherited plain link styling and did not read as actionable.
+//
+// data-community-category is read by #agentsCategories' delegated click
+// handler, which routes it through navigateToPage's options so the matching
+// Community chip is pre-selected. 'all' is a valid value there -- navigateToPage
+// falls it back to 'all' because it isn't a MARKET_LABELS key.
+function communityShelfButtonHtml(category) {
+  return `<button type="button" class="agents-empty-community-btn" data-community-category="${escapeHtml(category)}">Community</button>`;
+}
+
+/** The Stocks shelf's market filter row: 'All' plus one chip per MARKET_LABELS
+ * entry, reusing the Community chip classes so the same taxonomy looks the same
+ * on both surfaces.
+ *
+ * Built once, then only toggled. This runs from renderAgentCategories, which is
+ * bound to the search box's `input` event -- rebuilding innerHTML per keystroke
+ * would blow away the focused chip on every character typed. */
+function renderAgentMarketChips() {
+  const container = document.getElementById('agentsMarketChips');
+  if (!container) return;
+  const chips = [
+    { key: 'all', label: 'All' },
+    ...Object.entries(MARKET_LABELS).map(([key, label]) => ({ key, label })),
+  ];
+  const existing = container.querySelectorAll('[data-agent-market]');
+  if (existing.length !== chips.length) {
+    container.innerHTML = chips
+      .map((chip) => `<button type="button" class="marketplace-category-chip" data-agent-market="${escapeHtml(chip.key)}" aria-pressed="false">${escapeHtml(chip.label)}</button>`)
+      .join('');
+  }
+  container.querySelectorAll('[data-agent-market]').forEach((button) => {
+    const active = button.dataset.agentMarket === agentMarketFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+/** Select a market chip and re-render. Resets pagination: the page index is
+ * per-shelf, so a page-3 position under 'All' would land past the end of a
+ * narrower market's single page -- an empty grid under a "Page 3 of 1" footer.
+ * An unrecognized market falls back to 'all' rather than filtering to a chip
+ * that doesn't exist. */
+function setAgentMarketFilter(market) {
+  agentMarketFilter = MARKET_LABELS[market] ? market : 'all';
+  applyAgentFilters();
+}
+
 function renderAgentCategories(agents) {
-  const builtinGrid = document.getElementById('agentsGridBuiltin');
-  const externalGrid = document.getElementById('agentsGridExternal');
   const errorEl = document.getElementById('agentsErrorState');
-  if (!builtinGrid || !externalGrid) return;
+  const shelves = AGENT_SHELVES.map((shelf) => {
+    const suffix = shelfIdSuffix(shelf.key);
+    return {
+      shelf,
+      grid: document.getElementById(`agentsGrid${suffix}`),
+      emptyEl: document.getElementById(`agentsEmpty${suffix}`),
+      countEl: document.getElementById(`agentsCount${suffix}`),
+    };
+  });
+  if (shelves.some(({ grid }) => !grid)) return;
 
   if (errorEl) errorEl.hidden = true; // a successful render clears any prior error
+
+  renderAgentMarketChips();
 
   const defaultId = getDefaultAgentId();
   const pinDefaultFirst = (list) =>
     [...list].sort((a, b) => (b.agent_id === defaultId) - (a.agent_id === defaultId));
 
-  // A live search narrows the list: distinguish "no agents at all" (onboarding)
-  // from "none match your search" so we neither mis-say "No foundation agents
-  // yet" nor surface the External onboarding card as if it were a search result.
+  // A live search narrows every shelf: distinguish "no agents at all"
+  // (onboarding / Community upsell) from "none match your search" so we
+  // never mis-say a shelf is empty when a search term is just hiding its
+  // agents, and never surface the External onboarding card as a search result.
   const searching = !!(document.getElementById('agentSearchInput')?.value || '').trim();
 
-  const builtin = pinDefaultFirst(agents.filter((a) => a.agent_type === 'builtin'));
-  const external = pinDefaultFirst(agents.filter((a) => a.agent_type !== 'builtin'));
+  shelves.forEach(({ shelf, grid, emptyEl, countEl }) => {
+    // The pill counts what the shelf HOLDS, read from the unfiltered roster --
+    // not what is currently on screen. A number that moved while you typed or
+    // clicked a chip would read as agents disappearing.
+    if (countEl) {
+      const held = allAgents.filter(shelf.match).length;
+      countEl.hidden = held === 0;
+      countEl.textContent = `${held} agent${held === 1 ? '' : 's'}`;
+    }
 
-  renderAgentCards(builtinGrid, builtin, 'builtin');
-  renderAgentCards(externalGrid, external, 'external');
+    let matched = pinDefaultFirst(agents.filter(shelf.match));
+    if (shelf.key === 'stocks' && agentMarketFilter !== 'all') {
+      // agentMarketKey returns '' for a NULL/blank/unknown category, so those
+      // agents match no chip and appear under All only -- visible, but never
+      // filed under a market the platform can't actually vouch for.
+      matched = matched.filter((a) => agentMarketKey(a) === agentMarketFilter);
+    }
+    renderAgentCards(grid, matched, shelf.key);
 
-  const builtinEmpty = document.getElementById('agentsEmptyBuiltin');
-  if (builtinEmpty) {
-    builtinEmpty.hidden = builtin.length > 0;
-    builtinEmpty.innerHTML = searching
-      ? 'No foundation agents match your search.'
-      : 'No foundation agents yet. Click <strong>Add Agent</strong> to create one.';
-  }
+    if (shelf.key === 'external') {
+      if (matched.length > 0) {
+        if (emptyEl) emptyEl.hidden = true;
+      } else if (searching) {
+        if (emptyEl) {
+          emptyEl.hidden = false;
+          emptyEl.textContent = 'No agents match your search.';
+        }
+      } else {
+        if (emptyEl) emptyEl.hidden = true;
+        renderExternalPlaceholderCard(grid);
+      }
+      return;
+    }
 
-  const externalEmpty = document.getElementById('agentsEmptyExternal');
-  if (external.length > 0) {
-    if (externalEmpty) externalEmpty.hidden = true;
-  } else if (searching) {
-    // A search that matched no external agents — show a no-match note, not the
-    // "Connect your own agent" onboarding card.
-    if (externalEmpty) externalEmpty.hidden = false;
-  } else {
-    if (externalEmpty) externalEmpty.hidden = true;
-    renderExternalPlaceholderCard(externalGrid);
-  }
+    if (!emptyEl) return;
+    emptyEl.hidden = matched.length > 0;
+    if (matched.length === 0) {
+      emptyEl.innerHTML = stocksEmptyHtml({ searching, marketFilter: agentMarketFilter });
+    }
+  });
 }
 
 // Reserved entry point for connect-your-own agents: the connection mechanism
@@ -1346,8 +1568,8 @@ function renderExternalPlaceholderCard(grid) {
   card.className = 'section-card agent-card agent-card--placeholder';
   card.innerHTML = `
     <div class="agent-card-identity-text">
-      <h3 class="agent-name">Connect your own agent</h3>
-      <p class="agent-card-submeta">Run your own trading agent against our backtests via an API key.</p>
+      <h3 class="agent-name">Connect your own trading program</h3>
+      <p class="agent-card-submeta">For developers: run your own trading program against our backtests using an access key.</p>
     </div>
     <button class="agent-card-cta agent-card-cta--outline" type="button">Connect agent</button>`;
   card.querySelector('button')?.addEventListener('click', openCreateExternalAgentModal);
@@ -1377,7 +1599,7 @@ function renderAgentTokenCost(agent) {
     Number(agent.total_input_tokens || 0) + Number(agent.total_output_tokens || 0);
   if (!totalTokens) return '';
   const cost = formatUsd(agent.total_est_cost_usd);
-  const costLabel = cost ? `${cost} est. LLM cost` : '';
+  const costLabel = cost ? `${cost} est. AI cost` : '';
   return `<span title="Estimated from market context served and decisions returned">${formatTokenCount(totalTokens)} tokens${costLabel ? ` · ${costLabel}` : ''}</span>`;
 }
 
@@ -1461,8 +1683,9 @@ function resolveBacktestModelRequest(modelSelect, agent) {
   if (agentOption?.value === selectedModel && agent?.model_name) {
     return agent.model_name;
   }
-  // A model the nine-option list cannot represent still belongs to the agent:
-  // without this the run submits whatever value a previous agent left behind.
+  // Belt-and-braces since syncModelSelectFromAgent started injecting an option
+  // for unrepresentable models: on the hidden path the agent's saved model wins
+  // outright, whatever the select happens to hold.
   if (agent?.model_name && !backtestModelPickerIsLiveControl()) {
     return agent.model_name;
   }
@@ -1481,17 +1704,38 @@ function syncBacktestModelFieldMode() {
   readonly.textContent = (runBacktestModalAgent?.runtime_type || 'pipeline') !== 'pipeline'
     ? 'AI Hedge Fund — hosted runtime'
     : (source === 'vnpy_simulation'
-      ? 'Rule-based — vn.py simulation makes no LLM calls'
+      ? 'Rule-based — simulated practice data, no AI involved'
       : formatAgentModelLabel(runBacktestModalAgent?.model_name));
 }
 
+/**
+ * Point the picker at this agent's model.
+ *
+ * A model the curated list cannot represent (a legacy value like 'gpt-5.2' or
+ * 'local-model') is INJECTED as its own option rather than left unmatched.
+ * Leaving it unmatched is a silent-wrong-value bug, not a cosmetic one: on the
+ * live iFinD path resolveBacktestModelRequest returns the select's current
+ * value, so the run would submit whatever the previously-selected agent left
+ * there, recorded under this agent's name. js/agent-editor.js does the same
+ * thing for the Configure picker.
+ */
 function syncModelSelectFromAgent(agent) {
   const modelSelect = document.getElementById('modelSelect');
   if (!modelSelect || !agent?.model_name) return;
+  // Drop the previous agent's injected option first, so injections cannot pile
+  // up across agent switches and cannot be matched as if they were curated.
+  modelSelect.querySelectorAll('option[data-injected-model]').forEach((option) => option.remove());
   const option = findBacktestModelOption(modelSelect, agent.model_name);
   if (option) {
     modelSelect.value = option.value;
+    return;
   }
+  const injected = document.createElement('option');
+  injected.value = agent.model_name;
+  injected.textContent = formatAgentModelLabel(agent.model_name);
+  injected.dataset.injectedModel = 'true';
+  modelSelect.appendChild(injected);
+  modelSelect.value = agent.model_name;
 }
 
 function getSelectedBacktestAgent() {
@@ -1563,7 +1807,7 @@ async function ensureDefaultFoundationAgent(agents) {
   defaultAgentProvisionInFlight = (async () => {
     try {
       const data = await API.post(`${API_BASE}/api/v1/agents`, {
-        name: 'My Foundation Agent',
+        name: 'My Trading Agent',
         model_name: DEFAULT_FOUNDATION_MODEL,
         agent_type: 'builtin',
         description: 'Your starter agent — configure it and run a backtest.',
@@ -1708,10 +1952,84 @@ async function loadAgentsNow() {
 let marketplaceTemplates = [];
 let marketplaceCloneInFlight = false;
 let marketplaceLoadInFlight = null;
+/** 'all' or one of MARKET_LABELS' keys. Set by the chip row and by the Stocks
+ * shelf's empty-state Community button (via navigateToPage's options). */
+let marketplaceCategoryFilter = 'all';
+
+/** Model slug prefix -> "Powered by <provider>" label for the marketplace
+ * card submeta. Matched by prefix, not exact slug, so a new model version
+ * under an already-known provider doesn't need a new table entry. The raw
+ * slug itself never renders on the card -- an unmatched prefix falls back to
+ * the glossary's generic "AI-powered" rather than leaking it. */
+const MODEL_PROVIDER_LABELS = [
+  { prefix: 'anthropic/', label: 'Powered by Claude' },
+  { prefix: 'nvidia/nemotron', label: 'Powered by NVIDIA Nemotron' },
+  { prefix: 'deepseek/', label: 'Powered by DeepSeek' },
+  { prefix: 'openai/', label: 'Powered by GPT' },
+  // Not in today's catalog, but all four are already on the leaderboard, so a
+  // template using one is a config change away -- cheaper to cover the whole
+  // set now than to notice a card reading "AI-powered" after the fact.
+  { prefix: 'google/', label: 'Powered by Gemini' },
+  { prefix: 'qwen/', label: 'Powered by Qwen' },
+  { prefix: 'x-ai/', label: 'Powered by Grok' },
+  { prefix: 'meta-llama/', label: 'Powered by Llama' },
+];
+
+function formatModelProviderLabel(modelName) {
+  const raw = String(modelName || '').trim().toLowerCase();
+  const match = MODEL_PROVIDER_LABELS.find((entry) => raw.startsWith(entry.prefix));
+  return match ? match.label : 'AI-powered';
+}
+
+/** Select a Community category chip and re-render, without a route or API
+ * change -- this is in-memory UI state, not navigation. Used by the chip
+ * row's own click handler for in-page filtering while already on Community.
+ * (Pre-selecting a chip on *entry* to Community -- e.g. from C3's My Agents
+ * empty-shelf links -- goes through navigateToPage's `communityCategory`
+ * option instead, which is also the one place that resets the filter to
+ * 'all' on a plain Community nav-tab entry; calling this function directly
+ * from a pre-navigation hook would set the filter just before that reset
+ * overwrote it back to 'all'.) An unrecognized category falls back to 'all'
+ * rather than filtering to a chip that doesn't exist. */
+function setMarketplaceCategoryFilter(category) {
+  marketplaceCategoryFilter = MARKET_LABELS[category] ? category : 'all';
+  renderMarketplaceGrid();
+}
+
+/** Chip row above the marketplace grid: 'All' plus one chip per market, built
+ * from MARKET_LABELS rather than a second hardcoded list. Built from the label
+ * map rather than AGENT_SHELVES because Community filters templates by
+ * *market*, and there is now one Stocks shelf holding both markets -- the shelf
+ * list and the chip list are different things. */
+function renderMarketplaceCategoryChips() {
+  const container = document.getElementById('marketplaceCategoryChips');
+  if (!container) return;
+  const chips = [
+    { key: 'all', label: 'All' },
+    ...Object.entries(MARKET_LABELS).map(([key, label]) => ({ key, label })),
+  ];
+  // Build once, then only toggle state. This runs from renderMarketplaceGrid,
+  // which is bound to the search box's `input` event -- rebuilding innerHTML
+  // per keystroke would blow away the focused chip on every character typed.
+  const existing = container.querySelectorAll('[data-marketplace-category]');
+  if (existing.length !== chips.length) {
+    container.innerHTML = chips
+      .map((chip) => `<button type="button" class="marketplace-category-chip" data-marketplace-category="${escapeHtml(chip.key)}" aria-pressed="false">${escapeHtml(chip.label)}</button>`)
+      .join('');
+  }
+  container.querySelectorAll('[data-marketplace-category]').forEach((button) => {
+    const active = button.dataset.marketplaceCategory === marketplaceCategoryFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
 
 function getFilteredMarketplaceTemplates() {
   const query = (document.getElementById('marketplaceSearchInput')?.value || '').trim().toLowerCase();
   let list = marketplaceTemplates.slice();
+  if (marketplaceCategoryFilter !== 'all') {
+    list = list.filter((template) => String(template.category || '').toLowerCase() === marketplaceCategoryFilter);
+  }
   if (query) {
     list = list.filter((template) => {
       const haystack = [
@@ -1737,12 +2055,16 @@ function renderMarketplaceGrid() {
   const errorEl = document.getElementById('marketplaceErrorState');
   if (!grid) return;
 
+  renderMarketplaceCategoryChips();
   if (errorEl) errorEl.hidden = true;
   const templates = getFilteredMarketplaceTemplates();
   grid.innerHTML = '';
 
   if (!templates.length) {
-    if (emptyEl) emptyEl.hidden = marketplaceTemplates.length > 0;
+    // Show the empty message once the catalog has actually loaded and the
+    // filter narrowed it to zero; keep it hidden before the first load so
+    // it doesn't flash while marketplaceTemplates is still empty.
+    if (emptyEl) emptyEl.hidden = marketplaceTemplates.length === 0;
     return;
   }
   if (emptyEl) emptyEl.hidden = true;
@@ -1750,30 +2072,46 @@ function renderMarketplaceGrid() {
   templates.forEach((template) => {
     const card = document.createElement('div');
     card.className = 'section-card agent-card marketplace-card';
-    const isAiHedgeFundTemplate = template.runtime_type === 'ai_hedge_fund';
     const modeLabel = template.mode === 'runtime'
-      ? 'Hosted runtime'
-      : (template.mode === 'pipeline' ? 'Multi-step pipeline' : 'Simple instruction');
-    const cloneLabel = isAiHedgeFundTemplate ? 'Copy to My Agents' : 'Add to My Agents';
+      ? 'Hosted'
+      : (template.mode === 'pipeline' ? 'Multi-step strategy' : 'Simple instruction');
+    const cloneLabel = 'Add to My Agents';
+    const categoryLabel = MARKET_LABELS[String(template.category || '').toLowerCase()] || 'General';
+    const modelLabel = formatModelProviderLabel(template.model_name);
     const tags = (template.tags || [])
       .slice(0, 3)
       .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
       .join('');
+    const repoLabel = (() => {
+      if (!template.repo_url) return '';
+      try {
+        const path = new URL(template.repo_url).pathname.replace(/^\/+|\/+$/g, '');
+        return path || template.author || 'GitHub';
+      } catch {
+        return template.author || 'GitHub';
+      }
+    })();
+    const authorMeta = template.repo_url
+      ? `<a class="marketplace-repo-btn" href="${escapeHtml(template.repo_url)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(repoLabel)} on GitHub">
+            <svg class="ui-icon marketplace-repo-icon" aria-hidden="true"><use href="#icon-github"></use></svg>
+            <span>${escapeHtml(repoLabel)}</span>
+          </a>`
+      : `<span>By ${escapeHtml(template.author || 'Community')}</span>`;
     card.innerHTML = `
       <div class="agent-card-top">
         <div class="agent-card-identity">
           ${agentRobotIcon()}
           <div class="agent-card-identity-text">
             <h3 class="agent-name">${escapeHtml(template.name)}</h3>
-            <p class="agent-card-submeta">${escapeHtml(template.model_name || 'local-model')} · ${escapeHtml(template.category || 'General')}</p>
+            <p class="agent-card-submeta">${escapeHtml(modelLabel)} · ${escapeHtml(categoryLabel)}</p>
           </div>
         </div>
         <span class="marketplace-mode-chip">${escapeHtml(modeLabel)}</span>
       </div>
       <div class="marketplace-card-body">
-        <p class="marketplace-card-description">${escapeHtml(template.description || 'Open agent template.')}</p>
+        <p class="marketplace-card-description">${escapeHtml(template.description || 'No description provided yet.')}</p>
         <div class="marketplace-card-meta">
-          <span>By ${escapeHtml(template.author || 'Community')}</span>
+          ${authorMeta}
           ${template.step_count ? `<span>${template.step_count} step${template.step_count === 1 ? '' : 's'}</span>` : ''}
         </div>
         ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
@@ -1796,7 +2134,7 @@ function renderMarketplaceGrid() {
       try {
         await cloneMarketplaceTemplate(template);
       } catch (error) {
-        alert(error.message || 'Failed to add template');
+        alert(error.message || `Couldn't add this template. Please try again.`);
       } finally {
         marketplaceCloneInFlight = false;
         btn.disabled = false;
@@ -1985,7 +2323,7 @@ function showAgentCredentials(apiKey, options = {}) {
   if (subtitleEl) {
     subtitleEl.textContent =
       options.subtitle ||
-      'Your agent is ready. Use the API key below to connect your trading client to Agentic Trading Lab.';
+      'Your agent is ready. Use the access key below to connect your own program to Agentic Trading Lab. (This is the API key in the SDK and docs.)';
   }
   if (apiInput) apiInput.value = apiKey;
   if (copyBtn) {
@@ -2017,8 +2355,8 @@ async function rotateAgentApiKey(agent) {
   );
   await loadAgents();
   showAgentCredentials(data.api_key, {
-    title: 'New API key created',
-    subtitle: `A new key was issued for "${agent.name}". Update your client — the old key no longer works.`,
+    title: 'New access key created',
+    subtitle: `A new key was issued for "${agent.name}". Update your program — the old key no longer works.`,
   });
   return data;
 }
@@ -3132,7 +3470,7 @@ async function openDiscordWithAccount(event) {
     window.open(discordUrl, '_blank', 'noopener,noreferrer');
   } catch (error) {
     console.warn('Discord link start failed:', error.message);
-    alert(error.message || 'Could not start Discord linking. Are you signed in?');
+    alert(error.message || `Couldn't start Discord linking. Please sign in and try again.`);
   }
 }
 
@@ -3163,8 +3501,18 @@ async function handleRobinhoodOAuthReturn() {
   if (!robinhood) return;
 
   const agentId = params.get('agent_id');
-  const reason = params.get('reason');
   const linkCode = params.get('link_code');
+  // Read before the delete below strips it. The alert deliberately says nothing
+  // about `reason` -- it's an upstream error code, not something a user can act
+  // on -- but it's the only signal that separates one failure mode from
+  // another, and backend logging is not visible in this deployment, so the
+  // console is where support has to be able to find it.
+  //
+  // Narrowed to the shape an error code actually has before it reaches a log
+  // sink: this value arrives on the query string, so anyone can choose it, and
+  // an unfiltered one could forge console lines with embedded newlines.
+  const failureReason =
+    (params.get('reason') || '').replace(/[^A-Za-z0-9._-]/g, '').slice(0, 64) || 'oauth_failed';
   params.delete('robinhood');
   params.delete('agent_id');
   params.delete('reason');
@@ -3213,7 +3561,8 @@ async function handleRobinhoodOAuthReturn() {
   }
 
   if (robinhood === 'error') {
-    alert(`Robinhood connection failed (${reason || 'oauth_failed'}). Use localhost and a desktop browser.`);
+    console.warn('Robinhood OAuth failed:', failureReason);
+    alert('Robinhood connection failed. Connecting only works on a desktop computer, on the address you started from.');
   }
 }
 
@@ -3632,7 +3981,10 @@ function highlightAgentCard(agentId) {
 let liveBacktestChartMeta = { timestamps: [] };
 let tradingLogCache = [];
 let tradingLogFilter = 'all';
-let tradingLogEmptyMessage = 'No trades yet.';
+let tradingLogEmptyMessage = 'No orders yet.';
+// Survives filter re-renders: the "N more not shown" notice must not disappear
+// just because the user switched to BUY-only.
+let tradingLogTruncatedCount = 0;
 let currentMode = "home";
 let currentPage = "home";
 let playgroundTab = "agents";
@@ -3664,6 +4016,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initNavigation();
     setupTickerResizeHandler();
     setupTickerScrollControls();
+    populateSupportedModelSelects();
 
     // Setup time period buttons
     document.querySelectorAll('.time-btn').forEach(btn => {
@@ -3708,10 +4061,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (tradingLogFilterSelect) {
         tradingLogFilterSelect.addEventListener('change', () => {
             tradingLogFilter = tradingLogFilterSelect.value || 'all';
-            renderTradingLog(tradingLogCache, {
+            paintTradingLog(tradingLogCache, {
                 emptyMessage: tradingLogCache.length
-                    ? 'No trades match this filter.'
+                    ? 'No orders match this filter.'
                     : tradingLogEmptyMessage,
+                truncatedCount: tradingLogTruncatedCount,
             });
         });
     }
@@ -4491,7 +4845,7 @@ function syncIFindModelControl({ resetDecisionSource = false } = {}) {
     modelSelect.setAttribute('aria-disabled', String(!allowsLLM));
     if (modelSelectHint) {
         modelSelectHint.textContent = allowsLLM
-            ? "Uses this agent's model by default. Choose Rule-based for deterministic decisions without LLM calls."
+            ? "Uses this agent's AI model by default. Choose Rule-based for repeatable decisions without AI."
             : 'This universe supports rule-based decisions only.';
     }
 }
@@ -4797,7 +5151,7 @@ function formatBacktestError(error, dataSource = null) {
     const lower = raw.toLowerCase();
     if (status === 403) return 'iFinD A-share access is disabled (403). Ask the server operator to enable it.';
     if (lower.includes('llm provider client is unavailable') || lower.includes('llm client is unavailable')) {
-        return 'The selected LLM provider is not configured. Configure the provider or choose Rule-based.';
+        return 'The selected AI provider is not configured. Configure the provider or choose Rule-based.';
     }
     if (status === 503) return 'iFinD A-share access is not configured (503). Ask the server operator to finish API setup.';
     if (status === 429 || lower.includes('429')) return 'iFinD is rate limited (429). Wait briefly, then run again.';
@@ -5253,7 +5607,7 @@ function prepareLiveBacktestView(launchConfig = null) {
     const runSelect = document.getElementById('backtestRunSelect');
     if (runSelect) runSelect.value = '';
     displayNoMetrics();
-    clearTradingLog('Backtest running… trades will appear here.');
+    clearTradingLog('Backtest running… orders will appear here.');
     initLiveBacktestChart();
     renderBacktestRunConfig(null, { running: true, launchConfig });
     showBacktestRunProgress(true);
@@ -5311,7 +5665,7 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
             stepPct,
         });
     } else if (!alreadyLive) {
-        clearTradingLog('Backtest running… trades will appear here.');
+        clearTradingLog('Backtest running… orders will appear here.');
     }
     ensureBacktestPolling();
 }
@@ -5504,23 +5858,132 @@ function updateLiveBacktestChart(progress) {
     chartInstance.update('none');
 }
 
-function normalizeTradeRecord(trade) {
-    const side = String(trade?.side || trade?.action || '').toUpperCase();
-    const quantity = Number(trade?.quantity ?? trade?.shares ?? 0);
-    const price = Number(trade?.price || 0);
-    const value = Number(
-        trade?.value ?? trade?.total_value ?? trade?.cost ?? trade?.proceeds ?? quantity * price
+function orderEventMatchKey(record) {
+    const side = String(record?.side || record?.action || '').toUpperCase();
+    return `${record?.timestamp ?? ''}|${record?.symbol ?? ''}|${side}`;
+}
+
+/**
+ * Reassemble the run's full order history from the two complementary lists.
+ *
+ * `trades` is every fill, uncapped, straight from the trades table.
+ * `order_events` carries only the orders that did NOT fill cleanly, because
+ * duplicating fills into the bounded metadata sample is what would make that
+ * sample lossy (see `engine._unfilled_order_events`). Preferring one list over
+ * the other — as this function first did — therefore hides real rows either
+ * way: take `order_events` alone and every fill disappears; take `trades`
+ * alone and every rejection does.
+ *
+ * A partial fill is the one order that appears in both: the trade row records
+ * what executed, the order event records the shortfall and its reason. The
+ * event is a strict superset, so it replaces its trade rather than adding a
+ * second row for the same order.
+ */
+function resolveTradingLogRecords(payload) {
+    const trades = Array.isArray(payload?.trades) ? payload.trades : [];
+    const orderEvents = Array.isArray(payload?.order_events) ? payload.order_events : [];
+    if (orderEvents.length === 0) return trades;
+
+    const partialsByKey = new Map();
+    const standalone = [];
+    for (const event of orderEvents) {
+        // Executed nothing => no trade row exists to merge with.
+        if (Number(event?.executed_shares ?? 0) > 0) {
+            const key = orderEventMatchKey(event);
+            if (!partialsByKey.has(key)) partialsByKey.set(key, []);
+            partialsByKey.get(key).push(event);
+        } else {
+            standalone.push(event);
+        }
+    }
+
+    const merged = trades.map((trade) => {
+        const queue = partialsByKey.get(orderEventMatchKey(trade));
+        return queue && queue.length ? queue.shift() : trade;
+    });
+    // Any partial with no matching trade still belongs in the log — dropping it
+    // would be the same silent loss this merge exists to prevent.
+    for (const queue of partialsByKey.values()) merged.push(...queue);
+    merged.push(...standalone);
+
+    return merged.sort((a, b) => {
+        const left = Date.parse(a?.timestamp) || 0;
+        const right = Date.parse(b?.timestamp) || 0;
+        return left - right;
+    });
+}
+
+/** How many non-filled orders the server had to drop from its bounded sample. */
+function resolveTradingLogTruncation(payload) {
+    const returned = Array.isArray(payload?.order_events) ? payload.order_events.length : 0;
+    const explicit = Number(payload?.order_events_truncated);
+    if (Number.isFinite(explicit) && explicit > 0) return Math.trunc(explicit);
+    const total = Number(payload?.order_events_count ?? payload?.order_event_count);
+    if (Number.isFinite(total) && total > returned) return Math.trunc(total - returned);
+    return 0;
+}
+
+function resolveTradingAssetName(symbol) {
+    for (const profile of Object.values(IFIND_ASHARE_UNIVERSES)) {
+        const asset = profile.assets.find((item) => item.symbol === symbol);
+        if (asset) return asset.name;
+    }
+    return POPULAR_STOCKS[symbol] || '';
+}
+
+function formatOrderExecutionReason(reason, strategyReason = '') {
+    const labels = {
+        invalid_lot_size: 'Invalid lot size',
+        insufficient_cash_for_lot: 'Insufficient cash for one lot',
+        insufficient_cash: 'Insufficient cash',
+        t1_frozen: 'T+1 frozen',
+        insufficient_position: 'Insufficient position',
+    };
+    const code = String(reason || '').trim();
+    if (labels[code]) return labels[code];
+    if (code) return 'Order not executed';
+    return String(strategyReason || '').trim() || '--';
+}
+
+function normalizeOrderRecord(record) {
+    const side = String(record?.side || record?.action || '').toUpperCase();
+    const legacyQuantity = Number(record?.quantity ?? record?.shares ?? 0);
+    const requestedValue = Number(record?.requested_shares ?? legacyQuantity);
+    const executedValue = Number(record?.executed_shares ?? legacyQuantity);
+    const requestedShares = Number.isFinite(requestedValue) ? requestedValue : 0;
+    const executedShares = Number.isFinite(executedValue) ? executedValue : 0;
+    const rawPrice = Number(record?.price ?? 0);
+    const price = Number.isFinite(rawPrice) ? rawPrice : 0;
+    const rawValue = Number(
+        record?.executed_value
+        ?? record?.value
+        ?? record?.total_value
+        ?? record?.cost
+        ?? record?.proceeds
+        ?? executedShares * price
     );
+    const value = Number.isFinite(rawValue) ? rawValue : 0;
+    const rawStatus = String(record?.status || '').toLowerCase();
+    const status = ['filled', 'partial', 'rejected'].includes(rawStatus)
+        ? rawStatus
+        : rawStatus
+            ? 'rejected'
+            : 'filled';
     return {
-        timestamp: trade?.timestamp,
+        timestamp: record?.timestamp,
         side,
-        symbol: trade?.symbol || '--',
-        quantity,
+        symbol: record?.symbol || '--',
+        requestedShares,
+        executedShares,
         price,
         value,
-        nativePrice: trade?.native_price == null ? null : Number(trade.native_price),
-        nativeValue: trade?.native_value == null ? null : Number(trade.native_value),
-        fxRate: trade?.fx_rate == null ? null : Number(trade.fx_rate),
+        status,
+        reason: record?.reason || '',
+        strategyReason: record?.strategy_reason || '',
+        repeatCount: Math.max(Math.trunc(Number(record?.repeat_count) || 1), 1),
+        nativePrice: record?.native_price == null ? null : Number(record.native_price),
+        nativeValue: record?.native_value == null ? null : Number(record.native_value),
+        fxRate: record?.fx_rate == null ? null : Number(record.fx_rate),
     };
 }
 
@@ -5541,74 +6004,121 @@ function formatTradeTimestamp(ts) {
     }
 }
 
-function renderTradingLog(trades, { emptyMessage = 'No trades yet.' } = {}) {
+/**
+ * Render already-normalized rows.
+ *
+ * Split out from `renderTradingLog` because the filter control re-renders from
+ * `tradingLogCache`, which holds normalized records. Feeding those back through
+ * `normalizeOrderRecord` would re-read wire-format keys (`requested_shares`,
+ * `native_price`, …) that a normalized record does not carry, silently zeroing
+ * every quantity and dropping the currency audit the moment a user filters.
+ */
+function paintTradingLog(normalizedRecords, options) {
     const tbody = document.getElementById('tradingLogBody');
     if (!tbody) return;
+    options = options || {};
+    const emptyMessage = options.emptyMessage || 'No orders yet.';
 
-    tradingLogCache = Array.isArray(trades) ? trades.map(normalizeTradeRecord) : [];
-    tradingLogEmptyMessage = emptyMessage;
-    let filtered = tradingLogCache;
+    let filtered = normalizedRecords;
     if (tradingLogFilter === 'buy') {
-        filtered = tradingLogCache.filter((trade) => trade.side === 'BUY');
+        filtered = normalizedRecords.filter((trade) => trade.side === 'BUY');
     } else if (tradingLogFilter === 'sell') {
-        filtered = tradingLogCache.filter((trade) => trade.side === 'SELL');
+        filtered = normalizedRecords.filter((trade) => trade.side === 'SELL');
     }
 
     if (filtered.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="trading-log-empty">${emptyMessage}</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="trading-log-empty">${escapeHtml(emptyMessage)}</td></tr>`;
         return;
     }
 
-    tbody.innerHTML = filtered.map((trade) => {
-        const actionClass = trade.side === 'SELL' ? 'action-sell' : 'action-buy';
-        const actionLabel = trade.side === 'SELL' ? 'SELL' : 'BUY';
-        const totalValue = trade.value.toLocaleString('en-US', {
+    tbody.innerHTML = filtered.map((order) => {
+        const actionClass = order.side === 'SELL' ? 'action-sell' : 'action-buy';
+        const actionLabel = order.side === 'SELL' ? 'SELL' : 'BUY';
+        const statusLabel = order.status.toUpperCase();
+        const totalValue = order.value.toLocaleString('en-US', {
             minimumFractionDigits: 2,
             maximumFractionDigits: 2,
         });
-        const hasNativeAudit = Number.isFinite(trade.nativePrice)
-            && Number.isFinite(trade.nativeValue)
-            && Number.isFinite(trade.fxRate);
+        const hasNativeAudit = Number.isFinite(order.nativePrice)
+            && Number.isFinite(order.nativeValue)
+            && Number.isFinite(order.fxRate);
         const priceAudit = hasNativeAudit
-            ? `<div class="trading-log-native">¥${trade.nativePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>`
+            ? `<div class="trading-log-native">¥${order.nativePrice.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div>`
             : '';
-        const valueAudit = hasNativeAudit
-            ? `<div class="trading-log-native">¥${trade.nativeValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · FX ${trade.fxRate.toFixed(4)}</div>`
+        const valueAudit = hasNativeAudit && order.executedShares > 0
+            ? `<div class="trading-log-native">¥${order.nativeValue.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} · FX ${order.fxRate.toFixed(4)}</div>`
+            : '';
+        const assetName = resolveTradingAssetName(order.symbol);
+        const quantity = `${order.executedShares.toLocaleString('en-US')} / ${order.requestedShares.toLocaleString('en-US')} shares`;
+        const reason = formatOrderExecutionReason(order.reason, order.strategyReason);
+        // A rejection the agent re-issued on every bar of a day is stored once,
+        // with its tally. Showing the tally is the difference between "this
+        // blocked one order" and "this blocked the strategy all day".
+        const repeatNote = order.repeatCount > 1
+            ? `<div class="trading-log-native">×${order.repeatCount} that day</div>`
             : '';
         return `<tr>
-            <td>${formatTradeTimestamp(trade.timestamp)}</td>
+            <td>${escapeHtml(formatTradeTimestamp(order.timestamp))}</td>
             <td><span class="${actionClass}">${actionLabel}</span></td>
-            <td>${trade.symbol}</td>
-            <td>${trade.quantity} shares</td>
-            <td>$${trade.price.toFixed(2)}${priceAudit}</td>
-            <td>$${totalValue}${valueAudit}</td>
+            <td><div class="trading-log-asset"><strong>${escapeHtml(order.symbol)}</strong>${assetName ? `<small>${escapeHtml(assetName)}</small>` : ''}</div></td>
+            <td class="trading-log-quantity">${escapeHtml(quantity)}</td>
+            <td>$${order.price.toFixed(2)}${priceAudit}</td>
+            <td>${order.executedShares > 0 ? `$${totalValue}${valueAudit}` : '--'}</td>
+            <td><span class="order-status order-status-${order.status}" title="Order status: ${statusLabel}" aria-label="Order status: ${statusLabel}">${statusLabel}</span></td>
+            <td class="trading-log-reason">${escapeHtml(reason)}${repeatNote}</td>
         </tr>`;
     }).join('');
+
+    // Never let a capped list read like a complete one. The server bounds the
+    // non-filled sample, so when it drops records the table must say so rather
+    // than quietly ending early.
+    const truncated = Math.max(Math.trunc(Number(options.truncatedCount) || 0), 0);
+    if (truncated > 0) {
+        const note = `${truncated.toLocaleString('en-US')} more unfilled `
+            + `${truncated === 1 ? 'order is' : 'orders are'} not shown `
+            + '(audit sample capped).';
+        tbody.innerHTML += `<tr><td colspan="8" class="trading-log-empty">${escapeHtml(note)}</td></tr>`;
+    }
 }
 
-function clearTradingLog(message = 'Waiting for trades…') {
-    tradingLogCache = [];
+function renderTradingLog(records, options) {
+    options = options || {};
+    tradingLogCache = Array.isArray(records) ? records.map(normalizeOrderRecord) : [];
+    tradingLogEmptyMessage = options.emptyMessage || 'No orders yet.';
+    tradingLogTruncatedCount = Math.max(
+        Math.trunc(Number(options.truncatedCount) || 0), 0
+    );
+    paintTradingLog(tradingLogCache, {
+        emptyMessage: tradingLogEmptyMessage,
+        truncatedCount: tradingLogTruncatedCount,
+    });
+}
+
+function clearTradingLog(message = 'Waiting for orders…') {
     renderTradingLog([], { emptyMessage: message });
 }
 
 function updateLiveTradingLog(progress) {
-    if (!progress?.trades) return;
-    renderTradingLog(progress.trades);
+    if (!Array.isArray(progress?.order_events) && !Array.isArray(progress?.trades)) return;
+    renderTradingLog(resolveTradingLogRecords(progress), {
+        truncatedCount: resolveTradingLogTruncation(progress),
+    });
 }
 
 async function loadTradingLogForRun(runId) {
     if (!runId) {
-        clearTradingLog('Run a backtest to see trades here.');
+        clearTradingLog('Run a backtest to see orders here.');
         return;
     }
     try {
         const data = await API.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/trades?t=${Date.now()}`);
-        renderTradingLog(data.trades || [], {
-            emptyMessage: 'No trades were executed. The selected strategy produced no executable orders.',
+        renderTradingLog(resolveTradingLogRecords(data), {
+            emptyMessage: 'No orders were submitted by the selected strategy.',
+            truncatedCount: resolveTradingLogTruncation(data),
         });
     } catch (error) {
-        console.warn('Could not load trades:', error.message);
-        clearTradingLog('Trade log unavailable for this run.');
+        console.warn('Could not load orders:', error.message);
+        clearTradingLog('Order log unavailable for this run.');
     }
 }
 
@@ -5732,7 +6242,7 @@ function renderBacktestRunConfig(
         ? formatAgentModelLabel(model)
         : (decisionSource === RULE_BASED_DECISION_SOURCE
             ? 'Rule-based'
-            : (decisionSource || 'LLM / Rule-based'));
+            : (decisionSource || 'AI / Rule-based'));
     const marketData = cfg?.marketDataLabel
         || (dataSource === IFIND_ASHARE_SOURCE
             ? 'iFinD A-Share'
@@ -6035,6 +6545,10 @@ async function runBacktest() {
     // Pin live view BEFORE navigateToPage → showPlaygroundPanel → loadData(),
     // otherwise the async history load paints the previous run over the chart.
     closeRunBacktestModal();
+    // The agent editor is a fullscreen overlay (z-index 1200) and the run modal
+    // sits above it — without this, a run launched from inside the editor
+    // repaints My Agents invisibly underneath the settings page.
+    if (window.AgentEditor?.close) window.AgentEditor.close(true);
     prepareLiveBacktestView(launchConfigBase);
     markAgentBacktestRunning(activeAgent.agent_id, null);
     // A synchronous throw anywhere in here would otherwise leave the agent
@@ -6423,7 +6937,12 @@ async function applyAgentRunDeepLink() {
         }
     }
 
-    if (agentId && !agent && agentAuthError) {
+    // agentAuthError can only be set inside the `!agent && agentId` branch above,
+    // and only from the catch — where the `agent = …` assignment never ran. So it
+    // already implies both operands; re-testing them added nothing but made the
+    // guard read as if the URL-supplied agentId decided the outcome. The access
+    // decision is the server's 401/403, not this condition.
+    if (agentAuthError) {
         const signedIn = isSignedIn();
         if (!signedIn) {
             // Park it so a successful sign-in retries — see PENDING_DEEP_LINK_KEY.
@@ -6619,6 +7138,12 @@ function navigateToPage(page, options = {}) {
             showCompetitionPanel(competitionTab);
         } else if (page === 'community') {
             currentMode = 'community';
+            // Every entry to Community resets the chip filter to 'all' unless
+            // an explicit category rides in via options.communityCategory (the
+            // My Agents empty-shelf "Community" links) -- otherwise a category
+            // set on one visit would leak into the next, unrelated visit made
+            // through the plain nav tab, the most common entry path.
+            marketplaceCategoryFilter = MARKET_LABELS[options.communityCategory] ? options.communityCategory : 'all';
             if (communityView) communityView.style.display = 'block';
             loadMarketplace();
         } else if (page === 'account') {
@@ -6727,7 +7252,27 @@ function initNavigation() {
 
     document.getElementById('agentSearchInput')?.addEventListener('input', applyAgentFilters);
     document.getElementById('marketplaceSearchInput')?.addEventListener('input', renderMarketplaceGrid);
+    document.getElementById('marketplaceCategoryChips')?.addEventListener('click', (event) => {
+      const chipBtn = event.target.closest('[data-marketplace-category]');
+      if (!chipBtn) return;
+      setMarketplaceCategoryFilter(chipBtn.dataset.marketplaceCategory);
+    });
     document.getElementById('agentsCategories')?.addEventListener('click', (event) => {
+      const marketChip = event.target.closest('[data-agent-market]');
+      if (marketChip) {
+        setAgentMarketFilter(marketChip.dataset.agentMarket);
+        return;
+      }
+      const communityLink = event.target.closest('[data-community-category]');
+      if (communityLink) {
+        event.preventDefault();
+        // Routed through navigateToPage's options rather than a separate
+        // setMarketplaceCategoryFilter call -- navigateToPage is the one
+        // place that resets the filter to 'all' on a plain Community entry,
+        // so the explicit category has to ride the same call to survive it.
+        navigateToPage('community', { communityCategory: communityLink.dataset.communityCategory });
+        return;
+      }
       const prevBtn = event.target.closest('[data-agent-grid-prev]');
       const nextBtn = event.target.closest('[data-agent-grid-next]');
       const key = prevBtn?.dataset.agentGridPrev || nextBtn?.dataset.agentGridNext;
@@ -7941,7 +8486,7 @@ async function executeMyTradingAlgo() {
     if (statusEl) {
         statusEl.hidden = false;
         statusEl.className = 'algo-execute-status';
-        statusEl.textContent = 'Submitting real backtest (Alpaca + LLM)…';
+        statusEl.textContent = 'Submitting backtest — real market data + AI…';
     }
 
     try {

@@ -149,6 +149,7 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
         "symbols": ["AAPL", "MSFT"],
         "native_currency": "USD",
         "reporting_currency": "USD",
+        "lot_size": 1,
         "llm_max_output_tokens": 777,
     }
     backtester.use_llm = False
@@ -157,6 +158,7 @@ def test_engine_llm_run_metadata_snapshot(monkeypatch):
         "symbols": ["AAPL", "MSFT"],
         "native_currency": "USD",
         "reporting_currency": "USD",
+        "lot_size": 1,
     }
 
 
@@ -186,6 +188,7 @@ def test_baseline_metadata_is_provenance_only(monkeypatch):
         "symbols": ["AAPL"],
         "native_currency": "USD",
         "reporting_currency": "USD",
+        "lot_size": 1,
     }
 
 

@@ -149,7 +149,7 @@ def test_ifind_profiles_declare_llm_capability_and_sync_model_control(js):
         js,
         re.S,
     )
-    assert "Uses this agent's model by default" in js
+    assert "Uses this agent's AI model by default" in js
     assert re.search(r"function\s+normalizeBacktestModelId\s*\(", js)
     assert re.search(r"function\s+findBacktestModelOption\s*\(", js)
     assert re.search(
@@ -218,22 +218,23 @@ def test_backtest_capital_input_stays_removed_default_unchanged(html, js):
     assert re.search(r"DEFAULT_AGENT_CASH_ALLOCATION\s*=\s*1000", js)
 
 
-def test_ifind_model_dropdown_keeps_all_nine_models_available(html):
-    model_options = re.findall(
-        r'<option\s+value="([^"]+)">[^<]+</option>',
-        re.search(r'<select[^>]+id="modelSelect"[^>]*>(.*?)</select>', html, re.S).group(1),
+def test_ifind_model_dropdown_is_populated_from_supported_models(html, js):
+    """This used to pin nine hardcoded <option>s here -- six models the platform
+    cannot run, in a bare-slug format ('gpt-5.2') the rest of the app does not
+    use, while #builtinAgentModel used namespaced slugs. Both pickers now build
+    from SUPPORTED_MODELS in app.js; the vocabulary itself is pinned by
+    test_frontend_model_vocabulary.py.
+
+    What still matters *here* is that the picker is never left empty: on the
+    iFinD A-share path it is the live rule-based-vs-LLM decision-source control,
+    so the populator has to be wired into boot, not merely defined.
+    """
+    assert re.search(r'<select[^>]*id="modelSelect"[^>]*>\s*</select>', html)
+    assert "function populateSupportedModelSelects" in js
+    # Wired into the pure-DOM boot block, not left merely defined.
+    assert js.index("setupTickerScrollControls();") < js.index(
+        "populateSupportedModelSelects();"
     )
-    assert model_options == [
-        "claude-haiku-4.5",
-        "claude-sonnet-4.6",
-        "claude-opus-4.7",
-        "gpt-5.2",
-        "gpt-5-mini",
-        "deepseek-v4-flash",
-        "deepseek-v4-pro",
-        "gemini-3.5-flash",
-        "gemini-2.5-pro",
-    ]
 
 
 def test_run_config_shows_ifind_source_universe_count_timeframe_and_decision(html, js):
@@ -308,7 +309,7 @@ def test_ifind_errors_are_mapped_to_short_actionable_messages(js):
     ):
         assert marker in js
     assert re.search(r"formatBacktestError\(\s*error", js)
-    assert "The selected LLM provider is not configured" in js
+    assert "The selected AI provider is not configured" in js
     assert js.index("llm provider client is unavailable") < js.index("status === 503")
 
 
@@ -327,10 +328,7 @@ def test_backtest_launch_failure_remains_visible_instead_of_loading_history(js):
 
 
 def test_completed_zero_trade_run_has_actionable_empty_state(js):
-    assert (
-        "No trades were executed. The selected strategy produced no executable orders."
-        in js
-    )
+    assert "No orders were submitted by the selected strategy." in js
 
 
 def test_frontend_never_collects_or_stores_ifind_credentials(html, js):
