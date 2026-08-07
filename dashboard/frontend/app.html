@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=84">
+    <link rel="stylesheet" href="styles.css?v=85">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -804,6 +804,25 @@
                 <p id="builtinAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createBuiltinAgentError" class="auth-error" hidden></p>
                 <button id="createBuiltinAgentSubmit" class="auth-submit-btn" type="submit">Create built-in agent</button>
+            </form>
+        </div>
+    </div>
+
+    <div id="duplicateAgentModal" class="auth-modal" hidden>
+        <div class="auth-modal-backdrop" id="duplicateAgentModalBackdrop"></div>
+        <div class="auth-modal-panel" role="dialog" aria-labelledby="duplicateAgentModalTitle">
+            <button id="duplicateAgentModalClose" class="auth-modal-close" type="button" aria-label="Close">×</button>
+            <h2 id="duplicateAgentModalTitle" class="auth-modal-title">Run on another model</h2>
+            <p class="auth-modal-subtitle">Makes a copy of this agent — same strategy, same instructions — running on a different AI model, so you can compare them side by side. Nothing runs until you press Run Backtest.</p>
+            <form id="duplicateAgentForm" class="auth-form">
+                <label class="auth-field">
+                    <span>Model</span>
+                    <!-- Options are written by openDuplicateAgentModal(): the list
+                         excludes the agent's own model, so it cannot be built here. -->
+                    <select id="duplicateAgentModel"></select>
+                </label>
+                <p id="duplicateAgentError" class="auth-error" hidden></p>
+                <button id="duplicateAgentSubmit" class="auth-submit-btn" type="submit">Create the copy</button>
             </form>
         </div>
     </div>
@@ -1602,9 +1621,10 @@
                 </div>
             </div>
             <p class="control-helper">Every test here uses simulated money. Real money is involved only if you explicitly connect a brokerage account and turn on live trading.</p>
-            <div id="marketplaceCategoryChips" class="marketplace-category-chips" role="group" aria-label="Filter templates by category"></div>
+            <div id="marketplaceCategoryChips" class="marketplace-category-chips" role="group" aria-label="Filter templates by market"></div>
+            <div id="marketplaceVendorChips" class="marketplace-category-chips marketplace-vendor-chips" role="group" aria-label="Filter templates by AI model"></div>
             <div id="marketplaceGrid" class="agents-grid marketplace-grid"></div>
-            <p id="marketplaceEmptyState" class="control-helper" hidden>No templates match your search.</p>
+            <p id="marketplaceEmptyState" class="control-helper" hidden></p>
             <p id="marketplaceErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't load the marketplace. Check your connection and try again.</p>
         </div>
     </div>
@@ -1719,7 +1739,7 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=26" defer></script>
-    <script src="app.js?v=75" defer></script>
+    <script src="app.js?v=76" defer></script>
     <script src="js/leaderboard.js?v=16" defer></script>
     <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

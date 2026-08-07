@@ -9631,6 +9631,68 @@ body.agent-editor-open {
     margin: 4px 0 16px;
 }
 
+/* Second facet row (model vendor). Pulled up under the market row so the two
+   read as one stacked filter block rather than two unrelated controls. */
+.marketplace-vendor-chips {
+    margin-top: -8px;
+}
+
+/* Open-weight marker. Sits in the tag row so it wraps with the tags rather
+   than competing with the mode chip for the card's top-right corner. */
+.marketplace-licence-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: var(--success-color);
+    background: rgba(34, 197, 94, 0.12);
+    border: 1px solid rgba(34, 197, 94, 0.35);
+}
+
+/* Split CTA: the primary Add button keeps its weight; the model picker is a
+   quieter sibling so it cannot compete with the conversion click. */
+.marketplace-clone-split {
+    position: relative;
+    display: flex;
+    gap: 6px;
+    width: 100%;
+}
+
+.marketplace-clone-split .marketplace-clone-btn {
+    flex: 1 1 auto;
+}
+
+.marketplace-clone-model-btn {
+    flex: 0 0 auto;
+    background: transparent;
+    color: var(--text-secondary);
+    border: 1px solid var(--border-color);
+}
+
+.marketplace-clone-model-btn:hover {
+    color: var(--text-primary);
+    border-color: var(--info-color);
+}
+
+.marketplace-model-menu {
+    position: absolute;
+    right: 0;
+    bottom: calc(100% + 6px);
+    z-index: 20;
+    min-width: 200px;
+    padding: 6px;
+    border-radius: 10px;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    box-shadow: 0 12px 28px rgba(0, 0, 0, 0.35);
+}
+
+.marketplace-model-menu[hidden] {
+    display: none !important;
+}
+
 .marketplace-category-chip {
     display: inline-flex;
     align-items: center;

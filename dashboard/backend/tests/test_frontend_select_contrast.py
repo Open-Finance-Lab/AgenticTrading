@@ -42,6 +42,7 @@ _COVERED_CLASSES = {"control-select", "filter-select", "agent-editor-model-selec
 # <select>s covered by a descendant rule rather than their own class.
 _DESCENDANT_COVERED_IDS = {
     "builtinAgentModel",  # inside <label class="auth-field"> -> `.auth-field select`
+    "duplicateAgentModel",  # inside <label class="auth-field"> -> `.auth-field select`
 }
 
 # The only <select> that is never rendered: no code path clears its `hidden`
