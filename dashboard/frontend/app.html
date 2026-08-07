@@ -1425,7 +1425,7 @@
                 </div>
                 <div class="section-card">
                     <h3 class="section-title">Daily Leaderboard</h3>
-                    <p class="about-text">The Daily Leaderboard is the same chart + standings UI as Competition, but each entry is an hourly backtest over the <strong>last completed US weekday</strong>. Baseline and index lines refresh automatically on load. New AI entries appear when the leaderboard next updates.</p>
+                    <p class="about-text">The Daily Leaderboard is the same chart + standings UI as Competition, but each entry is an hourly backtest over the <strong>last completed US cash session</strong> (after 16:00 ET that weekday; before the close, the prior session). Baseline and index lines refresh automatically on load. New AI entries appear when the leaderboard next updates.</p>
                 </div>
                 <div class="section-card">
                     <h3 class="section-title">Competition Leaderboard</h3>
@@ -1741,7 +1741,7 @@
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=26" defer></script>
     <script src="app.js?v=77" defer></script>
-    <script src="js/leaderboard.js?v=17" defer></script>
+    <script src="js/leaderboard.js?v=18" defer></script>
     <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),

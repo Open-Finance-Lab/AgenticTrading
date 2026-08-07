@@ -15,8 +15,9 @@ import os
 import secrets
 import tempfile
 import threading
-from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union
+from zoneinfo import ZoneInfo
 
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.database import db
@@ -46,6 +47,10 @@ _SKIP_CACHE_PATH = DATA_DIR / "leaderboard_skip_cache.json"
 _DAILY_REFRESH_STATE_PATH = DATA_DIR / "leaderboard_daily_refresh.json"
 _daily_refresh_lock = threading.Lock()
 _daily_refresh_running = False
+
+# Daily board window is the last *completed* US cash session, not UTC-yesterday.
+_US_EASTERN = ZoneInfo("America/New_York")
+_US_CASH_CLOSE = time(16, 0)  # 16:00 America/New_York regular-session close
 
 # H6 integrity threshold: an LLM entry must have decided at least this fraction
 # of its steps with the model itself. Below it, the curve is mostly a rule-based
@@ -81,17 +86,48 @@ def _normalize_period(period: Optional[str]) -> str:
     return value if value in VALID_PERIODS else "contest"
 
 
-def daily_window_dates(as_of: Optional[date] = None) -> Tuple[str, str]:
-    """Most recently completed US equity session (Mon–Fri), as the daily window.
+def _coerce_as_of_eastern(as_of: Optional[Union[date, datetime]]) -> datetime:
+    """Normalize ``as_of`` to a timezone-aware America/New_York datetime.
 
-    Uses UTC calendar dates with a conservative "yesterday" anchor so the board
-    never advances to an in-progress session. On weekends (and Monday before the
-    prior week closes out in UTC terms) this rolls back to the last Friday —
-    i.e. "show yesterday's board" when today has no completed session yet.
+    - ``None`` → now in Eastern.
+    - aware ``datetime`` → converted to Eastern.
+    - naive ``datetime`` → interpreted as already Eastern.
+    - bare ``date`` → that Eastern calendar day at the cash close (16:00), so a
+      weekday date means "that session is eligible" without callers inventing a
+      clock time.
     """
-    d = as_of or datetime.now(timezone.utc).date()
-    d = d - timedelta(days=1)
-    while d.weekday() >= 5:  # Sat/Sun → roll back to Friday
+    if as_of is None:
+        return datetime.now(_US_EASTERN)
+    if isinstance(as_of, datetime):
+        if as_of.tzinfo is None:
+            return as_of.replace(tzinfo=_US_EASTERN)
+        return as_of.astimezone(_US_EASTERN)
+    return datetime(
+        as_of.year, as_of.month, as_of.day,
+        _US_CASH_CLOSE.hour, _US_CASH_CLOSE.minute,
+        tzinfo=_US_EASTERN,
+    )
+
+
+def daily_window_dates(as_of: Optional[Union[date, datetime]] = None) -> Tuple[str, str]:
+    """Most recently completed US cash equity session (Mon–Fri).
+
+    Anchored on America/New_York so the board flips to **today** once the
+    regular session has closed (16:00 ET). Before the close on a weekday — and
+    all weekend — the window rolls back to the previous weekday. That is what
+    makes a post-close cron (e.g. 22:30 UTC ≈ 18:30 EDT) refresh the session
+    that just finished, instead of UTC-yesterday / last Friday.
+
+    Market holidays are not special-cased: an exchange holiday still selects
+    that weekday after 16:00 ET (bars may be empty/sparse).
+    """
+    now_et = _coerce_as_of_eastern(as_of)
+    d = now_et.date()
+    # Wall-clock compare in Eastern (DST already applied by ZoneInfo).
+    session_complete = now_et.weekday() < 5 and now_et.time() >= _US_CASH_CLOSE
+    if not session_complete:
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:  # Sat/Sun → Friday
         d -= timedelta(days=1)
     iso = d.isoformat()
     return iso, iso
@@ -392,7 +428,9 @@ def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, A
             "end_date": end_date,
             "reference_start_date": reference_start_date(start_date, None),
             "description": (
-                f"Daily leaderboard for {start_date} (last completed US weekday). "
+                f"Daily leaderboard for {start_date} (last completed US cash session). "
+                "After 16:00 America/New_York the board advances to that weekday; "
+                "before the close (and on weekends) it shows the prior session. "
                 "Baselines refresh automatically; competition models deploy via the "
                 "nightly refresh job or LEADERBOARD_DAILY_AUTO_DEPLOY locally."
             ),

@@ -2,14 +2,16 @@ name: Daily Leaderboard refresh
 
 # Enqueue a rolling Daily Leaderboard refresh after US cash equity close.
 # The API returns 202 immediately; model deploys continue on the Render
-# instance. Weekends are handled server-side (window rolls back to Friday).
+# instance. Server-side window math is America/New_York + 16:00 close, so this
+# Mon–Fri 22:30 UTC schedule targets the session that just finished (not
+# UTC-yesterday). Weekends roll back to Friday without a Saturday cron.
 #
 # Requires repository secret LEADERBOARD_DAILY_REFRESH_SECRET matching
 # the value configured on the Render service.
 
 on:
   schedule:
-    # 22:30 UTC Mon–Fri ≈ 6:30pm EDT / 5:30pm EST — after the cash close.
+    # 22:30 UTC Mon–Fri ≈ 18:30 EDT / 17:30 EST — after the 16:00 ET cash close.
     - cron: "30 22 * * 1-5"
   workflow_dispatch:
     inputs:

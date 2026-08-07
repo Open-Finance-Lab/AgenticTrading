@@ -337,8 +337,9 @@ function scheduleDailyLeaderboardPoll(payload) {
   }
   if (payload.period !== 'daily') return;
   const status = payload.daily_status || {};
-  const pending = Number(status.models_pending) || 0;
-  if (!status.refresh_in_progress && pending <= 0) return;
+  // Only poll while a refresh worker is running. Pending curves with no worker
+  // wait for the nightly cron — polling forever just hammers the API.
+  if (!status.refresh_in_progress) return;
   dailyLeaderboardPollTimer = setTimeout(() => {
     loadLeaderboardData('daily');
   }, 30000);

@@ -14,7 +14,9 @@ Remote prod (Render) without shell access — enqueues a background refresh
     curl -X POST "$ATL_API/api/v1/leaderboard/daily/refresh?deploy_models=true" \\
       -H "X-Leaderboard-Refresh-Secret: $LEADERBOARD_DAILY_REFRESH_SECRET"
 
-Weekends automatically target Friday — there is no Saturday/Sunday session.
+Window math is America/New_York + 16:00 cash close: after the close the board
+is *that* weekday; before the close (and on weekends) it rolls to the prior
+session. There is no Saturday/Sunday session.
 """
 
 from __future__ import annotations

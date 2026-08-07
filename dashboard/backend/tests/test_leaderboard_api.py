@@ -160,13 +160,38 @@ def test_daily_leaderboard_api_uses_daily_window(client, monkeypatch):
 
 
 def test_daily_window_dates_skips_weekend():
-    # Monday → previous Friday
-    from datetime import date
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
 
-    start, end = lb_service.daily_window_dates(as_of=date(2026, 7, 13))  # Monday
+    et = ZoneInfo("America/New_York")
+    # Monday before the cash close → previous Friday
+    start, end = lb_service.daily_window_dates(
+        as_of=datetime(2026, 7, 13, 15, 59, tzinfo=et)
+    )
     assert start == end == "2026-07-10"
-    # Tuesday → Monday
+    # Monday at/after 16:00 ET → Monday (same-day board after close)
+    start, end = lb_service.daily_window_dates(
+        as_of=datetime(2026, 7, 13, 16, 0, tzinfo=et)
+    )
+    assert start == end == "2026-07-13"
+    # Tuesday morning → Monday
+    start, end = lb_service.daily_window_dates(
+        as_of=datetime(2026, 7, 14, 9, 30, tzinfo=et)
+    )
+    assert start == end == "2026-07-13"
+    # Bare date is treated as that ET day at cash close → weekday = that session
     start, end = lb_service.daily_window_dates(as_of=date(2026, 7, 14))
+    assert start == end == "2026-07-14"
+
+
+def test_daily_window_dates_cron_moment_is_todays_session():
+    """22:30 UTC after a weekday close must select that US session, not Friday."""
+    from datetime import datetime, timezone
+
+    # Monday 22:30 UTC = Monday 18:30 EDT (after 16:00 close)
+    start, end = lb_service.daily_window_dates(
+        as_of=datetime(2026, 7, 13, 22, 30, tzinfo=timezone.utc)
+    )
     assert start == end == "2026-07-13"
 
 
