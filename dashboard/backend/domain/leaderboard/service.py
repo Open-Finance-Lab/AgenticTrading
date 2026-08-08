@@ -181,6 +181,18 @@ def _daily_window_key(config: Dict[str, Any]) -> str:
     return f"{config['session_id']}|{config['start_date']}|{config['end_date']}"
 
 
+def _set_daily_refresh_running(value: bool) -> None:
+    """Single writer for the in-progress flag; callers hold ``_daily_refresh_lock``.
+
+    Deliberately does *not* take the lock itself:
+    ``maybe_schedule_daily_leaderboard_refresh`` calls this from inside its own
+    ``with`` block, and ``_daily_refresh_lock`` is a plain Lock, not an RLock,
+    so acquiring here would deadlock.
+    """
+    global _daily_refresh_running
+    _daily_refresh_running = value
+
+
 def _cached_run_index(
     start_date: str, end_date: str, session_id: str
 ) -> Dict[str, Dict[str, Any]]:
@@ -325,7 +337,6 @@ def _run_daily_refresh_background(
     """Worker body. Deliberately no ``allow_fallback``: the H6 integrity guard
     is never waived on a background/HTTP-triggered run, only by an operator
     running ``scripts/refresh_daily_leaderboard.py --allow-fallback`` locally."""
-    global _daily_refresh_running
     try:
         refresh_daily_leaderboard(
             deploy_models=deploy_models,
@@ -335,7 +346,7 @@ def _run_daily_refresh_background(
         print(f"⚠️ Daily leaderboard background refresh failed: {exc}")
     finally:
         with _daily_refresh_lock:
-            _daily_refresh_running = False
+            _set_daily_refresh_running(False)
 
 
 def maybe_schedule_daily_leaderboard_refresh(
@@ -352,7 +363,6 @@ def maybe_schedule_daily_leaderboard_refresh(
     window. Adequate for the current single-instance Render deploy; a
     multi-replica deploy would need a shared lock, or duplicate model deploys.
     """
-    global _daily_refresh_running
     config = resolve_leaderboard_config("daily")
     status = _daily_models_status(config)
     should_deploy = (
@@ -370,7 +380,10 @@ def maybe_schedule_daily_leaderboard_refresh(
     with _daily_refresh_lock:
         if _daily_refresh_running:
             return False
-        _daily_refresh_running = True
+        # Claim before starting, never after: a fast worker can reach its
+        # finally and clear the flag before start() even returns, and a
+        # set-after-start would then leave it stuck True forever.
+        _set_daily_refresh_running(True)
         thread = threading.Thread(
             target=_run_daily_refresh_background,
             kwargs={
@@ -386,7 +399,7 @@ def maybe_schedule_daily_leaderboard_refresh(
             # A failed start would otherwise strand the flag at True forever:
             # every later refresh returns False and the UI polls a worker that
             # does not exist. Release it and let the caller see "not started".
-            _daily_refresh_running = False
+            _set_daily_refresh_running(False)
             raise
         return True
 
