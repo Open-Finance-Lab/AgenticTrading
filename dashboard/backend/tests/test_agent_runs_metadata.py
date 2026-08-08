@@ -198,6 +198,7 @@ def test_engine_agent_run_wires_the_metadata():
 
     Both needles matter: _run_metadata() alone would still be found in the
     source (the baselines call it), so this greps for the agent-specific one."""
+    import re
     from pathlib import Path
 
     engine_src = (
@@ -205,5 +206,13 @@ def test_engine_agent_run_wires_the_metadata():
         / "domain" / "backtesting" / "engine.py"
     ).read_text(encoding="utf-8")
     assert "metadata=self._agent_run_metadata()" in engine_src
+    # The index baseline is the only bare call: it places no orders, so it
+    # passes neither a cost ledger nor an allocation summary.
     assert engine_src.count("metadata=self._run_metadata()") == 1
-    assert "metadata=self._run_metadata(baseline_cost_totals)" in engine_src
+    # Buy & Hold does trade, so its call carries both. Matched across newlines
+    # because the argument list is long enough to wrap.
+    assert re.search(
+        r"metadata=self\._run_metadata\(\s*baseline_cost_totals,"
+        r"[^)]*baseline_allocation=baseline_allocation,",
+        engine_src,
+    )

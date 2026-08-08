@@ -74,6 +74,29 @@ the minimum commission is applied once per order after aggregating its filled va
 still remains observable. Run metadata stores the complete, versioned cost profile used for
 the run.
 
+`calculate_transaction_costs` carries no order identity, so its contract is **one call is one
+submitted order** and the `CNY 5` floor is charged once per call. Every caller today executes
+an action in a single call, which is what makes that correct; a future piecewise fill must
+cost the whole order and take differences between quotes rather than calling per fragment.
+
+Run metadata separates the market's rule from the run's ledger. `transaction_cost_profile` is
+provenance and rides every row of that market — including the index reference curve, which is
+a price series that places no orders. `transaction_costs_applied` says whether the run
+actually paid, so a reference curve cannot be read as a costed book.
+
+### Baseline sleeve under board lots
+
+Whole lots and equal weight do not compose. An equal slice of the accounts this app allows
+(`$1,000` default, `$3,000` max) across a 20-name universe is worth less than one 100-share
+A-share lot, so flooring each slice independently strands the entire buy & hold sleeve in cash
+— a flat line that every agent beats for free and that is indistinguishable from a legitimate
+result. The generator therefore allocates in two passes: equal weight capped by each symbol's
+own slice, then a poorest-first top-up sweep of the remainder into further whole lots. The
+board lot comes from `MarketProfile.lot_size`, never inferred from the presence of a cost
+profile — they are separate market rules. `baseline_allocation` in run metadata records
+symbols requested/priced/bought and the invested ratio so a partly-placed sleeve is visible
+rather than silent.
+
 ## Data Flow
 
 ```text

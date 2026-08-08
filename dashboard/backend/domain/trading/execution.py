@@ -268,6 +268,18 @@ def calculate_transaction_costs(
     configured profile uses adverse-direction slippage, market price-tick
     rounding, and cent-rounded fees. The function does not mutate portfolio
     state, making the accounting independently testable.
+
+    ONE CALL IS ONE SUBMITTED ORDER. There is no order identity here, so the
+    per-order commission floor (¥5 on A-shares) is charged once per call. Every
+    caller today executes an action in a single call, which is what makes that
+    correct. Anything that later fills an order in pieces must cost the whole
+    order and take differences between quotes, never call this per piece —
+    otherwise the floor is charged once per fragment.
+
+    ``gross_value`` is ``price * shares`` at the SLIPPED execution price, so it
+    already contains ``slippage_amount``; the latter is reported separately for
+    audit display only. Cash moved is ``net_cash_impact`` — adding slippage to
+    ``gross_value`` or to ``total_fees`` double-counts it.
     """
     normalized_side = str(side).strip().lower()
     if normalized_side not in {"buy", "sell"}:

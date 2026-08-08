@@ -234,6 +234,7 @@ _DEFAULT_UNIVERSES = {
     IFIND_ASHARE: A_SHARE_DEMO_6,
 }
 
+
 def get_market_profile(
     data_source: str,
     universe: str | None = None,

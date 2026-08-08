@@ -531,6 +531,7 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
         "fx_observation_end_date": "2026-03-31",
         "native_initial_capital": 7_000.0,
         "transaction_cost_profile": ASHARE_TRANSACTION_COST_PROFILE.to_metadata(),
+        "transaction_costs_applied": True,
     }
     # A run with no fills writes no cost totals. The baseline may have initial
     # fills, so its totals are asserted separately below.
@@ -538,11 +539,19 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
     assert buyhold_run["metadata"]["transaction_cost_profile"] == (
         ASHARE_TRANSACTION_COST_PROFILE.to_metadata()
     )
-    baseline_totals = buyhold_run["metadata"].get("transaction_cost_totals")
-    if universe == A_SHARE_DEMO_6:
-        assert baseline_totals["total_fees"] > 0
-    else:
-        assert baseline_totals is None
+    # The benchmark every A-share agent is scored against has to be INVESTED.
+    # Flooring an equal slice to whole lots strands a small account entirely in
+    # cash, and a flat cash line is both trivially beaten and impossible to tell
+    # from a correct result — so assert the money actually moved, for every
+    # universe. Asserting "no fees" here would certify exactly that failure.
+    baseline_meta = buyhold_run["metadata"]
+    assert baseline_meta["transaction_costs_applied"] is True
+    assert baseline_meta["transaction_cost_totals"]["total_fees"] > 0
+    allocation = baseline_meta["baseline_allocation"]
+    assert allocation["symbols_requested"] == len(symbols)
+    assert allocation["lot_size"] == 100
+    assert allocation["symbols_bought"] >= 1
+    assert allocation["invested_ratio"] > 0.5
     assert agent_run["llm_calls"] == 0
     assert agent_run["baseline_djia_run_id"] is None
     assert agent_run["baseline_buyhold_run_id"] == buyhold_run["run_id"]

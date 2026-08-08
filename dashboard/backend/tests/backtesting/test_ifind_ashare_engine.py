@@ -366,6 +366,10 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "fx_observation_end_date": "2026-04-15",
         "native_initial_capital": 7_000.0,
         "transaction_cost_profile": ASHARE_TRANSACTION_COST_PROFILE.to_metadata(),
+        # An agent run executes through the cost path, so it did pay. The flag
+        # separates the market's rule from this run's ledger — see the index
+        # baseline, which carries the same profile with this set False.
+        "transaction_costs_applied": True,
         # No rejected_orders* keys at all: a clean run writes nothing rather
         # than an empty array on every A-share row.
     }
@@ -432,6 +436,9 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "fx_observation_end_date": "2026-04-15",
         "native_initial_capital": 7_000.0,
         "transaction_cost_profile": ASHARE_TRANSACTION_COST_PROFILE.to_metadata(),
+        # Bare _run_metadata() is the provenance-only call the index baseline
+        # makes; it advertises the market's cost rules without charging them.
+        "transaction_costs_applied": False,
     }
 
 
@@ -819,7 +826,9 @@ def _metadata_stub(
     backtester.prompt_adaptations = None
     backtester.initial_pipeline = None
     backtester.pipeline = None
-    monkeypatch.setattr(HourlyBacktester, "_run_metadata", lambda self: {})
+    monkeypatch.setattr(
+        HourlyBacktester, "_run_metadata", lambda self, *args, **kwargs: {}
+    )
     return backtester._agent_run_metadata()
 
 

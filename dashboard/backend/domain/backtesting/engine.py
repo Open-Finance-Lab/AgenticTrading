@@ -17,7 +17,7 @@ be extracted in a later phase.
 import json
 import uuid
 from datetime import date, datetime, time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.database import db
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
@@ -336,10 +336,12 @@ class HourlyBacktester:
                 if field in trade:
                     record[field] = float(trade[field])
             for field in (
+                # No native_executed_value here: executed_value belongs to an
+                # order event, never to a trade row, and the column list the
+                # trades table persists does not carry it either.
                 "native_price",
                 "native_reference_price",
                 "native_value",
-                "native_executed_value",
                 "native_gross_value",
                 "native_slippage_amount",
                 "native_commission",
@@ -644,12 +646,25 @@ class HourlyBacktester:
             return profile
         return get_market_profile(self.data_source)
 
-    def _run_metadata(self, transaction_cost_totals: Optional[Dict] = None) -> Dict:
+    def _run_metadata(
+        self,
+        transaction_cost_totals: Optional[Dict] = None,
+        costs_applied: bool = False,
+        baseline_allocation: Optional[Dict] = None,
+    ) -> Dict:
         """Data provenance recorded on EVERY run row, agent and baseline alike.
 
         Provenance is the only thing the baselines share with the agent: they
         make no model calls and run no pipeline, so anything LLM-shaped belongs
-        in ``_agent_run_metadata`` instead."""
+        in ``_agent_run_metadata`` instead.
+
+        ``costs_applied`` separates the market's rule from this run's ledger.
+        The cost profile is provenance — it describes the market and belongs on
+        every row of it, exactly like ``lot_size``. Whether the run actually
+        paid those fees is a different fact: the index reference curve is a
+        price series that never places an order, so it must not read as a
+        costed book.
+        """
         profile = self._effective_profile()
         metadata = {
             "data_source": self.data_source,
@@ -662,10 +677,13 @@ class HourlyBacktester:
             metadata["transaction_cost_profile"] = (
                 profile.transaction_cost_profile.to_metadata()
             )
-            if transaction_cost_totals and any(
+            metadata["transaction_costs_applied"] = bool(costs_applied)
+            if costs_applied and transaction_cost_totals and any(
                 float(value or 0) != 0 for value in transaction_cost_totals.values()
             ):
                 metadata["transaction_cost_totals"] = dict(transaction_cost_totals)
+        if baseline_allocation:
+            metadata["baseline_allocation"] = dict(baseline_allocation)
         if self.data_source == IFIND_ASHARE:
             metadata.update(
                 {
@@ -717,7 +735,15 @@ class HourlyBacktester:
         LLM_MAX_OUTPUT_TOKENS is an env knob that changes a run's spend and
         response truncation; recording the EFFECTIVE value (post defensive
         parse) makes runs auditable after the env changes."""
-        meta: Dict = self._run_metadata()
+        # An agent run always executes through the cost path when the market
+        # defines one, so the profile is the honest gate here. Keying this on
+        # the data source instead would silently drop the ledger the day a
+        # second costed market appears.
+        profile = self._effective_profile()
+        meta: Dict = self._run_metadata(
+            transaction_cost_totals=getattr(self, "transaction_cost_totals", None),
+            costs_applied=profile.transaction_cost_profile is not None,
+        )
         decision_source = getattr(self, "decision_source", None)
         if decision_source is not None:
             meta["decision_source"] = decision_source
@@ -730,11 +756,6 @@ class HourlyBacktester:
         if self.pipeline is not None:
             meta["final_pipeline"] = self.pipeline
         if self.data_source == IFIND_ASHARE:
-            cost_totals = dict(getattr(self, "transaction_cost_totals", {}) or {})
-            if cost_totals and any(
-                float(value or 0) != 0 for value in cost_totals.values()
-            ):
-                meta["transaction_cost_totals"] = cost_totals
             rejected = list(getattr(self, "rejected_orders", []) or [])
             if rejected:
                 # Count first, sample second: a consumer must be able to tell
@@ -1243,17 +1264,24 @@ class HourlyBacktester:
                 for symbol in self.symbols
             }
 
+        profile = self._effective_profile()
         baseline_cost_totals: Dict[str, float] = {}
+        baseline_allocation: Dict[str, Any] = {}
         equity_history, _ = generate_baselines(
             bars_by_symbol=bars,
             start_date=self.start_date,
             end_date=self.end_date,
             initial_capital=self.initial_capital,
             symbols_list=bh_symbols,
-            market_timezone=self._effective_profile().timezone,
+            market_timezone=profile.timezone,
             currency_context=self._require_currency_context(),
-            transaction_cost_profile=self.profile.transaction_cost_profile,
+            transaction_cost_profile=profile.transaction_cost_profile,
             transaction_cost_totals=baseline_cost_totals,
+            # The board lot is its own market rule. Deriving it from the cost
+            # profile would floor buys to 100 in any future market that charges
+            # fees but trades in single shares.
+            lot_size=profile.lot_size,
+            allocation_summary=baseline_allocation,
         )
         
         if not equity_history:
@@ -1278,7 +1306,11 @@ class HourlyBacktester:
             sharpe_ratio=self._calc_sharpe(equity_history),
             max_drawdown=self._calc_max_dd(equity_history),
             num_trades=1,
-            metadata=self._run_metadata(baseline_cost_totals),
+            metadata=self._run_metadata(
+                baseline_cost_totals,
+                costs_applied=profile.transaction_cost_profile is not None,
+                baseline_allocation=baseline_allocation,
+            ),
         )
         
         db.insert_equity_points(run_id, equity_history)

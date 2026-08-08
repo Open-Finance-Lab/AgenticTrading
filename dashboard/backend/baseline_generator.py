@@ -15,7 +15,7 @@ Same logic, different contexts.
 
 import json
 import os
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 from datetime import datetime, time
 
 from dashboard.backend.paths import CREDENTIALS_DIR
@@ -108,9 +108,117 @@ def _equity_point(
     return record
 
 
+# Backstop for the lot top-up sweep below. Reached only if a lot were free,
+# which the cost model forbids; it exists so a future zero-price bar cannot
+# spin the loop forever.
+_MAX_TOPUP_LOTS = 100_000
+
+
+def _buy_order_cash_out(
+    price: float,
+    shares: int,
+    transaction_cost_profile,
+) -> float:
+    """Cash a single buy order of ``shares`` removes, fees included.
+
+    Always costs the WHOLE order rather than an increment, because the A-share
+    commission carries a per-order minimum (¥5): ten lots priced one at a time
+    would be charged that floor ten times. Callers that grow a position take
+    the difference between two whole-order quotes instead.
+    """
+    if shares <= 0:
+        return 0.0
+    costs = calculate_transaction_costs(
+        side="buy",
+        reference_price=price,
+        shares=shares,
+        transaction_cost_profile=transaction_cost_profile,
+    )
+    return -costs["net_cash_impact"]
+
+
+def _plan_buyhold_allocation(
+    prices: Dict[str, float],
+    capital: float,
+    num_symbols: int,
+    lot_size: int,
+    transaction_cost_profile,
+) -> Dict[str, int]:
+    """Share counts for an equal-weight buy & hold sleeve.
+
+    Two passes, because equal weight and whole lots do not compose. An equal
+    slice of a small account is routinely worth less than one 100-share A-share
+    lot, so flooring each slice on its own strands most of the capital in cash
+    and turns the benchmark every agent is scored against into a flat line.
+
+    1. Equal weight: each symbol gets its own slice, floored to whole lots and
+       capped by cash actually left. A symbol never borrows from its neighbours'
+       slices, so composition does not depend on iteration order.
+    2. Top-up: whatever pass 1 could not place is swept into further lots,
+       poorest symbol first, so the sleeve stays invested and stays as close to
+       equal weight as whole lots allow.
+    """
+    if not prices or capital <= 0 or num_symbols <= 0:
+        return {}
+
+    lot_size = max(1, int(lot_size or 1))
+    # Denominator is the full sleeve, not the priced subset: a symbol with no
+    # bar at the open forfeits its slice rather than redistributing it, which
+    # is what the equal-weight baseline has always done.
+    allocation = capital / num_symbols
+    planned: Dict[str, int] = {}
+    spent = 0.0
+
+    for symbol, price in prices.items():
+        # Rejects NaN as well as zero/negative: a bad bar must not divide, and
+        # a free lot would spin the top-up sweep below.
+        if not price > 0:
+            continue
+        shares = int(allocation / price)
+        shares -= shares % lot_size
+        # Fees push a naively-affordable order over its slice; shrink a lot at a
+        # time until it fits both the slice and the cash on hand.
+        budget = min(allocation, capital - spent)
+        while shares > 0 and _buy_order_cash_out(
+            price, shares, transaction_cost_profile
+        ) > budget:
+            shares -= lot_size
+        if shares > 0:
+            planned[symbol] = shares
+            spent += _buy_order_cash_out(price, shares, transaction_cost_profile)
+
+    if lot_size <= 1:
+        # Without lot rounding pass 1 already places the whole slice, so a
+        # top-up would only push the benchmark past equal weight.
+        return planned
+
+    for _ in range(_MAX_TOPUP_LOTS):
+        remaining = capital - spent
+        # Poorest-first keeps the sleeve balanced and gets an unrepresented
+        # symbol its first lot before any symbol gets a second one.
+        candidates = sorted(
+            (symbol for symbol, price in prices.items() if price > 0),
+            key=lambda s: (planned.get(s, 0) * float(prices[s]), float(prices[s]), s),
+        )
+        for symbol in candidates:
+            price = prices[symbol]
+            held = planned.get(symbol, 0)
+            delta = _buy_order_cash_out(
+                price, held + lot_size, transaction_cost_profile
+            ) - _buy_order_cash_out(price, held, transaction_cost_profile)
+            if delta <= remaining:
+                planned[symbol] = held + lot_size
+                spent += delta
+                break
+        else:
+            break
+
+    return planned
+
+
 class BaselineGenerator:
     """Generates baseline equity curves from real historical data."""
-    
+
     def __init__(self):
         """Initialize without touching credentials or the network."""
         self.api_key = None
@@ -221,19 +329,30 @@ class BaselineGenerator:
         currency_context: CurrencyContext | None = None,
         transaction_cost_profile=None,
         transaction_cost_totals: Optional[Dict[str, float]] = None,
+        lot_size: int = 1,
+        allocation_summary: Optional[Dict[str, Any]] = None,
     ) -> List[Dict]:
         """
         Generate Buy & Hold baseline curve.
-        
+
         Strategy: Buy equal amounts of specified symbols at start, hold until end.
-        
+
         Args:
             bars_by_symbol: Dict of {symbol: DataFrame with OHLCV}
             start_date: Start date string
             end_date: End date string
             initial_capital: Initial portfolio value
             symbols_to_buy: List of symbols to buy (default: all in bars_by_symbol)
-        
+            transaction_cost_profile: Charges the sleeve real fees when set.
+            transaction_cost_totals: Out-dict; fee totals are added into it.
+            lot_size: Board lot the market enforces (100 for A-shares, 1
+                elsewhere). Comes from ``MarketProfile.lot_size`` — it is a
+                separate market rule from ``transaction_cost_profile`` and must
+                not be inferred from it.
+            allocation_summary: Out-dict recording how much of the sleeve
+                actually filled, so a partly-placed benchmark is visible in run
+                metadata instead of silently reading as a real flat curve.
+
         Returns:
             List of equity points: [{timestamp, equity, cash, positions_value}, ...]
         """
@@ -280,7 +399,6 @@ class BaselineGenerator:
             and currency_context.native_currency == "CNY"
             else "$"
         )
-        positions = {}
         cash = native_initial_capital
         num_symbols = len(bars_subset)
         
@@ -290,50 +408,73 @@ class BaselineGenerator:
             f"{native_initial_capital / num_symbols:,.0f}"
         )
         
-        for symbol, df in bars_subset.items():
-            if first_ts not in df.index:
-                continue
-            
-            price = df.loc[first_ts, "close"]
-            allocation = native_initial_capital / num_symbols
-            shares = int(allocation / price)
-            if transaction_cost_profile is not None:
-                lot_size = 100
-                shares = (shares // lot_size) * lot_size
-                while shares > 0:
-                    costs = calculate_transaction_costs(
-                        side="buy",
-                        reference_price=price,
-                        shares=shares,
-                        transaction_cost_profile=transaction_cost_profile,
-                    )
-                    if -costs["net_cash_impact"] <= cash:
-                        break
-                    shares -= lot_size
+        open_prices = {
+            symbol: float(df.loc[first_ts, "close"])
+            for symbol, df in bars_subset.items()
+            if first_ts in df.index
+        }
+        positions = _plan_buyhold_allocation(
+            open_prices,
+            native_initial_capital,
+            num_symbols,
+            lot_size,
+            transaction_cost_profile,
+        )
 
-            if shares > 0:
-                costs = calculate_transaction_costs(
-                    side="buy",
-                    reference_price=price,
-                    shares=shares,
-                    transaction_cost_profile=transaction_cost_profile,
-                )
-                positions[symbol] = shares
-                cash += costs["net_cash_impact"]
-                if transaction_cost_totals is not None:
-                    for field in (
-                        "gross_value",
-                        "slippage_amount",
-                        "commission",
-                        "stamp_duty",
-                        "transfer_fee",
-                        "total_fees",
-                    ):
-                        transaction_cost_totals[field] = (
-                            transaction_cost_totals.get(field, 0.0)
-                            + costs[field]
-                        )
-        
+        # Cost the plan once per symbol. The order-level pass matters for the
+        # A-share ¥5 minimum commission: it is charged per submitted order, so
+        # a symbol's whole sleeve must be priced as one order.
+        for symbol, shares in positions.items():
+            costs = calculate_transaction_costs(
+                side="buy",
+                reference_price=open_prices[symbol],
+                shares=shares,
+                transaction_cost_profile=transaction_cost_profile,
+            )
+            cash += costs["net_cash_impact"]
+            if transaction_cost_totals is not None:
+                for field in (
+                    "gross_value",
+                    "slippage_amount",
+                    "commission",
+                    "stamp_duty",
+                    "transfer_fee",
+                    "total_fees",
+                ):
+                    transaction_cost_totals[field] = (
+                        transaction_cost_totals.get(field, 0.0) + costs[field]
+                    )
+
+        invested = native_initial_capital - cash
+        effective_lot = max(1, int(lot_size or 1))
+        if allocation_summary is not None:
+            # Absent is not the same as broken: without these a benchmark that
+            # placed nothing looks exactly like one that correctly held cash.
+            allocation_summary.update(
+                {
+                    "symbols_requested": num_symbols,
+                    "symbols_priced": len(open_prices),
+                    "symbols_bought": len(positions),
+                    "symbols_skipped": num_symbols - len(positions),
+                    "lot_size": effective_lot,
+                    "invested_ratio": (
+                        invested / native_initial_capital
+                        if native_initial_capital
+                        else 0.0
+                    ),
+                }
+            )
+        # Only an affordability shortfall is worth shouting about; a symbol with
+        # no bar at the open is an ordinary data gap the loop above already
+        # skipped, and the counts above still record it.
+        if len(positions) < len(open_prices):
+            print(
+                f"      ⚠️  {len(open_prices) - len(positions)} of "
+                f"{len(open_prices)} priced symbols bought nothing — an equal "
+                f"slice is worth less than one {effective_lot}-share lot at "
+                f"this capital"
+            )
+
         print(f"      Stocks bought: {len(positions)} ({', '.join(sorted(positions.keys())[:10])}{'...' if len(positions) > 10 else ''})")
         print(f"      Total invested: {native_symbol}{native_initial_capital - cash:,.0f}")
         print(f"      Cash remaining: {native_symbol}{cash:,.0f}")
@@ -519,22 +660,28 @@ def generate_baselines(
     currency_context: CurrencyContext | None = None,
     transaction_cost_profile=None,
     transaction_cost_totals: Optional[Dict[str, float]] = None,
+    lot_size: int = 1,
+    allocation_summary: Optional[Dict[str, Any]] = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Generate both baselines (Buy & Hold, Index).
-    
+
     Args:
         bars_by_symbol: Dict of {symbol: DataFrame with OHLCV}
         start_date: Start date string
         end_date: End date string
         initial_capital: Initial portfolio value
         symbols_list: List of symbols to use (default: all in bars_by_symbol)
-    
+        lot_size: Board lot the market enforces; see
+            ``BaselineGenerator.generate_buyhold_baseline``.
+        allocation_summary: Out-dict describing how much of the buy & hold
+            sleeve actually filled.
+
     Returns:
         Tuple of (buyhold_curve, index_curve)
     """
     generator = BaselineGenerator()
-    
+
     buyhold_curve = generator.generate_buyhold_baseline(
         bars_by_symbol,
         start_date,
@@ -545,6 +692,8 @@ def generate_baselines(
         currency_context,
         transaction_cost_profile,
         transaction_cost_totals,
+        lot_size,
+        allocation_summary,
     )
     
     index_curve = generator.generate_index_baseline(

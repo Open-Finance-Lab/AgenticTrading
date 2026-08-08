@@ -6581,6 +6581,10 @@ function renderBacktestRunConfig(
         ?? run?.transaction_cost_profile;
     const transactionCostTotals = metadata.transaction_cost_totals
         ?? run?.transaction_cost_totals;
+    // Absent (older runs) reads as applied; only an explicit false marks a
+    // curve that carries the market's cost rules without ever paying them.
+    const transactionCostsApplied = (metadata.transaction_costs_applied
+        ?? run?.transaction_costs_applied) !== false;
     const start = cfg?.startDate || run?.start_date;
     const end = cfg?.endDate || run?.end_date;
     const universe = cfg?.universeLabel
@@ -6650,14 +6654,21 @@ function renderBacktestRunConfig(
     if (costProfileRow) costProfileRow.hidden = !showTransactionCosts;
     if (totalCostsRow) totalCostsRow.hidden = !showTransactionCosts;
     if (showTransactionCosts) {
-        setBacktestConfigText('backtestConfigTransactionCosts', 'Enabled · CNY native ledger');
+        setBacktestConfigText(
+            'backtestConfigTransactionCosts',
+            transactionCostsApplied
+                ? 'Charged · CNY native ledger'
+                : 'Market rules shown · not charged on this curve',
+        );
         setBacktestConfigText(
             'backtestConfigCostProfile',
             formatTransactionCostProfile(transactionCostProfile),
         );
         setBacktestConfigText(
             'backtestConfigTotalCosts',
-            formatTransactionCostTotals(transactionCostTotals),
+            transactionCostsApplied
+                ? formatTransactionCostTotals(transactionCostTotals)
+                : 'Not applicable — reference price curve',
         );
     }
     setBacktestConfigText('backtestConfigUniverse', universe);
