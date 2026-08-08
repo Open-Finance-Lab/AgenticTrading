@@ -1919,6 +1919,36 @@ a.header-brand:hover .title-section h1 {
     white-space: nowrap;
 }
 
+.trading-log-scroll .trading-log-value {
+    min-width: 230px;
+    font-variant-numeric: tabular-nums;
+}
+
+.trading-log-costs,
+.trading-log-native-costs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 8px;
+    margin-top: 4px;
+    line-height: 1.35;
+}
+
+.trading-log-costs {
+    color: var(--text-secondary);
+    font-size: 10px;
+}
+
+.trading-log-costs span,
+.trading-log-native-costs span {
+    white-space: nowrap;
+}
+
+.trading-log-native-costs strong {
+    color: var(--text-primary);
+    font-size: 10px;
+    font-weight: 700;
+}
+
 .trading-log-scroll .trading-log-asset {
     display: flex;
     flex-direction: column;

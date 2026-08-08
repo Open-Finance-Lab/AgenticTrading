@@ -58,8 +58,24 @@ _CURRENCY_EQUITY_COLUMNS = {
     "fx_rate": ("REAL", 0, None),
 }
 _CURRENCY_TRADE_COLUMNS = {
+    "reference_price": ("REAL", 0, None),
+    "gross_value": ("REAL", 0, None),
+    "slippage_amount": ("REAL", 0, None),
+    "commission": ("REAL", 0, None),
+    "stamp_duty": ("REAL", 0, None),
+    "transfer_fee": ("REAL", 0, None),
+    "total_fees": ("REAL", 0, None),
+    "net_cash_impact": ("REAL", 0, None),
     "native_price": ("REAL", 0, None),
     "native_value": ("REAL", 0, None),
+    "native_reference_price": ("REAL", 0, None),
+    "native_gross_value": ("REAL", 0, None),
+    "native_slippage_amount": ("REAL", 0, None),
+    "native_commission": ("REAL", 0, None),
+    "native_stamp_duty": ("REAL", 0, None),
+    "native_transfer_fee": ("REAL", 0, None),
+    "native_total_fees": ("REAL", 0, None),
+    "native_net_cash_impact": ("REAL", 0, None),
     "fx_rate": ("REAL", 0, None),
 }
 

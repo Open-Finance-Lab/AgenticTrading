@@ -21,6 +21,7 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     ALPACA,
     A_SHARE_DEMO_6,
     A_SHARE_DEMO_6_SYMBOLS,
+    ASHARE_TRANSACTION_COST_PROFILE,
     CSI300_SAMPLE_20_2026H2,
     CSI300_SAMPLE_20_2026H2_SYMBOLS,
     IFIND_ASHARE,
@@ -153,9 +154,10 @@ def test_order_event_serializer_converts_currency_and_preserves_fractional_reque
         "executed_value": 0.0,
         "status": "rejected",
         "reason": "invalid_lot_size",
-        "strategy_reason": "Model request",
-        "native_price": 700.0,
-        "native_value": 0.0,
+            "strategy_reason": "Model request",
+            "native_price": 700.0,
+            "native_executed_value": 0.0,
+            "native_value": 0.0,
         "fx_rate": 7.0,
     }]
     json.dumps(serialized)
@@ -363,6 +365,11 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         "fx_observation_start_date": "2026-03-31",
         "fx_observation_end_date": "2026-04-15",
         "native_initial_capital": 7_000.0,
+        "transaction_cost_profile": ASHARE_TRANSACTION_COST_PROFILE.to_metadata(),
+        # An agent run executes through the cost path, so it did pay. The flag
+        # separates the market's rule from this run's ledger — see the index
+        # baseline, which carries the same profile with this set False.
+        "transaction_costs_applied": True,
         # No rejected_orders* keys at all: a clean run writes nothing rather
         # than an empty array on every A-share row.
     }
@@ -428,6 +435,10 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         "fx_observation_start_date": "2026-03-31",
         "fx_observation_end_date": "2026-04-15",
         "native_initial_capital": 7_000.0,
+        "transaction_cost_profile": ASHARE_TRANSACTION_COST_PROFILE.to_metadata(),
+        # Bare _run_metadata() is the provenance-only call the index baseline
+        # makes; it advertises the market's cost rules without charging them.
+        "transaction_costs_applied": False,
     }
 
 
@@ -815,7 +826,9 @@ def _metadata_stub(
     backtester.prompt_adaptations = None
     backtester.initial_pipeline = None
     backtester.pipeline = None
-    monkeypatch.setattr(HourlyBacktester, "_run_metadata", lambda self: {})
+    monkeypatch.setattr(
+        HourlyBacktester, "_run_metadata", lambda self, *args, **kwargs: {}
+    )
     return backtester._agent_run_metadata()
 
 

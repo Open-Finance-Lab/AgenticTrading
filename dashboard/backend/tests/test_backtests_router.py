@@ -155,6 +155,23 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
                 "fx_end_rate": 7.1,
                 "t_plus_one_enabled": True,
                 "lot_size": 100,
+                "transaction_cost_profile": {
+                    "commission_rate": 0.00025,
+                    "minimum_commission": 5.0,
+                    "stamp_duty_sell_rate": 0.0005,
+                    "transfer_fee_rate": 0.00001,
+                    "buy_slippage_rate": 0.0005,
+                    "sell_slippage_rate": 0.0005,
+                    "price_tick": 0.01,
+                },
+                "transaction_cost_totals": {
+                    "gross_value": 10005.0,
+                    "slippage_amount": 5.0,
+                    "commission": 5.0,
+                    "stamp_duty": 0.0,
+                    "transfer_fee": 0.1,
+                    "total_fees": 5.1,
+                },
                 # The records themselves are deliberately NOT projected onto
                 # RunMetadata (it backs two list routes); only the scalars are.
                 "rejected_orders": [{
@@ -188,6 +205,8 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
     assert response.fx_end_rate == 7.1
     assert response.t_plus_one_enabled is True
     assert response.lot_size == 100
+    assert response.transaction_cost_profile["minimum_commission"] == 5.0
+    assert response.transaction_cost_totals["total_fees"] == 5.1
     assert response.rejected_orders_count == 7200
     assert response.rejected_orders_truncated == 7000
     assert response.order_events_count == 7300
@@ -216,6 +235,8 @@ def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
     assert response.fx_start_rate is None
     assert response.t_plus_one_enabled is None
     assert response.lot_size is None
+    assert response.transaction_cost_profile is None
+    assert response.transaction_cost_totals is None
     # None, not 0: a legacy run predates the feature, it did not record zero
     # rejections. Same convention as t_plus_one_enabled above.
     assert response.rejected_orders_count is None

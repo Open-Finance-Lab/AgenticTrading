@@ -18,6 +18,28 @@ from dashboard.backend.db_url import describe_database_url
 # Use persistent disk path if set (Render), otherwise local dashboard storage path
 DB_PATH = Path(os.getenv("DATABASE_PATH", str(DEFAULT_DB_PATH)))
 
+TRADE_OPTIONAL_AUDIT_FIELDS = (
+    "reference_price",
+    "gross_value",
+    "slippage_amount",
+    "commission",
+    "stamp_duty",
+    "transfer_fee",
+    "total_fees",
+    "net_cash_impact",
+    "native_price",
+    "native_value",
+    "native_reference_price",
+    "native_gross_value",
+    "native_slippage_amount",
+    "native_commission",
+    "native_stamp_duty",
+    "native_transfer_fee",
+    "native_total_fees",
+    "native_net_cash_impact",
+    "fx_rate",
+)
+
 
 def enable_wal(db_path) -> None:
     """Switch a SQLite file to WAL journal mode (best-effort, idempotent).
@@ -175,8 +197,24 @@ class BacktestDatabase:
                 price REAL NOT NULL,
                 value REAL NOT NULL,
                 reason TEXT,
+                reference_price REAL,
+                gross_value REAL,
+                slippage_amount REAL,
+                commission REAL,
+                stamp_duty REAL,
+                transfer_fee REAL,
+                total_fees REAL,
+                net_cash_impact REAL,
                 native_price REAL,
                 native_value REAL,
+                native_reference_price REAL,
+                native_gross_value REAL,
+                native_slippage_amount REAL,
+                native_commission REAL,
+                native_stamp_duty REAL,
+                native_transfer_fee REAL,
+                native_total_fees REAL,
+                native_net_cash_impact REAL,
                 fx_rate REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
@@ -498,7 +536,7 @@ class BacktestDatabase:
 
     @staticmethod
     def _migrate_currency_audit_schema(cursor) -> None:
-        """Add nullable native-currency fields without rewriting USD history."""
+        """Add nullable currency and execution audit fields to stored history."""
         # Literal SQL, not f-string assembly -- see the note on token_columns.
         # This loop interpolated the *table* name too, which made the parity
         # guard's parser see a whole phantom table.
@@ -514,8 +552,24 @@ class BacktestDatabase:
                  "ALTER TABLE equity_timeseries ADD COLUMN fx_rate REAL"),
             ),
             "trades": (
+                ("reference_price", "ALTER TABLE trades ADD COLUMN reference_price REAL"),
+                ("gross_value", "ALTER TABLE trades ADD COLUMN gross_value REAL"),
+                ("slippage_amount", "ALTER TABLE trades ADD COLUMN slippage_amount REAL"),
+                ("commission", "ALTER TABLE trades ADD COLUMN commission REAL"),
+                ("stamp_duty", "ALTER TABLE trades ADD COLUMN stamp_duty REAL"),
+                ("transfer_fee", "ALTER TABLE trades ADD COLUMN transfer_fee REAL"),
+                ("total_fees", "ALTER TABLE trades ADD COLUMN total_fees REAL"),
+                ("net_cash_impact", "ALTER TABLE trades ADD COLUMN net_cash_impact REAL"),
                 ("native_price", "ALTER TABLE trades ADD COLUMN native_price REAL"),
                 ("native_value", "ALTER TABLE trades ADD COLUMN native_value REAL"),
+                ("native_reference_price", "ALTER TABLE trades ADD COLUMN native_reference_price REAL"),
+                ("native_gross_value", "ALTER TABLE trades ADD COLUMN native_gross_value REAL"),
+                ("native_slippage_amount", "ALTER TABLE trades ADD COLUMN native_slippage_amount REAL"),
+                ("native_commission", "ALTER TABLE trades ADD COLUMN native_commission REAL"),
+                ("native_stamp_duty", "ALTER TABLE trades ADD COLUMN native_stamp_duty REAL"),
+                ("native_transfer_fee", "ALTER TABLE trades ADD COLUMN native_transfer_fee REAL"),
+                ("native_total_fees", "ALTER TABLE trades ADD COLUMN native_total_fees REAL"),
+                ("native_net_cash_impact", "ALTER TABLE trades ADD COLUMN native_net_cash_impact REAL"),
                 ("fx_rate", "ALTER TABLE trades ADD COLUMN fx_rate REAL"),
             ),
         }
@@ -859,7 +913,7 @@ class BacktestDatabase:
                 if "reason" in columns:
                     col_names.append("reason")
                     col_values.append(trade.get("reason"))
-                for field in ("native_price", "native_value", "fx_rate"):
+                for field in TRADE_OPTIONAL_AUDIT_FIELDS:
                     if field in columns:
                         col_names.append(field)
                         col_values.append(trade.get(field))
@@ -926,7 +980,7 @@ class BacktestDatabase:
             ]
             selected.extend(
                 field
-                for field in ("native_price", "native_value", "fx_rate")
+                for field in TRADE_OPTIONAL_AUDIT_FIELDS
                 if field in columns
             )
             cursor.execute(
@@ -946,7 +1000,7 @@ class BacktestDatabase:
         result = []
         for row in rows:
             item = dict(row)
-            for field in ("native_price", "native_value", "fx_rate"):
+            for field in TRADE_OPTIONAL_AUDIT_FIELDS:
                 if item.get(field) is None:
                     item.pop(field, None)
             result.append(item)

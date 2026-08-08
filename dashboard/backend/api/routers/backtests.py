@@ -253,6 +253,16 @@ class RunMetadata(BaseModel):
     fx_end_rate: Optional[float] = None
     t_plus_one_enabled: Optional[bool] = None
     lot_size: Optional[int] = None
+    transaction_cost_profile: Optional[Dict[str, Any]] = None
+    # The profile above is market provenance and rides every row of that
+    # market; this says whether THIS run actually paid it. The index reference
+    # curve places no orders, so it carries the profile with the flag false.
+    transaction_costs_applied: Optional[bool] = None
+    transaction_cost_totals: Optional[Dict[str, Any]] = None
+    # How much of the buy & hold sleeve filled. A lot-constrained benchmark on
+    # a small account can place fewer symbols than requested, and a partly
+    # placed benchmark must be legible rather than read as a real flat curve.
+    baseline_allocation: Optional[Dict[str, Any]] = None
     # Scalars only. The rejected-order records themselves are unbounded per-step
     # audit data and this model is the response_model for two *list* routes
     # (/api/backtest/runs and the public, unpaginated /runs), so shipping them
@@ -323,6 +333,10 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "fx_end_rate",
             "t_plus_one_enabled",
             "lot_size",
+            "transaction_cost_profile",
+            "transaction_costs_applied",
+            "transaction_cost_totals",
+            "baseline_allocation",
             "rejected_orders_count",
             "rejected_orders_truncated",
             "order_events_count",
