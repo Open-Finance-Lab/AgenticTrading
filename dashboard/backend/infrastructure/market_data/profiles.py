@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 from dashboard.backend.infrastructure.llm.validator import DJIA_30
 
@@ -50,6 +51,74 @@ CSI300_SAMPLE_20_2026H2_SYMBOLS = (
 
 
 @dataclass(frozen=True)
+class TransactionCostProfile:
+    """Deterministic transaction-cost rules for one market profile.
+
+    Rates are stored as decimal fractions (for example, ``0.00025`` means
+    0.025%). The execution layer converts monetary results to Decimal before
+    applying currency rounding; keeping the profile immutable makes a run's
+    cost assumptions safe to share across its providers and executors.
+    """
+
+    version: str
+    currency: str
+    commission_rate: float
+    minimum_commission: float
+    stamp_duty_sell_rate: float
+    transfer_fee_rate: float
+    buy_slippage_rate: float
+    sell_slippage_rate: float
+    price_tick: float
+
+    def __post_init__(self) -> None:
+        if not str(self.version).strip():
+            raise ValueError("transaction cost profile version must be non-empty")
+        if not str(self.currency).strip():
+            raise ValueError("transaction cost profile currency must be non-empty")
+        for name in (
+            "commission_rate",
+            "minimum_commission",
+            "stamp_duty_sell_rate",
+            "transfer_fee_rate",
+            "buy_slippage_rate",
+            "sell_slippage_rate",
+            "price_tick",
+        ):
+            value = float(getattr(self, name))
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if self.price_tick <= 0:
+            raise ValueError("price_tick must be positive")
+
+    def to_metadata(self) -> dict[str, object]:
+        """Return a stable JSON-safe representation for run metadata."""
+        return {
+            "version": self.version,
+            "currency": self.currency,
+            "commission_rate": self.commission_rate,
+            "minimum_commission": self.minimum_commission,
+            "stamp_duty_sell_rate": self.stamp_duty_sell_rate,
+            "transfer_fee_rate": self.transfer_fee_rate,
+            "buy_slippage_rate": self.buy_slippage_rate,
+            "sell_slippage_rate": self.sell_slippage_rate,
+            "price_tick": self.price_tick,
+        }
+
+
+ASHARE_TRANSACTION_COST_PROFILE = TransactionCostProfile(
+    version="cn-ashare-default-2026-08",
+    currency="CNY",
+    commission_rate=0.00025,
+    minimum_commission=5.0,
+    stamp_duty_sell_rate=0.0005,
+    transfer_fee_rate=0.00001,
+    buy_slippage_rate=0.0005,
+    sell_slippage_rate=0.0005,
+    price_tick=0.01,
+)
+
+
+@dataclass(frozen=True)
 class MarketProfile:
     """Backtest market behavior selected together with a data source."""
 
@@ -67,6 +136,7 @@ class MarketProfile:
     reporting_currency: str
     t_plus_one_enabled: bool
     lot_size: int = 1
+    transaction_cost_profile: TransactionCostProfile | None = None
 
     @property
     def decision_source(self) -> str:
@@ -133,6 +203,7 @@ _MARKET_PROFILES = {
         reporting_currency="USD",
         t_plus_one_enabled=True,
         lot_size=100,
+        transaction_cost_profile=ASHARE_TRANSACTION_COST_PROFILE,
     ),
     (IFIND_ASHARE, CSI300_SAMPLE_20_2026H2): MarketProfile(
         data_source=IFIND_ASHARE,
@@ -152,6 +223,7 @@ _MARKET_PROFILES = {
         reporting_currency="USD",
         t_plus_one_enabled=True,
         lot_size=100,
+        transaction_cost_profile=ASHARE_TRANSACTION_COST_PROFILE,
     ),
 }
 

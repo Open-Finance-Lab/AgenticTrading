@@ -55,6 +55,7 @@ clients, the database singleton, API routers, or scripts.
 import math
 import numbers
 from datetime import date, datetime
+from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from typing import Any, Dict, List, Optional
 
 
@@ -180,6 +181,7 @@ def _append_order_event(
     status: str,
     reason: str,
     strategy_reason: str,
+    costs: Optional[Dict[str, float]] = None,
     repeat_index: Optional[Dict] = None,
 ) -> None:
     if order_events is None:
@@ -211,7 +213,7 @@ def _append_order_event(
             existing["repeat_count"] = existing.get("repeat_count", 1) + 1
             return
 
-    order_events.append({
+    event = {
         "timestamp": timestamp,
         "symbol": symbol,
         "side": side,
@@ -223,9 +225,140 @@ def _append_order_event(
         "status": status,
         "reason": reason,
         "strategy_reason": strategy_reason,
-    })
+    }
+    if costs is not None:
+        event.update(costs)
+    order_events.append(event)
     if repeat_key is not None:
         repeat_index[repeat_key] = order_events[-1]
+
+
+_MONEY_QUANTUM = Decimal("0.01")
+
+
+def _round_money(value: Decimal) -> Decimal:
+    """Round a monetary amount to CNY cents deterministically."""
+    return value.quantize(_MONEY_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def _zero_transaction_costs(reference_price: Any) -> Dict[str, float]:
+    """Return an explicit zero-cost breakdown for a rejected A-share order."""
+    price = float(reference_price)
+    return {
+        "reference_price": price,
+        "slippage_amount": 0.0,
+        "commission": 0.0,
+        "stamp_duty": 0.0,
+        "transfer_fee": 0.0,
+        "total_fees": 0.0,
+        "net_cash_impact": 0.0,
+    }
+
+
+def calculate_transaction_costs(
+    *,
+    side: str,
+    reference_price: Any,
+    shares: Any,
+    transaction_cost_profile: Any = None,
+) -> Dict[str, float]:
+    """Calculate one deterministic simulated fill and its cash impact.
+
+    A ``None`` profile deliberately preserves the legacy US execution path. A
+    configured profile uses adverse-direction slippage, market price-tick
+    rounding, and cent-rounded fees. The function does not mutate portfolio
+    state, making the accounting independently testable.
+
+    ONE CALL IS ONE SUBMITTED ORDER. There is no order identity here, so the
+    per-order commission floor (¥5 on A-shares) is charged once per call. Every
+    caller today executes an action in a single call, which is what makes that
+    correct. Anything that later fills an order in pieces must cost the whole
+    order and take differences between quotes, never call this per piece —
+    otherwise the floor is charged once per fragment.
+
+    ``gross_value`` is ``price * shares`` at the SLIPPED execution price, so it
+    already contains ``slippage_amount``; the latter is reported separately for
+    audit display only. Cash moved is ``net_cash_impact`` — adding slippage to
+    ``gross_value`` or to ``total_fees`` double-counts it.
+    """
+    normalized_side = str(side).strip().lower()
+    if normalized_side not in {"buy", "sell"}:
+        raise ValueError(f"unsupported transaction side: {side!r}")
+
+    if transaction_cost_profile is None:
+        price = float(reference_price)
+        gross = float(shares) * price
+        return {
+            "reference_price": price,
+            "price": price,
+            "gross_value": gross,
+            "slippage_amount": 0.0,
+            "commission": 0.0,
+            "stamp_duty": 0.0,
+            "transfer_fee": 0.0,
+            "total_fees": 0.0,
+            "net_cash_impact": -gross if normalized_side == "buy" else gross,
+        }
+
+    try:
+        reference = Decimal(str(reference_price))
+        quantity = Decimal(str(shares))
+    except (TypeError, ValueError, ArithmeticError) as exc:
+        raise ValueError("price and shares must be numeric") from exc
+    if not reference.is_finite() or reference <= 0:
+        raise ValueError("reference price must be positive and finite")
+    if not quantity.is_finite() or quantity <= 0:
+        raise ValueError("filled shares must be positive and finite")
+
+    rate_name = (
+        "buy_slippage_rate"
+        if normalized_side == "buy"
+        else "sell_slippage_rate"
+    )
+    slippage_rate = Decimal(str(getattr(transaction_cost_profile, rate_name)))
+    direction = Decimal(1) + slippage_rate
+    if normalized_side == "sell":
+        direction = Decimal(1) - slippage_rate
+    raw_price = reference * direction
+    tick = Decimal(str(transaction_cost_profile.price_tick))
+    rounding = ROUND_CEILING if normalized_side == "buy" else ROUND_FLOOR
+    execution_price = (raw_price / tick).to_integral_value(rounding=rounding) * tick
+    execution_price = _round_money(execution_price)
+
+    gross_value = _round_money(execution_price * quantity)
+    slippage_amount = _round_money(abs(execution_price - reference) * quantity)
+    commission = max(
+        _round_money(
+            gross_value * Decimal(str(transaction_cost_profile.commission_rate))
+        ),
+        _round_money(Decimal(str(transaction_cost_profile.minimum_commission))),
+    )
+    stamp_duty = Decimal("0")
+    if normalized_side == "sell":
+        stamp_duty = _round_money(
+            gross_value * Decimal(str(transaction_cost_profile.stamp_duty_sell_rate))
+        )
+    transfer_fee = _round_money(
+        gross_value * Decimal(str(transaction_cost_profile.transfer_fee_rate))
+    )
+    total_fees = commission + stamp_duty + transfer_fee
+    net_cash_impact = (
+        -(gross_value + total_fees)
+        if normalized_side == "buy"
+        else gross_value - total_fees
+    )
+
+    return {
+        "reference_price": float(reference),
+        "price": float(execution_price),
+        "gross_value": float(gross_value),
+        "slippage_amount": float(slippage_amount),
+        "commission": float(commission),
+        "stamp_duty": float(stamp_duty),
+        "transfer_fee": float(transfer_fee),
+        "total_fees": float(total_fees),
+        "net_cash_impact": float(_round_money(net_cash_impact)),
+    }
 
 
 def execute_actions(
@@ -244,6 +377,7 @@ def execute_actions(
     lot_size: int = 1,
     order_events: Optional[List[Dict]] = None,
     order_event_repeats: Optional[Dict] = None,
+    transaction_cost_profile: Any = None,
 ) -> float:
     """Apply ``actions`` to the given portfolio state in place.
 
@@ -257,6 +391,8 @@ def execute_actions(
     keeps every event, which is what a single-call unit test wants; the
     ``PortfolioManager`` owns one for the lifetime of a run.
     """
+    costs_enabled = transaction_cost_profile is not None
+
     def _record_order_event(**fields) -> None:
         _append_order_event(
             order_events, repeat_index=order_event_repeats, **fields
@@ -317,15 +453,32 @@ def execute_actions(
                 status="rejected",
                 reason="invalid_lot_size",
                 strategy_reason=reason,
+                costs=(
+                    _zero_transaction_costs(price) if costs_enabled else None
+                ),
             )
             continue
 
         if action_type == "buy":
-            cost = shares * price
-            if cost <= cash and shares > 0:
-                cash -= cost
+            calculated_costs = None
+            if shares > 0:
+                calculated_costs = calculate_transaction_costs(
+                    side="buy",
+                    reference_price=price,
+                    shares=shares,
+                    transaction_cost_profile=transaction_cost_profile,
+                )
+            required_cash = (
+                -calculated_costs["net_cash_impact"]
+                if calculated_costs is not None
+                else 0.0
+            )
+            if calculated_costs is not None and required_cash <= cash:
+                execution_price = calculated_costs["price"]
+                gross_value = calculated_costs["gross_value"]
+                cash += calculated_costs["net_cash_impact"]
                 positions[symbol] = positions.get(symbol, 0) + shares
-                entry_prices[symbol] = price
+                entry_prices[symbol] = execution_price
                 if t_plus_one_enabled:
                     frozen_lots.setdefault(symbol, []).append({
                         "quantity": shares,
@@ -336,20 +489,23 @@ def execute_actions(
                     "symbol": symbol,
                     "side": "BUY",
                     "shares": shares,
-                    "price": price,
-                    "cost": cost,
+                    "price": execution_price,
+                    "cost": gross_value,
                     "reason": reason
                 })
+                if costs_enabled:
+                    trades[-1].update(calculated_costs)
                 _record_order_event(
                     timestamp=timestamp,
                     symbol=symbol,
                     side="BUY",
                     requested_shares=shares,
                     executed_shares=shares,
-                    price=price,
+                    price=execution_price,
                     status="filled",
                     reason="",
                     strategy_reason=reason,
+                    costs=(calculated_costs if costs_enabled else None),
                 )
             elif shares > 0:
                 # The order-event ledger records this for every market, not
@@ -385,6 +541,9 @@ def execute_actions(
                         else "insufficient_cash"
                     ),
                     strategy_reason=reason,
+                    costs=(
+                        _zero_transaction_costs(price) if costs_enabled else None
+                    ),
                 )
 
         elif action_type == "sell" and t_plus_one_enabled:
@@ -398,8 +557,14 @@ def execute_actions(
             sell_shares = min(shares, sellable_shares)
 
             if sell_shares > 0:
-                proceeds = sell_shares * price
-                cash += proceeds
+                calculated_costs = calculate_transaction_costs(
+                    side="sell",
+                    reference_price=price,
+                    shares=sell_shares,
+                    transaction_cost_profile=transaction_cost_profile,
+                )
+                proceeds = calculated_costs["gross_value"]
+                cash += calculated_costs["net_cash_impact"]
                 positions[symbol] -= sell_shares
                 available_positions[symbol] -= sell_shares
                 if available_positions[symbol] == 0:
@@ -412,10 +577,12 @@ def execute_actions(
                     "symbol": symbol,
                     "side": "SELL",
                     "shares": sell_shares,
-                    "price": price,
+                    "price": calculated_costs["price"],
                     "proceeds": proceeds,
                     "reason": reason,
                 })
+                if costs_enabled:
+                    trades[-1].update(calculated_costs)
 
             unfilled_shares = shares - sell_shares
             if unfilled_shares <= _SHARE_EPSILON:
@@ -425,10 +592,19 @@ def execute_actions(
                     side="SELL",
                     requested_shares=shares,
                     executed_shares=sell_shares,
-                    price=price,
+                    price=(
+                        calculated_costs["price"]
+                        if sell_shares > 0
+                        else price
+                    ),
                     status="filled",
                     reason="",
                     strategy_reason=reason,
+                    costs=(
+                        calculated_costs
+                        if costs_enabled and sell_shares > 0
+                        else (_zero_transaction_costs(price) if costs_enabled else None)
+                    ),
                 )
                 continue
             frozen_shares = max(held_shares - sellable_shares, 0)
@@ -467,17 +643,32 @@ def execute_actions(
                 side="SELL",
                 requested_shares=shares,
                 executed_shares=sell_shares,
-                price=price,
+                price=(
+                    calculated_costs["price"]
+                    if sell_shares > 0
+                    else price
+                ),
                 status="partial" if sell_shares > 0 else "rejected",
                 reason=primary_reason,
                 strategy_reason=reason,
+                costs=(
+                    calculated_costs
+                    if costs_enabled and sell_shares > 0
+                    else (_zero_transaction_costs(price) if costs_enabled else None)
+                ),
             )
 
         elif action_type == "sell":
             if symbol in positions and positions[symbol] > 0:
                 sell_shares = min(shares, positions[symbol])
-                proceeds = sell_shares * price
-                cash += proceeds
+                calculated_costs = calculate_transaction_costs(
+                    side="sell",
+                    reference_price=price,
+                    shares=sell_shares,
+                    transaction_cost_profile=transaction_cost_profile,
+                )
+                proceeds = calculated_costs["gross_value"]
+                cash += calculated_costs["net_cash_impact"]
                 positions[symbol] -= sell_shares
                 if positions[symbol] == 0:
                     del positions[symbol]
@@ -488,10 +679,12 @@ def execute_actions(
                     "symbol": symbol,
                     "side": "SELL",
                     "shares": sell_shares,
-                    "price": price,
+                    "price": calculated_costs["price"],
                     "proceeds": proceeds,
                     "reason": reason
                 })
+                if costs_enabled:
+                    trades[-1].update(calculated_costs)
                 unfilled_shares = shares - sell_shares
                 _record_order_event(
                     timestamp=timestamp,
@@ -499,7 +692,7 @@ def execute_actions(
                     side="SELL",
                     requested_shares=shares,
                     executed_shares=sell_shares,
-                    price=price,
+                    price=calculated_costs["price"],
                     status=(
                         "filled"
                         if unfilled_shares <= _SHARE_EPSILON
@@ -511,6 +704,7 @@ def execute_actions(
                         else "insufficient_position"
                     ),
                     strategy_reason=reason,
+                    costs=(calculated_costs if costs_enabled else None),
                 )
             elif shares > 0:
                 # Recorded for every market, for the reason given on the BUY
@@ -538,6 +732,9 @@ def execute_actions(
                     status="rejected",
                     reason="insufficient_position",
                     strategy_reason=reason,
+                    costs=(
+                        _zero_transaction_costs(price) if costs_enabled else None
+                    ),
                 )
 
     return cash

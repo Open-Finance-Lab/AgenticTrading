@@ -112,6 +112,72 @@ def test_reporting_order_event_converts_only_executed_value():
     assert rejected["native_value"] == 0
 
 
+def test_reporting_trade_converts_a_share_cost_breakdown_and_preserves_cny_audit():
+    context = make_context()
+    timestamp = datetime(2026, 4, 1, 10, 30, tzinfo=CN)
+    trade = context.reporting_trade(
+        {
+            "timestamp": timestamp,
+            "symbol": "600519.SH",
+            "side": "BUY",
+            "shares": 100,
+            "price": 100.05,
+            "reference_price": 100.0,
+            "cost": 10005.0,
+            "gross_value": 10005.0,
+            "slippage_amount": 5.0,
+            "commission": 5.0,
+            "stamp_duty": 0.0,
+            "transfer_fee": 0.1,
+            "total_fees": 5.1,
+            "net_cash_impact": -10010.1,
+        }
+    )
+
+    assert trade["price"] == pytest.approx(100.05 / 7.0)
+    assert trade["reference_price"] == pytest.approx(100.0 / 7.0)
+    assert trade["total_fees"] == pytest.approx(5.1 / 7.0)
+    assert trade["net_cash_impact"] == pytest.approx(-10010.1 / 7.0)
+    assert trade["native_price"] == pytest.approx(100.05)
+    assert trade["native_reference_price"] == pytest.approx(100.0)
+    assert trade["native_total_fees"] == pytest.approx(5.1)
+    assert trade["native_net_cash_impact"] == pytest.approx(-10010.1)
+    assert trade["native_value"] == pytest.approx(10005.0)
+
+
+def test_reporting_order_event_converts_a_share_cost_fields():
+    context = make_context()
+    timestamp = datetime(2026, 4, 1, 10, 30, tzinfo=CN)
+    event = context.reporting_order_event(
+        {
+            "timestamp": timestamp,
+            "symbol": "600519.SH",
+            "side": "SELL",
+            "requested_shares": 100,
+            "executed_shares": 100,
+            "price": 99.95,
+            "reference_price": 100.0,
+            "executed_value": 9995.0,
+            "gross_value": 9995.0,
+            "slippage_amount": 5.0,
+            "commission": 5.0,
+            "stamp_duty": 5.0,
+            "transfer_fee": 0.1,
+            "total_fees": 10.1,
+            "net_cash_impact": 9984.9,
+            "status": "filled",
+            "reason": "",
+        }
+    )
+
+    assert event["executed_value"] == pytest.approx(9995.0 / 7.0)
+    assert event["total_fees"] == pytest.approx(10.1 / 7.0)
+    assert event["net_cash_impact"] == pytest.approx(9984.9 / 7.0)
+    assert event["native_executed_value"] == pytest.approx(9995.0)
+    assert event["native_total_fees"] == pytest.approx(10.1)
+    assert event["native_net_cash_impact"] == pytest.approx(9984.9)
+
+
 def test_identity_context_keeps_legacy_usd_schema():
     context = CurrencyContext.identity("USD", "US/Eastern")
     record = {
