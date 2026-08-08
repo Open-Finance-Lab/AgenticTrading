@@ -1273,3 +1273,39 @@ def test_builtin_listing_echoes_category(client):
     entry = next(a for a in listing.json()["agents"] if a["agent_id"] == agent_id)
     assert "category" in entry
     assert entry["category"] == "cn_ashares"
+
+
+def test_clone_honours_a_model_name_override(client):
+    """Community's "Choose model" affordance clones a template onto another model."""
+    cloned = client.post(
+        "/api/v1/agents/marketplace/balanced-starter/clone",
+        json={"model_name": "deepseek/deepseek-v4-pro"},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert cloned.json()["agent"]["model_name"] == "deepseek/deepseek-v4-pro"
+
+
+@pytest.mark.parametrize("blank", [None, "", "   "])
+def test_clone_falls_back_to_the_template_model(client, blank):
+    """Omitted or blank means "use the template's model", not "use empty"."""
+    body = {} if blank is None else {"model_name": blank}
+    cloned = client.post(
+        "/api/v1/agents/marketplace/balanced-starter/clone",
+        json=body,
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert cloned.json()["agent"]["model_name"] == "anthropic/claude-haiku-4-5"
+
+
+def test_clone_does_not_validate_the_model_name(client):
+    """No whitelist here: POST /agents and PATCH /agents/{id} don't have one either,
+    and a Literal would drag in the openapi enum deploy gate #313 discharged."""
+    cloned = client.post(
+        "/api/v1/agents/marketplace/balanced-starter/clone",
+        json={"model_name": "some/unreleased-model"},
+        headers={"X-Session-Id": str(uuid.uuid4())},
+    )
+    assert cloned.status_code == 200, cloned.text
+    assert cloned.json()["agent"]["model_name"] == "some/unreleased-model"

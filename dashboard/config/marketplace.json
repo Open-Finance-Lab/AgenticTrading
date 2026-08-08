@@ -140,6 +140,90 @@
           "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
         }
       ]
+    },
+    {
+      "template_id": "contrarian-dip-buyer",
+      "name": "Contrarian Dip Buyer",
+      "model_name": "openai/gpt-5.5",
+      "description": "Buys stocks that have sold off hard and trims them back once they have recovered. The opposite instinct to a momentum strategy.",
+      "category": "us_stocks",
+      "tags": [
+        "contrarian",
+        "mean reversion"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_contrarian_dip",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Look for stocks that have fallen well below where they were trading recently and buy those, in small pieces rather than all at once. Sell back into strength once a position has recovered. Do not chase stocks that are already running.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "sector-rotator",
+      "name": "Sector Rotator",
+      "model_name": "google/gemini-3.1-pro-preview",
+      "description": "Concentrates into whichever part of the market is leading, and moves on when leadership changes.",
+      "category": "us_stocks",
+      "tags": [
+        "rotation",
+        "trend"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_sector_rotator",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Group the available stocks by the kind of business they are in. Put most of the money into the group that has been performing best, and hold two or three names from it rather than one. When a different group takes the lead, sell out of the old one before building the new position.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "volatility-guard",
+      "name": "Volatility Guard",
+      "model_name": "deepseek/deepseek-v4-pro",
+      "description": "Holds a steady portfolio in calm markets and cuts exposure when prices start swinging. Runs on the only model that has beaten the passive baselines on our leaderboard.",
+      "category": "us_stocks",
+      "tags": [
+        "risk management",
+        "defensive"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_volatility_guard",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Judge how violently prices have been moving lately compared with earlier in the period. While things are calm, stay invested across several stocks. When the swings get noticeably larger, sell part of every position and hold the cash rather than switching stocks. Rebuild the positions gradually once the market settles down. Protecting the money matters more here than catching every rally.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
+    },
+    {
+      "template_id": "ashare-momentum-t1",
+      "name": "A-Share Momentum (T+1)",
+      "model_name": "qwen/qwen3.7-plus",
+      "description": "Rides the strongest Chinese A-shares while respecting that market's rule that shares bought today cannot be sold until the next trading day.",
+      "category": "cn_ashares",
+      "tags": [
+        "a-shares",
+        "momentum"
+      ],
+      "author": "Agentic Trading Lab",
+      "pipeline": [
+        {
+          "id": "sub_ashare_momentum",
+          "presetKey": "simple_instruction",
+          "label": "Trading instruction",
+          "prompt": "Buy the Chinese A-shares that have been climbing most steadily and hold them while they keep leading. Shares bought today cannot be sold until the next trading day, so only buy what you are happy to still own tomorrow, and plan any exit at least a day ahead. Sell a position once it stops leading.",
+          "outputFormat": "JSON: { \"orders\": [{ \"symbol\": \"...\", \"side\": \"buy|sell|hold\", \"qty\": number, \"order_type\": \"market|limit\", \"limit_price\": number|null, \"reason\": \"...\" }] }"
+        }
+      ]
     }
   ]
 }

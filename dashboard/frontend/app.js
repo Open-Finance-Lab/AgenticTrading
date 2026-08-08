@@ -497,6 +497,46 @@ const MARKET_LABELS = {
 // opens), never at its own module-init time -- the same rule window.API follows.
 window.AGENT_SHELF_LABELS = MARKET_LABELS;
 
+/** Every model a user can actually pick and run here. The single source for
+ * both model <select> elements: the Run Backtest picker (#modelSelect, live
+ * only on the iFinD A-share path) and the Create Built-in picker
+ * (#builtinAgentModel, which the Configure editor clones its own options from).
+ *
+ * These lists were hand-maintained separately and drifted: the backtest picker
+ * offered six models this platform does not run and omitted four it does, and
+ * an agent on an unlisted model silently submitted the *previous* agent's
+ * selection (see syncModelSelectFromAgent). Declaration order is display order.
+ *
+ * The AI Hedge Fund runtime's Nemotron is deliberately absent: it is a property
+ * of a hosted runtime, not a user choice, and syncBacktestModelFieldMode
+ * already renders that case as "AI Hedge Fund — hosted runtime". */
+const SUPPORTED_MODELS = [
+  { slug: 'anthropic/claude-haiku-4-5', label: 'Claude Haiku 4.5', vendor: 'anthropic' },
+  { slug: 'anthropic/claude-sonnet-4-6', label: 'Claude Sonnet 4.6', vendor: 'anthropic' },
+  { slug: 'openai/gpt-5.5', label: 'GPT-5.5', vendor: 'openai' },
+  { slug: 'google/gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', vendor: 'google' },
+  { slug: 'deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro', vendor: 'deepseek' },
+  { slug: 'qwen/qwen3.7-plus', label: 'Qwen3.7 Plus', vendor: 'qwen' },
+];
+
+/** Pure: no DOM, so the guards can run it under node. */
+function modelOptionsHtml(models) {
+  return models
+    .map((model) => `<option value="${escapeHtml(model.slug)}">${escapeHtml(model.label)}</option>`)
+    .join('');
+}
+
+/** Fill both model pickers. Runs once, in the pure-DOM boot block, which is
+ * before syncIFindModelControl can prepend #modelSelect's "Rule-based" option
+ * -- calling this again later would wipe that option out. */
+function populateSupportedModelSelects() {
+  const html = modelOptionsHtml(SUPPORTED_MODELS);
+  const backtestPicker = document.getElementById('modelSelect');
+  if (backtestPicker) backtestPicker.innerHTML = html;
+  const createPicker = document.getElementById('builtinAgentModel');
+  if (createPicker) createPicker.innerHTML = html;
+}
+
 // My Agents' JS-driven sections, in display order. `match` delegates to
 // agentShelfKey so every agent resolves to exactly one shelf by construction
 // rather than by predicates staying mutually exclusive as they're edited.
@@ -1045,6 +1085,20 @@ function renderAgentCardActions(agent, statusKey) {
     agent.agent_type === 'builtin'
       ? ''
       : `<button class="agent-menu-item agent-rotate-key-btn" type="button" data-agent-id="${id}">New access key</button>`;
+  // Only once the user has actually run this agent: "try it on another model"
+  // is a follow-on offer, not a first action. Built-in only -- duplicating an
+  // external agent would mint an API key (see the backend's duplicate route).
+  // Also excludes hosted runtimes (runtime_type !== 'pipeline'): ai_hedge_fund
+  // hardcodes its own model and never reads the stored value, so duplicating
+  // it onto a chosen model would display a model that isn't actually running.
+  // runtime_type is always present and truthy (server-defaulted to
+  // 'pipeline'), so this MUST be an equality check, never a truthiness test.
+  const duplicate =
+    agent.agent_type === 'builtin' &&
+    agent.runtime_type === 'pipeline' &&
+    (statusKey === 'backtested' || statusKey === 'paper')
+      ? `<button class="agent-menu-item agent-duplicate-model-btn" type="button" data-agent-id="${id}">Run on another model</button>`
+      : '';
   return `
     <div class="agent-card-actions agent-card-actions--status">
       ${configure}
@@ -1056,10 +1110,92 @@ function renderAgentCardActions(agent, statusKey) {
         <div class="agent-menu-dropdown" hidden>
           <button class="agent-menu-item agent-set-default-btn" type="button" data-agent-id="${id}">Set as default</button>
           ${rotate}
+          ${duplicate}
           <button class="agent-menu-item agent-menu-item--danger agent-delete-btn" type="button" data-agent-id="${id}">Delete</button>
         </div>
       </div>
     </div>`;
+}
+
+/** SUPPORTED_MODELS minus the agent's current model -- an entry that duplicates
+ * an agent onto the model it already runs is a no-op the user has to reason
+ * about. A legacy or hosted-runtime model isn't in the list, so nothing is
+ * filtered out and the full six are offered. */
+function duplicateModelChoices(agent) {
+  const current = String(agent?.model_name || '').trim().toLowerCase();
+  return SUPPORTED_MODELS.filter((model) => model.slug.toLowerCase() !== current).map(
+    (model) => ({ slug: model.slug, label: model.label }),
+  );
+}
+
+/** "Momentum Alpha (DeepSeek)". Collides freely: two copies onto DeepSeek read
+ * the same. Names are not unique anywhere else in this product, and
+ * de-duplicating would mean a lookup for a cosmetic gain. */
+function duplicateAgentName(agent, modelSlug) {
+  const vendor = MODEL_VENDORS.find((entry) => entry.key === modelVendorKey(modelSlug));
+  const suffix = ` (${vendor?.label || 'new model'})`;
+  // 100 mirrors DuplicateAgentBody.name's max_length and both name inputs'
+  // maxlength. A 95-char agent would otherwise generate an over-length copy,
+  // and API.request JSON.stringify's the non-string 422 `detail`, so the raw
+  // Pydantic array renders in the modal's error line. Inlined rather than a
+  // module constant because the guards lift this function body into node on
+  // its own -- an outside reference would be undefined there.
+  // Trim the base, never the suffix: the vendor is the point of the name.
+  const base = String(agent?.name || 'Agent').slice(0, 100 - suffix.length).trimEnd();
+  return `${base}${suffix}`;
+}
+
+let duplicateAgentSource = null;
+
+function openDuplicateAgentModal(agent) {
+  const modal = document.getElementById('duplicateAgentModal');
+  const select = document.getElementById('duplicateAgentModel');
+  const error = document.getElementById('duplicateAgentError');
+  if (!modal || !select || !agent) return;
+  duplicateAgentSource = agent;
+  select.innerHTML = duplicateModelChoices(agent)
+    .map((model) => `<option value="${escapeHtml(model.slug)}">${escapeHtml(model.label)}</option>`)
+    .join('');
+  if (error) { error.hidden = true; error.textContent = ''; }
+  modal.hidden = false;
+}
+
+function closeDuplicateAgentModal() {
+  const modal = document.getElementById('duplicateAgentModal');
+  if (modal) modal.hidden = true;
+  duplicateAgentSource = null;
+}
+
+/** Lands the user on the new agent with Run primed. Deliberately does NOT start
+ * a backtest: auto-firing would spend LLM credits on a click the user framed as
+ * "make a copy". */
+async function submitDuplicateAgent() {
+  const agent = duplicateAgentSource;
+  const select = document.getElementById('duplicateAgentModel');
+  const error = document.getElementById('duplicateAgentError');
+  const submit = document.getElementById('duplicateAgentSubmit');
+  if (!agent || !select?.value) return;
+  if (submit) submit.disabled = true;
+  try {
+    const data = await API.post(
+      `${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}/duplicate`,
+      { model_name: select.value, name: duplicateAgentName(agent, select.value) },
+    );
+    const created = data?.agent;
+    if (!created?.agent_id) throw new Error('Copy failed — no agent returned');
+    closeDuplicateAgentModal();
+    applyActiveAgent(created);
+    await loadAgents();
+    showAppToast(`${created.name} is ready. Press Run Backtest to compare them.`);
+    highlightAgentCard(created.agent_id);
+  } catch (err) {
+    if (error) {
+      error.textContent = err.message || `Couldn't create the copy. Please try again.`;
+      error.hidden = false;
+    }
+  } finally {
+    if (submit) submit.disabled = false;
+  }
 }
 
 function renderAgentRunningActions(agent) {
@@ -1357,6 +1493,14 @@ function renderAgentCards(grid, agents, categoryKey) {
     });
   });
 
+  grid.querySelectorAll('.agent-duplicate-model-btn').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const agent = visibleAgents.find((a) => a.agent_id === btn.dataset.agentId);
+      if (!agent) return;
+      openDuplicateAgentModal(agent);
+    });
+  });
+
   grid.querySelectorAll('.agent-delete-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const agentId = btn.dataset.agentId;
@@ -1643,8 +1787,9 @@ function resolveBacktestModelRequest(modelSelect, agent) {
   if (agentOption?.value === selectedModel && agent?.model_name) {
     return agent.model_name;
   }
-  // A model the nine-option list cannot represent still belongs to the agent:
-  // without this the run submits whatever value a previous agent left behind.
+  // Belt-and-braces since syncModelSelectFromAgent started injecting an option
+  // for unrepresentable models: on the hidden path the agent's saved model wins
+  // outright, whatever the select happens to hold.
   if (agent?.model_name && !backtestModelPickerIsLiveControl()) {
     return agent.model_name;
   }
@@ -1667,13 +1812,34 @@ function syncBacktestModelFieldMode() {
       : formatAgentModelLabel(runBacktestModalAgent?.model_name));
 }
 
+/**
+ * Point the picker at this agent's model.
+ *
+ * A model the curated list cannot represent (a legacy value like 'gpt-5.2' or
+ * 'local-model') is INJECTED as its own option rather than left unmatched.
+ * Leaving it unmatched is a silent-wrong-value bug, not a cosmetic one: on the
+ * live iFinD path resolveBacktestModelRequest returns the select's current
+ * value, so the run would submit whatever the previously-selected agent left
+ * there, recorded under this agent's name. js/agent-editor.js does the same
+ * thing for the Configure picker.
+ */
 function syncModelSelectFromAgent(agent) {
   const modelSelect = document.getElementById('modelSelect');
   if (!modelSelect || !agent?.model_name) return;
+  // Drop the previous agent's injected option first, so injections cannot pile
+  // up across agent switches and cannot be matched as if they were curated.
+  modelSelect.querySelectorAll('option[data-injected-model]').forEach((option) => option.remove());
   const option = findBacktestModelOption(modelSelect, agent.model_name);
   if (option) {
     modelSelect.value = option.value;
+    return;
   }
+  const injected = document.createElement('option');
+  injected.value = agent.model_name;
+  injected.textContent = formatAgentModelLabel(agent.model_name);
+  injected.dataset.injectedModel = 'true';
+  modelSelect.appendChild(injected);
+  modelSelect.value = agent.model_name;
 }
 
 function getSelectedBacktestAgent() {
@@ -1894,29 +2060,65 @@ let marketplaceLoadInFlight = null;
  * shelf's empty-state Community button (via navigateToPage's options). */
 let marketplaceCategoryFilter = 'all';
 
-/** Model slug prefix -> "Powered by <provider>" label for the marketplace
- * card submeta. Matched by prefix, not exact slug, so a new model version
- * under an already-known provider doesn't need a new table entry. The raw
- * slug itself never renders on the card -- an unmatched prefix falls back to
- * the glossary's generic "AI-powered" rather than leaking it. */
-const MODEL_PROVIDER_LABELS = [
-  { prefix: 'anthropic/', label: 'Powered by Claude' },
-  { prefix: 'nvidia/nemotron', label: 'Powered by NVIDIA Nemotron' },
-  { prefix: 'deepseek/', label: 'Powered by DeepSeek' },
-  { prefix: 'openai/', label: 'Powered by GPT' },
-  // Not in today's catalog, but all four are already on the leaderboard, so a
-  // template using one is a config change away -- cheaper to cover the whole
-  // set now than to notice a card reading "AI-powered" after the fact.
-  { prefix: 'google/', label: 'Powered by Gemini' },
-  { prefix: 'qwen/', label: 'Powered by Qwen' },
-  { prefix: 'x-ai/', label: 'Powered by Grok' },
-  { prefix: 'meta-llama/', label: 'Powered by Llama' },
+/** 'all' or one of MODEL_VENDORS' keys. ANDs with marketplaceCategoryFilter. */
+let marketplaceVendorFilter = 'all';
+
+/** The model-vendor axis: who makes a model, and how it is licensed.
+ *
+ * Promoted from a submeta label lookup into the source of truth for the whole
+ * axis -- Community's vendor chips, the open-source badge and the card submeta
+ * all derive from this one table, so a badge cannot drift from the vendor it
+ * describes. A wrong badge is a factual claim about someone else's product.
+ *
+ * Matched by PREFIX, not exact slug, so a new model version under a known
+ * vendor needs no entry here. Declaration order is chip order, mirroring how
+ * MARKET_LABELS' key order mirrors the AgentCategory Literal.
+ *
+ * All eight are listed even though only six are pickable: a card whose model
+ * matches nothing renders as the generic "AI-powered" with no chip and no
+ * badge, which is invisible until someone notices. The chip ROW is still
+ * derived from what the loaded catalog actually contains (see
+ * renderMarketplaceVendorChips), so listing a vendor here never ships an
+ * empty chip. */
+const MODEL_VENDORS = [
+  { key: 'anthropic', prefix: 'anthropic/', label: 'Claude', licence: 'closed' },
+  { key: 'openai', prefix: 'openai/', label: 'GPT', licence: 'closed' },
+  { key: 'google', prefix: 'google/', label: 'Gemini', licence: 'closed' },
+  { key: 'deepseek', prefix: 'deepseek/', label: 'DeepSeek', licence: 'open' },
+  { key: 'qwen', prefix: 'qwen/', label: 'Qwen', licence: 'open' },
+  // "NVIDIA Nemotron", not "Nemotron": this label also feeds
+  // formatModelProviderLabel, whose shipped output must not change.
+  { key: 'nvidia', prefix: 'nvidia/nemotron', label: 'NVIDIA Nemotron', licence: 'open' },
+  { key: 'meta', prefix: 'meta-llama/', label: 'Llama', licence: 'open' },
+  { key: 'xai', prefix: 'x-ai/', label: 'Grok', licence: 'closed' },
 ];
 
-function formatModelProviderLabel(modelName) {
+/** Vendor key for a model slug, or '' when the platform genuinely doesn't know.
+ *
+ * '' is not a bug and must never hide the template: it stays visible under the
+ * All chip and is excluded only by an explicit vendor chip -- the same contract
+ * agentMarketKey documents for markets. */
+function modelVendorKey(modelName) {
   const raw = String(modelName || '').trim().toLowerCase();
-  const match = MODEL_PROVIDER_LABELS.find((entry) => raw.startsWith(entry.prefix));
-  return match ? match.label : 'AI-powered';
+  if (!raw) return '';
+  return (MODEL_VENDORS.find((vendor) => raw.startsWith(vendor.prefix)) || {}).key || '';
+}
+
+/** modelVendorKey for an agent record. The agent-facing twin of agentMarketKey. */
+function agentVendorKey(agent) {
+  return modelVendorKey(agent?.model_name);
+}
+
+/** 'open' | 'closed' | '' -- '' when the vendor is unknown. */
+function modelVendorLicence(modelName) {
+  const key = modelVendorKey(modelName);
+  return (MODEL_VENDORS.find((vendor) => vendor.key === key) || {}).licence || '';
+}
+
+function formatModelProviderLabel(modelName) {
+  const key = modelVendorKey(modelName);
+  const vendor = MODEL_VENDORS.find((entry) => entry.key === key);
+  return vendor ? `Powered by ${vendor.label}` : 'AI-powered';
 }
 
 /** Select a Community category chip and re-render, without a route or API
@@ -1931,6 +2133,15 @@ function formatModelProviderLabel(modelName) {
  * rather than filtering to a chip that doesn't exist. */
 function setMarketplaceCategoryFilter(category) {
   marketplaceCategoryFilter = MARKET_LABELS[category] ? category : 'all';
+  renderMarketplaceGrid();
+}
+
+/** Select a vendor chip and re-render. Mirrors setMarketplaceCategoryFilter,
+ * including the reset-to-'all' fallback for an unrecognized key. */
+function setMarketplaceVendorFilter(vendorKey) {
+  marketplaceVendorFilter = MODEL_VENDORS.some((vendor) => vendor.key === vendorKey)
+    ? vendorKey
+    : 'all';
   renderMarketplaceGrid();
 }
 
@@ -1962,11 +2173,67 @@ function renderMarketplaceCategoryChips() {
   });
 }
 
+/** Second chip row: 'All' plus one chip per vendor PRESENT IN THE CATALOG.
+ *
+ * Deliberately asymmetric with the market row, which is hardcoded from
+ * MARKET_LABELS: markets are a closed, backend-validated enum, vendors are
+ * open-ended. Hardcoding all of MODEL_VENDORS would ship chips that can never
+ * match anything. Order still comes from MODEL_VENDORS, not from catalog order,
+ * so the row does not reshuffle when a template is added. */
+function renderMarketplaceVendorChips() {
+  const container = document.getElementById('marketplaceVendorChips');
+  if (!container) return;
+  const present = new Set(marketplaceTemplates.map((t) => modelVendorKey(t.model_name)));
+  const chips = [
+    { key: 'all', label: 'All models' },
+    ...MODEL_VENDORS.filter((vendor) => present.has(vendor.key)).map((vendor) => ({
+      key: vendor.key,
+      label: vendor.label,
+    })),
+  ];
+  // Build once, then only toggle state -- same reason as the market row: this
+  // runs from renderMarketplaceGrid, which is bound to the search box's `input`.
+  const existing = container.querySelectorAll('[data-marketplace-vendor]');
+  if (existing.length !== chips.length) {
+    container.innerHTML = chips
+      .map((chip) => `<button type="button" class="marketplace-category-chip" data-marketplace-vendor="${escapeHtml(chip.key)}" aria-pressed="false">${escapeHtml(chip.label)}</button>`)
+      .join('');
+  }
+  container.querySelectorAll('[data-marketplace-vendor]').forEach((button) => {
+    const active = button.dataset.marketplaceVendor === marketplaceVendorFilter;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+}
+
+/** Empty-state copy. Three cases, deliberately worded apart -- the same concern
+ * stocksEmptyHtml records for My Agents.
+ *
+ * A typed query wins over the facet case: when a search is what emptied the
+ * grid, offering "Clear filters" sends the user to fix the wrong thing. */
+function marketplaceEmptyHtml({ searching, categoryFilter, vendorFilter }) {
+  if (searching) return 'No templates match your search.';
+  if (categoryFilter !== 'all' && vendorFilter !== 'all') {
+    return `No templates match both filters. <button type="button" class="marketplace-clear-filters">Clear filters</button>`;
+  }
+  if (categoryFilter !== 'all') {
+    return `No ${escapeHtml(MARKET_LABELS[categoryFilter] || '')} templates yet.`;
+  }
+  if (vendorFilter !== 'all') {
+    const vendor = MODEL_VENDORS.find((entry) => entry.key === vendorFilter);
+    return `No ${escapeHtml(vendor?.label || '')} templates yet.`;
+  }
+  return 'No templates match your search.';
+}
+
 function getFilteredMarketplaceTemplates() {
   const query = (document.getElementById('marketplaceSearchInput')?.value || '').trim().toLowerCase();
   let list = marketplaceTemplates.slice();
   if (marketplaceCategoryFilter !== 'all') {
     list = list.filter((template) => String(template.category || '').toLowerCase() === marketplaceCategoryFilter);
+  }
+  if (marketplaceVendorFilter !== 'all') {
+    list = list.filter((template) => modelVendorKey(template.model_name) === marketplaceVendorFilter);
   }
   if (query) {
     list = list.filter((template) => {
@@ -1994,15 +2261,27 @@ function renderMarketplaceGrid() {
   if (!grid) return;
 
   renderMarketplaceCategoryChips();
+  renderMarketplaceVendorChips();
   if (errorEl) errorEl.hidden = true;
   const templates = getFilteredMarketplaceTemplates();
   grid.innerHTML = '';
 
   if (!templates.length) {
-    // Show the empty message once the catalog has actually loaded and the
-    // filter narrowed it to zero; keep it hidden before the first load so
-    // it doesn't flash while marketplaceTemplates is still empty.
-    if (emptyEl) emptyEl.hidden = marketplaceTemplates.length === 0;
+    // Keep it hidden before the first load, so it doesn't flash while
+    // marketplaceTemplates is still empty.
+    if (emptyEl) {
+      emptyEl.hidden = marketplaceTemplates.length === 0;
+      emptyEl.innerHTML = marketplaceEmptyHtml({
+        searching: Boolean((document.getElementById('marketplaceSearchInput')?.value || '').trim()),
+        categoryFilter: marketplaceCategoryFilter,
+        vendorFilter: marketplaceVendorFilter,
+      });
+      emptyEl.querySelector('.marketplace-clear-filters')?.addEventListener('click', () => {
+        marketplaceCategoryFilter = 'all';
+        marketplaceVendorFilter = 'all';
+        renderMarketplaceGrid();
+      });
+    }
     return;
   }
   if (emptyEl) emptyEl.hidden = true;
@@ -2016,6 +2295,11 @@ function renderMarketplaceGrid() {
     const cloneLabel = 'Add to My Agents';
     const categoryLabel = MARKET_LABELS[String(template.category || '').toLowerCase()] || 'General';
     const modelLabel = formatModelProviderLabel(template.model_name);
+    // Open weights get a badge; closed models get nothing. Licence comes from
+    // MODEL_VENDORS so it cannot drift from the vendor it describes.
+    const licenceBadge = modelVendorLicence(template.model_name) === 'open'
+      ? '<span class="marketplace-licence-badge">Open-source model</span>'
+      : '';
     const tags = (template.tags || [])
       .slice(0, 3)
       .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
@@ -2052,10 +2336,17 @@ function renderMarketplaceGrid() {
           ${authorMeta}
           ${template.step_count ? `<span>${template.step_count} step${template.step_count === 1 ? '' : 's'}</span>` : ''}
         </div>
-        ${tags ? `<div class="marketplace-tag-row">${tags}</div>` : ''}
+        ${(licenceBadge || tags) ? `<div class="marketplace-tag-row">${licenceBadge}${tags}</div>` : ''}
       </div>
       <div class="agent-card-actions agent-card-actions--status">
-        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
+        <div class="marketplace-clone-split">
+          <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
+          ${template.runtime_type === 'pipeline' ? `
+          <button class="agent-card-cta marketplace-clone-model-btn" type="button" data-template-id="${escapeHtml(template.template_id)}" aria-haspopup="true" aria-expanded="false" aria-label="Choose model — add this template on a different model">Choose model ▾</button>
+          <div class="marketplace-model-menu" hidden>
+            ${SUPPORTED_MODELS.map((model) => `<button type="button" class="agent-menu-item marketplace-model-option" data-template-id="${escapeHtml(template.template_id)}" data-model-slug="${escapeHtml(model.slug)}"${normalizeBacktestModelId(model.slug) === normalizeBacktestModelId(template.model_name) ? ' aria-current="true"' : ''}>${escapeHtml(model.label)}</button>`).join('')}
+          </div>` : ''}
+        </div>
       </div>`;
     grid.appendChild(card);
   });
@@ -2077,6 +2368,37 @@ function renderMarketplaceGrid() {
         marketplaceCloneInFlight = false;
         btn.disabled = false;
         btn.textContent = prevLabel;
+      }
+    });
+  });
+
+  grid.querySelectorAll('.marketplace-clone-model-btn').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const menu = btn.parentElement?.querySelector('.marketplace-model-menu');
+      if (!menu) return;
+      const opening = menu.hidden;
+      // Close every other card's menu first: two open menus overlap.
+      grid.querySelectorAll('.marketplace-model-menu').forEach((el) => { el.hidden = true; });
+      grid.querySelectorAll('.marketplace-clone-model-btn').forEach((el) => el.setAttribute('aria-expanded', 'false'));
+      menu.hidden = !opening;
+      btn.setAttribute('aria-expanded', String(opening));
+    });
+  });
+
+  grid.querySelectorAll('.marketplace-model-option').forEach((option) => {
+    option.addEventListener('click', async () => {
+      const template = marketplaceTemplates.find((item) => item.template_id === option.dataset.templateId);
+      if (!template || marketplaceCloneInFlight) return;
+      marketplaceCloneInFlight = true;
+      option.disabled = true;
+      try {
+        await cloneMarketplaceTemplate(template, option.dataset.modelSlug);
+      } catch (error) {
+        alert(error.message || `Couldn't add this template. Please try again.`);
+      } finally {
+        marketplaceCloneInFlight = false;
+        option.disabled = false;
       }
     });
   });
@@ -2124,10 +2446,12 @@ async function loadMarketplace() {
   return marketplaceLoadInFlight;
 }
 
-async function cloneMarketplaceTemplate(template) {
+/** `modelName` omitted means the template's own model -- the primary CTA's
+ * path, whose behaviour is deliberately unchanged. */
+async function cloneMarketplaceTemplate(template, modelName) {
   const data = await API.post(
     `${API_BASE}/api/v1/agents/marketplace/${encodeURIComponent(template.template_id)}/clone`,
-    {},
+    modelName ? { model_name: modelName } : {},
   );
   const agent = data?.agent;
   if (!agent?.agent_id) {
@@ -3954,6 +4278,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initNavigation();
     setupTickerResizeHandler();
     setupTickerScrollControls();
+    populateSupportedModelSelects();
 
     // Setup time period buttons
     document.querySelectorAll('.time-btn').forEach(btn => {
@@ -7195,6 +7520,11 @@ function navigateToPage(page, options = {}) {
             // set on one visit would leak into the next, unrelated visit made
             // through the plain nav tab, the most common entry path.
             marketplaceCategoryFilter = MARKET_LABELS[options.communityCategory] ? options.communityCategory : 'all';
+            // The vendor chip resets for the same reason, and nothing rides in
+            // via options: a vendor left selected on one visit would AND with an
+            // incoming category and strand the empty-shelf deep links on an
+            // empty grid.
+            marketplaceVendorFilter = 'all';
             if (communityView) communityView.style.display = 'block';
             loadMarketplace();
         } else if (page === 'account') {
@@ -7308,6 +7638,11 @@ function initNavigation() {
       if (!chipBtn) return;
       setMarketplaceCategoryFilter(chipBtn.dataset.marketplaceCategory);
     });
+    document.getElementById('marketplaceVendorChips')?.addEventListener('click', (event) => {
+        const chip = event.target.closest('[data-marketplace-vendor]');
+        if (!chip) return;
+        setMarketplaceVendorFilter(chip.dataset.marketplaceVendor);
+    });
     document.getElementById('agentsCategories')?.addEventListener('click', (event) => {
       const marketChip = event.target.closest('[data-agent-market]');
       if (marketChip) {
@@ -7346,6 +7681,12 @@ function initNavigation() {
     document.getElementById('createBuiltinAgentModalClose')?.addEventListener('click', closeCreateBuiltinAgentModal);
     document.getElementById('createBuiltinAgentModalBackdrop')?.addEventListener('click', closeCreateBuiltinAgentModal);
     document.getElementById('createBuiltinAgentForm')?.addEventListener('submit', submitCreateBuiltinAgent);
+    document.getElementById('duplicateAgentModalClose')?.addEventListener('click', closeDuplicateAgentModal);
+    document.getElementById('duplicateAgentModalBackdrop')?.addEventListener('click', closeDuplicateAgentModal);
+    document.getElementById('duplicateAgentForm')?.addEventListener('submit', (event) => {
+        event.preventDefault();
+        submitDuplicateAgent();
+    });
     document.getElementById('agentCredentialsModalClose')?.addEventListener('click', closeAgentCredentialsModal);
     document.getElementById('agentCredentialsModalBackdrop')?.addEventListener('click', closeAgentCredentialsModal);
 
