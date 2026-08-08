@@ -292,9 +292,9 @@ function updateLeaderboardHeader(payload) {
 function formatDailyBoardSubtitle(payload) {
   const date = payload.daily_status?.trading_date || payload.window?.start_date;
   if (date) {
-    return `Daily window · ${date} (last completed US weekday)`;
+    return `Daily window · ${date} (last completed US cash session)`;
   }
-  return 'Daily window · last completed US weekday';
+  return 'Daily window · last completed US cash session';
 }
 
 function renderDailyLeaderboardNotice(payload) {
@@ -341,8 +341,30 @@ function scheduleDailyLeaderboardPoll(payload) {
   // wait for the nightly cron — polling forever just hammers the API.
   if (!status.refresh_in_progress) return;
   dailyLeaderboardPollTimer = setTimeout(() => {
+    dailyLeaderboardPollTimer = null;
+    // Re-check on fire, not only on schedule: navigating away from Competition
+    // never calls loadLeaderboardData again, so without this the poll would
+    // keep re-fetching and re-rendering a hidden chart for the whole (possibly
+    // multi-hour) deploy. Landing back on the daily tab restarts it.
+    if (!isDailyBoardVisible()) return;
     loadLeaderboardData('daily');
   }, 30000);
+}
+
+/** True only while the Daily Leaderboard is the board actually on screen.
+ *
+ * Read from the DOM rather than the html[data-nav-*] boot attributes: those are
+ * written by navigateToPage but not by showCompetitionPanel, so they go stale
+ * on a plain subtab switch. The active subtab button and the board's own
+ * display are what the user is actually looking at.
+ */
+function isDailyBoardVisible() {
+  const view = document.getElementById('leaderboardView');
+  // offsetParent covers the whole Competition page being hidden; style.display
+  // covers the board being swapped out for Participants/About within it.
+  if (!view || view.style.display === 'none' || view.offsetParent === null) return false;
+  const activeTab = document.querySelector('.competition-subtabs .subtab-btn.active');
+  return activeTab?.dataset.competitionTab === 'daily';
 }
 
 async function loadLeaderboardData(period = 'contest') {

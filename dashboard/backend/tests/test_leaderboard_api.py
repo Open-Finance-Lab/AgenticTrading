@@ -1,9 +1,13 @@
 """Tests for leaderboard API."""
 
+import threading
+import time
+
 import pytest
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
+import dashboard.backend.api.routers.leaderboard as leaderboard_router
 import dashboard.backend.database as db_module
 import dashboard.backend.domain.leaderboard.service as lb_service
 
@@ -392,6 +396,7 @@ def test_daily_refresh_endpoint_requires_secret(client, monkeypatch):
     assert body["window"]["start_date"] == "2026-07-14"
 
 
+@pytest.mark.daily_refresh_background
 def test_enqueue_daily_refresh_returns_immediately(monkeypatch):
     """Cron path must schedule a thread, not block on deploy_model_run."""
     day = "2026-07-14"
@@ -411,29 +416,41 @@ def test_enqueue_daily_refresh_returns_immediately(monkeypatch):
     )
 
     called = {}
+    done = threading.Event()
 
-    def _bg(**kwargs):
+    # Stub the *work*, not threading.Thread. Patching lb_service.threading.Thread
+    # would rebind the attribute on the stdlib threading module itself -- every
+    # thread created anywhere in the process for the duration of this test. The
+    # real _run_daily_refresh_background still runs here, so its try/finally
+    # still releases _daily_refresh_running exactly as in production.
+    def _fake_refresh(**kwargs):
         called["kwargs"] = kwargs
+        done.set()
+        return {}
 
-    monkeypatch.setattr(lb_service, "_run_daily_refresh_background", _bg)
-
-    # Avoid actually starting a real Thread; invoke target inline via stub.
-    class _ImmediateThread:
-        def __init__(self, target=None, kwargs=None, **_):
-            self._target = target
-            self._kwargs = kwargs or {}
-
-        def start(self):
-            self._target(**self._kwargs)
-
-    monkeypatch.setattr(lb_service.threading, "Thread", _ImmediateThread)
+    monkeypatch.setattr(lb_service, "refresh_daily_leaderboard", _fake_refresh)
 
     payload = lb_service.enqueue_daily_leaderboard_refresh(
-        deploy_models=True, force_refresh=False, allow_fallback=False
+        deploy_models=True, force_refresh=False
     )
     assert payload["accepted"] is True
     assert payload["started"] is True
+
+    # enqueue returned without waiting for the worker -- that is the property
+    # under test -- so join before asserting on what the worker received.
+    assert done.wait(5), "background refresh worker never ran"
     assert called["kwargs"]["deploy_models"] is True
+    assert "allow_fallback" not in called["kwargs"], (
+        "the background path must never be able to waive the H6 integrity guard"
+    )
+
+    # The worker's finally clause must hand the flag back, or every later
+    # refresh in this process returns False and the UI polls a dead worker.
+    for _ in range(50):
+        if not lb_service._daily_refresh_running:
+            break
+        time.sleep(0.01)
+    assert lb_service._daily_refresh_running is False
 
 
 def test_daily_window_dates_on_saturday_shows_friday():
@@ -482,3 +499,205 @@ def test_partial_model_deploy_does_not_mark_window_complete(tmp_path, monkeypatc
     # Without force, a wrongly-true models_deployed flag would skip forever.
     second = lb_service.refresh_daily_leaderboard(deploy_models=True, force_refresh=False)
     assert second.get("skipped") is not True
+
+
+# --- Review hardening: the daily refresh path spends real money -------------
+# GET /api/v1/leaderboard?period=daily is public and unauthenticated, and it
+# calls maybe_schedule_daily_leaderboard_refresh() on every request. These pin
+# the guards that stop an anonymous request turning into LLM billing.
+
+
+class _StubThreading:
+    """Stand-in for the threading module, scoped to lb_service only.
+
+    Patching ``lb_service.threading.Thread`` would rebind the attribute on the
+    real stdlib module -- affecting every thread created anywhere in the process
+    for the duration of the test. Replacing the module *reference* this one
+    module holds does not.
+    """
+
+    def __init__(self, thread_cls):
+        self.Thread = thread_cls
+
+    def __getattr__(self, name):
+        return getattr(threading, name)
+
+
+def test_auto_deploy_is_strict_opt_in(monkeypatch):
+    """Unset must mean OFF, including where RENDER is absent (Docker, CI, forks)."""
+    monkeypatch.delenv("LEADERBOARD_DAILY_AUTO_DEPLOY", raising=False)
+    monkeypatch.delenv("RENDER", raising=False)
+    assert lb_service._auto_deploy_daily_models_enabled() is False
+
+    monkeypatch.setenv("LEADERBOARD_DAILY_AUTO_DEPLOY", "true")
+    assert lb_service._auto_deploy_daily_models_enabled() is True
+
+    monkeypatch.setenv("LEADERBOARD_DAILY_AUTO_DEPLOY", "false")
+    assert lb_service._auto_deploy_daily_models_enabled() is False
+
+
+@pytest.mark.daily_refresh_background
+def test_public_daily_get_does_not_schedule_model_deploys(monkeypatch):
+    """An anonymous GET must not be able to start a paid model deploy."""
+    monkeypatch.delenv("LEADERBOARD_DAILY_AUTO_DEPLOY", raising=False)
+    monkeypatch.delenv("RENDER", raising=False)
+    monkeypatch.setattr(
+        lb_service,
+        "_daily_models_status",
+        lambda config: {
+            "trading_date": "2026-07-14",
+            "models_total": 7,
+            "models_cached": 0,
+            "models_pending": 7,
+            "pending_entry_ids": ["a"],
+            "refresh_in_progress": False,
+        },
+    )
+    started = {}
+
+    def _fake_refresh(**kwargs):
+        started["kwargs"] = kwargs
+        return {}
+
+    monkeypatch.setattr(lb_service, "refresh_daily_leaderboard", _fake_refresh)
+
+    lb_service.maybe_schedule_daily_leaderboard_refresh()
+    for _ in range(200):
+        if "kwargs" in started:
+            break
+        time.sleep(0.01)
+
+    # A baselines-only refresh is fine; deploying models is not.
+    assert started.get("kwargs", {}).get("deploy_models") is False
+
+
+def test_daily_refresh_endpoint_hides_whether_secret_is_configured(client, monkeypatch):
+    """Unconfigured must answer 401 like a wrong secret, not advertise 503."""
+    monkeypatch.delenv("LEADERBOARD_DAILY_REFRESH_SECRET", raising=False)
+    resp = client.post(
+        "/api/v1/leaderboard/daily/refresh",
+        headers={"X-Leaderboard-Refresh-Secret": "anything"},
+    )
+    assert resp.status_code == 401
+    assert "LEADERBOARD_DAILY_REFRESH_SECRET" not in resp.text
+
+
+def test_daily_refresh_endpoint_rejects_non_ascii_secret_header(client, monkeypatch):
+    """compare_digest raises TypeError on a non-ASCII str -> would surface as 500.
+
+    Sent as raw bytes because httpx refuses to encode a non-ASCII *str* header;
+    a real HTTP client is under no such constraint, and Starlette latin-1
+    decodes whatever arrives into chars above 127.
+    """
+    monkeypatch.setenv("LEADERBOARD_DAILY_REFRESH_SECRET", "cron-secret")
+    resp = client.post(
+        "/api/v1/leaderboard/daily/refresh",
+        headers={"X-Leaderboard-Refresh-Secret": "sécret".encode("latin-1")},
+    )
+    assert resp.status_code == 401
+
+
+def test_verify_daily_refresh_secret_handles_non_ascii(monkeypatch):
+    """The boundary itself: a wrong secret is a PermissionError, never TypeError."""
+    monkeypatch.setenv("LEADERBOARD_DAILY_REFRESH_SECRET", "cron-secret")
+    with pytest.raises(PermissionError):
+        lb_service.verify_daily_refresh_secret("sécret")
+
+
+def test_daily_refresh_endpoint_has_no_h6_fallback_bypass(client, monkeypatch):
+    """allow_fallback waives the H6 integrity guard; keep it off the HTTP surface."""
+    import inspect
+
+    monkeypatch.setenv("LEADERBOARD_DAILY_REFRESH_SECRET", "cron-secret")
+    seen = {}
+
+    def _fake_enqueue(**kwargs):
+        seen["kwargs"] = kwargs
+        return {
+            "accepted": True,
+            "started": True,
+            "refresh_in_progress": True,
+            "window": {"start_date": "d", "end_date": "d", "label": "d"},
+            "message": "ok",
+        }
+
+    monkeypatch.setattr(
+        "dashboard.backend.api.routers.leaderboard.enqueue_daily_leaderboard_refresh",
+        _fake_enqueue,
+    )
+    resp = client.post(
+        "/api/v1/leaderboard/daily/refresh?deploy_models=false&allow_fallback=true",
+        headers={"X-Leaderboard-Refresh-Secret": "cron-secret"},
+    )
+    assert resp.status_code == 202
+    # The query param is ignored, never forwarded.
+    assert "allow_fallback" not in seen["kwargs"]
+
+    # And no function on the background path can accept it either.
+    for fn in (
+        lb_service.enqueue_daily_leaderboard_refresh,
+        lb_service.maybe_schedule_daily_leaderboard_refresh,
+        lb_service._run_daily_refresh_background,
+    ):
+        assert "allow_fallback" not in inspect.signature(fn).parameters, fn.__name__
+
+
+def test_daily_refresh_endpoint_is_rate_limited(client, monkeypatch):
+    """One shared secret plus unlimited attempts is an open guessing budget."""
+    monkeypatch.setenv("LEADERBOARD_DAILY_REFRESH_SECRET", "cron-secret")
+    limiter = leaderboard_router._daily_refresh_rate_limiter
+    codes = {
+        client.post(
+            "/api/v1/leaderboard/daily/refresh",
+            headers={"X-Leaderboard-Refresh-Secret": "wrong"},
+        ).status_code
+        for _ in range(limiter.max_events + 3)
+    }
+    assert 429 in codes
+
+
+def test_daily_models_status_scans_runs_once(client, monkeypatch):
+    """N+1: this used to be one full session scan per LLM entry, per public GET."""
+    config = lb_service.resolve_leaderboard_config("daily")
+    assert len(lb_service.llm_leaderboard_entries(config)) > 1  # else the bug hides
+    calls = {"n": 0}
+    real = lb_service.db.get_runs_by_session
+
+    def _counting(session_id):
+        calls["n"] += 1
+        return real(session_id)
+
+    monkeypatch.setattr(lb_service.db, "get_runs_by_session", _counting)
+    lb_service._daily_models_status(config)
+    assert calls["n"] == 1
+
+
+@pytest.mark.daily_refresh_background
+def test_thread_start_failure_releases_the_in_progress_flag(monkeypatch):
+    """A stuck True flag blocks every later refresh and makes the UI poll forever."""
+    monkeypatch.setattr(lb_service, "_daily_refresh_running", False)
+    monkeypatch.setattr(
+        lb_service,
+        "_daily_models_status",
+        lambda config: {
+            "trading_date": "2026-07-14",
+            "models_total": 0,
+            "models_cached": 0,
+            "models_pending": 0,
+            "pending_entry_ids": [],
+            "refresh_in_progress": False,
+        },
+    )
+
+    class _ExplodingThread:
+        def __init__(self, **_):
+            pass
+
+        def start(self):
+            raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(lb_service, "threading", _StubThreading(_ExplodingThread))
+
+    with pytest.raises(RuntimeError):
+        lb_service.maybe_schedule_daily_leaderboard_refresh(force_refresh=True)
+    assert lb_service._daily_refresh_running is False

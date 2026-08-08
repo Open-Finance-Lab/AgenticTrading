@@ -181,16 +181,38 @@ def _daily_window_key(config: Dict[str, Any]) -> str:
     return f"{config['session_id']}|{config['start_date']}|{config['end_date']}"
 
 
+def _cached_run_index(
+    start_date: str, end_date: str, session_id: str
+) -> Dict[str, Dict[str, Any]]:
+    """``llm_model`` → cached leaderboard run for one window, in one query.
+
+    ``_find_cached_run`` rescans the whole session per lookup, so calling it in
+    a loop is O(entries × runs) DB work on a request path. First match wins,
+    matching ``_find_cached_run``'s semantics exactly.
+    """
+    index: Dict[str, Dict[str, Any]] = {}
+    for run in db.get_runs_by_session(session_id) or []:
+        if (
+            run.get("mode") == LEADERBOARD_MODE
+            and run.get("start_date") == start_date
+            and run.get("end_date") == end_date
+        ):
+            index.setdefault(run.get("llm_model"), run)
+    return index
+
+
 def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
     """How many competition LLM curves exist for the current daily window."""
     entries = llm_leaderboard_entries(config)
+    # Single scan: this runs on every public GET of the daily board.
+    cached_runs = _cached_run_index(
+        config["start_date"], config["end_date"], config["session_id"]
+    )
     cached = 0
     pending_ids: List[str] = []
     for entry in entries:
         entry_id = entry["id"]
-        if _find_cached_run(
-            entry_id, config["start_date"], config["end_date"], config["session_id"]
-        ):
+        if cached_runs.get(entry_id):
             cached += 1
         else:
             pending_ids.append(entry_id)
@@ -206,14 +228,17 @@ def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _auto_deploy_daily_models_enabled() -> bool:
-    """Whether missing daily LLM curves should backfill in a background thread."""
+    """Whether missing daily LLM curves should backfill in a background thread.
+
+    **Strict opt-in.** ``GET /api/v1/leaderboard?period=daily`` is public and
+    unauthenticated, and this flag decides whether serving it may kick off
+    ``deploy_model_run`` for every competition entry — i.e. real, billable LLM
+    API calls. Defaulting on for "not Render" would have armed that path on the
+    Docker image, every self-host and fork, and the test suite (``conftest``
+    deliberately strips ``RENDER``). An operator must ask for it by name.
+    """
     raw = (os.getenv("LEADERBOARD_DAILY_AUTO_DEPLOY") or "").strip().lower()
-    if raw in ("1", "true", "yes", "on"):
-        return True
-    if raw in ("0", "false", "no", "off"):
-        return False
-    # Local dev: backfill on demand. Prod (Render) expects the nightly refresh job.
-    return not os.getenv("RENDER")
+    return raw in ("1", "true", "yes", "on")
 
 
 def refresh_daily_leaderboard(
@@ -296,14 +321,15 @@ def _run_daily_refresh_background(
     *,
     deploy_models: bool,
     force_refresh: bool,
-    allow_fallback: bool,
 ) -> None:
+    """Worker body. Deliberately no ``allow_fallback``: the H6 integrity guard
+    is never waived on a background/HTTP-triggered run, only by an operator
+    running ``scripts/refresh_daily_leaderboard.py --allow-fallback`` locally."""
     global _daily_refresh_running
     try:
         refresh_daily_leaderboard(
             deploy_models=deploy_models,
             force_refresh=force_refresh,
-            allow_fallback=allow_fallback,
         )
     except Exception as exc:
         print(f"⚠️ Daily leaderboard background refresh failed: {exc}")
@@ -316,11 +342,15 @@ def maybe_schedule_daily_leaderboard_refresh(
     *,
     deploy_models: Optional[bool] = None,
     force_refresh: bool = False,
-    allow_fallback: bool = False,
 ) -> bool:
     """Start a background daily refresh if one is not already running.
 
     Returns True when a new worker thread was started.
+
+    The in-progress guard (``_daily_refresh_running``) and the state file are
+    **per-process**: two workers or two instances can each schedule the same
+    window. Adequate for the current single-instance Render deploy; a
+    multi-replica deploy would need a shared lock, or duplicate model deploys.
     """
     global _daily_refresh_running
     config = resolve_leaderboard_config("daily")
@@ -346,12 +376,18 @@ def maybe_schedule_daily_leaderboard_refresh(
             kwargs={
                 "deploy_models": should_deploy,
                 "force_refresh": force_refresh,
-                "allow_fallback": allow_fallback,
             },
             daemon=True,
             name="daily-leaderboard-refresh",
         )
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            # A failed start would otherwise strand the flag at True forever:
+            # every later refresh returns False and the UI polls a worker that
+            # does not exist. Release it and let the caller see "not started".
+            _daily_refresh_running = False
+            raise
         return True
 
 
@@ -359,19 +395,19 @@ def enqueue_daily_leaderboard_refresh(
     *,
     deploy_models: bool = True,
     force_refresh: bool = False,
-    allow_fallback: bool = False,
 ) -> Dict[str, Any]:
     """Cron/API entrypoint: accept a refresh and run it in a background thread.
 
     Never blocks on model deploys — callers (GitHub Actions curl, ``--remote``)
     get an immediate acknowledgement. Progress is visible via
     ``GET /api/v1/leaderboard?period=daily`` (``daily_status``).
+
+    No ``allow_fallback``: the H6 integrity guard is not waivable over HTTP.
     """
     config = resolve_leaderboard_config("daily")
     started = maybe_schedule_daily_leaderboard_refresh(
         deploy_models=deploy_models,
         force_refresh=force_refresh,
-        allow_fallback=allow_fallback,
     )
     status = _daily_models_status(config)
     # The worker flips the flag under the lock; treat a just-started thread as
@@ -400,12 +436,20 @@ def enqueue_daily_leaderboard_refresh(
 
 
 def verify_daily_refresh_secret(provided: Optional[str]) -> None:
-    """Raise ValueError when the cron secret is missing or wrong."""
+    """Raise when the cron secret is unconfigured (ValueError) or wrong (PermissionError)."""
     expected = (os.getenv("LEADERBOARD_DAILY_REFRESH_SECRET") or "").strip()
     if not expected:
         raise ValueError("LEADERBOARD_DAILY_REFRESH_SECRET is not configured")
     token = (provided or "").strip()
-    if not token or not secrets.compare_digest(token, expected):
+    # Compare as bytes: Starlette latin-1-decodes headers, and compare_digest
+    # raises TypeError on a str containing non-ASCII — which would surface as an
+    # unhandled 500 instead of a clean auth failure.
+    # surrogateescape, not strict: os.getenv round-trips undecodable env bytes as
+    # surrogates on Linux, and strict encoding would raise on those too.
+    if not token or not secrets.compare_digest(
+        token.encode("utf-8", "surrogateescape"),
+        expected.encode("utf-8", "surrogateescape"),
+    ):
         raise PermissionError("Invalid daily leaderboard refresh secret")
 
 
@@ -1112,8 +1156,13 @@ def get_leaderboard(
 
     daily_status: Optional[Dict[str, Any]] = None
     if config.get("period") == "daily":
-        daily_status = _daily_models_status(config)
+        # Schedule *before* snapshotting: the scheduler sets the in-progress flag
+        # synchronously, so taking the status first would report
+        # refresh_in_progress=false for a worker that had just started — and the
+        # frontend only polls while that flag is true, so the user would sit on
+        # a stale board until they reloaded by hand.
         maybe_schedule_daily_leaderboard_refresh()
+        daily_status = _daily_models_status(config)
 
     payload: Dict[str, Any] = {
         "period": config.get("period", "contest"),

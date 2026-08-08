@@ -7,9 +7,10 @@ status codes, exception messages, and service calls are unchanged; only the
 module location moved.
 """
 
-from fastapi import APIRouter, Header, HTTPException, Query
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
+from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.leaderboard.service import (
     enqueue_daily_leaderboard_refresh,
     get_leaderboard,
@@ -17,6 +18,11 @@ from dashboard.backend.domain.leaderboard.service import (
 )
 
 router = APIRouter(prefix="/v1/leaderboard", tags=["leaderboard"])
+
+# The refresh hook is unauthenticated apart from one shared secret, and a hit
+# schedules real LLM spend. Best-effort budget (see api/rate_limit): it bounds
+# naive abuse and secret-guessing volume, it is not the security boundary.
+_daily_refresh_rate_limiter = FixedWindowRateLimiter(max_events=20, window_seconds=3600)
 
 
 @router.get("")
@@ -44,18 +50,12 @@ def api_get_leaderboard(
 
 @router.post("/daily/refresh")
 def api_refresh_daily_leaderboard(
+    request: Request,
     deploy_models: bool = Query(
         default=True,
         description="Also run every competition LLM model for the daily window (expensive).",
     ),
     force: bool = Query(default=False, description="Ignore the per-window refresh cache."),
-    allow_fallback: bool = Query(
-        default=False,
-        description=(
-            "Admin-only: allow publishing LLM entries that fell back to rule-based "
-            "trading (bypasses the H6 integrity guard). Prefer leaving false."
-        ),
-    ),
     x_leaderboard_refresh_secret: str | None = Header(default=None, alias="X-Leaderboard-Refresh-Secret"),
 ):
     """Cron/admin hook: enqueue a Daily Leaderboard refresh (non-blocking).
@@ -64,11 +64,29 @@ def api_refresh_daily_leaderboard(
     Returns **202 Accepted** immediately; model deploys run in a background
     thread so Render/GitHub Actions HTTP timeouts cannot abort a multi-hour job.
     Poll ``GET /api/v1/leaderboard?period=daily`` for ``daily_status``.
+
+    There is deliberately no ``allow_fallback`` parameter: that flag bypasses
+    the H6 leaderboard-integrity guard (publishing a rule-based curve under an
+    LLM's name) and stays a local operator decision on
+    ``scripts/refresh_daily_leaderboard.py``, not something reachable over HTTP
+    behind a single shared secret.
     """
+    if not _daily_refresh_rate_limiter.allow(client_key(request)):
+        raise HTTPException(
+            status_code=429,
+            detail="Too many daily leaderboard refresh requests. Try again later.",
+        )
+
     try:
         verify_daily_refresh_secret(x_leaderboard_refresh_secret)
-    except ValueError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ValueError:
+        # Unconfigured and wrong-secret both answer 401: a public endpoint
+        # should not tell an anonymous caller whether it is armed. The operator
+        # signal goes to the server log instead.
+        print("⚠️ Daily leaderboard refresh rejected: LEADERBOARD_DAILY_REFRESH_SECRET is not configured")
+        raise HTTPException(
+            status_code=401, detail="Invalid daily leaderboard refresh secret"
+        ) from None
     except PermissionError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 
@@ -76,7 +94,6 @@ def api_refresh_daily_leaderboard(
         payload = enqueue_daily_leaderboard_refresh(
             deploy_models=deploy_models,
             force_refresh=force,
-            allow_fallback=allow_fallback,
         )
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc

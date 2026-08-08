@@ -94,6 +94,14 @@ os.environ.pop("BREVO_API_KEY", None)
 os.environ.pop("ACCOUNT_EMAIL_FROM", None)
 os.environ.pop("ACCOUNT_EMAIL_FROM_NAME", None)
 
+# Daily Leaderboard knobs. LEADERBOARD_DAILY_AUTO_DEPLOY is the flag that lets a
+# public GET of ?period=daily kick off deploy_model_run for every competition
+# entry -- real, billable LLM calls. A developer with it exported would have the
+# suite spend their credits. LEADERBOARD_DAILY_REFRESH_SECRET is stripped so the
+# secret-gate tests see a known-unset baseline rather than the shell's value.
+os.environ.pop("LEADERBOARD_DAILY_AUTO_DEPLOY", None)
+os.environ.pop("LEADERBOARD_DAILY_REFRESH_SECRET", None)
+
 
 @atexit.register
 def _cleanup_test_db_dir() -> None:
@@ -102,6 +110,43 @@ def _cleanup_test_db_dir() -> None:
 
 
 import pytest  # noqa: E402
+
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "daily_refresh_background: test drives the real Daily Leaderboard "
+        "background scheduler; opts out of the autouse no-op guard.",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _no_background_daily_refresh(request, monkeypatch, tmp_path):
+    """Keep the Daily Leaderboard's background worker out of the test process.
+
+    ``get_leaderboard(period="daily")`` calls
+    ``maybe_schedule_daily_leaderboard_refresh()`` on every request, so *any*
+    test that hits ``GET /api/v1/leaderboard?period=daily`` would otherwise
+    spawn a real thread into ``ensure_leaderboard_runs`` (live Alpaca fetch) and
+    -- with LEADERBOARD_DAILY_AUTO_DEPLOY on -- ``deploy_model_run`` for every
+    competition entry. That thread outlives the test, races the temp DB, and
+    writes state into the repo working tree.
+
+    Also redirects the refresh state file at all times, including for the tests
+    that opt out, so nothing lands in dashboard/storage/data/.
+    """
+    from dashboard.backend.domain.leaderboard import service as lb_service
+
+    monkeypatch.setattr(
+        lb_service,
+        "_DAILY_REFRESH_STATE_PATH",
+        tmp_path / "leaderboard_daily_refresh.json",
+    )
+    if request.node.get_closest_marker("daily_refresh_background"):
+        return
+    monkeypatch.setattr(
+        lb_service, "maybe_schedule_daily_leaderboard_refresh", lambda **_: False
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -116,6 +161,7 @@ def _reset_shared_scale_state(monkeypatch):
     from dashboard.backend.domain.agents import auth_cache
     from dashboard.backend import db_pool
     from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.routers import leaderboard as leaderboard_router
 
     monkeypatch.setattr(db_pool, "POOL_TIMEOUT_SECONDS", 1.0)
     market_data_store._reset_for_tests()
@@ -128,6 +174,10 @@ def _reset_shared_scale_state(monkeypatch):
     auth_api._LOGIN_EMAIL_LIMITER.reset()
     auth_api._SIGNUP_IP_LIMITER.reset()
     auth_api._SIGNUP_EMAIL_LIMITER.reset()
+    # Same reason: every TestClient request shares one client key, so the daily
+    # refresh budget would otherwise be consumed cumulatively across the suite
+    # and later tests would start seeing 429s.
+    leaderboard_router._daily_refresh_rate_limiter.reset()
     yield
     # Best-effort drain so a job enqueued in this test doesn't leak into the
     # next. Note pytest tears fixtures down LIFO, so a test's own monkeypatches

@@ -34,12 +34,24 @@ jobs:
         env:
           ATL_API: ${{ vars.ATL_API || 'https://agentictrading.onrender.com' }}
           LEADERBOARD_DAILY_REFRESH_SECRET: ${{ secrets.LEADERBOARD_DAILY_REFRESH_SECRET }}
-          DEPLOY_MODELS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.deploy_models || 'true' }}
+          # Scheduled runs always deploy; a manual run honours its input. Written
+          # as an explicit ternary rather than `A && B || 'true'`: that idiom
+          # returns 'true' whenever B is falsy, so a manual run asking for
+          # deploy_models=false would silently deploy anyway if the expression
+          # ever yielded a real boolean (as the `inputs.` context does) instead
+          # of the string "false" that `github.event.inputs.` happens to give.
+          DEPLOY_MODELS: ${{ github.event_name != 'workflow_dispatch' && 'true' || (inputs.deploy_models && 'true' || 'false') }}
         run: |
+          set -euo pipefail
           if [ -z "$LEADERBOARD_DAILY_REFRESH_SECRET" ]; then
             echo "LEADERBOARD_DAILY_REFRESH_SECRET is not configured." >&2
             exit 1
           fi
+          case "$DEPLOY_MODELS" in
+            true|false) ;;
+            *) echo "Unexpected DEPLOY_MODELS='$DEPLOY_MODELS'" >&2; exit 1 ;;
+          esac
+          echo "deploy_models=$DEPLOY_MODELS"
           curl --silent --show-error --fail \
             --max-time 120 \
             --retry 2 --retry-delay 30 --retry-all-errors \

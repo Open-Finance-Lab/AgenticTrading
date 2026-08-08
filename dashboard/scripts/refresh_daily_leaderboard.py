@@ -119,11 +119,20 @@ def _refresh_remote(*, deploy_models: bool, force: bool, allow_fallback: bool) -
     if not secret:
         print("ERROR: LEADERBOARD_DAILY_REFRESH_SECRET is not set", file=sys.stderr)
         return 1
+    if allow_fallback:
+        # The H6 integrity guard is deliberately not waivable over HTTP, so the
+        # endpoint has no such parameter. Fail loudly rather than silently
+        # publishing under the guard the operator thought they had lifted.
+        print(
+            "ERROR: --allow-fallback cannot be combined with --remote; run the "
+            "refresh locally against the target database instead.",
+            file=sys.stderr,
+        )
+        return 1
     base = (os.getenv("ATL_API") or os.getenv("ATL_API_BASE") or "http://localhost:8000").rstrip("/")
     params = {
         "deploy_models": str(deploy_models).lower(),
         "force": str(force).lower(),
-        "allow_fallback": str(allow_fallback).lower(),
     }
     url = f"{base}/api/v1/leaderboard/daily/refresh"
     print(f"POST {url}")
