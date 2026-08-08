@@ -185,6 +185,20 @@ async def startup_event():
     thread.start()
     # Don't wait - server starts immediately
 
+    def init_daily_leaderboard():
+        """Background: baselines + optional LLM deploy for the daily board."""
+        try:
+            from dashboard.backend.domain.leaderboard.service import (
+                maybe_schedule_daily_leaderboard_refresh,
+            )
+
+            if maybe_schedule_daily_leaderboard_refresh():
+                print("📊 Daily Leaderboard: background refresh started")
+        except Exception as e:
+            print(f"⚠️ Daily leaderboard initialization error: {e}")
+
+    threading.Thread(target=init_daily_leaderboard, daemon=True).start()
+
     # Protocol run lifecycle: fail runs orphaned by the previous process (their
     # in-memory engine sessions did not survive the restart) and start the
     # background reaper that drains/evicts abandoned runs. Kept in separate

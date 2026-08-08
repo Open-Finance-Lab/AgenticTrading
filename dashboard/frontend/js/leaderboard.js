@@ -10,6 +10,7 @@ let equityCurvesData = null;
 let equityCurvesChartInstance = null;
 let currentChartView = 'absolute'; // default: money ($). 'cumulative' = % return
 let leaderboardListenersInitialized = false;
+let dailyLeaderboardPollTimer = null;
 
 // Chart visual-hierarchy state
 let hiddenSeries = new Set();
@@ -281,10 +282,89 @@ function updateLeaderboardHeader(payload) {
   }
   if (subtitleEl) {
     subtitleEl.textContent = payload.period === 'daily'
-      ? (payload.window?.label ? `Daily window · ${payload.window.label}` : 'Daily window · last completed weekday')
+      ? formatDailyBoardSubtitle(payload)
       : 'Sep 1 – Oct 30, 2026';
   }
+  renderDailyLeaderboardNotice(payload);
   updateCurvePickerCount();
+}
+
+function formatDailyBoardSubtitle(payload) {
+  const date = payload.daily_status?.trading_date || payload.window?.start_date;
+  if (date) {
+    return `Daily window · ${date} (last completed US cash session)`;
+  }
+  return 'Daily window · last completed US cash session';
+}
+
+function renderDailyLeaderboardNotice(payload) {
+  const host = document.getElementById('leaderboardDailyNotice');
+  if (!host) return;
+  if (payload.period !== 'daily') {
+    host.hidden = true;
+    host.textContent = '';
+    return;
+  }
+  const status = payload.daily_status || {};
+  const pending = Number(status.models_pending) || 0;
+  const total = Number(status.models_total) || 0;
+  const cached = Number(status.models_cached) || 0;
+  const inProgress = Boolean(status.refresh_in_progress);
+
+  if (inProgress || pending > 0) {
+    host.hidden = false;
+    const date = status.trading_date || payload.window?.start_date || 'today';
+    if (inProgress) {
+      host.textContent = `Running competition models for ${date}… (${cached}/${total} ready). This page refreshes automatically.`;
+    } else {
+      host.textContent = `${pending} competition model curve(s) pending for ${date}. Baselines are live; models appear once the daily job finishes.`;
+    }
+    return;
+  }
+  if (total > 0 && cached === total) {
+    host.hidden = false;
+    host.textContent = `All ${total} competition models loaded for ${status.trading_date || payload.window?.start_date}.`;
+    return;
+  }
+  host.hidden = true;
+  host.textContent = '';
+}
+
+function scheduleDailyLeaderboardPoll(payload) {
+  if (dailyLeaderboardPollTimer) {
+    clearTimeout(dailyLeaderboardPollTimer);
+    dailyLeaderboardPollTimer = null;
+  }
+  if (payload.period !== 'daily') return;
+  const status = payload.daily_status || {};
+  // Only poll while a refresh worker is running. Pending curves with no worker
+  // wait for the nightly cron — polling forever just hammers the API.
+  if (!status.refresh_in_progress) return;
+  dailyLeaderboardPollTimer = setTimeout(() => {
+    dailyLeaderboardPollTimer = null;
+    // Re-check on fire, not only on schedule: navigating away from Competition
+    // never calls loadLeaderboardData again, so without this the poll would
+    // keep re-fetching and re-rendering a hidden chart for the whole (possibly
+    // multi-hour) deploy. Landing back on the daily tab restarts it.
+    if (!isDailyBoardVisible()) return;
+    loadLeaderboardData('daily');
+  }, 30000);
+}
+
+/** True only while the Daily Leaderboard is the board actually on screen.
+ *
+ * Read from the DOM rather than the html[data-nav-*] boot attributes: those are
+ * written by navigateToPage but not by showCompetitionPanel, so they go stale
+ * on a plain subtab switch. The active subtab button and the board's own
+ * display are what the user is actually looking at.
+ */
+function isDailyBoardVisible() {
+  const view = document.getElementById('leaderboardView');
+  // offsetParent covers the whole Competition page being hidden; style.display
+  // covers the board being swapped out for Participants/About within it.
+  if (!view || view.style.display === 'none' || view.offsetParent === null) return false;
+  const activeTab = document.querySelector('.competition-subtabs .subtab-btn.active');
+  return activeTab?.dataset.competitionTab === 'daily';
 }
 
 async function loadLeaderboardData(period = 'contest') {
@@ -311,6 +391,7 @@ async function loadLeaderboardData(period = 'contest') {
     }
 
     await renderEquityCurvesChart();
+    scheduleDailyLeaderboardPoll(leaderboardPayload);
   } catch (error) {
     console.error('Error loading leaderboard:', error);
     displayLeaderboardError(error.message);
@@ -615,7 +696,11 @@ function populateLeaderboardTable() {
 
   const filtered = getFilteredLeaderboardEntries();
   if (!filtered.length) {
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">No leaderboard entries yet. Baselines compute on first load (requires market data).</td></tr>';
+    const period = leaderboardPayload?.period;
+    const msg = period === 'daily'
+      ? 'No daily entries yet. Baselines compute on first load; competition models deploy automatically (local dev) or via the nightly refresh job.'
+      : 'No leaderboard entries yet. Baselines compute on first load (requires market data).';
+    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">${msg}</td></tr>`;
     return;
   }
 

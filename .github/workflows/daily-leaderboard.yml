@@ -1,0 +1,61 @@
+name: Daily Leaderboard refresh
+
+# Enqueue a rolling Daily Leaderboard refresh after US cash equity close.
+# The API returns 202 immediately; model deploys continue on the Render
+# instance. Server-side window math is America/New_York + 16:00 close, so this
+# Mon–Fri 22:30 UTC schedule targets the session that just finished (not
+# UTC-yesterday). Weekends roll back to Friday without a Saturday cron.
+#
+# Requires repository secret LEADERBOARD_DAILY_REFRESH_SECRET matching
+# the value configured on the Render service.
+
+on:
+  schedule:
+    # 22:30 UTC Mon–Fri ≈ 18:30 EDT / 17:30 EST — after the 16:00 ET cash close.
+    - cron: "30 22 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      deploy_models:
+        description: "Deploy competition LLM models (expensive)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: daily-leaderboard
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    name: Enqueue daily board refresh
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: POST daily refresh (202 Accepted)
+        env:
+          ATL_API: ${{ vars.ATL_API || 'https://agentictrading.onrender.com' }}
+          LEADERBOARD_DAILY_REFRESH_SECRET: ${{ secrets.LEADERBOARD_DAILY_REFRESH_SECRET }}
+          # Scheduled runs always deploy; a manual run honours its input. Written
+          # as an explicit ternary rather than `A && B || 'true'`: that idiom
+          # returns 'true' whenever B is falsy, so a manual run asking for
+          # deploy_models=false would silently deploy anyway if the expression
+          # ever yielded a real boolean (as the `inputs.` context does) instead
+          # of the string "false" that `github.event.inputs.` happens to give.
+          DEPLOY_MODELS: ${{ github.event_name != 'workflow_dispatch' && 'true' || (inputs.deploy_models && 'true' || 'false') }}
+        run: |
+          set -euo pipefail
+          if [ -z "$LEADERBOARD_DAILY_REFRESH_SECRET" ]; then
+            echo "LEADERBOARD_DAILY_REFRESH_SECRET is not configured." >&2
+            exit 1
+          fi
+          case "$DEPLOY_MODELS" in
+            true|false) ;;
+            *) echo "Unexpected DEPLOY_MODELS='$DEPLOY_MODELS'" >&2; exit 1 ;;
+          esac
+          echo "deploy_models=$DEPLOY_MODELS"
+          curl --silent --show-error --fail \
+            --max-time 120 \
+            --retry 2 --retry-delay 30 --retry-all-errors \
+            -X POST "${ATL_API%/}/api/v1/leaderboard/daily/refresh?deploy_models=${DEPLOY_MODELS}&force=false" \
+            -H "X-Leaderboard-Refresh-Secret: ${LEADERBOARD_DAILY_REFRESH_SECRET}"
+          echo
+          echo "Accepted. Poll GET /api/v1/leaderboard?period=daily for daily_status."

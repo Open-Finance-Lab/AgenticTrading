@@ -12,9 +12,12 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import tempfile
-from datetime import date, datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+import threading
+from datetime import date, datetime, time, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple, Union
+from zoneinfo import ZoneInfo
 
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
 from dashboard.backend.database import db
@@ -41,6 +44,13 @@ fetch_hourly_bars = _baselines.fetch_hourly_bars
 LEADERBOARD_MODE = "leaderboard"
 VALID_PERIODS = ("contest", "daily")
 _SKIP_CACHE_PATH = DATA_DIR / "leaderboard_skip_cache.json"
+_DAILY_REFRESH_STATE_PATH = DATA_DIR / "leaderboard_daily_refresh.json"
+_daily_refresh_lock = threading.Lock()
+_daily_refresh_running = False
+
+# Daily board window is the last *completed* US cash session, not UTC-yesterday.
+_US_EASTERN = ZoneInfo("America/New_York")
+_US_CASH_CLOSE = time(16, 0)  # 16:00 America/New_York regular-session close
 
 # H6 integrity threshold: an LLM entry must have decided at least this fraction
 # of its steps with the model itself. Below it, the curve is mostly a rule-based
@@ -76,18 +86,384 @@ def _normalize_period(period: Optional[str]) -> str:
     return value if value in VALID_PERIODS else "contest"
 
 
-def daily_window_dates(as_of: Optional[date] = None) -> Tuple[str, str]:
-    """Most recently completed weekday (Mon–Fri), used as the daily board window."""
-    # UTC "yesterday" is intentionally conservative: for the ~4h between a
-    # weekday's 16:00 ET close and 00:00 UTC the board still shows the prior
-    # completed session rather than a partial/in-progress one. Same-day
-    # freshness is driven by the nightly deploy job, not this boundary.
-    d = as_of or datetime.now(timezone.utc).date()
-    d = d - timedelta(days=1)
-    while d.weekday() >= 5:  # Sat/Sun → roll back to Friday
+def _coerce_as_of_eastern(as_of: Optional[Union[date, datetime]]) -> datetime:
+    """Normalize ``as_of`` to a timezone-aware America/New_York datetime.
+
+    - ``None`` → now in Eastern.
+    - aware ``datetime`` → converted to Eastern.
+    - naive ``datetime`` → interpreted as already Eastern.
+    - bare ``date`` → that Eastern calendar day at the cash close (16:00), so a
+      weekday date means "that session is eligible" without callers inventing a
+      clock time.
+    """
+    if as_of is None:
+        return datetime.now(_US_EASTERN)
+    if isinstance(as_of, datetime):
+        if as_of.tzinfo is None:
+            return as_of.replace(tzinfo=_US_EASTERN)
+        return as_of.astimezone(_US_EASTERN)
+    return datetime(
+        as_of.year, as_of.month, as_of.day,
+        _US_CASH_CLOSE.hour, _US_CASH_CLOSE.minute,
+        tzinfo=_US_EASTERN,
+    )
+
+
+def daily_window_dates(as_of: Optional[Union[date, datetime]] = None) -> Tuple[str, str]:
+    """Most recently completed US cash equity session (Mon–Fri).
+
+    Anchored on America/New_York so the board flips to **today** once the
+    regular session has closed (16:00 ET). Before the close on a weekday — and
+    all weekend — the window rolls back to the previous weekday. That is what
+    makes a post-close cron (e.g. 22:30 UTC ≈ 18:30 EDT) refresh the session
+    that just finished, instead of UTC-yesterday / last Friday.
+
+    Market holidays are not special-cased: an exchange holiday still selects
+    that weekday after 16:00 ET (bars may be empty/sparse).
+    """
+    now_et = _coerce_as_of_eastern(as_of)
+    d = now_et.date()
+    # Wall-clock compare in Eastern (DST already applied by ZoneInfo).
+    session_complete = now_et.weekday() < 5 and now_et.time() >= _US_CASH_CLOSE
+    if not session_complete:
+        d -= timedelta(days=1)
+    while d.weekday() >= 5:  # Sat/Sun → Friday
         d -= timedelta(days=1)
     iso = d.isoformat()
     return iso, iso
+
+
+def daily_window_label(start_date: str, end_date: str) -> str:
+    """Human-readable label for the daily board header."""
+    if start_date == end_date:
+        return start_date
+    return f"{start_date} → {end_date}"
+
+
+def llm_leaderboard_entries(config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Configured competition LLM models (same roster as the contest board)."""
+    cfg = config or load_leaderboard_config()
+    return [
+        s for s in cfg.get("strategies", [])
+        if s.get("strategy") == "llm_agent"
+    ]
+
+
+def _daily_refresh_state() -> Dict[str, Any]:
+    if not _DAILY_REFRESH_STATE_PATH.exists():
+        return {}
+    try:
+        with open(_DAILY_REFRESH_STATE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _save_daily_refresh_state(state: Dict[str, Any]) -> None:
+    dest_dir = _DAILY_REFRESH_STATE_PATH.parent
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(dest_dir), prefix=".daily_refresh_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(state, f, indent=2, sort_keys=True)
+        os.replace(tmp, _DAILY_REFRESH_STATE_PATH)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            # Best-effort cleanup of the temp file; the original error is re-raised.
+            pass
+        raise
+
+
+def _daily_window_key(config: Dict[str, Any]) -> str:
+    return f"{config['session_id']}|{config['start_date']}|{config['end_date']}"
+
+
+def _set_daily_refresh_running(value: bool) -> None:
+    """Single writer for the in-progress flag; callers hold ``_daily_refresh_lock``.
+
+    Deliberately does *not* take the lock itself:
+    ``maybe_schedule_daily_leaderboard_refresh`` calls this from inside its own
+    ``with`` block, and ``_daily_refresh_lock`` is a plain Lock, not an RLock,
+    so acquiring here would deadlock.
+    """
+    global _daily_refresh_running
+    _daily_refresh_running = value
+
+
+def _cached_run_index(
+    start_date: str, end_date: str, session_id: str
+) -> Dict[str, Dict[str, Any]]:
+    """``llm_model`` → cached leaderboard run for one window, in one query.
+
+    ``_find_cached_run`` rescans the whole session per lookup, so calling it in
+    a loop is O(entries × runs) DB work on a request path. First match wins,
+    matching ``_find_cached_run``'s semantics exactly.
+    """
+    index: Dict[str, Dict[str, Any]] = {}
+    for run in db.get_runs_by_session(session_id) or []:
+        if (
+            run.get("mode") == LEADERBOARD_MODE
+            and run.get("start_date") == start_date
+            and run.get("end_date") == end_date
+        ):
+            index.setdefault(run.get("llm_model"), run)
+    return index
+
+
+def _daily_models_status(config: Dict[str, Any]) -> Dict[str, Any]:
+    """How many competition LLM curves exist for the current daily window."""
+    entries = llm_leaderboard_entries(config)
+    # Single scan: this runs on every public GET of the daily board.
+    cached_runs = _cached_run_index(
+        config["start_date"], config["end_date"], config["session_id"]
+    )
+    cached = 0
+    pending_ids: List[str] = []
+    for entry in entries:
+        entry_id = entry["id"]
+        if cached_runs.get(entry_id):
+            cached += 1
+        else:
+            pending_ids.append(entry_id)
+    total = len(entries)
+    return {
+        "trading_date": config["start_date"],
+        "models_total": total,
+        "models_cached": cached,
+        "models_pending": total - cached,
+        "pending_entry_ids": pending_ids,
+        "refresh_in_progress": _daily_refresh_running,
+    }
+
+
+def _auto_deploy_daily_models_enabled() -> bool:
+    """Whether missing daily LLM curves should backfill in a background thread.
+
+    **Strict opt-in.** ``GET /api/v1/leaderboard?period=daily`` is public and
+    unauthenticated, and this flag decides whether serving it may kick off
+    ``deploy_model_run`` for every competition entry — i.e. real, billable LLM
+    API calls. Defaulting on for "not Render" would have armed that path on the
+    Docker image, every self-host and fork, and the test suite (``conftest``
+    deliberately strips ``RENDER``). An operator must ask for it by name.
+    """
+    raw = (os.getenv("LEADERBOARD_DAILY_AUTO_DEPLOY") or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def refresh_daily_leaderboard(
+    *,
+    deploy_models: bool = False,
+    force_refresh: bool = False,
+    allow_fallback: bool = False,
+) -> Dict[str, Any]:
+    """Recompute the rolling daily board for the last completed weekday.
+
+    Always refreshes cheap baselines/index lines. When ``deploy_models`` is
+    True, also runs every configured ``llm_agent`` entry over the daily window
+    (real LLM API calls — use the cron script or POST refresh endpoint).
+    """
+    config = resolve_leaderboard_config("daily")
+    window_key = _daily_window_key(config)
+    prior = _daily_refresh_state()
+    if (
+        not force_refresh
+        and prior.get("window_key") == window_key
+        and prior.get("baselines_refreshed")
+        and (not deploy_models or prior.get("models_deployed"))
+    ):
+        return {
+            **prior,
+            "skipped": True,
+            "window": {
+                "start_date": config["start_date"],
+                "end_date": config["end_date"],
+                "label": daily_window_label(config["start_date"], config["end_date"]),
+            },
+        }
+
+    baseline_meta = ensure_leaderboard_runs(
+        force_refresh=force_refresh, period="daily", config=config
+    )
+    result: Dict[str, Any] = {
+        "window_key": window_key,
+        "window": {
+            "start_date": config["start_date"],
+            "end_date": config["end_date"],
+            "label": daily_window_label(config["start_date"], config["end_date"]),
+        },
+        "period": "daily",
+        "baselines_refreshed": True,
+        "baselines": baseline_meta,
+        "models_deployed": False,
+        "model_results": [],
+        "model_failures": [],
+        "refreshed_at": _utcnow_iso(),
+        "skipped": False,
+    }
+
+    if deploy_models:
+        failures: List[Dict[str, str]] = []
+        successes: List[Dict[str, Any]] = []
+        for entry in llm_leaderboard_entries(config):
+            entry_id = entry["id"]
+            try:
+                row = deploy_model_run(
+                    entry_id,
+                    force_refresh=force_refresh,
+                    period="daily",
+                    allow_fallback=allow_fallback,
+                )
+                successes.append(row)
+            except (LeaderboardFallbackError, ValueError, RuntimeError) as exc:
+                failures.append({"entry_id": entry_id, "error": str(exc)})
+        # Only mark complete when every model succeeded; a partial run must not
+        # skip the remaining entries on the next cron (force=false).
+        result["models_deployed"] = not failures
+        result["model_results"] = successes
+        result["model_failures"] = failures
+
+    _save_daily_refresh_state(result)
+    return result
+
+
+def _run_daily_refresh_background(
+    *,
+    deploy_models: bool,
+    force_refresh: bool,
+) -> None:
+    """Worker body. Deliberately no ``allow_fallback``: the H6 integrity guard
+    is never waived on a background/HTTP-triggered run, only by an operator
+    running ``scripts/refresh_daily_leaderboard.py --allow-fallback`` locally."""
+    try:
+        refresh_daily_leaderboard(
+            deploy_models=deploy_models,
+            force_refresh=force_refresh,
+        )
+    except Exception as exc:
+        print(f"⚠️ Daily leaderboard background refresh failed: {exc}")
+    finally:
+        with _daily_refresh_lock:
+            _set_daily_refresh_running(False)
+
+
+def maybe_schedule_daily_leaderboard_refresh(
+    *,
+    deploy_models: Optional[bool] = None,
+    force_refresh: bool = False,
+) -> bool:
+    """Start a background daily refresh if one is not already running.
+
+    Returns True when a new worker thread was started.
+
+    The in-progress guard (``_daily_refresh_running``) and the state file are
+    **per-process**: two workers or two instances can each schedule the same
+    window. Adequate for the current single-instance Render deploy; a
+    multi-replica deploy would need a shared lock, or duplicate model deploys.
+    """
+    config = resolve_leaderboard_config("daily")
+    status = _daily_models_status(config)
+    should_deploy = (
+        deploy_models
+        if deploy_models is not None
+        else (_auto_deploy_daily_models_enabled() and status["models_pending"] > 0)
+    )
+    if not force_refresh and not should_deploy:
+        prior = _daily_refresh_state()
+        if prior.get("window_key") == _daily_window_key(config) and prior.get(
+            "baselines_refreshed"
+        ):
+            return False
+
+    with _daily_refresh_lock:
+        if _daily_refresh_running:
+            return False
+        # Claim before starting, never after: a fast worker can reach its
+        # finally and clear the flag before start() even returns, and a
+        # set-after-start would then leave it stuck True forever.
+        _set_daily_refresh_running(True)
+        thread = threading.Thread(
+            target=_run_daily_refresh_background,
+            kwargs={
+                "deploy_models": should_deploy,
+                "force_refresh": force_refresh,
+            },
+            daemon=True,
+            name="daily-leaderboard-refresh",
+        )
+        try:
+            thread.start()
+        except Exception:
+            # A failed start would otherwise strand the flag at True forever:
+            # every later refresh returns False and the UI polls a worker that
+            # does not exist. Release it and let the caller see "not started".
+            _set_daily_refresh_running(False)
+            raise
+        return True
+
+
+def enqueue_daily_leaderboard_refresh(
+    *,
+    deploy_models: bool = True,
+    force_refresh: bool = False,
+) -> Dict[str, Any]:
+    """Cron/API entrypoint: accept a refresh and run it in a background thread.
+
+    Never blocks on model deploys — callers (GitHub Actions curl, ``--remote``)
+    get an immediate acknowledgement. Progress is visible via
+    ``GET /api/v1/leaderboard?period=daily`` (``daily_status``).
+
+    No ``allow_fallback``: the H6 integrity guard is not waivable over HTTP.
+    """
+    config = resolve_leaderboard_config("daily")
+    started = maybe_schedule_daily_leaderboard_refresh(
+        deploy_models=deploy_models,
+        force_refresh=force_refresh,
+    )
+    status = _daily_models_status(config)
+    # The worker flips the flag under the lock; treat a just-started thread as
+    # in-progress even if the status snapshot raced ahead of the assignment.
+    in_progress = bool(status.get("refresh_in_progress") or started)
+    return {
+        "accepted": True,
+        "started": started,
+        "refresh_in_progress": in_progress,
+        "window": {
+            "start_date": config["start_date"],
+            "end_date": config["end_date"],
+            "label": daily_window_label(config["start_date"], config["end_date"]),
+        },
+        "daily_status": status,
+        "message": (
+            "Daily leaderboard refresh started in the background."
+            if started
+            else (
+                "Daily leaderboard refresh already in progress."
+                if in_progress
+                else "No new daily refresh scheduled (window already satisfied)."
+            )
+        ),
+    }
+
+
+def verify_daily_refresh_secret(provided: Optional[str]) -> None:
+    """Raise when the cron secret is unconfigured (ValueError) or wrong (PermissionError)."""
+    expected = (os.getenv("LEADERBOARD_DAILY_REFRESH_SECRET") or "").strip()
+    if not expected:
+        raise ValueError("LEADERBOARD_DAILY_REFRESH_SECRET is not configured")
+    token = (provided or "").strip()
+    # Compare as bytes: Starlette latin-1-decodes headers, and compare_digest
+    # raises TypeError on a str containing non-ASCII — which would surface as an
+    # unhandled 500 instead of a clean auth failure.
+    # surrogateescape, not strict: os.getenv round-trips undecodable env bytes as
+    # surrogates on Linux, and strict encoding would raise on those too.
+    if not token or not secrets.compare_digest(
+        token.encode("utf-8", "surrogateescape"),
+        expected.encode("utf-8", "surrogateescape"),
+    ):
+        raise PermissionError("Invalid daily leaderboard refresh secret")
 
 
 def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, Any]:
@@ -109,8 +485,11 @@ def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, A
             "end_date": end_date,
             "reference_start_date": reference_start_date(start_date, None),
             "description": (
-                f"Daily leaderboard for {start_date} (last completed US weekday). "
-                "Baselines recompute on load; LLM entries appear once the daily deploy job runs."
+                f"Daily leaderboard for {start_date} (last completed US cash session). "
+                "After 16:00 America/New_York the board advances to that weekday; "
+                "before the close (and on weekends) it shows the prior session. "
+                "Baselines refresh automatically; competition models deploy via the "
+                "nightly refresh job or LEADERBOARD_DAILY_AUTO_DEPLOY locally."
             ),
             "period": "daily",
             "board_title": "Daily Leaderboard",
@@ -788,7 +1167,17 @@ def get_leaderboard(
     else:
         leader = entries[0]["team_name"] if entries else "—"
 
-    return {
+    daily_status: Optional[Dict[str, Any]] = None
+    if config.get("period") == "daily":
+        # Schedule *before* snapshotting: the scheduler sets the in-progress flag
+        # synchronously, so taking the status first would report
+        # refresh_in_progress=false for a worker that had just started — and the
+        # frontend only polls while that flag is true, so the user would sit on
+        # a stale board until they reloaded by hand.
+        maybe_schedule_daily_leaderboard_refresh()
+        daily_status = _daily_models_status(config)
+
+    payload: Dict[str, Any] = {
         "period": config.get("period", "contest"),
         "board_title": config.get("board_title", "Competition Leaderboard"),
         "phase_label": config.get("phase_label", "Preseason"),
@@ -796,7 +1185,9 @@ def get_leaderboard(
         "window": {
             "start_date": start_date,
             "end_date": end_date,
-            "label": f"{start_date} → {end_date}" if start_date != end_date else start_date,
+            "label": daily_window_label(start_date, end_date)
+            if config.get("period") == "daily"
+            else (f"{start_date} → {end_date}" if start_date != end_date else start_date),
             "description": config.get("description", ""),
         },
         "updated_at": meta.get("refreshed_at"),
@@ -805,3 +1196,6 @@ def get_leaderboard(
         "leader": leader,
         "entries": entries,
     }
+    if daily_status is not None:
+        payload["daily_status"] = daily_status
+    return payload

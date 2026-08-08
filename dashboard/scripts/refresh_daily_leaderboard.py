@@ -2,29 +2,27 @@
 """Refresh the Daily Leaderboard for the last completed US weekday.
 
 1. Recomputes cheap baselines (indices + rule-based strategies) for the daily window.
-2. Optionally redeploys every ``llm_agent`` entry (real API calls — pass ``--models``).
+2. Optionally redeploys every competition ``llm_agent`` entry (real API calls).
 
-NOTE: nothing in this repo runs this script automatically yet — there is no cron
-or CI schedule wired up. Until one exists, the daily board shows baselines and
-index lines only (those recompute on load); LLM entries will not appear. It must
-also run somewhere that writes the *live* leaderboard DB: on the current
-free-tier Render deploy that DB is ephemeral (no persistent disk), so a schedule
-that runs off-instance won't reach prod without a persistent/shared DB.
+Schedule nightly after US market close, e.g. via GitHub Actions or:
 
-Schedule nightly after US market close, e.g.:
-
-    # Baselines only (cheap):
-    python dashboard/scripts/refresh_daily_leaderboard.py
-
-    # Baselines + all LLM models:
     python dashboard/scripts/refresh_daily_leaderboard.py --models
 
-Or hit ``GET /api/v1/leaderboard?period=daily&refresh=true`` for baselines only.
+Remote prod (Render) without shell access — enqueues a background refresh
+(HTTP 202); poll ``GET /api/v1/leaderboard?period=daily`` for progress:
+
+    curl -X POST "$ATL_API/api/v1/leaderboard/daily/refresh?deploy_models=true" \\
+      -H "X-Leaderboard-Refresh-Secret: $LEADERBOARD_DAILY_REFRESH_SECRET"
+
+Window math is America/New_York + 16:00 cash close: after the close the board
+is *that* weekday; before the close (and on weekends) it rolls to the prior
+session. There is no Saturday/Sunday session.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -40,9 +38,7 @@ load_dotenv(DASHBOARD_DIR / ".env")
 load_dotenv(DASHBOARD_DIR.parent / ".env")
 
 from dashboard.backend.domain.leaderboard.service import (  # noqa: E402
-    LeaderboardFallbackError,
-    deploy_model_run,
-    ensure_leaderboard_runs,
+    refresh_daily_leaderboard,
     resolve_leaderboard_config,
 )
 
@@ -59,53 +55,104 @@ def main() -> int:
         action="store_true",
         help="Allow publishing LLM entries that fell back to rule-based trading",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Ignore the per-window refresh cache",
+    )
+    parser.add_argument(
+        "--remote",
+        action="store_true",
+        help="POST to ATL_API instead of running locally (uses LEADERBOARD_DAILY_REFRESH_SECRET)",
+    )
     args = parser.parse_args()
 
+    if args.remote:
+        return _refresh_remote(deploy_models=args.models, force=args.force, allow_fallback=args.allow_fallback)
+
     config = resolve_leaderboard_config("daily")
-    start = config["start_date"]
-    end = config["end_date"]
-    print(f"Daily leaderboard window: {start} → {end}")
+    print(f"Daily leaderboard window: {config['start_date']} → {config['end_date']}")
     print(f"Session: {config['session_id']}")
 
-    print("Recomputing baselines…")
     try:
-        meta = ensure_leaderboard_runs(force_refresh=True, period="daily", config=config)
+        result = refresh_daily_leaderboard(
+            deploy_models=args.models,
+            force_refresh=args.force,
+            allow_fallback=args.allow_fallback,
+        )
     except RuntimeError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
-    print(f"Baselines created: {meta.get('created', 0)} (skipped {meta.get('skipped', 0)})")
+
+    if result.get("skipped"):
+        print("Already refreshed for this window — skipped.")
+        return 0
+
+    baselines = result.get("baselines") or {}
+    print(
+        f"Baselines created: {baselines.get('created', 0)} "
+        f"(skipped {baselines.get('skipped', 0)})"
+    )
 
     if not args.models:
         print("Done (baselines only). Pass --models to redeploy LLM entries.")
         print("View: GET /api/v1/leaderboard?period=daily")
         return 0
 
-    llm_entries = [
-        s for s in config.get("strategies", [])
-        if s.get("strategy") == "llm_agent" or s.get("auto_compute") is False
-    ]
-    print(f"Deploying {len(llm_entries)} model entr(y/ies)…")
-    failures = 0
-    for entry in llm_entries:
-        entry_id = entry["id"]
-        print(f"\n--- {entry_id} ({entry.get('model')}) ---")
-        try:
-            result = deploy_model_run(
-                entry_id,
-                force_refresh=True,
-                period="daily",
-                allow_fallback=args.allow_fallback,
-            )
-            ret = result.get("total_return")
-            ret_s = f"{ret * 100:+.2f}%" if ret is not None else "—"
-            print(f"  ok  run={result.get('run_id')}  return={ret_s}")
-        except (LeaderboardFallbackError, ValueError, RuntimeError) as exc:
-            failures += 1
-            print(f"  FAIL: {exc}", file=sys.stderr)
+    failures = result.get("model_failures") or []
+    for row in result.get("model_results") or []:
+        ret = row.get("total_return")
+        ret_s = f"{ret * 100:+.2f}%" if ret is not None else "—"
+        print(f"  ok  {row.get('entry_id')}  run={row.get('run_id')}  return={ret_s}")
+    for fail in failures:
+        print(f"  FAIL {fail.get('entry_id')}: {fail.get('error')}", file=sys.stderr)
 
-    print(f"\nDone. Failures: {failures}")
+    print(f"\nDone. Failures: {len(failures)}")
     print("View: GET /api/v1/leaderboard?period=daily")
     return 1 if failures else 0
+
+
+def _refresh_remote(*, deploy_models: bool, force: bool, allow_fallback: bool) -> int:
+    import httpx
+
+    secret = (os.getenv("LEADERBOARD_DAILY_REFRESH_SECRET") or "").strip()
+    if not secret:
+        print("ERROR: LEADERBOARD_DAILY_REFRESH_SECRET is not set", file=sys.stderr)
+        return 1
+    if allow_fallback:
+        # The H6 integrity guard is deliberately not waivable over HTTP, so the
+        # endpoint has no such parameter. Fail loudly rather than silently
+        # publishing under the guard the operator thought they had lifted.
+        print(
+            "ERROR: --allow-fallback cannot be combined with --remote; run the "
+            "refresh locally against the target database instead.",
+            file=sys.stderr,
+        )
+        return 1
+    base = (os.getenv("ATL_API") or os.getenv("ATL_API_BASE") or "http://localhost:8000").rstrip("/")
+    params = {
+        "deploy_models": str(deploy_models).lower(),
+        "force": str(force).lower(),
+    }
+    url = f"{base}/api/v1/leaderboard/daily/refresh"
+    print(f"POST {url}")
+    try:
+        resp = httpx.post(
+            url,
+            params=params,
+            headers={"X-Leaderboard-Refresh-Secret": secret},
+            timeout=120.0,
+        )
+    except httpx.HTTPError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 1
+    if resp.status_code >= 400:
+        print(f"ERROR {resp.status_code}: {resp.text}", file=sys.stderr)
+        return 1
+    print(resp.text)
+    if resp.status_code == 202:
+        print("Accepted (background). Poll GET /api/v1/leaderboard?period=daily")
+    return 0
 
 
 if __name__ == "__main__":
