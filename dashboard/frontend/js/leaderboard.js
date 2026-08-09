@@ -16,11 +16,19 @@ let dailyLeaderboardPollTimer = null;
 let hiddenSeries = new Set();
 let hiddenInitialized = false;
 let hoveredDatasetIndex = null;
-let canvasLeaveBound = false;
+// Pixel position on the hovered curve directly under the pointer, or null. Kept
+// alongside the index so the hover dot sits on the line rather than snapping to
+// the nearest data point — on the Daily board those are ~97px apart.
+let hoveredPoint = null;
+let canvasPointerBound = false;
 const selectedBenchmarkLabel = 'SPY';
 /** Expanded groups in the Show-on-Chart picker: model | baseline | index */
 let curvePickerExpanded = new Set();
 let curvePickerOutsideBound = false;
+// Max vertical distance from a curve before hover emphasis clears. Without it,
+// Chart.js `nearest` + `intersect:false` keeps a curve selected anywhere inside
+// the canvas — including empty plot space and the label gutter.
+const HOVER_HIT_RADIUS_PX = 16;
 
 // Stable per-series style presets. `kind` drives width/opacity hierarchy:
 //   benchmark -> neutral gray, dotted / dash-dot, understated
@@ -762,12 +770,140 @@ function selectLeaderboardTeam(entryId) {
   renderEquityCurvesChart();
 }
 
-function getEmphasisLabel(orderedEntries) {
+function getEmphasisLabel() {
+  // Only an explicit row/detail selection stays emphasized when the pointer is
+  // idle. Do not auto-emphasize the current leader — idle view shows the whole
+  // figure with every visible curve at its kind weight.
   if (selectedLeaderboardEntry) {
     return selectedLeaderboardEntry.model || selectedLeaderboardEntry.team_name;
   }
-  const leadTeam = orderedEntries.find((e) => getEntryKind(e) === 'team');
-  return leadTeam ? (leadTeam.model || leadTeam.team_name) : null;
+  return null;
+}
+
+/**
+ * The curve under the pointer at canvas pixel (x, y), or null.
+ *
+ * Distance is measured to the *rendered line* — `LineElement.interpolate` gives
+ * the curve's y at the pointer's x — rather than to the nearest data point. A
+ * point-distance test only works on a dense series: the Daily board plots 8
+ * points per curve (~97px apart at typical widths), so a 16px radius around the
+ * points rejects roughly two thirds of every segment while the cursor is
+ * sitting directly on the line.
+ */
+function resolveHoverTarget(chart, x, y) {
+  if (x == null || y == null) return null;
+  const area = chart.chartArea;
+  if (!area) return null;
+  if (x < area.left || x > area.right || y < area.top || y > area.bottom) {
+    return null;
+  }
+
+  let best = null;
+  chart.data.datasets.forEach((ds, i) => {
+    if (!chart.isDatasetVisible(i)) return;
+    const line = chart.getDatasetMeta(i).dataset;
+    if (!line || typeof line.interpolate !== 'function') return;
+    // Undefined past the ends of the series; an array where several segments
+    // cross this x (spanGaps can leave a curve in more than one piece).
+    const found = line.interpolate({ x }, 'x');
+    if (!found) return;
+    (Array.isArray(found) ? found : [found]).forEach((pt) => {
+      if (!pt || !Number.isFinite(pt.y)) return;
+      const distance = Math.abs(pt.y - y);
+      if (!best || distance < best.distance) {
+        best = { datasetIndex: i, x: pt.x, y: pt.y, distance };
+      }
+    });
+  });
+
+  if (!best || best.distance > HOVER_HIT_RADIUS_PX) return null;
+  // The tooltip reads real samples (`_raw[dataIndex]`), so pair the interpolated
+  // position with the closest actual point on that curve.
+  best.dataIndex = nearestDataIndex(chart.getDatasetMeta(best.datasetIndex), x);
+  return best.dataIndex < 0 ? null : best;
+}
+
+/** Index of the closest non-skipped point of `meta` to canvas x. */
+function nearestDataIndex(meta, x) {
+  let index = -1;
+  let smallest = Infinity;
+  (meta.data || []).forEach((point, i) => {
+    if (point.skip) return;
+    const dx = Math.abs(point.x - x);
+    if (dx < smallest) {
+      smallest = dx;
+      index = i;
+    }
+  });
+  return index;
+}
+
+/** Commit a resolved hover target (or null) to the chart, redrawing on change. */
+function applyHoverTarget(chart, target) {
+  const index = target ? target.datasetIndex : null;
+  const sameSpot =
+    (hoveredPoint?.x ?? null) === (target?.x ?? null) &&
+    (hoveredPoint?.y ?? null) === (target?.y ?? null);
+  if (index === hoveredDatasetIndex && sameSpot) return;
+  const curveChanged = index !== hoveredDatasetIndex;
+
+  // State first: setActiveElements rebuilds the tooltip synchronously, and
+  // `tooltip.filter` reads hoveredDatasetIndex while it does.
+  hoveredDatasetIndex = index;
+  hoveredPoint = target ? { x: target.x, y: target.y } : null;
+
+  // The tooltip is driven from here rather than by Chart.js (see `events: []`),
+  // so it can never disagree with the emphasis about which curve is hovered.
+  if (chart.tooltip) {
+    chart.tooltip.setActiveElements(
+      target ? [{ datasetIndex: target.datasetIndex, index: target.dataIndex }] : [],
+      target ? { x: target.x, y: target.y } : undefined,
+    );
+  }
+
+  if (curveChanged) {
+    // Every dataset's colour and width changed — needs a real update pass.
+    styleDatasets(chart);
+    chart.update('none');
+    return;
+  }
+  // Only the marker slid along the curve already emphasized: repaint is enough.
+  // `update('none')` here would re-run the whole pipeline on every mousemove.
+  chart.render();
+}
+
+function clearChartHoverEmphasis() {
+  if (hoveredDatasetIndex == null && hoveredPoint == null) return;
+  // Clear the state even with no live chart, so a stale index can never dim the
+  // wrong series after the next render rebuilds the dataset array.
+  const chart = equityCurvesChartInstance;
+  hoveredDatasetIndex = null;
+  hoveredPoint = null;
+  if (!chart) return;
+  if (chart.tooltip) chart.tooltip.setActiveElements([], undefined);
+  styleDatasets(chart);
+  chart.update('none');
+}
+
+/**
+ * Single source of truth for chart hover: every pointer position on the canvas.
+ *
+ * Chart.js' own `onHover` cannot do this job. It only fires while the pointer
+ * is inside `chartArea` (plus `_minPadding`, a couple of px of dataset
+ * overflow), so the 120px endpoint-label gutter reserved by
+ * `layout.padding.right` never reaches the proximity gate — emphasis would
+ * stick on whichever curve was hovered last. Worse, `chart.update()` replays
+ * the last in-plot event, so clearing from `onHover` re-emphasized the curve
+ * the clear had just dropped. Handling the DOM event directly sidesteps both.
+ */
+function handleCanvasPointerMove(event) {
+  const chart = equityCurvesChartInstance;
+  if (!chart || !chart.chartArea) return;
+  const rect = chart.canvas.getBoundingClientRect();
+  applyHoverTarget(
+    chart,
+    resolveHoverTarget(chart, event.clientX - rect.left, event.clientY - rect.top),
+  );
 }
 
 function styleDatasets(chart) {
@@ -795,7 +931,7 @@ function styleDatasets(chart) {
   });
 }
 
-// Subtle glow only on the emphasized (selected/leading) curve.
+// Subtle glow only on the explicitly selected curve (row click), not on hover.
 const selectedGlowPlugin = {
   id: 'selectedGlow',
   beforeDatasetDraw(chart, args) {
@@ -812,6 +948,30 @@ const selectedGlowPlugin = {
     if (ds && ds.label === chart.$emphasisLabel && hoveredDatasetIndex == null) {
       chart.ctx.restore();
     }
+  },
+};
+
+// Dot marking the exact spot on the hovered curve. Chart.js' own point-hover
+// styling is off (`hover: { mode: null }`): it tracks the nearest *data point*
+// on the nearest curve regardless of our proximity gate, so it kept marking a
+// curve out in empty plot space, and on a sparse board it snapped up to half a
+// segment away from the cursor.
+const hoverMarkerPlugin = {
+  id: 'hoverMarker',
+  afterDatasetsDraw(chart) {
+    if (hoveredDatasetIndex == null || !hoveredPoint) return;
+    const ds = chart.data.datasets[hoveredDatasetIndex];
+    if (!ds) return;
+    const { ctx } = chart;
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(hoveredPoint.x, hoveredPoint.y, 4, 0, Math.PI * 2);
+    ctx.fillStyle = (ds._style && ds._style.color) || '#e5e7eb';
+    ctx.strokeStyle = 'rgba(15, 23, 42, 0.9)';
+    ctx.lineWidth = 2;
+    ctx.fill();
+    ctx.stroke();
+    ctx.restore();
   },
 };
 
@@ -941,7 +1101,13 @@ async function renderEquityCurvesChart() {
   const { times, days, curves, initials } = equityCurvesData;
   const axisLabels = times || days;
   const orderedEntries = (leaderboardPayload?.entries || []);
-  const emphasisLabel = getEmphasisLabel(orderedEntries);
+  const emphasisLabel = getEmphasisLabel();
+
+  // Hover state is a position into the dataset array about to be rebuilt, and
+  // rank changes or a legend toggle reorder it. Drop it rather than carry an
+  // index that now points at a different series.
+  hoveredDatasetIndex = null;
+  hoveredPoint = null;
 
   const datasets = [];
   orderedEntries.forEach((entry) => {
@@ -963,7 +1129,8 @@ async function renderEquityCurvesChart() {
       borderDash: style.dash || [],
       borderCapStyle: 'round',
       pointRadius: 0,
-      pointHoverRadius: 4,
+      // Marker comes from hoverMarkerPlugin, which honours the proximity gate.
+      pointHoverRadius: 0,
       tension: 0.1,
       fill: false,
       // Series use different hour grids (e.g. SPY :30 vs LLM :00). On a shared
@@ -983,29 +1150,22 @@ async function renderEquityCurvesChart() {
   equityCurvesChartInstance = new Chart(ctx, {
     type: 'line',
     data: { labels: axisLabels, datasets },
-    plugins: [selectedGlowPlugin, endpointLabelPlugin],
+    plugins: [selectedGlowPlugin, hoverMarkerPlugin, endpointLabelPlugin],
     options: {
       responsive: true,
       maintainAspectRatio: false,
       layout: { padding: { right: 120, top: 8 } },
-      // 'nearest' across BOTH axes (no axis:'x') so hover targets the single
-      // line under the cursor instead of every series sharing that x-position.
-      interaction: { mode: 'nearest', intersect: false },
-      onHover(event, _els, chart) {
-        let idx = null;
-        const hits = chart.getElementsAtEventForMode(event, 'nearest', { intersect: false }, true);
-        if (hits.length) idx = hits[0].datasetIndex;
-        if (idx !== hoveredDatasetIndex) {
-          hoveredDatasetIndex = idx;
-          styleDatasets(chart);
-          chart.update('none');
-        }
-      },
+      // Chart.js does no interaction resolution of its own: hover, the marker
+      // and the tooltip are all driven from handleCanvasPointerMove, which is
+      // the only path that sees the endpoint-label gutter. Leaving the built-in
+      // handling on would light up curves the proximity gate has rejected, and
+      // its replay of the last in-plot event on every `update()` would undo the
+      // clear that moving into the gutter had just performed.
+      events: [],
+      hover: { mode: null },
       plugins: {
         legend: { display: false },
         tooltip: {
-          mode: 'nearest',
-          intersect: false,
           position: 'nearest',
           backgroundColor: 'rgba(15, 23, 42, 0.96)',
           borderColor: 'rgba(148, 163, 184, 0.25)',
@@ -1014,6 +1174,12 @@ async function renderEquityCurvesChart() {
           bodyColor: '#cbd5e1',
           padding: 10,
           displayColors: false,
+          // Belt-and-braces: the active element is set explicitly by
+          // applyHoverTarget, so this only bites if Chart.js event handling is
+          // ever switched back on above.
+          filter(item) {
+            return hoveredDatasetIndex != null && item.datasetIndex === hoveredDatasetIndex;
+          },
           callbacks: {
             title(items) {
               if (!items.length) return '';
@@ -1087,15 +1253,13 @@ async function renderEquityCurvesChart() {
   styleDatasets(equityCurvesChartInstance);
   equityCurvesChartInstance.update('none');
 
-  if (!canvasLeaveBound) {
-    canvas.addEventListener('mouseleave', () => {
-      if (hoveredDatasetIndex != null && equityCurvesChartInstance) {
-        hoveredDatasetIndex = null;
-        styleDatasets(equityCurvesChartInstance);
-        equityCurvesChartInstance.update('none');
-      }
-    });
-    canvasLeaveBound = true;
+  if (!canvasPointerBound) {
+    // Pointer events, not mouse events: `events: []` turned off Chart.js' own
+    // touchstart/touchmove handling, and these cover mouse, touch and pen in
+    // one pair. Bound once — the canvas outlives each destroy/recreate cycle.
+    canvas.addEventListener('pointermove', handleCanvasPointerMove);
+    canvas.addEventListener('pointerleave', clearChartHoverEmphasis);
+    canvasPointerBound = true;
   }
 
   buildCustomLegend(equityCurvesChartInstance);
