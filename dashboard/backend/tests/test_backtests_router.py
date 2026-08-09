@@ -48,6 +48,14 @@ def test_plot_png_cached_per_run(monkeypatch):
         "baseline_buyhold_run_id": None, "baseline_djia_run_id": None,
     }
 
+    # Unique per-invocation key: the render cache is a module-level lru_cache
+    # shared across tests, and a leftover TestClient threadpool render (from an
+    # earlier test) that lands *after* cache_clear() would populate a fixed
+    # "run_x" entry with real data — making the 2nd call a cache hit and the
+    # get_run count 0 instead of 1 (intermittent flake). A unique key keeps
+    # this test hermetic against that race.
+    run_id = f"run_x_{uuid.uuid4().hex}"
+
     def fake_get_run(rid):
         calls["get_run"] += 1
         return fake_run
@@ -61,8 +69,8 @@ def test_plot_png_cached_per_run(monkeypatch):
     monkeypatch.setattr(bt.db, "get_equity_curve", fake_equity)
     monkeypatch.setattr(bt, "filter_market_hours", lambda pts: pts)  # isolate caching
 
-    first = bt._render_run_plot_png("run_x")
-    second = bt._render_run_plot_png("run_x")
+    first = bt._render_run_plot_png(run_id)
+    second = bt._render_run_plot_png(run_id)
 
     assert first == second
     assert first[:8] == b"\x89PNG\r\n\x1a\n"      # valid PNG
