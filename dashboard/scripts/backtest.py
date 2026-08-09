@@ -393,9 +393,11 @@ def save_backtest_to_database(results: Dict, start_date: str, end_date: str):
         metrics = data["metrics"]
         equity_curve = data["equity_curve"]
         
-        # Insert run metadata
+        # Insert run metadata. The CLI has no session concept, so each run is
+        # its own session — same pattern as the /paper/start-session fix.
         db.insert_run(
             run_id=run_id,
+            session_id=run_id,
             agent_name=agent,
             mode="backtest",
             start_date=start_date,
