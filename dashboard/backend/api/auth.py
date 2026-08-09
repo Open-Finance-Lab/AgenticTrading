@@ -478,7 +478,12 @@ async def change_password(
     current_user: dict = Depends(get_current_user),
     authorization: Optional[str] = Header(default=None),
 ):
-    if not verify_password(payload.current_password, current_user["password_hash"]):
+    # bcrypt verify off the event loop: it is deliberately slow (~190 ms),
+    # and on a shared event loop it would stall every concurrent request
+    # (same reason login()/signup() already offload via asyncio.to_thread).
+    if not await asyncio.to_thread(
+        verify_password, payload.current_password, current_user["password_hash"]
+    ):
         raise HTTPException(status_code=400, detail="Current password is incorrect.")
     violations = validate_new_password(payload.new_password, current_user["email"])
     if violations:
@@ -608,7 +613,11 @@ async def request_email_change(
     current_user: dict = Depends(get_current_user),
 ):
     store = users_module.user_store
-    if not verify_password(payload.current_password, current_user["password_hash"]):
+    # bcrypt verify off the event loop (same as change_password): it is
+    # deliberately slow and would stall concurrent requests when inline.
+    if not await asyncio.to_thread(
+        verify_password, payload.current_password, current_user["password_hash"]
+    ):
         raise HTTPException(status_code=400, detail="Current password is incorrect.")
     if payload.new_email == str(current_user["email"]).strip().lower():
         raise HTTPException(status_code=400, detail="That is already your email address.")

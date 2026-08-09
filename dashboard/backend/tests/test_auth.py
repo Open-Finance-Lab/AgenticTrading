@@ -289,6 +289,43 @@ def test_change_password_invalidates_other_sessions_keeps_current(client):
     assert me_b.status_code == 401
 
 
+def test_password_verify_runs_off_event_loop(client, monkeypatch):
+    """bcrypt password checks must run in a worker thread, not the loop.
+
+    Regression for the perf issue where change-password and the email-change
+    request verified the current password inline: bcrypt is deliberately slow
+    (~190 ms), so a shared event loop stalled every concurrent request
+    (signup/login already offload via asyncio.to_thread).
+    """
+    import dashboard.backend.api.auth as auth
+
+    # Record which callables the handlers dispatch through asyncio.to_thread.
+    # The fix routes verify_password through it; without the fix it is called
+    # inline on the loop and never appears here.
+    offloaded = []
+
+    real_to_thread = auth.asyncio.to_thread
+
+    def recording_to_thread(func, *args, **kwargs):
+        offloaded.append(func)
+        return real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(auth.asyncio, "to_thread", recording_to_thread)
+
+    token = _signup_and_token(client, email="helen@example.com")
+
+    response = client.post(
+        "/api/auth/change-password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "orig-sturdy-pw-1", "new_password": "new-sturdy-pw-2"},
+    )
+    assert response.status_code == 200
+    assert auth.verify_password in offloaded, (
+        "password verify ran on the event loop; should be offloaded via to_thread"
+    )
+
+
+
 def test_change_password_revocation_failure_still_succeeds(client, monkeypatch, capsys):
     # The password write and the other-session revocation are two separate
     # transactions. If revocation raises, the (already-durable) password change
