@@ -104,6 +104,34 @@ def test_leaderboard_api_returns_baselines(client, monkeypatch):
     assert body["entries"][0]["entry_type"] == "baseline"
 
 
+def test_leaderboard_api_does_not_leak_exception_text(client, monkeypatch):
+    """Public GET must answer 500 with a static message, never raw exception text.
+
+    Regression for the Neon-host leak: a psycopg connection failure message
+    embeds the database endpoint id, and this endpoint is public +
+    unauthenticated, so `detail=str(exc)` would hand that to any visitor.
+    The traceback still goes to the server log via print().
+    """
+    monkeypatch.setattr(
+        "dashboard.backend.api.routers.leaderboard.get_leaderboard",
+        lambda **kwargs: (_ for _ in ()).throw(
+            # A psycopg connection failure is a plain Exception (OperationalError),
+            # NOT a RuntimeError — the RuntimeError branch is reserved for
+            # deliberate domain failures whose messages are safe to show.
+            Exception("stale connection: could not connect to "
+                      "ep-abc123.us-east-2.aws.neon.tech:5432"),
+        ),
+    )
+
+    resp = client.get("/api/v1/leaderboard")
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["detail"] == "Failed to load leaderboard"
+    # The internal endpoint id must never appear in the public response.
+    assert "neon.tech" not in resp.text
+    assert "ep-abc123" not in resp.text
+
+
 def test_daily_leaderboard_api_uses_daily_window(client, monkeypatch):
     day = "2026-07-14"  # Tuesday
     monkeypatch.setattr(lb_service, "daily_window_dates", lambda as_of=None: (day, day))

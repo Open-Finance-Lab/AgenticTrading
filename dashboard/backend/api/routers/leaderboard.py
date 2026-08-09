@@ -7,6 +7,8 @@ status codes, exception messages, and service calls are unchanged; only the
 module location moved.
 """
 
+import traceback
+
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -43,9 +45,17 @@ def api_get_leaderboard(
     try:
         return get_leaderboard(force_refresh=refresh, period=period)
     except RuntimeError as exc:
+        # Deliberate domain failure (e.g. "leaderboard not ready yet") — the
+        # message is safe to show.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except Exception:
+        # Public, unauthenticated endpoint: a raw exception string can embed
+        # internal infrastructure details (e.g. the Neon endpoint id from a
+        # psycopg connection failure). Log the traceback server-side and
+        # answer with a static message, mirroring the POST /daily/refresh
+        # sibling fix (PR #325).
+        print(f"⚠️ Leaderboard request failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to load leaderboard") from None
 
 
 @router.post("/daily/refresh")
