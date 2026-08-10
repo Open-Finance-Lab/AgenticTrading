@@ -289,6 +289,85 @@ def test_change_password_invalidates_other_sessions_keeps_current(client):
     assert me_b.status_code == 401
 
 
+def _running_on_the_event_loop() -> bool:
+    """True when the calling thread is the one running the event loop.
+
+    A worker thread has no running loop, so ``get_running_loop`` raises there.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def test_password_verify_never_runs_on_the_event_loop(client, monkeypatch, sent_emails):
+    """bcrypt must execute in a worker thread on every route that verifies one.
+
+    bcrypt is deliberately slow (~190 ms of CPU). Run on the event loop it
+    stalls every concurrent request for that long, which is what #292 fixed
+    across 58 handlers and #297 tracked for the two auth.py routes below.
+
+    This asserts the *property* -- no running loop on the thread doing the hash
+    -- rather than the mechanism, so it stays green for whichever offload a
+    handler uses (a plain ``def`` dispatched to the threadpool, asyncio.to_thread
+    or run_in_threadpool) and goes red only when the hash is back on the loop.
+    An assertion that a specific dispatcher was called has the failure modes
+    reversed: it breaks on a correct refactor, and passes while the handler
+    still blocks on everything the offload did not cover.
+    """
+    # `from ... import auth as auth_api`, matching this file's other five sites:
+    # the plain `import dashboard.backend.api.auth` form collides with the
+    # `from dashboard.backend.api.auth import _humanize_wait` further down and
+    # trips py/import-and-import-from. Either form yields the module object the
+    # setattr seam below needs.
+    from dashboard.backend.api import auth as auth_api
+
+    ran_on_loop = []
+    real_verify = auth_api.verify_password
+
+    def recording_verify(password, password_hash):
+        ran_on_loop.append(_running_on_the_event_loop())
+        return real_verify(password, password_hash)
+
+    # Patched on the auth module -- the name both handlers actually call --
+    # rather than on asyncio or users. Patching `asyncio.to_thread` would rebind
+    # it for the whole interpreter, so unrelated callers would land in the
+    # recorder and the assertion would be over global traffic, not these routes.
+    monkeypatch.setattr(auth_api, "verify_password", recording_verify)
+
+    token = _signup_and_token(client, email="helen@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+
+    changed = client.post(
+        "/api/auth/change-password",
+        headers=headers,
+        json={"current_password": "orig-sturdy-pw-1", "new_password": "new-sturdy-pw-2"},
+    )
+    assert changed.status_code == 200
+
+    requested = client.post(
+        "/api/auth/email-change",
+        headers=headers,
+        json={
+            "current_password": "new-sturdy-pw-2",
+            "new_email": "helen-next@example.com",
+        },
+    )
+    assert requested.status_code == 200, requested.text
+
+    assert len(ran_on_loop) == 2, (
+        f"expected one bcrypt verify per route, saw {len(ran_on_loop)} -- the "
+        "test no longer exercises what it claims to"
+    )
+    assert ran_on_loop == [False, False], (
+        "a bcrypt verify ran on the event loop thread, stalling every "
+        f"concurrent request for its duration (per-call on-loop: {ran_on_loop})"
+    )
+
+
 def test_change_password_revocation_failure_still_succeeds(client, monkeypatch, capsys):
     # The password write and the other-session revocation are two separate
     # transactions. If revocation raises, the (already-durable) password change

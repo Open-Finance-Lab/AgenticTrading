@@ -45,10 +45,27 @@ BLOCKING_IO_ROUTER_MODULES = {
 }
 
 # Handlers in modules that legitimately mix awaited and blocking work, so the
-# whole module cannot be pinned. auth.py's OAuth callbacks genuinely await, but
-# these do sync store I/O with no await in sight.
+# whole module cannot be pinned. auth.py's OAuth callbacks and the two mail
+# routes genuinely await; everything below does sync store I/O -- a network
+# round trip against Postgres in prod, and for change_password two bcrypt
+# rounds -- with no await in sight, so `def` is both safe and required.
+#
+# This set is also what stops the fix from being undone by accident: a handler
+# only stays covered while it has no ``await``, so adding one (e.g. wrapping a
+# single blocking call in ``asyncio.to_thread`` and leaving the rest inline)
+# silently drops it out of the guard. That is exactly what #332 first did to
+# change_password before #297's plain-``def`` fix was applied instead.
 BLOCKING_IO_HANDLERS = {
+    ("dashboard.backend.api.auth", "me"),
     ("dashboard.backend.api.auth", "logout"),
+    ("dashboard.backend.api.auth", "logout_all"),
+    ("dashboard.backend.api.auth", "change_password"),
+    ("dashboard.backend.api.auth", "update_display_name"),
+    ("dashboard.backend.api.auth", "get_email_change"),
+    ("dashboard.backend.api.auth", "cancel_email_change"),
+    ("dashboard.backend.api.auth", "set_avatar"),
+    ("dashboard.backend.api.auth", "delete_avatar"),
+    ("dashboard.backend.api.auth", "discord_oauth_start"),
 }
 
 
