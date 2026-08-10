@@ -7,6 +7,8 @@ status codes, exception messages, and service calls are unchanged; only the
 module location moved.
 """
 
+import traceback
+
 from fastapi import APIRouter, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
@@ -40,12 +42,29 @@ def api_get_leaderboard(
     Pass ?refresh=true to recompute (e.g. after config change).
     Pass ?period=daily for the rolling one-day board (weekends show Friday).
     """
+    # Public, unauthenticated endpoint: no exception text reaches the caller.
+    # A raw exception string can embed internal infrastructure details — the
+    # Neon endpoint id from a psycopg failure, or the server-side credentials
+    # path from AlpacaCredentialsError. Both branches log the traceback
+    # server-side and answer with a static message, mirroring the
+    # POST /daily/refresh sibling fix (PR #325).
+    #
+    # RuntimeError is NOT an allowlist of safe domain errors: it is the base
+    # class of this repo's market-data family (MarketDataUnavailableError ->
+    # AlpacaCredentialsError, MarketDataDependencyError,
+    # MarketDataCredentialsError, IFindClientError), all of which reach here
+    # through ensure_leaderboard_runs -> fetch_hourly_bars. It only selects the
+    # 503 status code, never the message.
     try:
         return get_leaderboard(force_refresh=refresh, period=period)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    except RuntimeError:
+        print(f"⚠️ Leaderboard unavailable: {traceback.format_exc()}")
+        raise HTTPException(
+            status_code=503, detail="Leaderboard is temporarily unavailable"
+        ) from None
+    except Exception:
+        print(f"⚠️ Leaderboard request failed: {traceback.format_exc()}")
+        raise HTTPException(status_code=500, detail="Failed to load leaderboard") from None
 
 
 @router.post("/daily/refresh")
