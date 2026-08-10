@@ -289,41 +289,78 @@ def test_change_password_invalidates_other_sessions_keeps_current(client):
     assert me_b.status_code == 401
 
 
-def test_password_verify_runs_off_event_loop(client, monkeypatch):
-    """bcrypt password checks must run in a worker thread, not the loop.
+def _running_on_the_event_loop() -> bool:
+    """True when the calling thread is the one running the event loop.
 
-    Regression for the perf issue where change-password and the email-change
-    request verified the current password inline: bcrypt is deliberately slow
-    (~190 ms), so a shared event loop stalled every concurrent request
-    (signup/login already offload via asyncio.to_thread).
+    A worker thread has no running loop, so ``get_running_loop`` raises there.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return False
+    return True
+
+
+def test_password_verify_never_runs_on_the_event_loop(client, monkeypatch, sent_emails):
+    """bcrypt must execute in a worker thread on every route that verifies one.
+
+    bcrypt is deliberately slow (~190 ms of CPU). Run on the event loop it
+    stalls every concurrent request for that long, which is what #292 fixed
+    across 58 handlers and #297 tracked for the two auth.py routes below.
+
+    This asserts the *property* -- no running loop on the thread doing the hash
+    -- rather than the mechanism, so it stays green for whichever offload a
+    handler uses (a plain ``def`` dispatched to the threadpool, asyncio.to_thread
+    or run_in_threadpool) and goes red only when the hash is back on the loop.
+    An assertion that a specific dispatcher was called has the failure modes
+    reversed: it breaks on a correct refactor, and passes while the handler
+    still blocks on everything the offload did not cover.
     """
     import dashboard.backend.api.auth as auth
 
-    # Record which callables the handlers dispatch through asyncio.to_thread.
-    # The fix routes verify_password through it; without the fix it is called
-    # inline on the loop and never appears here.
-    offloaded = []
+    ran_on_loop = []
+    real_verify = auth.verify_password
 
-    real_to_thread = auth.asyncio.to_thread
+    def recording_verify(password, password_hash):
+        ran_on_loop.append(_running_on_the_event_loop())
+        return real_verify(password, password_hash)
 
-    def recording_to_thread(func, *args, **kwargs):
-        offloaded.append(func)
-        return real_to_thread(func, *args, **kwargs)
-
-    monkeypatch.setattr(auth.asyncio, "to_thread", recording_to_thread)
+    # Patched on the auth module -- the name both handlers actually call --
+    # rather than on asyncio or users. Patching `asyncio.to_thread` would rebind
+    # it for the whole interpreter, so unrelated callers would land in the
+    # recorder and the assertion would be over global traffic, not these routes.
+    monkeypatch.setattr(auth, "verify_password", recording_verify)
 
     token = _signup_and_token(client, email="helen@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
 
-    response = client.post(
+    changed = client.post(
         "/api/auth/change-password",
-        headers={"Authorization": f"Bearer {token}"},
+        headers=headers,
         json={"current_password": "orig-sturdy-pw-1", "new_password": "new-sturdy-pw-2"},
     )
-    assert response.status_code == 200
-    assert auth.verify_password in offloaded, (
-        "password verify ran on the event loop; should be offloaded via to_thread"
-    )
+    assert changed.status_code == 200
 
+    requested = client.post(
+        "/api/auth/email-change",
+        headers=headers,
+        json={
+            "current_password": "new-sturdy-pw-2",
+            "new_email": "helen-next@example.com",
+        },
+    )
+    assert requested.status_code == 200, requested.text
+
+    assert len(ran_on_loop) == 2, (
+        f"expected one bcrypt verify per route, saw {len(ran_on_loop)} -- the "
+        "test no longer exercises what it claims to"
+    )
+    assert ran_on_loop == [False, False], (
+        "a bcrypt verify ran on the event loop thread, stalling every "
+        f"concurrent request for its duration (per-call on-loop: {ran_on_loop})"
+    )
 
 
 def test_change_password_revocation_failure_still_succeeds(client, monkeypatch, capsys):
