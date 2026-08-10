@@ -393,18 +393,30 @@ def save_backtest_to_database(results: Dict, start_date: str, end_date: str):
         metrics = data["metrics"]
         equity_curve = data["equity_curve"]
         
-        # Insert run metadata
+        # Insert run metadata. This standalone CLI has no session of its own,
+        # so it uses the same grouping key every other sessionless writer uses
+        # (engine.BacktestEngine's default and backtest_hourly_agent's
+        # --session-id default), which is also what database.py backfills onto
+        # pre-session rows. A per-run session id would instead mint one orphan
+        # session per invocation, unreachable by every session-scoped query.
+        #
+        # BacktestMetrics reports return/drawdown in PERCENT (backtest_engine
+        # multiplies by 100), but agent_runs stores FRACTIONS — every other
+        # insert_run caller writes (final - initial) / initial. The frontend
+        # disambiguates by magnitude (`Math.abs(x) <= 1 ? x * 100 : x`), so
+        # storing percent here would render a +0.4% run as "+40.00%".
         db.insert_run(
             run_id=run_id,
+            session_id="legacy-demo-session",
             agent_name=agent,
             mode="backtest",
             start_date=start_date,
             end_date=end_date,
             initial_equity=100000,
             final_equity=equity_curve[-1]["equity"] if equity_curve else 100000,
-            total_return=metrics["total_return"],
+            total_return=metrics["total_return"] / 100.0,
             sharpe_ratio=metrics["sharpe_ratio"],
-            max_drawdown=metrics["max_drawdown"],
+            max_drawdown=metrics["max_drawdown"] / 100.0,
             num_trades=metrics["num_trades"]
         )
         
