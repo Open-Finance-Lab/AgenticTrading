@@ -34,6 +34,12 @@ def test_hosted_editor_replaces_model_picker_with_managed_metadata():
     )
     assert "modelField.hidden = hostedAiHedgeFund" in configure
     assert "managedModelField.hidden = !hostedAiHedgeFund" in configure
+    assert "hedgeFundPanel.hidden = !hostedAiHedgeFund" in configure
+    assert "simplePanel.hidden = hostedAiHedgeFund" in configure
+    # .agent-cp-field { display:flex } beats the UA [hidden] rule — without an
+    # explicit override the AI Hedge Fund panel leaked onto every built-in.
+    assert ".agent-cp-field[hidden]" in _STYLES_CSS
+    assert "#agentEditorAiHedgeFundPanel[hidden]" in _STYLES_CSS
     assert ".agent-editor-model-field[hidden]" in _STYLES_CSS
     assert ".agent-editor-managed-model-field[hidden]" in _STYLES_CSS
 

@@ -82,6 +82,8 @@
   let isDirty = false;
   let savedSnapshot = '';
   let financialDatasetsConfigured = false;
+  let activeCpTab = 'overview';
+  let cachedRuns = [];
 
   function isAiHedgeFundAgent(agent = currentAgent) {
     return (agent?.runtime_type || 'pipeline') === AI_HEDGE_FUND_RUNTIME;
@@ -285,7 +287,225 @@
 
   function formatUsd(value) {
     if (value == null || Number.isNaN(Number(value))) return '—';
-    return `$${Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+    return `$${Number(value).toLocaleString(undefined, {
+      maximumFractionDigits: Number(value) % 1 === 0 ? 0 : 2,
+    })}`;
+  }
+
+  function formatReturnPct(run) {
+    if (typeof window.formatBacktestRunReturn === 'function') {
+      return window.formatBacktestRunReturn(run);
+    }
+    if (run?.total_return == null) return '—';
+    const pct = Math.abs(run.total_return) <= 1 ? run.total_return * 100 : run.total_return;
+    const sign = pct >= 0 ? '+' : '';
+    return `${sign}${pct.toFixed(1)}%`;
+  }
+
+  function returnToneClass(run) {
+    if (run?.total_return == null || Number.isNaN(Number(run.total_return))) return '';
+    return Number(run.total_return) >= 0 ? 'is-positive' : 'is-negative';
+  }
+
+  function formatRelativeTime(iso) {
+    if (typeof window.formatRelativeTime === 'function') return window.formatRelativeTime(iso);
+    if (!iso) return '';
+    const t = new Date(iso).getTime();
+    if (!Number.isFinite(t)) return '';
+    const mins = Math.round((Date.now() - t) / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return `${mins} min ago`;
+    const hours = Math.round(mins / 60);
+    if (hours < 48) return `${hours}h ago`;
+    return `${Math.round(hours / 24)}d ago`;
+  }
+
+  function formatShortDateRange(start, end) {
+    if (typeof window.formatShortDateRange === 'function') {
+      return window.formatShortDateRange(start, end);
+    }
+    const parts = [start, end].filter(Boolean);
+    return parts.length ? parts.join(' – ') : '—';
+  }
+
+  function marketLabelForAgent(agent) {
+    const labels = shelfLabels();
+    const slug = String(agent?.category || '').trim().toLowerCase();
+    if (labels[slug]) return labels[slug];
+    if (agent?.agent_type === 'builtin') return 'Not set';
+    return 'External';
+  }
+
+  function modelLabelForAgent(agent) {
+    if (isAiHedgeFundAgent(agent)) {
+      return document.getElementById('agentEditorManagedModelValue')?.textContent?.trim()
+        || 'Hosted Nemotron';
+    }
+    const select = document.getElementById('agentEditorModelSelect');
+    if (select?.selectedOptions?.[0]?.textContent) return select.selectedOptions[0].textContent.trim();
+    return agent?.model_name || '—';
+  }
+
+  function resolveStatusBadge(agent) {
+    if (typeof window.resolveAgentStatusBadge === 'function') {
+      return window.resolveAgentStatusBadge(agent);
+    }
+    const runCount = Number(agent?.run_count) || (Array.isArray(agent?.runs) ? agent.runs.length : 0);
+    if (runCount > 0 || agent?.latest_run?.run_id) {
+      return { key: 'backtested', label: 'Backtested', className: 'idle' };
+    }
+    return { key: 'draft', label: 'Draft', className: 'draft' };
+  }
+
+  function setActiveTab(tab) {
+    const allowed = new Set(['overview', 'settings', 'backtest', 'paper', 'live']);
+    activeCpTab = allowed.has(tab) ? tab : 'overview';
+
+    document.querySelectorAll('[data-agent-cp-tab]').forEach((btn) => {
+      const on = btn.getAttribute('data-agent-cp-tab') === activeCpTab;
+      btn.classList.toggle('is-active', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
+
+    document.querySelectorAll('[data-agent-cp-panel]').forEach((panel) => {
+      const on = panel.getAttribute('data-agent-cp-panel') === activeCpTab;
+      panel.hidden = !on;
+      panel.classList.toggle('is-active', on);
+    });
+  }
+
+  function syncHeroDescription() {
+    const hero = document.getElementById('agentEditorHeroDescription');
+    if (!hero) return;
+    const text = String(currentAgent?.description || '').trim();
+    hero.textContent = text
+      || 'Researches market data and identifies trading opportunities using a configurable LLM strategy.';
+  }
+
+  function updateStatusChrome(agent = currentAgent) {
+    if (!agent) return;
+    const badge = document.getElementById('agentEditorStatusBadge');
+    const status = resolveStatusBadge(agent);
+    if (badge) {
+      const raw = status.label || (status.key === 'draft' ? 'Draft' : 'Draft');
+      badge.textContent = raw
+        .toLowerCase()
+        .replace(/\b\w/g, (ch) => ch.toUpperCase())
+        .replace('Paper Trading', 'Paper');
+      badge.className = 'agent-cp-status-badge';
+      if (status.className === 'idle') badge.classList.add('is-idle');
+      if (status.className === 'paper' || status.key === 'paper') badge.classList.add('is-paper');
+    }
+
+    const updated = agent.updated_at || agent.created_at;
+    const updatedLabel = document.getElementById('agentEditorUpdatedLabel');
+    if (updatedLabel) {
+      updatedLabel.textContent = updated
+        ? `Updated ${new Date(updated).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`
+        : 'Updated —';
+    }
+
+    const version = agent.version || agent.current_version || 'v1';
+    const versionLabel = String(version).startsWith('v') ? String(version) : `v${version}`;
+    const versionEls = [
+      document.getElementById('agentEditorVersionLabel'),
+      document.getElementById('agentEditorOverviewVersionBadge'),
+      document.getElementById('agentBacktestConfigVersion'),
+    ];
+    versionEls.forEach((el) => {
+      if (!el) return;
+      el.textContent = el.id === 'agentEditorOverviewVersionBadge'
+        ? `Agent ${versionLabel}`
+        : versionLabel;
+    });
+  }
+
+  function renderOverview(runs = cachedRuns) {
+    const agent = currentAgent;
+    if (!agent) return;
+
+    const configPrimary = document.getElementById('agentOverviewConfigPrimary');
+    const configSecondary = document.getElementById('agentOverviewConfigSecondary');
+    if (configPrimary) configPrimary.textContent = modelLabelForAgent(agent);
+    if (configSecondary) {
+      configSecondary.textContent = `${marketLabelForAgent(agent)} · allocated ${formatUsd(
+        agent.backtest_allocation ?? agent.cash_allocation ?? 1000,
+      )}`;
+    }
+
+    const sorted = [...(runs || [])].sort(
+      (a, b) => (b.created_at || '').localeCompare(a.created_at || ''),
+    );
+    const latest = sorted[0] || agent.latest_run || null;
+    const btPrimary = document.getElementById('agentOverviewBacktestPrimary');
+    const btSecondary = document.getElementById('agentOverviewBacktestSecondary');
+    if (btPrimary && btSecondary) {
+      if (latest && latest.total_return != null) {
+        btPrimary.textContent = formatReturnPct(latest);
+        btPrimary.className = `agent-cp-status-primary ${returnToneClass(latest)}`;
+        const sharpe = latest.sharpe_ratio != null && Number.isFinite(Number(latest.sharpe_ratio))
+          ? ` · Sharpe ${Number(latest.sharpe_ratio).toFixed(2)}`
+          : '';
+        btSecondary.textContent = `${formatShortDateRange(latest.start_date, latest.end_date)}${sharpe}`;
+      } else {
+        btPrimary.textContent = sorted.length ? 'Completed' : 'No runs yet';
+        btPrimary.className = 'agent-cp-status-primary';
+        btSecondary.textContent = sorted.length
+          ? formatShortDateRange(latest?.start_date, latest?.end_date)
+          : 'Run a backtest to see results';
+      }
+    }
+
+    const capitalEl = document.getElementById('agentBacktestConfigCapital');
+    if (capitalEl) {
+      capitalEl.textContent = formatUsd(agent.backtest_allocation ?? agent.cash_allocation ?? 1000);
+    }
+    const marketEl = document.getElementById('agentBacktestConfigMarket');
+    if (marketEl) marketEl.textContent = marketLabelForAgent(agent);
+
+    const activity = document.getElementById('agentEditorActivityList');
+    if (!activity) return;
+    const items = [];
+    sorted.slice(0, 5).forEach((run) => {
+      items.push({
+        title: 'Backtest completed',
+        sub: `${formatShortDateRange(run.start_date, run.end_date)} · ${formatReturnPct(run)}`,
+        time: formatRelativeTime(run.created_at) || formatRunSecondary(run),
+        icon: 'check',
+      });
+    });
+    if (agent.updated_at && agent.updated_at !== agent.created_at) {
+      items.push({
+        title: 'Agent settings saved',
+        sub: 'Configuration updated',
+        time: formatRelativeTime(agent.updated_at),
+        icon: 'save',
+      });
+    }
+    items.push({
+      title: 'Agent created',
+      sub: `${agent.name || 'Agent'} ${agent.version || 'v1'}`,
+      time: formatRelativeTime(agent.created_at) || (agent.created_at
+        ? new Date(agent.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        : '—'),
+      icon: 'plus',
+    });
+
+    const iconSvg = {
+      check: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg>',
+      save: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><path d="M17 21v-8H7v8"/><path d="M7 3v5h8"/></svg>',
+      plus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 5v14"/><path d="M5 12h14"/></svg>',
+    };
+
+    activity.innerHTML = items.slice(0, 6).map((item) => `
+      <div class="agent-cp-activity-item">
+        <span class="agent-cp-activity-icon" aria-hidden="true">${iconSvg[item.icon] || iconSvg.plus}</span>
+        <div>
+          <p class="agent-cp-activity-title-text">${escapeHtml(item.title)}</p>
+          <p class="agent-cp-activity-sub">${escapeHtml(item.sub)}</p>
+        </div>
+        <span class="agent-cp-activity-time">${escapeHtml(item.time || '')}</span>
+      </div>`).join('');
   }
 
   function setBrokerMessage(message, isError) {
@@ -385,6 +605,8 @@
           metaEl.hidden = true;
         }
       }
+      const livePrimary = document.getElementById('agentOverviewLivePrimary');
+      if (livePrimary) livePrimary.textContent = connected ? 'Connected' : 'Not connected';
       if (!connected) {
         setBrokerMessage('Not connected yet. Click Connect Robinhood to authorize.');
       } else {
@@ -574,7 +796,7 @@
   // floor for the case where app.js failed to load -- agent-editor.js is loaded
   // first, so this must never be read at module-init time.
   const SHELF_LABELS_FALLBACK = {
-    us_stocks: 'U.S.',
+    us_stocks: 'US Stocks',
     cn_ashares: 'China A-Share',
   };
 
@@ -597,10 +819,10 @@
     const select = document.getElementById('agentEditorCategorySelect');
     if (!select) return;
     const labels = shelfLabels();
-    // "" is a real, saveable choice, not a placeholder: the backend folds an
-    // empty string to NULL, which un-shelves the agent. It is listed first so
-    // an agent that has never been categorized shows its actual state.
-    const options = [['', 'Not set (shows under Prompting LLMs)']].concat(
+    // "" remains a saveable choice (backend folds it to NULL / un-shelves).
+    // Default the *visible* selection to US Stocks when nothing is stored yet
+    // -- bare "Not set (Prompting LLMs)" was stale copy and looked broken.
+    const options = [['', 'Not set']].concat(
       Object.keys(labels).map((slug) => [slug, labels[slug]]),
     );
     select.innerHTML = '';
@@ -611,7 +833,7 @@
       select.appendChild(option);
     });
     const current = String(agent?.category || '').trim().toLowerCase();
-    select.value = labels[current] ? current : '';
+    select.value = labels[current] ? current : 'us_stocks';
   }
 
   function getEditorState() {
@@ -623,8 +845,9 @@
       ? String(categorySelect.value || '')
       : null;
     const nameInput = document.getElementById('agentEditorNameInput');
-    const descInput = document.getElementById('agentEditorDescription');
     const cashInput = document.getElementById('agentEditorCashAllocation');
+    // Description was removed from Configure — it is not shown on agent cards
+    // and was only acting as a private note. Preserve whatever is already stored.
     let cash_allocation = null;
     if (cashInput && cashInput.value !== '') {
       const value = Number(cashInput.value);
@@ -695,7 +918,7 @@
     const credentialInput = document.getElementById('agentEditorFinancialDatasetsKey');
     return {
       name: nameInput ? nameInput.value.trim() : '',
-      description: descInput ? descInput.value.trim() : '',
+      description: String(currentAgent?.description || '').trim(),
       category,
       cash_allocation,
       backtest_allocation,
@@ -772,12 +995,10 @@
 
   function fillHeader(agent) {
     const nameInput = document.getElementById('agentEditorNameInput');
-    const descInput = document.getElementById('agentEditorDescription');
     const cashInput = document.getElementById('agentEditorCashAllocation');
     const meta = document.getElementById('agentEditorMeta');
 
     if (nameInput) nameInput.value = agent.name || '';
-    if (descInput) descInput.value = agent.description || '';
     if (cashInput) {
       cashInput.value = agent.cash_allocation != null ? String(agent.cash_allocation) : '';
     }
@@ -796,12 +1017,15 @@
     }
     if (meta) {
       meta.textContent = agent.agent_type === 'builtin' ? 'Built-in agent' : 'External agent';
+      meta.hidden = true;
     }
     const categoryField = document.getElementById('agentEditorCategoryField');
     if (categoryField) categoryField.hidden = !categoryFieldApplies(agent);
     fillCategorySelect(agent);
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
     if (liveToggle) liveToggle.checked = Boolean(agent.live_trading_enabled);
+    syncHeroDescription();
+    updateStatusChrome(agent);
   }
 
   function configureEditorMode(agent) {
@@ -961,35 +1185,68 @@
   function renderRunHistory(runs) {
     const container = document.getElementById('agentEditorRunHistory');
     const countEl = document.getElementById('agentEditorRunCount');
+    const navCountEl = document.getElementById('agentEditorNavRunCount');
     if (!container) return;
 
     const sorted = [...(runs || [])].sort(
       (a, b) => (b.created_at || '').localeCompare(a.created_at || ''),
     );
+    cachedRuns = sorted;
 
     if (countEl) {
       countEl.textContent = `${sorted.length} run${sorted.length === 1 ? '' : 's'}`;
     }
+    if (navCountEl) navCountEl.textContent = String(sorted.length);
 
     if (!sorted.length) {
       container.innerHTML = '<p class="agent-editor-run-empty">No backtest runs yet. Run a backtest from this agent to see history here.</p>';
+      renderOverview([]);
       return;
     }
 
-    container.innerHTML = sorted
-      .map(
-        (run) => `
-          <button type="button" class="agent-editor-run-item" data-run-id="${escapeHtml(run.run_id)}" role="listitem">
-            <span class="agent-editor-run-primary">${escapeHtml(formatRunPrimary(run))}</span>
-            <span class="agent-editor-run-secondary">${escapeHtml(formatRunSecondary(run))}</span>
-            ${formatRunMeta(run) ? `<span class="agent-editor-run-meta">${escapeHtml(formatRunMeta(run))}</span>` : ''}
-          </button>`,
-      )
-      .join('');
+    container.innerHTML = `
+      <table class="agent-cp-run-table">
+        <thead>
+          <tr>
+            <th>Run</th>
+            <th>Period</th>
+            <th>Initial capital</th>
+            <th>Return</th>
+            <th>Sharpe</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${sorted.map((run) => {
+            const ret = formatReturnPct(run);
+            const tone = returnToneClass(run);
+            const sharpe = run.sharpe_ratio != null && Number.isFinite(Number(run.sharpe_ratio))
+              ? Number(run.sharpe_ratio).toFixed(2)
+              : '—';
+            const capital = formatUsd(run.initial_equity ?? run.initial_capital ?? currentAgent?.backtest_allocation);
+            const created = run.created_at
+              ? new Date(run.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+              : '';
+            const runLabel = run.strategy_name || run.universe_label || run.agent_name || currentAgent?.name || 'Backtest';
+            return `
+              <tr data-run-id="${escapeHtml(run.run_id)}" role="listitem">
+                <td>
+                  <span class="agent-cp-run-name">${escapeHtml(runLabel)}</span>
+                  <span class="agent-cp-run-date">${escapeHtml(created)}</span>
+                </td>
+                <td>${escapeHtml(formatShortDateRange(run.start_date, run.end_date))}</td>
+                <td>${escapeHtml(capital)}</td>
+                <td class="agent-cp-run-return ${tone}">${escapeHtml(ret)}</td>
+                <td>${escapeHtml(sharpe)}</td>
+                <td><span class="agent-cp-run-status">Complete</span></td>
+              </tr>`;
+          }).join('')}
+        </tbody>
+      </table>`;
 
-    container.querySelectorAll('.agent-editor-run-item').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const runId = btn.dataset.runId;
+    container.querySelectorAll('tr[data-run-id]').forEach((row) => {
+      row.addEventListener('click', () => {
+        const runId = row.dataset.runId;
         if (!currentAgent || !runId) return;
         window.dispatchEvent(
           new CustomEvent('agent-editor-open-run', {
@@ -998,6 +1255,8 @@
         );
       });
     });
+
+    renderOverview(sorted);
   }
 
   async function refreshRunHistory(agent) {
@@ -1039,6 +1298,7 @@
     fillHeader(agent);
     populateModelSelect(agent);
     configureEditorMode(agent);
+    setActiveTab('overview');
 
     const instructionEl = document.getElementById('agentEditorSimpleInstruction');
     const defaultText = document.getElementById('agentEditorDefaultInstructionText');
@@ -1054,6 +1314,7 @@
     if (isAiHedgeFundAgent(agent)) {
       refreshFinancialDatasetsStatus(agent);
     }
+    renderOverview(currentAgent.runs || []);
 
     const view = document.getElementById('agentEditorView');
     if (view) {
@@ -1155,7 +1416,7 @@
       } finally {
         if (saveBtn) {
           saveBtn.disabled = false;
-          saveBtn.textContent = 'Save';
+          saveBtn.textContent = 'Save changes';
         }
       }
       return;
@@ -1197,6 +1458,7 @@
       }
 
       fillHeader(currentAgent);
+      renderOverview(cachedRuns);
       captureSavedSnapshot();
       showSaveStatus(
         clearingToDefault
@@ -1237,8 +1499,22 @@
     } finally {
       if (saveBtn) {
         saveBtn.disabled = false;
-        saveBtn.textContent = 'Save';
+        saveBtn.textContent = 'Save changes';
       }
+    }
+  }
+
+  function openRunBacktestFromEditor() {
+    if (!currentAgent) return;
+    // The modal reads the last-saved agent, so an unsaved edit would run the
+    // old instruction while the preview shows the new one. Same guard as Run Live.
+    if (isDirty) {
+      showSaveStatus('Save changes before Run Backtest', true);
+      setActiveTab('settings');
+      return;
+    }
+    if (typeof window.openRunBacktestModal === 'function') {
+      window.openRunBacktestModal(currentAgent);
     }
   }
 
@@ -1249,22 +1525,40 @@
     document.getElementById('agentEditorDisconnectRobinhoodBtn')?.addEventListener('click', disconnectRobinhood);
     document.getElementById('agentEditorFinancialDatasetsRemove')?.addEventListener('click', removeFinancialDatasetsCredential);
     document.getElementById('agentEditorRunLiveBtn')?.addEventListener('click', runLive);
-    document.getElementById('agentEditorRunBacktestBtn')?.addEventListener('click', () => {
-      if (!currentAgent) return;
-      // The modal reads the last-saved agent, so an unsaved edit would run the
-      // old instruction while the preview shows the new one. Same guard as Run Live.
-      if (isDirty) {
-        showSaveStatus('Save changes before Run Backtest', true);
-        return;
-      }
-      if (typeof window.openRunBacktestModal === 'function') {
-        window.openRunBacktestModal(currentAgent);
-      }
+    document.getElementById('agentEditorRunBacktestBtn')?.addEventListener('click', openRunBacktestFromEditor);
+    document.getElementById('agentEditorNewBacktestBtn')?.addEventListener('click', openRunBacktestFromEditor);
+    document.getElementById('agentEditorTalkBtn')?.addEventListener('click', () => {
+      showSaveStatus('Talk to agent is coming soon');
+    });
+
+    document.querySelectorAll('[data-agent-cp-tab]').forEach((btn) => {
+      btn.addEventListener('click', () => setActiveTab(btn.getAttribute('data-agent-cp-tab')));
+    });
+    document.querySelectorAll('[data-agent-cp-goto]').forEach((btn) => {
+      btn.addEventListener('click', () => setActiveTab(btn.getAttribute('data-agent-cp-goto')));
     });
 
     const body = document.getElementById('agentEditorView');
-    body?.addEventListener('input', markDirtyFromInput);
-    body?.addEventListener('change', markDirtyFromInput);
+    body?.addEventListener('input', (event) => {
+      markDirtyFromInput();
+      if (
+        event.target?.id === 'agentEditorModelSelect'
+        || event.target?.id === 'agentEditorCategorySelect'
+        || event.target?.id === 'agentEditorCashAllocation'
+        || event.target?.id === 'agentEditorBacktestAllocation'
+      ) {
+        renderOverview(cachedRuns);
+      }
+    });
+    body?.addEventListener('change', (event) => {
+      markDirtyFromInput();
+      if (
+        event.target?.id === 'agentEditorModelSelect'
+        || event.target?.id === 'agentEditorCategorySelect'
+      ) {
+        renderOverview(cachedRuns);
+      }
+    });
 
     document.addEventListener('keydown', (event) => {
       const view = document.getElementById('agentEditorView');

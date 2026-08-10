@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=86">
+    <link rel="stylesheet" href="styles.css?v=89">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -987,108 +987,279 @@
 
     <!-- Fullscreen Agent Editor -->
     <div id="agentEditorView" class="agent-editor-view" hidden>
-        <header class="agent-editor-header">
-            <button id="agentEditorBackBtn" class="agent-editor-back-btn" type="button" aria-label="Back to My Agents">
+        <div class="agent-cp">
+            <button id="agentEditorBackBtn" class="agent-cp-back" type="button" aria-label="Back to My Agents">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
-                Back to My Agents
+                My Agents
             </button>
-            <div class="agent-editor-title-wrap">
-                <input id="agentEditorNameInput" class="agent-editor-name-input" type="text" maxlength="100" placeholder="Agent name" aria-label="Agent name" autocomplete="off">
-                <p id="agentEditorMeta" class="agent-editor-meta"></p>
-                <label id="agentEditorModelField" class="agent-editor-model-field" for="agentEditorModelSelect">
-                    <span class="agent-editor-model-label">Model</span>
-                    <select id="agentEditorModelSelect" class="agent-editor-model-select" aria-label="Agent model"></select>
-                </label>
-                <div id="agentEditorManagedModelField" class="agent-editor-managed-model-field" aria-label="Hosted AI model" hidden>
-                    <span class="agent-editor-model-label">Hosted AI model</span>
-                    <strong id="agentEditorManagedModelValue" class="agent-editor-managed-model-value">OpenRouter · nvidia/nemotron-3-nano-30b-a3b</strong>
-                    <span class="agent-editor-managed-model-note">Managed for you by Agentic Trading Lab</span>
-                </div>
-                <label id="agentEditorCategoryField" class="agent-editor-model-field" for="agentEditorCategorySelect">
-                    <span class="agent-editor-model-label">Market</span>
-                    <select id="agentEditorCategorySelect" class="agent-editor-model-select" aria-label="Which market this agent trades"></select>
-                </label>
-                <textarea id="agentEditorDescription" class="agent-editor-description" rows="2" maxlength="280" placeholder="Optional description for this agent…" aria-label="Agent description"></textarea>
-                <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact">
-                    <div class="agent-editor-broker-head">
-                        <h3 class="agent-editor-intro-title">Robinhood live trading</h3>
-                        <span id="agentEditorRobinhoodStatus" class="agent-editor-broker-status">Checking…</span>
+
+            <header class="agent-cp-hero">
+                <div class="agent-cp-identity">
+                    <div class="agent-cp-avatar" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="8" width="14" height="11" rx="3"/><circle cx="9.5" cy="13" r="1.1" fill="currentColor" stroke="none"/><circle cx="14.5" cy="13" r="1.1" fill="currentColor" stroke="none"/><path d="M9 17h6"/><path d="M9 8V6.5a3 3 0 0 1 6 0V8"/></svg>
                     </div>
-                    <p class="agent-editor-intro-text">Connect your Robinhood Agentic account to run this agent with real money. Orders only execute when live trading is enabled and the server execute switch is on.</p>
-                    <div id="agentEditorRobinhoodMeta" class="agent-editor-broker-meta" hidden></div>
-                    <label class="agent-editor-live-toggle">
-                        <input id="agentEditorLiveTradingEnabled" type="checkbox">
-                        <span>Enable live trading for this agent</span>
-                    </label>
-                    <div class="agent-editor-broker-actions">
-                        <button id="agentEditorConnectRobinhoodBtn" class="home-btn home-btn-secondary" type="button">Connect Robinhood</button>
-                        <button id="agentEditorDisconnectRobinhoodBtn" class="home-btn home-btn-secondary" type="button" hidden>Disconnect</button>
-                        <button id="agentEditorRunLiveBtn" class="home-btn home-btn-primary" type="button">Run Live</button>
-                    </div>
-                    <p id="agentEditorLiveRunResult" class="agent-editor-live-result" hidden></p>
-                </div>
-            </div>
-            <div class="agent-editor-header-actions">
-                <span id="agentEditorDirtyBadge" class="agent-editor-dirty-badge" hidden>Unsaved changes</span>
-                <button id="agentEditorRunBacktestBtn" class="home-btn home-btn-secondary" type="button">Run Backtest</button>
-                <button id="agentEditorSaveBtn" class="home-btn home-btn-primary" type="button">Save</button>
-            </div>
-        </header>
-        <div class="agent-editor-body">
-            <div class="agent-editor-layout">
-                <div class="agent-editor-main">
-                    <div class="agent-capital-card section-card compact">
-                        <h3 class="agent-capital-title">Allocated Capital</h3>
-                        <div class="agent-capital-grid">
-                            <label class="agent-capital-field" for="agentEditorCashAllocation">
-                                <span class="agent-capital-label">Paper Trading <span class="agent-capital-max">max $3,000</span></span>
-                                <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital">
-                                <span class="agent-capital-note">Reserved from your My Portfolio balance while this agent paper-trades. Backtests use a separate simulated amount and never touch it.</span>
-                            </label>
-                            <label class="agent-capital-field" for="agentEditorBacktestAllocation">
-                                <span class="agent-capital-label">Backtesting <span class="agent-capital-max">max $3,000</span></span>
-                                <input id="agentEditorBacktestAllocation" class="agent-capital-input" type="number" min="1" max="3000" step="100" placeholder="1000" aria-label="Backtest Allocated Capital">
-                                <span class="agent-capital-note">Simulated only. Never spends real cash.</span>
-                            </label>
+                    <div class="agent-cp-identity-text">
+                        <div class="agent-cp-title-row">
+                            <input id="agentEditorNameInput" class="agent-editor-name-input agent-cp-name-input" type="text" maxlength="100" placeholder="Agent name" aria-label="Agent name" autocomplete="off">
+                            <span id="agentEditorStatusBadge" class="agent-cp-status-badge">Draft</span>
                         </div>
-                        <p id="agentCapitalRealMoneyNote" class="control-helper">Every test here uses simulated money. Real money is involved only if you explicitly connect a brokerage account and turn on live trading.</p>
+                        <p id="agentEditorMeta" class="agent-editor-meta agent-cp-meta" hidden></p>
+                        <p id="agentEditorHeroDescription" class="agent-cp-hero-desc">Researches market data and identifies trading opportunities using a configurable LLM strategy.</p>
                     </div>
-                    <div id="agentEditorSimplePanel" class="agent-editor-simple section-card compact">
-                        <h3 class="agent-editor-intro-title">Trading instruction</h3>
-                        <p class="agent-editor-intro-text">Tell the agent how to trade in plain language. Each market hour it sees prices and its portfolio, follows your instruction, and decides what to buy or sell.</p>
-                        <textarea id="agentEditorSimpleInstruction" rows="6" maxlength="8000" placeholder="e.g. Spread the money across a few of the strongest available stocks. Buy on meaningful dips and take profits after strong run-ups." aria-label="Trading instruction"></textarea>
-                        <p class="agent-editor-simple-note">Leave this empty and the agent uses the platform's default trading strategy.</p>
-                        <details class="agent-editor-default-details">
-                            <summary>See the default instruction</summary>
-                            <p id="agentEditorDefaultInstructionText" class="agent-editor-default-text"></p>
-                        </details>
-                        <p id="agentEditorSimpleReplaceNote" class="agent-editor-simple-note" hidden>This agent currently uses a custom multi-step strategy. Saving this instruction replaces it.</p>
-                    </div>
-                    <div id="agentEditorAiHedgeFundPanel" class="agent-editor-simple section-card compact" hidden>
-                        <h3 class="agent-editor-intro-title">AI Hedge Fund analyst panel</h3>
-                        <p class="agent-editor-intro-text">Choose the analysts that shape this agent's strategy. The AI model and its settings are hosted and managed by Agentic Trading Lab.</p>
-                        <div id="agentEditorAiHedgeFundAnalysts" class="agent-editor-analyst-grid" role="group" aria-label="AI Hedge Fund analysts"></div>
-                        <label class="auth-field agent-editor-credential-field" for="agentEditorFinancialDatasetsKey">
-                            <span>Financial Datasets access key (from financialdatasets.ai)</span>
-                            <input id="agentEditorFinancialDatasetsKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep the stored key" aria-describedby="agentEditorFinancialDatasetsStatus">
-                        </label>
-                        <p id="agentEditorFinancialDatasetsStatus" class="agent-editor-simple-note">Checking credential…</p>
-                        <button id="agentEditorFinancialDatasetsRemove" class="agent-editor-credential-remove" type="button" hidden>Remove stored key</button>
-                        <p class="agent-editor-simple-note">Encrypted and stored securely. For your protection, it is never shown again after you save.</p>
-                    </div>
-                    <p id="agentEditorSaveStatus" class="agent-editor-save-status" hidden></p>
-                    <p class="agent-editor-hint">Tip: press <kbd>Ctrl</kbd>+<kbd>S</kbd> to save.</p>
                 </div>
-                <aside class="agent-editor-history" aria-label="Backtest history">
-                    <div class="agent-editor-history-card section-card compact">
-                        <div class="agent-editor-history-head">
-                            <h3 class="agent-editor-history-title">Backtest history</h3>
-                            <span id="agentEditorRunCount" class="agent-editor-run-count">0 runs</span>
-                        </div>
-                        <p class="agent-editor-history-hint">All backtest runs for this agent. Click a run to open it in Playground.</p>
-                        <div id="agentEditorRunHistory" class="agent-editor-run-history" role="list"></div>
+                <div class="agent-editor-header-actions agent-cp-hero-actions">
+                    <span id="agentEditorDirtyBadge" class="agent-editor-dirty-badge" hidden>Unsaved changes</span>
+                    <button id="agentEditorTalkBtn" class="home-btn home-btn-secondary agent-cp-btn-talk" type="button">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+                        Talk to agent
+                    </button>
+                    <button id="agentEditorRunBacktestBtn" class="home-btn home-btn-primary agent-cp-btn-run" type="button">
+                        <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
+                        Run backtest
+                    </button>
+                </div>
+            </header>
+
+            <div class="agent-cp-shell">
+                <nav class="agent-cp-nav" aria-label="Control plane">
+                    <p class="agent-cp-nav-label">Control Plane</p>
+                    <div class="agent-cp-nav-list" role="tablist" aria-orientation="vertical">
+                        <button type="button" class="agent-cp-nav-item is-active" data-agent-cp-tab="overview" role="tab" aria-selected="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+                            <span>Overview</span>
+                        </button>
+                        <button type="button" class="agent-cp-nav-item" data-agent-cp-tab="settings" role="tab" aria-selected="false">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 21v-7"/><path d="M4 10V3"/><path d="M12 21v-9"/><path d="M12 8V3"/><path d="M20 21v-5"/><path d="M20 12V3"/><path d="M1 14h6"/><path d="M9 8h6"/><path d="M17 16h6"/></svg>
+                            <span>Agent settings</span>
+                        </button>
+                        <button type="button" class="agent-cp-nav-item" data-agent-cp-tab="backtest" role="tab" aria-selected="false">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M9 3h6"/><path d="M10 3v6.5L6 18a2 2 0 0 0 1.8 3h8.4A2 2 0 0 0 18 18l-4-8.5V3"/><path d="M8.5 14h7"/></svg>
+                            <span>Backtest</span>
+                            <span id="agentEditorNavRunCount" class="agent-cp-nav-count">0</span>
+                        </button>
+                        <button type="button" class="agent-cp-nav-item" data-agent-cp-tab="paper" role="tab" aria-selected="false">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></svg>
+                            <span>Paper trading</span>
+                            <span class="agent-cp-nav-soon">Soon</span>
+                        </button>
+                        <button type="button" class="agent-cp-nav-item" data-agent-cp-tab="live" role="tab" aria-selected="false">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 12h3"/><path d="M19 12h3"/><path d="M12 2v3"/><path d="M12 19v3"/><circle cx="12" cy="12" r="4"/><path d="M4.9 4.9l2.1 2.1"/><path d="M17 17l2.1 2.1"/><path d="M17 7l2.1-2.1"/><path d="M4.9 19.1 7 17"/></svg>
+                            <span>Live trading</span>
+                        </button>
                     </div>
-                </aside>
+                    <div class="agent-cp-nav-footer">
+                        <div>Current version: <strong id="agentEditorVersionLabel">v1</strong></div>
+                        <div id="agentEditorUpdatedLabel">Updated —</div>
+                    </div>
+                </nav>
+
+                <div class="agent-cp-main">
+                    <!-- Overview -->
+                    <section id="agentCpPanelOverview" class="agent-cp-panel is-active" data-agent-cp-panel="overview" role="tabpanel">
+                        <div class="agent-cp-panel-head">
+                            <div>
+                                <h2 class="agent-cp-panel-title">Overview</h2>
+                                <p class="agent-cp-panel-sub">Monitor this agent and continue its workflow.</p>
+                            </div>
+                            <span id="agentEditorOverviewVersionBadge" class="agent-cp-chip">Agent v1</span>
+                        </div>
+                        <div class="agent-cp-status-grid">
+                            <button type="button" class="agent-cp-status-card" data-agent-cp-goto="settings">
+                                <div class="agent-cp-status-card-top">
+                                    <span class="agent-cp-status-icon" aria-hidden="true">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h0a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v0a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+                                    </span>
+                                    <span class="agent-cp-status-arrow" aria-hidden="true">↗</span>
+                                </div>
+                                <h3 class="agent-cp-status-title">Agent configuration</h3>
+                                <p id="agentOverviewConfigPrimary" class="agent-cp-status-primary">—</p>
+                                <p id="agentOverviewConfigSecondary" class="agent-cp-status-secondary">—</p>
+                            </button>
+                            <button type="button" class="agent-cp-status-card" data-agent-cp-goto="backtest">
+                                <div class="agent-cp-status-card-top">
+                                    <span class="agent-cp-status-icon" aria-hidden="true">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19V5"/><path d="M4 19h16"/><path d="M8 17V10"/><path d="M12 17V7"/><path d="M16 17v-4"/></svg>
+                                    </span>
+                                    <span class="agent-cp-status-arrow" aria-hidden="true">↗</span>
+                                </div>
+                                <h3 class="agent-cp-status-title">Latest backtest</h3>
+                                <p id="agentOverviewBacktestPrimary" class="agent-cp-status-primary">No runs yet</p>
+                                <p id="agentOverviewBacktestSecondary" class="agent-cp-status-secondary">Run a backtest to see results</p>
+                            </button>
+                            <button type="button" class="agent-cp-status-card is-muted" data-agent-cp-goto="paper">
+                                <div class="agent-cp-status-card-top">
+                                    <span class="agent-cp-status-icon" aria-hidden="true">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>
+                                    </span>
+                                </div>
+                                <h3 class="agent-cp-status-title">Paper trading</h3>
+                                <p class="agent-cp-status-primary">Not deployed</p>
+                                <p class="agent-cp-status-secondary">Available soon</p>
+                            </button>
+                            <button type="button" class="agent-cp-status-card is-muted" data-agent-cp-goto="live">
+                                <div class="agent-cp-status-card-top">
+                                    <span class="agent-cp-status-icon" aria-hidden="true">
+                                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12h3"/><path d="M19 12h3"/><circle cx="12" cy="12" r="4"/></svg>
+                                    </span>
+                                </div>
+                                <h3 class="agent-cp-status-title">Live trading</h3>
+                                <p id="agentOverviewLivePrimary" class="agent-cp-status-primary">Not connected</p>
+                                <p class="agent-cp-status-secondary">Broker connection available here</p>
+                            </button>
+                        </div>
+                        <div class="agent-cp-activity">
+                            <div class="agent-cp-activity-head">
+                                <h3 class="agent-cp-activity-title">Agent activity</h3>
+                                <button type="button" class="agent-cp-link-btn" data-agent-cp-goto="backtest">View all</button>
+                            </div>
+                            <div id="agentEditorActivityList" class="agent-cp-activity-list"></div>
+                        </div>
+                    </section>
+
+                    <!-- Agent settings -->
+                    <section id="agentCpPanelSettings" class="agent-cp-panel" data-agent-cp-panel="settings" role="tabpanel" hidden>
+                        <div class="agent-cp-panel-head">
+                            <div>
+                                <h2 class="agent-cp-panel-title">Agent settings</h2>
+                                <p class="agent-cp-panel-sub">Set the model, market, capital, and trading prompt for this agent.</p>
+                            </div>
+                            <button id="agentEditorSaveBtn" class="home-btn home-btn-primary" type="button">Save changes</button>
+                        </div>
+
+                        <div class="agent-cp-settings-stack">
+                            <div class="agent-cp-form-grid">
+                                <label id="agentEditorModelField" class="agent-cp-field" for="agentEditorModelSelect">
+                                    <span class="agent-cp-field-label">Model</span>
+                                    <select id="agentEditorModelSelect" class="agent-cp-control agent-editor-model-select" aria-label="Agent model"></select>
+                                </label>
+                                <div id="agentEditorManagedModelField" class="agent-cp-field" aria-label="Hosted AI model" hidden>
+                                    <span class="agent-cp-field-label">Hosted AI model</span>
+                                    <strong id="agentEditorManagedModelValue" class="agent-editor-managed-model-value">OpenRouter · nvidia/nemotron-3-nano-30b-a3b</strong>
+                                    <span class="agent-cp-field-note">hosted and managed by Agentic Trading Lab</span>
+                                </div>
+                                <label id="agentEditorCategoryField" class="agent-cp-field" for="agentEditorCategorySelect">
+                                    <span class="agent-cp-field-label">Market</span>
+                                    <select id="agentEditorCategorySelect" class="agent-cp-control agent-editor-model-select" aria-label="Which market this agent trades"></select>
+                                </label>
+                                <label class="agent-cp-field" for="agentEditorCashAllocation">
+                                    <span class="agent-cp-field-label">Paper capital <span class="agent-cp-field-max">max $3,000</span></span>
+                                    <input id="agentEditorCashAllocation" class="agent-cp-control agent-cp-control--mono" type="number" min="0" max="3000" step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital">
+                                    <span class="agent-cp-field-note">Reserved from My Portfolio while paper-trading.</span>
+                                </label>
+                                <label class="agent-cp-field" for="agentEditorBacktestAllocation">
+                                    <span class="agent-cp-field-label">Backtest capital <span class="agent-cp-field-max">max $3,000</span></span>
+                                    <input id="agentEditorBacktestAllocation" class="agent-cp-control agent-cp-control--mono" type="number" min="1" max="3000" step="100" placeholder="1000" aria-label="Backtest Allocated Capital">
+                                    <span class="agent-cp-field-note">Simulated only — never spends real cash.</span>
+                                </label>
+                            </div>
+
+                            <div id="agentEditorSimplePanel" class="agent-cp-field agent-cp-field--wide agent-editor-simple">
+                                <span class="agent-cp-field-label" id="agentEditorInstructionLabel">Trading prompt</span>
+                                <textarea id="agentEditorSimpleInstruction" class="agent-cp-control agent-cp-control--area" rows="7" maxlength="8000" placeholder="e.g. Spread the money across a few of the strongest available stocks. Buy on meaningful dips and take profits after strong run-ups." aria-labelledby="agentEditorInstructionLabel"></textarea>
+                                <p class="agent-cp-field-note">Leave this empty and the agent uses the platform's default trading strategy.</p>
+                                <details class="agent-editor-default-details">
+                                    <summary>See the default instruction</summary>
+                                    <p id="agentEditorDefaultInstructionText" class="agent-editor-default-text"></p>
+                                </details>
+                                <p id="agentEditorSimpleReplaceNote" class="agent-editor-simple-note agent-editor-simple-note--warn" hidden>This agent currently uses a custom multi-step strategy. Saving this instruction replaces it.</p>
+                            </div>
+
+                            <div id="agentEditorAiHedgeFundPanel" class="agent-editor-simple agent-cp-field agent-cp-field--wide" hidden>
+                                <span class="agent-cp-field-label">AI Hedge Fund analysts</span>
+                                <p class="agent-cp-field-note">Hosted runtime — pick which analysts shape each trade.</p>
+                                <div id="agentEditorAiHedgeFundAnalysts" class="agent-editor-analyst-grid" role="group" aria-label="AI Hedge Fund analysts"></div>
+                                <label class="auth-field agent-editor-credential-field" for="agentEditorFinancialDatasetsKey">
+                                    <span>Financial Datasets access key</span>
+                                    <input id="agentEditorFinancialDatasetsKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep the stored key" aria-describedby="agentEditorFinancialDatasetsStatus">
+                                </label>
+                                <p id="agentEditorFinancialDatasetsStatus" class="agent-editor-simple-note">Checking credential…</p>
+                                <button id="agentEditorFinancialDatasetsRemove" class="agent-editor-credential-remove" type="button" hidden>Remove stored key</button>
+                                <p class="agent-cp-field-note">Encrypted at rest. Never shown again after you save.</p>
+                            </div>
+                        </div>
+
+                        <p id="agentEditorSaveStatus" class="agent-editor-save-status" hidden></p>
+                    </section>
+
+                    <!-- Backtest -->
+                    <section id="agentCpPanelBacktest" class="agent-cp-panel" data-agent-cp-panel="backtest" role="tabpanel" hidden>
+                        <div class="agent-cp-panel-head">
+                            <div>
+                                <h2 class="agent-cp-panel-title">Backtest</h2>
+                                <p class="agent-cp-panel-sub">Test this agent on historical market data.</p>
+                            </div>
+                            <button id="agentEditorNewBacktestBtn" class="home-btn home-btn-primary" type="button">New backtest</button>
+                        </div>
+                        <div class="agent-cp-config-bar">
+                            <div class="agent-cp-config-metrics">
+                                <div>
+                                    <span class="agent-cp-config-label">Default initial capital</span>
+                                    <strong id="agentBacktestConfigCapital">—</strong>
+                                </div>
+                                <div>
+                                    <span class="agent-cp-config-label">Agent version</span>
+                                    <strong id="agentBacktestConfigVersion">v1</strong>
+                                </div>
+                                <div>
+                                    <span class="agent-cp-config-label">Market</span>
+                                    <strong id="agentBacktestConfigMarket">—</strong>
+                                </div>
+                            </div>
+                            <button type="button" class="home-btn home-btn-secondary" data-agent-cp-goto="settings">Configure</button>
+                        </div>
+                        <div class="agent-cp-history-block section-card compact">
+                            <div class="agent-editor-history-head">
+                                <h3 class="agent-editor-history-title">Backtest history</h3>
+                                <span id="agentEditorRunCount" class="agent-editor-run-count">0 runs</span>
+                            </div>
+                            <div id="agentEditorRunHistory" class="agent-editor-run-history agent-cp-run-table-wrap" role="list"></div>
+                        </div>
+                    </section>
+
+                    <!-- Paper (soon) -->
+                    <section id="agentCpPanelPaper" class="agent-cp-panel" data-agent-cp-panel="paper" role="tabpanel" hidden>
+                        <div class="agent-cp-panel-head">
+                            <div>
+                                <h2 class="agent-cp-panel-title">Paper trading</h2>
+                                <p class="agent-cp-panel-sub">Deploy this agent with simulated capital in live market hours.</p>
+                            </div>
+                            <span class="agent-cp-chip">Soon</span>
+                        </div>
+                        <div class="agent-cp-soon-card">
+                            <h3>Not deployed yet</h3>
+                            <p>Paper trading from the agent control plane is coming soon. You can still allocate paper capital under Agent settings.</p>
+                            <button type="button" class="home-btn home-btn-secondary" data-agent-cp-goto="settings">Open agent settings</button>
+                        </div>
+                    </section>
+
+                    <!-- Live -->
+                    <section id="agentCpPanelLive" class="agent-cp-panel" data-agent-cp-panel="live" role="tabpanel" hidden>
+                        <div class="agent-cp-panel-head">
+                            <div>
+                                <h2 class="agent-cp-panel-title">Live trading</h2>
+                                <p class="agent-cp-panel-sub">Connect a brokerage account and run this agent with real money when enabled.</p>
+                            </div>
+                        </div>
+                        <div id="agentEditorBrokerPanel" class="agent-editor-broker section-card compact agent-cp-card">
+                            <div class="agent-editor-broker-head">
+                                <h3 class="agent-editor-intro-title">Robinhood live trading</h3>
+                                <span id="agentEditorRobinhoodStatus" class="agent-editor-broker-status">Checking…</span>
+                            </div>
+                            <p class="agent-editor-intro-text">Connect your Robinhood Agentic account to run this agent with real money. Orders only execute when live trading is enabled and the server execute switch is on.</p>
+                            <div id="agentEditorRobinhoodMeta" class="agent-editor-broker-meta" hidden></div>
+                            <label class="agent-editor-live-toggle">
+                                <input id="agentEditorLiveTradingEnabled" type="checkbox">
+                                <span>Enable live trading for this agent</span>
+                            </label>
+                            <div class="agent-editor-broker-actions">
+                                <button id="agentEditorConnectRobinhoodBtn" class="home-btn home-btn-secondary" type="button">Connect Robinhood</button>
+                                <button id="agentEditorDisconnectRobinhoodBtn" class="home-btn home-btn-secondary" type="button" hidden>Disconnect</button>
+                                <button id="agentEditorRunLiveBtn" class="home-btn home-btn-primary" type="button">Run Live</button>
+                            </div>
+                            <p id="agentEditorLiveRunResult" class="agent-editor-live-result" hidden></p>
+                        </div>
+                    </section>
+                </div>
             </div>
         </div>
     </div>
@@ -1751,7 +1922,7 @@
     <script src="market-events/MarketEventCard.js" defer></script>
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
-    <script src="js/agent-editor.js?v=26" defer></script>
+    <script src="js/agent-editor.js?v=28" defer></script>
     <script src="app.js?v=77" defer></script>
     <script src="js/leaderboard.js?v=19" defer></script>
     <script src="home-page.js?v=37" defer></script>

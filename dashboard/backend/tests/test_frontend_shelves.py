@@ -199,7 +199,7 @@ def test_market_labels_is_the_only_declaration_of_the_market_names():
     not merely unused.
     """
     decl = js_const("MARKET_LABELS")
-    assert "us_stocks: 'U.S.'" in decl
+    assert "us_stocks: 'US Stocks'" in decl
     assert "cn_ashares: 'China A-Share'" in decl
     # The bare identifier only. `window.AGENT_SHELF_LABELS` -- the export name
     # agent-editor.js reads, deliberately unchanged so the editor needs no
@@ -230,7 +230,7 @@ def test_render_marketplace_category_chips_is_built_from_the_shared_label_map():
     body = _strip_js_comments(fn_body("function renderMarketplaceCategoryChips()"))
     assert "MARKET_LABELS" in body
     assert "'all'" in body
-    for label in ("U.S.", "China A-Share"):
+    for label in ("US Stocks", "China A-Share"):
         assert label not in body, f"{label!r} hardcoded instead of read from MARKET_LABELS"
 
 

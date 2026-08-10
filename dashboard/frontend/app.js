@@ -487,7 +487,8 @@ const LEGACY_RUNTIME_MARKET = { ai_hedge_fund: 'us_stocks' };
  * Stocks is the only asset class the engine can backtest, so both entries here
  * live under it. */
 const MARKET_LABELS = {
-  us_stocks: 'U.S.',
+  // Retail-standard name (not bare "U.S." / "US Equities"). Slug stays us_stocks.
+  us_stocks: 'US Stocks',
   cn_ashares: 'China A-Share',
 };
 

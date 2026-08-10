@@ -2,8 +2,9 @@
 
 Paper-trading capital used to sit in the agent editor's *header* as a 12.5px
 uppercase field while backtest capital was a separate input inside the Run
-Backtest modal, with nothing connecting them. They are now one card in the
-editor's main column, and the modal shows the saved backtest figure read-only.
+Backtest modal, with nothing connecting them. They are now peer fields in the
+Agent settings form (alongside model / market / trading prompt), and the modal
+shows the saved backtest figure read-only.
 
 These are contract guards, not style assertions: they pin *where the inputs
 live* and *that the modal no longer edits capital*, which is the behaviour the
@@ -24,15 +25,17 @@ def _slice(text: str, start_marker: str, end_marker: str) -> str:
 
 
 def test_configure_has_one_allocated_capital_card_with_both_inputs():
-    card = _slice(_APP_HTML, 'class="agent-capital-card', "</div>\n                    <div")
-    assert "Allocated Capital" in card
-    assert 'id="agentEditorCashAllocation"' in card
-    assert 'id="agentEditorBacktestAllocation"' in card
+    start = _APP_HTML.index('id="agentCpPanelSettings"')
+    end = _APP_HTML.index('id="agentEditorSimplePanel"', start)
+    settings = _APP_HTML[start:end]
+    assert 'id="agentEditorCashAllocation"' in settings
+    assert 'id="agentEditorBacktestAllocation"' in settings
+    assert "max $3,000" in settings
 
 
 def test_capital_inputs_are_no_longer_in_the_editor_header():
     """The header held a cramped uppercase field; the card replaces it."""
-    header = _slice(_APP_HTML, 'class="agent-editor-title-wrap"', "</header>")
+    header = _slice(_APP_HTML, 'class="agent-cp-hero"', 'class="agent-cp-shell"')
     assert 'id="agentEditorCashAllocation"' not in header
     assert 'id="agentEditorBacktestAllocation"' not in header
 

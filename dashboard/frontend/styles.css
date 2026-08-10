@@ -35,10 +35,13 @@ textarea {
     --bg-input: #0a0e27;
     --bg-hover: #1a2047;
     
-    /* Text */
-    --text-primary: #e5e7eb;
-    --text-secondary: #9ca3af;
-    --text-muted: #6b7280;
+    /* Text — contrast vs --bg-primary #0a0e27 (WCAG AA normal text ≥4.5:1).
+       Keep the three roles distinct: primary = body, secondary = supporting,
+       muted = meta only. Do not darken muted back under ~#94a3b8; the old
+       #6b7280 measured ~3.9:1 and failed AA on this background. */
+    --text-primary: #e5e7eb;   /* ~15.4:1 */
+    --text-secondary: #cbd5e1; /* slate-300, ~11:1 — was #9ca3af */
+    --text-muted: #94a3b8;     /* slate-400, ~7.4:1 — was #6b7280 */
     
     /* Borders */
     --border-color: #1f2937;
@@ -60,6 +63,7 @@ textarea {
     /* Typography */
     --font-base: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
     --font-mono: 'SF Mono', Monaco, 'Cascadia Code', 'Roboto Mono', monospace;
+    --font-size-base: 15px; /* was 14px; rem-based rules still track html, not this */
 
     /* Shared accent (used outside .home-view, e.g. My Agents) */
     --home-accent-cyan: #22d3ee;
@@ -82,7 +86,7 @@ body {
     background-color: var(--bg-primary);
     color: var(--text-primary);
     line-height: 1.6;
-    font-size: 14px;
+    font-size: var(--font-size-base);
     font-weight: 400;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -4644,7 +4648,7 @@ a.header-brand:hover .title-section h1 {
 }
 
 .run-backtest-modal-panel {
-    width: min(560px, calc(100vw - 32px));
+    width: min(760px, calc(100vw - 32px));
     max-height: calc(100vh - 48px);
     overflow: auto;
     /* Column layout so the submit button can be pinned to the bottom below. */
@@ -8746,6 +8750,839 @@ body.agent-editor-open {
     display: none !important;
 }
 
+/* ── Agent Control Plane (Configure redesign) ─────────────────────────── */
+.agent-cp {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+    padding: 16px 20px 20px;
+    gap: 14px;
+    overflow: hidden;
+    background:
+        radial-gradient(ellipse 80% 50% at 10% -10%, rgba(92, 124, 250, 0.14), transparent 55%),
+        radial-gradient(ellipse 60% 40% at 90% 0%, rgba(34, 211, 238, 0.08), transparent 50%),
+        var(--bg-primary);
+}
+
+.agent-cp-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    align-self: flex-start;
+    padding: 6px 10px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+}
+
+.agent-cp-back svg {
+    width: 16px;
+    height: 16px;
+}
+
+.agent-cp-back:hover {
+    color: var(--home-accent-cyan, #22d3ee);
+    background: rgba(34, 211, 238, 0.08);
+}
+
+.agent-cp-hero {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 20px;
+    flex-shrink: 0;
+}
+
+.agent-cp-identity {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    min-width: 0;
+    flex: 1;
+}
+
+.agent-cp-avatar {
+    width: 52px;
+    height: 52px;
+    border-radius: 14px;
+    flex-shrink: 0;
+    display: grid;
+    place-items: center;
+    color: var(--text-on-accent);
+    background: linear-gradient(145deg, var(--neutral-color), #3b82f6);
+    box-shadow: 0 8px 20px rgba(92, 124, 250, 0.28);
+}
+
+.agent-cp-avatar svg {
+    width: 28px;
+    height: 28px;
+}
+
+.agent-cp-identity-text {
+    min-width: 0;
+    flex: 1;
+}
+
+.agent-cp-title-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.agent-cp-name-input.agent-editor-name-input {
+    width: auto;
+    max-width: min(420px, 100%);
+    padding: 4px 8px;
+    border-color: transparent;
+    background: transparent;
+    font-size: 28px;
+    font-weight: 750;
+    letter-spacing: -0.02em;
+}
+
+.agent-cp-name-input.agent-editor-name-input:hover,
+.agent-cp-name-input.agent-editor-name-input:focus {
+    border-color: var(--border-color);
+    background: var(--bg-input);
+}
+
+.agent-cp-status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 999px;
+    border: 1px solid rgba(0, 200, 81, 0.35);
+    background: rgba(0, 200, 81, 0.12);
+    color: var(--success-color);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.agent-cp-status-badge::before {
+    content: '';
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: currentColor;
+    box-shadow: 0 0 0 3px rgba(0, 200, 81, 0.18);
+}
+
+.agent-cp-status-badge.is-idle {
+    border-color: rgba(92, 124, 250, 0.4);
+    background: rgba(92, 124, 250, 0.14);
+    color: #93a8ff;
+}
+
+.agent-cp-status-badge.is-idle::before {
+    box-shadow: 0 0 0 3px rgba(92, 124, 250, 0.18);
+}
+
+.agent-cp-status-badge.is-paper {
+    border-color: rgba(34, 211, 238, 0.4);
+    background: rgba(34, 211, 238, 0.12);
+    color: var(--home-accent-cyan);
+}
+
+.agent-cp-status-badge.is-paper::before {
+    box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.18);
+}
+
+.agent-cp-hero-desc {
+    margin: 6px 0 0;
+    max-width: 560px;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+.agent-cp-meta {
+    margin: 2px 0 0;
+}
+
+.agent-cp-hero-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+.agent-cp-btn-talk,
+.agent-cp-btn-run {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.agent-cp-btn-talk svg,
+.agent-cp-btn-run svg {
+    width: 15px;
+    height: 15px;
+}
+
+.agent-cp-shell {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    gap: 0;
+    min-height: 0;
+    flex: 1;
+    border: 1px solid var(--border-color);
+    border-radius: 16px;
+    background: var(--bg-surface);
+    overflow: hidden;
+    box-shadow: 0 18px 40px rgba(0, 0, 0, 0.28);
+}
+
+.agent-cp-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 16px 12px;
+    border-right: 1px solid var(--border-color);
+    background: rgba(10, 14, 39, 0.55);
+    min-height: 0;
+}
+
+.agent-cp-nav-label {
+    margin: 0 8px 6px;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.agent-cp-nav-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex: 1;
+    min-height: 0;
+}
+
+.agent-cp-nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 14px;
+    font-weight: 600;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.agent-cp-nav-item svg {
+    width: 16px;
+    height: 16px;
+    flex-shrink: 0;
+}
+
+.agent-cp-nav-item span:first-of-type {
+    flex: 1;
+    min-width: 0;
+}
+
+.agent-cp-nav-item:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.agent-cp-nav-item.is-active {
+    background: var(--neutral-color);
+    color: #fff;
+    border-color: rgba(255, 255, 255, 0.12);
+    box-shadow: 0 8px 18px rgba(92, 124, 250, 0.28);
+}
+
+.agent-cp-nav-count {
+    margin-left: auto;
+    min-width: 20px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.12);
+    color: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    text-align: center;
+}
+
+.agent-cp-nav-item:not(.is-active) .agent-cp-nav-count {
+    background: var(--bg-hover);
+    color: var(--text-secondary);
+}
+
+.agent-cp-nav-soon {
+    margin-left: auto;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.agent-cp-nav-item.is-active .agent-cp-nav-soon {
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.agent-cp-nav-footer {
+    margin-top: auto;
+    padding: 12px 10px 4px;
+    border-top: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.agent-cp-nav-footer strong {
+    color: var(--text-primary);
+    font-weight: 700;
+}
+
+.agent-cp-main {
+    min-width: 0;
+    min-height: 0;
+    overflow: auto;
+    padding: 22px 24px 28px;
+    background: var(--bg-card);
+}
+
+.agent-cp-panel[hidden] {
+    display: none !important;
+}
+
+.agent-cp-panel-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 18px;
+}
+
+.agent-cp-panel-title {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 22px;
+    font-weight: 750;
+    letter-spacing: -0.02em;
+}
+
+.agent-cp-panel-sub {
+    margin: 4px 0 0;
+    color: var(--text-secondary);
+    font-size: 14px;
+    line-height: 1.45;
+}
+
+.agent-cp-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 5px 10px;
+    border-radius: 999px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-surface);
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.agent-cp-status-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 22px;
+}
+
+.agent-cp-status-card {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+    padding: 16px;
+    border: 1px solid var(--border-color);
+    border-radius: 14px;
+    background: linear-gradient(180deg, rgba(92, 124, 250, 0.08), rgba(10, 14, 39, 0.35));
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.15s, transform 0.15s, background 0.15s;
+}
+
+.agent-cp-status-card:hover {
+    border-color: rgba(92, 124, 250, 0.55);
+    transform: translateY(-1px);
+}
+
+.agent-cp-status-card.is-muted {
+    opacity: 0.78;
+    background: var(--bg-surface);
+}
+
+.agent-cp-status-card-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    margin-bottom: 8px;
+}
+
+.agent-cp-status-icon {
+    width: 34px;
+    height: 34px;
+    border-radius: 10px;
+    display: grid;
+    place-items: center;
+    background: rgba(92, 124, 250, 0.16);
+    color: #93a8ff;
+}
+
+.agent-cp-status-icon svg {
+    width: 18px;
+    height: 18px;
+}
+
+.agent-cp-status-arrow {
+    color: var(--text-muted);
+    font-size: 14px;
+}
+
+.agent-cp-status-title {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 650;
+}
+
+.agent-cp-status-primary {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 18px;
+    font-weight: 750;
+    letter-spacing: -0.01em;
+}
+
+.agent-cp-status-primary.is-positive {
+    color: var(--success-color);
+}
+
+.agent-cp-status-primary.is-negative {
+    color: var(--danger-color);
+}
+
+.agent-cp-status-secondary {
+    margin: 0;
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.agent-cp-activity-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.agent-cp-activity-title {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 15px;
+    font-weight: 700;
+}
+
+.agent-cp-link-btn {
+    border: none;
+    background: transparent;
+    color: var(--home-accent-cyan, #22d3ee);
+    font-size: 13px;
+    font-weight: 650;
+    cursor: pointer;
+}
+
+.agent-cp-link-btn:hover {
+    text-decoration: underline;
+}
+
+.agent-cp-activity-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.agent-cp-activity-item {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    gap: 12px;
+    align-items: center;
+    padding: 12px 14px;
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: var(--bg-surface);
+}
+
+.agent-cp-activity-icon {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    background: rgba(92, 124, 250, 0.16);
+    color: #93a8ff;
+}
+
+.agent-cp-activity-icon svg {
+    width: 16px;
+    height: 16px;
+}
+
+.agent-cp-activity-title-text {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.agent-cp-activity-sub {
+    margin: 2px 0 0;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.agent-cp-activity-time {
+    color: var(--text-muted);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.agent-cp-form-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px 16px;
+    margin-bottom: 8px;
+}
+
+.agent-cp-settings-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    margin-bottom: 16px;
+}
+
+.agent-cp-settings-footnote {
+    margin: -6px 0 0;
+}
+
+.agent-cp-field {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+    margin: 0;
+    text-align: left;
+}
+
+.agent-cp-field--wide {
+    grid-column: 1 / -1;
+}
+
+.agent-cp-field-label {
+    display: block;
+    color: var(--text-primary);
+    font-size: 15px;
+    font-weight: 650;
+    text-align: left;
+}
+
+.agent-cp-field-max {
+    margin-left: 6px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.agent-cp-field-note {
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.agent-cp-control {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 11px 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    font-size: 15px;
+    font-family: inherit;
+    line-height: 1.4;
+}
+
+.agent-cp-control:focus {
+    outline: none;
+    border-color: rgba(92, 124, 250, 0.55);
+    box-shadow: 0 0 0 2px rgba(92, 124, 250, 0.14);
+}
+
+.agent-cp-control--mono {
+    font-family: var(--font-mono);
+}
+
+.agent-cp-control--area {
+    min-height: 140px;
+    resize: vertical;
+    line-height: 1.45;
+}
+
+select.agent-cp-control {
+    cursor: pointer;
+}
+
+select.agent-cp-control option {
+    background: var(--bg-card);
+    color: var(--text-primary);
+}
+
+.agent-cp-card {
+    margin-bottom: 14px;
+}
+
+.agent-cp-info-banner {
+    display: flex;
+    gap: 12px;
+    align-items: flex-start;
+    margin: 8px 0 12px;
+    padding: 12px 14px;
+    border: 1px solid rgba(92, 124, 250, 0.35);
+    border-left: 3px solid var(--neutral-color);
+    border-radius: 10px;
+    background: rgba(92, 124, 250, 0.1);
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+.agent-cp-info-banner p {
+    margin: 0;
+}
+
+.agent-cp-info-icon {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    flex-shrink: 0;
+    background: var(--neutral-color);
+    color: #fff;
+    font-size: 12px;
+    font-weight: 800;
+    font-style: italic;
+}
+
+.agent-cp-config-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 18px;
+    padding: 14px 16px;
+    border: 1px solid rgba(92, 124, 250, 0.3);
+    border-radius: 12px;
+    background: rgba(92, 124, 250, 0.08);
+}
+
+.agent-cp-config-metrics {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 22px;
+}
+
+.agent-cp-config-label {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 650;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.agent-cp-config-metrics strong {
+    color: var(--text-primary);
+    font-size: 14px;
+    font-weight: 700;
+}
+
+.agent-cp-history-block {
+    border: 1px solid var(--border-color);
+    border-radius: 12px;
+    background: var(--bg-surface);
+    padding: 14px 16px 8px;
+}
+
+.agent-cp-run-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.agent-cp-run-table th {
+    padding: 8px 10px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    text-align: left;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.agent-cp-run-table td {
+    padding: 12px 10px;
+    border-bottom: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    vertical-align: middle;
+}
+
+.agent-cp-run-table tr[data-run-id] {
+    cursor: pointer;
+    transition: background 0.12s;
+}
+
+.agent-cp-run-table tr[data-run-id]:hover {
+    background: var(--bg-hover);
+}
+
+.agent-cp-run-name {
+    display: block;
+    color: var(--text-primary);
+    font-weight: 650;
+}
+
+.agent-cp-run-date {
+    display: block;
+    margin-top: 2px;
+    color: var(--text-muted);
+    font-size: 12px;
+}
+
+.agent-cp-run-return.is-positive {
+    color: var(--success-color);
+    font-weight: 700;
+}
+
+.agent-cp-run-return.is-negative {
+    color: var(--danger-color);
+    font-weight: 700;
+}
+
+.agent-cp-run-status {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 8px;
+    border-radius: 999px;
+    background: rgba(0, 200, 81, 0.12);
+    color: var(--success-color);
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.agent-cp-soon-card {
+    padding: 28px 24px;
+    border: 1px dashed var(--border-color);
+    border-radius: 14px;
+    background: var(--bg-surface);
+    text-align: left;
+}
+
+.agent-cp-soon-card h3 {
+    margin: 0 0 8px;
+    color: var(--text-primary);
+    font-size: 16px;
+}
+
+.agent-cp-soon-card p {
+    margin: 0 0 16px;
+    max-width: 480px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
+}
+
+@media (max-width: 960px) {
+    .agent-cp-shell {
+        grid-template-columns: 1fr;
+    }
+
+    .agent-cp-nav {
+        border-right: none;
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    .agent-cp-nav-list {
+        flex-direction: row;
+        flex-wrap: wrap;
+    }
+
+    .agent-cp-nav-item {
+        width: auto;
+    }
+
+    .agent-cp-nav-footer {
+        display: none;
+    }
+
+    .agent-cp-status-grid,
+    .agent-cp-form-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 640px) {
+    .agent-cp {
+        padding: 10px 12px 14px;
+    }
+
+    .agent-cp-hero {
+        flex-direction: column;
+    }
+
+    .agent-cp-hero-actions {
+        width: 100%;
+        flex-wrap: wrap;
+    }
+
+    .agent-cp-hero-actions .home-btn {
+        flex: 1;
+    }
+
+    .agent-cp-name-input.agent-editor-name-input {
+        font-size: 22px;
+    }
+
+    .agent-cp-main {
+        padding: 16px 14px 20px;
+    }
+
+    .agent-cp-config-bar {
+        flex-direction: column;
+        align-items: stretch;
+    }
+}
+
 .agent-editor-header {
     display: flex;
     align-items: flex-start;
@@ -9138,7 +9975,7 @@ body.agent-editor-open {
 .agent-editor-hint {
     margin: 16px 0 0;
     font-size: 13px;
-    color: var(--text-muted);
+    color: var(--text-secondary);
 }
 
 .agent-editor-hint kbd {
@@ -9759,16 +10596,26 @@ body.agent-editor-open {
     border-color: var(--info-color);
 }
 
-/* Agent editor — model picker (Demo 1) */
+/* Agent editor — model picker (Demo 1). Legacy header layout was horizontal +
+   center-aligned; settings now uses .agent-cp-field. Keep these hide rules. */
 .agent-editor-model-field {
     display: flex;
     align-items: center;
     gap: 8px;
     margin-top: 6px;
 }
+/* .agent-cp-field sets display:flex, which beats the UA [hidden] rule and used
+   to leak the AI Hedge Fund panel onto every built-in agent's settings screen.
+   Any field that toggles with .hidden must opt into this override. */
+.agent-cp-field[hidden],
 .agent-editor-model-field[hidden],
-.agent-editor-managed-model-field[hidden] {
-    display: none;
+.agent-editor-managed-model-field[hidden],
+#agentEditorModelField[hidden],
+#agentEditorManagedModelField[hidden],
+#agentEditorCategoryField[hidden],
+#agentEditorSimplePanel[hidden],
+#agentEditorAiHedgeFundPanel[hidden] {
+    display: none !important;
 }
 .agent-editor-managed-model-field {
     display: flex;
@@ -9778,31 +10625,34 @@ body.agent-editor-open {
     margin-top: 6px;
 }
 .agent-editor-managed-model-value {
-    font-size: 13px;
+    font-size: 15px;
     color: var(--text-primary);
 }
 .agent-editor-managed-model-note {
-    font-size: 12px;
-    color: var(--text-secondary);
-}
-.agent-editor-model-label {
     font-size: 13px;
     color: var(--text-secondary);
 }
+.agent-editor-model-label {
+    font-size: 15px;
+    color: var(--text-secondary);
+}
+/* Size/padding live on .agent-cp-control (same elements). This class only
+   keeps native <select> menus readable on dark UI — do not re-shrink here. */
 .agent-editor-model-select {
-    background: var(--bg-input);
-    border: 1px solid var(--border-color);
-    border-radius: 6px;
-    color: var(--text-primary);
-    font-size: 0.85rem;
-    padding: 4px 8px;
-    /* Native <select> menus often paint a light OS panel; without this the
-       inherited light text becomes unreadable on white. */
     color-scheme: dark;
 }
 .agent-editor-model-select option {
     background-color: var(--bg-card);
     color: var(--text-primary);
+}
+.agent-cp .agent-editor-simple textarea.agent-cp-control {
+    /* Beat the legacy .agent-editor-simple textarea rule below so settings
+       controls share one size/padding/background with Model/Market inputs. */
+    margin-top: 0;
+    background: var(--bg-input);
+    font-size: 15px;
+    line-height: 1.45;
+    padding: 11px 12px;
 }
 .agent-editor-simple textarea {
     width: 100%;
@@ -9813,9 +10663,8 @@ body.agent-editor-open {
     color: var(--text-primary);
     /*
      * 14px, not `0.95rem`: `rem` resolves against the 16px html root while the
-     * whole app is sized off the 14px body, so 0.95rem painted this field at
-     * 15.2px -- a fractional size (blurry sub-pixel text) on a different scale
-     * from every other control.
+     * whole app is sized off the body base, so rem painted this field on a
+     * different scale from every other control.
      */
     font-size: 14px;
     line-height: 1.5;
@@ -9825,6 +10674,10 @@ body.agent-editor-open {
 .agent-editor-simple-note {
     margin: 10px 0 0;
     font-size: 13px;
+    line-height: 1.45;
+    color: var(--text-secondary);
+}
+.agent-editor-simple-note--warn {
     color: #fbbf24;
 }
 
@@ -9837,7 +10690,7 @@ body.agent-editor-open {
 .agent-editor-default-details summary {
     cursor: pointer;
     font-weight: 600;
-    color: var(--text-secondary);
+    color: var(--text-primary);
 }
 
 .agent-editor-default-text {
@@ -9845,6 +10698,8 @@ body.agent-editor-open {
     padding: 10px 12px;
     border-left: 2px solid var(--border-color);
     color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.45;
 }
 
 .agent-editor-analyst-grid {
@@ -9862,7 +10717,7 @@ body.agent-editor-open {
     border: 1px solid var(--border-color);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: 14px;
     cursor: pointer;
 }
 

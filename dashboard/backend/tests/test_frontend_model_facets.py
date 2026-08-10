@@ -167,7 +167,7 @@ def test_three_empty_states_stay_distinguishable():
 def test_empty_state_precedence():
     script = f"""
 function escapeHtml(s) {{ return String(s); }}
-const MARKET_LABELS = {{ us_stocks: 'U.S.', cn_ashares: 'China A-Share' }};
+const MARKET_LABELS = {{ us_stocks: 'US Stocks', cn_ashares: 'China A-Share' }};
 {js_const("MODEL_VENDORS")}
 {fn_body("function marketplaceEmptyHtml")}
 const out = [
@@ -186,7 +186,7 @@ console.log(JSON.stringify(out));
     # A typed query wins: clearing the chips would not bring anything back.
     assert search_empty == "No templates match your search."
     assert "both filters" in both and "marketplace-clear-filters" in both
-    assert "U.S." in one_chip and "both filters" not in one_chip
+    assert "US Stocks" in one_chip and "both filters" not in one_chip
     assert none_at_all == "No templates match your search."
 
 
@@ -359,7 +359,7 @@ def test_shipped_grid_badges_only_open_weight_cards():
     script = f"""
 {fn_body("function escapeHtml")}
 {fn_body("function agentRobotIcon")}
-const MARKET_LABELS = {{ us_stocks: 'U.S.', cn_ashares: 'China A-Share' }};
+const MARKET_LABELS = {{ us_stocks: 'US Stocks', cn_ashares: 'China A-Share' }};
 {js_const("MODEL_VENDORS")}
 {fn_body("function modelVendorKey")}
 {fn_body("function modelVendorLicence")}
@@ -423,7 +423,7 @@ def test_closed_card_differs_from_open_card_by_exactly_the_badge():
     script = f"""
 {fn_body("function escapeHtml")}
 {fn_body("function agentRobotIcon")}
-const MARKET_LABELS = {{ us_stocks: 'U.S.', cn_ashares: 'China A-Share' }};
+const MARKET_LABELS = {{ us_stocks: 'US Stocks', cn_ashares: 'China A-Share' }};
 {js_const("MODEL_VENDORS")}
 {fn_body("function modelVendorKey")}
 {fn_body("function modelVendorLicence")}
@@ -544,7 +544,7 @@ def test_model_picker_gated_on_runtime_type_not_truthiness():
     script = f"""
 {fn_body("function escapeHtml")}
 {fn_body("function agentRobotIcon")}
-const MARKET_LABELS = {{ us_stocks: 'U.S.' }};
+const MARKET_LABELS = {{ us_stocks: 'US Stocks' }};
 {js_const("MODEL_VENDORS")}
 {js_const("SUPPORTED_MODELS")}
 {fn_body("function modelVendorKey")}

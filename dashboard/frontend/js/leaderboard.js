@@ -1047,7 +1047,8 @@ async function renderEquityCurvesChart() {
       scales: {
         x: {
           ticks: {
-            color: '#6b7280',
+            /* Match --text-muted / --text-secondary in styles.css */
+            color: '#94a3b8',
             maxRotation: 0,
             minRotation: 0,
             autoSkip: true,
@@ -1060,7 +1061,7 @@ async function renderEquityCurvesChart() {
         },
         y: {
           ticks: {
-            color: '#9ca3af',
+            color: '#cbd5e1',
             callback(value) {
               if (isMoney) return `$${formatLeaderboardNumber(value)}`;
               return `${(value * 100).toFixed(1)}%`;
