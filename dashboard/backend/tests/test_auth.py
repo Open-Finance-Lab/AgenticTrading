@@ -318,10 +318,15 @@ def test_password_verify_never_runs_on_the_event_loop(client, monkeypatch, sent_
     reversed: it breaks on a correct refactor, and passes while the handler
     still blocks on everything the offload did not cover.
     """
-    import dashboard.backend.api.auth as auth
+    # `from ... import auth as auth_api`, matching this file's other five sites:
+    # the plain `import dashboard.backend.api.auth` form collides with the
+    # `from dashboard.backend.api.auth import _humanize_wait` further down and
+    # trips py/import-and-import-from. Either form yields the module object the
+    # setattr seam below needs.
+    from dashboard.backend.api import auth as auth_api
 
     ran_on_loop = []
-    real_verify = auth.verify_password
+    real_verify = auth_api.verify_password
 
     def recording_verify(password, password_hash):
         ran_on_loop.append(_running_on_the_event_loop())
@@ -331,7 +336,7 @@ def test_password_verify_never_runs_on_the_event_loop(client, monkeypatch, sent_
     # rather than on asyncio or users. Patching `asyncio.to_thread` would rebind
     # it for the whole interpreter, so unrelated callers would land in the
     # recorder and the assertion would be over global traffic, not these routes.
-    monkeypatch.setattr(auth, "verify_password", recording_verify)
+    monkeypatch.setattr(auth_api, "verify_password", recording_verify)
 
     token = _signup_and_token(client, email="helen@example.com")
     headers = {"Authorization": f"Bearer {token}"}
