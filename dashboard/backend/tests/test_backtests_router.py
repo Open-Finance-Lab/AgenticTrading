@@ -69,6 +69,25 @@ def test_plot_png_cached_per_run(monkeypatch):
         return [{"timestamp": "2026-05-01T10:00:00", "equity": 100000},
                 {"timestamp": "2026-05-01T11:00:00", "equity": 101000}]
 
+    # fake_run carries no `metadata`, so _market_profile_for_run falls back to
+    # the Alpaca/US profile with index_baseline_enabled true, which makes
+    # _render_run_plot_png call market_index_baselines_for_run ->
+    # fetch_index_hourly for ^DJI/^NDX. Without this patch that is a real
+    # HTTPS call to query1.finance.yahoo.com on every run (issue #320: flakes
+    # when Yahoo is slow/rate-limited). Stub it here, same pattern as
+    # test_equity_plot.py; the network fetch is incidental to what this test
+    # covers (lru_cache behaviour).
+    from datetime import datetime, timezone
+    _ts = lambda s: datetime.fromisoformat(s).replace(
+        tzinfo=timezone.utc
+    )
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly",
+        lambda _sym, _start, _end: [
+            (_ts("2026-05-01T10:00:00"), 40_000.0),
+            (_ts("2026-05-01T11:00:00"), 41_000.0),
+        ],
+    )
     monkeypatch.setattr(bt.db, "get_run", fake_get_run)
     monkeypatch.setattr(bt.db, "get_equity_curve", fake_equity)
     monkeypatch.setattr(bt, "filter_market_hours", lambda pts: pts)  # isolate caching
