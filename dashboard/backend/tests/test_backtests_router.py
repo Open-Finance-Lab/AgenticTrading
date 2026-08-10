@@ -48,20 +48,24 @@ def test_plot_png_cached_per_run(monkeypatch):
         "baseline_buyhold_run_id": None, "baseline_djia_run_id": None,
     }
 
-    # Unique per-invocation key: the render cache is a module-level lru_cache
-    # shared across tests, and a leftover TestClient threadpool render (from an
-    # earlier test) that lands *after* cache_clear() would populate a fixed
-    # "run_x" entry with real data — making the 2nd call a cache hit and the
-    # get_run count 0 instead of 1 (intermittent flake). A unique key keeps
-    # this test hermetic against that race.
+    # #139's traceback was lost, so the real flake mechanism is unconfirmed.
+    # Defense in depth against cross-test interference: the render cache is a
+    # module-level lru_cache and bt.db is a process-wide singleton (patched
+    # for any thread while this test runs), so (a) a unique per-invocation
+    # key guarantees no other code path can collide with this test's cache
+    # entry, and (b) the counters only count calls for *this* key, so a stray
+    # db.get_run from another test's leftover threadpool thread cannot skew
+    # the assertions either way.
     run_id = f"run_x_{uuid.uuid4().hex}"
 
     def fake_get_run(rid):
-        calls["get_run"] += 1
+        if rid == run_id:
+            calls["get_run"] += 1
         return fake_run
 
     def fake_equity(rid):
-        calls["equity"] += 1
+        if rid == run_id:
+            calls["equity"] += 1
         return [{"timestamp": "2026-05-01T10:00:00", "equity": 100000},
                 {"timestamp": "2026-05-01T11:00:00", "equity": 101000}]
 
@@ -89,7 +93,8 @@ def test_plot_png_missing_run_not_cached(monkeypatch):
     hits = {"n": 0}
 
     def counting_get_run(rid):
-        hits["n"] += 1
+        if rid == "missing":  # same stray-thread gating as the cache test above
+            hits["n"] += 1
         return None
 
     monkeypatch.setattr(bt.db, "get_run", counting_get_run)
