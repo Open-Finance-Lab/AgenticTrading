@@ -31,6 +31,7 @@ PLAYGROUND_THEME = {
     "legend_bg": "#131a35",
     "legend_edge": "#1f2937",
     "legend_text": "#e5e7eb",
+    "note": "#f59e0b",       # amber: degraded-render caption (missing baselines)
     "line_width": 2.5,
 }
 

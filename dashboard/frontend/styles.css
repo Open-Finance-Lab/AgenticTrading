@@ -1045,6 +1045,24 @@ a.header-brand:hover .title-section h1 {
     background: rgba(251, 113, 133, 0.07);
 }
 
+/* Degraded backtest chart: index benchmarks dropped because the market-data
+   provider was unreachable. Same treatment as .market-data-notice, including
+   the explicit [hidden] rule — without it the display above would beat the
+   hidden attribute and the notice would show on every healthy chart. */
+.chart-baseline-notice {
+    margin: 0 0 10px;
+    padding: 6px 8px;
+    border-left: 2px solid var(--warning-color);
+    background: rgba(245, 158, 11, 0.08);
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.chart-baseline-notice[hidden] {
+    display: none;
+}
+
 .date-separator {
     color: var(--text-secondary);
     font-size: 12px;
