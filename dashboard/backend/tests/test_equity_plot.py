@@ -137,6 +137,23 @@ def test_market_index_baselines_skip_an_unusable_window_without_fetching(monkeyp
     assert "run_abc" in out  # the log line names the request, not just a symbol
 
 
+def test_log_context_cannot_forge_a_log_line(monkeypatch, capsys):
+    # `context` is a run id from a URL path parameter. A newline in it would let
+    # one request write what looks like a second, unrelated log entry.
+    t0, t1 = _session_stamps()
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly", lambda *_a, **_k: []
+    )
+
+    market_index_baselines_with_status(
+        [t0, t1], "2026-05-01", "", 100_000.0,
+        context="run_1\n⚠️ index baselines skipped [forged]: unusable run window",
+    )
+    out = capsys.readouterr().out
+    assert out.count("index baselines skipped") == 1
+    assert "\n⚠️" not in out.rstrip("\n")
+
+
 def test_market_index_baselines_treat_a_200_delivered_failure_as_broken(monkeypatch):
     # Yahoo answers 200 with an error envelope. The status code says "fine", so
     # only YahooChartError keeps this out of the "no data for this window" bucket.

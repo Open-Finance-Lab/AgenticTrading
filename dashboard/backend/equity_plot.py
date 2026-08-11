@@ -7,6 +7,7 @@ Playground theme in ``chart_style.py``.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from io import BytesIO
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -93,6 +94,17 @@ def compute_index_baseline_values(
     return [float(initial_capital * (value / base)) for value in aligned]
 
 
+def _log_safe(value: str, limit: int = 80) -> str:
+    """Reduce a caller-supplied identifier to something safe to print verbatim.
+
+    Run ids arrive from a URL path parameter. They are server-generated in
+    practice — the plot route 404s on an unknown run before it gets here — but
+    a log line is a poor place to rely on that, since a single newline lets one
+    forge another entry.
+    """
+    return re.sub(r"[^A-Za-z0-9_.:-]", "", value or "")[:limit]
+
+
 def market_index_baselines_with_status(
     timestamps: Sequence[datetime],
     start_date: str,
@@ -114,11 +126,13 @@ def market_index_baselines_with_status(
     render is safe to cache — but it is still printed, because a run whose dates
     don't parse is a data defect worth seeing.
 
-    ``context`` (a run id / window) is echoed into the log lines: during an
-    intermittent outage a bare symbol name repeats without saying which request
-    it came from.
+    ``context`` (a run id) is echoed into the log lines: during an intermittent
+    outage a bare symbol name repeats without saying which request it came from.
+    It reaches here from a URL path parameter, so it is stripped to run-id
+    characters and truncated before being printed — a newline in a log line
+    forges a log line. The dates are ``!r``-quoted for the same reason.
     """
-    where = f" [{context}]" if context else ""
+    where = f" [{_log_safe(context)}]" if context else ""
     if not usable_window(start_date, end_date):
         print(
             f"⚠️ index baselines skipped{where}: unusable run window "
