@@ -1209,6 +1209,14 @@
                     </div>
                 </div>
 
+                <!-- Shown only when the index benchmarks are missing because the
+                     market-data provider was unreachable, so a benchmark-free
+                     chart is never mistaken for an agent that has no benchmark. -->
+                <p id="chartBaselineNotice" class="chart-baseline-notice" hidden>
+                    ⚠ Index benchmarks unavailable — the market-data provider could not be
+                    reached. Your agent's curve is complete; reload to retry the benchmarks.
+                </p>
+
                 <!-- Chart with integrated legend -->
                 <div class="chart-container">
                     <canvas id="performanceChart"></canvas>

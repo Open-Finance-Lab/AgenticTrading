@@ -85,7 +85,7 @@ def test_plot_png_cached_per_run(monkeypatch):
 
     # fake_run carries no `metadata`, so _market_profile_for_run falls back to
     # the Alpaca/US profile with index_baseline_enabled true, which makes
-    # _render_run_plot_png call market_index_baselines_for_run ->
+    # _render_run_plot_png call market_index_baselines_with_status ->
     # fetch_index_hourly for ^DJI/^NDX. Without this patch that is a real
     # HTTPS call to query1.finance.yahoo.com on every run (issue #320: flakes
     # when Yahoo is slow/rate-limited). Stub it here, same pattern as
@@ -199,14 +199,27 @@ def test_plot_png_survives_index_outage_and_retries_it(monkeypatch, capsys):
     assert degraded.status_code == 200                       # was an unhandled 500
     assert degraded.headers["content-type"] == "image/png"
     assert degraded.content[:8] == b"\x89PNG\r\n\x1a\n"      # a real chart, sans baselines
+    assert fetches["n"] == 2
 
-    client.get(f"/runs/{run_id}/plot.png")
-    assert fetches["n"] == 4  # both symbols retried: the degraded render wasn't cached
+    # Inside the negative-cache TTL the degraded bytes are replayed without
+    # re-rendering. This route is public and unauthenticated, so an unbounded
+    # retry would let a *persistent* Yahoo block turn every hit into a full
+    # matplotlib render — the exact cost the lru_cache exists to avoid.
+    assert client.get(f"/runs/{run_id}/plot.png").content == degraded.content
+    assert fetches["n"] == 2
+
+    # Past the TTL, Yahoo is tried again: the degraded render was never allowed
+    # into the lru_cache, so recovery is never more than one TTL away.
+    bt._clear_degraded_plot_cache()
+    assert client.get(f"/runs/{run_id}/plot.png").status_code == 200
+    assert fetches["n"] == 4
 
     outage["on"] = False
+    bt._clear_degraded_plot_cache()
     healthy = client.get(f"/runs/{run_id}/plot.png")
     assert healthy.status_code == 200
     assert healthy.content != degraded.content  # baselines are back on the chart
+    assert fetches["n"] == 6
     again = client.get(f"/runs/{run_id}/plot.png")
     assert again.content == healthy.content
     assert fetches["n"] == 6  # ...and a complete render *is* cached, as before
@@ -215,9 +228,86 @@ def test_plot_png_survives_index_outage_and_retries_it(monkeypatch, capsys):
     # upstream otherwise render identically (see CLAUDE.md, "fail-closed is not
     # fail-visible"). print(), because logging is invisible under prod uvicorn.
     out = capsys.readouterr().out
-    assert "index baseline ^DJI unavailable: HTTPError" in out
-    assert "index baseline ^NDX unavailable: HTTPError" in out
+    assert "index baseline ^DJI unavailable" in out and "HTTPError" in out
+    assert "index baseline ^NDX unavailable" in out and "HTTPError" in out
+    assert run_id in out  # names the request, not just the symbol
     bt._render_run_plot_png.cache_clear()
+    bt._clear_degraded_plot_cache()
+
+
+def test_degraded_plot_negative_cache_expires_on_its_own(monkeypatch):
+    """The negative cache must *lapse*, not just be clearable.
+
+    Bounding the re-render storm is only half the requirement: a degraded chart
+    that never expires is the failure the lru_cache escape (_UncachedPlotPng)
+    was added to prevent in the first place, just on a slower clock. Exercised
+    against the real expiry branch by shrinking the TTL rather than clearing.
+    """
+    bt._clear_degraded_plot_cache()
+    run_id = f"run_ttl_{uuid.uuid4().hex}"
+    bt._degraded_plot_store(run_id, b"degraded-bytes")
+    assert bt._degraded_plot_cached(run_id) == b"degraded-bytes"
+
+    monkeypatch.setattr(bt, "_DEGRADED_PLOT_TTL_SECONDS", 0.0)
+    assert bt._degraded_plot_cached(run_id) is None  # lapsed, so Yahoo is retried
+    bt._clear_degraded_plot_cache()
+
+
+def test_degraded_plot_negative_cache_is_bounded():
+    """Both bounds are load-bearing on a public, unauthenticated route.
+
+    The TTL caps how stale a degraded chart can get; the entry cap stops one
+    outage window from pinning a PNG per requested run in memory.
+    """
+    assert 0 < bt._DEGRADED_PLOT_TTL_SECONDS <= 300
+    bt._clear_degraded_plot_cache()
+    for i in range(bt._DEGRADED_PLOT_MAX_ENTRIES + 25):
+        bt._degraded_plot_store(f"run_bound_{i}", b"x")
+    assert len(bt._degraded_plot_cache) <= bt._DEGRADED_PLOT_MAX_ENTRIES
+    bt._clear_degraded_plot_cache()
+
+
+def test_plot_png_survives_a_run_window_that_does_not_parse(monkeypatch, capsys):
+    """#320, third path: a non-``YYYY-MM-DD`` window must not 500 either.
+
+    ``_epoch`` raises ValueError *before* any HTTP call, so this never reached
+    the transport-level guard. It is reachable in prod two ways: paper-trading
+    baselines store ``start_date.isoformat()``, and
+    ``api/routers/paper_trading.py`` writes ``end_date=""``.
+    """
+    bt._render_run_plot_png.cache_clear()
+    bt._clear_degraded_plot_cache()
+    run_id = f"run_badwindow_{uuid.uuid4().hex}"
+    fake_run = {
+        "session_id": None, "created_at": "2026-05-01T10:00:00", "agent_name": "Agent",
+        "start_date": "2026-06-02T20:00:00", "end_date": "", "mode": "safe_trading",
+        "baseline_buyhold_run_id": None, "baseline_djia_run_id": None,
+    }
+    et = pytz.timezone("US/Eastern")
+    t0 = et.localize(datetime(2026, 5, 1, 10, 30)).astimezone(pytz.UTC)
+    t1 = et.localize(datetime(2026, 5, 1, 11, 30)).astimezone(pytz.UTC)
+
+    monkeypatch.setattr(bt.db, "get_run", lambda rid: fake_run if rid == run_id else None)
+    monkeypatch.setattr(
+        bt.db, "get_equity_curve",
+        lambda rid: [{"timestamp": t0.replace(tzinfo=None).isoformat(), "equity": 100000},
+                     {"timestamp": t1.replace(tzinfo=None).isoformat(), "equity": 101000}],
+    )
+    monkeypatch.setattr(bt, "filter_market_hours", lambda pts: pts)
+
+    def must_not_be_called(*_a, **_k):  # pragma: no cover - asserts absence
+        raise AssertionError("Yahoo must not be asked for an unparseable window")
+
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly", must_not_be_called
+    )
+
+    resp = TestClient(app).get(f"/runs/{run_id}/plot.png")
+    assert resp.status_code == 200  # was an unhandled 500
+    assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert "unusable run window" in capsys.readouterr().out
+    bt._render_run_plot_png.cache_clear()
+    bt._clear_degraded_plot_cache()
 
 
 # ===========================================================================

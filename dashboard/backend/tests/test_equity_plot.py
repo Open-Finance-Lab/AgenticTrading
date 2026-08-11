@@ -6,6 +6,7 @@ import pytest
 import pytz
 import requests
 
+from dashboard.backend.domain.leaderboard.strategies._yahoo import YahooChartError
 from dashboard.backend.equity_plot import (
     build_backtest_chart_data,
     compute_index_baseline_values,
@@ -109,6 +110,95 @@ def test_market_index_baselines_partial_outage_keeps_the_symbol_that_answered(mo
     assert upstream_ok is False  # partial is still incomplete: retry it
 
 
+def test_market_index_baselines_skip_an_unusable_window_without_fetching(monkeypatch, capsys):
+    # A run window that doesn't parse used to raise ValueError out of _epoch
+    # *before* any HTTP call, so no transport-level guard could catch it and the
+    # public plot.png route 500'd. paper_trading.py writes end_date="", and the
+    # route passes `run.get("end_date") or ""`, so this window is reachable.
+    t0, t1 = _session_stamps()
+
+    def must_not_be_called(*_a, **_k):  # pragma: no cover - asserts absence
+        raise AssertionError("Yahoo must not be asked for an unparseable window")
+
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly", must_not_be_called
+    )
+
+    baselines, upstream_ok = market_index_baselines_with_status(
+        [t0, t1], "2026-05-01", "", 100_000.0, context="run_abc"
+    )
+    assert baselines == []
+    # True, not False: the window is *permanently* baseline-free, so there is
+    # nothing to retry and the render is safe to cache. The flag means
+    # "transient and retryable", which is the only thing a caller can act on.
+    assert upstream_ok is True
+    out = capsys.readouterr().out
+    assert "unusable run window" in out
+    assert "run_abc" in out  # the log line names the request, not just a symbol
+
+
+def test_market_index_baselines_treat_a_200_delivered_failure_as_broken(monkeypatch):
+    # Yahoo answers 200 with an error envelope. The status code says "fine", so
+    # only YahooChartError keeps this out of the "no data for this window" bucket.
+    t0, t1 = _session_stamps()
+
+    def error_envelope(_sym, _start, _end):
+        raise YahooChartError("^DJI: Invalid Crumb")
+
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly", error_envelope
+    )
+
+    baselines, upstream_ok = market_index_baselines_with_status(
+        [t0, t1], "2026-05-01", "2026-05-01", 100_000.0
+    )
+    assert baselines == []
+    assert upstream_ok is False  # retryable, and the chart is incomplete
+
+
+def test_render_note_changes_the_rendered_bytes():
+    # The caption is the only thing marking a Discord-posted chart as degraded;
+    # that artifact is permanent and cannot be re-fetched once Yahoo recovers.
+    t0, t1 = _session_stamps()
+    kwargs = dict(
+        agent_label="Agent",
+        agent_run_id="run_note",
+        timestamps=[t0, t1],
+        agent_values=[100_000.0, 101_000.0],
+        baselines=[],
+    )
+    assert render_backtest_equity_png(**kwargs) != render_backtest_equity_png(
+        **kwargs, note="⚠ Index benchmarks unavailable"
+    )
+
+
+def test_chart_data_reports_index_baseline_status(monkeypatch):
+    # The JSON chart path must expose the flag too, or /chart-data 200s with the
+    # benchmark silently missing and the Playground paints an unexplained
+    # single-line chart.
+    t0, t1 = _session_stamps()
+    curve = [
+        {"timestamp": t0.isoformat(), "equity": 100_000},
+        {"timestamp": t1.isoformat(), "equity": 100_500},
+    ]
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly",
+        lambda *_a, **_k: (_ for _ in ()).throw(requests.ConnectionError("down")),
+    )
+
+    payload = build_backtest_chart_data(
+        run_id="agent_test_outage",
+        agent_name="Agent",
+        llm_model=None,
+        start_date="2026-05-01",
+        end_date="2026-05-01",
+        initial_capital=100_000,
+        agent_curve=curve,
+    )
+    assert payload["index_baselines_ok"] is False
+    assert [s["label"] for s in payload["series"][1:]] == []
+
+
 def test_market_index_baselines_do_not_swallow_non_transport_errors(monkeypatch):
     # A delivered-but-malformed payload is a different bug. Swallowing it here
     # would turn a code defect into a permanently baseline-free chart.
@@ -144,11 +234,14 @@ def test_build_backtest_chart_data_uses_card_name(monkeypatch):
     ]
 
     monkeypatch.setattr(
-        "dashboard.backend.equity_plot.market_index_baselines_for_run",
-        lambda *_a, **_k: [
-            ("DJIA index", "index:^DJI", [100_000, 99_800]),
-            ("Nasdaq-100", "index:^NDX", [100_000, 99_700]),
-        ],
+        "dashboard.backend.equity_plot.market_index_baselines_with_status",
+        lambda *_a, **_k: (
+            [
+                ("DJIA index", "index:^DJI", [100_000, 99_800]),
+                ("Nasdaq-100", "index:^NDX", [100_000, 99_700]),
+            ],
+            True,
+        ),
     )
 
     payload = build_backtest_chart_data(

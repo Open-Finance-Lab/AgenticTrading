@@ -19,7 +19,10 @@ from matplotlib.figure import Figure
 from matplotlib.ticker import FixedFormatter, FixedLocator, FuncFormatter, NullFormatter
 
 from dashboard.backend.chart_style import PLAYGROUND_THEME, series_color
-from dashboard.backend.domain.leaderboard.strategies._yahoo import fetch_index_hourly
+from dashboard.backend.domain.leaderboard.strategies._yahoo import (
+    fetch_index_hourly,
+    usable_window,
+)
 
 _ET = pytz.timezone("US/Eastern")
 _DEFAULT_MARKET_TIMEZONE = "US/Eastern"
@@ -95,6 +98,7 @@ def market_index_baselines_with_status(
     start_date: str,
     end_date: str,
     initial_capital: float,
+    context: str = "",
 ) -> Tuple[List[Tuple[str, str, List[float]]], bool]:
     """DJIA + Nasdaq-100 index baselines, plus whether Yahoo answered for every symbol.
 
@@ -103,7 +107,26 @@ def market_index_baselines_with_status(
     The flag keeps ``broken`` distinguishable from ``absent``: both yield fewer
     baselines, but only a transport failure is worth retrying, and only it means
     the chart the caller got is incomplete rather than simply data-free.
+
+    ``False`` therefore means *transient and retryable*, which is the only thing
+    a caller can act on. A window that cannot be parsed at all is permanently
+    baseline-free, so it reports ``True`` — there is nothing to retry and the
+    render is safe to cache — but it is still printed, because a run whose dates
+    don't parse is a data defect worth seeing.
+
+    ``context`` (a run id / window) is echoed into the log lines: during an
+    intermittent outage a bare symbol name repeats without saying which request
+    it came from.
     """
+    where = f" [{context}]" if context else ""
+    if not usable_window(start_date, end_date):
+        print(
+            f"⚠️ index baselines skipped{where}: unusable run window "
+            f"(start={start_date!r}, end={end_date!r})",
+            flush=True,
+        )
+        return [], True
+
     baselines: List[Tuple[str, str, List[float]]] = []
     upstream_ok = True
     for label, symbol in (("DJIA index", DJIA_INDEX), ("Nasdaq-100", NASDAQ_100_INDEX)):
@@ -112,13 +135,14 @@ def market_index_baselines_with_status(
                 symbol, timestamps, start_date, end_date, initial_capital
             )
         except requests.RequestException as exc:
-            # Transport-level only (HTTPError/Timeout/ConnectionError, and
-            # requests' JSONDecodeError). A malformed-but-delivered payload is a
-            # different bug and must keep surfacing. print(), not logging: log
-            # records are invisible under the deployed uvicorn.
+            # Transport-level, plus YahooChartError for the failures Yahoo
+            # delivers inside a 200. A malformed-but-delivered payload that gets
+            # past those checks is a different bug and must keep surfacing.
+            # print(), not logging: log records are invisible under the
+            # deployed uvicorn.
             upstream_ok = False
             print(
-                f"⚠️ index baseline {symbol} unavailable: "
+                f"⚠️ index baseline {symbol} unavailable{where}: "
                 f"{type(exc).__name__}: {exc}",
                 flush=True,
             )
@@ -126,19 +150,6 @@ def market_index_baselines_with_status(
         if values:
             baselines.append((label, f"index:{symbol}", values))
     return baselines, upstream_ok
-
-
-def market_index_baselines_for_run(
-    timestamps: Sequence[datetime],
-    start_date: str,
-    end_date: str,
-    initial_capital: float,
-) -> List[Tuple[str, str, List[float]]]:
-    """DJIA + Nasdaq-100 index baselines (same pair as simple_trading_agent_backtest.py)."""
-    baselines, _upstream_ok = market_index_baselines_with_status(
-        timestamps, start_date, end_date, initial_capital
-    )
-    return baselines
 
 
 def gapless_market_axis(
@@ -262,12 +273,12 @@ def build_backtest_chart_data(
             (bl_label, bl_run_id, align_equity(timestamps, equity_lookup(bl_curve)))
         )
 
+    index_baselines_ok = True
     if include_market_indexes:
-        baseline_values.extend(
-            market_index_baselines_for_run(
-                timestamps, start_date, end_date, initial_capital
-            )
+        index_baselines, index_baselines_ok = market_index_baselines_with_status(
+            timestamps, start_date, end_date, initial_capital, context=run_id
         )
+        baseline_values.extend(index_baselines)
 
     for bl_label, bl_run_id, bl_values in baseline_values:
         series.append(
@@ -285,6 +296,11 @@ def build_backtest_chart_data(
         "timestamps": [t.isoformat() for t in timestamps],
         "x_labels": gapless_chart_x_labels(timestamps, market_timezone),
         "series": series,
+        # False = the index benchmarks are missing because Yahoo was down, not
+        # because this run has none. The client has to be able to tell those
+        # apart; a chart that silently loses its benchmark reads as "this agent
+        # has no benchmark".
+        "index_baselines_ok": index_baselines_ok,
     }
 
 
@@ -313,8 +329,17 @@ def render_backtest_equity_png(
     title: str = "Trading Performance",
     xlabel: str = "Date",
     ylabel: str = "Portfolio value ($)",
+    note: Optional[str] = None,
 ) -> bytes:
-    """Render agent vs baseline curves using the gapless market-hour x axis."""
+    """Render agent vs baseline curves using the gapless market-hour x axis.
+
+    ``note`` is a caption drawn above the plot. It exists so a *degraded* render
+    — one whose index baselines were lost to a Yahoo outage — is self-describing:
+    the Discord bot uploads this PNG as a permanent channel artifact that, unlike
+    an HTTP response, nobody can re-fetch once the outage passes. Without the
+    caption a benchmark-free chart is indistinguishable from an agent that
+    genuinely has no benchmark.
+    """
     if not timestamps or not agent_values:
         raise ValueError("No equity data to plot")
 
@@ -345,6 +370,19 @@ def render_backtest_equity_png(
         )
 
     ax.set_title(title, color=theme["title"], fontsize=12, pad=12)
+    if note:
+        # Above the axes, so it can never be hidden behind a curve. bbox_inches
+        # is "tight" at savefig, so text outside the axes is not clipped.
+        ax.text(
+            0.0,
+            1.02,
+            note,
+            transform=ax.transAxes,
+            ha="left",
+            va="bottom",
+            fontsize=9,
+            color=theme["note"],
+        )
     ax.set_ylabel(ylabel, color=theme["label"], fontsize=10)
     ax.set_xlabel(xlabel, color=theme["label"], fontsize=10)
     ax.yaxis.set_major_formatter(FuncFormatter(lambda v, _: f"{v:,.0f}"))
