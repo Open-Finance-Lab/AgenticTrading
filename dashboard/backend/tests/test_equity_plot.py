@@ -4,12 +4,14 @@ from datetime import datetime
 
 import pytest
 import pytz
+import requests
 
 from dashboard.backend.equity_plot import (
     build_backtest_chart_data,
     compute_index_baseline_values,
     gapless_chart_x_labels,
     gapless_market_axis,
+    market_index_baselines_with_status,
     render_backtest_equity_png,
 )
 
@@ -43,6 +45,82 @@ def test_compute_index_baseline_values_scales_to_initial_capital(monkeypatch):
         100_000.0,
     )
     assert values == [100_000.0, pytest.approx(102_500.0)]
+
+
+def _session_stamps():
+    et = pytz.timezone("US/Eastern")
+    return (
+        et.localize(datetime(2026, 5, 1, 10, 30)).astimezone(pytz.UTC),
+        et.localize(datetime(2026, 5, 1, 11, 30)).astimezone(pytz.UTC),
+    )
+
+
+def test_market_index_baselines_report_upstream_failure(monkeypatch, capsys):
+    # Yahoo unreachable: drop the baselines, flag it, and say so on stdout —
+    # never let the exception escape into a caller rendering a public chart.
+    t0, t1 = _session_stamps()
+
+    def boom(_sym, _start, _end):
+        raise requests.ConnectionError("yahoo unreachable")
+
+    monkeypatch.setattr("dashboard.backend.equity_plot.fetch_index_hourly", boom)
+
+    baselines, upstream_ok = market_index_baselines_with_status(
+        [t0, t1], "2026-05-01", "2026-05-01", 100_000.0
+    )
+    assert baselines == []
+    assert upstream_ok is False
+    out = capsys.readouterr().out
+    assert "index baseline ^DJI unavailable: ConnectionError" in out
+    assert "index baseline ^NDX unavailable: ConnectionError" in out
+
+
+def test_market_index_baselines_distinguish_absent_from_broken(monkeypatch):
+    # Yahoo answered and simply had nothing for the window. Same empty baselines
+    # as an outage, but upstream_ok stays True — the flag is the only thing
+    # separating "no data" from "upstream is down", and callers key retries and
+    # cacheability off it.
+    t0, t1 = _session_stamps()
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly", lambda _s, _a, _b: []
+    )
+
+    baselines, upstream_ok = market_index_baselines_with_status(
+        [t0, t1], "2026-05-01", "2026-05-01", 100_000.0
+    )
+    assert baselines == []
+    assert upstream_ok is True
+
+
+def test_market_index_baselines_partial_outage_keeps_the_symbol_that_answered(monkeypatch):
+    t0, t1 = _session_stamps()
+
+    def only_djia(symbol, _start, _end):
+        if symbol == "^NDX":
+            raise requests.Timeout("read timeout")
+        return [(t0, 40_000.0), (t1, 41_000.0)]
+
+    monkeypatch.setattr("dashboard.backend.equity_plot.fetch_index_hourly", only_djia)
+
+    baselines, upstream_ok = market_index_baselines_with_status(
+        [t0, t1], "2026-05-01", "2026-05-01", 100_000.0
+    )
+    assert [label for label, _key, _values in baselines] == ["DJIA index"]
+    assert upstream_ok is False  # partial is still incomplete: retry it
+
+
+def test_market_index_baselines_do_not_swallow_non_transport_errors(monkeypatch):
+    # A delivered-but-malformed payload is a different bug. Swallowing it here
+    # would turn a code defect into a permanently baseline-free chart.
+    t0, t1 = _session_stamps()
+
+    def garbage(_sym, _start, _end):
+        raise TypeError("unorderable index payload")
+
+    monkeypatch.setattr("dashboard.backend.equity_plot.fetch_index_hourly", garbage)
+
+    with pytest.raises(TypeError):
+        market_index_baselines_with_status([t0, t1], "2026-05-01", "2026-05-01", 100_000.0)
 
 
 def test_gapless_chart_x_labels_anchor_at_day_start():

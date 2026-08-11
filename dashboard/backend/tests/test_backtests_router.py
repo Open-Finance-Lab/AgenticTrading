@@ -15,6 +15,7 @@ from datetime import datetime
 
 import pytest
 import pytz
+import requests
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
@@ -147,6 +148,75 @@ def test_plot_png_missing_run_not_cached(monkeypatch):
     with pytest.raises(HTTPException):
         bt._render_run_plot_png("missing")
     assert hits["n"] == 1  # re-evaluated, not served from a cached exception
+    bt._render_run_plot_png.cache_clear()
+
+
+def test_plot_png_survives_index_outage_and_retries_it(monkeypatch, capsys):
+    """#320, second half: Yahoo going down must cost the chart its baselines, not 500.
+
+    ``/runs/{run_id}/plot.png`` is public and unauthenticated, and app.py only
+    registers handlers for ApiError/RequestValidationError — so before this fix a
+    Yahoo 429 (the very flakiness #320 opened on) propagated out of the route as
+    an unhandled 500. The degraded render must also stay out of the lru_cache, or
+    one rate-limited minute would pin a baseline-free chart to that run until the
+    process restarted.
+    """
+    bt._render_run_plot_png.cache_clear()
+    run_id = f"run_outage_{uuid.uuid4().hex}"  # unique key, as in the cache test
+    fake_run = {
+        "session_id": None, "created_at": "2026-05-01T10:00:00", "agent_name": "Agent",
+        "start_date": "2026-05-01", "end_date": "2026-05-07", "mode": "safe_trading",
+        "baseline_buyhold_run_id": None, "baseline_djia_run_id": None,
+    }
+    et = pytz.timezone("US/Eastern")
+    t0 = et.localize(datetime(2026, 5, 1, 10, 30)).astimezone(pytz.UTC)
+    t1 = et.localize(datetime(2026, 5, 1, 11, 30)).astimezone(pytz.UTC)
+
+    monkeypatch.setattr(bt.db, "get_run", lambda rid: fake_run if rid == run_id else None)
+    monkeypatch.setattr(
+        bt.db, "get_equity_curve",
+        lambda rid: [{"timestamp": t0.replace(tzinfo=None).isoformat(), "equity": 100000},
+                     {"timestamp": t1.replace(tzinfo=None).isoformat(), "equity": 101000}],
+    )
+    monkeypatch.setattr(bt, "filter_market_hours", lambda pts: pts)
+
+    outage = {"on": True}
+    fetches = {"n": 0}
+
+    def flaky_fetch(_symbol, start, end):
+        if (start, end) != (fake_run["start_date"], fake_run["end_date"]):
+            return []  # not this test's run; don't touch the counter
+        fetches["n"] += 1
+        if outage["on"]:
+            # What requests raises on 429/5xx via raise_for_status().
+            raise requests.HTTPError("429 Client Error: Too Many Requests")
+        return [(t0, 40_000.0), (t1, 41_000.0)]
+
+    monkeypatch.setattr("dashboard.backend.equity_plot.fetch_index_hourly", flaky_fetch)
+    client = TestClient(app)
+
+    degraded = client.get(f"/runs/{run_id}/plot.png")
+    assert degraded.status_code == 200                       # was an unhandled 500
+    assert degraded.headers["content-type"] == "image/png"
+    assert degraded.content[:8] == b"\x89PNG\r\n\x1a\n"      # a real chart, sans baselines
+
+    client.get(f"/runs/{run_id}/plot.png")
+    assert fetches["n"] == 4  # both symbols retried: the degraded render wasn't cached
+
+    outage["on"] = False
+    healthy = client.get(f"/runs/{run_id}/plot.png")
+    assert healthy.status_code == 200
+    assert healthy.content != degraded.content  # baselines are back on the chart
+    again = client.get(f"/runs/{run_id}/plot.png")
+    assert again.content == healthy.content
+    assert fetches["n"] == 6  # ...and a complete render *is* cached, as before
+
+    # The outage has to be legible in the logs: absent baselines and broken
+    # upstream otherwise render identically (see CLAUDE.md, "fail-closed is not
+    # fail-visible"). print(), because logging is invisible under prod uvicorn.
+    out = capsys.readouterr().out
+    assert "index baseline ^DJI unavailable: HTTPError" in out
+    assert "index baseline ^NDX unavailable: HTTPError" in out
     bt._render_run_plot_png.cache_clear()
 
 

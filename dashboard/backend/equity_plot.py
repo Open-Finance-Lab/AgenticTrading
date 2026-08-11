@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import matplotlib.dates as mdates
 import pandas as pd
 import pytz
+import requests
 from matplotlib.figure import Figure
 from matplotlib.ticker import FixedFormatter, FixedLocator, FuncFormatter, NullFormatter
 
@@ -89,6 +90,44 @@ def compute_index_baseline_values(
     return [float(initial_capital * (value / base)) for value in aligned]
 
 
+def market_index_baselines_with_status(
+    timestamps: Sequence[datetime],
+    start_date: str,
+    end_date: str,
+    initial_capital: float,
+) -> Tuple[List[Tuple[str, str, List[float]]], bool]:
+    """DJIA + Nasdaq-100 index baselines, plus whether Yahoo answered for every symbol.
+
+    Yahoo is a third-party dependency of a *public* chart endpoint, so a 429 /
+    5xx / timeout must cost the caller its baselines, never the whole render.
+    The flag keeps ``broken`` distinguishable from ``absent``: both yield fewer
+    baselines, but only a transport failure is worth retrying, and only it means
+    the chart the caller got is incomplete rather than simply data-free.
+    """
+    baselines: List[Tuple[str, str, List[float]]] = []
+    upstream_ok = True
+    for label, symbol in (("DJIA index", DJIA_INDEX), ("Nasdaq-100", NASDAQ_100_INDEX)):
+        try:
+            values = compute_index_baseline_values(
+                symbol, timestamps, start_date, end_date, initial_capital
+            )
+        except requests.RequestException as exc:
+            # Transport-level only (HTTPError/Timeout/ConnectionError, and
+            # requests' JSONDecodeError). A malformed-but-delivered payload is a
+            # different bug and must keep surfacing. print(), not logging: log
+            # records are invisible under the deployed uvicorn.
+            upstream_ok = False
+            print(
+                f"⚠️ index baseline {symbol} unavailable: "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            continue
+        if values:
+            baselines.append((label, f"index:{symbol}", values))
+    return baselines, upstream_ok
+
+
 def market_index_baselines_for_run(
     timestamps: Sequence[datetime],
     start_date: str,
@@ -96,13 +135,9 @@ def market_index_baselines_for_run(
     initial_capital: float,
 ) -> List[Tuple[str, str, List[float]]]:
     """DJIA + Nasdaq-100 index baselines (same pair as simple_trading_agent_backtest.py)."""
-    baselines: List[Tuple[str, str, List[float]]] = []
-    for label, symbol in (("DJIA index", DJIA_INDEX), ("Nasdaq-100", NASDAQ_100_INDEX)):
-        values = compute_index_baseline_values(
-            symbol, timestamps, start_date, end_date, initial_capital
-        )
-        if values:
-            baselines.append((label, f"index:{symbol}", values))
+    baselines, _upstream_ok = market_index_baselines_with_status(
+        timestamps, start_date, end_date, initial_capital
+    )
     return baselines
 
 

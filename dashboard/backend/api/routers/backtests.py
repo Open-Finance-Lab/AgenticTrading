@@ -91,7 +91,7 @@ from dashboard.backend.equity_plot import (
     build_backtest_chart_data,
     curve_timestamps_and_values,
     equity_lookup,
-    market_index_baselines_for_run,
+    market_index_baselines_with_status,
     render_backtest_equity_png,
     resolve_agent_chart_label,
 )
@@ -1688,7 +1688,29 @@ def get_run_plot(run_id: str):
     Sync ``def`` so FastAPI runs the CPU-bound matplotlib render in its
     threadpool rather than blocking the event loop; the PNG is cached per run_id.
     """
-    return Response(content=_render_run_plot_png(run_id), media_type="image/png")
+    return Response(content=_run_plot_png(run_id), media_type="image/png")
+
+
+class _UncachedPlotPng(Exception):
+    """Carries a rendered PNG that must *not* be memoized.
+
+    Raised when Yahoo was unreachable, so the chart is missing its index
+    baselines. ``lru_cache`` never stores a call that raised, which is what
+    keeps a degraded render out of the cache — otherwise one Yahoo 429 would
+    pin a baseline-free chart to that run for the life of the process.
+    """
+
+    def __init__(self, png: bytes) -> None:
+        super().__init__("index baselines unavailable; render not cached")
+        self.png = png
+
+
+def _run_plot_png(run_id: str) -> bytes:
+    """``_render_run_plot_png`` with the uncached-degraded-render escape unwrapped."""
+    try:
+        return _render_run_plot_png(run_id)
+    except _UncachedPlotPng as exc:
+        return exc.png
 
 
 @lru_cache(maxsize=128)
@@ -1698,7 +1720,9 @@ def _render_run_plot_png(run_id: str) -> bytes:
     A run's equity data is immutable once written and run_ids are unique per
     run, so the rendered bytes are reused without re-querying the DB or
     re-rendering. HTTPExceptions (missing run / no equity data) are raised, not
-    cached — so data that appears later is still picked up on a retry.
+    cached — so data that appears later is still picked up on a retry. A render
+    whose index baselines were lost to a Yahoo outage leaves the same way, via
+    ``_UncachedPlotPng``; call through ``_run_plot_png`` to get its bytes.
     """
     run = db.get_run(run_id)
     if not run:
@@ -1717,8 +1741,9 @@ def _render_run_plot_png(run_id: str) -> bytes:
         raise HTTPException(status_code=404, detail="No equity data to plot for this run")
 
     initial_capital = float(run.get("initial_equity") or agent_values[0] or 1_000)
+    index_baselines_ok = True
     if profile.index_baseline_enabled:
-        baselines = market_index_baselines_for_run(
+        baselines, index_baselines_ok = market_index_baselines_with_status(
             timestamps,
             run.get("start_date") or "",
             run.get("end_date") or "",
@@ -1733,7 +1758,7 @@ def _render_run_plot_png(run_id: str) -> bytes:
         ]
 
     try:
-        return render_backtest_equity_png(
+        png = render_backtest_equity_png(
             agent_label=agent_label,
             agent_run_id=run_id,
             timestamps=timestamps,
@@ -1743,6 +1768,10 @@ def _render_run_plot_png(run_id: str) -> bytes:
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if not index_baselines_ok:
+        raise _UncachedPlotPng(png)
+    return png
 
 
 @router.get("/compare", response_model=ComparisonResponse)
