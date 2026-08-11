@@ -90,3 +90,18 @@ def test_leaderboard_cache_buster_bumped():
     match = re.search(r"js/leaderboard\.js\?v=(\d+)", _APP_HTML)
     assert match, "leaderboard.js must be loaded with a ?v= cache buster"
     assert int(match.group(1)) >= 19
+
+
+def test_daily_leaderboard_subtab_is_parked():
+    """UI is hidden until daily model deploys are reliable; backend stays.
+
+    Re-enable by removing ``hidden`` from the subtab (and About card), restoring
+    ``NAV_VIEW_MAP['daily']`` → ``competitionTab: 'daily'``, dropping the
+    navigateToPage redirect in app.js, and turning the workflow schedule back on.
+    """
+    assert re.search(
+        r'data-competition-tab="daily"[^>]*\bhidden\b',
+        _APP_HTML,
+    ), "Daily Leaderboard subtab must stay hidden while the board is parked"
+    assert "competitionTab: 'leaderboard'" in _APP_HTML
+    assert re.search(r"\bdaily\s*:\s*\{[^}]*competitionTab:\s*'leaderboard'", _APP_HTML)

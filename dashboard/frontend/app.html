@@ -36,7 +36,9 @@
             playground: { page: 'playground', playgroundTab: 'agents' },
             'my-algo': { page: 'playground', playgroundTab: 'agents' },
             contest: { page: 'competition', competitionTab: 'leaderboard' },
-            daily: { page: 'competition', competitionTab: 'daily' },
+            // Daily Leaderboard UI is temporarily retired (backend/cron kept).
+            // ?view=daily deep links fall through to the contest board.
+            daily: { page: 'competition', competitionTab: 'leaderboard' },
             competition: { page: 'competition', competitionTab: 'leaderboard' },
             leaderboard: { page: 'competition', competitionTab: 'leaderboard' },
             participants: { page: 'competition', competitionTab: 'participants' },
@@ -50,6 +52,10 @@
         function migrateSavedNavState(saved) {
             if (saved && saved.page === 'playground' && saved.playgroundTab === 'marketplace') {
                 return { page: 'community' };
+            }
+            // Daily Leaderboard tab is hidden until the deploy pipeline is fixed.
+            if (saved && saved.page === 'competition' && saved.competitionTab === 'daily') {
+                return { page: 'competition', competitionTab: 'leaderboard' };
             }
             return saved;
         }
@@ -1416,7 +1422,8 @@
     <div id="competitionView" class="page-view competition-view" style="display: none;">
         <div class="subtab-bar competition-subtabs">
             <button class="subtab-btn active" data-competition-tab="leaderboard">Competition Leaderboard</button>
-            <button class="subtab-btn" data-competition-tab="daily">Daily Leaderboard</button>
+            <!-- hidden: Daily Leaderboard UI parked until model curves deploy reliably. Backend + workflow_dispatch kept. -->
+            <button class="subtab-btn" data-competition-tab="daily" hidden>Daily Leaderboard</button>
             <button class="subtab-btn" data-competition-tab="participants">Participating Teams</button>
             <button class="subtab-btn" data-competition-tab="about">About</button>
         </div>
@@ -1435,7 +1442,8 @@
                     <h3 class="section-title">Competition Overview</h3>
                     <p class="about-text">SecureFinAI Contest 2026 is a paper-trading competition for AI-powered agents. The contest is currently in <strong>Preseason</strong>. Participating teams join when the season starts (registration Aug 2026).</p>
                 </div>
-                <div class="section-card">
+                <!-- hidden with the Daily Leaderboard subtab; restore when that tab ships again. -->
+                <div class="section-card" hidden>
                     <h3 class="section-title">Daily Leaderboard</h3>
                     <p class="about-text">The Daily Leaderboard is the same chart + standings UI as Competition, but each entry is an hourly backtest over the <strong>last completed US cash session</strong> (after 16:00 ET that weekday; before the close, the prior session). Baseline and index lines refresh automatically on load. New AI entries appear when the leaderboard next updates.</p>
                 </div>
@@ -1752,7 +1760,7 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=26" defer></script>
-    <script src="app.js?v=77" defer></script>
+    <script src="app.js?v=78" defer></script>
     <script src="js/leaderboard.js?v=19" defer></script>
     <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
