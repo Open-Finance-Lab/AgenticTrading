@@ -84,6 +84,10 @@
   let financialDatasetsConfigured = false;
   let activeCpTab = 'overview';
   let cachedRuns = [];
+  // True when Market shows US Stocks only as a UI default for an uncategorized
+  // agent (DB category still null). Cleared when the user touches the select so
+  // Save of unrelated fields cannot silently shelf the agent.
+  let categoryUiDefaulted = false;
 
   function isAiHedgeFundAgent(agent = currentAgent) {
     return (agent?.runtime_type || 'pipeline') === AI_HEDGE_FUND_RUNTIME;
@@ -820,8 +824,9 @@
     if (!select) return;
     const labels = shelfLabels();
     // "" remains a saveable choice (backend folds it to NULL / un-shelves).
-    // Default the *visible* selection to US Stocks when nothing is stored yet
-    // -- bare "Not set (Prompting LLMs)" was stale copy and looked broken.
+    // Uncategorized agents show US Stocks as the suggested default, but
+    // categoryUiDefaulted keeps that from being PATCH'd until the user
+    // touches Market (see getEditorState).
     const options = [['', 'Not set']].concat(
       Object.keys(labels).map((slug) => [slug, labels[slug]]),
     );
@@ -833,7 +838,13 @@
       select.appendChild(option);
     });
     const current = String(agent?.category || '').trim().toLowerCase();
-    select.value = labels[current] ? current : 'us_stocks';
+    if (labels[current]) {
+      select.value = current;
+      categoryUiDefaulted = false;
+    } else {
+      select.value = labels.us_stocks ? 'us_stocks' : '';
+      categoryUiDefaulted = Boolean(labels.us_stocks);
+    }
   }
 
   function getEditorState() {
@@ -841,9 +852,11 @@
     const categorySelect = document.getElementById('agentEditorCategorySelect');
     // null means "omit the key", which the PATCH route reads as "leave alone".
     // "" means "clear the shelf" and must still be sent.
-    const category = categoryFieldApplies() && categorySelect
-      ? String(categorySelect.value || '')
-      : null;
+    // categoryUiDefaulted → null so a capital/name save does not invent a market.
+    let category = null;
+    if (categoryFieldApplies() && categorySelect) {
+      category = categoryUiDefaulted ? null : String(categorySelect.value || '');
+    }
     const nameInput = document.getElementById('agentEditorNameInput');
     const cashInput = document.getElementById('agentEditorCashAllocation');
     // Description was removed from Configure — it is not shown on agent cards
@@ -1540,6 +1553,9 @@
 
     const body = document.getElementById('agentEditorView');
     body?.addEventListener('input', (event) => {
+      if (event.target?.id === 'agentEditorCategorySelect') {
+        categoryUiDefaulted = false;
+      }
       markDirtyFromInput();
       if (
         event.target?.id === 'agentEditorModelSelect'
@@ -1551,6 +1567,9 @@
       }
     });
     body?.addEventListener('change', (event) => {
+      if (event.target?.id === 'agentEditorCategorySelect') {
+        categoryUiDefaulted = false;
+      }
       markDirtyFromInput();
       if (
         event.target?.id === 'agentEditorModelSelect'
