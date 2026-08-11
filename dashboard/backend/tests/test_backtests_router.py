@@ -11,8 +11,10 @@ import inspect
 import json
 import time
 import uuid
+from datetime import datetime
 
 import pytest
+import pytz
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
@@ -41,7 +43,7 @@ def test_plot_png_matplotlib_hoisted_to_module():
 
 def test_plot_png_cached_per_run(monkeypatch):
     bt._render_run_plot_png.cache_clear()
-    calls = {"get_run": 0, "equity": 0}
+    calls = {"get_run": 0, "equity": 0, "yahoo": 0}
     fake_run = {
         "session_id": None, "created_at": "2026-05-01T10:00:00", "agent_name": "Agent",
         "start_date": "2026-05-01", "end_date": "2026-05-07", "mode": "safe_trading",
@@ -58,6 +60,16 @@ def test_plot_png_cached_per_run(monkeypatch):
     # the assertions either way.
     run_id = f"run_x_{uuid.uuid4().hex}"
 
+    # 10:30/11:30 ET (== 14:30/15:30 UTC). compute_index_baseline_values first
+    # drops every index level failing is_market_hour, then aligns the survivors
+    # onto the agent's own timeline with a 30-minute nearest-match tolerance —
+    # so the equity curve *and* the stubbed index levels both have to sit inside
+    # the session. Stamps outside it (e.g. a naive 10:00 "UTC", which is 06:00
+    # ET) make the baselines come back empty with the test still passing.
+    et = pytz.timezone("US/Eastern")
+    t0 = et.localize(datetime(2026, 5, 1, 10, 30)).astimezone(pytz.UTC)
+    t1 = et.localize(datetime(2026, 5, 1, 11, 30)).astimezone(pytz.UTC)
+
     def fake_get_run(rid):
         if rid == run_id:
             calls["get_run"] += 1
@@ -66,12 +78,41 @@ def test_plot_png_cached_per_run(monkeypatch):
     def fake_equity(rid):
         if rid == run_id:
             calls["equity"] += 1
-        return [{"timestamp": "2026-05-01T10:00:00", "equity": 100000},
-                {"timestamp": "2026-05-01T11:00:00", "equity": 101000}]
+        # Naive-UTC ISO strings, the shape the DB stores.
+        return [{"timestamp": t0.replace(tzinfo=None).isoformat(), "equity": 100000},
+                {"timestamp": t1.replace(tzinfo=None).isoformat(), "equity": 101000}]
 
+    # fake_run carries no `metadata`, so _market_profile_for_run falls back to
+    # the Alpaca/US profile with index_baseline_enabled true, which makes
+    # _render_run_plot_png call market_index_baselines_for_run ->
+    # fetch_index_hourly for ^DJI/^NDX. Without this patch that is a real
+    # HTTPS call to query1.finance.yahoo.com on every run (issue #320: flakes
+    # when Yahoo is slow/rate-limited). Stub it here, same pattern as
+    # test_equity_plot.py; the network fetch is incidental to what this test
+    # covers (lru_cache behaviour).
+    def fake_fetch_index_hourly(_symbol, start, end):
+        if (start, end) == (fake_run["start_date"], fake_run["end_date"]):
+            calls["yahoo"] += 1  # same stray-thread gating as the counters above
+        return [(t0, 40_000.0), (t1, 41_000.0)]
+
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly", fake_fetch_index_hourly
+    )
     monkeypatch.setattr(bt.db, "get_run", fake_get_run)
     monkeypatch.setattr(bt.db, "get_equity_curve", fake_equity)
     monkeypatch.setattr(bt, "filter_market_hours", lambda pts: pts)  # isolate caching
+
+    # Record what the renderer is handed: an index baseline that got filtered
+    # away upstream arrives as [], which would leave this path uncovered while
+    # every other assertion still passed.
+    rendered = {}
+    real_render = bt.render_backtest_equity_png
+
+    def spy_render(**kwargs):
+        rendered.setdefault("baselines", kwargs["baselines"])
+        return real_render(**kwargs)
+
+    monkeypatch.setattr(bt, "render_backtest_equity_png", spy_render)
 
     first = bt._render_run_plot_png(run_id)
     second = bt._render_run_plot_png(run_id)
@@ -79,6 +120,11 @@ def test_plot_png_cached_per_run(monkeypatch):
     assert first == second
     assert first[:8] == b"\x89PNG\r\n\x1a\n"      # valid PNG
     assert calls["get_run"] == 1                  # 2nd call served from cache
+    assert calls["yahoo"] == 2                    # stub answered ^DJI + ^NDX, no network
+    assert [label for label, _key, _values in rendered["baselines"]] == [
+        "DJIA index",
+        "Nasdaq-100",
+    ]
     bt._render_run_plot_png.cache_clear()
 
 
