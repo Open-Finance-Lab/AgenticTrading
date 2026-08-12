@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import pandas as pd
 import pytest
+from datetime import date
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from dashboard.backend import baseline_generator as baseline_module
 from dashboard.backend.baseline_generator import BaselineGenerator
+from dashboard.backend.domain.backtesting.market_rules import (
+    ClosingLimitState,
+    DailyMarketRule,
+    MarketRuleCalendar,
+)
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
 )
@@ -351,3 +358,61 @@ def test_us_baseline_is_untouched_by_the_lot_and_cost_plumbing():
     assert before == after
     # 100k over two names at 101/201 -> 495 and 248 whole shares, no top-up.
     assert before[0]["positions_value"] == pytest.approx(495 * 101 + 248 * 201)
+
+
+def test_a_share_baseline_retries_market_blocked_initial_buy_on_later_bar():
+    index = pd.DatetimeIndex(
+        [
+            "2026-04-01 15:00:00",
+            "2026-04-02 10:30:00",
+            "2026-04-02 15:00:00",
+        ],
+        tz=ZoneInfo("Asia/Shanghai"),
+        name="timestamp",
+    )
+    bars = {
+        "600519.SH": pd.DataFrame(
+            {"close": [10.0, 12.0, 13.0]},
+            index=index,
+        )
+    }
+    calendar = MarketRuleCalendar([
+        DailyMarketRule(
+            symbol="600519.SH",
+            trading_date=date(2026, 4, 1),
+            suspended=True,
+        ),
+        DailyMarketRule(
+            symbol="600519.SH",
+            trading_date=date(2026, 4, 2),
+            suspended=False,
+            closing_limit_state=ClosingLimitState.NONE,
+            official_close_price=Decimal("13.00"),
+            final_bar_timestamp=index[-1].to_pydatetime(),
+        ),
+    ])
+    summary = {}
+    totals = {}
+
+    curve = BaselineGenerator().generate_buyhold_baseline(
+        bars,
+        "2026-04-01",
+        "2026-04-02",
+        initial_capital=10_000,
+        symbols_to_buy=["600519.SH"],
+        market_timezone="Asia/Shanghai",
+        transaction_cost_profile=ASHARE_TRANSACTION_COST_PROFILE,
+        transaction_cost_totals=totals,
+        lot_size=100,
+        allocation_summary=summary,
+        market_rule_calendar=calendar,
+    )
+
+    assert curve[0]["cash"] == 10_000
+    assert curve[0]["positions_value"] == 0
+    assert curve[1]["cash"] < 10_000
+    assert curve[1]["positions_value"] > 0
+    assert summary["symbols_delayed"] == 1
+    assert summary["symbols_unfilled"] == 0
+    assert summary["symbols_bought"] == 1
+    assert totals["total_fees"] > 0
