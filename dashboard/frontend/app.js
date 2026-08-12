@@ -6200,6 +6200,9 @@ function formatOrderExecutionReason(reason, strategyReason = '') {
         insufficient_cash: 'Insufficient cash',
         t1_frozen: 'T+1 frozen',
         insufficient_position: 'Insufficient position',
+        suspended: 'Suspended',
+        limit_up_buy_blocked: 'Buy blocked at upper limit',
+        limit_down_sell_blocked: 'Sell blocked at lower limit',
     };
     const code = String(reason || '').trim();
     if (labels[code]) return labels[code];
@@ -6268,7 +6271,32 @@ function normalizeOrderRecord(record) {
         nativeTransferFee: optionalNumber(record?.native_transfer_fee),
         nativeTotalFees: optionalNumber(record?.native_total_fees),
         nativeNetCashImpact: optionalNumber(record?.native_net_cash_impact),
+        marketRuleDate: record?.market_rule_date || null,
+        marketRuleSuspended: record?.market_rule_suspended === true
+            || record?.market_rule_suspended === 1,
+        marketRuleClosingLimitState: record?.market_rule_closing_limit_state || null,
+        marketRuleOfficialClose: optionalNumber(record?.market_rule_official_close),
+        marketRuleClosingGateEffective:
+            record?.market_rule_closing_gate_effective === true
+            || record?.market_rule_closing_gate_effective === 1,
     };
+}
+
+function renderMarketRuleAudit(order) {
+    if (!order.marketRuleDate) return '';
+    const details = [];
+    if (order.marketRuleSuspended) {
+        details.push('Official status: suspended');
+    } else if (order.marketRuleClosingLimitState
+        && order.marketRuleClosingLimitState !== 'none') {
+        const side = order.marketRuleClosingLimitState === 'upper' ? 'upper' : 'lower';
+        details.push(`Official close: ${side} limit`);
+    }
+    if (Number.isFinite(order.marketRuleOfficialClose)) {
+        details.push(`¥${order.marketRuleOfficialClose.toFixed(2)}`);
+    }
+    if (!details.length) return '';
+    return `<div class="trading-log-native">${escapeHtml(order.marketRuleDate)} · ${escapeHtml(details.join(' · '))}</div>`;
 }
 
 function formatTradingMoney(value, symbol) {
@@ -6373,6 +6401,7 @@ function paintTradingLog(normalizedRecords, options) {
         const assetName = resolveTradingAssetName(order.symbol);
         const quantity = `${order.executedShares.toLocaleString('en-US')} / ${order.requestedShares.toLocaleString('en-US')} shares`;
         const reason = formatOrderExecutionReason(order.reason, order.strategyReason);
+        const marketRuleAudit = renderMarketRuleAudit(order);
         // A rejection the agent re-issued on every bar of a day is stored once,
         // with its tally. Showing the tally is the difference between "this
         // blocked one order" and "this blocked the strategy all day".
@@ -6387,7 +6416,7 @@ function paintTradingLog(normalizedRecords, options) {
             <td>$${order.price.toFixed(2)}${priceAudit}</td>
             <td class="trading-log-value">${order.executedShares > 0 ? `${formatTradingMoney(order.value, '$')}${valueAudit}${costAudit}` : '--'}</td>
             <td><span class="order-status order-status-${order.status}" title="Order status: ${statusLabel}" aria-label="Order status: ${statusLabel}">${statusLabel}</span></td>
-            <td class="trading-log-reason">${escapeHtml(reason)}${repeatNote}</td>
+            <td class="trading-log-reason">${escapeHtml(reason)}${marketRuleAudit}${repeatNote}</td>
         </tr>`;
     }).join('');
 
@@ -6581,6 +6610,12 @@ function renderBacktestRunConfig(
         ?? run?.transaction_cost_profile;
     const transactionCostTotals = metadata.transaction_cost_totals
         ?? run?.transaction_cost_totals;
+    const marketRuleProfile = metadata.market_rule_profile
+        ?? run?.market_rule_profile;
+    const marketRuleRejections = metadata.market_rule_rejections
+        ?? run?.market_rule_rejections;
+    const baselineAllocation = metadata.baseline_allocation
+        ?? run?.baseline_allocation;
     // Absent (older runs) reads as applied; only an explicit false marks a
     // curve that carries the market's cost rules without ever paying them.
     const transactionCostsApplied = (metadata.transaction_costs_applied
@@ -6669,6 +6704,36 @@ function renderBacktestRunConfig(
             transactionCostsApplied
                 ? formatTransactionCostTotals(transactionCostTotals)
                 : 'Not applicable — reference price curve',
+        );
+    }
+    const showMarketRules = marketRuleProfile?.enabled === true;
+    const marketRulesRow = document.getElementById('backtestConfigMarketRulesRow');
+    if (marketRulesRow) marketRulesRow.hidden = !showMarketRules;
+    if (showMarketRules) {
+        setBacktestConfigText('backtestConfigMarketRules', 'Enabled');
+    }
+    const rejectionLabels = {
+        suspended: 'Suspended',
+        limit_up_buy_blocked: 'Upper-limit buys',
+        limit_down_sell_blocked: 'Lower-limit sells',
+    };
+    const ruleRejectionParts = Object.entries(marketRuleRejections || {})
+        .filter(([, count]) => Number(count) > 0)
+        .map(([reason, count]) => `${rejectionLabels[reason] || reason} ${Number(count)}`);
+    const ruleRejectionsRow = document.getElementById('backtestConfigRuleRejectionsRow');
+    if (ruleRejectionsRow) ruleRejectionsRow.hidden = ruleRejectionParts.length === 0;
+    if (ruleRejectionParts.length) {
+        setBacktestConfigText('backtestConfigRuleRejections', ruleRejectionParts.join(' · '));
+    }
+    const delayed = Number(baselineAllocation?.symbols_delayed || 0);
+    const unfilled = Number(baselineAllocation?.symbols_unfilled || 0);
+    const showBaselineRules = delayed > 0 || unfilled > 0;
+    const baselineRulesRow = document.getElementById('backtestConfigBaselineRulesRow');
+    if (baselineRulesRow) baselineRulesRow.hidden = !showBaselineRules;
+    if (showBaselineRules) {
+        setBacktestConfigText(
+            'backtestConfigBaselineRules',
+            `Delayed ${delayed} · Unfilled ${unfilled}`,
         );
     }
     setBacktestConfigText('backtestConfigUniverse', universe);
