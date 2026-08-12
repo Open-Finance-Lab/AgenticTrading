@@ -1135,7 +1135,7 @@
                                 <div id="agentEditorManagedModelField" class="agent-cp-field" aria-label="Hosted AI model" hidden>
                                     <span class="agent-cp-field-label">Hosted AI model</span>
                                     <strong id="agentEditorManagedModelValue" class="agent-editor-managed-model-value">OpenRouter · nvidia/nemotron-3-nano-30b-a3b</strong>
-                                    <span class="agent-cp-field-note">hosted and managed by Agentic Trading Lab</span>
+                                    <span class="agent-cp-field-note">Managed for you by Agentic Trading Lab</span>
                                 </div>
                                 <label id="agentEditorCategoryField" class="agent-cp-field" for="agentEditorCategorySelect">
                                     <span class="agent-cp-field-label">Market</span>
@@ -1144,7 +1144,7 @@
                                 <label class="agent-cp-field" for="agentEditorCashAllocation">
                                     <span class="agent-cp-field-label">Paper capital <span class="agent-cp-field-max">max $3,000</span></span>
                                     <input id="agentEditorCashAllocation" class="agent-cp-control agent-cp-control--mono" type="number" min="0" max="3000" step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital">
-                                    <span class="agent-cp-field-note">Reserved from My Portfolio while paper-trading.</span>
+                                    <span class="agent-cp-field-note">Reserved from your My Portfolio balance while this agent paper-trades. Backtests use a separate simulated amount and never touch it.</span>
                                 </label>
                                 <label class="agent-cp-field" for="agentEditorBacktestAllocation">
                                     <span class="agent-cp-field-label">Backtest capital <span class="agent-cp-field-max">max $3,000</span></span>
@@ -1165,16 +1165,16 @@
                             </div>
 
                             <div id="agentEditorAiHedgeFundPanel" class="agent-editor-simple agent-cp-field agent-cp-field--wide" hidden>
-                                <span class="agent-cp-field-label">AI Hedge Fund analysts</span>
-                                <p class="agent-cp-field-note">Hosted runtime — pick which analysts shape each trade.</p>
+                                <span class="agent-cp-field-label">AI Hedge Fund analyst panel</span>
+                                <p class="agent-cp-field-note">Choose the analysts that shape this agent's strategy. The AI model and its settings are hosted and managed by Agentic Trading Lab.</p>
                                 <div id="agentEditorAiHedgeFundAnalysts" class="agent-editor-analyst-grid" role="group" aria-label="AI Hedge Fund analysts"></div>
                                 <label class="auth-field agent-editor-credential-field" for="agentEditorFinancialDatasetsKey">
-                                    <span>Financial Datasets access key</span>
+                                    <span>Financial Datasets access key (from financialdatasets.ai)</span>
                                     <input id="agentEditorFinancialDatasetsKey" type="password" autocomplete="new-password" placeholder="Leave blank to keep the stored key" aria-describedby="agentEditorFinancialDatasetsStatus">
                                 </label>
                                 <p id="agentEditorFinancialDatasetsStatus" class="agent-editor-simple-note">Checking credential…</p>
                                 <button id="agentEditorFinancialDatasetsRemove" class="agent-editor-credential-remove" type="button" hidden>Remove stored key</button>
-                                <p class="agent-cp-field-note">Encrypted at rest. Never shown again after you save.</p>
+                                <p class="agent-cp-field-note">Encrypted and stored securely. For your protection, it is never shown again after you save.</p>
                             </div>
                         </div>
 
