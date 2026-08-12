@@ -7,15 +7,17 @@
 
 ## Objective
 
-Enforce official iFinD full-day suspension and daily upper/lower price-limit data in
-ATL's A-share historical backtests. Apply the same rule contract to Agent orders and the
+Enforce official iFinD full-day suspension and closing price-limit observations in ATL's
+A-share historical backtests. Apply the same rule contract to Agent orders and the
 buy-and-hold baseline without changing Alpaca or vn.py behavior. Keep the platform
 simulation-only and keep every credential and unsanitized production response out of
 Git.
 
 ## Guardrails
 
-- Do not infer suspension or limit prices from OHLCV.
+- Do not infer suspension or theoretical limit prices from prior close, board rules, or
+  OHLCV.
+- Do not apply an official end-of-day limit state to an earlier intraday bar.
 - Do not hard-code an unverified iFinD indicator or response field.
 - Fail an A-share run before execution when rule data is unavailable or incomplete.
 - Keep all repository and GitHub text in English.
@@ -34,20 +36,23 @@ Git.
 
 **Steps:**
 
-1. Generate or inspect the official command for daily suspension status, upper-limit
-   price, and lower-limit price.
+1. Generate or inspect the official commands for daily trading status, daily closing
+   limit status, official daily close, and real-time upper/lower limit prices.
 2. Run the narrowest authorized request for one registered A-share and a short historical
    date window.
 3. Record only a sanitized structural summary: endpoint category, request field names,
    top-level response keys, table keys, indicator keys, value types, and row counts.
-4. Confirm how full-day suspension is represented and whether prices/status share one
-   endpoint or require separate official requests.
-5. Keep the raw response outside the repository and delete temporary captures after the
+4. Confirm that historical quotation exposes daily trading/limit status and close, while
+   real-time quotation alone exposes `upperLimit` and `downLimit`.
+5. Confirm that requesting daily status fields from high-frequency history returns no
+   point-in-time values, so closing state must never be backfilled onto earlier bars.
+6. Keep the raw response outside the repository and delete temporary captures after the
    fixture shape is encoded.
 
 **Stop condition:** No implementation proceeds until all vendor-specific names and value
 encodings are verified. If the account lacks a required field permission, report the
-permission failure and do not substitute inferred rules.
+permission failure and do not substitute inferred rules. Do not claim historical
+intraday price-limit enforcement from daily closing data.
 
 ## Task 2: Add the Daily Rule Domain Contract and Adapter
 
@@ -71,11 +76,14 @@ permission failure and do not substitute inferred rules.
    missing-symbol, and missing-date responses.
 3. Implement the verified iFinD client request without exposing vendor fields outside the
    adapter.
-4. Normalize official values into native-CNY decimals and explicit booleans.
+4. Normalize official values into an explicit suspension boolean, closing limit enum,
+   and native-CNY official close.
 5. Validate coverage against every registered symbol and every combined-clock market
    date.
-6. Raise a dedicated sanitized `MarketRuleDataError` for transport, permission, schema,
-   or coverage failures.
+6. Derive the unique final hourly timestamp per active symbol-date and validate its close
+   against the official daily close to the profile price tick.
+7. Raise a dedicated sanitized `MarketRuleDataError` for transport, permission, schema,
+   coverage, or close-alignment failures.
 
 **Verification:** Run the new client, adapter, provider, and domain test modules plus
 `git diff --check`.
@@ -94,12 +102,13 @@ permission failure and do not substitute inferred rules.
 
 **Steps:**
 
-1. Add failing tests for suspended BUY/SELL, upper-limit BUY, lower-limit SELL, and
-   permitted opposite directions.
+1. Add failing tests for suspended BUY/SELL, closing upper-limit BUY, closing lower-limit
+   SELL, permitted opposite directions, and earlier-bar non-blocking.
 2. Pass the daily rule from engine to portfolio manager and shared executor only for the
    iFinD A-share profile.
 3. Run market-rule gates before lot-size, T+1, cash, and cost checks.
-4. Use tick-safe native-CNY decimal comparison against the reference execution price.
+4. Use tick-safe native-CNY decimal comparison against the official daily close and
+   require the validated final hourly timestamp for closing gates.
 5. Emit `suspended`, `limit_up_buy_blocked`, or `limit_down_sell_blocked` with zero
    execution, zero fees, and complete rule audit fields.
 6. Aggregate the three Agent rejection counts in run metadata.
@@ -121,8 +130,8 @@ permission failure and do not substitute inferred rules.
 
 **Steps:**
 
-1. Add failing tests where a baseline symbol is suspended or upper-limit blocked at its
-   first bar and becomes eligible later.
+1. Add failing tests where a baseline symbol is suspended or closing-upper-limit blocked
+   at its first eligible bar and becomes eligible later.
 2. Track pending initial allocations per symbol.
 3. Retry a pending allocation only on a later symbol bar with a valid rule.
 4. Recalculate price, affordable lot quantity, fees, and available cash at retry time.
@@ -146,9 +155,9 @@ permission failure and do not substitute inferred rules.
 
 **Steps:**
 
-1. Add nullable order-event/trade audit columns for rule date, suspended state, native
-   upper-limit price, and native lower-limit price using existing lazy-migration
-   patterns.
+1. Add nullable order-event/trade audit columns for rule date, suspended state, closing
+   limit state, official native-CNY close, and closing-gate effective state using
+   existing lazy-migration patterns.
 2. Keep SQLite and PostgreSQL schemas and queries in parity.
 3. Serialize the market-rule profile/version, enabled state, rejection totals, and
    baseline delay summary through the run APIs.
@@ -176,7 +185,8 @@ permission failure and do not substitute inferred rules.
    rule profile.
 2. Map stable rejection codes to `Suspended`, `Buy blocked at upper limit`, and
    `Sell blocked at lower limit`.
-3. Display official native-CNY limit prices on rejected rows without showing fake fees.
+3. Display the official native-CNY close and closing limit state on rejected rows without
+   showing fake fees.
 4. Display non-zero rule rejection totals and baseline delay/unfilled counts compactly.
 5. Preserve layout at desktop and mobile widths and avoid a new decorative panel.
 6. Bump the frontend cache key only if the repository's delivery pattern requires it.
@@ -194,7 +204,8 @@ and browser verification on desktop and mobile.
 2. Run the complete backend test suite.
 3. Run frontend syntax checks and `git diff --check`.
 4. Start ATL with a temporary database and fixed offline fixtures.
-5. Manually verify one normal fill and each of the three market-rule rejection states.
+5. Manually verify one normal fill, each of the three market-rule rejection states, and
+   one earlier bar on a closing-limit day that remains eligible.
 6. Verify no fees/cash/position mutation on rejected rows and correct retry behavior in
    baseline metadata.
 7. Run one controlled live iFinD rule-data fetch and, if a suitable historical event is
@@ -219,4 +230,3 @@ ambiguous, or the production iFinD command remains unverified.
 6. Wait for GitHub checks and address failures before handoff.
 
 **PR title:** `feat(backtest): enforce A-share daily market rules`
-
