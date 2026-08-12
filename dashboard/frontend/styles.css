@@ -9884,9 +9884,51 @@ body.agent-editor-open {
     cursor: pointer;
 }
 
+.agent-editor-analyst-option:has(input:focus-visible) {
+    outline: 2px solid rgba(34, 211, 238, 0.65);
+    outline-offset: 2px;
+}
+
 .agent-editor-analyst-option:has(input:checked) {
     border-color: var(--info-color);
     background: rgba(0, 191, 255, 0.08);
+}
+
+.agent-editor-analyst-tooltip {
+    position: fixed;
+    left: var(--analyst-tooltip-left, 16px);
+    top: var(--analyst-tooltip-top, 16px);
+    z-index: 1300;
+    box-sizing: border-box;
+    width: max-content;
+    max-width: min(280px, var(--analyst-tooltip-max-width, calc(100vw - 32px)));
+    padding: 8px 10px;
+    border: 1px solid rgba(148, 163, 184, 0.38);
+    border-radius: 8px;
+    background: rgba(10, 14, 28, 0.96);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+    color: #e2e8f0;
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.4;
+    overflow-wrap: anywhere;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(4px);
+    transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+}
+
+.agent-editor-analyst-option.is-tooltip-visible .agent-editor-analyst-tooltip {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .agent-editor-analyst-tooltip {
+        transition: none;
+    }
 }
 
 .agent-editor-credential-field {
