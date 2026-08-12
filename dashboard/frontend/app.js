@@ -6574,7 +6574,12 @@ function formatTransactionCostTotals(totals) {
 
 function renderBacktestRunConfig(
     run,
-    { running = false, launchConfig = null, statusLabel = null } = {},
+    {
+        running = false,
+        launchConfig = null,
+        statusLabel = null,
+        baselineRun = null,
+    } = {},
 ) {
     const empty = document.getElementById('backtestConfigEmpty');
     const list = document.getElementById('backtestConfigList');
@@ -6614,7 +6619,13 @@ function renderBacktestRunConfig(
         ?? run?.market_rule_profile;
     const marketRuleRejections = metadata.market_rule_rejections
         ?? run?.market_rule_rejections;
-    const baselineAllocation = metadata.baseline_allocation
+    const baselineMetadata = baselineRun?.metadata
+        && typeof baselineRun.metadata === 'object'
+        ? baselineRun.metadata
+        : {};
+    const baselineAllocation = baselineMetadata.baseline_allocation
+        ?? baselineRun?.baseline_allocation
+        ?? metadata.baseline_allocation
         ?? run?.baseline_allocation;
     // Absent (older runs) reads as applied; only an explicit false marks a
     // curve that carries the market's cost rules without ever paying them.
@@ -8105,9 +8116,14 @@ async function loadData() {
             }
 
             localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, selectedRun.run_id);
+            const baselineIds = resolveBaselinesForRun(selectedRun, sessionRuns);
+            const selectedBuyholdRun = sessionRuns.find(
+                run => run.run_id === baselineIds.buyhold,
+            ) || null;
             renderBacktestRunConfig(selectedRun, {
                 running: false,
                 launchConfig: getBacktestLaunchConfig(selectedRun.run_id),
+                baselineRun: selectedBuyholdRun,
             });
 
             const chartUrl = `${API_BASE}/api/backtest/${encodeURIComponent(selectedRun.run_id)}/chart-data?t=${Date.now()}`;
