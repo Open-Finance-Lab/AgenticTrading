@@ -82,8 +82,14 @@ following contract:
 - historical quotation provides `ths_trading_status_stock` and
   `ths_up_and_down_status_stock` at daily frequency;
 - historical quotation also provides the unadjusted official daily `close`;
+- high-frequency and daily close requests both use iFinD's documented unadjusted
+  settings (`CPS=no` and `CPS=1`, respectively), so execution prices, board lots,
+  costs, and close alignment all use actual historical CNY prices;
 - high-frequency history does not return those two status fields even when requested;
-  and
+- suspended dates may appear as blank status/close rows in historical quotation, while
+  the authorized same-date basic-data indicators return an explicit suspension
+  description and `suspended` limit state; this is the only permitted fallback for
+  blank daily rows; and
 - `upperLimit` and `downLimit` are real-time quotation fields, not documented historical
   quotation or high-frequency fields.
 

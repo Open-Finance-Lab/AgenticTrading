@@ -46,7 +46,9 @@ Git.
    real-time quotation alone exposes `upperLimit` and `downLimit`.
 5. Confirm that requesting daily status fields from high-frequency history returns no
    point-in-time values, so closing state must never be backfilled onto earlier bars.
-6. Keep the raw response outside the repository and delete temporary captures after the
+6. Confirm that blank history rows can be resolved only through the authorized same-date
+   basic-data trading and limit-status indicators.
+7. Keep the raw response outside the repository and delete temporary captures after the
    fixture shape is encoded.
 
 **Stop condition:** No implementation proceeds until all vendor-specific names and value
@@ -78,11 +80,15 @@ intraday price-limit enforcement from daily closing data.
    adapter.
 4. Normalize official values into an explicit suspension boolean, closing limit enum,
    and native-CNY official close.
-5. Validate coverage against every registered symbol and every combined-clock market
+5. Use iFinD's documented unadjusted settings for both high-frequency bars and daily
+   closes so the two price paths share one executable-price basis.
+6. Batch blank history rows by date and fetch only their official basic-data status
+   supplement; never infer a blank row.
+7. Validate coverage against every registered symbol and every combined-clock market
    date.
-6. Derive the unique final hourly timestamp per active symbol-date and validate its close
+8. Derive the unique final hourly timestamp per active symbol-date and validate its close
    against the official daily close to the profile price tick.
-7. Raise a dedicated sanitized `MarketRuleDataError` for transport, permission, schema,
+9. Raise a dedicated sanitized `MarketRuleDataError` for transport, permission, schema,
    coverage, or close-alignment failures.
 
 **Verification:** Run the new client, adapter, provider, and domain test modules plus
