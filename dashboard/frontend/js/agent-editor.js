@@ -21,25 +21,101 @@
   const CASH_OVERRIDE_PREFIX = 'agent-cash-allocation:';
   const AI_HEDGE_FUND_RUNTIME = 'ai_hedge_fund';
   const AI_HEDGE_FUND_ANALYSTS = [
-    ['aswath_damodaran', 'Aswath Damodaran'],
-    ['ben_graham', 'Ben Graham'],
-    ['bill_ackman', 'Bill Ackman'],
-    ['cathie_wood', 'Cathie Wood'],
-    ['charlie_munger', 'Charlie Munger'],
-    ['michael_burry', 'Michael Burry'],
-    ['mohnish_pabrai', 'Mohnish Pabrai'],
-    ['nassim_taleb', 'Nassim Taleb'],
-    ['peter_lynch', 'Peter Lynch'],
-    ['phil_fisher', 'Phil Fisher'],
-    ['rakesh_jhunjhunwala', 'Rakesh Jhunjhunwala'],
-    ['stanley_druckenmiller', 'Stanley Druckenmiller'],
-    ['warren_buffett', 'Warren Buffett'],
-    ['technical_analyst', 'Technical'],
-    ['fundamentals_analyst', 'Fundamentals'],
-    ['growth_analyst', 'Growth'],
-    ['news_sentiment_analyst', 'News Sentiment'],
-    ['sentiment_analyst', 'Sentiment'],
-    ['valuation_analyst', 'Valuation'],
+    {
+      id: 'aswath_damodaran',
+      label: 'Aswath Damodaran',
+      description: 'Estimates intrinsic value by connecting company narratives with growth, reinvestment, risk, cash flow, and relative valuation.',
+    },
+    {
+      id: 'ben_graham',
+      label: 'Ben Graham',
+      description: 'Uses value-investing principles and a margin of safety to identify financially strong, potentially undervalued companies.',
+    },
+    {
+      id: 'bill_ackman',
+      label: 'Bill Ackman',
+      description: 'Seeks high-quality, cash-generative businesses where financial discipline, catalysts, or activism can unlock value.',
+    },
+    {
+      id: 'cathie_wood',
+      label: 'Cathie Wood',
+      description: 'Looks for disruptive, innovation-led companies with exponential growth potential, large markets, and long time horizons.',
+    },
+    {
+      id: 'charlie_munger',
+      label: 'Charlie Munger',
+      description: 'Favors predictable, high-quality businesses with durable moats and strong management at fair valuations.',
+    },
+    {
+      id: 'michael_burry',
+      label: 'Michael Burry',
+      description: 'Hunts for contrarian deep-value opportunities using free cash flow, EV/EBIT, balance-sheet risk, and hard catalysts.',
+    },
+    {
+      id: 'mohnish_pabrai',
+      label: 'Mohnish Pabrai',
+      description: 'Seeks simple, durable businesses with protected downside, high free-cash-flow yields, low leverage, and doubling potential.',
+    },
+    {
+      id: 'nassim_taleb',
+      label: 'Nassim Taleb',
+      description: 'Evaluates tail risk, antifragility, fragility, and convexity to find asymmetric opportunities with limited downside.',
+    },
+    {
+      id: 'peter_lynch',
+      label: 'Peter Lynch',
+      description: 'Looks for understandable businesses with steady growth and ten-bagger potential at reasonable PEG-based valuations.',
+    },
+    {
+      id: 'phil_fisher',
+      label: 'Phil Fisher',
+      description: 'Seeks long-term growers with strong management, R&D investment, durable margins, and thorough scuttlebutt-style research.',
+    },
+    {
+      id: 'rakesh_jhunjhunwala',
+      label: 'Rakesh Jhunjhunwala',
+      description: 'Seeks understandable, financially strong businesses with durable moats, quality management, consistent growth, and a margin of safety.',
+    },
+    {
+      id: 'stanley_druckenmiller',
+      label: 'Stanley Druckenmiller',
+      description: 'Targets asymmetric opportunities with strong growth, price momentum, and sentiment while controlling drawdown, leverage, and volatility risk.',
+    },
+    {
+      id: 'warren_buffett',
+      label: 'Warren Buffett',
+      description: 'Seeks businesses with durable moats, strong management, predictable fundamentals, and intrinsic value above market price.',
+    },
+    {
+      id: 'technical_analyst',
+      label: 'Technical',
+      description: 'Analyzes price trends and technical indicators to identify trading signals.',
+    },
+    {
+      id: 'fundamentals_analyst',
+      label: 'Fundamentals',
+      description: 'Evaluates company financial health using profitability, growth, leverage, and other fundamental metrics.',
+    },
+    {
+      id: 'growth_analyst',
+      label: 'Growth',
+      description: 'Identifies opportunities using revenue, earnings, and cash-flow growth, valuation, margins, insider activity, and financial health.',
+    },
+    {
+      id: 'news_sentiment_analyst',
+      label: 'News Sentiment',
+      description: 'Analyzes company-news sentiment, classifying recent headlines when needed, and aggregates it into a trading signal.',
+    },
+    {
+      id: 'sentiment_analyst',
+      label: 'Sentiment',
+      description: 'Combines company-news sentiment with insider trading activity to gauge market sentiment and generate a signal.',
+    },
+    {
+      id: 'valuation_analyst',
+      label: 'Valuation',
+      description: 'Estimates intrinsic value using DCF, owner earnings, EV/EBITDA, and residual-income models, then compares it with market value.',
+    },
   ];
   // Match app.js: same-origin locally, hosted backend everywhere else. In
   // Same-origin API base. Local uvicorn serves the backend; production Vercel
@@ -185,15 +261,139 @@
     }
   }
 
+  function positionAiHedgeFundTooltip(option) {
+    const tooltip = option?.querySelector('.agent-editor-analyst-tooltip');
+    if (!tooltip) return;
+
+    const optionRect = option.getBoundingClientRect();
+    const margin = 12;
+    const gap = 8;
+    const visualViewport = window.visualViewport;
+    const viewportLeft = visualViewport?.offsetLeft || 0;
+    const viewportTop = visualViewport?.offsetTop || 0;
+    const viewportWidth = Math.min(
+      visualViewport?.width || window.innerWidth,
+      document.documentElement.clientWidth || window.innerWidth,
+    );
+    const viewportHeight = Math.min(
+      visualViewport?.height || window.innerHeight,
+      document.documentElement.clientHeight || window.innerHeight,
+    );
+    const viewportRight = viewportLeft + viewportWidth;
+    const viewportBottom = viewportTop + viewportHeight;
+    const editorScrollRect = option.closest('.agent-cp-main, .agent-editor-body')?.getBoundingClientRect();
+    const safeTop = Math.max(
+      viewportTop + margin,
+      (editorScrollRect?.top || viewportTop) + margin,
+    );
+    const safeBottom = Math.min(
+      viewportBottom - margin,
+      (editorScrollRect?.bottom || viewportBottom) - margin,
+    );
+
+    if (optionRect.bottom <= safeTop || optionRect.top >= safeBottom) {
+      tooltip.hidden = true;
+      option.classList.remove('is-tooltip-visible');
+      if (activeAiHedgeFundTooltipOption === option) {
+        activeAiHedgeFundTooltipOption = null;
+      }
+      return;
+    }
+
+    tooltip.hidden = false;
+    tooltip.style.setProperty(
+      '--analyst-tooltip-max-width',
+      `${Math.max(1, viewportWidth - margin * 2)}px`,
+    );
+    const tooltipRect = tooltip.getBoundingClientRect();
+
+    const preferredLeft = optionRect.left + (optionRect.width - tooltipRect.width) / 2;
+    const safeLeft = viewportLeft + margin;
+    const maxLeft = Math.max(safeLeft, viewportRight - tooltipRect.width - margin);
+    const left = Math.min(Math.max(preferredLeft, safeLeft), maxLeft);
+
+    const above = optionRect.top - tooltipRect.height - gap;
+    const below = optionRect.bottom + gap;
+    const preferredTop = above >= safeTop ? above : below;
+    const maxTop = Math.max(safeTop, safeBottom - tooltipRect.height);
+    const top = Math.min(Math.max(preferredTop, safeTop), maxTop);
+
+    tooltip.style.setProperty('--analyst-tooltip-left', `${Math.round(left)}px`);
+    tooltip.style.setProperty('--analyst-tooltip-top', `${Math.round(top)}px`);
+  }
+
+  let activeAiHedgeFundTooltipOption = null;
+  let analystTooltipPositionFrame = null;
+
+  function showAiHedgeFundTooltip(option) {
+    if (activeAiHedgeFundTooltipOption !== option) {
+      activeAiHedgeFundTooltipOption?.classList.remove('is-tooltip-visible');
+      activeAiHedgeFundTooltipOption = option;
+    }
+    positionAiHedgeFundTooltip(option);
+    option.classList.add('is-tooltip-visible');
+  }
+
+  function hideAiHedgeFundTooltip(option) {
+    option?.classList.remove('is-tooltip-visible');
+    if (activeAiHedgeFundTooltipOption === option) {
+      activeAiHedgeFundTooltipOption = null;
+    }
+  }
+
+  function restoreKeyboardFocusedAiHedgeFundTooltip() {
+    const focusedInput = document.querySelector(
+      'input[name="agentEditorAiHedgeFundAnalyst"]:focus-visible',
+    );
+    const focusedOption = focusedInput?.closest('.agent-editor-analyst-option');
+    if (focusedOption) showAiHedgeFundTooltip(focusedOption);
+  }
+
+  function scheduleActiveAiHedgeFundTooltipPosition() {
+    if (
+      analystTooltipPositionFrame !== null
+      || !activeAiHedgeFundTooltipOption?.isConnected
+    ) return;
+    analystTooltipPositionFrame = window.requestAnimationFrame(() => {
+      analystTooltipPositionFrame = null;
+      if (activeAiHedgeFundTooltipOption?.isConnected) {
+        positionAiHedgeFundTooltip(activeAiHedgeFundTooltipOption);
+      }
+    });
+  }
+
   function renderAiHedgeFundAnalysts(agent) {
     const grid = document.getElementById('agentEditorAiHedgeFundAnalysts');
     if (!grid) return;
+    hideAiHedgeFundTooltip(activeAiHedgeFundTooltipOption);
     const selected = new Set(agent?.runtime_config?.analysts || []);
-    grid.innerHTML = AI_HEDGE_FUND_ANALYSTS.map(([id, label]) => `
-      <label class="agent-editor-analyst-option">
-        <input type="checkbox" name="agentEditorAiHedgeFundAnalyst" value="${escapeHtml(id)}" ${selected.has(id) ? 'checked' : ''}>
-        <span>${escapeHtml(label)}</span>
-      </label>`).join('');
+    grid.innerHTML = AI_HEDGE_FUND_ANALYSTS.map(({ id, label, description }) => {
+      const labelId = `agentEditorAiHedgeFundAnalyst-${id}-label`;
+      const tooltipId = `agentEditorAiHedgeFundAnalyst-${id}-tooltip`;
+      return `
+        <label class="agent-editor-analyst-option">
+          <input type="checkbox" name="agentEditorAiHedgeFundAnalyst" value="${escapeHtml(id)}" aria-labelledby="${escapeHtml(labelId)}" aria-describedby="${escapeHtml(tooltipId)}" ${selected.has(id) ? 'checked' : ''}>
+          <span id="${escapeHtml(labelId)}">${escapeHtml(label)}</span>
+          <span id="${escapeHtml(tooltipId)}" class="agent-editor-analyst-tooltip" role="tooltip">${escapeHtml(description)}</span>
+        </label>`;
+    }).join('');
+    grid.querySelectorAll('.agent-editor-analyst-option').forEach((option) => {
+      option.addEventListener('mouseenter', () => showAiHedgeFundTooltip(option));
+      option.addEventListener('mouseleave', () => {
+        hideAiHedgeFundTooltip(option);
+        restoreKeyboardFocusedAiHedgeFundTooltip();
+      });
+      option.addEventListener('focusin', () => {
+        window.requestAnimationFrame(() => {
+          if (option.querySelector('input:focus-visible')) {
+            showAiHedgeFundTooltip(option);
+          }
+        });
+      });
+      option.addEventListener('focusout', (event) => {
+        if (!option.contains(event.relatedTarget)) hideAiHedgeFundTooltip(option);
+      });
+    });
   }
 
   function selectedAiHedgeFundAnalysts() {
@@ -1349,6 +1549,7 @@
       if (!window.confirm('Discard unsaved changes?')) return;
     }
 
+    hideAiHedgeFundTooltip(activeAiHedgeFundTooltipOption);
     const view = document.getElementById('agentEditorView');
     if (view) view.hidden = true;
     document.body.classList.remove('agent-editor-open');
@@ -1578,6 +1779,21 @@
         renderOverview(cachedRuns);
       }
     });
+    // Control Plane scrolls .agent-cp-main; legacy editor used .agent-editor-body.
+    document.querySelector('.agent-cp-main, .agent-editor-body')?.addEventListener(
+      'scroll',
+      scheduleActiveAiHedgeFundTooltipPosition,
+      { passive: true },
+    );
+    window.addEventListener('resize', scheduleActiveAiHedgeFundTooltipPosition);
+    window.visualViewport?.addEventListener(
+      'resize',
+      scheduleActiveAiHedgeFundTooltipPosition,
+    );
+    window.visualViewport?.addEventListener(
+      'scroll',
+      scheduleActiveAiHedgeFundTooltipPosition,
+    );
 
     document.addEventListener('keydown', (event) => {
       const view = document.getElementById('agentEditorView');

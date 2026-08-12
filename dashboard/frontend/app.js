@@ -8078,6 +8078,14 @@ function initializeCharts() {
         return;
     }
 
+    // Missing index benchmarks are only visible as *fewer lines*, which reads as
+    // "this agent has no benchmark". Say which it is. Older payloads omit the
+    // flag entirely, so only an explicit false shows the notice.
+    const baselineNotice = document.getElementById('chartBaselineNotice');
+    if (baselineNotice) {
+        baselineNotice.hidden = backtestChartData.index_baselines_ok !== false;
+    }
+
     const perfCtx = document.getElementById('performanceChart');
     if (perfCtx && perfCtx.getContext) {
         if (chartInstance) {

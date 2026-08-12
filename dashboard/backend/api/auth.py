@@ -427,7 +427,7 @@ async def login(payload: LoginRequest, request: Request):
 
 
 @router.get("/me")
-async def me(
+def me(
     request: Request,
     authorization: Optional[str] = Header(default=None),
     current_user: dict = Depends(get_current_user),
@@ -461,7 +461,7 @@ def logout(
 
 
 @router.post("/logout-all")
-async def logout_all(request: Request, current_user: dict = Depends(get_current_user)):
+def logout_all(request: Request, current_user: dict = Depends(get_current_user)):
     users_module.user_store.delete_other_sessions(current_user["id"], keep_token=None)
     response = JSONResponse({"status": "ok"})
     clear_session_cookie(response)
@@ -472,17 +472,33 @@ async def logout_all(request: Request, current_user: dict = Depends(get_current_
 
 
 @router.post("/change-password")
-async def change_password(
+def change_password(
     payload: ChangePasswordRequest,
     request: Request,
     current_user: dict = Depends(get_current_user),
     authorization: Optional[str] = Header(default=None),
 ):
-    if not verify_password(payload.current_password, current_user["password_hash"]):
-        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+    # Plain def, not async: nothing in this handler awaits, and *everything* in
+    # it blocks -- one bcrypt verify (~190 ms), a second bcrypt hash of the same
+    # cost inside update_password(), and three store round trips (network calls
+    # against Postgres in prod). Starlette runs a sync handler in the threadpool,
+    # so the whole lot costs one worker thread instead of freezing the event
+    # loop for every concurrent request. This is #292's fix applied to the
+    # handler #297 singled out for it; offloading only the verify would have
+    # left an identically slow hash on the loop. Pinned by BLOCKING_IO_HANDLERS
+    # in tests/test_event_loop_threadpool.py -- adding an await here silently
+    # takes it back out of that guard.
+    #
+    # Policy first, bcrypt second, for the same reason signup() checks in that
+    # order: a rejected new password changes nothing, so it should not cost a
+    # hash. The trade is that a request wrong on both counts now reports the
+    # policy violation instead of "Current password is incorrect"; neither is a
+    # secret, since signup enforces the same policy unauthenticated.
     violations = validate_new_password(payload.new_password, current_user["email"])
     if violations:
         raise HTTPException(status_code=400, detail=" ".join(violations))
+    if not verify_password(payload.current_password, current_user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
     users_module.user_store.update_password(current_user["id"], payload.new_password)
     # Best-effort: revoke every other session so a stolen token dies with the old
     # password. Deliberately NOT atomic with the update above -- the two are separate
@@ -516,7 +532,7 @@ async def change_password(
 
 
 @router.put("/display-name")
-async def update_display_name(
+def update_display_name(
     payload: DisplayNameRequest,
     current_user: dict = Depends(get_current_user),
 ):
@@ -602,12 +618,19 @@ def _email_change_new_body(code: str) -> str:
     )
 
 
-@router.post("/email-change")
-async def request_email_change(
-    payload: EmailChangeRequest,
-    current_user: dict = Depends(get_current_user),
-):
-    store = users_module.user_store
+def _authorize_email_change(store, current_user: dict, payload: EmailChangeRequest) -> None:
+    """Password check + policy + the three rate limits, or raise.
+
+    Extracted so request_email_change -- which must stay ``async def`` for the
+    awaited send below -- can run this whole blocking half in one worker-thread
+    hop. Every step here blocks: one bcrypt verify (~190 ms) plus four store
+    round trips, which are network calls against Postgres in prod. Offloading
+    only the bcrypt would leave the four round trips stalling the event loop,
+    which on a cold pooled connection costs more than the hash does.
+
+    Raises HTTPException directly; those propagate out of asyncio.to_thread
+    unchanged, so FastAPI turns them into the same responses as before.
+    """
     if not verify_password(payload.current_password, current_user["password_hash"]):
         raise HTTPException(status_code=400, detail="Current password is incorrect.")
     if payload.new_email == str(current_user["email"]).strip().lower():
@@ -673,6 +696,18 @@ async def request_email_change(
                 "Please wait a minute before requesting another code.", remaining
             )
 
+
+@router.post("/email-change")
+async def request_email_change(
+    payload: EmailChangeRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    # Stays async: send_email() is a real coroutine. Everything either side of
+    # it blocks, so each half goes to a worker thread rather than running on the
+    # event loop (#297). Two hops, not five inline store calls plus a bcrypt.
+    store = users_module.user_store
+    await asyncio.to_thread(_authorize_email_change, store, current_user, payload)
+
     code = generate_code()
     # Send BEFORE persisting. Persisting first and then failing to send would
     # burn the cooldown on a code that does not exist.
@@ -686,14 +721,17 @@ async def request_email_change(
             status_code=503,
             detail="Could not send the confirmation email. Please try again later.",
         )
-    store.create_email_change_request(
-        current_user["id"], payload.new_email, hash_code(code)
+    await asyncio.to_thread(
+        store.create_email_change_request,
+        current_user["id"],
+        payload.new_email,
+        hash_code(code),
     )
     return {"stage": "old", "new_email": payload.new_email}
 
 
 @router.get("/email-change")
-async def get_email_change(current_user: dict = Depends(get_current_user)):
+def get_email_change(current_user: dict = Depends(get_current_user)):
     """Let a reloaded page pick the flow back up instead of stranding the user."""
     row = users_module.user_store.get_active_email_change(current_user["id"])
     if not row:
@@ -707,7 +745,7 @@ async def get_email_change(current_user: dict = Depends(get_current_user)):
 
 
 @router.delete("/email-change")
-async def cancel_email_change(current_user: dict = Depends(get_current_user)):
+def cancel_email_change(current_user: dict = Depends(get_current_user)):
     """Cancel a pending change. Also the resend path: cancel, then start again,
     which re-verifies the password.
 
@@ -818,7 +856,7 @@ def _store_avatar(user_id: int, value: Optional[str]) -> dict:
 
 
 @router.put("/avatar")
-async def set_avatar(payload: AvatarRequest, current_user: dict = Depends(get_current_user)):
+def set_avatar(payload: AvatarRequest, current_user: dict = Depends(get_current_user)):
     try:
         value = _validate_avatar_data_uri(payload.avatar)
     except ValueError as exc:
@@ -827,7 +865,7 @@ async def set_avatar(payload: AvatarRequest, current_user: dict = Depends(get_cu
 
 
 @router.delete("/avatar")
-async def delete_avatar(current_user: dict = Depends(get_current_user)):
+def delete_avatar(current_user: dict = Depends(get_current_user)):
     return {"user": _store_avatar(current_user["id"], None)}
 
 
@@ -996,7 +1034,7 @@ async def robinhood_oauth_complete(
 
 
 @router.post("/discord/start")
-async def discord_oauth_start(current_user: dict = Depends(get_current_user)):
+def discord_oauth_start(current_user: dict = Depends(get_current_user)):
     """Begin Discord OAuth linking for the logged-in website user."""
     if not discord_oauth.oauth_configured():
         raise HTTPException(

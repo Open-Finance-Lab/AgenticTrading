@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=90">
+    <link rel="stylesheet" href="styles.css?v=91">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -1380,6 +1380,14 @@
                     </div>
                 </div>
 
+                <!-- Shown only when the index benchmarks are missing because the
+                     market-data provider was unreachable, so a benchmark-free
+                     chart is never mistaken for an agent that has no benchmark. -->
+                <p id="chartBaselineNotice" class="chart-baseline-notice" hidden>
+                    ⚠ Index benchmarks unavailable — the market-data provider could not be
+                    reached. Your agent's curve is complete; reload to retry the benchmarks.
+                </p>
+
                 <!-- Chart with integrated legend -->
                 <div class="chart-container">
                     <canvas id="performanceChart"></canvas>
@@ -1727,7 +1735,7 @@
                         <canvas id="equityCurvesChart"></canvas>
                     </div>
                     <div id="equityCurvesLegend" class="chart-legend-custom"></div>
-                    <div class="chart-hint">Click a legend item to show/hide a curve • Hover to emphasize • Click a row to select a team</div>
+                    <div class="chart-hint">Click a legend item to show/hide a curve • Hover a curve to emphasize • Click a row to select a team</div>
                 </section>
             </div>
 
@@ -1922,7 +1930,7 @@
     <script src="market-events/MarketEventCard.js" defer></script>
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
-    <script src="js/agent-editor.js?v=29" defer></script>
+    <script src="js/agent-editor.js?v=30" defer></script>
     <script src="app.js?v=77" defer></script>
     <script src="js/leaderboard.js?v=19" defer></script>
     <script src="home-page.js?v=37" defer></script>

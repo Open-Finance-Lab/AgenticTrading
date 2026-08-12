@@ -11,8 +11,11 @@ import inspect
 import json
 import time
 import uuid
+from datetime import datetime
 
 import pytest
+import pytz
+import requests
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
@@ -41,32 +44,88 @@ def test_plot_png_matplotlib_hoisted_to_module():
 
 def test_plot_png_cached_per_run(monkeypatch):
     bt._render_run_plot_png.cache_clear()
-    calls = {"get_run": 0, "equity": 0}
+    calls = {"get_run": 0, "equity": 0, "yahoo": 0}
     fake_run = {
         "session_id": None, "created_at": "2026-05-01T10:00:00", "agent_name": "Agent",
         "start_date": "2026-05-01", "end_date": "2026-05-07", "mode": "safe_trading",
         "baseline_buyhold_run_id": None, "baseline_djia_run_id": None,
     }
 
+    # #139's traceback was lost, so the real flake mechanism is unconfirmed.
+    # Defense in depth against cross-test interference: the render cache is a
+    # module-level lru_cache and bt.db is a process-wide singleton (patched
+    # for any thread while this test runs), so (a) a unique per-invocation
+    # key guarantees no other code path can collide with this test's cache
+    # entry, and (b) the counters only count calls for *this* key, so a stray
+    # db.get_run from another test's leftover threadpool thread cannot skew
+    # the assertions either way.
+    run_id = f"run_x_{uuid.uuid4().hex}"
+
+    # 10:30/11:30 ET (== 14:30/15:30 UTC). compute_index_baseline_values first
+    # drops every index level failing is_market_hour, then aligns the survivors
+    # onto the agent's own timeline with a 30-minute nearest-match tolerance —
+    # so the equity curve *and* the stubbed index levels both have to sit inside
+    # the session. Stamps outside it (e.g. a naive 10:00 "UTC", which is 06:00
+    # ET) make the baselines come back empty with the test still passing.
+    et = pytz.timezone("US/Eastern")
+    t0 = et.localize(datetime(2026, 5, 1, 10, 30)).astimezone(pytz.UTC)
+    t1 = et.localize(datetime(2026, 5, 1, 11, 30)).astimezone(pytz.UTC)
+
     def fake_get_run(rid):
-        calls["get_run"] += 1
+        if rid == run_id:
+            calls["get_run"] += 1
         return fake_run
 
     def fake_equity(rid):
-        calls["equity"] += 1
-        return [{"timestamp": "2026-05-01T10:00:00", "equity": 100000},
-                {"timestamp": "2026-05-01T11:00:00", "equity": 101000}]
+        if rid == run_id:
+            calls["equity"] += 1
+        # Naive-UTC ISO strings, the shape the DB stores.
+        return [{"timestamp": t0.replace(tzinfo=None).isoformat(), "equity": 100000},
+                {"timestamp": t1.replace(tzinfo=None).isoformat(), "equity": 101000}]
 
+    # fake_run carries no `metadata`, so _market_profile_for_run falls back to
+    # the Alpaca/US profile with index_baseline_enabled true, which makes
+    # _render_run_plot_png call market_index_baselines_with_status ->
+    # fetch_index_hourly for ^DJI/^NDX. Without this patch that is a real
+    # HTTPS call to query1.finance.yahoo.com on every run (issue #320: flakes
+    # when Yahoo is slow/rate-limited). Stub it here, same pattern as
+    # test_equity_plot.py; the network fetch is incidental to what this test
+    # covers (lru_cache behaviour).
+    def fake_fetch_index_hourly(_symbol, start, end):
+        if (start, end) == (fake_run["start_date"], fake_run["end_date"]):
+            calls["yahoo"] += 1  # same stray-thread gating as the counters above
+        return [(t0, 40_000.0), (t1, 41_000.0)]
+
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly", fake_fetch_index_hourly
+    )
     monkeypatch.setattr(bt.db, "get_run", fake_get_run)
     monkeypatch.setattr(bt.db, "get_equity_curve", fake_equity)
     monkeypatch.setattr(bt, "filter_market_hours", lambda pts: pts)  # isolate caching
 
-    first = bt._render_run_plot_png("run_x")
-    second = bt._render_run_plot_png("run_x")
+    # Record what the renderer is handed: an index baseline that got filtered
+    # away upstream arrives as [], which would leave this path uncovered while
+    # every other assertion still passed.
+    rendered = {}
+    real_render = bt.render_backtest_equity_png
+
+    def spy_render(**kwargs):
+        rendered.setdefault("baselines", kwargs["baselines"])
+        return real_render(**kwargs)
+
+    monkeypatch.setattr(bt, "render_backtest_equity_png", spy_render)
+
+    first = bt._render_run_plot_png(run_id)
+    second = bt._render_run_plot_png(run_id)
 
     assert first == second
     assert first[:8] == b"\x89PNG\r\n\x1a\n"      # valid PNG
     assert calls["get_run"] == 1                  # 2nd call served from cache
+    assert calls["yahoo"] == 2                    # stub answered ^DJI + ^NDX, no network
+    assert [label for label, _key, _values in rendered["baselines"]] == [
+        "DJIA index",
+        "Nasdaq-100",
+    ]
     bt._render_run_plot_png.cache_clear()
 
 
@@ -81,7 +140,8 @@ def test_plot_png_missing_run_not_cached(monkeypatch):
     hits = {"n": 0}
 
     def counting_get_run(rid):
-        hits["n"] += 1
+        if rid == "missing":  # same stray-thread gating as the cache test above
+            hits["n"] += 1
         return None
 
     monkeypatch.setattr(bt.db, "get_run", counting_get_run)
@@ -89,6 +149,165 @@ def test_plot_png_missing_run_not_cached(monkeypatch):
         bt._render_run_plot_png("missing")
     assert hits["n"] == 1  # re-evaluated, not served from a cached exception
     bt._render_run_plot_png.cache_clear()
+
+
+def test_plot_png_survives_index_outage_and_retries_it(monkeypatch, capsys):
+    """#320, second half: Yahoo going down must cost the chart its baselines, not 500.
+
+    ``/runs/{run_id}/plot.png`` is public and unauthenticated, and app.py only
+    registers handlers for ApiError/RequestValidationError — so before this fix a
+    Yahoo 429 (the very flakiness #320 opened on) propagated out of the route as
+    an unhandled 500. The degraded render must also stay out of the lru_cache, or
+    one rate-limited minute would pin a baseline-free chart to that run until the
+    process restarted.
+    """
+    bt._render_run_plot_png.cache_clear()
+    run_id = f"run_outage_{uuid.uuid4().hex}"  # unique key, as in the cache test
+    fake_run = {
+        "session_id": None, "created_at": "2026-05-01T10:00:00", "agent_name": "Agent",
+        "start_date": "2026-05-01", "end_date": "2026-05-07", "mode": "safe_trading",
+        "baseline_buyhold_run_id": None, "baseline_djia_run_id": None,
+    }
+    et = pytz.timezone("US/Eastern")
+    t0 = et.localize(datetime(2026, 5, 1, 10, 30)).astimezone(pytz.UTC)
+    t1 = et.localize(datetime(2026, 5, 1, 11, 30)).astimezone(pytz.UTC)
+
+    monkeypatch.setattr(bt.db, "get_run", lambda rid: fake_run if rid == run_id else None)
+    monkeypatch.setattr(
+        bt.db, "get_equity_curve",
+        lambda rid: [{"timestamp": t0.replace(tzinfo=None).isoformat(), "equity": 100000},
+                     {"timestamp": t1.replace(tzinfo=None).isoformat(), "equity": 101000}],
+    )
+    monkeypatch.setattr(bt, "filter_market_hours", lambda pts: pts)
+
+    outage = {"on": True}
+    fetches = {"n": 0}
+
+    def flaky_fetch(_symbol, start, end):
+        if (start, end) != (fake_run["start_date"], fake_run["end_date"]):
+            return []  # not this test's run; don't touch the counter
+        fetches["n"] += 1
+        if outage["on"]:
+            # What requests raises on 429/5xx via raise_for_status().
+            raise requests.HTTPError("429 Client Error: Too Many Requests")
+        return [(t0, 40_000.0), (t1, 41_000.0)]
+
+    monkeypatch.setattr("dashboard.backend.equity_plot.fetch_index_hourly", flaky_fetch)
+    client = TestClient(app)
+
+    degraded = client.get(f"/runs/{run_id}/plot.png")
+    assert degraded.status_code == 200                       # was an unhandled 500
+    assert degraded.headers["content-type"] == "image/png"
+    assert degraded.content[:8] == b"\x89PNG\r\n\x1a\n"      # a real chart, sans baselines
+    assert fetches["n"] == 2
+
+    # Inside the negative-cache TTL the degraded bytes are replayed without
+    # re-rendering. This route is public and unauthenticated, so an unbounded
+    # retry would let a *persistent* Yahoo block turn every hit into a full
+    # matplotlib render — the exact cost the lru_cache exists to avoid.
+    assert client.get(f"/runs/{run_id}/plot.png").content == degraded.content
+    assert fetches["n"] == 2
+
+    # Past the TTL, Yahoo is tried again: the degraded render was never allowed
+    # into the lru_cache, so recovery is never more than one TTL away.
+    bt._clear_degraded_plot_cache()
+    assert client.get(f"/runs/{run_id}/plot.png").status_code == 200
+    assert fetches["n"] == 4
+
+    outage["on"] = False
+    bt._clear_degraded_plot_cache()
+    healthy = client.get(f"/runs/{run_id}/plot.png")
+    assert healthy.status_code == 200
+    assert healthy.content != degraded.content  # baselines are back on the chart
+    assert fetches["n"] == 6
+    again = client.get(f"/runs/{run_id}/plot.png")
+    assert again.content == healthy.content
+    assert fetches["n"] == 6  # ...and a complete render *is* cached, as before
+
+    # The outage has to be legible in the logs: absent baselines and broken
+    # upstream otherwise render identically (see CLAUDE.md, "fail-closed is not
+    # fail-visible"). print(), because logging is invisible under prod uvicorn.
+    out = capsys.readouterr().out
+    assert "index baseline ^DJI unavailable" in out and "HTTPError" in out
+    assert "index baseline ^NDX unavailable" in out and "HTTPError" in out
+    assert run_id in out  # names the request, not just the symbol
+    bt._render_run_plot_png.cache_clear()
+    bt._clear_degraded_plot_cache()
+
+
+def test_degraded_plot_negative_cache_expires_on_its_own(monkeypatch):
+    """The negative cache must *lapse*, not just be clearable.
+
+    Bounding the re-render storm is only half the requirement: a degraded chart
+    that never expires is the failure the lru_cache escape (_UncachedPlotPng)
+    was added to prevent in the first place, just on a slower clock. Exercised
+    against the real expiry branch by shrinking the TTL rather than clearing.
+    """
+    bt._clear_degraded_plot_cache()
+    run_id = f"run_ttl_{uuid.uuid4().hex}"
+    bt._degraded_plot_store(run_id, b"degraded-bytes")
+    assert bt._degraded_plot_cached(run_id) == b"degraded-bytes"
+
+    monkeypatch.setattr(bt, "_DEGRADED_PLOT_TTL_SECONDS", 0.0)
+    assert bt._degraded_plot_cached(run_id) is None  # lapsed, so Yahoo is retried
+    bt._clear_degraded_plot_cache()
+
+
+def test_degraded_plot_negative_cache_is_bounded():
+    """Both bounds are load-bearing on a public, unauthenticated route.
+
+    The TTL caps how stale a degraded chart can get; the entry cap stops one
+    outage window from pinning a PNG per requested run in memory.
+    """
+    assert 0 < bt._DEGRADED_PLOT_TTL_SECONDS <= 300
+    bt._clear_degraded_plot_cache()
+    for i in range(bt._DEGRADED_PLOT_MAX_ENTRIES + 25):
+        bt._degraded_plot_store(f"run_bound_{i}", b"x")
+    assert len(bt._degraded_plot_cache) <= bt._DEGRADED_PLOT_MAX_ENTRIES
+    bt._clear_degraded_plot_cache()
+
+
+def test_plot_png_survives_a_run_window_that_does_not_parse(monkeypatch, capsys):
+    """#320, third path: a non-``YYYY-MM-DD`` window must not 500 either.
+
+    ``_epoch`` raises ValueError *before* any HTTP call, so this never reached
+    the transport-level guard. It is reachable in prod two ways: paper-trading
+    baselines store ``start_date.isoformat()``, and
+    ``api/routers/paper_trading.py`` writes ``end_date=""``.
+    """
+    bt._render_run_plot_png.cache_clear()
+    bt._clear_degraded_plot_cache()
+    run_id = f"run_badwindow_{uuid.uuid4().hex}"
+    fake_run = {
+        "session_id": None, "created_at": "2026-05-01T10:00:00", "agent_name": "Agent",
+        "start_date": "2026-06-02T20:00:00", "end_date": "", "mode": "safe_trading",
+        "baseline_buyhold_run_id": None, "baseline_djia_run_id": None,
+    }
+    et = pytz.timezone("US/Eastern")
+    t0 = et.localize(datetime(2026, 5, 1, 10, 30)).astimezone(pytz.UTC)
+    t1 = et.localize(datetime(2026, 5, 1, 11, 30)).astimezone(pytz.UTC)
+
+    monkeypatch.setattr(bt.db, "get_run", lambda rid: fake_run if rid == run_id else None)
+    monkeypatch.setattr(
+        bt.db, "get_equity_curve",
+        lambda rid: [{"timestamp": t0.replace(tzinfo=None).isoformat(), "equity": 100000},
+                     {"timestamp": t1.replace(tzinfo=None).isoformat(), "equity": 101000}],
+    )
+    monkeypatch.setattr(bt, "filter_market_hours", lambda pts: pts)
+
+    def must_not_be_called(*_a, **_k):  # pragma: no cover - asserts absence
+        raise AssertionError("Yahoo must not be asked for an unparseable window")
+
+    monkeypatch.setattr(
+        "dashboard.backend.equity_plot.fetch_index_hourly", must_not_be_called
+    )
+
+    resp = TestClient(app).get(f"/runs/{run_id}/plot.png")
+    assert resp.status_code == 200  # was an unhandled 500
+    assert resp.content[:8] == b"\x89PNG\r\n\x1a\n"
+    assert "unusable run window" in capsys.readouterr().out
+    bt._render_run_plot_png.cache_clear()
+    bt._clear_degraded_plot_cache()
 
 
 # ===========================================================================

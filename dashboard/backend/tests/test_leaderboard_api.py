@@ -10,6 +10,7 @@ from dashboard.backend.app import app
 import dashboard.backend.api.routers.leaderboard as leaderboard_router
 import dashboard.backend.database as db_module
 import dashboard.backend.domain.leaderboard.service as lb_service
+import dashboard.backend.infrastructure.market_data.alpaca_bars as alpaca_bars
 
 
 @pytest.fixture
@@ -102,6 +103,75 @@ def test_leaderboard_api_returns_baselines(client, monkeypatch):
     assert "SPY" in models
     assert body["entries"][0]["rank"] == 1
     assert body["entries"][0]["entry_type"] == "baseline"
+
+
+def test_leaderboard_api_does_not_leak_exception_text(client, monkeypatch):
+    """Public GET must answer 500 with a static message, never raw exception text.
+
+    Regression for the Neon-host leak: a psycopg connection failure message
+    embeds the database endpoint id, and this endpoint is public +
+    unauthenticated, so `detail=str(exc)` would hand that to any visitor.
+    The traceback still goes to the server log via print().
+    """
+    monkeypatch.setattr(
+        "dashboard.backend.api.routers.leaderboard.get_leaderboard",
+        lambda **kwargs: (_ for _ in ()).throw(
+            # A psycopg connection failure is a plain Exception (OperationalError),
+            # so it lands in the generic branch. The RuntimeError branch is
+            # covered separately below — it is equally unsafe to echo.
+            Exception("stale connection: could not connect to "
+                      "ep-abc123.us-east-2.aws.neon.tech:5432"),
+        ),
+    )
+
+    resp = client.get("/api/v1/leaderboard")
+    assert resp.status_code == 500
+    body = resp.json()
+    assert body["detail"] == "Failed to load leaderboard"
+    # The internal endpoint id must never appear in the public response.
+    assert "neon.tech" not in resp.text
+    assert "ep-abc123" not in resp.text
+
+
+def test_leaderboard_api_does_not_leak_runtime_error_text(client, monkeypatch, tmp_path):
+    """The 503 branch must be static too — RuntimeError is not a safe allowlist.
+
+    ``MarketDataUnavailableError`` -> ``AlpacaCredentialsError`` subclass
+    ``RuntimeError`` (they were made RuntimeErrors to escape SystemExit, not as
+    a safety marker), and reach this handler through ``get_leaderboard`` ->
+    ``ensure_leaderboard_runs`` -> ``fetch_hourly_bars``. Their message embeds
+    the server-side credentials path, so ``detail=str(exc)`` on the 503 handed
+    that path to anonymous callers exactly like the 500 branch did — the daily
+    board hits it on any window with no cached runs yet.
+
+    The exception is raised by the *real* loader rather than hand-written, so a
+    reworded upstream message cannot drift away from this assertion.
+    """
+    creds_dir = tmp_path / "server-only" / "credentials"
+    monkeypatch.delenv("ALPACA_API_KEY", raising=False)
+    monkeypatch.delenv("ALPACA_SECRET_KEY", raising=False)
+    monkeypatch.setattr(alpaca_bars, "CREDENTIALS_DIR", creds_dir)
+
+    def _raise_from_real_loader(**kwargs):
+        alpaca_bars.AlpacaDataLoader()  # raises AlpacaCredentialsError
+
+    monkeypatch.setattr(
+        "dashboard.backend.api.routers.leaderboard.get_leaderboard",
+        _raise_from_real_loader,
+    )
+
+    # Sanity: the error really is a RuntimeError, so it really does take the
+    # 503 branch rather than the already-covered generic one.
+    with pytest.raises(RuntimeError) as raised:
+        alpaca_bars.AlpacaDataLoader()
+    assert str(creds_dir) in str(raised.value)
+
+    resp = client.get("/api/v1/leaderboard")
+    assert resp.status_code == 503
+    assert resp.json()["detail"] == "Leaderboard is temporarily unavailable"
+    # The server-side credentials path must never reach a public caller.
+    assert str(creds_dir) not in resp.text
+    assert "alpaca.json" not in resp.text
 
 
 def test_daily_leaderboard_api_uses_daily_window(client, monkeypatch):

@@ -109,7 +109,10 @@ def _cleanup_test_db_dir() -> None:
     shutil.rmtree(_TEST_DB_DIR, ignore_errors=True)
 
 
+from types import SimpleNamespace  # noqa: E402
+
 import pytest  # noqa: E402
+import requests  # noqa: E402
 
 
 def pytest_configure(config):
@@ -190,3 +193,37 @@ def _reset_shared_scale_state(monkeypatch):
     market_data_store._reset_for_tests()
     auth_cache._reset_for_tests()
     db_pool._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_yahoo(monkeypatch):
+    """No test may reach query1.finance.yahoo.com.
+
+    Restores a failure signal the outage guard would otherwise erase. Now that
+    ``market_index_baselines_with_status`` swallows ``requests.RequestException``
+    — and ``ConnectionError`` is exactly what a socket-blocked CI box raises —
+    a test that forgets to stub the fetch no longer fails. It *passes*, silently,
+    with empty baselines. That is the signal issue #320 and PRs #331/#334 relied
+    on to notice tests depending on live Yahoo.
+
+    Narrow on purpose: blocking sockets wholesale would break the @pg_only tier,
+    which needs a real connection to TEST_POSTGRES_URL.
+
+    Rebinds the *name* ``requests`` inside the ``_yahoo`` module rather than
+    setting an attribute on the requests module itself — the latter is one
+    shared object, so it would swap HTTP for the whole process.
+    """
+    from dashboard.backend.domain.leaderboard.strategies import _yahoo
+
+    def _blocked(*_args, **_kwargs):
+        raise AssertionError(
+            "test reached live Yahoo. Stub "
+            "'dashboard.backend.equity_plot.fetch_index_hourly' (or _yahoo.requests) "
+            "-- an unstubbed fetch now degrades silently instead of failing."
+        )
+
+    monkeypatch.setattr(
+        _yahoo,
+        "requests",
+        SimpleNamespace(get=_blocked, RequestException=requests.RequestException),
+    )

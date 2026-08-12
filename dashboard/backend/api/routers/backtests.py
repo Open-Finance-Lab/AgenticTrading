@@ -23,8 +23,9 @@ from pathlib import Path
 # thread factory HERE. Patching `backtests_router.threading.Thread` reaches
 # through to the shared stdlib module object and swaps Thread process-wide,
 # which leaks into every later test in the session.
+from threading import Lock as _PlotCacheLock
 from threading import Thread as _BackgroundThread
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import pytz
 from datetime import datetime
@@ -91,7 +92,7 @@ from dashboard.backend.equity_plot import (
     build_backtest_chart_data,
     curve_timestamps_and_values,
     equity_lookup,
-    market_index_baselines_for_run,
+    market_index_baselines_with_status,
     render_backtest_equity_png,
     resolve_agent_chart_label,
 )
@@ -306,6 +307,10 @@ class BacktestChartData(BaseModel):
     timestamps: List[str]
     x_labels: List[str]
     series: List[ChartSeries]
+    # False = the index benchmarks are absent because Yahoo was unreachable, not
+    # because this run has none. Defaults True so an older cached client that
+    # never reads it behaves exactly as before.
+    index_baselines_ok: bool = True
 
 
 def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
@@ -1688,7 +1693,93 @@ def get_run_plot(run_id: str):
     Sync ``def`` so FastAPI runs the CPU-bound matplotlib render in its
     threadpool rather than blocking the event loop; the PNG is cached per run_id.
     """
-    return Response(content=_render_run_plot_png(run_id), media_type="image/png")
+    return Response(content=_run_plot_png(run_id), media_type="image/png")
+
+
+class _UncachedPlotPng(Exception):
+    """Carries a rendered PNG that must *not* be memoized.
+
+    Raised when Yahoo was unreachable, so the chart is missing its index
+    baselines. ``lru_cache`` never stores a call that raised, which is what
+    keeps a degraded render out of the cache — otherwise one Yahoo 429 would
+    pin a baseline-free chart to that run for the life of the process.
+    """
+
+    def __init__(self, png: bytes) -> None:
+        super().__init__("index baselines unavailable; render not cached")
+        self.png = png
+
+
+_DEGRADED_PLOT_NOTE = (
+    "⚠ Index benchmarks unavailable — market-data provider unreachable"
+)
+
+# A short negative cache for degraded renders. Keeping them out of the lru_cache
+# entirely (see _UncachedPlotPng) is right for a blip, but a *persistent* Yahoo
+# block is a steady state on a free-tier host with shared egress IPs — and this
+# route is public, unauthenticated and exempt from the session middleware. With
+# no bound at all, that state re-runs the full matplotlib render on every hit,
+# forever, which is precisely the cost the lru_cache exists to avoid. One retry
+# per run per minute keeps the recovery behaviour without the amplification.
+_DEGRADED_PLOT_TTL_SECONDS = 60.0
+_DEGRADED_PLOT_MAX_ENTRIES = 128
+_degraded_plot_lock = _PlotCacheLock()
+_degraded_plot_cache: Dict[str, Tuple[float, bytes]] = {}
+
+
+def _degraded_plot_cached(run_id: str) -> Optional[bytes]:
+    with _degraded_plot_lock:
+        entry = _degraded_plot_cache.get(run_id)
+        if not entry:
+            return None
+        stored_at, png = entry
+        if (time.monotonic() - stored_at) >= _DEGRADED_PLOT_TTL_SECONDS:
+            _degraded_plot_cache.pop(run_id, None)
+            return None
+        return png
+
+
+def _degraded_plot_store(run_id: str, png: bytes) -> None:
+    now = time.monotonic()
+    with _degraded_plot_lock:
+        expired = [
+            key
+            for key, (stored_at, _png) in _degraded_plot_cache.items()
+            if (now - stored_at) >= _DEGRADED_PLOT_TTL_SECONDS
+        ]
+        for key in expired:
+            _degraded_plot_cache.pop(key, None)
+        # Bound the dict even if every entry is still live (many distinct runs
+        # requested inside one outage window): evict oldest-inserted first.
+        while len(_degraded_plot_cache) >= _DEGRADED_PLOT_MAX_ENTRIES:
+            _degraded_plot_cache.pop(next(iter(_degraded_plot_cache)), None)
+        _degraded_plot_cache[run_id] = (now, png)
+
+
+def _clear_degraded_plot_cache() -> None:
+    """Test hook: the TTL is wall-clock, so tests must reset it explicitly."""
+    with _degraded_plot_lock:
+        _degraded_plot_cache.clear()
+
+
+def _run_plot_png(run_id: str) -> bytes:
+    """``_render_run_plot_png`` with the uncached-degraded-render escape unwrapped.
+
+    A degraded render is served from the short negative cache for
+    ``_DEGRADED_PLOT_TTL_SECONDS`` before Yahoo is tried again, so a sustained
+    outage costs one re-render per run per minute instead of one per request.
+    """
+    cached = _degraded_plot_cached(run_id)
+    if cached is not None:
+        return cached
+    try:
+        png = _render_run_plot_png(run_id)
+    except _UncachedPlotPng as exc:
+        _degraded_plot_store(run_id, exc.png)
+        return exc.png
+    with _degraded_plot_lock:
+        _degraded_plot_cache.pop(run_id, None)
+    return png
 
 
 @lru_cache(maxsize=128)
@@ -1698,7 +1789,9 @@ def _render_run_plot_png(run_id: str) -> bytes:
     A run's equity data is immutable once written and run_ids are unique per
     run, so the rendered bytes are reused without re-querying the DB or
     re-rendering. HTTPExceptions (missing run / no equity data) are raised, not
-    cached — so data that appears later is still picked up on a retry.
+    cached — so data that appears later is still picked up on a retry. A render
+    whose index baselines were lost to a Yahoo outage leaves the same way, via
+    ``_UncachedPlotPng``; call through ``_run_plot_png`` to get its bytes.
     """
     run = db.get_run(run_id)
     if not run:
@@ -1717,12 +1810,14 @@ def _render_run_plot_png(run_id: str) -> bytes:
         raise HTTPException(status_code=404, detail="No equity data to plot for this run")
 
     initial_capital = float(run.get("initial_equity") or agent_values[0] or 1_000)
+    index_baselines_ok = True
     if profile.index_baseline_enabled:
-        baselines = market_index_baselines_for_run(
+        baselines, index_baselines_ok = market_index_baselines_with_status(
             timestamps,
             run.get("start_date") or "",
             run.get("end_date") or "",
             initial_capital,
+            context=run_id,
         )
     else:
         baselines = [
@@ -1733,16 +1828,21 @@ def _render_run_plot_png(run_id: str) -> bytes:
         ]
 
     try:
-        return render_backtest_equity_png(
+        png = render_backtest_equity_png(
             agent_label=agent_label,
             agent_run_id=run_id,
             timestamps=timestamps,
             agent_values=agent_values,
             baselines=baselines,
             market_timezone=profile.timezone,
+            note=None if index_baselines_ok else _DEGRADED_PLOT_NOTE,
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if not index_baselines_ok:
+        raise _UncachedPlotPng(png)
+    return png
 
 
 @router.get("/compare", response_model=ComparisonResponse)
