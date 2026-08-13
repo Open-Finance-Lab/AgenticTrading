@@ -3327,6 +3327,7 @@ async function saveAdminUserRole(rowEl, nextRole) {
     const data = await AdminAPI.patchUser(userId, { role: nextRole });
     rowEl.setAttribute('data-current-role', nextRole);
     _setAdminFlash('success', `${email} is now ${nextRole}`);
+    loadAdminStats();
     const me = getStoredAuthUser();
     if (me && Number(me.id) === userId && data?.user) {
       applyUpdatedUser({

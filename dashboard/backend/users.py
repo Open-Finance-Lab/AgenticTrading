@@ -237,6 +237,9 @@ DEFAULT_CREDITS = 0
 # LLM subprocesses on one Render box.
 MAX_CONCURRENT_BACKTESTS_CAP = 20
 MAX_CREDITS_CAP = 1_000_000
+# Postgres advisory-lock key for serializing admin-role mutations (bootstrap
+# one-shot + last-admin demotion). SQLite uses BEGIN IMMEDIATE instead.
+ADMIN_ROLE_LOCK_KEY = 0xA71AD01
 
 
 def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
@@ -1051,23 +1054,67 @@ class UserStore:
         normalized = (role or "").strip().lower()
         if normalized not in VALID_ROLES:
             raise ValueError("invalid_role")
-        if self.get_user_by_id(user_id) is None:
-            raise ValueError("user_not_found")
-        if normalized != "admin" and self.count_admins() <= 1:
-            current = self.get_user_by_id(user_id)
-            if current and current.get("role") == "admin":
-                raise ValueError("last_admin")
 
         conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET role = ? WHERE id = ?",
-            (normalized, int(user_id)),
-        )
-        conn.commit()
-        cursor.execute("SELECT * FROM users WHERE id = ?", (int(user_id),))
-        row = cursor.fetchone()
-        conn.close()
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE id = ?", (int(user_id),))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("user_not_found")
+            current_role = dict(row)["role"]
+            if normalized != "admin" and current_role == "admin":
+                cursor.execute(
+                    "SELECT COUNT(*) AS n FROM users WHERE role = 'admin'"
+                )
+                n = int(cursor.fetchone()["n"] or 0)
+                if n <= 1:
+                    raise ValueError("last_admin")
+            cursor.execute(
+                "UPDATE users SET role = ? WHERE id = ?",
+                (normalized, int(user_id)),
+            )
+            conn.commit()
+            cursor.execute("SELECT * FROM users WHERE id = ?", (int(user_id),))
+            row = cursor.fetchone()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def promote_first_admin(self, user_id: int) -> Dict[str, Any]:
+        """Promote ``user_id`` to admin iff no admin row exists yet."""
+        conn = self._get_connection()
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")
+            n = int(cursor.fetchone()["n"] or 0)
+            if n > 0:
+                raise ValueError("admin_exists")
+            cursor.execute("SELECT * FROM users WHERE id = ?", (int(user_id),))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("user_not_found")
+            cursor.execute(
+                "UPDATE users SET role = 'admin' WHERE id = ?",
+                (int(user_id),),
+            )
+            conn.commit()
+            cursor.execute("SELECT * FROM users WHERE id = ?", (int(user_id),))
+            row = cursor.fetchone()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
         if not row:
             raise ValueError("user_not_found")
         return public_user(row)

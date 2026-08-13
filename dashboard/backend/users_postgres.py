@@ -22,6 +22,7 @@ from dashboard.backend.session_tokens import (
     should_touch_last_seen,
 )
 from dashboard.backend.users import (
+    ADMIN_ROLE_LOCK_KEY,
     EMAIL_CHANGE_TTL_MINUTES,
     MAX_CONCURRENT_BACKTESTS_CAP,
     MAX_CREDITS_CAP,
@@ -720,18 +721,53 @@ class PostgresUserStore:
         normalized = (role or "").strip().lower()
         if normalized not in VALID_ROLES:
             raise ValueError("invalid_role")
-        if self.get_user_by_id(user_id) is None:
-            raise ValueError("user_not_found")
-        if normalized != "admin" and self.count_admins() <= 1:
-            current = self.get_user_by_id(user_id)
-            if current and current.get("role") == "admin":
-                raise ValueError("last_admin")
 
         with self._get_connection() as conn:
             with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (ADMIN_ROLE_LOCK_KEY,))
+                cur.execute(
+                    "SELECT * FROM users WHERE id = %s",
+                    (int(user_id),),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError("user_not_found")
+                current_role = dict(row)["role"]
+                if normalized != "admin" and current_role == "admin":
+                    cur.execute(
+                        "SELECT COUNT(*) AS n FROM users WHERE role = 'admin'"
+                    )
+                    n = int(cur.fetchone()["n"] or 0)
+                    if n <= 1:
+                        raise ValueError("last_admin")
                 cur.execute(
                     "UPDATE users SET role = %s WHERE id = %s RETURNING *",
                     (normalized, int(user_id)),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def promote_first_admin(self, user_id: int) -> Dict[str, Any]:
+        """Promote ``user_id`` to admin iff no admin row exists yet."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (ADMIN_ROLE_LOCK_KEY,))
+                cur.execute("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")
+                n = int(cur.fetchone()["n"] or 0)
+                if n > 0:
+                    raise ValueError("admin_exists")
+                cur.execute(
+                    "SELECT * FROM users WHERE id = %s",
+                    (int(user_id),),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError("user_not_found")
+                cur.execute(
+                    "UPDATE users SET role = 'admin' WHERE id = %s RETURNING *",
+                    (int(user_id),),
                 )
                 row = cur.fetchone()
         if not row:

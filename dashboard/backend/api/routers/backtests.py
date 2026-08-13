@@ -370,6 +370,21 @@ backtest_status = {
 backtest_session_id = None  # Track which session owns the running backtest
 
 
+def count_active_dashboard_backtests() -> int:
+    """How many dashboard-UI backtests are in flight on this process.
+
+    Prefers the multi-slot ledger when a later change defines ``_active_slots``;
+    otherwise the single-flight ``backtest_status`` flag (0 or 1). Admin stats
+    call this instead of reaching into those names itself.
+    """
+    slots = globals().get("_active_slots")
+    lock = globals().get("_backtest_slots_lock")
+    if isinstance(slots, dict) and lock is not None:
+        with lock:
+            return sum(1 for slot in slots.values() if slot.get("running"))
+    return 1 if backtest_status.get("running") else 0
+
+
 def _read_backtest_progress() -> Optional[Dict[str, Any]]:
     """Load incremental equity snapshots written by the backtest subprocess.
 

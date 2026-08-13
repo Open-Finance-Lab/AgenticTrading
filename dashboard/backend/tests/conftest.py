@@ -101,6 +101,10 @@ os.environ.pop("ACCOUNT_EMAIL_FROM_NAME", None)
 # secret-gate tests see a known-unset baseline rather than the shell's value.
 os.environ.pop("LEADERBOARD_DAILY_AUTO_DEPLOY", None)
 os.environ.pop("LEADERBOARD_DAILY_REFRESH_SECRET", None)
+# Same known-unset baseline for the first-admin bootstrap secret: a developer
+# with it exported would otherwise make the unconfigured-503 tests fail, and
+# could accidentally promote the suite's throwaway accounts.
+os.environ.pop("ADMIN_BOOTSTRAP_SECRET", None)
 
 
 @atexit.register

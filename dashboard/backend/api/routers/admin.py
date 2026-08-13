@@ -14,9 +14,9 @@ SQLite file a redeploy restored -- the wipe undid itself. Once
 ``curl`` irreversibly destroys the only copy, with no redeploy to recover
 from. Nothing ever called it (no frontend, SDK, Discord bot or doc), so it was
 removed rather than gated. ``admin_delete_run`` below now does gate on
-``users.role == "admin"``, but nothing assigns that role -- no signup or profile
-route writes it and the column defaults to ``'user'`` -- so the tier only exists
-for an operator who flips the column by hand.
+``users.role == "admin"``. Signup still defaults the column to ``'user'``;
+admin is assigned by ``POST /api/admin/bootstrap`` (one-shot, while no admin
+exists), by another admin in the Admin UI, or by SQL.
 ``db.clear_all()`` itself stays: it is still used by the test suite and by
 ``dashboard/scripts/backtest_hourly_agent.py --clear``, both of which run
 against a database the operator chose on purpose.
