@@ -88,6 +88,14 @@ def allow_recent_sip() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _parse_alpaca_end_or_none(value: Union[str, datetime]) -> Optional[datetime]:
+    """``parse_alpaca_end`` for values we are willing to ignore when malformed."""
+    try:
+        return parse_alpaca_end(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def parse_alpaca_end(end: Union[str, datetime]) -> datetime:
     """Normalize an Alpaca ``end`` to an aware UTC datetime."""
     if isinstance(end, datetime):
@@ -119,9 +127,8 @@ def clamp_end_for_sip(
     raising: the clamp is an optimization, and the SDK's own validation gives a
     better error than a bare ``ValueError`` from here.
     """
-    try:
-        end_dt = parse_alpaca_end(end)
-    except (TypeError, ValueError):
+    end_dt = _parse_alpaca_end_or_none(end)
+    if end_dt is None:
         return end
     minutes = DEFAULT_SIP_DELAY_MINUTES if delay_minutes is None else delay_minutes
     if minutes <= 0 or allow_recent_sip():
@@ -131,10 +138,9 @@ def clamp_end_for_sip(
         clock = clock.replace(tzinfo=timezone.utc)
     cutoff = clock.astimezone(timezone.utc) - timedelta(minutes=minutes)
     if start is not None:
-        try:
-            cutoff = max(cutoff, parse_alpaca_end(start))
-        except (TypeError, ValueError):
-            pass
+        start_dt = _parse_alpaca_end_or_none(start)
+        if start_dt is not None:
+            cutoff = max(cutoff, start_dt)
     return min(end_dt, cutoff)
 
 
@@ -253,9 +259,8 @@ class AlpacaDataLoader:
         clamped = clamp_end_for_sip(
             end, start=start, delay_minutes=sip_delay_minutes()
         )
-        try:
-            original = parse_alpaca_end(end)
-        except (TypeError, ValueError):
+        original = _parse_alpaca_end_or_none(end)
+        if original is None:
             return clamped, False
         if not isinstance(clamped, datetime) or clamped >= original:
             return clamped, False

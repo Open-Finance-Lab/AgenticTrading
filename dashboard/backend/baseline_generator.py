@@ -23,6 +23,7 @@ from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.domain.backtesting.currency import CurrencyContext
 from dashboard.backend.domain.trading.execution import calculate_transaction_costs
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    AlpacaDataLoader,
     MarketDataUnavailableError,
 )
 
@@ -293,22 +294,12 @@ class BaselineGenerator:
         """
         self._ensure_credentials()
 
-        try:
-            from dashboard.backend.infrastructure.market_data.alpaca_bars import (
-                AlpacaDataLoader,
-            )
-        except ImportError as e:
-            # Distinct from the alpaca-py branch below on purpose: reporting a
-            # first-party import break as "pip install alpaca-py" sends the
-            # next debugger to the wrong place entirely.
-            print(f"❌ Cannot import the Alpaca bar loader: {e}")
-            raise MarketDataUnavailableError(
-                "dashboard.backend.infrastructure.market_data.alpaca_bars "
-                "could not be imported"
-            ) from e
-
-        # The loader raises MarketDataUnavailableError itself when alpaca-py is
-        # missing, with the same install hint this method used to print.
+        # Imported at module scope alongside MarketDataUnavailableError, not
+        # inside the alpaca-py ImportError handler this method used to carry:
+        # reporting a first-party import break as "pip install alpaca-py" sends
+        # the next debugger somewhere the problem is not. The loader raises
+        # MarketDataUnavailableError itself when the SDK really is missing,
+        # with the same install hint.
         loader = AlpacaDataLoader(api_key=self.api_key, secret_key=self.secret_key)
         bars = loader.fetch_bars([symbol], start_date, end_date)
         return bars.get(symbol)

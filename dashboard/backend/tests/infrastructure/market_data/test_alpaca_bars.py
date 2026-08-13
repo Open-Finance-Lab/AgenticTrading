@@ -15,10 +15,18 @@ from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     FRAME_ATTR_FEED,
     FRAME_ATTR_SIP_FALLBACK,
     AlpacaDataLoader,
+    clamp_end_for_sip,
+    feed_provenance,
 )
 from dashboard.scripts import backtest_hourly_agent as bha
 
 CLIENT_TARGET = "alpaca.data.historical.StockHistoricalDataClient"
+# Patch target for the clamp. A string keeps this module on ONE import form for
+# alpaca_bars: adding `import ... as bars_mod` alongside the `from` import above
+# is what py/import-and-import-from flags.
+CLAMP_TARGET = (
+    "dashboard.backend.infrastructure.market_data.alpaca_bars.clamp_end_for_sip"
+)
 
 
 def _bars_df(symbol_to_rows):
@@ -299,18 +307,14 @@ def test_feed_provenance_reads_frame_stamps(fake_alpaca):
 def test_clamped_fetch_is_marked_in_provenance(fake_alpaca, monkeypatch):
     from datetime import datetime, timezone
 
-    import dashboard.backend.infrastructure.market_data.alpaca_bars as bars_mod
-    from dashboard.backend.infrastructure.market_data.alpaca_bars import feed_provenance
-
     frozen = datetime(2026, 8, 12, 23, 50, tzinfo=timezone.utc)
-    original = bars_mod.clamp_end_for_sip
 
     def _clamp(end, *, start=None, now=None, delay_minutes=None):
-        return original(
+        return clamp_end_for_sip(
             end, start=start, now=now or frozen, delay_minutes=delay_minutes
         )
 
-    monkeypatch.setattr(bars_mod, "clamp_end_for_sip", _clamp)
+    monkeypatch.setattr(CLAMP_TARGET, _clamp)
     loader = AlpacaDataLoader(api_key="k", secret_key="s")
     fake_alpaca["df"] = _bars_df({"AAPL": [("2026-08-12 10:00", 1, 2, 0.5, 1.5, 100)]})
     out = loader.fetch_bars(["AAPL"], "2026-07-12", "2026-08-13")
@@ -324,19 +328,16 @@ def test_sip_fetch_uses_clamped_end(fake_alpaca, monkeypatch):
 
     from alpaca.data.enums import DataFeed
 
-    import dashboard.backend.infrastructure.market_data.alpaca_bars as bars_mod
-
     frozen = datetime(2026, 8, 12, 23, 50, tzinfo=timezone.utc)
     clamped = datetime(2026, 8, 12, 23, 35, tzinfo=timezone.utc)
-    original = bars_mod.clamp_end_for_sip
 
     def _clamp(end, *, start=None, now=None, delay_minutes=None):
-        return original(
+        return clamp_end_for_sip(
             end, start=start, now=now or frozen, delay_minutes=delay_minutes
         )
 
     monkeypatch.setenv("ALPACA_DATA_FEED", "sip")
-    monkeypatch.setattr(bars_mod, "clamp_end_for_sip", _clamp)
+    monkeypatch.setattr(CLAMP_TARGET, _clamp)
     loader = AlpacaDataLoader(api_key="k", secret_key="s")
     fake_alpaca["df"] = _bars_df({"AAPL": [("2026-08-12 10:00", 1, 2, 0.5, 1.5, 100)]})
     loader.fetch_bars(["AAPL"], "2026-07-12", "2026-08-13")
