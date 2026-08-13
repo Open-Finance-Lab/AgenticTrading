@@ -52,9 +52,12 @@ def test_credits_api_values_never_enter_inner_html():
     assert ".textContent" in source
     assert ".innerHTML" not in source
     assert "insertAdjacentHTML" not in source
+    assert "toLocaleString('en-US'" in source
 
 
 def test_credits_layout_has_mobile_contract():
     assert ".credits-view" in STYLES
     assert ".credits-package-grid" in STYLES
     assert "@media (max-width: 600px)" in STYLES
+    assert '<th aria-label="Action"></th>' in APP_HTML
+    assert '<span class="sr-only">Action</span>' not in APP_HTML
