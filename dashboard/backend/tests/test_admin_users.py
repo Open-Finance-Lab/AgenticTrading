@@ -5,13 +5,13 @@ from pathlib import Path
 
 import pytest
 
-from dashboard.backend.users import UserStore, user_store
+import dashboard.backend.users as users_module
 
 
 @pytest.fixture
 def store():
     with tempfile.TemporaryDirectory() as tmpdir:
-        yield UserStore(db_path=Path(tmpdir) / "users.db")
+        yield users_module.UserStore(db_path=Path(tmpdir) / "users.db")
 
 
 def test_entitlements_default_then_upsert(store):
@@ -71,7 +71,7 @@ def test_admin_users_requires_admin():
     resp = client.get("/api/admin/users")
     assert resp.status_code == 403
 
-    user_store.set_user_role(user["id"], "admin")
+    users_module.user_store.set_user_role(user["id"], "admin")
     me = client.get("/api/auth/me")
     assert me.status_code == 200
     assert me.json()["user"]["role"] == "admin"
@@ -89,10 +89,10 @@ def test_admin_cannot_demote_self():
 
     client = TestClient(app)
     admin = _signup(client, "selfadmin@example.com")
-    user_store.set_user_role(admin["id"], "admin")
+    users_module.user_store.set_user_role(admin["id"], "admin")
     # Second admin so last_admin is not the reason for refusal.
     other = _signup(client, "otheradmin@example.com")
-    user_store.set_user_role(other["id"], "admin")
+    users_module.user_store.set_user_role(other["id"], "admin")
 
     client.post(
         "/api/auth/login",
@@ -104,7 +104,7 @@ def test_admin_cannot_demote_self():
     )
     assert resp.status_code == 400, resp.text
     assert "yourself" in resp.json()["detail"].lower()
-    assert user_store.get_user_by_id(admin["id"])["role"] == "admin"
+    assert users_module.user_store.get_user_by_id(admin["id"])["role"] == "admin"
 
 
 def test_admin_stats_endpoint():
@@ -114,7 +114,7 @@ def test_admin_stats_endpoint():
 
     client = TestClient(app)
     admin = _signup(client, "stats-admin@example.com")
-    user_store.set_user_role(admin["id"], "admin")
+    users_module.user_store.set_user_role(admin["id"], "admin")
     _signup(client, "stats-user@example.com")
     agent_store.create_agent(
         name="stats-agent",
@@ -141,7 +141,7 @@ def test_admin_patch_entitlements_and_role():
 
     client = TestClient(app)
     admin = _signup(client, "boss@example.com")
-    user_store.set_user_role(admin["id"], "admin")
+    users_module.user_store.set_user_role(admin["id"], "admin")
     target = _signup(client, "member@example.com")
 
     client.post(
@@ -193,7 +193,7 @@ def test_admin_patch_rejects_out_of_range_quotas():
 
     client = TestClient(app)
     admin = _signup(client, "quota-admin@example.com")
-    user_store.set_user_role(admin["id"], "admin")
+    users_module.user_store.set_user_role(admin["id"], "admin")
     target = _signup(client, "quota-member@example.com")
     client.post(
         "/api/auth/login",
@@ -209,13 +209,12 @@ def test_admin_patch_rejects_out_of_range_quotas():
 @pytest.fixture
 def isolated_auth(monkeypatch):
     """Fresh UserStore so bootstrap tests do not see admins from other cases."""
-    import dashboard.backend.users as users_module
     from fastapi.testclient import TestClient
     from dashboard.backend.app import app
     from dashboard.backend.api.routers import admin_users as admin_mod
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        store = UserStore(db_path=Path(tmpdir) / "users.db")
+        store = users_module.UserStore(db_path=Path(tmpdir) / "users.db")
         monkeypatch.setattr(users_module, "user_store", store)
         admin_mod._BOOTSTRAP_LIMITER.reset()
         yield TestClient(app), store
