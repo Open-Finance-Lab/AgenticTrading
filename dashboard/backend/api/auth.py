@@ -436,9 +436,18 @@ def me(
     current_user: dict = Depends(get_current_user),
 ):
     user_payload = public_user(current_user)
-    user_payload["entitlements"] = users_module.user_store.get_entitlements(
-        current_user["id"]
+    # /me is on the page-boot critical path, where every query is a round-trip
+    # to pooled Postgres. get_user_for_token already LEFT JOINs the
+    # entitlements row, so read it off the session row instead of paying a
+    # second one. The fallback covers a store whose session query has not been
+    # taught the join -- it returns None rather than silently reporting
+    # defaults for a user who has real quotas.
+    entitlements = users_module.entitlements_from_session_row(
+        current_user, current_user["id"]
     )
+    if entitlements is None:
+        entitlements = users_module.user_store.get_entitlements(current_user["id"])
+    user_payload["entitlements"] = entitlements
     response = JSONResponse({"user": user_payload})
     # Migration bridge: a browser signed in before the HttpOnly-cookie change
     # holds a valid session only in localStorage. app.js sends it once as

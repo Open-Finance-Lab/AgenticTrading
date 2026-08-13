@@ -24,12 +24,12 @@ from dashboard.backend.session_tokens import (
 from dashboard.backend.users import (
     ADMIN_ROLE_LOCK_KEY,
     EMAIL_CHANGE_TTL_MINUTES,
-    MAX_CONCURRENT_BACKTESTS_CAP,
-    MAX_CREDITS_CAP,
+    ENTITLEMENTS_UPSERT_POSTGRES,
     VALID_ROLES,
     _utcnow,
     _utcnow_iso,
     default_entitlements,
+    entitlements_upsert_params,
     format_stored_timestamp,
     hash_password,
     is_expired,
@@ -37,6 +37,7 @@ from dashboard.backend.users import (
     public_entitlements,
     public_user,
     public_user_with_entitlements,
+    validate_entitlement_patch,
     verify_password_for_account,
 )
 
@@ -293,9 +294,17 @@ class PostgresUserStore:
                         auth_sessions.created_at AS session_created_at,
                         auth_sessions.last_seen_at AS session_last_seen_at,
                         auth_sessions.expires_at AS session_expires_at,
-                        auth_sessions.revoked_at AS session_revoked_at
+                        auth_sessions.revoked_at AS session_revoked_at,
+                        user_entitlements.max_concurrent_backtests
+                            AS ent_max_concurrent_backtests,
+                        user_entitlements.credits AS ent_credits,
+                        user_entitlements.updated_at AS ent_updated_at,
+                        user_entitlements.updated_by_admin_id
+                            AS ent_updated_by_admin_id
                     FROM auth_sessions
                     JOIN users ON users.id = auth_sessions.user_id
+                    LEFT JOIN user_entitlements
+                        ON user_entitlements.user_id = users.id
                     WHERE auth_sessions.token_hash = %s
                     """,
                     (token_hash,),
@@ -680,42 +689,66 @@ class PostgresUserStore:
         if self.get_user_by_id(user_id) is None:
             raise ValueError("user_not_found")
 
-        current = self.get_entitlements(user_id)
-        next_max = (
-            current["max_concurrent_backtests"]
-            if max_concurrent_backtests is None
-            else int(max_concurrent_backtests)
+        next_max, next_credits = validate_entitlement_patch(
+            max_concurrent_backtests, credits
         )
-        next_credits = current["credits"] if credits is None else int(credits)
-        if next_max < 1 or next_max > MAX_CONCURRENT_BACKTESTS_CAP:
-            raise ValueError("invalid_max_concurrent_backtests")
-        if next_credits < 0 or next_credits > MAX_CREDITS_CAP:
-            raise ValueError("invalid_credits")
-
-        updated_at = format_stored_timestamp(_utcnow().replace(microsecond=0))
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
-                    INSERT INTO user_entitlements (
-                        user_id, max_concurrent_backtests, credits, updated_at, updated_by_admin_id
-                    )
-                    VALUES (%s, %s, %s, %s, %s)
-                    ON CONFLICT (user_id) DO UPDATE SET
-                        max_concurrent_backtests = EXCLUDED.max_concurrent_backtests,
-                        credits = EXCLUDED.credits,
-                        updated_at = EXCLUDED.updated_at,
-                        updated_by_admin_id = EXCLUDED.updated_by_admin_id
-                    """,
-                    (
-                        int(user_id),
-                        next_max,
-                        next_credits,
-                        updated_at,
-                        int(updated_by_admin_id) if updated_by_admin_id is not None else None,
+                    ENTITLEMENTS_UPSERT_POSTGRES,
+                    entitlements_upsert_params(
+                        user_id, next_max, next_credits, updated_by_admin_id
                     ),
                 )
         return self.get_entitlements(user_id)
+
+    def apply_admin_patch(
+        self,
+        user_id: int,
+        *,
+        role: Optional[str] = None,
+        max_concurrent_backtests: Optional[int] = None,
+        credits: Optional[int] = None,
+        updated_by_admin_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Role and entitlements for one user, in a single transaction."""
+        normalized_role: Optional[str] = None
+        if role is not None:
+            normalized_role = (role or "").strip().lower()
+            if normalized_role not in VALID_ROLES:
+                raise ValueError("invalid_role")
+        next_max, next_credits = validate_entitlement_patch(
+            max_concurrent_backtests, credits
+        )
+        touches_entitlements = next_max is not None or next_credits is not None
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (ADMIN_ROLE_LOCK_KEY,))
+                cur.execute("SELECT * FROM users WHERE id = %s", (int(user_id),))
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError("user_not_found")
+                if normalized_role is not None:
+                    current_role = dict(row)["role"]
+                    if normalized_role != "admin" and current_role == "admin":
+                        cur.execute(
+                            "SELECT COUNT(*) AS n FROM users WHERE role = 'admin'"
+                        )
+                        if int(cur.fetchone()["n"] or 0) <= 1:
+                            raise ValueError("last_admin")
+                    cur.execute(
+                        "UPDATE users SET role = %s WHERE id = %s",
+                        (normalized_role, int(user_id)),
+                    )
+                if touches_entitlements:
+                    cur.execute(
+                        ENTITLEMENTS_UPSERT_POSTGRES,
+                        entitlements_upsert_params(
+                            user_id, next_max, next_credits, updated_by_admin_id
+                        ),
+                    )
+        return self.get_user_admin(user_id)
 
     def set_user_role(self, user_id: int, role: str) -> Dict[str, Any]:
         normalized = (role or "").strip().lower()

@@ -1786,6 +1786,13 @@
                 </tbody>
             </table>
         </div>
+        <div class="admin-pager">
+            <span id="adminUsersRange" class="admin-pager-range" aria-live="polite"></span>
+            <div class="admin-pager-buttons">
+                <button id="adminPrevBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Previous</button>
+                <button id="adminNextBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Next</button>
+            </div>
+        </div>
     </div>
 
 
@@ -1798,7 +1805,7 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=27" defer></script>
-    <script src="app.js?v=88" defer></script>
+    <script src="app.js?v=98" defer></script>
     <script src="js/leaderboard.js?v=19" defer></script>
     <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

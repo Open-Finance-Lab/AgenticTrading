@@ -268,15 +268,21 @@ def default_entitlements(user_id: int) -> Dict[str, Any]:
 
 
 def public_entitlements(row: sqlite3.Row | Dict[str, Any] | None, user_id: int) -> Dict[str, Any]:
+    # NULL columns mean "no entitlements row" (a LEFT JOIN miss), not zero: fall
+    # back to the defaults per field rather than crashing on ``int(None)``.
     if not row:
         return default_entitlements(user_id)
     data = dict(row)
+    max_concurrent = data.get("max_concurrent_backtests")
+    credits = data.get("credits")
     return {
-        "user_id": int(data.get("user_id", user_id)),
-        "max_concurrent_backtests": int(
-            data.get("max_concurrent_backtests", DEFAULT_MAX_CONCURRENT_BACKTESTS)
+        "user_id": int(data.get("user_id") or user_id),
+        "max_concurrent_backtests": (
+            int(max_concurrent)
+            if max_concurrent is not None
+            else DEFAULT_MAX_CONCURRENT_BACKTESTS
         ),
-        "credits": int(data.get("credits", DEFAULT_CREDITS)),
+        "credits": int(credits) if credits is not None else DEFAULT_CREDITS,
         "updated_at": data.get("updated_at"),
         "updated_by_admin_id": (
             int(data["updated_by_admin_id"])
@@ -286,13 +292,130 @@ def public_entitlements(row: sqlite3.Row | Dict[str, Any] | None, user_id: int) 
     }
 
 
+# Column aliases the session join adds so ``/api/auth/me`` can report
+# entitlements without a second round-trip. Prefixed to avoid colliding with
+# ``users.*`` (both tables have an ``updated_at``-shaped column).
+SESSION_ENTITLEMENT_PREFIX = "ent_"
+
+
+def entitlements_from_session_row(
+    row: sqlite3.Row | Dict[str, Any] | None, user_id: int
+) -> Optional[Dict[str, Any]]:
+    """Public entitlements built from a ``get_user_for_token`` row.
+
+    Returns ``None`` when the row carries no ``ent_*`` columns at all — that
+    means the caller's store did not join ``user_entitlements`` and must query
+    it separately. A column that is *present but NULL* is different: it is a
+    LEFT JOIN miss, i.e. a user with no entitlements row yet, so defaults apply.
+    """
+    data = dict(row or {})
+    if f"{SESSION_ENTITLEMENT_PREFIX}max_concurrent_backtests" not in data:
+        return None
+    return public_entitlements(
+        {
+            "user_id": user_id,
+            "max_concurrent_backtests": data.get("ent_max_concurrent_backtests"),
+            "credits": data.get("ent_credits"),
+            "updated_at": data.get("ent_updated_at"),
+            "updated_by_admin_id": data.get("ent_updated_by_admin_id"),
+        },
+        user_id,
+    )
+
+
 def public_user_with_entitlements(
     row: sqlite3.Row | Dict[str, Any],
     entitlements: Dict[str, Any],
 ) -> Dict[str, Any]:
+    """Admin projection: the public user plus entitlements, minus ``avatar``.
+
+    Avatars are data: URIs bounded at 200_000 chars each on write
+    (``api/auth.py``). The admin console renders emails, names, roles and two
+    numbers — never the image — so carrying them would make a 100-row page tens
+    of megabytes of response body on a free-tier box for nothing. Callers that
+    merge this into a stored user (``saveAdminUserRole``) spread it over the
+    existing object, so an absent key leaves the cached avatar intact.
+    """
     payload = public_user(row)
+    payload.pop("avatar", None)
     payload["entitlements"] = entitlements
     return payload
+
+
+def validate_entitlement_patch(
+    max_concurrent_backtests: Optional[int], credits: Optional[int]
+) -> tuple[Optional[int], Optional[int]]:
+    """Range-check the provided fields; ``None`` stays ``None`` (unchanged).
+
+    Each field is bounded independently, so validating only what was supplied
+    is equivalent to validating the merged row — and it means the store never
+    has to read the current values to decide whether a patch is legal.
+    """
+    next_max: Optional[int] = None
+    if max_concurrent_backtests is not None:
+        next_max = int(max_concurrent_backtests)
+        if next_max < 1 or next_max > MAX_CONCURRENT_BACKTESTS_CAP:
+            raise ValueError("invalid_max_concurrent_backtests")
+    next_credits: Optional[int] = None
+    if credits is not None:
+        next_credits = int(credits)
+        if next_credits < 0 or next_credits > MAX_CREDITS_CAP:
+            raise ValueError("invalid_credits")
+    return next_max, next_credits
+
+
+# Upsert that leaves an omitted field alone instead of rewriting it with the
+# value this request happened to read a moment ago. The old read-modify-write
+# spanned two connections, so two admins patching different fields at once lost
+# one of the two edits. ``COALESCE(<param>, <existing column>)`` pushes the
+# merge into the statement, where the row is locked. Note the DO UPDATE clause
+# repeats the raw parameters rather than reading ``excluded.*``: the VALUES row
+# has already had defaults substituted, so ``excluded`` cannot tell "not
+# supplied" from "supplied as the default".
+_ENTITLEMENTS_UPSERT_TEMPLATE = """
+INSERT INTO user_entitlements (
+    user_id, max_concurrent_backtests, credits, updated_at, updated_by_admin_id
+)
+VALUES ({p}, COALESCE({max_cast}, {p}), COALESCE({credits_cast}, {p}), {p}, {p})
+ON CONFLICT (user_id) DO UPDATE SET
+    max_concurrent_backtests = COALESCE(
+        {max_cast}, user_entitlements.max_concurrent_backtests
+    ),
+    credits = COALESCE({credits_cast}, user_entitlements.credits),
+    updated_at = EXCLUDED.updated_at,
+    updated_by_admin_id = EXCLUDED.updated_by_admin_id
+"""
+
+ENTITLEMENTS_UPSERT_SQLITE = _ENTITLEMENTS_UPSERT_TEMPLATE.format(
+    p="?", max_cast="?", credits_cast="?"
+)
+# psycopg sends a bare ``None`` as an untyped NULL (OID 0), which Postgres
+# refuses to resolve inside COALESCE ("could not determine data type"). The
+# explicit ``::integer`` casts are load-bearing, and no SQLite test can catch
+# their absence.
+ENTITLEMENTS_UPSERT_POSTGRES = _ENTITLEMENTS_UPSERT_TEMPLATE.format(
+    p="%s", max_cast="%s::integer", credits_cast="%s::integer"
+)
+
+
+def entitlements_upsert_params(
+    user_id: int,
+    next_max: Optional[int],
+    next_credits: Optional[int],
+    updated_by_admin_id: Optional[int],
+) -> tuple:
+    """Positional parameters for ``ENTITLEMENTS_UPSERT_*`` (same order in both)."""
+    return (
+        int(user_id),
+        next_max,
+        DEFAULT_MAX_CONCURRENT_BACKTESTS,
+        next_credits,
+        DEFAULT_CREDITS,
+        format_stored_timestamp(_utcnow().replace(microsecond=0)),
+        int(updated_by_admin_id) if updated_by_admin_id is not None else None,
+        next_max,
+        next_credits,
+    )
 
 
 class UserStore:
@@ -555,9 +678,15 @@ class UserStore:
                 auth_sessions.created_at AS session_created_at,
                 auth_sessions.last_seen_at AS session_last_seen_at,
                 auth_sessions.expires_at AS session_expires_at,
-                auth_sessions.revoked_at AS session_revoked_at
+                auth_sessions.revoked_at AS session_revoked_at,
+                user_entitlements.max_concurrent_backtests
+                    AS ent_max_concurrent_backtests,
+                user_entitlements.credits AS ent_credits,
+                user_entitlements.updated_at AS ent_updated_at,
+                user_entitlements.updated_by_admin_id AS ent_updated_by_admin_id
             FROM auth_sessions
             JOIN users ON users.id = auth_sessions.user_id
+            LEFT JOIN user_entitlements ON user_entitlements.user_id = users.id
             WHERE auth_sessions.token_hash = ?
             """,
             (token_hash,),
@@ -1011,44 +1140,74 @@ class UserStore:
         if self.get_user_by_id(user_id) is None:
             raise ValueError("user_not_found")
 
-        current = self.get_entitlements(user_id)
-        next_max = (
-            current["max_concurrent_backtests"]
-            if max_concurrent_backtests is None
-            else int(max_concurrent_backtests)
+        next_max, next_credits = validate_entitlement_patch(
+            max_concurrent_backtests, credits
         )
-        next_credits = current["credits"] if credits is None else int(credits)
-        if next_max < 1 or next_max > MAX_CONCURRENT_BACKTESTS_CAP:
-            raise ValueError("invalid_max_concurrent_backtests")
-        if next_credits < 0 or next_credits > MAX_CREDITS_CAP:
-            raise ValueError("invalid_credits")
-
-        updated_at = format_stored_timestamp(_utcnow().replace(microsecond=0))
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO user_entitlements (
-                user_id, max_concurrent_backtests, credits, updated_at, updated_by_admin_id
-            )
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                max_concurrent_backtests = excluded.max_concurrent_backtests,
-                credits = excluded.credits,
-                updated_at = excluded.updated_at,
-                updated_by_admin_id = excluded.updated_by_admin_id
-            """,
-            (
-                int(user_id),
-                next_max,
-                next_credits,
-                updated_at,
-                int(updated_by_admin_id) if updated_by_admin_id is not None else None,
-            ),
-        )
+        cursor.execute(ENTITLEMENTS_UPSERT_SQLITE, entitlements_upsert_params(
+            user_id, next_max, next_credits, updated_by_admin_id
+        ))
         conn.commit()
         conn.close()
         return self.get_entitlements(user_id)
+
+    def apply_admin_patch(
+        self,
+        user_id: int,
+        *,
+        role: Optional[str] = None,
+        max_concurrent_backtests: Optional[int] = None,
+        credits: Optional[int] = None,
+        updated_by_admin_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Role and entitlements for one user, in a single transaction.
+
+        ``PATCH /api/admin/users/{id}`` advertises one atomic change. Doing it
+        as ``set_user_role`` then ``set_entitlements`` meant a failure on the
+        second leg left the role change committed behind a 500 response, so the
+        console showed the old row while the database held the new one.
+        """
+        normalized_role: Optional[str] = None
+        if role is not None:
+            normalized_role = (role or "").strip().lower()
+            if normalized_role not in VALID_ROLES:
+                raise ValueError("invalid_role")
+        next_max, next_credits = validate_entitlement_patch(
+            max_concurrent_backtests, credits
+        )
+        touches_entitlements = next_max is not None or next_credits is not None
+
+        conn = self._get_connection()
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM users WHERE id = ?", (int(user_id),))
+            row = cursor.fetchone()
+            if not row:
+                raise ValueError("user_not_found")
+            if normalized_role is not None:
+                current_role = dict(row)["role"]
+                if normalized_role != "admin" and current_role == "admin":
+                    cursor.execute("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")
+                    if int(cursor.fetchone()["n"] or 0) <= 1:
+                        raise ValueError("last_admin")
+                cursor.execute(
+                    "UPDATE users SET role = ? WHERE id = ?",
+                    (normalized_role, int(user_id)),
+                )
+            if touches_entitlements:
+                cursor.execute(ENTITLEMENTS_UPSERT_SQLITE, entitlements_upsert_params(
+                    user_id, next_max, next_credits, updated_by_admin_id
+                ))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return self.get_user_admin(user_id)
 
     def set_user_role(self, user_id: int, role: str) -> Dict[str, Any]:
         normalized = (role or "").strip().lower()

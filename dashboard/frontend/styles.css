@@ -10141,6 +10141,30 @@ body.agent-editor-open {
     border-radius: 10px;
 }
 
+.admin-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+}
+
+.admin-pager-range {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.admin-pager-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.admin-pager-buttons .auth-btn[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .admin-users-table {
     width: 100%;
     border-collapse: collapse;

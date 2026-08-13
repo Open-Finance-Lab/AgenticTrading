@@ -179,5 +179,9 @@ def test_slow_boot_notice_is_wired():
 
 def test_cache_busters_bumped():
     # Floor advances whenever app.js/styles.css change and their ?v= must ship.
-    assert "app.js?v=88" in APP_HTML
+    # The floor must clear whatever main already ships, not just whatever this
+    # branch started from. Two branches cut from different bases can both
+    # "bump" to the same number, merge without a conflict, and leave prod
+    # serving new app.js content under a ?v= browsers have already cached.
+    assert "app.js?v=98" in APP_HTML
     assert "styles.css?v=97" in APP_HTML

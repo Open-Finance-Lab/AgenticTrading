@@ -3026,7 +3026,12 @@ const AuthAPI = {
 
     if (!response.ok) {
       const message = data?.detail || data?.error || `HTTP ${response.status}`;
-      throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      const error = new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      // Callers that need to react to *which* refusal (a 403 means the cached
+      // role is stale, not that the request was malformed) cannot recover the
+      // status from the message text once it is a plain Error.
+      error.status = response.status;
+      throw error;
     }
 
     return data;
@@ -3113,9 +3118,13 @@ const AuthAPI = {
   },
 };
 
+const ADMIN_USERS_PAGE_SIZE = 50;
+const adminUsersPage = { offset: 0, total: 0, limit: ADMIN_USERS_PAGE_SIZE };
+
 const AdminAPI = {
-  listUsers() {
-    return AuthAPI.request('/api/admin/users');
+  listUsers({ limit = ADMIN_USERS_PAGE_SIZE, offset = 0 } = {}) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    return AuthAPI.request(`/api/admin/users?${params}`);
   },
   stats() {
     return AuthAPI.request('/api/admin/stats');
@@ -3239,7 +3248,35 @@ async function loadAdminStats() {
   }
 }
 
-async function loadAdminUsers() {
+function _renderAdminPager() {
+  const rangeEl = document.getElementById('adminUsersRange');
+  const prevBtn = document.getElementById('adminPrevBtn');
+  const nextBtn = document.getElementById('adminNextBtn');
+  const { offset, total, limit } = adminUsersPage;
+  const shown = Math.min(limit, Math.max(0, total - offset));
+  if (rangeEl) {
+    rangeEl.textContent = total
+      ? `Showing ${offset + 1}–${offset + shown} of ${total}`
+      : '';
+  }
+  if (prevBtn) prevBtn.disabled = offset <= 0;
+  if (nextBtn) nextBtn.disabled = offset + limit >= total;
+}
+
+// A 403 from an admin route means the cached role is stale — someone demoted
+// this account since the last /me. Re-read the server's answer so the menu
+// entry and the page disappear instead of sitting there erroring.
+async function _handleAdminAccessLost() {
+  try {
+    const refreshed = await AuthAPI.me();
+    if (refreshed?.user) applyUpdatedUser(refreshed.user);
+  } catch (_error) {
+    clearAuthState();
+  }
+  if (currentPage === 'admin') navigateToPage('home');
+}
+
+async function loadAdminUsers({ offset } = {}) {
   const body = document.getElementById('adminUsersBody');
   if (!body) return;
   const user = getStoredAuthUser();
@@ -3247,12 +3284,22 @@ async function loadAdminUsers() {
     body.innerHTML = '<tr><td colspan="6" class="admin-empty">Admin access required.</td></tr>';
     return;
   }
+  if (Number.isFinite(offset)) adminUsersPage.offset = Math.max(0, offset);
   loadAdminStats();
   body.innerHTML = '<tr><td colspan="6" class="admin-empty">Loading…</td></tr>';
   _setAdminFlash(null);
   try {
-    const data = await AdminAPI.listUsers();
+    const data = await AdminAPI.listUsers({
+      limit: adminUsersPage.limit,
+      offset: adminUsersPage.offset,
+    });
     const users = Array.isArray(data?.users) ? data.users : [];
+    adminUsersPage.total = Number(data?.total) || users.length;
+    // A page can go out of range when accounts are deleted between requests.
+    if (!users.length && adminUsersPage.offset > 0) {
+      return loadAdminUsers({ offset: 0 });
+    }
+    _renderAdminPager();
     if (!users.length) {
       body.innerHTML = '<tr><td colspan="6" class="admin-empty">No users yet.</td></tr>';
       return;
@@ -3289,6 +3336,11 @@ async function loadAdminUsers() {
       </tr>`;
     }).join('');
   } catch (error) {
+    if (error?.status === 403 || error?.status === 401) {
+      body.innerHTML = '<tr><td colspan="6" class="admin-empty">Admin access required.</td></tr>';
+      await _handleAdminAccessLost();
+      return;
+    }
     body.innerHTML = `<tr><td colspan="6" class="admin-empty">${_adminEscape(error.message || 'Failed to load users')}</td></tr>`;
     _setAdminFlash('error', error.message || 'Failed to load users');
   }
@@ -3339,24 +3391,47 @@ async function saveAdminUserRole(rowEl, nextRole) {
   } catch (error) {
     if (roleSelect) roleSelect.value = prevRole;
     _setAdminFlash('error', error.message || 'Role update failed');
+    if (error?.status === 403 || error?.status === 401) await _handleAdminAccessLost();
   } finally {
     if (roleSelect) roleSelect.disabled = false;
   }
 }
 
+// A blank <input type="number"> reads as '' and Number('') is 0 while
+// Number(' ') is 0 too — but the old code's Number(undefined) path produced
+// NaN, which JSON.stringify writes as null, which Pydantic reads as "field
+// omitted". The save then succeeded, changed nothing, and flashed "Updated
+// quotas". Refuse the submit instead of sending a value we cannot represent.
+function _readAdminQuota(rowEl, field, label, { min, max }) {
+  const el = rowEl.querySelector(`[data-field="${field}"]`);
+  const raw = String(el?.value ?? '').trim();
+  if (raw === '') return { error: `${label} cannot be blank` };
+  const value = Number(raw);
+  if (!Number.isInteger(value)) return { error: `${label} must be a whole number` };
+  if (value < min || value > max) {
+    return { error: `${label} must be between ${min} and ${max}` };
+  }
+  return { value };
+}
+
 async function saveAdminUserRow(rowEl) {
   if (!rowEl) return;
   const userId = Number(rowEl.getAttribute('data-user-id'));
-  const maxConcurrent = Number(rowEl.querySelector('[data-field="max_concurrent_backtests"]')?.value);
-  const credits = Number(rowEl.querySelector('[data-field="credits"]')?.value);
+  const maxField = _readAdminQuota(rowEl, 'max_concurrent_backtests', 'Max concurrent backtests', { min: 1, max: 20 });
+  const creditsField = _readAdminQuota(rowEl, 'credits', 'Credits', { min: 0, max: 1000000 });
   const btn = rowEl.querySelector('[data-admin-save]');
   const email = rowEl.querySelector('.admin-email')?.textContent || `user #${userId}`;
+  const invalid = maxField.error || creditsField.error;
+  if (invalid) {
+    _setAdminFlash('error', `${email}: ${invalid}`);
+    return;
+  }
   if (btn) btn.disabled = true;
   _setAdminFlash(null);
   try {
     await AdminAPI.patchUser(userId, {
-      max_concurrent_backtests: maxConcurrent,
-      credits,
+      max_concurrent_backtests: maxField.value,
+      credits: creditsField.value,
     });
     _setAdminFlash('success', `Updated quotas for ${email}`);
     const me = getStoredAuthUser();
@@ -3366,6 +3441,7 @@ async function saveAdminUserRow(rowEl) {
     }
   } catch (error) {
     _setAdminFlash('error', error.message || 'Save failed');
+    if (error?.status === 403 || error?.status === 401) await _handleAdminAccessLost();
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -4120,6 +4196,12 @@ function initAuthUI(options = {}) {
   });
   document.getElementById('adminRefreshBtn')?.addEventListener('click', () => {
     loadAdminUsers();
+  });
+  document.getElementById('adminPrevBtn')?.addEventListener('click', () => {
+    loadAdminUsers({ offset: adminUsersPage.offset - adminUsersPage.limit });
+  });
+  document.getElementById('adminNextBtn')?.addEventListener('click', () => {
+    loadAdminUsers({ offset: adminUsersPage.offset + adminUsersPage.limit });
   });
   document.getElementById('adminUsersBody')?.addEventListener('click', (event) => {
     const btn = event.target.closest('[data-admin-save]');
