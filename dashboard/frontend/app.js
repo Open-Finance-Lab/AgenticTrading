@@ -3605,6 +3605,10 @@ function updateAuthUI() {
 
   updateAccountPage();
 
+  if (window.CreditsPage) {
+    window.CreditsPage.syncAuth(user);
+  }
+
   if (typeof window.refreshHomeModules === 'function') {
     window.refreshHomeModules();
   }
@@ -3618,7 +3622,7 @@ async function logoutUser() {
   } finally {
     clearAuthState();
     await loadAgents();
-    if (currentPage === 'account') {
+    if (currentPage === 'account' || currentPage === 'credits') {
       navigateToPage('home');
     }
   }
@@ -3915,6 +3919,10 @@ function initAuthUI(options = {}) {
   document.getElementById('accountMenuAccountBtn')?.addEventListener('click', () => {
     closeAccountMenu();
     navigateToPage('account');
+  });
+  document.getElementById('accountMenuCreditsBtn')?.addEventListener('click', () => {
+    closeAccountMenu();
+    navigateToPage('credits');
   });
   document.getElementById('accountMenuLogoutBtn')?.addEventListener('click', () => {
     closeAccountMenu();
@@ -7115,6 +7123,7 @@ function viewParamForNavState(state) {
     if (state.page === 'home') return 'home';
     if (state.page === 'community') return 'community';
     if (state.page === 'account') return 'account';
+    if (state.page === 'credits') return 'credits';
     if (state.page === 'playground') {
         if (state.playgroundTab === 'backtest') return 'backtest';
         if (state.playgroundTab === 'paper') return 'paper';
@@ -7211,7 +7220,7 @@ function resolveInitialNavigation() {
         const saved = migrateSavedNavState(
             JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null'),
         );
-        const validPages = ['home', 'playground', 'competition', 'community', 'account'];
+        const validPages = ['home', 'playground', 'competition', 'community', 'account', 'credits'];
         if (saved && validPages.includes(saved.page)) {
             return saved;
         }
@@ -7486,6 +7495,7 @@ function navigateToPage(page, options = {}) {
     const competitionView = document.getElementById('competitionView');
     const communityView = document.getElementById('communityView');
     const accountView = document.getElementById('accountView');
+    const creditsView = document.getElementById('creditsView');
     const backtestPanel = document.querySelector('.playground-backtest-panel')
       || document.querySelector('.main-container');
     const paperView = document.getElementById('paperTradingView');
@@ -7501,6 +7511,7 @@ function navigateToPage(page, options = {}) {
     hide(competitionView);
     hide(communityView);
     hide(accountView);
+    hide(creditsView);
     hide(backtestPanel);
     hide(paperView);
     hide(myAlgoView);
@@ -7540,6 +7551,10 @@ function navigateToPage(page, options = {}) {
             currentMode = 'account';
             if (accountView) accountView.style.display = 'block';
             updateAccountPage();
+        } else if (page === 'credits') {
+            currentMode = 'credits';
+            if (creditsView) creditsView.style.display = 'block';
+            if (window.CreditsPage) window.CreditsPage.onEnter();
         }
     }
 
