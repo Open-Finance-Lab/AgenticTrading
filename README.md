@@ -117,7 +117,7 @@ Progress so far: news sentiment is live via Agentic FinSearch (Home panel + v2 a
 
 ## Citation
 
-This repository includes the FinAgent Orchestration Framework under `orchestration/`, originally developed by Jifeng Li et al. at Open Finance Lab as part of the work on financial agent orchestration. The orchestration framework provides multi-agent architecture, memory systems, and DAG-based planning components. See `orchestration/README.md` for details.
+This repository includes the FinAgent Orchestration Framework under `orchestration/`, developed by Jifeng Li et al. at Open Finance Lab. The orchestration framework provides multi-agent architecture, memory systems, and DAG-based planning components. See `orchestration/README.md` for details.
 
 If you use the orchestration framework in research, please cite:
 
@@ -135,11 +135,11 @@ Plain-text citation:
 
 Jifeng Li, Arnav Grover, Abraham Alpuerto, Yupeng Cao, and Xiao-Yang Liu. *Orchestration Framework for Financial Agents: From Algorithmic Trading to Agentic Trading*. NeurIPS 2025 Workshop on Generative AI in Finance, 2025.
 
-Documentation: [finagent-orchestration.readthedocs.io](https://finagent-orchestration.readthedocs.io) (Agentic Trading Lab + Orchestration Framework). Local preview: `docs/README.md`
+Documentation: [finagent-orchestration.readthedocs.io](https://finagent-orchestration.readthedocs.io). Local preview: `docs/README.md`
 
 ## License
 
-OpenMDW-1.0 — See [LICENSE](LICENSE) (Copyright Jifeng Li @ SecureFinAI Lab)
+OpenMDW-1.0 — See [LICENSE](LICENSE) (Copyright @ SecureFinAI Lab)
 
 ## Contributing
 
