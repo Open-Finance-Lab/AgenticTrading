@@ -39,8 +39,8 @@ def test_credits_client_keeps_stripe_authoritative():
     assert "crypto.randomUUID()" in source
     assert "client_request_id" in source
     assert "pendingPurchase" in source
-    assert "https:" in source
-    assert "checkout.stripe.com" in source
+    assert "parsed.protocol ===" in source
+    assert "parsed.hostname ===" in source
     assert "MAX_ORDER_POLLS" in source
     assert "/api/credits/orders/" in source
     assert "Payment confirmation pending" in source

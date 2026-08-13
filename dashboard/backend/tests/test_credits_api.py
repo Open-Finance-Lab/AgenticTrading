@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
 
+import dashboard.backend.users as users_module
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
 from dashboard.backend.app import app
 from dashboard.backend.domain.credits.config import BillingUnavailableError
@@ -20,7 +20,6 @@ from dashboard.backend.domain.credits.stripe_gateway import (
     StripeWebhookEvent,
 )
 from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
-from dashboard.backend.users import UserStore
 
 
 class FakeStripeGateway:
@@ -70,10 +69,9 @@ class FakeStripeGateway:
 @pytest.fixture
 def billing_api(tmp_path, monkeypatch):
     import dashboard.backend.api.routers.credits as credits_router
-    import dashboard.backend.users as users_module
 
     path = tmp_path / "billing-api.db"
-    user_store = UserStore(path)
+    user_store = users_module.UserStore(path)
     credit_store = CreditsStore(path)
     gateway = FakeStripeGateway()
     service = CreditsService(store=credit_store, gateway=gateway)
@@ -151,7 +149,7 @@ def _deliver_webhook(api, content=b"signed-event", signature="valid-signature"):
     )
 
 
-def _promote_admin(user_store: UserStore, user_id: int) -> None:
+def _promote_admin(user_store: users_module.UserStore, user_id: int) -> None:
     with user_store._get_connection() as conn:
         conn.execute("UPDATE users SET role = 'admin' WHERE id = ?", (user_id,))
 

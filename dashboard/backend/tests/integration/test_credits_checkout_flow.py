@@ -17,14 +17,11 @@ import dashboard.backend.domain.portfolios.repository as portfolio_repo
 import dashboard.backend.domain.portfolios.service as portfolio_service_module
 import dashboard.backend.users as users_module
 from dashboard.backend.app import app
-from dashboard.backend.domain.agents.repository import AgentStore
 from dashboard.backend.domain.credits.config import load_billing_config
 from dashboard.backend.domain.credits.repository import CreditsStore
 from dashboard.backend.domain.credits.service import CreditsService
 from dashboard.backend.domain.credits.stripe_gateway import StripeTestGateway
-from dashboard.backend.domain.portfolios.repository import PortfolioStore
 from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
-from dashboard.backend.users import UserStore
 
 
 class _FakeStripeSessions:
@@ -74,10 +71,10 @@ def checkout_flow(tmp_path, monkeypatch):
 
     users_path = tmp_path / "users.db"
     content_path = tmp_path / "content.db"
-    user_store = UserStore(users_path)
+    user_store = users_module.UserStore(users_path)
     credits_store = CreditsStore(users_path)
-    portfolio_store = PortfolioStore(content_path)
-    agent_store = AgentStore(content_path)
+    portfolio_store = portfolio_repo.PortfolioStore(content_path)
+    agent_store = agent_repo.AgentStore(content_path)
     sessions = _FakeStripeSessions()
     refunds = _FakeStripeRefunds()
     stripe_client = SimpleNamespace(

@@ -11,7 +11,9 @@ import psycopg
 import pytest
 from psycopg import sql
 
-from dashboard.backend.domain.credits.repository import RefundNotAllowedError
+from dashboard.backend import db_pool
+from dashboard.backend.domain.credits import repository as repo_module
+from dashboard.backend.domain.credits import repository_postgres as pg_module
 from dashboard.backend.tests._postgres_testing import require_local_postgres_url
 
 
@@ -24,8 +26,6 @@ pg_only = pytest.mark.skipif(
 
 
 def test_build_credits_store_defaults_to_sqlite(monkeypatch, capsys):
-    import dashboard.backend.domain.credits.repository as repo_module
-
     monkeypatch.delenv("USERS_DATABASE_URL", raising=False)
     store = repo_module._build_credits_store()
 
@@ -36,9 +36,6 @@ def test_build_credits_store_defaults_to_sqlite(monkeypatch, capsys):
 
 
 def test_build_credits_store_picks_postgres_from_users_url(monkeypatch, capsys):
-    import dashboard.backend.domain.credits.repository as repo_module
-    import dashboard.backend.domain.credits.repository_postgres as pg_module
-
     created = {}
 
     class FakePostgresCreditsStore:
@@ -56,8 +53,6 @@ def test_build_credits_store_picks_postgres_from_users_url(monkeypatch, capsys):
 
 
 def test_build_credits_store_ignores_other_database_urls(monkeypatch, capsys):
-    import dashboard.backend.domain.credits.repository as repo_module
-
     monkeypatch.delenv("USERS_DATABASE_URL", raising=False)
     monkeypatch.setenv("CONTENT_DATABASE_URL", "postgresql://fake/content")
     monkeypatch.setenv("AGENT_RUNS_DATABASE_URL", "postgresql://fake/runs")
@@ -71,9 +66,6 @@ def test_build_credits_store_ignores_other_database_urls(monkeypatch, capsys):
 
 
 def test_build_credits_store_never_prints_credentials(monkeypatch, capsys):
-    import dashboard.backend.domain.credits.repository as repo_module
-    import dashboard.backend.domain.credits.repository_postgres as pg_module
-
     class FakePostgresCreditsStore:
         def __init__(self, database_url):
             pass
@@ -92,8 +84,6 @@ def test_build_credits_store_never_prints_credentials(monkeypatch, capsys):
 
 
 def test_malformed_url_is_rejected_without_echoing_credentials():
-    import dashboard.backend.domain.credits.repository_postgres as pg_module
-
     with pytest.raises(ValueError) as excinfo:
         pg_module.PostgresCreditsStore(
             '"postgresql://u:sup3r-s3cret@ep-x.neon.tech/atl"'
@@ -102,8 +92,6 @@ def test_malformed_url_is_rejected_without_echoing_credentials():
 
 
 def test_unreachable_postgres_raises_instead_of_falling_back():
-    import dashboard.backend.domain.credits.repository_postgres as pg_module
-
     with pytest.raises(psycopg.OperationalError):
         pg_module.PostgresCreditsStore(
             "postgresql://u:p@127.0.0.1:1/nope?connect_timeout=1"
@@ -139,28 +127,23 @@ def pg_credits_store():
                 )
                 """
             )
-            conn.executemany(
-                """
-                INSERT INTO users (
-                    id, email, display_name, password_hash, role, created_at
+            with conn.cursor() as cur:
+                cur.executemany(
+                    """
+                    INSERT INTO users (
+                        id, email, display_name, password_hash, role, created_at
+                    )
+                    VALUES (%s, %s, %s, 'unused', %s, '2026-08-13T00:00:00+00:00')
+                    """,
+                    [
+                        (1, "buyer@example.com", "Buyer", "user"),
+                        (2, "admin@example.com", "Admin", "admin"),
+                        (3, "other@example.com", "Other", "user"),
+                    ],
                 )
-                VALUES (%s, %s, %s, 'unused', %s, '2026-08-13T00:00:00+00:00')
-                """,
-                [
-                    (1, "buyer@example.com", "Buyer", "user"),
-                    (2, "admin@example.com", "Admin", "admin"),
-                    (3, "other@example.com", "Other", "user"),
-                ],
-            )
 
-        from dashboard.backend.domain.credits.repository_postgres import (
-            PostgresCreditsStore,
-        )
-
-        yield PostgresCreditsStore(scoped_url)
+        yield pg_module.PostgresCreditsStore(scoped_url)
     finally:
-        from dashboard.backend import db_pool
-
         db_pool._reset_for_tests()
         with psycopg.connect(base_url) as conn:
             conn.execute(
@@ -177,7 +160,7 @@ def _pending_order(
     client_request_id: str = "11111111-1111-4111-8111-111111111111",
     cents: int = 1000,
 ):
-    order = store.create_or_get_order(
+    store.create_or_get_order(
         order_id=order_id,
         user_id=1,
         client_request_id=client_request_id,
@@ -323,7 +306,7 @@ def test_concurrent_refund_reservations_cannot_over_refund(pg_credits_store):
                 credits_micro=7_000_000,
             )
             return "reserved"
-        except RefundNotAllowedError:
+        except repo_module.RefundNotAllowedError:
             return "rejected"
 
     with ThreadPoolExecutor(max_workers=2) as pool:

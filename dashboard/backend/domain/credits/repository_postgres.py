@@ -7,7 +7,7 @@ from typing import Any
 import psycopg
 
 from dashboard.backend.db_url import require_postgres_url
-from dashboard.backend.domain.credits.repository import (
+from dashboard.backend.domain.credits.repository_common import (
     OrderConflictError,
     RefundNotAllowedError,
     _positive_integer,
