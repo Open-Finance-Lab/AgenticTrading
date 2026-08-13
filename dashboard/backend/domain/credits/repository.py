@@ -112,7 +112,7 @@ class CreditsStore:
                     id TEXT NOT NULL UNIQUE,
                     payment_order_id TEXT NOT NULL,
                     user_id INTEGER NOT NULL,
-                    requested_by_user_id INTEGER NOT NULL,
+                    requested_by_user_id INTEGER,
                     amount_usd_cents INTEGER NOT NULL
                         CHECK (amount_usd_cents > 0),
                     credits_micro INTEGER NOT NULL CHECK (credits_micro > 0),
@@ -559,6 +559,59 @@ class CreditsStore:
             ).fetchone()
             return _dict(row)
 
+    def get_order_for_admin(self, order_id: str) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM credit_payment_orders WHERE id = ?", (order_id,)
+            ).fetchone()
+            return _dict(row)
+
+    def get_order_by_payment_intent(
+        self, payment_intent_id: str
+    ) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM credit_payment_orders
+                WHERE stripe_payment_intent_id = ?
+                """,
+                (payment_intent_id,),
+            ).fetchone()
+            return _dict(row)
+
+    def get_refund_by_stripe_id(
+        self, stripe_refund_id: str
+    ) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM credit_refund_requests WHERE stripe_refund_id = ?
+                """,
+                (stripe_refund_id,),
+            ).fetchone()
+            return _dict(row)
+
+    def get_refund_by_id(self, refund_id: str) -> dict[str, Any] | None:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM credit_refund_requests WHERE id = ?", (refund_id,)
+            ).fetchone()
+            return _dict(row)
+
+    def restrict_account(self, user_id: int) -> dict[str, Any]:
+        _positive_integer(user_id, "user_id")
+        with self._get_connection() as conn:
+            self._begin(conn)
+            self._ensure_account_in_transaction(conn, user_id)
+            conn.execute(
+                "UPDATE credit_accounts SET status = 'restricted' WHERE user_id = ?",
+                (user_id,),
+            )
+            row = conn.execute(
+                "SELECT * FROM credit_accounts WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return dict(row)
+
     def list_ledger_entries(
         self,
         user_id: int,
@@ -678,6 +731,88 @@ class CreditsStore:
                     now,
                 ),
             )
+            row = conn.execute(
+                "SELECT * FROM credit_refund_requests WHERE id = ?", (refund_id,)
+            ).fetchone()
+            return dict(row)
+
+    def reserve_reconciliation_refund(
+        self,
+        *,
+        refund_id: str,
+        payment_order_id: str,
+        user_id: int,
+        amount_usd_cents: int,
+        credits_micro: int,
+        stripe_refund_id: str,
+    ) -> dict[str, Any]:
+        _validate_amount_pair(amount_usd_cents, credits_micro)
+        with self._get_connection() as conn:
+            self._begin(conn)
+            existing = conn.execute(
+                """
+                SELECT * FROM credit_refund_requests
+                WHERE id = ? OR stripe_refund_id = ?
+                """,
+                (refund_id, stripe_refund_id),
+            ).fetchone()
+            if existing:
+                if (
+                    existing["payment_order_id"] != payment_order_id
+                    or existing["user_id"] != user_id
+                    or existing["amount_usd_cents"] != amount_usd_cents
+                    or existing["credits_micro"] != credits_micro
+                    or existing["stripe_refund_id"] != stripe_refund_id
+                ):
+                    raise OrderConflictError(
+                        "Stripe Refund already represents a different request"
+                    )
+                return dict(existing)
+
+            order = conn.execute(
+                "SELECT * FROM credit_payment_orders WHERE id = ?",
+                (payment_order_id,),
+            ).fetchone()
+            if not order or order["user_id"] != user_id:
+                raise RefundNotAllowedError("paid purchase was not found")
+            if order["status"] not in {"paid", "partially_refunded"}:
+                raise RefundNotAllowedError("purchase is not refundable")
+            refundable_cents, refundable_micro = self._refundable_in_transaction(
+                conn, order
+            )
+            if (
+                amount_usd_cents > refundable_cents
+                or credits_micro > refundable_micro
+            ):
+                raise RefundNotAllowedError(
+                    "refund exceeds the unused purchased Credits"
+                )
+            now = _utcnow_iso()
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO credit_refund_requests (
+                        id, payment_order_id, user_id, requested_by_user_id,
+                        amount_usd_cents, credits_micro, status,
+                        stripe_refund_id, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, NULL, ?, ?, 'submitted', ?, ?, ?)
+                    """,
+                    (
+                        refund_id,
+                        payment_order_id,
+                        user_id,
+                        amount_usd_cents,
+                        credits_micro,
+                        stripe_refund_id,
+                        now,
+                        now,
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise OrderConflictError(
+                    "Stripe Refund is already attached to another request"
+                ) from exc
             row = conn.execute(
                 "SELECT * FROM credit_refund_requests WHERE id = ?", (refund_id,)
             ).fetchone()
@@ -966,6 +1101,7 @@ class CreditsStore:
                 f"""
                 SELECT
                     o.*,
+                    a.status AS account_status,
                     o.amount_usd_cents - COALESCE((
                         SELECT SUM(r.amount_usd_cents)
                         FROM credit_refund_requests r
@@ -979,6 +1115,7 @@ class CreditsStore:
                           AND r.status IN ('pending', 'submitted', 'succeeded')
                     ), 0) AS refundable_credits_micro
                 FROM credit_payment_orders o
+                JOIN credit_accounts a ON a.user_id = o.user_id
                 WHERE o.status IN ('paid', 'partially_refunded', 'refunded')
                   {cursor_sql}
                 ORDER BY o.sequence DESC
