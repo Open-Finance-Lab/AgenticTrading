@@ -386,6 +386,30 @@ _recent_slots: Dict[str, Dict[str, Any]] = {}
 MAX_ACTIVE_DASHBOARD_BACKTESTS = int(os.getenv("MAX_ACTIVE_DASHBOARD_BACKTESTS", "20"))
 
 
+def _reset_slots_for_tests() -> None:
+    """Drop in-flight/recent slots and the legacy status mirror.
+
+    Tests mock ``run_backtest_background``, so ``_finalize_slot`` never runs.
+    The suite must call this between cases or the process-wide cap refuses
+    later ``POST /backtest/run`` with ``success: false``.
+    """
+    global backtest_session_id
+    with _backtest_slots_lock:
+        _active_slots.clear()
+        _recent_slots.clear()
+    backtest_status.update(
+        {
+            "running": False,
+            "error": None,
+            "runs_count": 0,
+            "started_at": None,
+            "progress_file": None,
+            "live_run_id": None,
+        }
+    )
+    backtest_session_id = None
+
+
 def _backtest_owner_key(user_id: Optional[int], session_id: str) -> str:
     if user_id is not None:
         return f"user:{int(user_id)}"

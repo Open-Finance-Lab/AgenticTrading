@@ -84,6 +84,7 @@ os.environ.pop("MARKET_DATA_CACHE_MAX_ENTRIES", None)
 os.environ.pop("BASELINE_QUEUE_MAX", None)
 os.environ.pop("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", None)
 os.environ.pop("MAX_ACTIVE_RUNS_GLOBAL", None)
+os.environ.pop("MAX_ACTIVE_DASHBOARD_BACKTESTS", None)
 os.environ.pop("AGENT_AUTH_CACHE_TTL_SECONDS", None)
 
 # Mail credentials: a developer with a real BREVO_API_KEY exported would
@@ -165,6 +166,7 @@ def _reset_shared_scale_state(monkeypatch):
     from dashboard.backend import db_pool
     from dashboard.backend.api import auth as auth_api
     from dashboard.backend.api.routers import leaderboard as leaderboard_router
+    from dashboard.backend.api.routers import backtests as backtests_router
 
     monkeypatch.setattr(db_pool, "POOL_TIMEOUT_SECONDS", 1.0)
     market_data_store._reset_for_tests()
@@ -181,6 +183,11 @@ def _reset_shared_scale_state(monkeypatch):
     # refresh budget would otherwise be consumed cumulatively across the suite
     # and later tests would start seeing 429s.
     leaderboard_router._daily_refresh_rate_limiter.reset()
+    # Dashboard backtest slots are process-global. Tests mock the worker so
+    # _finalize_slot never runs; without a reset the 20-slot process cap
+    # refuses later /backtest/run calls with success:false.
+    backtests_router._reset_slots_for_tests()
+    backtests_router._backtest_rate_limiter.reset()
     yield
     # Best-effort drain so a job enqueued in this test doesn't leak into the
     # next. Note pytest tears fixtures down LIFO, so a test's own monkeypatches
@@ -193,6 +200,8 @@ def _reset_shared_scale_state(monkeypatch):
     market_data_store._reset_for_tests()
     auth_cache._reset_for_tests()
     db_pool._reset_for_tests()
+    backtests_router._reset_slots_for_tests()
+    backtests_router._backtest_rate_limiter.reset()
 
 
 @pytest.fixture(autouse=True)

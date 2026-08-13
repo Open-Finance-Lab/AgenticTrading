@@ -726,23 +726,29 @@ def test_progress_reaches_each_concurrent_agent():
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
-            "const MAP = {"
-            " 'agent-A': {runId: 'run-1', startedAt: Date.now() - 30000},"
-            " 'agent-B': {runId: 'run-2', startedAt: Date.now() - 25000}"
-            "};",
+            (
+                "const MAP = {"
+                " 'agent-A': {runId: 'run-1', startedAt: Date.now() - 30000},"
+                " 'agent-B': {runId: 'run-2', startedAt: Date.now() - 25000}"
+                "};"
+            ),
             "function readRunningBacktests() { return MAP; }",
             "function clearAgentBacktestRunning(id) { delete MAP[id]; }",
             "let liveBacktestRunId = 'run-2';",
             "let liveBacktestProgress = null;",
-            "const liveBacktestProgressByRunId = {"
-            " 'run-1': {step: 3, totalSteps: 21, ageSeconds: 1, ageAt: Date.now()},"
-            " 'run-2': {step: 8, totalSteps: 21, ageSeconds: 1, ageAt: Date.now()}"
-            "};",
+            (
+                "const liveBacktestProgressByRunId = {"
+                " 'run-1': {step: 3, totalSteps: 21, ageSeconds: 1, ageAt: Date.now()},"
+                " 'run-2': {step: 8, totalSteps: 21, ageSeconds: 1, ageAt: Date.now()}"
+                "};"
+            ),
             fn_body("function getAgentBacktestRunning("),
-            "console.log(JSON.stringify({"
-            " a: getAgentBacktestRunning('agent-A'),"
-            " b: getAgentBacktestRunning('agent-B')"
-            "}));",
+            (
+                "console.log(JSON.stringify({"
+                " a: getAgentBacktestRunning('agent-A'),"
+                " b: getAgentBacktestRunning('agent-B')"
+                "}));"
+            ),
         ]
     )
     result = _node(script)
