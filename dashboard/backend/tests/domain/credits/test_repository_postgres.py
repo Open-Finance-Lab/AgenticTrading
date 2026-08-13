@@ -249,6 +249,27 @@ def test_live_or_tampered_payment_never_posts_credits(pg_credits_store):
 
 
 @pg_only
+def test_expired_checkout_projects_terminal_state_without_credit(pg_credits_store):
+    store = pg_credits_store
+    _pending_order(store)
+
+    result = store.settle_unpaid_checkout(
+        event_id="evt_expired",
+        event_type="checkout.session.expired",
+        livemode=False,
+        object_id="cs_test_ord_10",
+        payload_sha256="e" * 64,
+        order_id="ord_10",
+        checkout_session_id="cs_test_ord_10",
+        terminal_status="expired",
+    )
+
+    assert result == {"outcome": "processed", "status": "expired"}
+    assert store.get_order_for_user("ord_10", 1)["status"] == "expired"
+    assert store.get_balance_micro(1) == 0
+
+
+@pg_only
 def test_partial_then_full_refund_projects_balance_and_order(pg_credits_store):
     store = pg_credits_store
     _pending_order(store)

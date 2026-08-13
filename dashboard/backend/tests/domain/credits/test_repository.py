@@ -228,6 +228,55 @@ def test_paid_checkout_posts_one_purchase_even_when_events_repeat(tmp_path):
     assert ledger["items"][0]["amount_micro"] == 10_000_000
 
 
+@pytest.mark.parametrize("terminal_status", ["expired", "failed"])
+def test_unpaid_checkout_terminal_event_updates_pending_order_without_credit(
+    tmp_path, terminal_status
+):
+    store = _store(tmp_path)
+    _pending_order(store)
+
+    result = store.settle_unpaid_checkout(
+        event_id=f"evt_{terminal_status}",
+        event_type=(
+            "checkout.session.expired"
+            if terminal_status == "expired"
+            else "checkout.session.async_payment_failed"
+        ),
+        livemode=False,
+        object_id="cs_test_ord_10",
+        payload_sha256=terminal_status.ljust(64, "a"),
+        order_id="ord_10",
+        checkout_session_id="cs_test_ord_10",
+        terminal_status=terminal_status,
+    )
+
+    assert result == {"outcome": "processed", "status": terminal_status}
+    assert store.get_order_for_user("ord_10", 1)["status"] == terminal_status
+    assert store.get_balance_micro(1) == 0
+    assert store.list_ledger_entries(1)["items"] == []
+
+
+def test_unpaid_checkout_event_cannot_downgrade_a_paid_order(tmp_path):
+    store = _store(tmp_path)
+    _pending_order(store)
+    _pay_order(store)
+
+    result = store.settle_unpaid_checkout(
+        event_id="evt_late_expiry",
+        event_type="checkout.session.expired",
+        livemode=False,
+        object_id="cs_test_ord_10",
+        payload_sha256="z" * 64,
+        order_id="ord_10",
+        checkout_session_id="cs_test_ord_10",
+        terminal_status="expired",
+    )
+
+    assert result["outcome"] == "ignored"
+    assert store.get_order_for_user("ord_10", 1)["status"] == "paid"
+    assert store.get_balance_micro(1) == 10_000_000
+
+
 @pytest.mark.parametrize(
     ("field", "value", "reason"),
     [

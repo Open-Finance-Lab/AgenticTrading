@@ -185,6 +185,11 @@ class CreditsService:
             )
         if event.event_type == "checkout.session.completed":
             return self._handle_checkout_completed(event)
+        if event.event_type in {
+            "checkout.session.expired",
+            "checkout.session.async_payment_failed",
+        }:
+            return self._handle_checkout_unpaid(event)
         if event.event_type in {"refund.created", "refund.updated", "refund.failed"}:
             return self._handle_refund_event(event)
         return self._record_event(
@@ -279,6 +284,50 @@ class CreditsService:
             event_type=event.event_type,
             reason=result.get("reason"),
             balance_micro=result.get("balance_micro"),
+        )
+
+    def _handle_checkout_unpaid(self, event: StripeWebhookEvent) -> WebhookResult:
+        obj = event.data_object
+        metadata = obj.get("metadata")
+        metadata = metadata if isinstance(metadata, Mapping) else {}
+        order_id = _required_text(metadata.get("atl_order_id"))
+        client_reference_id = _required_text(obj.get("client_reference_id"))
+        if event.livemode:
+            return self._record_event(
+                event, outcome="rejected", reason="Live Mode payment is not accepted"
+            )
+        if not order_id or client_reference_id != order_id:
+            return self._record_event(
+                event, outcome="rejected", reason="Checkout order metadata is invalid"
+            )
+        order = self.store.get_order_for_admin(order_id)
+        if not order:
+            return self._record_event(
+                event, outcome="rejected", reason="Payment order was not found"
+            )
+        if _required_text(metadata.get("atl_user_reference")) != str(order["user_id"]):
+            return self._record_event(
+                event, outcome="rejected", reason="Checkout user metadata is invalid"
+            )
+        terminal_status = (
+            "expired"
+            if event.event_type == "checkout.session.expired"
+            else "failed"
+        )
+        result = self.store.settle_unpaid_checkout(
+            event_id=event.event_id,
+            event_type=event.event_type,
+            livemode=event.livemode,
+            object_id=event.object_id,
+            payload_sha256=event.payload_sha256,
+            order_id=order_id,
+            checkout_session_id=event.object_id,
+            terminal_status=terminal_status,
+        )
+        return WebhookResult(
+            outcome=result["outcome"],
+            event_type=event.event_type,
+            reason=result.get("reason"),
         )
 
     def _handle_refund_event(self, event: StripeWebhookEvent) -> WebhookResult:

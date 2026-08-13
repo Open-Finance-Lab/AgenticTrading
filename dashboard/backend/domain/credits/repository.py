@@ -407,6 +407,88 @@ class CreditsStore:
             )
             return {"outcome": outcome, "reason": reason}
 
+    def settle_unpaid_checkout(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        livemode: bool,
+        object_id: str,
+        payload_sha256: str,
+        order_id: str,
+        checkout_session_id: str,
+        terminal_status: str,
+    ) -> dict[str, Any]:
+        if terminal_status not in {"expired", "failed"}:
+            raise ValueError("invalid unpaid Checkout terminal status")
+        with self._get_connection() as conn:
+            self._begin(conn)
+            existing = self._existing_event(
+                conn,
+                event_id=event_id,
+                event_type=event_type,
+                livemode=livemode,
+                object_id=object_id,
+                payload_sha256=payload_sha256,
+            )
+            if existing:
+                return {"outcome": "duplicate", "status": terminal_status}
+
+            order = conn.execute(
+                "SELECT * FROM credit_payment_orders WHERE id = ?", (order_id,)
+            ).fetchone()
+            reason = None
+            if not order:
+                reason = "payment order not found"
+            elif livemode or order["stripe_mode"] != "test":
+                reason = "Live Mode payment is not accepted"
+            elif checkout_session_id != order["stripe_checkout_session_id"]:
+                reason = "Checkout Session does not match the order"
+            elif object_id != checkout_session_id:
+                reason = "event object does not match the Checkout Session"
+            if reason:
+                self._insert_event(
+                    conn,
+                    event_id=event_id,
+                    event_type=event_type,
+                    livemode=livemode,
+                    object_id=object_id,
+                    payload_sha256=payload_sha256,
+                    outcome="rejected",
+                    reason=reason,
+                )
+                return {"outcome": "rejected", "reason": reason}
+
+            if order["status"] != "pending":
+                reason = f"payment order is already {order['status']}"
+                self._insert_event(
+                    conn,
+                    event_id=event_id,
+                    event_type=event_type,
+                    livemode=livemode,
+                    object_id=object_id,
+                    payload_sha256=payload_sha256,
+                    outcome="ignored",
+                    reason=reason,
+                )
+                return {"outcome": "ignored", "reason": reason, "status": order["status"]}
+
+            now = _utcnow_iso()
+            self._insert_event(
+                conn,
+                event_id=event_id,
+                event_type=event_type,
+                livemode=livemode,
+                object_id=object_id,
+                payload_sha256=payload_sha256,
+                outcome="processed",
+            )
+            conn.execute(
+                "UPDATE credit_payment_orders SET status = ?, updated_at = ? WHERE id = ?",
+                (terminal_status, now, order_id),
+            )
+            return {"outcome": "processed", "status": terminal_status}
+
     def settle_paid_checkout(
         self,
         *,

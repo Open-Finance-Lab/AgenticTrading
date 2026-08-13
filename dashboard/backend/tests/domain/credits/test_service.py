@@ -307,6 +307,31 @@ def test_paid_checkout_posts_once_and_duplicate_events_are_noops(tmp_path):
 
 
 @pytest.mark.parametrize(
+    ("event_type", "terminal_status"),
+    [
+        ("checkout.session.expired", "expired"),
+        ("checkout.session.async_payment_failed", "failed"),
+    ],
+)
+def test_unpaid_checkout_events_project_terminal_order_state_without_credit(
+    tmp_path, event_type, terminal_status
+):
+    service, gateway = _service(tmp_path)
+    checkout = _checkout(service)
+    gateway.event = replace(
+        _checkout_event(checkout, payment_status="unpaid"),
+        event_id=f"evt_{terminal_status}",
+        event_type=event_type,
+    )
+
+    result = service.handle_webhook(terminal_status.encode(), "valid")
+
+    assert result.outcome == "processed"
+    assert service.store.get_order_for_user(checkout.order_id, 1)["status"] == terminal_status
+    assert service.get_balance(1).balance_micro == 0
+
+
+@pytest.mark.parametrize(
     ("change", "expected_outcome"),
     [("unpaid", "ignored"), ("amount", "rejected"), ("user", "rejected")],
 )
