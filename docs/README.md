@@ -31,5 +31,6 @@ Edit files under `docs/source/`:
 Integration guides outside the Sphinx site:
 
 - **vn.py simulated market data (Chinese)** — `docs/integrations/vnpy-simulation.md`
+- **Stripe Credits Test Mode** — `docs/integrations/stripe-credits-test-mode.md`
 
 Then commit and push.
