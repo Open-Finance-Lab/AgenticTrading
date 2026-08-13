@@ -166,6 +166,7 @@ def _render_harness(source: str):
         _extract_function(source, "normalizeOrderRecord"),
         _extract_function(source, "formatTradingMoney"),
         _extract_function(source, "renderOrderCostAudit"),
+        _extract_function(source, "renderMarketRuleAudit"),
         _extract_function(source, "formatTradeTimestamp"),
         _extract_function(source, "paintTradingLog"),
         _extract_function(source, "renderTradingLog"),
@@ -196,6 +197,27 @@ def test_rendered_rejection_has_safe_reason_zero_fill_and_english_company():
     assert ">--<" in known
     assert "<img" not in result["unknown"]
     assert "Order not executed" in result["unknown"]
+
+
+def test_rendered_market_rule_rejection_has_english_reason_and_native_close():
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_render_harness(source) + [
+        "renderTradingLog([{",
+        "  timestamp: '2026-04-01T15:00:00+08:00', symbol: '600519.SH', side: 'BUY',",
+        "  requested_shares: 100, executed_shares: 0, price: 200,",
+        "  status: 'rejected', reason: 'limit_up_buy_blocked',",
+        "  market_rule_date: '2026-04-01', market_rule_suspended: false,",
+        "  market_rule_closing_limit_state: 'upper',",
+        "  market_rule_official_close: 1400,",
+        "  market_rule_closing_gate_effective: true,",
+        "}]);",
+        "console.log(JSON.stringify(tbody.innerHTML));",
+    ])
+
+    assert "Buy blocked at upper limit" in result
+    assert "Official close: upper limit" in result
+    assert "¥1400.00" in result
+    assert "2026-04-01" in result
 
 
 def test_rendered_partial_uses_actual_value_and_side_filter():
@@ -321,3 +343,29 @@ def test_repeated_rejection_reports_how_many_times_it_fired():
 
     assert "Insufficient cash for one lot" in result
     assert "×47 that day" in result
+
+
+def test_ordinary_a_share_fill_carries_no_market_rule_audit_line():
+    """The audit line is for rows a rule spoke to, not every A-share order.
+
+    Every order on a rule-aware run carries the same audit payload, so keying
+    the line on "an official close is present" prints a date-and-price row under
+    every fill and buries the handful that were actually suspended or gated.
+    """
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_render_harness(source) + [
+        "renderTradingLog([{",
+        "  timestamp: '2026-04-01T15:00:00+08:00', symbol: '600519.SH', side: 'BUY',",
+        "  requested_shares: 100, executed_shares: 100, price: 13,",
+        "  status: 'filled', reason: '',",
+        "  market_rule_date: '2026-04-01', market_rule_suspended: false,",
+        "  market_rule_closing_limit_state: 'none',",
+        "  market_rule_official_close: 13,",
+        "  market_rule_closing_gate_effective: false,",
+        "}]);",
+        "console.log(JSON.stringify(tbody.innerHTML));",
+    ])
+
+    assert "¥13.00" not in result
+    assert "Official close" not in result
+    assert "Official status" not in result

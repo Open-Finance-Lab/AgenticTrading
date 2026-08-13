@@ -83,6 +83,7 @@ class PortfolioManager:
         t_plus_one_enabled: bool = False,
         lot_size: int = 1,
         transaction_cost_profile=None,
+        market_rule_calendar=None,
     ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
@@ -98,6 +99,7 @@ class PortfolioManager:
         self.t_plus_one_enabled = t_plus_one_enabled
         self.lot_size = lot_size
         self.transaction_cost_profile = transaction_cost_profile
+        self.market_rule_calendar = market_rule_calendar
         self.transaction_cost_totals = {
             "gross_value": 0.0,
             "slippage_amount": 0.0,
@@ -763,9 +765,25 @@ class PortfolioManager:
         )
         return self.make_trading_decision(portfolio_state)
     
-    def execute_actions(self, actions: List[Dict], market_data: Dict, timestamp: datetime):
+    def execute_actions(
+        self,
+        actions: List[Dict],
+        market_data: Dict,
+        timestamp: datetime,
+        fallback_prices: Optional[Dict] = None,
+    ):
         """Execute trading decisions."""
         trades_before = len(self.trades)
+        market_rules = None
+        if self.market_rule_calendar is not None:
+            market_rules = {
+                action.get("symbol"): self.market_rule_calendar.rule_for_timestamp(
+                    action.get("symbol"), timestamp
+                )
+                for action in actions
+                if action.get("action") in {"buy", "sell"}
+                and action.get("symbol") in self._allowed_set
+            }
         self.cash = _execute_actions(
             actions=actions,
             market_data=market_data,
@@ -782,6 +800,8 @@ class PortfolioManager:
             order_events=self.order_events,
             order_event_repeats=self._order_event_repeats,
             transaction_cost_profile=self.transaction_cost_profile,
+            market_rules=market_rules,
+            fallback_prices=fallback_prices,
         )
         for trade in self.trades[trades_before:]:
             for field in self.transaction_cost_totals:
