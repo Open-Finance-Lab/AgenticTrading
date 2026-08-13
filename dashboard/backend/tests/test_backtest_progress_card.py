@@ -275,7 +275,10 @@ def _patch(progress_js: str, then_progress_js: str | None = None, elapsed_ms: in
     state, so the two renderers can be compared field by field.
     """
     second_tick = (
-        f"liveBacktestProgress = {then_progress_js};\nrefreshRunningAgentCards();"
+        f"liveBacktestProgress = {then_progress_js};\n"
+        f"if ({then_progress_js} === null) delete liveBacktestProgressByRunId['run-1'];\n"
+        f"else liveBacktestProgressByRunId['run-1'] = {then_progress_js};\n"
+        "refreshRunningAgentCards();"
         if then_progress_js is not None
         else ""
     )
@@ -286,6 +289,7 @@ def _patch(progress_js: str, then_progress_js: str | None = None, elapsed_ms: in
             f"const MAP = {{a1: {{runId: 'run-1', startedAt: Date.now() - {elapsed_ms}}}}};",
             "let liveBacktestRunId = 'run-1';",
             "let liveBacktestProgress = null;",
+            "const liveBacktestProgressByRunId = Object.create(null);",
             "let lastRenderedRunningKey = null;",
             "let applyCalls = 0;",
             "function readRunningBacktests() { return MAP; }",
@@ -308,6 +312,8 @@ def _patch(progress_js: str, then_progress_js: str | None = None, elapsed_ms: in
             # but two ticks of a run.
             "lastRenderedRunningKey = Object.keys(MAP).sort().join(',');",
             f"liveBacktestProgress = {progress_js};",
+            f"if ({progress_js} === null) delete liveBacktestProgressByRunId['run-1'];",
+            f"else liveBacktestProgressByRunId['run-1'] = {progress_js};",
             "refreshRunningAgentCards();",
             second_tick,
             "console.log(JSON.stringify({",
@@ -578,6 +584,7 @@ def _resolve_entry(map_js: str, live_run_id: str, progress_js: str, agent: str) 
             "function clearAgentBacktestRunning(id) { delete MAP[id]; }",
             f"let liveBacktestRunId = {live_run_id};",
             f"let liveBacktestProgress = {progress_js};",
+            "const liveBacktestProgressByRunId = Object.create(null);",
             fn_body("function getAgentBacktestRunning("),
             f"console.log(JSON.stringify(getAgentBacktestRunning('{agent}')));",
         ]
@@ -622,9 +629,9 @@ def test_progress_is_withheld_when_no_run_is_identified():
 
 def test_progress_store_is_written_before_the_card_repaints():
     """Same poll response, two surfaces. refreshRunningAgentCards() reads
-    liveBacktestProgress via getAgentBacktestRunning; the Backtest panel is
-    handed the same object. Repainting before the assignment made the card show
-    the previous tick's numbers while the panel showed this tick's --
+    per-run progress via getAgentBacktestRunning; the Backtest panel is
+    handed the focused run's object. Repainting before the assignment made the
+    card show the previous tick's numbers while the panel showed this tick's --
     deterministic every tick, not a race.
     """
     poller = fn_body("function ensureBacktestPolling(")
@@ -635,9 +642,9 @@ def test_progress_store_is_written_before_the_card_repaints():
     code = "\n".join(
         line for line in running_branch.splitlines() if not line.lstrip().startswith("//")
     )
-    assert code.index("liveBacktestProgress =") < code.index(
+    assert code.index("liveBacktestProgressByRunId[") < code.index(
         "refreshRunningAgentCards()"
-    ), "liveBacktestProgress must be assigned before the card repaints"
+    ), "per-run progress must be assigned before the card repaints"
 
 
 def test_the_poller_reads_the_server_computed_age_not_the_mtime():
@@ -657,11 +664,9 @@ def test_the_poller_reads_the_server_computed_age_not_the_mtime():
 def test_timeout_branch_clears_the_running_map_and_the_progress_store():
     """The leak that makes one run render another run's numbers.
 
-    `liveBacktestProgress` is a single global spread into *every* entry of the
-    running map. The finished branch has always cleared that map; the 10-minute
-    timeout branch never did. Before this change an orphaned entry only showed a
-    stale elapsed timer -- now it would render the NEXT run's step, percent and
-    ETA until `getAgentBacktestRunning`'s 600s expiry caught it.
+    Progress is stored per live_run_id. The finished path clears that entry;
+    the 10-minute timeout branch must wipe the whole map so an orphaned card
+    cannot pick up the NEXT run's step/percent.
 
     Guarded by source slice rather than execution: reaching the branch takes 600
     poll ticks. Scoped to the branch itself, because both statements also appear
@@ -670,6 +675,7 @@ def test_timeout_branch_clears_the_running_map_and_the_progress_store():
     """
     branch = _timeout_branch()
     assert "clearAgentBacktestRunning" in branch, branch
+    assert "liveBacktestProgressByRunId = Object.create(null)" in branch, branch
     assert "liveBacktestProgress = null" in branch, branch
 
 
@@ -699,4 +705,46 @@ def test_live_poll_hands_the_panel_the_shared_progress_object():
     running_branch = poller[poller.index("const stepPct") :]
     call = running_branch[running_branch.index("updateBacktestRunProgress({") :]
     call = call[: call.index("});") + 3]
-    assert "progress: liveBacktestProgress || {}" in call
+    assert "progress:" in call
+    assert "|| {}" in call
+
+
+def test_poller_queries_each_concurrent_live_run_id():
+    """After entitlements allow N concurrent dashboard backtests, a single
+    focused liveBacktestRunId poll left every other card on an empty bar.
+    The poller must ask /backtest/status?live_run_id= for each in-flight job.
+    """
+    poller = fn_body("function ensureBacktestPolling(")
+    assert "Promise.all" in poller
+    assert "live_run_id=" in poller
+    assert "liveBacktestProgressByRunId[" in poller
+
+
+def test_progress_reaches_each_concurrent_agent():
+    """Two confirmed runs must each receive their own step numbers — the
+    regression behind empty progress on the non-focused card."""
+    script = "\n".join(
+        [
+            js_const("BACKTEST_POLL_MAX_SECONDS"),
+            "const MAP = {"
+            " 'agent-A': {runId: 'run-1', startedAt: Date.now() - 30000},"
+            " 'agent-B': {runId: 'run-2', startedAt: Date.now() - 25000}"
+            "};",
+            "function readRunningBacktests() { return MAP; }",
+            "function clearAgentBacktestRunning(id) { delete MAP[id]; }",
+            "let liveBacktestRunId = 'run-2';",
+            "let liveBacktestProgress = null;",
+            "const liveBacktestProgressByRunId = {"
+            " 'run-1': {step: 3, totalSteps: 21, ageSeconds: 1, ageAt: Date.now()},"
+            " 'run-2': {step: 8, totalSteps: 21, ageSeconds: 1, ageAt: Date.now()}"
+            "};",
+            fn_body("function getAgentBacktestRunning("),
+            "console.log(JSON.stringify({"
+            " a: getAgentBacktestRunning('agent-A'),"
+            " b: getAgentBacktestRunning('agent-B')"
+            "}));",
+        ]
+    )
+    result = _node(script)
+    assert result["a"]["step"] == 3
+    assert result["b"]["step"] == 8

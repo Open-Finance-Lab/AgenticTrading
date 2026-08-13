@@ -157,3 +157,42 @@ def test_admin_patch_entitlements_and_role():
     body = resp.json()["user"]
     assert body["entitlements"]["max_concurrent_backtests"] == 3
     assert body["entitlements"]["credits"] == 50
+
+def test_backtest_slot_respects_entitlement():
+    import dashboard.backend.api.routers.backtests as bt
+
+    with bt._backtest_slots_lock:
+        bt._active_slots.clear()
+        bt._recent_slots.clear()
+    bt.backtest_status.update({
+        "running": False,
+        "error": None,
+        "runs_count": 0,
+        "started_at": None,
+        "progress_file": None,
+        "live_run_id": None,
+    })
+
+    assert bt._try_acquire_backtest_slot(
+        live_run_id="r1", session_id="s1", user_id=None
+    ) is None
+    assert bt._try_acquire_backtest_slot(
+        live_run_id="r2", session_id="s1", user_id=None
+    ) == "Backtest already running. Please wait for it to complete."
+
+    with bt._backtest_slots_lock:
+        bt._active_slots.clear()
+
+    user = user_store.create_user("slot@example.com", "Slot", "SecurePass1!")
+    user_store.set_entitlements(user["id"], max_concurrent_backtests=2)
+
+    assert bt._try_acquire_backtest_slot(
+        live_run_id="a1", session_id="sx", user_id=user["id"]
+    ) is None
+    assert bt._try_acquire_backtest_slot(
+        live_run_id="a2", session_id="sx", user_id=user["id"]
+    ) is None
+    refused = bt._try_acquire_backtest_slot(
+        live_run_id="a3", session_id="sx", user_id=user["id"]
+    )
+    assert refused and "2 backtests" in refused

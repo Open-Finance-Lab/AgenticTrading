@@ -24,12 +24,13 @@ from pathlib import Path
 # through to the shared stdlib module object and swaps Thread process-wide,
 # which leaks into every later test in the session.
 from threading import Lock as _PlotCacheLock
+from threading import Lock as _BacktestSlotsLock
 from threading import Thread as _BackgroundThread
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
 import pytz
 from datetime import datetime
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
 
@@ -358,7 +359,15 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
 # Background backtest state + worker
 # ============================================================================
 
-# Global state for background backtest
+# Global state for background backtests.
+#
+# Historically a single process-wide ``backtest_status`` dict enforced
+# single-flight: one running dashboard backtest at a time. Entitlements now
+# allow N concurrent runs per signed-in user (anonymous / no entitlement stays
+# at 1). ``_active_slots`` is the concurrency ledger; ``backtest_status`` remains
+# as a compatibility mirror of the most recently started/updated slot so
+# existing tests and callers that poke the dict directly keep working.
+
 backtest_status = {
     "running": False,
     "error": None,
@@ -367,10 +376,166 @@ backtest_status = {
     "progress_file": None,
     "live_run_id": None,
 }
-backtest_session_id = None  # Track which session owns the running backtest
+backtest_session_id = None  # Track which session owns the mirrored status
+
+_backtest_slots_lock = _BacktestSlotsLock()
+# live_run_id -> slot dict (running or just-finished, briefly retained)
+_active_slots: Dict[str, Dict[str, Any]] = {}
+_recent_slots: Dict[str, Dict[str, Any]] = {}
+
+MAX_ACTIVE_DASHBOARD_BACKTESTS = int(os.getenv("MAX_ACTIVE_DASHBOARD_BACKTESTS", "20"))
 
 
-def _read_backtest_progress() -> Optional[Dict[str, Any]]:
+def _backtest_owner_key(user_id: Optional[int], session_id: str) -> str:
+    if user_id is not None:
+        return f"user:{int(user_id)}"
+    return f"session:{session_id}"
+
+
+def _max_concurrent_for_user(user_id: Optional[int]) -> int:
+    if user_id is None:
+        return 1
+    from dashboard.backend.users import user_store
+
+    return int(user_store.get_entitlements(user_id)["max_concurrent_backtests"])
+
+
+def _slot_snapshot(slot: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "running": bool(slot.get("running")),
+        "error": slot.get("error"),
+        "runs_count": int(slot.get("runs_count") or 0),
+        "started_at": slot.get("started_at"),
+        "progress_file": slot.get("progress_file"),
+        "live_run_id": slot.get("live_run_id"),
+        "session_id": slot.get("session_id"),
+        "user_id": slot.get("user_id"),
+        "owner_key": slot.get("owner_key"),
+    }
+
+
+def _mirror_slot_to_legacy(slot: Dict[str, Any]) -> None:
+    """Keep ``backtest_status`` / ``backtest_session_id`` in sync with one slot."""
+    global backtest_session_id
+    backtest_status["running"] = bool(slot.get("running"))
+    backtest_status["error"] = slot.get("error")
+    backtest_status["runs_count"] = int(slot.get("runs_count") or 0)
+    backtest_status["started_at"] = slot.get("started_at")
+    backtest_status["progress_file"] = slot.get("progress_file")
+    backtest_status["live_run_id"] = slot.get("live_run_id")
+    backtest_session_id = slot.get("session_id")
+
+
+def _count_active_for_owner(owner_key: str) -> int:
+    return sum(
+        1
+        for slot in _active_slots.values()
+        if slot.get("running") and slot.get("owner_key") == owner_key
+    )
+
+
+def _try_acquire_backtest_slot(
+    *,
+    live_run_id: str,
+    session_id: str,
+    user_id: Optional[int],
+) -> Optional[str]:
+    """Register a running slot or return a human-readable refusal reason."""
+    owner_key = _backtest_owner_key(user_id, session_id)
+    max_for_owner = _max_concurrent_for_user(user_id)
+    with _backtest_slots_lock:
+        active_global = sum(1 for s in _active_slots.values() if s.get("running"))
+        if active_global >= MAX_ACTIVE_DASHBOARD_BACKTESTS:
+            return (
+                "Server is at capacity for concurrent backtests. "
+                "Please wait for one to finish."
+            )
+        if _count_active_for_owner(owner_key) >= max_for_owner:
+            if max_for_owner <= 1:
+                return "Backtest already running. Please wait for it to complete."
+            return (
+                f"You already have {max_for_owner} backtests running. "
+                "Please wait for one to finish."
+            )
+        slot = {
+            "live_run_id": live_run_id,
+            "session_id": session_id,
+            "user_id": user_id,
+            "owner_key": owner_key,
+            "running": True,
+            "error": None,
+            "runs_count": 0,
+            "started_at": time.time(),
+            "progress_file": None,
+        }
+        _active_slots[live_run_id] = slot
+        _mirror_slot_to_legacy(slot)
+    return None
+
+
+def _update_slot(live_run_id: str, **fields: Any) -> None:
+    with _backtest_slots_lock:
+        slot = _active_slots.get(live_run_id) or _recent_slots.get(live_run_id)
+        if not slot:
+            # Legacy / test path: mutate the mirrored dict only.
+            for key, value in fields.items():
+                if key in backtest_status:
+                    backtest_status[key] = value
+            return
+        slot.update(fields)
+        if backtest_status.get("live_run_id") == live_run_id:
+            _mirror_slot_to_legacy(slot)
+
+
+def _finalize_slot(live_run_id: str, *, error: Optional[str], runs_count: int) -> None:
+    with _backtest_slots_lock:
+        slot = _active_slots.pop(live_run_id, None)
+        if not slot:
+            backtest_status["running"] = False
+            backtest_status["started_at"] = None
+            backtest_status["live_run_id"] = None
+            backtest_status["progress_file"] = None
+            if error is not None:
+                backtest_status["error"] = error
+            backtest_status["runs_count"] = runs_count
+            return
+        slot["running"] = False
+        slot["error"] = error
+        slot["runs_count"] = runs_count
+        slot["started_at"] = None
+        slot["progress_file"] = None
+        _recent_slots[live_run_id] = slot
+        # Bound retention so a long-lived process does not grow forever.
+        if len(_recent_slots) > 50:
+            oldest = next(iter(_recent_slots))
+            _recent_slots.pop(oldest, None)
+        if backtest_status.get("live_run_id") == live_run_id:
+            _mirror_slot_to_legacy(slot)
+            backtest_status["progress_file"] = None
+            backtest_status["started_at"] = None
+
+
+def _resolve_status_slot(
+    *,
+    session_id: str,
+    live_run_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    with _backtest_slots_lock:
+        if live_run_id:
+            slot = _active_slots.get(live_run_id) or _recent_slots.get(live_run_id)
+            if slot:
+                return _slot_snapshot(slot)
+        # Prefer an active run owned by this backtest session.
+        for slot in reversed(list(_active_slots.values())):
+            if slot.get("running") and slot.get("session_id") == session_id:
+                return _slot_snapshot(slot)
+        for slot in reversed(list(_recent_slots.values())):
+            if slot.get("session_id") == session_id:
+                return _slot_snapshot(slot)
+    return None
+
+
+def _read_backtest_progress(progress_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Load incremental equity snapshots written by the backtest subprocess.
 
     ``progress_updated_at`` (the file's mtime) and ``progress_age_seconds`` (how
@@ -389,7 +554,7 @@ def _read_backtest_progress() -> Optional[Dict[str, Any]]:
     them yields an mtime marginally older than the payload -- immaterial against
     a 120s staleness threshold, and not worth a lock to avoid.
     """
-    progress_file = backtest_status.get("progress_file")
+    progress_file = progress_file or backtest_status.get("progress_file")
     if not progress_file:
         return None
     path = Path(progress_file)
@@ -436,6 +601,8 @@ def run_backtest_background(
     pipeline_path = None
     runtime_config_path = None
     progress_file = None
+    # Bound so finally can always finalize even if minting the id fails early.
+    resolved_live_run_id = live_run_id
     try:
         import subprocess
         import sys
@@ -448,20 +615,25 @@ def run_backtest_background(
         timeframe = timeframe or profile.timeframe
         if timeframe != profile.timeframe:
             raise ValueError("Backtest market profile does not match the data source")
-        
-        backtest_status["running"] = True
-        backtest_status["error"] = None
-        backtest_status["started_at"] = time.time()
-        backtest_session_id = session_id  # Store session for status polling
 
-        if not live_run_id:
-            live_run_id = (
+        if not resolved_live_run_id:
+            resolved_live_run_id = (
                 f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
             )
-        progress_file = str(Path(tempfile.gettempdir()) / f"backtest_progress_{live_run_id}.json")
-        backtest_status["live_run_id"] = live_run_id
-        backtest_status["progress_file"] = progress_file
-        
+        progress_file = str(
+            Path(tempfile.gettempdir()) / f"backtest_progress_{resolved_live_run_id}.json"
+        )
+        _update_slot(
+            resolved_live_run_id,
+            running=True,
+            error=None,
+            started_at=time.time(),
+            progress_file=progress_file,
+            session_id=session_id,
+        )
+        # Legacy mirror for code paths that still read the globals directly.
+        backtest_session_id = session_id
+
         print(f"🚀 Background: Running backtest: {start_date} to {end_date}", flush=True)
         print(f"   Session: {session_id[:8]}...", flush=True)
         
@@ -533,7 +705,7 @@ def run_backtest_background(
         if uses_llm and model and model.strip():
             cmd += ["--model", model.strip()]
 
-        cmd += ["--run-id", live_run_id, "--progress-file", progress_file]
+        cmd += ["--run-id", resolved_live_run_id, "--progress-file", progress_file]
 
         # Simulation capital is independent of the agent's portfolio sleeve.
         cmd += ["--initial-capital", str(resolve_initial_capital(initial_capital))]
@@ -575,7 +747,9 @@ def run_backtest_background(
             )
         print(f"Return code: {result.returncode}", flush=True)
         print(f"=== END BACKTEST OUTPUT ===", flush=True)
-        
+
+        slot_error = None
+        slot_runs_count = 0
         if result.returncode != 0:
             error_msg = result.stderr if result.stderr else result.stdout
             summary = _sanitize_backtest_error(
@@ -583,30 +757,35 @@ def run_backtest_background(
                 500,
                 extra_secret=financial_datasets_api_key,
             )
-            backtest_status["error"] = (
+            slot_error = (
                 f"Backtest failed with return code {result.returncode}. {summary}"
             )
             print(f"❌ Backtest failed (returncode={result.returncode})", flush=True)
         else:
             runs = db.get_runs_by_mode("backtest")
-            backtest_status["runs_count"] = len(runs)
+            slot_runs_count = len(runs)
             print(f"✅ Backtest completed. Found {len(runs)} runs in database.", flush=True)
             if len(runs) > 0:
                 print(f"   Latest run IDs: {[r['run_id'] for r in runs[:3]]}", flush=True)
-            _maybe_writeback_adapted_pipeline(agent_id, live_run_id)
+            _maybe_writeback_adapted_pipeline(agent_id, resolved_live_run_id)
+        if resolved_live_run_id:
+            _finalize_slot(
+                resolved_live_run_id, error=slot_error, runs_count=slot_runs_count
+            )
+            resolved_live_run_id = None  # finally must not double-finalize
     except Exception as e:
         summary = _sanitize_backtest_error(
             e,
             500,
             extra_secret=financial_datasets_api_key,
         )
-        backtest_status["error"] = summary
         print(f"❌ Backtest exception: {summary}", flush=True)
+        if resolved_live_run_id:
+            _finalize_slot(resolved_live_run_id, error=summary, runs_count=0)
+            resolved_live_run_id = None
     finally:
-        backtest_status["running"] = False
-        backtest_status["started_at"] = None
-        backtest_status["live_run_id"] = None
-        backtest_status["progress_file"] = None
+        if resolved_live_run_id:
+            _finalize_slot(resolved_live_run_id, error=None, runs_count=0)
         if progress_file:
             try:
                 Path(progress_file).unlink(missing_ok=True)
@@ -1245,33 +1424,30 @@ def run_backtest_endpoint(
         print(f"   Assets ({len(selected_assets)}): {', '.join(selected_assets)}", flush=True)
     else:
         print(f"   Assets: default DJIA ({len(DJIA_30)})", flush=True)
-    
-    if backtest_status["running"]:
-        print(f"⚠️ Backtest already running, rejecting request", flush=True)
-        return {
-            "success": False,
-            "error": "Backtest already running. Please wait for it to complete."
-        }
+
+    from dashboard.backend.api.dependencies import _optional_user
+
+    optional_user = _optional_user(
+        request,
+        request.headers.get("authorization") or request.headers.get("Authorization"),
+    )
+    user_id = optional_user["id"] if optional_user else None
 
     # Mint run id before the worker starts so callers (Discord job watcher)
     # can key notifications on a stable id from the HTTP response.
     live_run_id = f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
 
-    # Publish "running" synchronously — before thread.start() — so a status poll
-    # landing in the gap between this return and the worker's first line cannot
-    # read a PRIOR run's completed state (running=False, runs_count>0) and report
-    # it as this run's result. Clearing runs_count/error retires the previous
-    # run's terminal signal; setting live_run_id lets the watcher key on this
-    # exact run. (PR #163 completion-detection race.) Item assignment on this
-    # global dict is atomic under the GIL, same as the worker's own writes.
-    global backtest_session_id
-    backtest_status["running"] = True
-    backtest_status["error"] = None
-    backtest_status["runs_count"] = 0
-    backtest_status["started_at"] = time.time()
-    backtest_status["live_run_id"] = live_run_id
-    backtest_status["progress_file"] = None
-    backtest_session_id = session_id
+    refusal = _try_acquire_backtest_slot(
+        live_run_id=live_run_id,
+        session_id=session_id,
+        user_id=user_id,
+    )
+    if refusal:
+        print(f"⚠️ Backtest refused: {refusal}", flush=True)
+        return {
+            "success": False,
+            "error": refusal,
+        }
 
     # Start backtest in background thread
     print(f"🧵 Starting background thread for backtest", flush=True)
@@ -1329,16 +1505,37 @@ def run_backtest_endpoint(
     return response
 
 @router.get("/backtest/status")
-def get_backtest_status(request: Request):
-    """Get backtest status (running, error, or completed)."""
+def get_backtest_status(
+    request: Request,
+    live_run_id: Optional[str] = Query(default=None),
+):
+    """Get backtest status (running, error, or completed).
+
+    Pass ``live_run_id`` when following a specific concurrent job; otherwise the
+    newest active (or recently finished) run for this session is returned.
+    """
     session_id = request.state.session_id
-    
-    if backtest_status["running"]:
+    slot = _resolve_status_slot(session_id=session_id, live_run_id=live_run_id)
+
+    # Tests and legacy callers still mutate ``backtest_status`` directly without
+    # registering a slot — honour that mirror when no slot resolves.
+    if slot is None:
+        slot = {
+            "running": bool(backtest_status.get("running")),
+            "error": backtest_status.get("error"),
+            "runs_count": int(backtest_status.get("runs_count") or 0),
+            "started_at": backtest_status.get("started_at"),
+            "progress_file": backtest_status.get("progress_file"),
+            "live_run_id": backtest_status.get("live_run_id"),
+            "session_id": backtest_session_id,
+        }
+
+    if slot.get("running"):
         elapsed = 0
-        started_at = backtest_status.get("started_at")
+        started_at = slot.get("started_at")
         if started_at:
             elapsed = max(0, int(time.time() - started_at))
-        progress = _read_backtest_progress()
+        progress = _read_backtest_progress(slot.get("progress_file"))
         message = "Backtest is running… (multi-step agent pipeline; may take several minutes)"
         if progress:
             step = int(progress.get("step") or 0)
@@ -1350,39 +1547,42 @@ def get_backtest_status(request: Request):
             "running": True,
             "message": message,
             "elapsed_seconds": elapsed,
-            "live_run_id": backtest_status.get("live_run_id"),
-            "session_id": backtest_session_id,
+            "live_run_id": slot.get("live_run_id"),
+            "session_id": slot.get("session_id") or backtest_session_id,
         }
         if progress:
             payload["progress"] = progress
         return payload
-    elif backtest_status["error"]:
+    elif slot.get("error"):
         return {
             "running": False,
-            "error": backtest_status["error"],
-            "message": "Backtest failed"
+            "error": slot.get("error"),
+            "live_run_id": slot.get("live_run_id"),
+            "message": "Backtest failed",
         }
-    elif backtest_status["runs_count"] > 0:
+    elif int(slot.get("runs_count") or 0) > 0:
         # Verify the completed backtest belongs to this session
         runs = db.get_runs_by_session(session_id)
         if not runs:
             return {
                 "running": False,
                 "error": "Backtest completed but no runs found for this session",
-                "message": "Session mismatch"
+                "live_run_id": slot.get("live_run_id"),
+                "message": "Session mismatch",
             }
-        
+
         return {
             "running": False,
             "success": True,
-            "runs_count": backtest_status["runs_count"],
+            "runs_count": int(slot.get("runs_count") or 0),
             "session_id": session_id,
-            "message": "Backtest completed successfully"
+            "live_run_id": slot.get("live_run_id"),
+            "message": "Backtest completed successfully",
         }
     else:
         return {
             "running": False,
-            "message": "No backtest has been run yet"
+            "message": "No backtest has been run yet",
         }
 
 

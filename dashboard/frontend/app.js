@@ -1200,9 +1200,13 @@ async function submitDuplicateAgent() {
 
 function renderAgentRunningActions(agent) {
   const id = escapeHtml(agent.agent_id);
+  // Configure stays available while a backtest runs: the in-flight job already
+  // has its launch snapshot, so opening the editor does not cancel or mutate it.
+  // Run stays locked — a second click on the same agent would only fight the
+  // per-agent running map / confuse the card.
   return `
     <div class="agent-card-actions agent-card-actions--status">
-      <button class="agent-card-cta agent-card-cta--configure agent-card-cta--disabled" type="button" disabled aria-disabled="true" data-agent-id="${id}">Configure</button>
+      <button class="agent-card-cta agent-card-cta--configure agent-configure-btn" type="button" data-agent-id="${id}">Configure</button>
       <button class="agent-card-cta agent-card-cta--disabled" type="button" disabled aria-disabled="true">Running…</button>
     </div>`;
 }
@@ -4267,12 +4271,13 @@ let chartInstance = null;
 let liveBacktestChartActive = false;
 /** When set, Backtest view is pinned to this in-flight run (blocks history chart paint). */
 let liveBacktestRunId = null;
-/** Latest polled progress for the single in-flight run, or null before the
- *  first step. backtest_status is one process-global dict on the server, so at
- *  most one backtest runs at a time and a single shared object is correct.
- *  Declared beside liveBacktestRunId because the two are only ever read
- *  together: getAgentBacktestRunning() applies this to a card only when the
- *  card's run id matches liveBacktestRunId. */
+/** Per-run progress for concurrent dashboard backtests (keyed by live_run_id).
+ *  The Backtest panel still follows one focused run (`liveBacktestRunId`); My
+ *  Agents cards read their own entry here so every in-flight job can show
+ *  step/percent instead of an empty indeterminate bar. */
+let liveBacktestProgressByRunId = Object.create(null);
+/** Focused-run progress mirror for the Backtest panel + older single-run
+ *  harnesses. Kept in sync with liveBacktestProgressByRunId[liveBacktestRunId]. */
 let liveBacktestProgress = null;
 let liveBacktestLaunchPending = false;
 let liveBacktestLaunchError = false;
@@ -4331,19 +4336,20 @@ function getAgentBacktestRunning(agentId) {
         clearAgentBacktestRunning(agentId);
         return null;
     }
-    // Progress belongs to the run the poller is following, and ONLY to it.
-    // The map can transiently hold two entries: runBacktest() marks an agent
-    // running before its POST resolves (:5689, runId still null) and the
-    // backend rejects a second concurrent run, so clicking Run on an idle
-    // agent while another is genuinely in flight briefly leaves both marked.
-    // An unconditional spread would paint the running agent's step/percent/ETA
-    // onto a card whose launch is about to be refused. An entry with no runId
-    // yet is pre-confirmation and correctly renders indeterminate -- there is
-    // no progress to show that early anyway.
-    const ownsProgress = Boolean(liveBacktestRunId) && entry.runId === liveBacktestRunId;
+    // Attribute progress by this card's runId. An entry with no runId yet is
+    // pre-confirmation (POST still in flight) and must stay indeterminate —
+    // spreading the focused run's numbers onto it used to paint a false
+    // step/percent on a launch that was about to be refused.
+    let progress = null;
+    if (entry.runId) {
+        progress = liveBacktestProgressByRunId[entry.runId] || null;
+        if (!progress && entry.runId === liveBacktestRunId) {
+            progress = liveBacktestProgress;
+        }
+    }
     return {
         ...entry,
-        ...(ownsProgress && liveBacktestProgress ? liveBacktestProgress : {}),
+        ...(progress || {}),
         elapsedSeconds: Math.floor(elapsed),
     };
 }
@@ -6192,87 +6198,145 @@ function ensureBacktestPolling() {
     backtestPollTimer = setInterval(async () => {
         attempts += 1;
         try {
-            const status = await API.get(`${API_BASE}/backtest/status`);
-            const liveId = status.live_run_id || liveBacktestRunId;
-            const serverElapsed = Number(status.elapsed_seconds);
-            const displayElapsed = Number.isFinite(serverElapsed) && serverElapsed > 0
-                ? serverElapsed
-                : attempts;
-            const viewingLive = isViewingLiveBacktest(liveId);
-
-            if (status.running) {
-                if (liveId) liveBacktestRunId = liveId;
-                const step = Number(status.progress?.step);
-                const total = Number(status.progress?.total_steps);
-                const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
-                    ? (100 * step / total)
-                    : null;
-                // Assigned BEFORE refreshRunningAgentCards() below, which reads
-                // it through getAgentBacktestRunning(). Painting first would
-                // show the previous tick's step on the card while the Backtest
-                // panel — handed the same object a few lines down — showed this
-                // tick's: two surfaces disagreeing by one poll.
-                liveBacktestProgress = advanceBacktestProgress(
-                    liveBacktestProgress,
-                    status.progress,
-                    Date.now(),
-                );
-                // Repaint the My Agents card even when the user is not on the
-                // Backtest tab — that page is now the landing page after launch.
-                // refreshRunningAgentCards() patches the elapsed timer in place
-                // instead of tearing down the whole grid every second.
-                if (playgroundTab === 'agents' && currentPage === 'playground') {
-                    refreshRunningAgentCards();
+            const runningMap = readRunningBacktests();
+            const jobs = [];
+            const seen = new Set();
+            Object.entries(runningMap).forEach(([agentId, entry]) => {
+                const runId = entry?.runId;
+                if (!runId || seen.has(runId)) return;
+                seen.add(runId);
+                jobs.push({ agentId, runId });
+            });
+            if (liveBacktestRunId && !seen.has(liveBacktestRunId)) {
+                jobs.push({ agentId: null, runId: liveBacktestRunId });
+            }
+            if (!jobs.length) {
+                const statusUrl = `${API_BASE}/backtest/status`;
+                const status = await API.get(statusUrl);
+                if (!status?.running) {
+                    stopBacktestPolling();
+                    return;
                 }
+                jobs.push({ agentId: null, runId: status.live_run_id || null });
+            }
 
-                if (viewingLive) {
-                    liveBacktestChartActive = true;
-                    if (status.progress) {
-                        updateLiveBacktestChart(status.progress);
-                        updateLiveTradingLog(status.progress);
+            const snapshots = await Promise.all(jobs.map(async (job) => {
+                const statusUrl = job.runId
+                    ? `${API_BASE}/backtest/status?live_run_id=${encodeURIComponent(job.runId)}`
+                    : `${API_BASE}/backtest/status`;
+                try {
+                    return { job, status: await API.get(statusUrl) };
+                } catch (error) {
+                    console.error('Error polling backtest status:', error);
+                    return { job, status: null };
+                }
+            }));
+
+            let anyRunning = false;
+            let finishedFocused = null;
+
+            for (const { job, status } of snapshots) {
+                if (!status) continue;
+                const liveId = status.live_run_id || job.runId;
+                const serverElapsed = Number(status.elapsed_seconds);
+                const displayElapsed = Number.isFinite(serverElapsed) && serverElapsed > 0
+                    ? serverElapsed
+                    : attempts;
+                const viewingLive = isViewingLiveBacktest(liveId);
+
+                if (status.running) {
+                    anyRunning = true;
+                    if (liveId && !liveBacktestRunId) liveBacktestRunId = liveId;
+                    const step = Number(status.progress?.step);
+                    const total = Number(status.progress?.total_steps);
+                    const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
+                        ? (100 * step / total)
+                        : null;
+                    // Assigned BEFORE refreshRunningAgentCards() below, which reads
+                    // it through getAgentBacktestRunning(). Painting first would
+                    // show the previous tick's step on the card while the Backtest
+                    // panel — handed the same object a few lines down — showed this
+                    // tick's: two surfaces disagreeing by one poll.
+                    if (liveId) {
+                        liveBacktestProgressByRunId[liveId] = advanceBacktestProgress(
+                            liveBacktestProgressByRunId[liveId] || null,
+                            status.progress,
+                            Date.now(),
+                        );
                     }
-                    updateBacktestRunProgress({
-                        elapsedSeconds: displayElapsed,
-                        message: status.message || 'Backtest is running…',
-                        stepPct,
-                        // `{}` rather than null before the first step: an empty
-                        // object still opts this surface into the startup
-                        // staleness notice, which is the only warning available
-                        // while the subprocess has published nothing.
-                        progress: liveBacktestProgress || {},
+
+                    if (viewingLive) {
+                        liveBacktestChartActive = true;
+                        if (status.progress) {
+                            updateLiveBacktestChart(status.progress);
+                            updateLiveTradingLog(status.progress);
+                        }
+                        updateBacktestRunProgress({
+                            elapsedSeconds: displayElapsed,
+                            message: status.message || 'Backtest is running…',
+                            stepPct,
+                            // `{}` rather than null before the first step: an empty
+                            // object still opts this surface into the startup
+                            // staleness notice, which is the only warning available
+                            // while the subprocess has published nothing.
+                            progress: liveBacktestProgressByRunId[liveId] || liveBacktestProgress || {},
+                        });
+                        showBacktestRunProgress(true);
+                        renderBacktestRunConfig(
+                            { run_id: liveId },
+                            { running: true, launchConfig: getBacktestLaunchConfig(liveId) },
+                        );
+                    }
+                } else {
+                    if (liveId) delete liveBacktestProgressByRunId[liveId];
+                    Object.entries(readRunningBacktests()).forEach(([agentId, entry]) => {
+                        if (entry?.runId === liveId || (!liveId && agentId === job.agentId)) {
+                            clearAgentBacktestRunning(agentId);
+                        }
                     });
-                    showBacktestRunProgress(true);
-                    renderBacktestRunConfig(
-                        { run_id: liveId },
-                        { running: true, launchConfig: getBacktestLaunchConfig(liveId) },
-                    );
+                    if (viewingLive || liveId === liveBacktestRunId) {
+                        finishedFocused = {
+                            status,
+                            liveId,
+                            displayElapsed,
+                            finishedId: liveId || liveBacktestRunId,
+                        };
+                    }
                 }
-            } else {
-                stopBacktestPolling();
+            }
+
+            // Focused-run mirror for the Backtest panel + single-run harnesses.
+            liveBacktestProgress = liveBacktestRunId
+                ? (liveBacktestProgressByRunId[liveBacktestRunId] || null)
+                : null;
+
+            // Repaint My Agents cards even when the user is not on the Backtest
+            // tab — that page is the landing page after launch.
+            if (playgroundTab === 'agents' && currentPage === 'playground') {
+                refreshRunningAgentCards();
+            }
+
+            if (finishedFocused) {
+                const { status, liveId, displayElapsed, finishedId } = finishedFocused;
                 liveBacktestChartActive = false;
-                const finishedId = liveBacktestRunId;
-                liveBacktestRunId = null;
-                liveBacktestProgress = null;
-                Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);
+                if (liveBacktestRunId === finishedId) {
+                    liveBacktestRunId = null;
+                    liveBacktestProgress = null;
+                }
                 lastRenderedRunningKey = null;
                 if (playgroundTab === 'agents' && currentPage === 'playground') {
                     loadAgents();
                 }
 
                 if (status.error) {
-                    if (viewingLive) {
-                        const source = getBacktestLaunchConfig(liveId || finishedId)?.dataSource;
-                        const message = formatBacktestError(status.error, source);
-                        showBacktestRunProgress(true, { isError: true });
-                        updateBacktestRunProgress({
-                            elapsedSeconds: displayElapsed,
-                            message,
-                        });
-                    }
-                    return;
-                }
-
-                if (status.success && viewingLive) {
+                    const source = getBacktestLaunchConfig(liveId || finishedId)?.dataSource;
+                    const message = formatBacktestError(status.error, source);
+                    showBacktestRunProgress(true, { isError: true });
+                    updateBacktestRunProgress({
+                        elapsedSeconds: displayElapsed,
+                        message,
+                    });
+                } else if (status.success) {
                     updateBacktestRunProgress({
                         elapsedSeconds: displayElapsed,
                         message: `Completed in ${formatBacktestElapsed(displayElapsed)}.`,
@@ -6285,9 +6349,20 @@ function ensureBacktestPolling() {
                     await loadData();
                     await loadPerformanceMetrics();
                     setTimeout(() => showBacktestRunProgress(false), 2500);
-                } else if (!viewingLive) {
+                } else {
                     showBacktestRunProgress(false);
                 }
+
+                const remaining = Object.values(readRunningBacktests())
+                    .map((entry) => entry?.runId)
+                    .filter(Boolean);
+                if (remaining.length) {
+                    attachToLiveBacktest(remaining[0], null, getBacktestLaunchConfig(remaining[0]));
+                } else if (!anyRunning) {
+                    stopBacktestPolling();
+                }
+            } else if (!anyRunning) {
+                stopBacktestPolling();
             }
 
             if (attempts >= maxAttempts) {
@@ -6301,12 +6376,11 @@ function ensureBacktestPolling() {
                 }
                 liveBacktestChartActive = false;
                 liveBacktestRunId = null;
-                // The finished branch above clears the running map; this one
-                // never did. Harmless while an orphaned entry only showed a
-                // wrong elapsed timer, but liveBacktestProgress is a single
-                // global spread into *every* entry, so a stale entry would
-                // render the NEXT run's step, percent and ETA until it aged out.
+                // The finished branch above clears finished runs; this one must
+                // clear every orphan so a stale card cannot pick up the NEXT
+                // run's step/percent from a leftover map entry.
                 Object.keys(readRunningBacktests()).forEach(clearAgentBacktestRunning);
+                liveBacktestProgressByRunId = Object.create(null);
                 liveBacktestProgress = null;
                 lastRenderedRunningKey = null;
                 // Clearing the map is not visible on its own: polling has just
