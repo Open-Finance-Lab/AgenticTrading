@@ -3026,7 +3026,11 @@ const AuthAPI = {
 
     if (!response.ok) {
       const message = data?.detail || data?.error || `HTTP ${response.status}`;
-      throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      const error = new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      // Callers need to tell "session is gone" (401) apart from "the server is
+      // cold/broken" (5xx, network) -- the message alone cannot carry that.
+      error.status = response.status;
+      throw error;
     }
 
     return data;
@@ -3144,6 +3148,27 @@ async function claimAgentsForUser({ reload = true } = {}) {
     // Ungated on purpose: this call IS the claim-then-load ordering the auth
     // boot gate exists to protect, and it runs before the gate opens.
     await loadAgentsNow();
+  }
+}
+
+// Drop the previous account's active agent so logout / the next login does not
+// keep sending that agent's trading session_id (list/activate used to treat it
+// as enough to surface or reclaim another user's agents).
+//
+// Deliberately NOT part of clearAuthState(): refreshAuthUser() funnels *every*
+// /api/auth/me failure through that function, including a free-tier cold start
+// or a first-request-after-idle 500. Wiping the agent selection there would
+// silently undo the restoreActiveAgentSession() that ran moments earlier on
+// boot. Only a real sign-out (logout, or a 401 that proves the session is gone)
+// should reach this.
+function clearActiveAgentSession() {
+  localStorage.removeItem(ACTIVE_AGENT_KEY);
+  localStorage.removeItem(ACTIVE_AGENT_NAME_KEY);
+  window.ACTIVE_AGENT = null;
+  const browserOwnerId = localStorage.getItem(BROWSER_OWNER_KEY) || window.BROWSER_OWNER_ID;
+  if (browserOwnerId) {
+    localStorage.setItem('trading-session-id', browserOwnerId);
+    window.SESSION_ID = browserOwnerId;
   }
 }
 
@@ -3617,6 +3642,7 @@ async function logoutUser() {
     console.warn('Logout request failed:', error.message);
   } finally {
     clearAuthState();
+    clearActiveAgentSession();
     await loadAgents();
     if (currentPage === 'account') {
       navigateToPage('home');
@@ -3892,6 +3918,11 @@ async function refreshAuthUser() {
       console.warn('Auth session expired:', error.message);
     }
     clearAuthState();
+    // Only a 401 proves the session is really gone. A network error or a 5xx
+    // cold start must not cost the user their active agent selection.
+    if (error?.status === 401) {
+      clearActiveAgentSession();
+    }
   }
 }
 
