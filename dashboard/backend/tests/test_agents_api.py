@@ -195,6 +195,84 @@ def test_import_session_from_backtest_runs(client):
     assert len(listed.json()["agents"]) == 1
 
 
+def test_import_session_rejects_another_accounts_session(client):
+    """import-session derives its session_id from a caller-supplied header.
+
+    Nothing there proves ownership, so re-importing a session already bound to
+    another account must 403 rather than silently re-own and rename it.
+    """
+    session_id = str(uuid.uuid4())
+    import dashboard.backend.database as db_module
+
+    db_module.db.insert_run(
+        run_id="ext_test_import_403",
+        session_id=session_id,
+        agent_name="victim-strategy",
+        mode="backtest",
+        start_date="2026-04-15",
+        end_date="2026-04-16",
+        initial_equity=100000,
+        final_equity=101000,
+        total_return=0.01,
+        sharpe_ratio=0.5,
+        max_drawdown=-0.02,
+        num_trades=3,
+        llm_model="rsi-demo",
+    )
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "import-owner@example.com",
+            "display_name": "Import Owner",
+            "password": "securepass123",
+        },
+    )
+    assert signup.status_code == 200
+    owner_token = _cookie_session_token(client)
+    owned = client.post(
+        "/api/v1/agents/import-session",
+        json={},
+        headers={
+            "X-Session-Id": session_id,
+            "Authorization": f"Bearer {owner_token}",
+        },
+    )
+    assert owned.status_code == 200
+    agent_id = owned.json()["agent"]["agent_id"]
+
+    client.cookies.clear()
+    signup2 = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "import-thief@example.com",
+            "display_name": "Import Thief",
+            "password": "securepass123",
+        },
+    )
+    assert signup2.status_code == 200
+    thief_token = _cookie_session_token(client)
+    stolen = client.post(
+        "/api/v1/agents/import-session",
+        json={"name": "stolen"},
+        headers={
+            "X-Session-Id": session_id,
+            "Authorization": f"Bearer {thief_token}",
+        },
+    )
+    assert stolen.status_code == 403
+
+    listed = client.get(
+        "/api/v1/agents",
+        headers={
+            "X-Session-Id": session_id,
+            "Authorization": f"Bearer {owner_token}",
+        },
+    )
+    agents = {a["agent_id"]: a for a in listed.json()["agents"]}
+    assert agents[agent_id]["name"] == "victim-strategy"
+
+
 def test_claim_account_links_browser_agents(client):
     browser_session = str(uuid.uuid4())
     anon_headers = {"X-Session-Id": browser_session, "X-Browser-Id": browser_session}

@@ -278,20 +278,35 @@ class AgentStore:
             conn = self._get_connection()
             cursor = conn.cursor()
             cursor.execute(
+                # Same no-steal guard as claim_agent: this is the fourth writer
+                # of owner_user_id and is reachable from
+                # POST /agents/import-session, whose session_id comes straight
+                # off a caller-supplied header. A bare COALESCE would let any
+                # non-null caller id replace the existing owner.
                 """
                 UPDATE external_agents
                 SET name = ?, model_name = ?, last_used_at = ?,
-                    owner_user_id = COALESCE(?, owner_user_id),
+                    owner_user_id = CASE
+                        WHEN owner_user_id IS NULL AND ? IS NOT NULL THEN ?
+                        ELSE owner_user_id
+                    END,
                     owner_browser_session = COALESCE(?, owner_browser_session)
                 WHERE session_id = ?
+                  AND (
+                        owner_user_id IS NULL
+                        OR (? IS NOT NULL AND owner_user_id = ?)
+                      )
                 """,
                 (
                     name.strip(),
                     model_name.strip() or "local-model",
                     _utcnow_iso(),
                     owner_user_id,
+                    owner_user_id,
                     owner_browser_session,
                     session_id,
+                    owner_user_id,
+                    owner_user_id,
                 ),
             )
             conn.commit()
@@ -378,12 +393,19 @@ class AgentStore:
                     (trading_session_id, owner_user_id),
                 )
             elif owner_browser_session:
+                # ``owner_browser_session = session_id`` is the import-session
+                # shape (see api/dependencies.py::_owner_context): those rows
+                # have no separate browser credential, so requiring the caller's
+                # browser id to match would hide an agent the caller does own.
                 _add_rows(
                     """
                     SELECT * FROM external_agents
                     WHERE session_id = ?
-                      AND owner_browser_session = ?
                       AND owner_user_id IS NULL
+                      AND (
+                            owner_browser_session = ?
+                            OR owner_browser_session = session_id
+                          )
                     ORDER BY created_at DESC
                     """,
                     (trading_session_id, owner_browser_session),
@@ -670,14 +692,6 @@ class AgentStore:
         conn.commit()
         conn.close()
         return deleted
-
-    def count_agents(self) -> int:
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) AS n FROM external_agents")
-        row = cursor.fetchone()
-        conn.close()
-        return int(row["n"] if row else 0)
 
     def owns_agent(
         self,

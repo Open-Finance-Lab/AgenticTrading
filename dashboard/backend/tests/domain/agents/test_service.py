@@ -265,6 +265,67 @@ def test_require_access_reclaim_does_not_steal_bound_agent(svc):
     assert svc.get_agent(agent["agent_id"])["owner_user_id"] == 1
 
 
+def test_session_match_grant_never_binds_an_account(svc):
+    """A session_id match grants access but must not claim the agent.
+
+    ``owns_agent`` now refuses browser-only access to a bound row, so an
+    account binding made off a bare session match is irreversible: the real
+    owner's browser credential stops working with no way back. Access itself
+    stays open (test_patch_agent_legacy_session_owner pins that contract) --
+    only the ownership write is withheld.
+    """
+    agent = svc.create_agent(
+        name="A", model_name="m", owner_user_id=None, owner_browser_session="b-victim"
+    )
+    got, owned = svc.resolve_access(
+        agent["agent_id"],
+        user_id=2,
+        browser_session="b-thief",
+        trading_session=agent["session_id"],
+        reclaim_on_session_match=True,
+    )
+    assert got["agent_id"] == agent["agent_id"]
+    assert owned is False
+    assert svc.get_agent(agent["agent_id"])["owner_user_id"] is None
+    # Still reversible: the original browser wins it back on its own session id.
+    _, owned_back = svc.resolve_access(
+        agent["agent_id"],
+        browser_session="b-victim",
+        trading_session=agent["session_id"],
+        reclaim_on_session_match=True,
+    )
+    assert owned_back is False
+    assert svc.agents.owns_agent(agent, owner_browser_session="b-victim") is True
+
+
+def test_resolve_access_reports_real_credentials_as_owned(svc):
+    """The flag must be True for the credentials that legitimately claim."""
+    guest = svc.create_agent(
+        name="G", model_name="m", owner_user_id=None, owner_browser_session="b1"
+    )
+    assert svc.resolve_access(guest["agent_id"], browser_session="b1")[1] is True
+
+    bound = svc.create_agent(
+        name="B", model_name="m", owner_user_id=7, owner_browser_session="b2"
+    )
+    assert svc.resolve_access(bound["agent_id"], user_id=7)[1] is True
+
+
+def test_import_session_rejects_another_accounts_agent(svc):
+    """import-session must not rename, re-own, or hand back a bound agent."""
+    _insert_ext_run(svc.db, run_id="ext_1", session_id="sess-a", agent_name="orig")
+    owned = svc.agents.register_or_get_agent(
+        session_id="sess-a", name="orig", owner_user_id=1
+    )
+    with pytest.raises(AgentAccessDeniedError):
+        svc.import_session(
+            session_id="sess-a", user_id=2, name="stolen", model_name="m"
+        )
+    row = svc.get_agent(owned["agent_id"])
+    assert row["owner_user_id"] == 1
+    assert row["name"] == "orig"
+
+
 def test_activate_does_not_overwrite_other_owner(svc):
     agent = svc.create_agent(
         name="A", model_name="m", owner_user_id=1, owner_browser_session="b1"

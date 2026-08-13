@@ -66,15 +66,38 @@ def _require_agent_access(
     api_key: Optional[str] = None,
     reclaim_on_session_match: bool = False,
 ) -> Dict[str, Any]:
+    agent, _owned = _resolve_agent_access(
+        agent_id,
+        ctx,
+        api_key=api_key,
+        reclaim_on_session_match=reclaim_on_session_match,
+    )
+    return agent
+
+
+def _resolve_agent_access(
+    agent_id: str,
+    ctx: Dict[str, Any],
+    *,
+    api_key: Optional[str] = None,
+    reclaim_on_session_match: bool = False,
+) -> tuple[Dict[str, Any], bool]:
+    """``(agent, owned)``. See ``AgentService.resolve_access``.
+
+    Routes that only *read* or edit the agent can use ``_require_agent_access``
+    and ignore the flag. Routes that write ownership must not: a grant that came
+    from a bare ``session_id`` match is not proof of ownership, and binding an
+    account on it cannot be undone by the real owner.
+    """
     # The agent's own API key is a valid credential for its own agent — this is
     # how API-only clients (which have no logged-in user or browser session)
     # authorize state-changing operations on the agent they own.
     if api_key:
         keyed = agent_service.resolve_api_key(api_key)
         if keyed and keyed.get("agent_id") == agent_id:
-            return keyed
+            return keyed, True
     try:
-        return agent_service.require_access(
+        return agent_service.resolve_access(
             agent_id,
             user_id=ctx.get("user_id"),
             browser_session=ctx.get("browser_session"),

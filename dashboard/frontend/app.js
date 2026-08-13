@@ -3026,7 +3026,11 @@ const AuthAPI = {
 
     if (!response.ok) {
       const message = data?.detail || data?.error || `HTTP ${response.status}`;
-      throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      const error = new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      // Callers need to tell "session is gone" (401) apart from "the server is
+      // cold/broken" (5xx, network) -- the message alone cannot carry that.
+      error.status = response.status;
+      throw error;
     }
 
     return data;
@@ -3147,13 +3151,17 @@ async function claimAgentsForUser({ reload = true } = {}) {
   }
 }
 
-function clearAuthState() {
-  clearLegacyAuthToken();
-  localStorage.removeItem(AUTH_USER_KEY);
-  window.AUTH_USER = null;
-  // Drop the previous account's active agent so logout / the next login does
-  // not keep sending that agent's trading session_id (list/activate used to
-  // treat it as enough to surface or reclaim another user's agents).
+// Drop the previous account's active agent so logout / the next login does not
+// keep sending that agent's trading session_id (list/activate used to treat it
+// as enough to surface or reclaim another user's agents).
+//
+// Deliberately NOT part of clearAuthState(): refreshAuthUser() funnels *every*
+// /api/auth/me failure through that function, including a free-tier cold start
+// or a first-request-after-idle 500. Wiping the agent selection there would
+// silently undo the restoreActiveAgentSession() that ran moments earlier on
+// boot. Only a real sign-out (logout, or a 401 that proves the session is gone)
+// should reach this.
+function clearActiveAgentSession() {
   localStorage.removeItem(ACTIVE_AGENT_KEY);
   localStorage.removeItem(ACTIVE_AGENT_NAME_KEY);
   window.ACTIVE_AGENT = null;
@@ -3162,6 +3170,12 @@ function clearAuthState() {
     localStorage.setItem('trading-session-id', browserOwnerId);
     window.SESSION_ID = browserOwnerId;
   }
+}
+
+function clearAuthState() {
+  clearLegacyAuthToken();
+  localStorage.removeItem(AUTH_USER_KEY);
+  window.AUTH_USER = null;
   // The email-change form keeps its stage in a closure keyed to nobody: left
   // alone, the next user to sign in on this tab resumes the previous user's
   // half-finished change. Reset here -- every sign-out path (logout button,
@@ -3628,6 +3642,7 @@ async function logoutUser() {
     console.warn('Logout request failed:', error.message);
   } finally {
     clearAuthState();
+    clearActiveAgentSession();
     await loadAgents();
     if (currentPage === 'account') {
       navigateToPage('home');
@@ -3903,6 +3918,11 @@ async function refreshAuthUser() {
       console.warn('Auth session expired:', error.message);
     }
     clearAuthState();
+    // Only a 401 proves the session is really gone. A network error or a 5xx
+    // cold start must not cost the user their active agent selection.
+    if (error?.status === 401) {
+      clearActiveAgentSession();
+    }
   }
 }
 

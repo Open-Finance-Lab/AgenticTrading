@@ -228,20 +228,36 @@ class PostgresAgentStore:
             with self._get_connection() as conn:
                 with conn.cursor() as cur:
                     cur.execute(
+                        # Same no-steal guard as claim_agent: this is the fourth
+                        # writer of owner_user_id and is reachable from
+                        # POST /agents/import-session, whose session_id comes
+                        # straight off a caller-supplied header. A bare COALESCE
+                        # would let any non-null caller id replace the owner.
                         """
                         UPDATE external_agents
                         SET name = %s, model_name = %s, last_used_at = %s,
-                            owner_user_id = COALESCE(%s, owner_user_id),
+                            owner_user_id = CASE
+                                WHEN owner_user_id IS NULL AND %s::integer IS NOT NULL
+                                    THEN %s
+                                ELSE owner_user_id
+                            END,
                             owner_browser_session = COALESCE(%s, owner_browser_session)
                         WHERE session_id = %s
+                          AND (
+                                owner_user_id IS NULL
+                                OR (%s::integer IS NOT NULL AND owner_user_id = %s)
+                              )
                         """,
                         (
                             name.strip(),
                             model_name.strip() or "local-model",
                             _utcnow_iso(),
                             owner_user_id,
+                            owner_user_id,
                             owner_browser_session,
                             session_id,
+                            owner_user_id,
+                            owner_user_id,
                         ),
                     )
             return self.get_agent_by_session(session_id) or existing
@@ -320,12 +336,17 @@ class PostgresAgentStore:
                             (trading_session_id, owner_user_id),
                         )
                     elif owner_browser_session:
+                        # owner_browser_session = session_id is the
+                        # import-session shape (see SQLite twin).
                         _add_rows(
                             """
                             SELECT * FROM external_agents
                             WHERE session_id = %s
-                              AND owner_browser_session = %s
                               AND owner_user_id IS NULL
+                              AND (
+                                    owner_browser_session = %s
+                                    OR owner_browser_session = session_id
+                                  )
                             ORDER BY created_at DESC
                             """,
                             (trading_session_id, owner_browser_session),
@@ -426,10 +447,18 @@ class PostgresAgentStore:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
+                    # The ``::integer`` casts are load-bearing, not decoration.
+                    # psycopg sends ``None`` with an unspecified type OID, and a
+                    # bare ``$n IS NOT NULL`` gives Postgres no context to infer
+                    # from, so an anonymous caller (owner_user_id=None) would hit
+                    # 42P08 "could not determine data type of parameter". The
+                    # SQLite twin cannot reproduce this -- its parameters are
+                    # untyped -- so only the @pg_only tier guards it.
                     """
                     UPDATE external_agents
                     SET owner_user_id = CASE
-                            WHEN owner_user_id IS NULL AND %s IS NOT NULL THEN %s
+                            WHEN owner_user_id IS NULL AND %s::integer IS NOT NULL
+                                THEN %s
                             ELSE owner_user_id
                         END,
                         owner_browser_session = COALESCE(%s, owner_browser_session),
@@ -437,7 +466,7 @@ class PostgresAgentStore:
                     WHERE agent_id = %s
                       AND (
                             owner_user_id IS NULL
-                            OR (%s IS NOT NULL AND owner_user_id = %s)
+                            OR (%s::integer IS NOT NULL AND owner_user_id = %s)
                           )
                     """,
                     (
@@ -462,10 +491,14 @@ class PostgresAgentStore:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
+                    # ``::integer`` casts: see claim_agent. This path is reached
+                    # with owner_user_id=None on every logged-out reclaim, so an
+                    # uncast parameter would 500 the common case.
                     """
                     UPDATE external_agents
                     SET owner_user_id = CASE
-                            WHEN owner_user_id IS NULL AND %s IS NOT NULL THEN %s
+                            WHEN owner_user_id IS NULL AND %s::integer IS NOT NULL
+                                THEN %s
                             ELSE owner_user_id
                         END,
                         owner_browser_session = %s,
@@ -473,7 +506,7 @@ class PostgresAgentStore:
                     WHERE agent_id = %s
                       AND (
                             owner_user_id IS NULL
-                            OR (%s IS NOT NULL AND owner_user_id = %s)
+                            OR (%s::integer IS NOT NULL AND owner_user_id = %s)
                           )
                     """,
                     (
@@ -587,13 +620,6 @@ class PostgresAgentStore:
                 )
                 deleted = cur.rowcount > 0
         return deleted
-
-    def count_agents(self) -> int:
-        with self._get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS n FROM external_agents")
-                row = cur.fetchone()
-        return int(row["n"] if row else 0)
 
     def owns_agent(
         self,

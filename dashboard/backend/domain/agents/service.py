@@ -230,6 +230,36 @@ class AgentService:
         trading_session: Optional[str] = None,
         reclaim_on_session_match: bool = False,
     ) -> Dict[str, Any]:
+        agent, _owned = self.resolve_access(
+            agent_id,
+            user_id=user_id,
+            browser_session=browser_session,
+            trading_session=trading_session,
+            reclaim_on_session_match=reclaim_on_session_match,
+        )
+        return agent
+
+    def resolve_access(
+        self,
+        agent_id: str,
+        *,
+        user_id: Optional[int] = None,
+        browser_session: Optional[str] = None,
+        trading_session: Optional[str] = None,
+        reclaim_on_session_match: bool = False,
+    ) -> Tuple[Dict[str, Any], bool]:
+        """``(agent, owned)`` -- ``owned`` is False for a session-match grant.
+
+        A matching ``session_id`` is enough to *reach* an unclaimed agent (the
+        legacy dashboard reclaim, pinned by
+        ``test_patch_agent_legacy_session_owner``), but it is not an ownership
+        credential. Callers that write ownership -- activate, which claims the
+        agent for the signed-in user -- must not treat it as one: binding an
+        account on a bare session match is irreversible now that
+        ``owns_agent`` refuses browser-only access to bound rows, so it would
+        lock the real owner out for good rather than losing a tug-of-war they
+        can win back.
+        """
         agent = self.agents.get_agent(agent_id)
         if not agent:
             raise AgentNotFoundError()
@@ -238,7 +268,7 @@ class AgentService:
             owner_user_id=user_id,
             owner_browser_session=browser_session,
         ):
-            return agent
+            return agent, True
         if (
             reclaim_on_session_match
             and trading_session
@@ -250,13 +280,15 @@ class AgentService:
             # already-bound agent (activate/restore used to COALESCE overwrite).
             if agent.get("owner_user_id") is not None:
                 raise AgentAccessDeniedError()
+            # Refresh the browser stamp only. owner_user_id stays NULL: this
+            # grant rests on a session id, not a credential, and an account
+            # binding made here cannot be undone by the real owner.
             self.agents.reclaim_agent(
                 agent_id,
-                owner_user_id=user_id,
                 owner_browser_session=browser_session,
             )
             reclaimed = self.agents.get_agent(agent_id)
-            return reclaimed or agent
+            return (reclaimed or agent), False
         raise AgentAccessDeniedError()
 
     # ------------------------------------------------------------------
@@ -622,6 +654,15 @@ class AgentService:
         resolved_model = (model_name or latest.get("llm_model") or "local-model").strip()
 
         existing = self.agents.get_agent_by_session(session_id)
+        # session_id here is the caller-supplied owner context, so re-importing
+        # a session that already belongs to another account must not silently
+        # rename it, re-own it, or hand its record back to the caller.
+        if (
+            existing
+            and existing.get("owner_user_id") is not None
+            and existing.get("owner_user_id") != user_id
+        ):
+            raise AgentAccessDeniedError()
         agent = self.agents.register_or_get_agent(
             session_id=session_id,
             name=resolved_name,
