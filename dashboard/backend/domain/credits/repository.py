@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from dashboard.backend.database import DB_PATH
+from dashboard.backend.db_url import describe_database_url
 
 
 class CreditsStoreError(RuntimeError):
@@ -990,3 +992,24 @@ class CreditsStore:
             "items": items,
             "next_cursor": items[-1]["sequence"] if has_more and items else None,
         }
+
+
+def _build_credits_store():
+    # Credits belong to the account database. Do not fall back to either the
+    # content or run-history database: those can have different retention and
+    # ownership boundaries.
+    database_url = os.getenv("USERS_DATABASE_URL")
+    if database_url:
+        from dashboard.backend.domain.credits.repository_postgres import (
+            PostgresCreditsStore,
+        )
+
+        print(
+            f"credits_store backend: postgres ({describe_database_url(database_url)})"
+        )
+        return PostgresCreditsStore(database_url)
+    print("credits_store backend: sqlite (ephemeral on Render)")
+    return CreditsStore()
+
+
+credits_store = _build_credits_store()
