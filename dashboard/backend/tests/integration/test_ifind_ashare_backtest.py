@@ -57,16 +57,16 @@ def _official_payload(
 
     tables = []
     for offset, symbol in enumerate(symbols):
-        opens = [10.0 + offset + row * 0.1 for row in range(count)]
+        opens = [round(10.0 + offset + row * 0.1, 2) for row in range(count)]
         tables.append(
             {
                 "thscode": symbol,
                 "time": timestamps.copy(),
                 "table": {
                     "open": opens,
-                    "high": [value + 1.0 for value in opens],
-                    "low": [value - 1.0 for value in opens],
-                    "close": [value + 0.5 for value in opens],
+                    "high": [round(value + 1.0, 2) for value in opens],
+                    "low": [round(value - 1.0, 2) for value in opens],
+                    "close": [round(value + 0.5, 2) for value in opens],
                     "volume": [10_000 + row for row in range(count)],
                 },
             }
@@ -79,6 +79,7 @@ class _FakeIFindClient:
         self.payload = payload
         self.calls = []
         self.fx_calls = []
+        self.market_rule_calls = []
 
     def fetch_hourly_bars(self, symbols, start, end):
         self.calls.append((tuple(symbols), start, end))
@@ -98,6 +99,36 @@ class _FakeIFindClient:
                 }
             )
         return {"errorcode": 0, "errmsg": "", "tables": tables}
+
+    def fetch_daily_market_rules(self, symbols, start, end):
+        self.market_rule_calls.append((tuple(symbols), start, end))
+        hourly_by_symbol = {
+            item["thscode"]: item for item in self.payload["tables"]
+        }
+        tables = []
+        for symbol in symbols:
+            hourly = hourly_by_symbol[symbol]
+            closes_by_date = {}
+            for timestamp, close in zip(
+                hourly["time"], hourly["table"]["close"], strict=True
+            ):
+                closes_by_date[timestamp[:10]] = close
+            dates = list(closes_by_date)
+            tables.append(
+                {
+                    "thscode": symbol,
+                    "time": dates,
+                    "table": {
+                        "close": [closes_by_date[value] for value in dates],
+                        "ths_trading_status_stock": ["交易"] * len(dates),
+                        "ths_up_and_down_status_stock": ["非涨跌停"] * len(dates),
+                    },
+                }
+            )
+        return {"errorcode": 0, "errmsg": "", "tables": tables}
+
+    def fetch_basic_market_status(self, _symbols, _trading_date):
+        raise AssertionError("complete history must not require status supplements")
 
 
 class _CapturingThread:
@@ -490,6 +521,7 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
     backtest_hourly_agent.main()
 
     assert fake_client.calls == [(symbols, START, END)]
+    assert fake_client.market_rule_calls == [(symbols, START, END)]
     assert [call[3] for call in fake_client.fx_calls] == ["RMB", "MHB"]
     frames = observed["frames"]
     assert tuple(frames) == symbols
@@ -532,6 +564,13 @@ def test_ifind_offline_response_reaches_engine_database_and_chart(
         "native_initial_capital": 7_000.0,
         "transaction_cost_profile": ASHARE_TRANSACTION_COST_PROFILE.to_metadata(),
         "transaction_costs_applied": True,
+        "market_rule_profile": {
+            "enabled": True,
+            "source": "ifind_http",
+            "version": "ifind-ashare-closing-rules-v1",
+            "observations": len(symbols) * 15,
+            "scope": "full_day_suspension_and_closing_limits",
+        },
     }
     # A run with no fills writes no cost totals. The baseline may have initial
     # fills, so its totals are asserted separately below.

@@ -260,6 +260,8 @@ class RunMetadata(BaseModel):
     # curve places no orders, so it carries the profile with the flag false.
     transaction_costs_applied: Optional[bool] = None
     transaction_cost_totals: Optional[Dict[str, Any]] = None
+    market_rule_profile: Optional[Dict[str, Any]] = None
+    market_rule_rejections: Optional[Dict[str, int]] = None
     # How much of the buy & hold sleeve filled. A lot-constrained benchmark on
     # a small account can place fewer symbols than requested, and a partly
     # placed benchmark must be legible rather than read as a real flat curve.
@@ -341,6 +343,8 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "transaction_cost_profile",
             "transaction_costs_applied",
             "transaction_cost_totals",
+            "market_rule_profile",
+            "market_rule_rejections",
             "baseline_allocation",
             "rejected_orders_count",
             "rejected_orders_truncated",

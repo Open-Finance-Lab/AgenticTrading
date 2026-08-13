@@ -115,8 +115,9 @@ def _append_rejection(
     executed_shares: float,
     unfilled_shares: float,
     reason: str,
+    audit: Optional[Dict[str, Any]] = None,
 ) -> None:
-    rejected_orders.append({
+    record = {
         "timestamp": timestamp,
         "symbol": symbol,
         "action": action,
@@ -125,7 +126,10 @@ def _append_rejection(
         "unfilled_shares": unfilled_shares,
         "status": "partial" if executed_shares > 0 else "rejected",
         "reason": reason,
-    })
+    }
+    if audit is not None:
+        record.update(audit)
+    rejected_orders.append(record)
 
 
 def _is_valid_lot_quantity(shares: Any, lot_size: int) -> bool:
@@ -183,6 +187,7 @@ def _append_order_event(
     strategy_reason: str,
     costs: Optional[Dict[str, float]] = None,
     repeat_index: Optional[Dict] = None,
+    audit: Optional[Dict[str, Any]] = None,
 ) -> None:
     if order_events is None:
         return
@@ -228,6 +233,8 @@ def _append_order_event(
     }
     if costs is not None:
         event.update(costs)
+    if audit is not None:
+        event.update(audit)
     order_events.append(event)
     if repeat_key is not None:
         repeat_index[repeat_key] = order_events[-1]
@@ -378,6 +385,8 @@ def execute_actions(
     order_events: Optional[List[Dict]] = None,
     order_event_repeats: Optional[Dict] = None,
     transaction_cost_profile: Any = None,
+    market_rules: Optional[Dict[str, Any]] = None,
+    fallback_prices: Optional[Dict[str, Any]] = None,
 ) -> float:
     """Apply ``actions`` to the given portfolio state in place.
 
@@ -393,10 +402,23 @@ def execute_actions(
     """
     costs_enabled = transaction_cost_profile is not None
 
+    current_market_rule_audit = None
+
     def _record_order_event(**fields) -> None:
         _append_order_event(
-            order_events, repeat_index=order_event_repeats, **fields
+            order_events,
+            repeat_index=order_event_repeats,
+            audit=current_market_rule_audit,
+            **fields,
         )
+
+    def _record_rejection(**fields) -> None:
+        if rejected_orders is not None:
+            _append_rejection(
+                rejected_orders,
+                audit=current_market_rule_audit,
+                **fields,
+            )
 
     current_date = None
     if t_plus_one_enabled:
@@ -422,10 +444,132 @@ def execute_actions(
         shares = action.get("shares", 0)
         reason = action.get("reason", "")
 
+        current_market_rule_audit = None
+        market_rule = None
+        if market_rules is not None and action_type in {"buy", "sell"}:
+            market_rule = market_rules.get(symbol)
+
+            reference_price = None
+            if symbol in market_data:
+                reference_price = market_data[symbol]["close"]
+            elif fallback_prices is not None:
+                reference_price = fallback_prices.get(symbol)
+            display_price = 0.0 if reference_price is None else reference_price
+
+            if market_rule is None:
+                # Fail closed, but do not take the run down with it. Every
+                # producer filters to the allowed universe before reaching here,
+                # so this is unreachable today — and if one ever stops, letting
+                # a symbol trade ungated would defeat the calendar, while
+                # raising would discard every bar already simulated for a single
+                # stray action. Reject it and leave a record instead.
+                _record_rejection(
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    action=action_type,
+                    requested_shares=shares,
+                    executed_shares=0,
+                    unfilled_shares=shares,
+                    reason="market_rule_unavailable",
+                )
+                _record_order_event(
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    side=action_type.upper(),
+                    requested_shares=shares,
+                    executed_shares=0,
+                    price=display_price,
+                    status="rejected",
+                    reason="market_rule_unavailable",
+                    strategy_reason=reason,
+                    costs=(
+                        _zero_transaction_costs(display_price)
+                        if costs_enabled
+                        else None
+                    ),
+                )
+                continue
+
+            current_market_rule_audit = market_rule.to_audit()
+
+            if market_rule.suspended:
+                _record_rejection(
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    action=action_type,
+                    requested_shares=shares,
+                    executed_shares=0,
+                    unfilled_shares=shares,
+                    reason="suspended",
+                )
+                _record_order_event(
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    side=action_type.upper(),
+                    requested_shares=shares,
+                    executed_shares=0,
+                    price=display_price,
+                    status="rejected",
+                    reason="suspended",
+                    strategy_reason=reason,
+                    costs=(
+                        _zero_transaction_costs(display_price)
+                        if costs_enabled
+                        else None
+                    ),
+                )
+                continue
+
         if symbol not in market_data:
             continue
 
         price = market_data[symbol]["close"]
+
+        if market_rule is not None:
+            price_tick = getattr(transaction_cost_profile, "price_tick", 0.01)
+            closing_gate_effective = market_rule.closing_gate_effective(
+                timestamp=timestamp,
+                reference_price=price,
+                price_tick=price_tick,
+            )
+            current_market_rule_audit = market_rule.to_audit(
+                closing_gate_effective=closing_gate_effective
+            )
+            limit_state = market_rule.closing_limit_state.value
+            market_rejection_reason = None
+            if closing_gate_effective and action_type == "buy" and limit_state == "upper":
+                market_rejection_reason = "limit_up_buy_blocked"
+            elif (
+                closing_gate_effective
+                and action_type == "sell"
+                and limit_state == "lower"
+            ):
+                market_rejection_reason = "limit_down_sell_blocked"
+            if market_rejection_reason is not None:
+                _record_rejection(
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    action=action_type,
+                    requested_shares=shares,
+                    executed_shares=0,
+                    unfilled_shares=shares,
+                    reason=market_rejection_reason,
+                )
+                _record_order_event(
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    side=action_type.upper(),
+                    requested_shares=shares,
+                    executed_shares=0,
+                    price=price,
+                    status="rejected",
+                    reason=market_rejection_reason,
+                    strategy_reason=reason,
+                    costs=(
+                        _zero_transaction_costs(price) if costs_enabled else None
+                    ),
+                )
+                continue
 
         if (
             lot_size > 1
@@ -433,8 +577,7 @@ def execute_actions(
             and not _is_valid_lot_quantity(shares, lot_size)
         ):
             if rejected_orders is not None:
-                _append_rejection(
-                    rejected_orders,
+                _record_rejection(
                     timestamp=timestamp,
                     symbol=symbol,
                     action=action_type,
@@ -495,6 +638,8 @@ def execute_actions(
                 })
                 if costs_enabled:
                     trades[-1].update(calculated_costs)
+                if current_market_rule_audit is not None:
+                    trades[-1].update(current_market_rule_audit)
                 _record_order_event(
                     timestamp=timestamp,
                     symbol=symbol,
@@ -517,8 +662,7 @@ def execute_actions(
                 # legacy single-share branch's semantics are frozen.
                 if lot_size > 1:
                     if rejected_orders is not None:
-                        _append_rejection(
-                            rejected_orders,
+                        _record_rejection(
                             timestamp=timestamp,
                             symbol=symbol,
                             action="buy",
@@ -583,6 +727,8 @@ def execute_actions(
                 })
                 if costs_enabled:
                     trades[-1].update(calculated_costs)
+                if current_market_rule_audit is not None:
+                    trades[-1].update(current_market_rule_audit)
 
             unfilled_shares = shares - sell_shares
             if unfilled_shares <= _SHARE_EPSILON:
@@ -610,8 +756,7 @@ def execute_actions(
             frozen_shares = max(held_shares - sellable_shares, 0)
             t1_unfilled = min(unfilled_shares, frozen_shares)
             if t1_unfilled > _SHARE_EPSILON:
-                _append_rejection(
-                    rejected_orders,
+                _record_rejection(
                     timestamp=timestamp,
                     symbol=symbol,
                     action="sell",
@@ -622,8 +767,7 @@ def execute_actions(
                 )
             insufficient_shares = unfilled_shares - t1_unfilled
             if insufficient_shares > _SHARE_EPSILON:
-                _append_rejection(
-                    rejected_orders,
+                _record_rejection(
                     timestamp=timestamp,
                     symbol=symbol,
                     action="sell",
@@ -685,6 +829,8 @@ def execute_actions(
                 })
                 if costs_enabled:
                     trades[-1].update(calculated_costs)
+                if current_market_rule_audit is not None:
+                    trades[-1].update(current_market_rule_audit)
                 unfilled_shares = shares - sell_shares
                 _record_order_event(
                     timestamp=timestamp,
@@ -712,8 +858,7 @@ def execute_actions(
                 # branch still skips silently, it just no longer skips
                 # *invisibly*.
                 if lot_size > 1 and rejected_orders is not None:
-                    _append_rejection(
-                        rejected_orders,
+                    _record_rejection(
                         timestamp=timestamp,
                         symbol=symbol,
                         action="sell",

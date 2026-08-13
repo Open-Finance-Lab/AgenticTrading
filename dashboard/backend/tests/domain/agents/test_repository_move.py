@@ -219,10 +219,26 @@ def test_list_agents_owner_filters(store):
     by_browser = store.list_agents(owner_browser_session="browser-1")
     assert [a["agent_id"] for a in by_browser] == [b_browser["agent_id"]]
 
-    by_session = store.list_agents(trading_session_id=a_user["session_id"])
+    # trading_session_id alone is not enough — must also match ownership.
+    assert store.list_agents(trading_session_id=a_user["session_id"]) == []
+    by_session = store.list_agents(
+        owner_user_id=1, trading_session_id=a_user["session_id"]
+    )
     assert [a["agent_id"] for a in by_session] == [a_user["agent_id"]]
 
     assert store.list_agents() == []
+
+
+def test_anonymous_list_hides_account_bound_browser_agents(store):
+    """Logout must not re-surface agents the previous signed-in user created."""
+    bound = store.create_agent(
+        name="Bound", owner_user_id=1, owner_browser_session="b1"
+    )
+    guest = store.create_agent(name="Guest", owner_browser_session="b1")
+    listed = store.list_agents(owner_browser_session="b1")
+    ids = {a["agent_id"] for a in listed}
+    assert guest["agent_id"] in ids
+    assert bound["agent_id"] not in ids
 
 
 def test_list_agents_signed_in_includes_unclaimed_browser_agents(store):
@@ -289,6 +305,76 @@ def test_claim_agent_and_browser_claim(store):
     assert store.claim_browser_agents_to_user("", 1) == 0
 
 
+def test_register_or_get_agent_does_not_steal_another_account(store):
+    """The fourth writer of owner_user_id.
+
+    register_or_get_agent is reachable from POST /agents/import-session, whose
+    session_id is read straight off a caller-supplied header. A bare
+    ``COALESCE(?, owner_user_id)`` takes the first non-null value, so any
+    signed-in caller could re-own (and rename) another account's agent.
+    """
+    created = store.create_agent(
+        name="Owned", owner_user_id=1, owner_browser_session="b-owner"
+    )
+    store.register_or_get_agent(
+        session_id=created["session_id"],
+        name="Renamed by thief",
+        model_name="thief-model",
+        owner_user_id=2,
+        owner_browser_session="b-thief",
+    )
+    row = store.get_agent(created["agent_id"])
+    assert row["owner_user_id"] == 1
+    assert row["name"] == "Owned"
+
+    # The real owner still gets the idempotent name/model refresh.
+    store.register_or_get_agent(
+        session_id=created["session_id"],
+        name="Renamed by owner",
+        model_name="m",
+        owner_user_id=1,
+    )
+    assert store.get_agent(created["agent_id"])["name"] == "Renamed by owner"
+
+
+def test_list_agents_session_fold_keeps_import_session_rows(store):
+    """Regression: the anonymous session fold must not require a browser match.
+
+    import-session rows are stamped owner_browser_session = session_id, so a
+    browser that later sends its own X-Browser-Id matches neither the browser
+    fold nor a browser-equality session fold -- the agent vanishes from
+    My Agents even though its owner is looking right at it.
+    """
+    imported = store.register_or_get_agent(
+        session_id="sess-import", name="I", owner_browser_session="sess-import"
+    )
+    listed = store.list_agents(
+        owner_browser_session="browser-abc", trading_session_id="sess-import"
+    )
+    assert [a["agent_id"] for a in listed] == [imported["agent_id"]]
+
+    # Still no leak: another browser's guest agent stays hidden even when its
+    # session id is known, and account-bound rows never appear anonymously.
+    other = store.create_agent(name="O", owner_browser_session="b-other")
+    assert store.list_agents(
+        owner_browser_session="browser-abc", trading_session_id=other["session_id"]
+    ) == []
+    bound = store.create_agent(name="Bound", owner_user_id=9, owner_browser_session="sess-b")
+    assert store.list_agents(
+        owner_browser_session="browser-abc", trading_session_id=bound["session_id"]
+    ) == []
+
+
+def test_claim_agent_does_not_steal_another_account(store):
+    created = store.create_agent(
+        name="A", owner_user_id=1, owner_browser_session="b1"
+    )
+    store.claim_agent(
+        created["agent_id"], owner_user_id=2, owner_browser_session="b1"
+    )
+    assert store.get_agent(created["agent_id"])["owner_user_id"] == 1
+
+
 def test_delete_agent(store):
     created = store.create_agent(name="A")
     assert store.delete_agent(created["agent_id"]) is True
@@ -304,6 +390,10 @@ def test_owns_agent(store):
     # session_id is NOT an ownership credential — it is discoverable, so matching
     # it must never grant ownership (regression guard for the takeover bug).
     assert store.owns_agent(stored, owner_browser_session=stored["session_id"]) is False
-    # The real owner_browser_session IS recognized — owns_agent reads it straight
-    # from the row (the public agent dict omits it as a private credential).
-    assert store.owns_agent(stored, owner_browser_session="bz") is True
+    # Once bound to an account, browser id alone must not grant access — that is
+    # how logout / a later login on the same machine took over another user's agents.
+    assert store.owns_agent(stored, owner_browser_session="bz") is False
+
+    guest = store.create_agent(name="G", owner_browser_session="guest-b")
+    assert store.owns_agent(guest, owner_browser_session="guest-b") is True
+    assert store.owns_agent(guest, owner_user_id=5) is False

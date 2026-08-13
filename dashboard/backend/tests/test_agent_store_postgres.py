@@ -514,15 +514,67 @@ def test_claim_and_reclaim_agent_postgres(pg_agent_store):
 
     pg_agent_store.claim_agent(created["agent_id"], owner_user_id=7)
     assert pg_agent_store.owns_agent(created, owner_user_id=7) is True
-    # COALESCE kept the original browser session (no owner_browser_session arg).
-    assert pg_agent_store.owns_agent(created, owner_browser_session="bs_old") is True
-
-    pg_agent_store.reclaim_agent(created["agent_id"], owner_browser_session="bs_new")
-    # reclaim overwrote it: the new session matches, the old one no longer does.
-    assert pg_agent_store.owns_agent(created, owner_browser_session="bs_new") is True
+    # Bound to a user: browser id alone must not grant ownership.
     assert pg_agent_store.owns_agent(created, owner_browser_session="bs_old") is False
-    # The user binding from claim survives reclaim (owner_user_id is COALESCEd).
+
+    pg_agent_store.reclaim_agent(
+        created["agent_id"], owner_user_id=7, owner_browser_session="bs_new"
+    )
+    # reclaim refreshed the browser stamp for the same user; browser-only
+    # access stays denied while the agent remains account-bound.
+    assert pg_agent_store.owns_agent(created, owner_browser_session="bs_new") is False
+    assert pg_agent_store.owns_agent(created, owner_browser_session="bs_old") is False
     assert pg_agent_store.owns_agent(created, owner_user_id=7) is True
+
+
+@pg_only
+def test_claim_reclaim_accept_null_owner_user_id_postgres(pg_agent_store):
+    """A logged-out caller passes owner_user_id=None through both writers.
+
+    psycopg sends None with an unspecified type OID, so a bare
+    ``%s IS NOT NULL`` in the no-steal guard cannot be type-inferred and
+    Postgres aborts the statement with 42P08 ("could not determine data type of
+    parameter"). Every anonymous activate/restore takes this path, so the
+    uncast form 500s the common case in prod while the SQLite twin -- whose
+    parameters are untyped -- stays green. Only this tier can see it.
+    """
+    created = pg_agent_store.create_agent(name="Anon", owner_browser_session="bs_old")
+
+    # No user id anywhere: the guard must still parse and still bind nothing.
+    pg_agent_store.reclaim_agent(created["agent_id"], owner_browser_session="bs_new")
+    assert pg_agent_store.owns_agent(created, owner_browser_session="bs_new") is True
+    assert pg_agent_store.get_agent(created["agent_id"])["owner_user_id"] is None
+
+    pg_agent_store.claim_agent(created["agent_id"], owner_browser_session="bs_third")
+    assert pg_agent_store.owns_agent(created, owner_browser_session="bs_third") is True
+    assert pg_agent_store.get_agent(created["agent_id"])["owner_user_id"] is None
+
+
+@pg_only
+def test_register_or_get_agent_does_not_steal_account_postgres(pg_agent_store):
+    """import-session must not re-own an agent bound to a different account."""
+    created = pg_agent_store.create_agent(
+        name="Owned", owner_user_id=1, owner_browser_session="bs_owner"
+    )
+    pg_agent_store.register_or_get_agent(
+        session_id=created["session_id"],
+        name="Renamed",
+        model_name="thief-model",
+        owner_user_id=2,
+        owner_browser_session="bs_thief",
+    )
+    row = pg_agent_store.get_agent(created["agent_id"])
+    assert row["owner_user_id"] == 1
+    assert row["name"] == "Owned"
+
+    # The real owner still gets the idempotent update.
+    pg_agent_store.register_or_get_agent(
+        session_id=created["session_id"],
+        name="Renamed by owner",
+        model_name="m",
+        owner_user_id=1,
+    )
+    assert pg_agent_store.get_agent(created["agent_id"])["name"] == "Renamed by owner"
 
 
 @pg_only

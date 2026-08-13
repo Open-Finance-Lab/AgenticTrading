@@ -126,6 +126,37 @@ def test_logging_out_resets_the_email_change_form():
     assert "resetEmailChangeForm = reset" in js
 
 
+def test_active_agent_is_only_cleared_on_a_real_sign_out():
+    """A transient /api/auth/me failure must not cost the agent selection.
+
+    refreshAuthUser() funnels *every* failure through clearAuthState() from a
+    bare catch -- a Render free-tier cold start or a first-request-after-idle
+    500 included -- and it runs immediately after restoreActiveAgentSession()
+    on boot. Clearing the active agent inside clearAuthState() therefore
+    silently undoes the restore for a signed-in user whose boot probe merely
+    timed out. The wipe belongs on the paths that prove the session is gone:
+    the logout button, and a 401.
+    """
+    from dashboard.backend.tests._frontend_source import fn_body
+
+    clear_auth = fn_body("function clearAuthState")
+    assert "ACTIVE_AGENT_KEY" not in clear_auth
+    assert "trading-session-id" not in clear_auth
+
+    clear_agent = fn_body("function clearActiveAgentSession")
+    assert "localStorage.removeItem(ACTIVE_AGENT_KEY)" in clear_agent
+    assert "trading-session-id" in clear_agent
+
+    assert "clearActiveAgentSession()" in fn_body("async function logoutUser")
+
+    refresh = fn_body("async function refreshAuthUser")
+    assert "error?.status === 401" in refresh
+    assert "clearActiveAgentSession()" in refresh
+    # The status has to actually reach the caller -- AuthAPI.request throws a
+    # bare Error, so without this the 401 gate is dead code that never fires.
+    assert "error.status = response.status" in fn_body("  async request(path")
+
+
 def test_cache_bust_versions_were_bumped():
     """Parsed >= rather than a literal ==: these counters are bumped by unrelated
     work too, and an equality assert turns CI red on every open PR the moment

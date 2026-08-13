@@ -84,7 +84,7 @@ def test_builds_official_hourly_request_with_exclusive_end():
         "endtime": "2026-04-22 15:00:00",
         "functionpara": {
             "Interval": "60",
-            "CPS": "forward1",
+            "CPS": "no",
             "Timeformat": "LocalTime",
             "Limitstart": "09:30:00",
             "Limitend": "15:00:00",
@@ -124,6 +124,57 @@ def test_builds_official_daily_close_request_with_exclusive_end(currency):
             "Currency": currency,
             "Fill": "Blank",
         },
+    }
+
+
+def test_builds_official_daily_market_rule_request_with_verified_indicators():
+    session = FakeSession([FakeResponse()])
+
+    result = make_client(session).fetch_daily_market_rules(
+        ["600519.SH", "601318.SH"], START, END
+    )
+
+    assert result == {"errorcode": 0, "tables": []}
+    url, kwargs = session.calls[0]
+    assert url == "https://ifind.test/api/v1/cmd_history_quotation"
+    assert kwargs["json"] == {
+        "codes": "600519.SH,601318.SH",
+        "indicators": (
+            "close,ths_trading_status_stock,ths_up_and_down_status_stock"
+        ),
+        "startdate": "2026-04-01",
+        "enddate": "2026-04-22",
+        "functionpara": {
+            "Interval": "D",
+            "CPS": "1",
+            "Currency": "RMB",
+            "Fill": "Blank",
+        },
+    }
+
+
+def test_builds_basic_status_supplement_request():
+    session = FakeSession([FakeResponse()])
+
+    result = make_client(session).fetch_basic_market_status(
+        ["688981.SH"], date(2025, 9, 1)
+    )
+
+    assert result == {"errorcode": 0, "tables": []}
+    url, kwargs = session.calls[0]
+    assert url == "https://ifind.test/api/v1/basic_data_service"
+    assert kwargs["json"] == {
+        "codes": "688981.SH",
+        "indipara": [
+            {
+                "indicator": "ths_trading_status_stock",
+                "indiparams": ["2025-09-01"],
+            },
+            {
+                "indicator": "ths_up_and_down_status_stock",
+                "indiparams": ["2025-09-01"],
+            },
+        ],
     }
 
 
