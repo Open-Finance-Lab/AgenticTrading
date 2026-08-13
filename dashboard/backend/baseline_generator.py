@@ -24,6 +24,7 @@ from dashboard.backend.domain.backtesting.currency import CurrencyContext
 from dashboard.backend.domain.backtesting.market_rules import MarketRuleCalendar
 from dashboard.backend.domain.trading.execution import calculate_transaction_costs
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    AlpacaDataLoader,
     MarketDataUnavailableError,
 )
 
@@ -285,49 +286,34 @@ class BaselineGenerator:
     def _fetch_bars_for_symbol(self, symbol: str, start_date: str, end_date: str) -> Optional[pd.DataFrame]:
         """
         Fetch REAL historical bars from Alpaca API.
-        
+
+        Delegates to :class:`AlpacaDataLoader` rather than rebuilding the
+        request here: that is the one place the Basic-plan SIP clamp, the
+        IEX-on-refusal retry and the feed stamping live. Hand-rolling a second
+        request meant this call site opted into SIP but swallowed the exact
+        refusal the retry exists to absorb — every symbol would come back
+        ``None``, rendering "the feed refused us" as "there is no data".
+
         Args:
             symbol: Stock symbol (e.g., "AAPL")
             start_date: Start date (YYYY-MM-DD)
             end_date: End date (YYYY-MM-DD)
-        
+
         Returns:
             DataFrame with OHLCV data, indexed by timestamp
         """
         self._ensure_credentials()
 
-        try:
-            from alpaca.data.historical import StockHistoricalDataClient
-            from alpaca.data.requests import StockBarsRequest
-            from alpaca.data.timeframe import TimeFrame
-        except ImportError as e:
-            print("❌ alpaca-py not installed. Install with: pip install alpaca-py")
-            raise MarketDataUnavailableError(
-                "alpaca-py is not installed (pip install alpaca-py)"
-            ) from e
-        
-        try:
-            client = StockHistoricalDataClient(self.api_key, self.secret_key)
-            
-            request = StockBarsRequest(
-                symbol_or_symbols=[symbol],
-                timeframe=TimeFrame.Hour,
-                start=start_date,
-                end=end_date,
-            )
-            
-            bars_data = client.get_stock_bars(request)
-            
-            if symbol in bars_data.df.index.get_level_values(0):
-                df = bars_data.df.loc[symbol].copy()
-                return df
-            else:
-                return None
-        
-        except Exception as e:
-            print(f"⚠️ Error fetching {symbol}: {e}")
-            return None
-    
+        # Imported at module scope alongside MarketDataUnavailableError, not
+        # inside the alpaca-py ImportError handler this method used to carry:
+        # reporting a first-party import break as "pip install alpaca-py" sends
+        # the next debugger somewhere the problem is not. The loader raises
+        # MarketDataUnavailableError itself when the SDK really is missing,
+        # with the same install hint.
+        loader = AlpacaDataLoader(api_key=self.api_key, secret_key=self.secret_key)
+        bars = loader.fetch_bars([symbol], start_date, end_date)
+        return bars.get(symbol)
+
     def generate_buyhold_baseline(
         self, 
         bars_by_symbol: Dict[str, pd.DataFrame],
