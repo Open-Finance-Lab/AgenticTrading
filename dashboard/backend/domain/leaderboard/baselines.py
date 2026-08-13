@@ -42,7 +42,16 @@ def fetch_hourly_bars(symbols: List[str], start_date: str, end_date: str) -> Dic
     end_inclusive = (
         datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
     ).strftime("%Y-%m-%d")
-    return loader.fetch_bars(symbols, start_date, end_inclusive)
+    data = loader.fetch_bars(symbols, start_date, end_inclusive)
+    meta = loader.last_fetch or {}
+    if meta.get("sip_fallback_to_iex"):
+        print(
+            "WARNING: leaderboard bars served from IEX after SIP refusal "
+            f"(requested_end={meta.get('requested_end')}, "
+            f"effective_end={meta.get('effective_end')}). "
+            "IEX is not the SIP tape."
+        )
+    return data
 
 
 def compute_equity_curve(

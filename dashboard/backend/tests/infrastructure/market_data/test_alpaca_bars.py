@@ -11,7 +11,11 @@ import pytest
 
 from alpaca.data.timeframe import TimeFrame
 
-from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
+from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    FRAME_ATTR_FEED,
+    FRAME_ATTR_SIP_FALLBACK,
+    AlpacaDataLoader,
+)
 from dashboard.scripts import backtest_hourly_agent as bha
 
 CLIENT_TARGET = "alpaca.data.historical.StockHistoricalDataClient"
@@ -144,18 +148,29 @@ def test_missing_credentials_raises(fake_alpaca, monkeypatch, tmp_path):
 
 # --- fetch_bars ------------------------------------------------------------
 
+@pytest.fixture(autouse=True)
+def _hermetic_alpaca_feed_env(monkeypatch):
+    monkeypatch.delenv("ALPACA_DATA_FEED", raising=False)
+    monkeypatch.delenv("ALPACA_ALLOW_RECENT_SIP", raising=False)
+    monkeypatch.delenv("ALPACA_SIP_DELAY_MINUTES", raising=False)
+
+
 def test_request_construction(fake_alpaca):
     from alpaca.data.enums import DataFeed
 
     loader = AlpacaDataLoader(api_key="k", secret_key="s")
     fake_alpaca["df"] = _bars_df({"AAPL": [("2026-01-02 10:00", 1, 2, 0.5, 1.5, 100)]})
-    loader.fetch_bars(["AAPL"], "2026-01-01", "2026-01-03")
+    out = loader.fetch_bars(["AAPL"], "2026-01-01", "2026-01-03")
     req = fake_alpaca["requests"][0]
     assert req.symbol_or_symbols == ["AAPL"]
     assert req.timeframe.value == TimeFrame.Hour.value
     assert str(req.start).startswith("2026-01-01")
-    # Basic plan: SIP historical is fine for dates well outside the 15m window.
+    # Historical exclusive end is already older than the 15m SIP window.
+    assert str(req.end).startswith("2026-01-03")
     assert req.feed == DataFeed.SIP
+    assert out["AAPL"].attrs[FRAME_ATTR_FEED] == "sip"
+    assert out["AAPL"].attrs[FRAME_ATTR_SIP_FALLBACK] is False
+    assert loader.last_fetch["sip_fallback_to_iex"] is False
 
 
 def test_clamp_end_for_sip_helper():
@@ -176,16 +191,25 @@ def test_sip_fetch_uses_clamped_end(fake_alpaca, monkeypatch):
 
     from alpaca.data.enums import DataFeed
 
-    loader = AlpacaDataLoader(api_key="k", secret_key="s")
+    import dashboard.backend.infrastructure.market_data.alpaca_bars as bars_mod
+
+    frozen = datetime(2026, 8, 12, 23, 50, tzinfo=timezone.utc)
     clamped = datetime(2026, 8, 12, 23, 35, tzinfo=timezone.utc)
+    original = bars_mod.clamp_end_for_sip
+
+    def _clamp(end, *, now=None, delay_minutes=None):
+        return original(end, now=now or frozen, delay_minutes=delay_minutes)
+
     monkeypatch.setenv("ALPACA_DATA_FEED", "sip")
-    monkeypatch.setattr(loader, "_effective_end", lambda end, feed: clamped)
+    monkeypatch.setattr(bars_mod, "clamp_end_for_sip", _clamp)
+    loader = AlpacaDataLoader(api_key="k", secret_key="s")
     fake_alpaca["df"] = _bars_df({"AAPL": [("2026-08-12 10:00", 1, 2, 0.5, 1.5, 100)]})
     loader.fetch_bars(["AAPL"], "2026-07-12", "2026-08-13")
     req = fake_alpaca["requests"][0]
     assert req.feed == DataFeed.SIP
     # alpaca-py may drop tzinfo when storing the request field.
     assert req.end.replace(tzinfo=timezone.utc) == clamped
+    assert loader.last_fetch["sip_fallback_to_iex"] is False
 
 
 def test_subscription_error_retries_iex(fake_alpaca):
@@ -209,6 +233,11 @@ def test_subscription_error_retries_iex(fake_alpaca):
     assert set(out.keys()) == {"AAPL"}
     assert fake_alpaca["requests"][0].feed == DataFeed.SIP
     assert fake_alpaca["requests"][1].feed == DataFeed.IEX
+    assert out["AAPL"].attrs[FRAME_ATTR_FEED] == "iex"
+    assert out["AAPL"].attrs[FRAME_ATTR_SIP_FALLBACK] is True
+    assert loader.last_fetch["feed"] == "iex"
+    assert loader.last_fetch["sip_fallback_to_iex"] is True
+    assert loader.last_fetch["requested_end"] == "2026-01-03"
 
 
 def test_single_symbol_response_schema(fake_alpaca):

@@ -31,6 +31,11 @@ from dashboard.backend.paths import CREDENTIALS_DIR
 # ("end must be at least 15 minutes old to query SIP without a subscription").
 DEFAULT_SIP_DELAY_MINUTES = 15
 
+# Stamped on each returned frame so a rare IEX fallback is visible to callers
+# (return type stays Dict[str, DataFrame] for the MarketDataProvider contract).
+FRAME_ATTR_FEED = "alpaca_feed"
+FRAME_ATTR_SIP_FALLBACK = "alpaca_sip_fallback"
+
 
 class MarketDataUnavailableError(RuntimeError):
     """Market data cannot be loaded (missing credentials, SDK, or data).
@@ -136,6 +141,7 @@ class AlpacaDataLoader:
             self.StockBarsRequest = StockBarsRequest
             self.TimeFrame = TimeFrame
             self.DataFeed = DataFeed
+            self.last_fetch: Optional[Dict[str, Any]] = None
             print("✅ Alpaca credentials loaded")
         except ImportError as e:
             print(f"❌ alpaca-py not installed: {e}")
@@ -148,7 +154,15 @@ class AlpacaDataLoader:
         return resolve_alpaca_data_feed(self.DataFeed)
 
     def _effective_end(self, end: str, feed) -> Union[str, datetime]:
-        """For SIP feeds on Basic, clamp ``end`` outside the recent window."""
+        """For SIP feeds on Basic, clamp ``end`` outside the recent window.
+
+        Alpaca ``end`` is exclusive; a date-only string is midnight UTC.
+        Leaderboard ``end_date + 1 day`` therefore becomes tomorrow 00:00 UTC,
+        which is inside the 15-minute SIP lockout. After the 16:00 ET cash
+        close, ``now−15m`` is still after the last RTH hourly bar, so the
+        session stays intact. Historical ends (already older than 15m) pass
+        through unchanged.
+        """
         if feed == self.DataFeed.IEX:
             return end
         clamped = clamp_end_for_sip(end, delay_minutes=sip_delay_minutes())
@@ -159,6 +173,34 @@ class AlpacaDataLoader:
                 f"(Basic plan blocks recent SIP; set ALPACA_ALLOW_RECENT_SIP=1 if paid)"
             )
         return clamped
+
+    def _record_fetch(
+        self,
+        *,
+        feed,
+        requested_end: str,
+        effective_end: Union[str, datetime],
+        sip_fallback_to_iex: bool,
+    ) -> None:
+        self.last_fetch = {
+            "feed": getattr(feed, "value", str(feed)),
+            "requested_end": requested_end,
+            "effective_end": effective_end,
+            "sip_fallback_to_iex": sip_fallback_to_iex,
+        }
+
+    def _stamp_frames(
+        self,
+        data: Dict[str, pd.DataFrame],
+        *,
+        feed,
+        sip_fallback_to_iex: bool,
+    ) -> Dict[str, pd.DataFrame]:
+        feed_name = getattr(feed, "value", str(feed))
+        for frame in data.values():
+            frame.attrs[FRAME_ATTR_FEED] = feed_name
+            frame.attrs[FRAME_ATTR_SIP_FALLBACK] = sip_fallback_to_iex
+        return data
 
     def _load_credentials(self) -> Dict:
         """Load Alpaca credentials from environment variables or file."""
@@ -212,6 +254,7 @@ class AlpacaDataLoader:
         """
         if not self.client:
             print("⚠️ Alpaca not configured — skipping bar fetch")
+            self.last_fetch = None
             return {}
 
         print(f"\n📊 Fetching {len(symbols)} symbols from {start} to {end}...")
@@ -232,18 +275,35 @@ class AlpacaDataLoader:
 
         try:
             bars = self.client.get_stock_bars(request)
-            return self._bars_to_frames(bars, symbols)
+            self._record_fetch(
+                feed=feed,
+                requested_end=end,
+                effective_end=effective_end,
+                sip_fallback_to_iex=False,
+            )
+            return self._stamp_frames(
+                self._bars_to_frames(bars, symbols),
+                feed=feed,
+                sip_fallback_to_iex=False,
+            )
 
         except Exception as e:
             message = str(e)
             print(f"❌ Error fetching bars ({feed.value}): {message}")
-            # Basic SIP refusal on an unclamped window — retry once on IEX so
-            # a local mis-set end does not wipe the whole backtest.
+            # Clamp should keep Basic SIP outside the recent window. If Alpaca
+            # still refuses, retry once on IEX so a local mis-set end does not
+            # wipe the backtest — but mark the result so callers can see it
+            # is not full-tape SIP. IEX allows recent data, so retry uses the
+            # original unclamped ``end``.
             if (
                 "subscription does not permit" in message.lower()
                 and feed != self.DataFeed.IEX
             ):
-                print("   Retrying with feed=iex…")
+                print(
+                    "WARNING: SIP refused; retrying feed=iex. "
+                    "IEX is ~2.5% of volume, not the SIP tape. "
+                    "Frames are stamped alpaca_sip_fallback=True."
+                )
                 try:
                     retry = self.StockBarsRequest(
                         symbol_or_symbols=symbols,
@@ -253,11 +313,23 @@ class AlpacaDataLoader:
                         feed=self.DataFeed.IEX,
                     )
                     bars = self.client.get_stock_bars(retry)
-                    return self._bars_to_frames(bars, symbols)
+                    self._record_fetch(
+                        feed=self.DataFeed.IEX,
+                        requested_end=end,
+                        effective_end=end,
+                        sip_fallback_to_iex=True,
+                    )
+                    return self._stamp_frames(
+                        self._bars_to_frames(bars, symbols),
+                        feed=self.DataFeed.IEX,
+                        sip_fallback_to_iex=True,
+                    )
                 except Exception as retry_exc:
                     print(f"❌ IEX retry also failed: {retry_exc}")
+                    self.last_fetch = None
                     return {}
             if "subscription does not permit" not in message.lower():
                 import traceback
                 traceback.print_exc()
+            self.last_fetch = None
             return {}
