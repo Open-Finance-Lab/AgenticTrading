@@ -20,6 +20,15 @@ from dashboard.backend.domain.backtesting.market_rules import (
 TRADING_STATUS_FIELD = "ths_trading_status_stock"
 LIMIT_STATUS_FIELD = "ths_up_and_down_status_stock"
 
+# Wider than any A-share daily band (10% main boards, 20% STAR/ChiNext), so an
+# overnight move past it cannot have come from trading. Both the hourly bars and
+# these daily closes are requested unadjusted — deliberately, because the audit
+# has to show the official close a limit was set against, not a back-adjusted
+# one — and nothing in the backend applies dividends or splits. A 除权除息 date
+# therefore lands in the equity curve as a real overnight loss that never
+# happened. Detecting it does not fix it; it stops it being silent.
+_CORPORATE_ACTION_GAP = Decimal("0.21")
+
 
 def _fail(detail: str) -> MarketRuleDataError:
     return MarketRuleDataError(f"Market rule data unavailable: {detail}")
@@ -49,7 +58,7 @@ def _status_is_suspended(trading_status: object, limit_status: object) -> bool:
     return any("停牌" in value for value in values)
 
 
-def _limit_state(value: object) -> ClosingLimitState:
+def _limit_state(value: object, symbol: str, trading_date: date) -> ClosingLimitState:
     text = str(value or "").strip()
     if text == "涨停":
         return ClosingLimitState.UPPER
@@ -57,7 +66,14 @@ def _limit_state(value: object) -> ClosingLimitState:
         return ClosingLimitState.LOWER
     if text in {"非涨跌停", "停牌"}:
         return ClosingLimitState.NONE
-    raise _fail("unknown closing limit status")
+    # Naming the value is the whole diagnosis. The gate is deliberately keyed on
+    # exact vendor strings and stays that way — guessing at an unrecognised
+    # status is how a limit-locked day gets traded — but an operator has to be
+    # able to tell "iFinD added a status" from "this account answers in English"
+    # from "the field arrived blank", and a bare message tells them none of it.
+    raise _fail(
+        f"unknown closing limit status={text[:40]!r} for {symbol} {trading_date}"
+    )
 
 
 def _numeric_close(value: object, symbol: str, trading_date: date) -> Decimal | None:
@@ -226,6 +242,16 @@ def response_to_market_rules(
                 row.get(field) in (None, "")
                 for field in ("trading_status", "limit_status")
             ):
+                if row is not None and _status_is_suspended(
+                    row.get("trading_status"), row.get("limit_status")
+                ):
+                    # A suspended security is exactly what leaves these fields
+                    # blank, and one field already settles it — the supplement
+                    # cannot change the outcome. Skipping it matters because
+                    # this fetch is one blocking round trip per date: a universe
+                    # with something suspended most days would otherwise open
+                    # the run with dozens of sequential vendor calls.
+                    continue
                 missing.append(symbol)
         if missing:
             supplement_payload = fetch_basic_status(tuple(missing), trading_date)
@@ -238,10 +264,13 @@ def response_to_market_rules(
             })
 
     rules: list[DailyMarketRule] = []
+    unaligned: list[tuple[str, date]] = []
+    price_gaps: list[tuple[str, date, Decimal]] = []
     for symbol in expected:
         frame = bars_by_symbol.get(symbol)
         if frame is None:
             raise _fail(f"hourly bars are missing symbol={symbol}")
+        previous_close: Decimal | None = None
         for trading_date in dates:
             row = history.get((symbol, trading_date))
             supplement = supplements.get((symbol, trading_date))
@@ -282,17 +311,55 @@ def response_to_market_rules(
                         suspended=True,
                     )
                 )
+                # A halt legitimately lets the price gap on resumption, so it
+                # breaks the chain rather than producing a false positive.
+                previous_close = None
                 continue
 
-            state = _limit_state(limit_status)
+            state = _limit_state(limit_status, symbol, trading_date)
 
             official_close = _numeric_close(row.get("close"), symbol, trading_date)
-            if official_close is None or str(trading_status or "").strip() != "交易":
-                raise _fail(f"active rule is incomplete for {symbol} {trading_date}")
+            observed_status = str(trading_status or "").strip()
+            if observed_status != "交易":
+                # Split from the missing-close case on purpose: these two fail
+                # for opposite reasons and want opposite responses, and one
+                # message covering both sent operators looking at the data feed
+                # when the actual cause was a status string nobody had seen.
+                raise _fail(
+                    f"unexpected trading status={observed_status[:40]!r} for "
+                    f"{symbol} {trading_date}"
+                )
+            if official_close is None:
+                raise _fail(
+                    f"active rule has no official close for {symbol} {trading_date}"
+                )
             _require_price_tick(official_close, tick, symbol, trading_date)
+            if previous_close is not None and previous_close > 0:
+                move = abs(official_close - previous_close) / previous_close
+                if move > _CORPORATE_ACTION_GAP:
+                    price_gaps.append((symbol, trading_date, move))
+            previous_close = official_close
             final_bar = _final_bar_for_date(frame, trading_date)
             if final_bar is None:
-                raise _fail(f"active rule has no hourly bars for {symbol} {trading_date}")
+                # ``required_dates`` is the union across the universe, so this
+                # is one symbol's gap on a date its neighbours traded — which
+                # the engine already tolerates (50-bar minimum, common-index
+                # start, 80%-coverage bar filter). Failing the load here would
+                # reject universes that run today. Carry the observation
+                # ungated; the symbol's own bar dates below still get the full
+                # alignment check, so a wholesale contract break still trips.
+                unaligned.append((symbol, trading_date))
+                rules.append(
+                    DailyMarketRule(
+                        symbol=symbol,
+                        trading_date=trading_date,
+                        suspended=False,
+                        closing_limit_state=state,
+                        official_close_price=official_close,
+                        final_bar_timestamp=None,
+                    )
+                )
+                continue
             bar_close = _numeric_close(_bar_close(frame, final_bar), symbol, trading_date)
             if bar_close is not None:
                 _require_price_tick(bar_close, tick, symbol, trading_date)
@@ -308,4 +375,28 @@ def response_to_market_rules(
                     final_bar_timestamp=final_bar,
                 )
             )
+    if price_gaps:
+        sample = ", ".join(
+            f"{symbol} {trading_date} {move:.0%}"
+            for symbol, trading_date, move in price_gaps[:5]
+        )
+        print(
+            f"   ⚠️  {len(price_gaps)} overnight move(s) exceed every A-share "
+            f"daily limit band, which trading cannot produce — these prices are "
+            f"unadjusted, so a 除权除息 (ex-rights/ex-dividend) date will show in "
+            f"the equity curve and in the buy-and-hold baseline as a loss that "
+            f"did not happen: {sample}"
+            f"{' …' if len(price_gaps) > 5 else ''}"
+        )
+    if unaligned:
+        # Absent is not the same as broken: say so, or a run whose rules never
+        # gated anything looks exactly like one whose rules all held.
+        sample = ", ".join(
+            f"{symbol} {trading_date}" for symbol, trading_date in unaligned[:5]
+        )
+        print(
+            f"   ⚠️  {len(unaligned)} active symbol-date(s) have no hourly bars "
+            f"and cannot be closing-gated: {sample}"
+            f"{' …' if len(unaligned) > 5 else ''}"
+        )
     return MarketRuleCalendar(rules)

@@ -106,6 +106,15 @@ class DailyMarketRule:
         close = _as_decimal(self.official_close_price, field="official_close_price")
         if close <= 0:
             raise ValueError("official_close_price must be positive")
+        if self.final_bar_timestamp is None:
+            # The official feed says this security traded, but this run holds no
+            # intraday series for the day — a symbol whose hourly history starts
+            # late, or has a gap, inside a universe that traded through it. The
+            # observation is still worth carrying for the audit, but it can never
+            # gate: ``closing_gate_effective`` needs a bar to compare against,
+            # and no order can execute on a bar that does not exist either.
+            object.__setattr__(self, "official_close_price", close)
+            return
         timestamp = _as_datetime(
             self.final_bar_timestamp, field="final_bar_timestamp"
         )
@@ -123,6 +132,10 @@ class DailyMarketRule:
     ) -> bool:
         """Return whether this order is at the verified end-of-day limit close."""
         if self.suspended or self.closing_limit_state is ClosingLimitState.NONE:
+            return False
+        if self.final_bar_timestamp is None:
+            # Unverifiable rather than false: without the day's final bar there
+            # is no observation proving this order sits at the limit close.
             return False
         current = _as_datetime(timestamp, field="timestamp")
         if current != self.final_bar_timestamp:

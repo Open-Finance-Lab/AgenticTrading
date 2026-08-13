@@ -73,6 +73,26 @@ iFinD omits all OHLCV rows for that date. The provider also records the final ho
 timestamp for each active symbol-date so the execution layer never applies an end-of-day
 observation to an earlier decision.
 
+### Known limitation: unadjusted prices carry corporate actions
+
+Both feeds are requested unadjusted — `CPS=no` on high-frequency, `CPS=1` on daily —
+because the audit has to show the official close a limit was set against, and because
+the daily-close alignment check can only compare two series adjusted the same way.
+The hourly series was previously requested `CPS=forward1`, so this change re-bases
+every A-share price the engine consumes.
+
+Nothing in the backend applies dividends or splits. A held position through a
+除权除息 date therefore shows the ex-rights drop as a real overnight loss — in the
+agent equity curve, in the buy-and-hold baseline, and in the reported return — with
+no offsetting cash credit. A 10-for-3 bonus issue, ordinary in June–July, reads as a
+~23% loss that did not happen. `forward1` previously smoothed this away.
+
+Correcting it means real corporate-action handling and is out of scope here. What is
+in scope is not hiding it: `response_to_market_rules` compares consecutive official
+closes per symbol and warns when an overnight move exceeds every A-share daily band
+(21%, above the 20% STAR/ChiNext limit), which trading cannot produce. Suspensions
+break the comparison chain, since a halt legitimately lets a price gap on resumption.
+
 ### Official iFinD command verification
 
 iFinD's public documentation states that supported indicator names and generated
