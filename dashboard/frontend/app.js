@@ -3113,6 +3113,21 @@ const AuthAPI = {
   },
 };
 
+const AdminAPI = {
+  listUsers() {
+    return AuthAPI.request('/api/admin/users');
+  },
+  stats() {
+    return AuthAPI.request('/api/admin/stats');
+  },
+  patchUser(userId, patch) {
+    return AuthAPI.request(`/api/admin/users/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  },
+};
+
 let authMode = 'login';
 
 function getStoredAuthUser() {
@@ -3183,6 +3198,175 @@ function updateAccountPage() {
   } else {
     signedIn.hidden = true;
     signedOut.hidden = false;
+  }
+}
+
+function _adminEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function _setAdminFlash(kind, message) {
+  const errorEl = document.getElementById('adminError');
+  const successEl = document.getElementById('adminSuccess');
+  if (errorEl) {
+    errorEl.hidden = kind !== 'error';
+    if (kind === 'error') errorEl.textContent = message || '';
+  }
+  if (successEl) {
+    successEl.hidden = kind !== 'success';
+    if (kind === 'success') successEl.textContent = message || '';
+  }
+}
+
+async function loadAdminStats() {
+  const root = document.getElementById('adminStats');
+  if (!root) return;
+  try {
+    const data = await AdminAPI.stats();
+    root.querySelectorAll('[data-stat]').forEach((el) => {
+      const key = el.getAttribute('data-stat');
+      const value = data?.[key];
+      el.textContent = Number.isFinite(Number(value)) ? String(value) : '—';
+    });
+  } catch (error) {
+    root.querySelectorAll('[data-stat]').forEach((el) => {
+      el.textContent = '—';
+    });
+  }
+}
+
+async function loadAdminUsers() {
+  const body = document.getElementById('adminUsersBody');
+  if (!body) return;
+  const user = getStoredAuthUser();
+  if (!user || user.role !== 'admin') {
+    body.innerHTML = '<tr><td colspan="6" class="admin-empty">Admin access required.</td></tr>';
+    return;
+  }
+  loadAdminStats();
+  body.innerHTML = '<tr><td colspan="6" class="admin-empty">Loading…</td></tr>';
+  _setAdminFlash(null);
+  try {
+    const data = await AdminAPI.listUsers();
+    const users = Array.isArray(data?.users) ? data.users : [];
+    if (!users.length) {
+      body.innerHTML = '<tr><td colspan="6" class="admin-empty">No users yet.</td></tr>';
+      return;
+    }
+    body.innerHTML = users.map((row) => {
+      const entitlements = row.entitlements || {};
+      const maxConcurrent = Number(entitlements.max_concurrent_backtests ?? 1);
+      const credits = Number(entitlements.credits ?? 0);
+      const role = row.role === 'admin' ? 'admin' : 'user';
+      const isSelf = Boolean(user && Number(user.id) === Number(row.id));
+      const roleControl = isSelf
+        ? `<span class="admin-role-locked" title="You cannot demote yourself">${_adminEscape(role)} (you)</span>`
+        : `<select data-field="role" aria-label="Role for ${_adminEscape(row.email)}">
+            <option value="user"${role === 'user' ? ' selected' : ''}>user</option>
+            <option value="admin"${role === 'admin' ? ' selected' : ''}>admin</option>
+          </select>`;
+      return `<tr data-user-id="${_adminEscape(row.id)}" data-current-role="${_adminEscape(role)}">
+        <td class="admin-email">${_adminEscape(row.email)}</td>
+        <td>${_adminEscape(row.display_name || '—')}</td>
+        <td>${roleControl}</td>
+        <td>
+          <input data-field="max_concurrent_backtests" type="number" min="1" max="20"
+            value="${_adminEscape(maxConcurrent)}"
+            aria-label="Max concurrent backtests for ${_adminEscape(row.email)}">
+        </td>
+        <td>
+          <input data-field="credits" type="number" min="0" max="1000000"
+            value="${_adminEscape(credits)}"
+            aria-label="Credits for ${_adminEscape(row.email)}">
+        </td>
+        <td>
+          <button type="button" class="auth-btn auth-btn-primary admin-save-btn" data-admin-save>Save quotas</button>
+        </td>
+      </tr>`;
+    }).join('');
+  } catch (error) {
+    body.innerHTML = `<tr><td colspan="6" class="admin-empty">${_adminEscape(error.message || 'Failed to load users')}</td></tr>`;
+    _setAdminFlash('error', error.message || 'Failed to load users');
+  }
+}
+
+async function saveAdminUserRole(rowEl, nextRole) {
+  if (!rowEl) return;
+  const userId = Number(rowEl.getAttribute('data-user-id'));
+  const prevRole = rowEl.getAttribute('data-current-role') || 'user';
+  const roleSelect = rowEl.querySelector('[data-field="role"]');
+  const email = rowEl.querySelector('.admin-email')?.textContent || `user #${userId}`;
+
+  if (nextRole === prevRole) return;
+
+  if (nextRole === 'admin') {
+    const ok = window.confirm(
+      `Promote ${email} to admin?\n\nThey will see Admin in their profile menu and can manage all accounts.`
+    );
+    if (!ok) {
+      if (roleSelect) roleSelect.value = prevRole;
+      return;
+    }
+  } else if (prevRole === 'admin') {
+    const ok = window.confirm(
+      `Demote ${email} to user?\n\nThey will lose Admin access immediately.`
+    );
+    if (!ok) {
+      if (roleSelect) roleSelect.value = prevRole;
+      return;
+    }
+  }
+
+  if (roleSelect) roleSelect.disabled = true;
+  _setAdminFlash(null);
+  try {
+    const data = await AdminAPI.patchUser(userId, { role: nextRole });
+    rowEl.setAttribute('data-current-role', nextRole);
+    _setAdminFlash('success', `${email} is now ${nextRole}`);
+    const me = getStoredAuthUser();
+    if (me && Number(me.id) === userId && data?.user) {
+      applyUpdatedUser({
+        ...me,
+        ...data.user,
+        entitlements: data.user.entitlements || me.entitlements,
+      });
+    }
+  } catch (error) {
+    if (roleSelect) roleSelect.value = prevRole;
+    _setAdminFlash('error', error.message || 'Role update failed');
+  } finally {
+    if (roleSelect) roleSelect.disabled = false;
+  }
+}
+
+async function saveAdminUserRow(rowEl) {
+  if (!rowEl) return;
+  const userId = Number(rowEl.getAttribute('data-user-id'));
+  const maxConcurrent = Number(rowEl.querySelector('[data-field="max_concurrent_backtests"]')?.value);
+  const credits = Number(rowEl.querySelector('[data-field="credits"]')?.value);
+  const btn = rowEl.querySelector('[data-admin-save]');
+  const email = rowEl.querySelector('.admin-email')?.textContent || `user #${userId}`;
+  if (btn) btn.disabled = true;
+  _setAdminFlash(null);
+  try {
+    await AdminAPI.patchUser(userId, {
+      max_concurrent_backtests: maxConcurrent,
+      credits,
+    });
+    _setAdminFlash('success', `Updated quotas for ${email}`);
+    const me = getStoredAuthUser();
+    if (me && Number(me.id) === userId) {
+      const refreshed = await AuthAPI.me();
+      if (refreshed?.user) applyUpdatedUser(refreshed.user);
+    }
+  } catch (error) {
+    _setAdminFlash('error', error.message || 'Save failed');
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -3581,8 +3765,21 @@ function updateAuthUI() {
   const label = document.getElementById('authUserLabel');
   const signInBtn = document.getElementById('authSignInBtn');
   const menuWrap = document.getElementById('accountMenuWrap');
+  const adminMenuBtn = document.getElementById('accountMenuAdminBtn');
   if (!signInBtn || !menuWrap) {
     return;
+  }
+
+  // Profile-dropdown only — never a primary-nav tab. Ordinary users must not
+  // see this entry at all (CSS also forces [hidden] because .account-menu-item
+  // sets display:block and otherwise overrides the UA rule).
+  const isAdmin = Boolean(user && user.role === 'admin');
+  if (adminMenuBtn) {
+    adminMenuBtn.hidden = !isAdmin;
+    adminMenuBtn.style.display = isAdmin ? '' : 'none';
+  }
+  if (!isAdmin && currentPage === 'admin') {
+    navigateToPage('home');
   }
 
   if (user) {
@@ -3618,7 +3815,7 @@ async function logoutUser() {
   } finally {
     clearAuthState();
     await loadAgents();
-    if (currentPage === 'account') {
+    if (currentPage === 'account' || currentPage === 'admin') {
       navigateToPage('home');
     }
   }
@@ -3915,6 +4112,25 @@ function initAuthUI(options = {}) {
   document.getElementById('accountMenuAccountBtn')?.addEventListener('click', () => {
     closeAccountMenu();
     navigateToPage('account');
+  });
+  document.getElementById('accountMenuAdminBtn')?.addEventListener('click', () => {
+    closeAccountMenu();
+    navigateToPage('admin');
+  });
+  document.getElementById('adminRefreshBtn')?.addEventListener('click', () => {
+    loadAdminUsers();
+  });
+  document.getElementById('adminUsersBody')?.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-admin-save]');
+    if (!btn) return;
+    saveAdminUserRow(btn.closest('tr'));
+  });
+  // Role changes save immediately (SaaS members-table pattern). Quotas still
+  // use the row Save button so typing a number does not fire mid-edit.
+  document.getElementById('adminUsersBody')?.addEventListener('change', (event) => {
+    const select = event.target.closest('select[data-field="role"]');
+    if (!select) return;
+    saveAdminUserRole(select.closest('tr'), select.value);
   });
   document.getElementById('accountMenuLogoutBtn')?.addEventListener('click', () => {
     closeAccountMenu();
@@ -7115,6 +7331,7 @@ function viewParamForNavState(state) {
     if (state.page === 'home') return 'home';
     if (state.page === 'community') return 'community';
     if (state.page === 'account') return 'account';
+    if (state.page === 'admin') return 'admin';
     if (state.page === 'playground') {
         if (state.playgroundTab === 'backtest') return 'backtest';
         if (state.playgroundTab === 'paper') return 'paper';
@@ -7486,6 +7703,7 @@ function navigateToPage(page, options = {}) {
     const competitionView = document.getElementById('competitionView');
     const communityView = document.getElementById('communityView');
     const accountView = document.getElementById('accountView');
+    const adminView = document.getElementById('adminView');
     const backtestPanel = document.querySelector('.playground-backtest-panel')
       || document.querySelector('.main-container');
     const paperView = document.getElementById('paperTradingView');
@@ -7501,6 +7719,7 @@ function navigateToPage(page, options = {}) {
     hide(competitionView);
     hide(communityView);
     hide(accountView);
+    hide(adminView);
     hide(backtestPanel);
     hide(paperView);
     hide(myAlgoView);
@@ -7540,6 +7759,10 @@ function navigateToPage(page, options = {}) {
             currentMode = 'account';
             if (accountView) accountView.style.display = 'block';
             updateAccountPage();
+        } else if (page === 'admin') {
+            currentMode = 'admin';
+            if (adminView) adminView.style.display = 'block';
+            loadAdminUsers();
         }
     }
 

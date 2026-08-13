@@ -610,6 +610,15 @@ class AgentStore:
         conn.close()
         return deleted
 
+
+    def count_agents(self) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM external_agents")
+        row = cursor.fetchone()
+        conn.close()
+        return int(row["n"] if row else 0)
+
     def owns_agent(
         self,
         agent: Dict[str, Any],

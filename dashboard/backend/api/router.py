@@ -3,6 +3,7 @@ from fastapi import APIRouter
 from dashboard.backend.api.routers.agent_versions import router as agent_versions_router
 from dashboard.backend.api.routers.agents import router as agents_router
 from dashboard.backend.api.routers.algo import router as algo_router
+from dashboard.backend.api.routers.admin_users import router as admin_users_router
 from dashboard.backend.api.auth import router as auth_router
 from dashboard.backend.api.routers.discord import router as discord_router
 from dashboard.backend.api.routers.environments import router as environments_router
@@ -19,6 +20,7 @@ from dashboard.backend.api.v2.router import v2_router
 api_router = APIRouter(prefix="/api")
 api_router.include_router(health_router)
 api_router.include_router(auth_router)
+api_router.include_router(admin_users_router)
 api_router.include_router(algo_router)
 api_router.include_router(agents_router)
 api_router.include_router(discord_router)

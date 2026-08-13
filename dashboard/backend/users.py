@@ -230,6 +230,15 @@ def verify_password_for_account(password: str, password_hash: Optional[str]) -> 
     return verify_password(password, password_hash)
 
 
+VALID_ROLES = frozenset({"user", "admin"})
+DEFAULT_MAX_CONCURRENT_BACKTESTS = 1
+DEFAULT_CREDITS = 0
+# Hard caps for admin PATCH — keep a runaway slider from scheduling dozens of
+# LLM subprocesses on one Render box.
+MAX_CONCURRENT_BACKTESTS_CAP = 20
+MAX_CREDITS_CAP = 1_000_000
+
+
 def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
     data = dict(row)
     discord_user_id = data.get("discord_user_id")
@@ -243,6 +252,44 @@ def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
         "discord_linked": bool(discord_user_id),
         "discord_user_id": str(discord_user_id) if discord_user_id else None,
     }
+
+
+def default_entitlements(user_id: int) -> Dict[str, Any]:
+    return {
+        "user_id": int(user_id),
+        "max_concurrent_backtests": DEFAULT_MAX_CONCURRENT_BACKTESTS,
+        "credits": DEFAULT_CREDITS,
+        "updated_at": None,
+        "updated_by_admin_id": None,
+    }
+
+
+def public_entitlements(row: sqlite3.Row | Dict[str, Any] | None, user_id: int) -> Dict[str, Any]:
+    if not row:
+        return default_entitlements(user_id)
+    data = dict(row)
+    return {
+        "user_id": int(data.get("user_id", user_id)),
+        "max_concurrent_backtests": int(
+            data.get("max_concurrent_backtests", DEFAULT_MAX_CONCURRENT_BACKTESTS)
+        ),
+        "credits": int(data.get("credits", DEFAULT_CREDITS)),
+        "updated_at": data.get("updated_at"),
+        "updated_by_admin_id": (
+            int(data["updated_by_admin_id"])
+            if data.get("updated_by_admin_id") is not None
+            else None
+        ),
+    }
+
+
+def public_user_with_entitlements(
+    row: sqlite3.Row | Dict[str, Any],
+    entitlements: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload = public_user(row)
+    payload["entitlements"] = entitlements
+    return payload
 
 
 class UserStore:
@@ -353,6 +400,18 @@ class UserStore:
             """
             CREATE INDEX IF NOT EXISTS idx_email_change_requests_user_id
             ON email_change_requests(user_id)
+            """
+        )
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_entitlements (
+                user_id INTEGER PRIMARY KEY,
+                max_concurrent_backtests INTEGER NOT NULL DEFAULT 1,
+                credits INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT,
+                updated_by_admin_id INTEGER,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
             """
         )
         conn.commit()
@@ -923,6 +982,165 @@ class UserStore:
         if not row:
             raise ValueError("user_not_found")
         return public_user(row)
+
+    def get_entitlements(self, user_id: int) -> Dict[str, Any]:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM user_entitlements WHERE user_id = ?",
+            (int(user_id),),
+        )
+        row = cursor.fetchone()
+        conn.close()
+        return public_entitlements(row, int(user_id))
+
+    def set_entitlements(
+        self,
+        user_id: int,
+        *,
+        max_concurrent_backtests: Optional[int] = None,
+        credits: Optional[int] = None,
+        updated_by_admin_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if max_concurrent_backtests is None and credits is None:
+            return self.get_entitlements(user_id)
+
+        if self.get_user_by_id(user_id) is None:
+            raise ValueError("user_not_found")
+
+        current = self.get_entitlements(user_id)
+        next_max = (
+            current["max_concurrent_backtests"]
+            if max_concurrent_backtests is None
+            else int(max_concurrent_backtests)
+        )
+        next_credits = current["credits"] if credits is None else int(credits)
+        if next_max < 1 or next_max > MAX_CONCURRENT_BACKTESTS_CAP:
+            raise ValueError("invalid_max_concurrent_backtests")
+        if next_credits < 0 or next_credits > MAX_CREDITS_CAP:
+            raise ValueError("invalid_credits")
+
+        updated_at = format_stored_timestamp(_utcnow().replace(microsecond=0))
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO user_entitlements (
+                user_id, max_concurrent_backtests, credits, updated_at, updated_by_admin_id
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                max_concurrent_backtests = excluded.max_concurrent_backtests,
+                credits = excluded.credits,
+                updated_at = excluded.updated_at,
+                updated_by_admin_id = excluded.updated_by_admin_id
+            """,
+            (
+                int(user_id),
+                next_max,
+                next_credits,
+                updated_at,
+                int(updated_by_admin_id) if updated_by_admin_id is not None else None,
+            ),
+        )
+        conn.commit()
+        conn.close()
+        return self.get_entitlements(user_id)
+
+    def set_user_role(self, user_id: int, role: str) -> Dict[str, Any]:
+        normalized = (role or "").strip().lower()
+        if normalized not in VALID_ROLES:
+            raise ValueError("invalid_role")
+        if self.get_user_by_id(user_id) is None:
+            raise ValueError("user_not_found")
+        if normalized != "admin" and self.count_admins() <= 1:
+            current = self.get_user_by_id(user_id)
+            if current and current.get("role") == "admin":
+                raise ValueError("last_admin")
+
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE users SET role = ? WHERE id = ?",
+            (normalized, int(user_id)),
+        )
+        conn.commit()
+        cursor.execute("SELECT * FROM users WHERE id = ?", (int(user_id),))
+        row = cursor.fetchone()
+        conn.close()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def count_admins(self) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")
+        row = cursor.fetchone()
+        conn.close()
+        return int(row["n"] if row else 0)
+
+    def count_users(self) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM users")
+        row = cursor.fetchone()
+        conn.close()
+        return int(row["n"] if row else 0)
+
+    def list_users_admin(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT users.*,
+                   user_entitlements.max_concurrent_backtests,
+                   user_entitlements.credits,
+                   user_entitlements.updated_at AS entitlements_updated_at,
+                   user_entitlements.updated_by_admin_id
+            FROM users
+            LEFT JOIN user_entitlements ON user_entitlements.user_id = users.id
+            ORDER BY users.id ASC
+            LIMIT ? OFFSET ?
+            """,
+            (limit, offset),
+        )
+        rows = cursor.fetchall()
+        conn.close()
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            has_entitlement_row = (
+                data.get("max_concurrent_backtests") is not None
+                or data.get("credits") is not None
+                or data.get("entitlements_updated_at") is not None
+            )
+            entitlements = (
+                public_entitlements(
+                    {
+                        "user_id": data["id"],
+                        "max_concurrent_backtests": data.get("max_concurrent_backtests"),
+                        "credits": data.get("credits"),
+                        "updated_at": data.get("entitlements_updated_at"),
+                        "updated_by_admin_id": data.get("updated_by_admin_id"),
+                    },
+                    int(data["id"]),
+                )
+                if has_entitlement_row
+                else default_entitlements(int(data["id"]))
+            )
+            results.append(public_user_with_entitlements(data, entitlements))
+        return results
+
+    def get_user_admin(self, user_id: int) -> Optional[Dict[str, Any]]:
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+        return public_user_with_entitlements(user, self.get_entitlements(user_id))
 
 
 def _build_user_store():

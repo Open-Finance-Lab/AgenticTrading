@@ -319,7 +319,10 @@ def get_current_user(
 def _auth_json(user: dict, raw_token: str) -> JSONResponse:
     from dashboard.backend.csrf import set_csrf_cookie
 
-    response = JSONResponse({"user": user})
+    payload = dict(user)
+    if "entitlements" not in payload and payload.get("id") is not None:
+        payload["entitlements"] = users_module.user_store.get_entitlements(payload["id"])
+    response = JSONResponse({"user": payload})
     set_session_cookie(response, raw_token)
     set_csrf_cookie(response)
     return response
@@ -432,7 +435,11 @@ def me(
     authorization: Optional[str] = Header(default=None),
     current_user: dict = Depends(get_current_user),
 ):
-    response = JSONResponse({"user": public_user(current_user)})
+    user_payload = public_user(current_user)
+    user_payload["entitlements"] = users_module.user_store.get_entitlements(
+        current_user["id"]
+    )
+    response = JSONResponse({"user": user_payload})
     # Migration bridge: a browser signed in before the HttpOnly-cookie change
     # holds a valid session only in localStorage. app.js sends it once as
     # Bearer on the boot /me probe; upgrading it to a cookie here keeps that

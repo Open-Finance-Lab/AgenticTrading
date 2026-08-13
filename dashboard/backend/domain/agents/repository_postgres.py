@@ -541,6 +541,14 @@ class PostgresAgentStore:
                 deleted = cur.rowcount > 0
         return deleted
 
+
+    def count_agents(self) -> int:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS n FROM external_agents")
+                row = cur.fetchone()
+        return int(row["n"] if row else 0)
+
     def owns_agent(
         self,
         agent: Dict[str, Any],

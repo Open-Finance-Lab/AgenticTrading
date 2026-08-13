@@ -9322,6 +9322,12 @@ body.agent-editor-open {
     box-sizing: border-box;
 }
 
+/* Author `display: block` above beats the UA [hidden] rule — same footgun as
+   .agent-cp-field[hidden]. Without this, Admin stays visible for every user. */
+.account-menu-item[hidden] {
+    display: none !important;
+}
+
 .account-menu-item:hover {
     background: var(--bg-hover);
 }
@@ -10079,4 +10085,116 @@ body.agent-editor-open {
 
 @media (prefers-reduced-motion: reduce) {
     .agent-card-running-bar.is-determinate { transition: none; }
+}
+
+/* —— Admin console —— */
+.admin-view {
+    max-width: 1100px;
+}
+
+.admin-view .page-header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.admin-stats {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 12px;
+    margin: 0 0 16px;
+}
+
+.admin-stat {
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.admin-stat-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text-primary);
+    line-height: 1.2;
+}
+
+.admin-stat-label {
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+@media (max-width: 720px) {
+    .admin-stats {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+.admin-table-wrap {
+    overflow-x: auto;
+    background: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 10px;
+}
+
+.admin-users-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.admin-users-table th,
+.admin-users-table td {
+    padding: 10px 12px;
+    text-align: left;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+    vertical-align: middle;
+}
+
+.admin-users-table th {
+    color: var(--text-secondary);
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.admin-users-table tr:last-child td {
+    border-bottom: none;
+}
+
+.admin-users-table input[type="number"],
+.admin-users-table select {
+    width: 100%;
+    min-width: 72px;
+    max-width: 120px;
+    padding: 6px 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-color);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font: inherit;
+}
+
+.admin-users-table .admin-email {
+    word-break: break-all;
+    max-width: 220px;
+}
+
+.admin-empty {
+    color: var(--text-secondary);
+    text-align: center;
+    padding: 24px 12px;
+}
+
+.admin-role-locked {
+    color: var(--text-secondary);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.admin-save-btn {
+    white-space: nowrap;
 }
