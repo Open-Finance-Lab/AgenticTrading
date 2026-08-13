@@ -33,6 +33,10 @@ def fetch_hourly_bars(symbols: List[str], start_date: str, end_date: str) -> Dic
     Alpaca treats ``end`` as exclusive, which would drop the final window day
     (e.g. bars on ``end_date`` start after midnight). We bump it by one day so
     the Alpaca strategies cover the same last day as the Yahoo index series.
+
+    For the rolling *daily* board, ``end_date`` is often "today", so this bump
+    lands on tomorrow 00:00 UTC — inside Basic's forbidden recent-SIP window.
+    ``AlpacaDataLoader.fetch_bars`` clamps SIP ``end`` to now−15m for that case.
     """
     loader = AlpacaDataLoader()
     end_inclusive = (

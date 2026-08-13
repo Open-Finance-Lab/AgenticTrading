@@ -145,6 +145,8 @@ def test_missing_credentials_raises(fake_alpaca, monkeypatch, tmp_path):
 # --- fetch_bars ------------------------------------------------------------
 
 def test_request_construction(fake_alpaca):
+    from alpaca.data.enums import DataFeed
+
     loader = AlpacaDataLoader(api_key="k", secret_key="s")
     fake_alpaca["df"] = _bars_df({"AAPL": [("2026-01-02 10:00", 1, 2, 0.5, 1.5, 100)]})
     loader.fetch_bars(["AAPL"], "2026-01-01", "2026-01-03")
@@ -152,7 +154,61 @@ def test_request_construction(fake_alpaca):
     assert req.symbol_or_symbols == ["AAPL"]
     assert req.timeframe.value == TimeFrame.Hour.value
     assert str(req.start).startswith("2026-01-01")
-    assert str(req.end).startswith("2026-01-03")
+    # Basic plan: SIP historical is fine for dates well outside the 15m window.
+    assert req.feed == DataFeed.SIP
+
+
+def test_clamp_end_for_sip_helper():
+    from datetime import datetime, timezone
+
+    from dashboard.backend.infrastructure.market_data.alpaca_bars import clamp_end_for_sip
+
+    now = datetime(2026, 8, 12, 23, 50, tzinfo=timezone.utc)
+    clamped = clamp_end_for_sip("2026-08-13", now=now, delay_minutes=15)
+    assert clamped == datetime(2026, 8, 12, 23, 35, tzinfo=timezone.utc)
+
+    untouched = clamp_end_for_sip("2026-07-01", now=now, delay_minutes=15)
+    assert untouched == datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
+
+
+def test_sip_fetch_uses_clamped_end(fake_alpaca, monkeypatch):
+    from datetime import datetime, timezone
+
+    from alpaca.data.enums import DataFeed
+
+    loader = AlpacaDataLoader(api_key="k", secret_key="s")
+    clamped = datetime(2026, 8, 12, 23, 35, tzinfo=timezone.utc)
+    monkeypatch.setenv("ALPACA_DATA_FEED", "sip")
+    monkeypatch.setattr(loader, "_effective_end", lambda end, feed: clamped)
+    fake_alpaca["df"] = _bars_df({"AAPL": [("2026-08-12 10:00", 1, 2, 0.5, 1.5, 100)]})
+    loader.fetch_bars(["AAPL"], "2026-07-12", "2026-08-13")
+    req = fake_alpaca["requests"][0]
+    assert req.feed == DataFeed.SIP
+    # alpaca-py may drop tzinfo when storing the request field.
+    assert req.end.replace(tzinfo=timezone.utc) == clamped
+
+
+def test_subscription_error_retries_iex(fake_alpaca):
+    from alpaca.data.enums import DataFeed
+
+    loader = AlpacaDataLoader(api_key="k", secret_key="s")
+
+    class _Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        def get_stock_bars(self, request):
+            self.calls += 1
+            fake_alpaca["requests"].append(request)
+            if self.calls == 1:
+                raise RuntimeError('{"message":"subscription does not permit querying recent SIP data"}')
+            return type("Bars", (), {"df": _bars_df({"AAPL": [("2026-01-02 10:00", 1, 2, 0.5, 1.5, 100)]})})()
+
+    loader.client = _Flaky()
+    out = loader.fetch_bars(["AAPL"], "2026-01-01", "2026-01-03")
+    assert set(out.keys()) == {"AAPL"}
+    assert fake_alpaca["requests"][0].feed == DataFeed.SIP
+    assert fake_alpaca["requests"][1].feed == DataFeed.IEX
 
 
 def test_single_symbol_response_schema(fake_alpaca):

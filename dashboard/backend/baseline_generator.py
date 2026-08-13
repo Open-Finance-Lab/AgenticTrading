@@ -287,9 +287,15 @@ class BaselineGenerator:
         self._ensure_credentials()
 
         try:
+            from alpaca.data.enums import DataFeed
             from alpaca.data.historical import StockHistoricalDataClient
             from alpaca.data.requests import StockBarsRequest
             from alpaca.data.timeframe import TimeFrame
+            from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+                clamp_end_for_sip,
+                resolve_alpaca_data_feed,
+                sip_delay_minutes,
+            )
         except ImportError as e:
             print("❌ alpaca-py not installed. Install with: pip install alpaca-py")
             raise MarketDataUnavailableError(
@@ -298,12 +304,20 @@ class BaselineGenerator:
         
         try:
             client = StockHistoricalDataClient(self.api_key, self.secret_key)
-            
+            # Basic plan: SIP historical is allowed if end is ≥15 minutes old.
+            feed = resolve_alpaca_data_feed(DataFeed)
+            effective_end = (
+                end_date
+                if feed == DataFeed.IEX
+                else clamp_end_for_sip(end_date, delay_minutes=sip_delay_minutes())
+            )
+
             request = StockBarsRequest(
                 symbol_or_symbols=[symbol],
                 timeframe=TimeFrame.Hour,
                 start=start_date,
-                end=end_date,
+                end=effective_end,
+                feed=feed,
             )
             
             bars_data = client.get_stock_bars(request)
