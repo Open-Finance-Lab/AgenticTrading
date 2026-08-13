@@ -2,7 +2,7 @@
 
 Date: 2026-08-13
 
-Status: Awaiting written-spec review
+Status: Approved
 
 Target branch: `feat/credits-recharge-design`
 
@@ -154,6 +154,8 @@ The API exposes these first-release operations:
   custom amount in cents and returns a Stripe Checkout URL;
 - `GET /api/credits/orders/{order_id}` returns an authenticated user's local
   order status for the return-page poll;
+- `GET /api/admin/credits/orders` returns cursor-paginated paid and refunded
+  orders, including their currently refundable amounts, to administrators;
 - `POST /api/admin/credits/refunds` creates an administrator refund request;
   and
 - `POST /api/webhooks/stripe` receives signed Stripe events.
