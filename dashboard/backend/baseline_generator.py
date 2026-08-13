@@ -144,6 +144,7 @@ def _plan_buyhold_allocation(
     num_symbols: int,
     lot_size: int,
     transaction_cost_profile,
+    reserved_capital: float = 0.0,
 ) -> Dict[str, int]:
     """Share counts for an equal-weight buy & hold sleeve.
 
@@ -158,11 +159,19 @@ def _plan_buyhold_allocation(
     2. Top-up: whatever pass 1 could not place is swept into further lots,
        poorest symbol first, so the sleeve stays invested and stays as close to
        equal weight as whole lots allow.
+
+    ``reserved_capital`` is withheld from the top-up sweep. ``prices`` carries
+    only the symbols that may trade right now, so the sweep cannot see a symbol
+    the market has blocked and would happily spend its slice on the neighbours
+    that are open — leaving nothing for the retry when the block lifts, and
+    turning an equal-weight benchmark into a concentrated one. Callers that
+    intend to place a symbol later must reserve its slice here.
     """
     if not prices or capital <= 0 or num_symbols <= 0:
         return {}
 
     lot_size = max(1, int(lot_size or 1))
+    reserved = max(0.0, float(reserved_capital or 0.0))
     # Denominator is the full sleeve, not the priced subset: a symbol with no
     # bar at the open forfeits its slice rather than redistributing it, which
     # is what the equal-weight baseline has always done.
@@ -179,7 +188,7 @@ def _plan_buyhold_allocation(
         shares -= shares % lot_size
         # Fees push a naively-affordable order over its slice; shrink a lot at a
         # time until it fits both the slice and the cash on hand.
-        budget = min(allocation, capital - spent)
+        budget = min(allocation, capital - spent - reserved)
         while shares > 0 and _buy_order_cash_out(
             price, shares, transaction_cost_profile
         ) > budget:
@@ -194,7 +203,7 @@ def _plan_buyhold_allocation(
         return planned
 
     for _ in range(_MAX_TOPUP_LOTS):
-        remaining = capital - spent
+        remaining = capital - spent - reserved
         # Poorest-first keeps the sleeve balanced and gets an unrepresented
         # symbol its first lot before any symbol gets a second one.
         candidates = sorted(
@@ -451,15 +460,20 @@ class BaselineGenerator:
                     and not _buy_allowed(symbol, first_ts, open_prices[symbol])
                 ):
                     market_blocked_symbols.add(symbol)
+        pending_symbols = set(market_blocked_symbols)
         positions = _plan_buyhold_allocation(
             eligible_open_prices,
             native_initial_capital,
             num_symbols,
             lot_size,
             transaction_cost_profile,
+            # Hold back the blocked names' slices so the retry below has
+            # something to spend when the market reopens them.
+            reserved_capital=(
+                native_initial_capital / num_symbols * len(pending_symbols)
+            ),
         )
 
-        pending_symbols = set(market_blocked_symbols)
         # Cost the plan once per symbol. The order-level pass matters for the
         # A-share ¥5 minimum commission: it is charged per submitted order, so
         # a symbol's whole sleeve must be priced as one order.
@@ -505,13 +519,23 @@ class BaselineGenerator:
             )
         # Only an affordability shortfall is worth shouting about; a symbol with
         # no bar at the open is an ordinary data gap the loop above already
-        # skipped, and the counts above still record it.
-        if len(positions) < len(open_prices):
+        # skipped, and the counts above still record it. A symbol the market
+        # blocked is not a shortfall either — it is waiting on the retry below,
+        # and counting it here reports the wrong cause for the wrong symbol.
+        tradable_priced = len(open_prices) - len(
+            market_blocked_symbols & set(open_prices)
+        )
+        if len(positions) < tradable_priced:
             print(
-                f"      ⚠️  {len(open_prices) - len(positions)} of "
-                f"{len(open_prices)} priced symbols bought nothing — an equal "
-                f"slice is worth less than one {effective_lot}-share lot at "
-                f"this capital"
+                f"      ⚠️  {tradable_priced - len(positions)} of "
+                f"{tradable_priced} tradable priced symbols bought nothing — an "
+                f"equal slice is worth less than one {effective_lot}-share lot "
+                f"at this capital"
+            )
+        if pending_symbols:
+            print(
+                f"      ⏸️  {len(pending_symbols)} symbol(s) blocked by market "
+                f"rules at the open; their allocation is held for a later bar"
             )
 
         print(f"      Stocks bought: {len(positions)} ({', '.join(sorted(positions.keys())[:10])}{'...' if len(positions) > 10 else ''})")
@@ -550,9 +574,13 @@ class BaselineGenerator:
                     allocation = native_initial_capital / num_symbols
                     lot = max(1, int(lot_size or 1))
                     shares = int(allocation / price) // lot * lot
+                    # Cap at this symbol's own slice, exactly as pass 1 does:
+                    # with several symbols pending, the first one to reopen
+                    # must not spend the slices still reserved for the others.
+                    budget = min(allocation, cash)
                     while shares > 0 and _buy_order_cash_out(
                         price, shares, transaction_cost_profile
-                    ) > cash:
+                    ) > budget:
                         shares -= lot
                     if shares <= 0:
                         continue
