@@ -37,6 +37,10 @@ def fetch_hourly_bars(symbols: List[str], start_date: str, end_date: str) -> Dic
     For the rolling *daily* board, ``end_date`` is often "today", so this bump
     lands on tomorrow 00:00 UTC — inside Basic's forbidden recent-SIP window.
     ``AlpacaDataLoader.fetch_bars`` clamps SIP ``end`` to now−15m for that case.
+
+    The returned frames carry the tape they came from in ``.attrs``; callers
+    that persist a curve should read it with ``feed_provenance`` and store it,
+    because the log line below outlives nothing.
     """
     loader = AlpacaDataLoader()
     end_inclusive = (
@@ -50,6 +54,12 @@ def fetch_hourly_bars(symbols: List[str], start_date: str, end_date: str) -> Dic
             f"(requested_end={meta.get('requested_end')}, "
             f"effective_end={meta.get('effective_end')}). "
             "IEX is not the SIP tape."
+        )
+    elif meta.get("end_clamped"):
+        print(
+            "NOTE: leaderboard bars fetched with a clamped SIP end "
+            f"(requested_end={meta.get('requested_end')}, "
+            f"effective_end={meta.get('effective_end')})."
         )
     return data
 

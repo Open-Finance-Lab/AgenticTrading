@@ -25,6 +25,11 @@ import dashboard.backend.domain.leaderboard.baselines as _baselines
 from dashboard.backend.domain.leaderboard.strategies._common import reference_start_date
 from dashboard.backend.domain.leaderboard.strategies import get_strategy
 from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
+from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+    MarketDataUnavailableError,
+    configured_feed_name,
+    feed_provenance,
+)
 from dashboard.backend.paths import CONFIG_DIR, DATA_DIR
 
 # Bound by assignment from the module alias rather than a bare
@@ -47,6 +52,8 @@ _SKIP_CACHE_PATH = DATA_DIR / "leaderboard_skip_cache.json"
 _DAILY_REFRESH_STATE_PATH = DATA_DIR / "leaderboard_daily_refresh.json"
 _daily_refresh_lock = threading.Lock()
 _daily_refresh_running = False
+# (configured_feed, stale_feeds) pairs already reported — see _warn_on_feed_drift.
+_warned_feed_drift: set[Tuple[str, Tuple[str, ...]]] = set()
 
 # Daily board window is the last *completed* US cash session, not UTC-yesterday.
 _US_EASTERN = ZoneInfo("America/New_York")
@@ -675,16 +682,25 @@ def ensure_leaderboard_runs(
     if force_refresh:
         skip_cache = _clear_skips_for_window(session_id, start_date, end_date, skip_cache)
 
+    cached_runs: List[Dict[str, Any]] = []
     missing: List[Dict[str, Any]] = []
     for strategy in config.get("strategies", []):
         if not _auto_compute(strategy):
             continue  # LLM models are deployed manually, never block a request
         strategy_id = strategy["id"]
-        if not force_refresh and _find_cached_run(strategy_id, start_date, end_date, session_id):
+        cached = (
+            None
+            if force_refresh
+            else _find_cached_run(strategy_id, start_date, end_date, session_id)
+        )
+        if cached:
+            cached_runs.append(cached)
             continue
         if not force_refresh and _is_skipped(session_id, start_date, end_date, strategy_id, skip_cache):
             continue
         missing.append(strategy)
+
+    _warn_on_feed_drift(cached_runs, _configured_feed_or_none())
 
     # Nothing left to compute — serve cached board without touching Alpaca.
     if not missing and not force_refresh:
@@ -785,17 +801,20 @@ def ensure_leaderboard_runs(
             max_drawdown=metrics["max_drawdown"],
             num_trades=strategy_impl.num_trades(),
             llm_model=strategy_id,
-            metadata=_llm_run_metadata(
-                strategy_id,
-                strategy,
-                strategy_impl,
-                model_id=(
-                    getattr(strategy_impl, "model_id", None)
-                    or strategy.get("model_id")
+            metadata=_with_market_data_provenance(
+                _llm_run_metadata(
+                    strategy_id,
+                    strategy,
+                    strategy_impl,
+                    model_id=(
+                        getattr(strategy_impl, "model_id", None)
+                        or strategy.get("model_id")
+                    ),
+                    initial_capital=initial_capital,
+                    start_date=start_date,
+                    end_date=end_date,
                 ),
-                initial_capital=initial_capital,
-                start_date=start_date,
-                end_date=end_date,
+                feed_provenance(bars),
             ),
         )
         db.insert_equity_points(run_id, curve)
@@ -889,6 +908,83 @@ def _reject_if_llm_fallback(
             f"or output truncated into invalid JSON). Pass allow_fallback=True / "
             f"--allow-fallback to publish it anyway."
         )
+
+
+def _with_market_data_provenance(
+    metadata: Optional[Dict[str, Any]],
+    provenance: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Record which Alpaca tape priced this run alongside its config snapshot.
+
+    Without this the board cannot tell a SIP curve from an IEX-fallback one:
+    the loader stamps the feed on the dataframes, but frames are transient and
+    ``agent_runs`` outlives them. Two curves for the same window computed off
+    different tapes are not comparable, and ranking them side by side is the
+    failure this guards — so the tape goes in the row, not just in a log line.
+
+    Applies to baselines too (``_llm_run_metadata`` returns ``None`` for those),
+    which is why it is a separate wrapper rather than another field in there.
+    """
+    if not provenance:
+        return metadata
+    return {**(metadata or {}), **provenance}
+
+
+def _configured_feed_or_none() -> Optional[str]:
+    """``ALPACA_DATA_FEED`` as a canonical name, or ``None`` if it is unusable.
+
+    The fetch path raises on a bad value (see ``resolve_alpaca_data_feed``);
+    this read-only comparison must not turn a fully cached board into a 500.
+    """
+    try:
+        return configured_feed_name()
+    except MarketDataUnavailableError as exc:
+        print(f"WARNING: cannot resolve the Alpaca feed for run provenance: {exc}")
+        return None
+
+
+def _run_market_data_feed(run: Dict[str, Any]) -> Optional[str]:
+    """Feed recorded on a cached run, or ``None`` for rows written before it was."""
+    metadata = run.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    feed = metadata.get("market_data_feed")
+    return feed if isinstance(feed, str) else None
+
+
+def _warn_on_feed_drift(runs: List[Dict[str, Any]], configured: Optional[str]) -> None:
+    """Print when cached rows were priced off a tape we no longer use.
+
+    Deliberately a warning and not an auto-refresh: ``ensure_leaderboard_runs``
+    runs on a public, unauthenticated GET, and treating a feed mismatch as
+    "missing" would re-fetch Alpaca on every page load for as long as the
+    mismatch persists (e.g. while SIP keeps falling back to IEX). Recomputing
+    is an operator action — ``POST /api/v1/leaderboard/refresh`` with
+    ``force=true``, or ``scripts/refresh_daily_leaderboard.py --remote``.
+
+    Emitted once per distinct drift per process: this runs on the hot cached
+    path of a public endpoint, and a line per page load would bury itself.
+    """
+    if not configured:
+        return
+    stale = sorted(
+        {
+            feed
+            for run in runs
+            if (feed := _run_market_data_feed(run)) and feed != configured
+        }
+    )
+    if not stale:
+        return
+    seen_key = (configured, tuple(stale))
+    if seen_key in _warned_feed_drift:
+        return
+    _warned_feed_drift.add(seen_key)
+    print(
+        f"WARNING: leaderboard has cached runs priced off {', '.join(stale)} "
+        f"while ALPACA_DATA_FEED resolves to {configured}. Curves from "
+        "different tapes are not comparable — force-refresh to recompute."
+    )
 
 
 def _llm_run_metadata(
@@ -1030,14 +1126,17 @@ def deploy_model_run(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         est_cost_usd=est_cost,
-        metadata=_llm_run_metadata(
-            entry_id,
-            entry,
-            strategy_impl,
-            model_id=model_id,
-            initial_capital=initial_capital,
-            start_date=start_date,
-            end_date=end_date,
+        metadata=_with_market_data_provenance(
+            _llm_run_metadata(
+                entry_id,
+                entry,
+                strategy_impl,
+                model_id=model_id,
+                initial_capital=initial_capital,
+                start_date=start_date,
+                end_date=end_date,
+            ),
+            feed_provenance(bars),
         ),
     )
     db.insert_equity_points(run_id, curve)

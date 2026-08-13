@@ -31,10 +31,19 @@ from dashboard.backend.paths import CREDENTIALS_DIR
 # ("end must be at least 15 minutes old to query SIP without a subscription").
 DEFAULT_SIP_DELAY_MINUTES = 15
 
+# Which tape prices every backtest, baseline and leaderboard curve. SIP is the
+# full consolidated tape; IEX is ~2.5% of volume. Changing this changes results,
+# so it is recorded per run (see ``feed_provenance``) rather than left implicit.
+DEFAULT_ALPACA_FEED = "sip"
+
+# Canonical feed names, matching ``alpaca.data.enums.DataFeed`` ``.value``.
+SUPPORTED_ALPACA_FEEDS = ("iex", "sip", "delayed_sip", "otc")
+
 # Stamped on each returned frame so a rare IEX fallback is visible to callers
 # (return type stays Dict[str, DataFrame] for the MarketDataProvider contract).
 FRAME_ATTR_FEED = "alpaca_feed"
 FRAME_ATTR_SIP_FALLBACK = "alpaca_sip_fallback"
+FRAME_ATTR_END_CLAMPED = "alpaca_end_clamped"
 
 
 class MarketDataUnavailableError(RuntimeError):
@@ -47,6 +56,17 @@ class MarketDataUnavailableError(RuntimeError):
 
 class AlpacaCredentialsError(MarketDataUnavailableError):
     """Raised when Alpaca API credentials are not configured."""
+
+
+class AlpacaFeedConfigError(MarketDataUnavailableError):
+    """``ALPACA_DATA_FEED`` names a feed we cannot serve.
+
+    Deliberately fatal rather than a warning-and-default: this variable selects
+    which tape priced a published leaderboard run, so silently substituting a
+    different feed for a typo'd one ("IEXX" meant to force IEX) would ship the
+    opposite of the operator's intent, and in prod the warning would be one log
+    line nobody reads.
+    """
 
 
 def sip_delay_minutes() -> int:
@@ -83,11 +103,26 @@ def parse_alpaca_end(end: Union[str, datetime]) -> datetime:
 def clamp_end_for_sip(
     end: Union[str, datetime],
     *,
+    start: Optional[Union[str, datetime]] = None,
     now: Optional[datetime] = None,
     delay_minutes: Optional[int] = None,
-) -> datetime:
-    """Cap ``end`` so Basic-plan SIP queries stay outside the recent window."""
-    end_dt = parse_alpaca_end(end)
+) -> Union[str, datetime]:
+    """Cap ``end`` so Basic-plan SIP queries stay outside the recent window.
+
+    ``start`` (when given) floors the cutoff: a same-day request dispatched
+    shortly after 00:00 UTC would otherwise be clamped to ``now−15m`` — i.e.
+    *yesterday*, an inverted range that Alpaca answers with nothing and that
+    the caller's negative cache then pins as a hard failure. Clamping is an
+    accommodation for the Basic plan, never a reason to invert a window.
+
+    An ``end`` this module cannot parse is returned unchanged rather than
+    raising: the clamp is an optimization, and the SDK's own validation gives a
+    better error than a bare ``ValueError`` from here.
+    """
+    try:
+        end_dt = parse_alpaca_end(end)
+    except (TypeError, ValueError):
+        return end
     minutes = DEFAULT_SIP_DELAY_MINUTES if delay_minutes is None else delay_minutes
     if minutes <= 0 or allow_recent_sip():
         return end_dt
@@ -95,7 +130,27 @@ def clamp_end_for_sip(
     if clock.tzinfo is None:
         clock = clock.replace(tzinfo=timezone.utc)
     cutoff = clock.astimezone(timezone.utc) - timedelta(minutes=minutes)
+    if start is not None:
+        try:
+            cutoff = max(cutoff, parse_alpaca_end(start))
+        except (TypeError, ValueError):
+            pass
     return min(end_dt, cutoff)
+
+
+def configured_feed_name() -> str:
+    """Canonical name of the tape selected by ``ALPACA_DATA_FEED``.
+
+    Kept SDK-free so callers that only need to *record* or compare the feed
+    (leaderboard run provenance) do not have to import alpaca-py.
+    """
+    raw = (os.getenv("ALPACA_DATA_FEED") or DEFAULT_ALPACA_FEED).strip().lower()
+    if raw not in SUPPORTED_ALPACA_FEEDS:
+        raise AlpacaFeedConfigError(
+            f"ALPACA_DATA_FEED={raw!r} is not a known Alpaca feed; "
+            f"expected one of {', '.join(SUPPORTED_ALPACA_FEEDS)}"
+        )
+    return raw
 
 
 def resolve_alpaca_data_feed(data_feed_enum: Any):
@@ -103,18 +158,37 @@ def resolve_alpaca_data_feed(data_feed_enum: Any):
 
     Basic accounts can use SIP for history older than ~15 minutes. IEX is only
     ~2.5% of volume and is the wrong default for DJIA / multi-name backtests.
+
+    An unknown name — or one this SDK build's enum lacks — raises rather than
+    falling back, so a typo cannot silently price a published run off the wrong
+    tape. See :class:`AlpacaFeedConfigError`.
     """
-    raw = (os.getenv("ALPACA_DATA_FEED") or "sip").strip().lower()
-    mapping = {
-        "iex": data_feed_enum.IEX,
-        "sip": data_feed_enum.SIP,
-        "delayed_sip": getattr(data_feed_enum, "DELAYED_SIP", data_feed_enum.SIP),
-        "otc": getattr(data_feed_enum, "OTC", data_feed_enum.IEX),
-    }
-    if raw not in mapping:
-        print(f"WARNING: ALPACA_DATA_FEED={raw!r} is not recognized; using sip")
-        return data_feed_enum.SIP
-    return mapping[raw]
+    name = configured_feed_name()
+    member = getattr(data_feed_enum, name.upper(), None)
+    if member is None:
+        raise AlpacaFeedConfigError(
+            f"ALPACA_DATA_FEED={name!r} is not supported by the installed "
+            "alpaca-py DataFeed enum"
+        )
+    return member
+
+
+def feed_provenance(bars: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
+    """Which tape produced these frames, read back off the stamps.
+
+    Returns ``None`` for an empty or unstamped mapping (e.g. an index strategy
+    priced from Yahoo, which never touches Alpaca) so callers can tell "not
+    applicable" from "IEX fallback".
+    """
+    for frame in bars.values():
+        attrs = getattr(frame, "attrs", None) or {}
+        if FRAME_ATTR_FEED in attrs:
+            return {
+                "market_data_feed": attrs.get(FRAME_ATTR_FEED),
+                "sip_fallback_to_iex": bool(attrs.get(FRAME_ATTR_SIP_FALLBACK)),
+                "end_clamped": bool(attrs.get(FRAME_ATTR_END_CLAMPED)),
+            }
+    return None
 
 
 class AlpacaDataLoader:
@@ -153,26 +227,43 @@ class AlpacaDataLoader:
     def _resolve_data_feed(self):
         return resolve_alpaca_data_feed(self.DataFeed)
 
-    def _effective_end(self, end: str, feed) -> Union[str, datetime]:
+    def _effective_end(
+        self, end: str, feed, start: Optional[str] = None
+    ) -> tuple[Union[str, datetime], bool]:
         """For SIP feeds on Basic, clamp ``end`` outside the recent window.
 
-        Alpaca ``end`` is exclusive; a date-only string is midnight UTC.
-        Leaderboard ``end_date + 1 day`` therefore becomes tomorrow 00:00 UTC,
-        which is inside the 15-minute SIP lockout. After the 16:00 ET cash
-        close, ``now−15m`` is still after the last RTH hourly bar, so the
-        session stays intact. Historical ends (already older than 15m) pass
-        through unchanged.
+        Returns ``(effective_end, was_clamped)``; the flag is recorded as run
+        provenance so a shortened window is identifiable after the fact.
+
+        Alpaca ``end`` is exclusive and filters on each bar's *opening*
+        timestamp — the left edge of the interval, per the market-data FAQ.
+        That is why ``fetch_hourly_bars`` bumps ``end_date`` by a day: bars on
+        ``end_date`` open after midnight and would otherwise be dropped. It is
+        also why the clamp does not truncate a just-closed session: at 16:05 ET
+        the cutoff is 15:50 ET, still later than the 15:00 ET open of the final
+        RTH hourly bar, so that bar is returned whole.
+
+        The margin is one bar wide, though — a ``ALPACA_SIP_DELAY_MINUTES``
+        above ~65 pushes the cutoff below 15:00 ET and *does* drop the closing
+        hour, which the daily board would then cache for the rest of the day.
+        ``test_clamp_keeps_final_rth_bar_after_close`` pins the default.
         """
         if feed == self.DataFeed.IEX:
-            return end
-        clamped = clamp_end_for_sip(end, delay_minutes=sip_delay_minutes())
-        original = parse_alpaca_end(end)
-        if clamped < original:
-            print(
-                f"   Clamping SIP end {original.isoformat()} → {clamped.isoformat()} "
-                f"(Basic plan blocks recent SIP; set ALPACA_ALLOW_RECENT_SIP=1 if paid)"
-            )
-        return clamped
+            return end, False
+        clamped = clamp_end_for_sip(
+            end, start=start, delay_minutes=sip_delay_minutes()
+        )
+        try:
+            original = parse_alpaca_end(end)
+        except (TypeError, ValueError):
+            return clamped, False
+        if not isinstance(clamped, datetime) or clamped >= original:
+            return clamped, False
+        print(
+            f"   Clamping SIP end {original.isoformat()} → {clamped.isoformat()} "
+            f"(Basic plan blocks recent SIP; set ALPACA_ALLOW_RECENT_SIP=1 if paid)"
+        )
+        return clamped, True
 
     def _record_fetch(
         self,
@@ -181,12 +272,14 @@ class AlpacaDataLoader:
         requested_end: str,
         effective_end: Union[str, datetime],
         sip_fallback_to_iex: bool,
+        end_clamped: bool = False,
     ) -> None:
         self.last_fetch = {
             "feed": getattr(feed, "value", str(feed)),
             "requested_end": requested_end,
             "effective_end": effective_end,
             "sip_fallback_to_iex": sip_fallback_to_iex,
+            "end_clamped": end_clamped,
         }
 
     def _stamp_frames(
@@ -195,11 +288,13 @@ class AlpacaDataLoader:
         *,
         feed,
         sip_fallback_to_iex: bool,
+        end_clamped: bool = False,
     ) -> Dict[str, pd.DataFrame]:
         feed_name = getattr(feed, "value", str(feed))
         for frame in data.values():
             frame.attrs[FRAME_ATTR_FEED] = feed_name
             frame.attrs[FRAME_ATTR_SIP_FALLBACK] = sip_fallback_to_iex
+            frame.attrs[FRAME_ATTR_END_CLAMPED] = end_clamped
         return data
 
     def _load_credentials(self) -> Dict:
@@ -259,7 +354,7 @@ class AlpacaDataLoader:
 
         print(f"\n📊 Fetching {len(symbols)} symbols from {start} to {end}...")
         feed = self._resolve_data_feed()
-        effective_end = self._effective_end(end, feed)
+        effective_end, end_clamped = self._effective_end(end, feed, start)
         print(
             f"   Timeframe: Hourly (1h) feed={feed.value} "
             f"end={effective_end} with forward-filled price cache\n"
@@ -280,11 +375,13 @@ class AlpacaDataLoader:
                 requested_end=end,
                 effective_end=effective_end,
                 sip_fallback_to_iex=False,
+                end_clamped=end_clamped,
             )
             return self._stamp_frames(
                 self._bars_to_frames(bars, symbols),
                 feed=feed,
                 sip_fallback_to_iex=False,
+                end_clamped=end_clamped,
             )
 
         except Exception as e:

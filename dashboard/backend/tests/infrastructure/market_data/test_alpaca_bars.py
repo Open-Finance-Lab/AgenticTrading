@@ -186,6 +186,139 @@ def test_clamp_end_for_sip_helper():
     assert untouched == datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc)
 
 
+def test_clamp_never_moves_end_before_start():
+    """A same-day run just after 00:00 UTC must not be clamped into yesterday.
+
+    Without the ``start`` floor the cutoff (now−15m) precedes the requested
+    start, Alpaca answers an inverted range with nothing, and the caller's
+    negative cache pins that as a hard failure for the whole TTL.
+    """
+    from datetime import datetime, timezone
+
+    from dashboard.backend.infrastructure.market_data.alpaca_bars import clamp_end_for_sip
+
+    now = datetime(2026, 8, 13, 0, 5, tzinfo=timezone.utc)
+    clamped = clamp_end_for_sip(
+        "2026-08-14", start="2026-08-13", now=now, delay_minutes=15
+    )
+    assert clamped >= datetime(2026, 8, 13, 0, 0, tzinfo=timezone.utc)
+
+    # Without a start floor the same call inverts the window.
+    unfloored = clamp_end_for_sip("2026-08-14", now=now, delay_minutes=15)
+    assert unfloored < datetime(2026, 8, 13, 0, 0, tzinfo=timezone.utc)
+
+
+def test_clamp_keeps_final_rth_bar_after_close():
+    """The 15-minute cutoff must stay later than the last hourly bar's open.
+
+    Alpaca filters bars on their opening timestamp, so a cutoff of 15:50 ET
+    still returns the complete 15:00–16:00 ET bar. The margin is one bar wide:
+    a delay above ~65 minutes would drop the closing hour, and the daily board
+    would cache that truncated curve for the rest of the session.
+    """
+    from datetime import datetime, timezone
+    from zoneinfo import ZoneInfo
+
+    from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+        DEFAULT_SIP_DELAY_MINUTES,
+        clamp_end_for_sip,
+    )
+
+    eastern = ZoneInfo("America/New_York")
+    just_after_close = datetime(2026, 8, 13, 16, 5, tzinfo=eastern)
+    last_bar_open = datetime(2026, 8, 13, 15, 0, tzinfo=eastern)
+
+    clamped = clamp_end_for_sip(
+        "2026-08-14",
+        start="2026-08-13",
+        now=just_after_close.astimezone(timezone.utc),
+        delay_minutes=DEFAULT_SIP_DELAY_MINUTES,
+    )
+    assert clamped > last_bar_open
+
+
+def test_clamp_returns_unparseable_end_unchanged():
+    """``end`` is unvalidated user input; the clamp must not become a validator.
+
+    Raising here would surface a bare ValueError from a new place, ahead of the
+    SDK's own (better) validation error.
+    """
+    from dashboard.backend.infrastructure.market_data.alpaca_bars import clamp_end_for_sip
+
+    assert clamp_end_for_sip("08/13/2026", delay_minutes=15) == "08/13/2026"
+    assert clamp_end_for_sip("not-a-date", delay_minutes=15) == "not-a-date"
+
+
+def test_unknown_feed_raises(monkeypatch):
+    """A typo must not silently price a published run off the other tape."""
+    from alpaca.data.enums import DataFeed
+
+    from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+        AlpacaFeedConfigError,
+        configured_feed_name,
+        resolve_alpaca_data_feed,
+    )
+
+    monkeypatch.setenv("ALPACA_DATA_FEED", "IEXX")
+    with pytest.raises(AlpacaFeedConfigError):
+        configured_feed_name()
+    with pytest.raises(AlpacaFeedConfigError):
+        resolve_alpaca_data_feed(DataFeed)
+
+
+def test_configured_feed_name_defaults_and_normalizes(monkeypatch):
+    from dashboard.backend.infrastructure.market_data.alpaca_bars import (
+        configured_feed_name,
+    )
+
+    monkeypatch.delenv("ALPACA_DATA_FEED", raising=False)
+    assert configured_feed_name() == "sip"
+
+    monkeypatch.setenv("ALPACA_DATA_FEED", "  IEX ")
+    assert configured_feed_name() == "iex"
+
+
+def test_feed_provenance_reads_frame_stamps(fake_alpaca):
+    """Provenance must survive as data, not only as a log line."""
+    from dashboard.backend.infrastructure.market_data.alpaca_bars import feed_provenance
+
+    loader = AlpacaDataLoader(api_key="k", secret_key="s")
+    fake_alpaca["df"] = _bars_df({"AAPL": [("2026-01-02 10:00", 1, 2, 0.5, 1.5, 100)]})
+    out = loader.fetch_bars(["AAPL"], "2026-01-01", "2026-01-03")
+
+    assert feed_provenance(out) == {
+        "market_data_feed": "sip",
+        "sip_fallback_to_iex": False,
+        "end_clamped": False,
+    }
+    # Nothing to attribute when no Alpaca frame was involved.
+    assert feed_provenance({}) is None
+    assert feed_provenance({"AAPL": pd.DataFrame()}) is None
+
+
+def test_clamped_fetch_is_marked_in_provenance(fake_alpaca, monkeypatch):
+    from datetime import datetime, timezone
+
+    import dashboard.backend.infrastructure.market_data.alpaca_bars as bars_mod
+    from dashboard.backend.infrastructure.market_data.alpaca_bars import feed_provenance
+
+    frozen = datetime(2026, 8, 12, 23, 50, tzinfo=timezone.utc)
+    original = bars_mod.clamp_end_for_sip
+
+    def _clamp(end, *, start=None, now=None, delay_minutes=None):
+        return original(
+            end, start=start, now=now or frozen, delay_minutes=delay_minutes
+        )
+
+    monkeypatch.setattr(bars_mod, "clamp_end_for_sip", _clamp)
+    loader = AlpacaDataLoader(api_key="k", secret_key="s")
+    fake_alpaca["df"] = _bars_df({"AAPL": [("2026-08-12 10:00", 1, 2, 0.5, 1.5, 100)]})
+    out = loader.fetch_bars(["AAPL"], "2026-07-12", "2026-08-13")
+
+    assert feed_provenance(out)["end_clamped"] is True
+    assert loader.last_fetch["end_clamped"] is True
+
+
 def test_sip_fetch_uses_clamped_end(fake_alpaca, monkeypatch):
     from datetime import datetime, timezone
 
@@ -197,8 +330,10 @@ def test_sip_fetch_uses_clamped_end(fake_alpaca, monkeypatch):
     clamped = datetime(2026, 8, 12, 23, 35, tzinfo=timezone.utc)
     original = bars_mod.clamp_end_for_sip
 
-    def _clamp(end, *, now=None, delay_minutes=None):
-        return original(end, now=now or frozen, delay_minutes=delay_minutes)
+    def _clamp(end, *, start=None, now=None, delay_minutes=None):
+        return original(
+            end, start=start, now=now or frozen, delay_minutes=delay_minutes
+        )
 
     monkeypatch.setenv("ALPACA_DATA_FEED", "sip")
     monkeypatch.setattr(bars_mod, "clamp_end_for_sip", _clamp)
