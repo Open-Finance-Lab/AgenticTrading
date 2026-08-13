@@ -94,6 +94,12 @@ os.environ.pop("BREVO_API_KEY", None)
 os.environ.pop("ACCOUNT_EMAIL_FROM", None)
 os.environ.pop("ACCOUNT_EMAIL_FROM_NAME", None)
 
+# Billing tests must never inherit a developer's Stripe credentials or enable
+# Test Mode accidentally. Individual tests set explicit fake values.
+os.environ.pop("ATL_STRIPE_TEST_BILLING_ENABLED", None)
+os.environ.pop("STRIPE_SECRET_KEY", None)
+os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
+
 # Daily Leaderboard knobs. LEADERBOARD_DAILY_AUTO_DEPLOY is the flag that lets a
 # public GET of ?period=daily kick off deploy_model_run for every competition
 # entry -- real, billable LLM calls. A developer with it exported would have the
