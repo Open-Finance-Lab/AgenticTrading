@@ -279,6 +279,23 @@ def test_running_and_historical_results_show_ifind_provenance(js, css):
     assert re.search(r"run\.data_source\s*===\s*['\"]ifind_ashare['\"]", js)
 
 
+def test_historical_run_config_reads_delay_summary_from_linked_buyhold(js):
+    assert re.search(
+        r"function\s+renderBacktestRunConfig\([^)]*baselineRun\s*=\s*null",
+        js,
+        re.S,
+    )
+    assert re.search(
+        r"baselineAllocation\s*=\s*baselineMetadata\.baseline_allocation",
+        js,
+    )
+    assert re.search(
+        r"resolveBaselinesForRun\(selectedRun,\s*sessionRuns\)",
+        js,
+    )
+    assert re.search(r"baselineRun:\s*selectedBuyholdRun", js)
+
+
 def test_ifind_chart_does_not_render_us_index_series(js):
     assert re.search(r"filterIfindChartSeries\s*\(", js)
     assert "DJIA index" in js

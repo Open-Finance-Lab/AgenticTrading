@@ -77,6 +77,11 @@ _CURRENCY_TRADE_COLUMNS = {
     "native_total_fees": ("REAL", 0, None),
     "native_net_cash_impact": ("REAL", 0, None),
     "fx_rate": ("REAL", 0, None),
+    "market_rule_date": ("TEXT", 0, None),
+    "market_rule_suspended": ("INTEGER", 0, None),
+    "market_rule_closing_limit_state": ("TEXT", 0, None),
+    "market_rule_official_close": ("REAL", 0, None),
+    "market_rule_closing_gate_effective": ("INTEGER", 0, None),
 }
 
 # The one place the ALTER path cannot reproduce CREATE TABLE, and why.

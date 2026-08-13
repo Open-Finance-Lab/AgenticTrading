@@ -21,6 +21,7 @@ from datetime import datetime, time
 from dashboard.backend.paths import CREDENTIALS_DIR
 from dashboard.backend.domain.backtesting.constants import INITIAL_CAPITAL
 from dashboard.backend.domain.backtesting.currency import CurrencyContext
+from dashboard.backend.domain.backtesting.market_rules import MarketRuleCalendar
 from dashboard.backend.domain.trading.execution import calculate_transaction_costs
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     MarketDataUnavailableError,
@@ -143,6 +144,7 @@ def _plan_buyhold_allocation(
     num_symbols: int,
     lot_size: int,
     transaction_cost_profile,
+    reserved_capital: float = 0.0,
 ) -> Dict[str, int]:
     """Share counts for an equal-weight buy & hold sleeve.
 
@@ -157,11 +159,19 @@ def _plan_buyhold_allocation(
     2. Top-up: whatever pass 1 could not place is swept into further lots,
        poorest symbol first, so the sleeve stays invested and stays as close to
        equal weight as whole lots allow.
+
+    ``reserved_capital`` is withheld from the top-up sweep. ``prices`` carries
+    only the symbols that may trade right now, so the sweep cannot see a symbol
+    the market has blocked and would happily spend its slice on the neighbours
+    that are open — leaving nothing for the retry when the block lifts, and
+    turning an equal-weight benchmark into a concentrated one. Callers that
+    intend to place a symbol later must reserve its slice here.
     """
     if not prices or capital <= 0 or num_symbols <= 0:
         return {}
 
     lot_size = max(1, int(lot_size or 1))
+    reserved = max(0.0, float(reserved_capital or 0.0))
     # Denominator is the full sleeve, not the priced subset: a symbol with no
     # bar at the open forfeits its slice rather than redistributing it, which
     # is what the equal-weight baseline has always done.
@@ -178,7 +188,7 @@ def _plan_buyhold_allocation(
         shares -= shares % lot_size
         # Fees push a naively-affordable order over its slice; shrink a lot at a
         # time until it fits both the slice and the cash on hand.
-        budget = min(allocation, capital - spent)
+        budget = min(allocation, capital - spent - reserved)
         while shares > 0 and _buy_order_cash_out(
             price, shares, transaction_cost_profile
         ) > budget:
@@ -193,7 +203,7 @@ def _plan_buyhold_allocation(
         return planned
 
     for _ in range(_MAX_TOPUP_LOTS):
-        remaining = capital - spent
+        remaining = capital - spent - reserved
         # Poorest-first keeps the sleeve balanced and gets an unrepresented
         # symbol its first lot before any symbol gets a second one.
         candidates = sorted(
@@ -331,6 +341,7 @@ class BaselineGenerator:
         transaction_cost_totals: Optional[Dict[str, float]] = None,
         lot_size: int = 1,
         allocation_summary: Optional[Dict[str, Any]] = None,
+        market_rule_calendar: MarketRuleCalendar | None = None,
     ) -> List[Dict]:
         """
         Generate Buy & Hold baseline curve.
@@ -413,12 +424,54 @@ class BaselineGenerator:
             for symbol, df in bars_subset.items()
             if first_ts in df.index
         }
+        rule_aware = market_rule_calendar is not None
+
+        def _buy_allowed(symbol: str, timestamp, price: float) -> bool:
+            if market_rule_calendar is None:
+                return True
+            rule = market_rule_calendar.rule_for_timestamp(symbol, timestamp)
+            return not (
+                rule.suspended
+                or (
+                    rule.closing_limit_state.value == "upper"
+                    and rule.closing_gate_effective(
+                        timestamp=timestamp,
+                        reference_price=price,
+                        price_tick=(
+                            transaction_cost_profile.price_tick
+                            if transaction_cost_profile is not None
+                            else 0.01
+                        ),
+                    )
+                )
+            )
+
+        eligible_open_prices = {
+            symbol: price
+            for symbol, price in open_prices.items()
+            if _buy_allowed(symbol, first_ts, price)
+        }
+        market_blocked_symbols = set()
+        if market_rule_calendar is not None:
+            for symbol in bars_subset:
+                rule = market_rule_calendar.rule_for_timestamp(symbol, first_ts)
+                if rule.suspended or (
+                    symbol in open_prices
+                    and not _buy_allowed(symbol, first_ts, open_prices[symbol])
+                ):
+                    market_blocked_symbols.add(symbol)
+        pending_symbols = set(market_blocked_symbols)
         positions = _plan_buyhold_allocation(
-            open_prices,
+            eligible_open_prices,
             native_initial_capital,
             num_symbols,
             lot_size,
             transaction_cost_profile,
+            # Hold back the blocked names' slices so the retry below has
+            # something to spend when the market reopens them.
+            reserved_capital=(
+                native_initial_capital / num_symbols * len(pending_symbols)
+            ),
         )
 
         # Cost the plan once per symbol. The order-level pass matters for the
@@ -466,40 +519,93 @@ class BaselineGenerator:
             )
         # Only an affordability shortfall is worth shouting about; a symbol with
         # no bar at the open is an ordinary data gap the loop above already
-        # skipped, and the counts above still record it.
-        if len(positions) < len(open_prices):
+        # skipped, and the counts above still record it. A symbol the market
+        # blocked is not a shortfall either — it is waiting on the retry below,
+        # and counting it here reports the wrong cause for the wrong symbol.
+        tradable_priced = len(open_prices) - len(
+            market_blocked_symbols & set(open_prices)
+        )
+        if len(positions) < tradable_priced:
             print(
-                f"      ⚠️  {len(open_prices) - len(positions)} of "
-                f"{len(open_prices)} priced symbols bought nothing — an equal "
-                f"slice is worth less than one {effective_lot}-share lot at "
-                f"this capital"
+                f"      ⚠️  {tradable_priced - len(positions)} of "
+                f"{tradable_priced} tradable priced symbols bought nothing — an "
+                f"equal slice is worth less than one {effective_lot}-share lot "
+                f"at this capital"
+            )
+        if pending_symbols:
+            print(
+                f"      ⏸️  {len(pending_symbols)} symbol(s) blocked by market "
+                f"rules at the open; their allocation is held for a later bar"
             )
 
         print(f"      Stocks bought: {len(positions)} ({', '.join(sorted(positions.keys())[:10])}{'...' if len(positions) > 10 else ''})")
         print(f"      Total invested: {native_symbol}{native_initial_capital - cash:,.0f}")
         print(f"      Cash remaining: {native_symbol}{cash:,.0f}")
         
-        # Build forward-filled price cache for smooth equity curve
+        # Build forward-filled price cache for smooth equity valuation. A cached
+        # price never makes a pending order eligible; retries still require a
+        # real symbol bar and a rule check at that exact timestamp.
         price_cache = {}
         for symbol, df in bars_subset.items():
-            if symbol not in positions:
+            if symbol not in positions and symbol not in pending_symbols:
                 continue
             
             price_cache[symbol] = {}
             last_price = df.loc[first_ts, "close"] if first_ts in df.index else None
-            
-            if last_price is None:
-                continue
-            
             for timestamp in all_timestamps:
                 if timestamp in df.index:
                     last_price = df.loc[timestamp, "close"]
                 # Forward-fill missing data
-                price_cache[symbol][timestamp] = last_price
+                if last_price is not None:
+                    price_cache[symbol][timestamp] = last_price
         
         # Calculate equity at each timestamp
         equity_curve = []
+        delayed_symbols = set(pending_symbols)
         for timestamp in all_timestamps:
+            if rule_aware and pending_symbols:
+                for symbol in sorted(tuple(pending_symbols)):
+                    frame = bars_subset[symbol]
+                    if timestamp not in frame.index:
+                        continue
+                    price = float(frame.loc[timestamp, "close"])
+                    if not _buy_allowed(symbol, timestamp, price):
+                        continue
+                    allocation = native_initial_capital / num_symbols
+                    lot = max(1, int(lot_size or 1))
+                    shares = int(allocation / price) // lot * lot
+                    # Cap at this symbol's own slice, exactly as pass 1 does:
+                    # with several symbols pending, the first one to reopen
+                    # must not spend the slices still reserved for the others.
+                    budget = min(allocation, cash)
+                    while shares > 0 and _buy_order_cash_out(
+                        price, shares, transaction_cost_profile
+                    ) > budget:
+                        shares -= lot
+                    if shares <= 0:
+                        continue
+                    costs = calculate_transaction_costs(
+                        side="buy",
+                        reference_price=price,
+                        shares=shares,
+                        transaction_cost_profile=transaction_cost_profile,
+                    )
+                    cash += costs["net_cash_impact"]
+                    positions[symbol] = shares
+                    pending_symbols.remove(symbol)
+                    if transaction_cost_totals is not None:
+                        for field in (
+                            "gross_value",
+                            "slippage_amount",
+                            "commission",
+                            "stamp_duty",
+                            "transfer_fee",
+                            "total_fees",
+                        ):
+                            transaction_cost_totals[field] = (
+                                transaction_cost_totals.get(field, 0.0) + costs[field]
+                            )
+
             positions_value = 0
             
             for symbol, shares in positions.items():
@@ -518,6 +624,18 @@ class BaselineGenerator:
                 )
             )
         
+        if allocation_summary is not None and rule_aware:
+            allocation_summary.update({
+                "symbols_bought": len(positions),
+                "symbols_skipped": num_symbols - len(positions),
+                "invested_ratio": (
+                    (native_initial_capital - cash) / native_initial_capital
+                    if native_initial_capital
+                    else 0.0
+                ),
+                "symbols_delayed": len(delayed_symbols),
+                "symbols_unfilled": len(pending_symbols),
+            })
         return equity_curve
     
     def generate_index_baseline(
@@ -662,6 +780,7 @@ def generate_baselines(
     transaction_cost_totals: Optional[Dict[str, float]] = None,
     lot_size: int = 1,
     allocation_summary: Optional[Dict[str, Any]] = None,
+    market_rule_calendar: MarketRuleCalendar | None = None,
 ) -> Tuple[List[Dict], List[Dict]]:
     """
     Generate both baselines (Buy & Hold, Index).
@@ -683,17 +802,18 @@ def generate_baselines(
     generator = BaselineGenerator()
 
     buyhold_curve = generator.generate_buyhold_baseline(
-        bars_by_symbol,
-        start_date,
-        end_date,
-        initial_capital,
-        symbols_list,
-        market_timezone,
-        currency_context,
-        transaction_cost_profile,
-        transaction_cost_totals,
-        lot_size,
-        allocation_summary,
+        bars_by_symbol=bars_by_symbol,
+        start_date=start_date,
+        end_date=end_date,
+        initial_capital=initial_capital,
+        symbols_to_buy=symbols_list,
+        market_timezone=market_timezone,
+        currency_context=currency_context,
+        transaction_cost_profile=transaction_cost_profile,
+        transaction_cost_totals=transaction_cost_totals,
+        lot_size=lot_size,
+        allocation_summary=allocation_summary,
+        market_rule_calendar=market_rule_calendar,
     )
     
     index_curve = generator.generate_index_baseline(

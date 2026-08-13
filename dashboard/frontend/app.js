@@ -3027,9 +3027,10 @@ const AuthAPI = {
     if (!response.ok) {
       const message = data?.detail || data?.error || `HTTP ${response.status}`;
       const error = new Error(typeof message === 'string' ? message : JSON.stringify(message));
-      // Callers that need to react to *which* refusal (a 403 means the cached
-      // role is stale, not that the request was malformed) cannot recover the
-      // status from the message text once it is a plain Error.
+      // Callers need to tell "session is gone" (401) apart from "the server is
+      // cold/broken" (5xx, network) -- the message alone cannot carry that.
+      // The admin console reads the same field for 403: a refusal there means
+      // the cached role is stale, not that the request was malformed.
       error.status = response.status;
       throw error;
     }
@@ -3168,6 +3169,27 @@ async function claimAgentsForUser({ reload = true } = {}) {
     // Ungated on purpose: this call IS the claim-then-load ordering the auth
     // boot gate exists to protect, and it runs before the gate opens.
     await loadAgentsNow();
+  }
+}
+
+// Drop the previous account's active agent so logout / the next login does not
+// keep sending that agent's trading session_id (list/activate used to treat it
+// as enough to surface or reclaim another user's agents).
+//
+// Deliberately NOT part of clearAuthState(): refreshAuthUser() funnels *every*
+// /api/auth/me failure through that function, including a free-tier cold start
+// or a first-request-after-idle 500. Wiping the agent selection there would
+// silently undo the restoreActiveAgentSession() that ran moments earlier on
+// boot. Only a real sign-out (logout, or a 401 that proves the session is gone)
+// should reach this.
+function clearActiveAgentSession() {
+  localStorage.removeItem(ACTIVE_AGENT_KEY);
+  localStorage.removeItem(ACTIVE_AGENT_NAME_KEY);
+  window.ACTIVE_AGENT = null;
+  const browserOwnerId = localStorage.getItem(BROWSER_OWNER_KEY) || window.BROWSER_OWNER_ID;
+  if (browserOwnerId) {
+    localStorage.setItem('trading-session-id', browserOwnerId);
+    window.SESSION_ID = browserOwnerId;
   }
 }
 
@@ -3891,6 +3913,7 @@ async function logoutUser() {
     console.warn('Logout request failed:', error.message);
   } finally {
     clearAuthState();
+    clearActiveAgentSession();
     await loadAgents();
     if (currentPage === 'account' || currentPage === 'admin') {
       navigateToPage('home');
@@ -4166,6 +4189,11 @@ async function refreshAuthUser() {
       console.warn('Auth session expired:', error.message);
     }
     clearAuthState();
+    // Only a 401 proves the session is really gone. A network error or a 5xx
+    // cold start must not cost the user their active agent selection.
+    if (error?.status === 401) {
+      clearActiveAgentSession();
+    }
   }
 }
 
@@ -6499,6 +6527,10 @@ function formatOrderExecutionReason(reason, strategyReason = '') {
         insufficient_cash: 'Insufficient cash',
         t1_frozen: 'T+1 frozen',
         insufficient_position: 'Insufficient position',
+        suspended: 'Suspended',
+        limit_up_buy_blocked: 'Buy blocked at upper limit',
+        limit_down_sell_blocked: 'Sell blocked at lower limit',
+        market_rule_unavailable: 'No market rule for this symbol',
     };
     const code = String(reason || '').trim();
     if (labels[code]) return labels[code];
@@ -6567,7 +6599,36 @@ function normalizeOrderRecord(record) {
         nativeTransferFee: optionalNumber(record?.native_transfer_fee),
         nativeTotalFees: optionalNumber(record?.native_total_fees),
         nativeNetCashImpact: optionalNumber(record?.native_net_cash_impact),
+        marketRuleDate: record?.market_rule_date || null,
+        marketRuleSuspended: record?.market_rule_suspended === true
+            || record?.market_rule_suspended === 1,
+        marketRuleClosingLimitState: record?.market_rule_closing_limit_state || null,
+        marketRuleOfficialClose: optionalNumber(record?.market_rule_official_close),
+        marketRuleClosingGateEffective:
+            record?.market_rule_closing_gate_effective === true
+            || record?.market_rule_closing_gate_effective === 1,
     };
+}
+
+// Only rows a rule actually spoke to. An ordinary fill on an ordinary day
+// carries the same audit payload as a blocked one, so rendering whenever the
+// official close is present puts a date-and-price line under every single
+// A-share order and buries the handful that mean something.
+function renderMarketRuleAudit(order) {
+    if (!order.marketRuleDate) return '';
+    const details = [];
+    if (order.marketRuleSuspended) {
+        details.push('Official status: suspended');
+    } else if (order.marketRuleClosingLimitState
+        && order.marketRuleClosingLimitState !== 'none') {
+        const side = order.marketRuleClosingLimitState === 'upper' ? 'upper' : 'lower';
+        details.push(`Official close: ${side} limit`);
+    }
+    if (!details.length) return '';
+    if (Number.isFinite(order.marketRuleOfficialClose)) {
+        details.push(`¥${order.marketRuleOfficialClose.toFixed(2)}`);
+    }
+    return `<div class="trading-log-native">${escapeHtml(order.marketRuleDate)} · ${escapeHtml(details.join(' · '))}</div>`;
 }
 
 function formatTradingMoney(value, symbol) {
@@ -6672,6 +6733,7 @@ function paintTradingLog(normalizedRecords, options) {
         const assetName = resolveTradingAssetName(order.symbol);
         const quantity = `${order.executedShares.toLocaleString('en-US')} / ${order.requestedShares.toLocaleString('en-US')} shares`;
         const reason = formatOrderExecutionReason(order.reason, order.strategyReason);
+        const marketRuleAudit = renderMarketRuleAudit(order);
         // A rejection the agent re-issued on every bar of a day is stored once,
         // with its tally. Showing the tally is the difference between "this
         // blocked one order" and "this blocked the strategy all day".
@@ -6686,7 +6748,7 @@ function paintTradingLog(normalizedRecords, options) {
             <td>$${order.price.toFixed(2)}${priceAudit}</td>
             <td class="trading-log-value">${order.executedShares > 0 ? `${formatTradingMoney(order.value, '$')}${valueAudit}${costAudit}` : '--'}</td>
             <td><span class="order-status order-status-${order.status}" title="Order status: ${statusLabel}" aria-label="Order status: ${statusLabel}">${statusLabel}</span></td>
-            <td class="trading-log-reason">${escapeHtml(reason)}${repeatNote}</td>
+            <td class="trading-log-reason">${escapeHtml(reason)}${marketRuleAudit}${repeatNote}</td>
         </tr>`;
     }).join('');
 
@@ -6844,7 +6906,12 @@ function formatTransactionCostTotals(totals) {
 
 function renderBacktestRunConfig(
     run,
-    { running = false, launchConfig = null, statusLabel = null } = {},
+    {
+        running = false,
+        launchConfig = null,
+        statusLabel = null,
+        baselineRun = null,
+    } = {},
 ) {
     const empty = document.getElementById('backtestConfigEmpty');
     const list = document.getElementById('backtestConfigList');
@@ -6880,6 +6947,18 @@ function renderBacktestRunConfig(
         ?? run?.transaction_cost_profile;
     const transactionCostTotals = metadata.transaction_cost_totals
         ?? run?.transaction_cost_totals;
+    const marketRuleProfile = metadata.market_rule_profile
+        ?? run?.market_rule_profile;
+    const marketRuleRejections = metadata.market_rule_rejections
+        ?? run?.market_rule_rejections;
+    const baselineMetadata = baselineRun?.metadata
+        && typeof baselineRun.metadata === 'object'
+        ? baselineRun.metadata
+        : {};
+    const baselineAllocation = baselineMetadata.baseline_allocation
+        ?? baselineRun?.baseline_allocation
+        ?? metadata.baseline_allocation
+        ?? run?.baseline_allocation;
     // Absent (older runs) reads as applied; only an explicit false marks a
     // curve that carries the market's cost rules without ever paying them.
     const transactionCostsApplied = (metadata.transaction_costs_applied
@@ -6968,6 +7047,37 @@ function renderBacktestRunConfig(
             transactionCostsApplied
                 ? formatTransactionCostTotals(transactionCostTotals)
                 : 'Not applicable — reference price curve',
+        );
+    }
+    const showMarketRules = marketRuleProfile?.enabled === true;
+    const marketRulesRow = document.getElementById('backtestConfigMarketRulesRow');
+    if (marketRulesRow) marketRulesRow.hidden = !showMarketRules;
+    if (showMarketRules) {
+        setBacktestConfigText('backtestConfigMarketRules', 'Enabled');
+    }
+    const rejectionLabels = {
+        suspended: 'Suspended',
+        limit_up_buy_blocked: 'Upper-limit buys',
+        limit_down_sell_blocked: 'Lower-limit sells',
+        market_rule_unavailable: 'Missing rule',
+    };
+    const ruleRejectionParts = Object.entries(marketRuleRejections || {})
+        .filter(([, count]) => Number(count) > 0)
+        .map(([reason, count]) => `${rejectionLabels[reason] || reason} ${Number(count)}`);
+    const ruleRejectionsRow = document.getElementById('backtestConfigRuleRejectionsRow');
+    if (ruleRejectionsRow) ruleRejectionsRow.hidden = ruleRejectionParts.length === 0;
+    if (ruleRejectionParts.length) {
+        setBacktestConfigText('backtestConfigRuleRejections', ruleRejectionParts.join(' · '));
+    }
+    const delayed = Number(baselineAllocation?.symbols_delayed || 0);
+    const unfilled = Number(baselineAllocation?.symbols_unfilled || 0);
+    const showBaselineRules = delayed > 0 || unfilled > 0;
+    const baselineRulesRow = document.getElementById('backtestConfigBaselineRulesRow');
+    if (baselineRulesRow) baselineRulesRow.hidden = !showBaselineRules;
+    if (showBaselineRules) {
+        setBacktestConfigText(
+            'backtestConfigBaselineRules',
+            `Delayed ${delayed} · Unfilled ${unfilled}`,
         );
     }
     setBacktestConfigText('backtestConfigUniverse', universe);
@@ -8346,9 +8456,14 @@ async function loadData() {
             }
 
             localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, selectedRun.run_id);
+            const baselineIds = resolveBaselinesForRun(selectedRun, sessionRuns);
+            const selectedBuyholdRun = sessionRuns.find(
+                run => run.run_id === baselineIds.buyhold,
+            ) || null;
             renderBacktestRunConfig(selectedRun, {
                 running: false,
                 launchConfig: getBacktestLaunchConfig(selectedRun.run_id),
+                baselineRun: selectedBuyholdRun,
             });
 
             const chartUrl = `${API_BASE}/api/backtest/${encodeURIComponent(selectedRun.run_id)}/chart-data?t=${Date.now()}`;

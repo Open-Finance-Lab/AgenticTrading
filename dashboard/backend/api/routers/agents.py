@@ -32,6 +32,7 @@ from dashboard.backend.domain.agents.credential_store import (
     agent_credential_store,
 )
 from dashboard.backend.domain.agents.service import (
+    AgentAccessDeniedError,
     AgentNotFoundError,
     AgentServiceError,
     MarketplaceTemplateNotFoundError,
@@ -47,6 +48,7 @@ from dashboard.backend.api.dependencies import (
     _owner_context,
     _require_agent_access,
     _require_owner_context,
+    _resolve_agent_access,
 )
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.portfolios.service import portfolio_service
@@ -363,6 +365,8 @@ def import_session_agent(
         )
     except NoExternalRunsError:
         raise HTTPException(status_code=404, detail="No external backtest runs for this session")
+    except AgentAccessDeniedError:
+        raise HTTPException(status_code=403, detail="Agent belongs to another account")
 
     result = {"agent": agent_service.agent_with_stats(agent), "imported": imported}
     if imported and agent.get("api_key"):
@@ -696,10 +700,16 @@ def activate_agent(
 ):
     """Return session info for switching the dashboard to this agent."""
     ctx = _require_owner_context(request, authorization)
-    agent = _require_agent_access(agent_id, ctx, reclaim_on_session_match=True)
+    agent, owned = _resolve_agent_access(
+        agent_id, ctx, reclaim_on_session_match=True
+    )
+    # Claiming binds owner_user_id, and owns_agent refuses browser-only access
+    # to a bound row -- so a claim made off a bare session_id match would lock
+    # the agent's real owner out with no way back. Only bind when the caller
+    # proved ownership with a real credential.
     agent_service.activate_agent(
         agent_id,
-        user_id=ctx.get("user_id"),
+        user_id=ctx.get("user_id") if owned else None,
         browser_session=ctx.get("browser_session"),
     )
     return {
