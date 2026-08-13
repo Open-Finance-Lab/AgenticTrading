@@ -245,6 +245,11 @@ class AgentService:
             and browser_session
             and agent.get("session_id") == trading_session
         ):
+            # Only reclaim still-unclaimed guest agents. Matching session_id
+            # must never let a later account on the same browser steal an
+            # already-bound agent (activate/restore used to COALESCE overwrite).
+            if agent.get("owner_user_id") is not None:
+                raise AgentAccessDeniedError()
             self.agents.reclaim_agent(
                 agent_id,
                 owner_user_id=user_id,

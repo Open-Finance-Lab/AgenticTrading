@@ -246,6 +246,33 @@ def test_require_access_rejects_bare_session_id(svc):
     assert got["agent_id"] == agent["agent_id"]
 
 
+def test_require_access_reclaim_does_not_steal_bound_agent(svc):
+    """Matching trading session + browser must not reassign another account."""
+    agent = svc.create_agent(
+        name="A",
+        model_name="m",
+        owner_user_id=1,
+        owner_browser_session="b-owner",
+    )
+    with pytest.raises(AgentAccessDeniedError):
+        svc.require_access(
+            agent["agent_id"],
+            user_id=2,
+            browser_session="b-thief",
+            trading_session=agent["session_id"],
+            reclaim_on_session_match=True,
+        )
+    assert svc.get_agent(agent["agent_id"])["owner_user_id"] == 1
+
+
+def test_activate_does_not_overwrite_other_owner(svc):
+    agent = svc.create_agent(
+        name="A", model_name="m", owner_user_id=1, owner_browser_session="b1"
+    )
+    svc.activate_agent(agent["agent_id"], user_id=2, browser_session="b1")
+    assert svc.get_agent(agent["agent_id"])["owner_user_id"] == 1
+
+
 # ---------------------------------------------------------------------------
 # Claim
 # ---------------------------------------------------------------------------

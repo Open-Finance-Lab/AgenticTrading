@@ -3151,6 +3151,17 @@ function clearAuthState() {
   clearLegacyAuthToken();
   localStorage.removeItem(AUTH_USER_KEY);
   window.AUTH_USER = null;
+  // Drop the previous account's active agent so logout / the next login does
+  // not keep sending that agent's trading session_id (list/activate used to
+  // treat it as enough to surface or reclaim another user's agents).
+  localStorage.removeItem(ACTIVE_AGENT_KEY);
+  localStorage.removeItem(ACTIVE_AGENT_NAME_KEY);
+  window.ACTIVE_AGENT = null;
+  const browserOwnerId = localStorage.getItem(BROWSER_OWNER_KEY) || window.BROWSER_OWNER_ID;
+  if (browserOwnerId) {
+    localStorage.setItem('trading-session-id', browserOwnerId);
+    window.SESSION_ID = browserOwnerId;
+  }
   // The email-change form keeps its stage in a closure keyed to nobody: left
   // alone, the next user to sign in on this tab resumes the previous user's
   // half-finished change. Reset here -- every sign-out path (logout button,

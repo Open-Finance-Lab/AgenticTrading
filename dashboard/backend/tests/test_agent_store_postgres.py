@@ -514,14 +514,16 @@ def test_claim_and_reclaim_agent_postgres(pg_agent_store):
 
     pg_agent_store.claim_agent(created["agent_id"], owner_user_id=7)
     assert pg_agent_store.owns_agent(created, owner_user_id=7) is True
-    # COALESCE kept the original browser session (no owner_browser_session arg).
-    assert pg_agent_store.owns_agent(created, owner_browser_session="bs_old") is True
-
-    pg_agent_store.reclaim_agent(created["agent_id"], owner_browser_session="bs_new")
-    # reclaim overwrote it: the new session matches, the old one no longer does.
-    assert pg_agent_store.owns_agent(created, owner_browser_session="bs_new") is True
+    # Bound to a user: browser id alone must not grant ownership.
     assert pg_agent_store.owns_agent(created, owner_browser_session="bs_old") is False
-    # The user binding from claim survives reclaim (owner_user_id is COALESCEd).
+
+    pg_agent_store.reclaim_agent(
+        created["agent_id"], owner_user_id=7, owner_browser_session="bs_new"
+    )
+    # reclaim refreshed the browser stamp for the same user; browser-only
+    # access stays denied while the agent remains account-bound.
+    assert pg_agent_store.owns_agent(created, owner_browser_session="bs_new") is False
+    assert pg_agent_store.owns_agent(created, owner_browser_session="bs_old") is False
     assert pg_agent_store.owns_agent(created, owner_user_id=7) is True
 
 

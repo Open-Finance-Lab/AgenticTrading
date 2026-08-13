@@ -296,24 +296,40 @@ class PostgresAgentStore:
                             (owner_browser_session,),
                         )
                 elif owner_browser_session:
+                    # Logged-out list: only guest agents for this browser (see
+                    # SQLite twin for the full rationale).
                     _add_rows(
                         """
                         SELECT * FROM external_agents
                         WHERE owner_browser_session = %s
+                          AND owner_user_id IS NULL
                         ORDER BY created_at DESC
                         """,
                         (owner_browser_session,),
                     )
 
                 if trading_session_id:
-                    _add_rows(
-                        """
-                        SELECT * FROM external_agents
-                        WHERE session_id = %s
-                        ORDER BY created_at DESC
-                        """,
-                        (trading_session_id,),
-                    )
+                    if owner_user_id is not None:
+                        _add_rows(
+                            """
+                            SELECT * FROM external_agents
+                            WHERE session_id = %s
+                              AND owner_user_id = %s
+                            ORDER BY created_at DESC
+                            """,
+                            (trading_session_id, owner_user_id),
+                        )
+                    elif owner_browser_session:
+                        _add_rows(
+                            """
+                            SELECT * FROM external_agents
+                            WHERE session_id = %s
+                              AND owner_browser_session = %s
+                              AND owner_user_id IS NULL
+                            ORDER BY created_at DESC
+                            """,
+                            (trading_session_id, owner_browser_session),
+                        )
 
         # Each _add_rows call is independently sorted, but the groups are
         # appended query-by-query, so a recent unclaimed browser agent could
@@ -406,17 +422,33 @@ class PostgresAgentStore:
         owner_user_id: Optional[int] = None,
         owner_browser_session: Optional[str] = None,
     ) -> None:
+        """Bind ownership without stealing another account's agent."""
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE external_agents
-                    SET owner_user_id = COALESCE(%s, owner_user_id),
+                    SET owner_user_id = CASE
+                            WHEN owner_user_id IS NULL AND %s IS NOT NULL THEN %s
+                            ELSE owner_user_id
+                        END,
                         owner_browser_session = COALESCE(%s, owner_browser_session),
                         last_used_at = %s
                     WHERE agent_id = %s
+                      AND (
+                            owner_user_id IS NULL
+                            OR (%s IS NOT NULL AND owner_user_id = %s)
+                          )
                     """,
-                    (owner_user_id, owner_browser_session, _utcnow_iso(), agent_id),
+                    (
+                        owner_user_id,
+                        owner_user_id,
+                        owner_browser_session,
+                        _utcnow_iso(),
+                        agent_id,
+                        owner_user_id,
+                        owner_user_id,
+                    ),
                 )
 
     def reclaim_agent(
@@ -426,18 +458,33 @@ class PostgresAgentStore:
         owner_user_id: Optional[int] = None,
         owner_browser_session: Optional[str] = None,
     ) -> None:
-        """Re-bind an agent to the current browser/user (dashboard session proof)."""
+        """Re-bind browser ownership for a guest or already-owned agent."""
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """
                     UPDATE external_agents
-                    SET owner_user_id = COALESCE(%s, owner_user_id),
+                    SET owner_user_id = CASE
+                            WHEN owner_user_id IS NULL AND %s IS NOT NULL THEN %s
+                            ELSE owner_user_id
+                        END,
                         owner_browser_session = %s,
                         last_used_at = %s
                     WHERE agent_id = %s
+                      AND (
+                            owner_user_id IS NULL
+                            OR (%s IS NOT NULL AND owner_user_id = %s)
+                          )
                     """,
-                    (owner_user_id, owner_browser_session, _utcnow_iso(), agent_id),
+                    (
+                        owner_user_id,
+                        owner_user_id,
+                        owner_browser_session,
+                        _utcnow_iso(),
+                        agent_id,
+                        owner_user_id,
+                        owner_user_id,
+                    ),
                 )
 
     def rotate_api_key(self, agent_id: str) -> Optional[str]:
@@ -541,6 +588,13 @@ class PostgresAgentStore:
                 deleted = cur.rowcount > 0
         return deleted
 
+    def count_agents(self) -> int:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS n FROM external_agents")
+                row = cur.fetchone()
+        return int(row["n"] if row else 0)
+
     def owns_agent(
         self,
         agent: Dict[str, Any],
@@ -565,14 +619,16 @@ class PostgresAgentStore:
                 row = cur.fetchone()
         if not row:
             return False
-        if owner_user_id is not None and row["owner_user_id"] == owner_user_id:
-            return True
+        bound_user = row["owner_user_id"]
+        # Account-bound agents are only accessible to that account (see SQLite twin).
+        if bound_user is not None:
+            return owner_user_id is not None and bound_user == owner_user_id
         if owner_browser_session and row["owner_browser_session"] == owner_browser_session:
             return True
         # NOTE: session_id is NOT an ownership credential. It is an internal
         # trading-session identifier that is discoverable (it used to be returned
         # by the public /builtin listing), so matching it against a caller-supplied
         # session would let anyone who learned it take over the agent. Ownership
-        # requires owner_user_id or owner_browser_session (a real, private
-        # credential), or the agent API key (checked at the route layer).
+        # requires owner_user_id (for bound agents) or owner_browser_session (for
+        # still-unclaimed guest agents), or the agent API key (route layer).
         return False

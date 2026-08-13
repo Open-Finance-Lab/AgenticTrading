@@ -235,6 +235,62 @@ def test_claim_account_links_browser_agents(client):
     assert listed.json()["agents"][0]["agent_id"] == agent_id
 
 
+def test_logout_list_hides_account_bound_agents(client):
+    """Same browser after logout must not keep seeing the signed-in user's agents."""
+    browser_session = str(uuid.uuid4())
+    anon_headers = {"X-Session-Id": browser_session, "X-Browser-Id": browser_session}
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "bound-logout@example.com",
+            "display_name": "Bound Logout",
+            "password": "securepass123",
+        },
+    )
+    assert signup.status_code == 200
+    token = _cookie_session_token(client)
+    auth_headers = {
+        **anon_headers,
+        "Authorization": f"Bearer {token}",
+    }
+
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "account-agent"},
+        headers=auth_headers,
+    )
+    assert created.status_code == 200
+    agent_id = created.json()["agent"]["agent_id"]
+
+    listed_auth = client.get("/api/v1/agents", headers=auth_headers)
+    assert any(a["agent_id"] == agent_id for a in listed_auth.json()["agents"])
+
+    # Drop auth cookie/session so the next list is anonymous on the same browser.
+    client.cookies.clear()
+    listed_anon = client.get("/api/v1/agents", headers=anon_headers)
+    assert listed_anon.status_code == 200
+    assert all(a["agent_id"] != agent_id for a in listed_anon.json()["agents"])
+
+    # A second account on the same browser must not inherit the first's agents.
+    signup2 = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "other-logout@example.com",
+            "display_name": "Other Logout",
+            "password": "securepass123",
+        },
+    )
+    assert signup2.status_code == 200
+    token2 = _cookie_session_token(client)
+    listed_other = client.get(
+        "/api/v1/agents",
+        headers={**anon_headers, "Authorization": f"Bearer {token2}"},
+    )
+    assert listed_other.status_code == 200
+    assert all(a["agent_id"] != agent_id for a in listed_other.json()["agents"])
+
+
 def test_signed_in_list_includes_unclaimed_browser_foundation_agent(client):
     """Regression: logout shows guest starter; signup must still see it pre-claim."""
     browser_session = str(uuid.uuid4())

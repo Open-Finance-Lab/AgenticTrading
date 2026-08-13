@@ -349,24 +349,45 @@ class AgentStore:
                     (owner_browser_session,),
                 )
         elif owner_browser_session:
+            # Logged-out list: only *guest* agents for this browser. Account-
+            # bound rows keep owner_browser_session stamped at create time; if
+            # we matched on browser alone, logout would re-surface every agent
+            # the previous signed-in user created on this machine.
             _add_rows(
                 """
                 SELECT * FROM external_agents
                 WHERE owner_browser_session = ?
+                  AND owner_user_id IS NULL
                 ORDER BY created_at DESC
                 """,
                 (owner_browser_session,),
             )
 
         if trading_session_id:
-            _add_rows(
-                """
-                SELECT * FROM external_agents
-                WHERE session_id = ?
-                ORDER BY created_at DESC
-                """,
-                (trading_session_id,),
-            )
+            # session_id is not an ownership credential. Only fold in the
+            # active trading session when it already belongs to this caller
+            # (same user, or an unclaimed browser agent).
+            if owner_user_id is not None:
+                _add_rows(
+                    """
+                    SELECT * FROM external_agents
+                    WHERE session_id = ?
+                      AND owner_user_id = ?
+                    ORDER BY created_at DESC
+                    """,
+                    (trading_session_id, owner_user_id),
+                )
+            elif owner_browser_session:
+                _add_rows(
+                    """
+                    SELECT * FROM external_agents
+                    WHERE session_id = ?
+                      AND owner_browser_session = ?
+                      AND owner_user_id IS NULL
+                    ORDER BY created_at DESC
+                    """,
+                    (trading_session_id, owner_browser_session),
+                )
 
         conn.close()
         # Each _add_rows call is independently sorted, but the groups are
@@ -463,17 +484,38 @@ class AgentStore:
         owner_user_id: Optional[int] = None,
         owner_browser_session: Optional[str] = None,
     ) -> None:
+        """Bind ownership without stealing another account's agent.
+
+        ``owner_user_id`` is only written when the row is still unclaimed.
+        ``owner_browser_session`` may refresh on rows this user already owns
+        (or unclaimed rows). A different account's agent is a no-op.
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
             UPDATE external_agents
-            SET owner_user_id = COALESCE(?, owner_user_id),
+            SET owner_user_id = CASE
+                    WHEN owner_user_id IS NULL AND ? IS NOT NULL THEN ?
+                    ELSE owner_user_id
+                END,
                 owner_browser_session = COALESCE(?, owner_browser_session),
                 last_used_at = ?
             WHERE agent_id = ?
+              AND (
+                    owner_user_id IS NULL
+                    OR (? IS NOT NULL AND owner_user_id = ?)
+                  )
             """,
-            (owner_user_id, owner_browser_session, _utcnow_iso(), agent_id),
+            (
+                owner_user_id,
+                owner_user_id,
+                owner_browser_session,
+                _utcnow_iso(),
+                agent_id,
+                owner_user_id,
+                owner_user_id,
+            ),
         )
         conn.commit()
         conn.close()
@@ -485,18 +527,37 @@ class AgentStore:
         owner_user_id: Optional[int] = None,
         owner_browser_session: Optional[str] = None,
     ) -> None:
-        """Re-bind an agent to the current browser/user (dashboard session proof)."""
+        """Re-bind browser ownership for a guest or already-owned agent.
+
+        Refuses to touch a row owned by a different user — that path used to
+        let activate/restore steal agents across accounts on a shared browser.
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute(
             """
             UPDATE external_agents
-            SET owner_user_id = COALESCE(?, owner_user_id),
+            SET owner_user_id = CASE
+                    WHEN owner_user_id IS NULL AND ? IS NOT NULL THEN ?
+                    ELSE owner_user_id
+                END,
                 owner_browser_session = ?,
                 last_used_at = ?
             WHERE agent_id = ?
+              AND (
+                    owner_user_id IS NULL
+                    OR (? IS NOT NULL AND owner_user_id = ?)
+                  )
             """,
-            (owner_user_id, owner_browser_session, _utcnow_iso(), agent_id),
+            (
+                owner_user_id,
+                owner_user_id,
+                owner_browser_session,
+                _utcnow_iso(),
+                agent_id,
+                owner_user_id,
+                owner_user_id,
+            ),
         )
         conn.commit()
         conn.close()
@@ -610,6 +671,14 @@ class AgentStore:
         conn.close()
         return deleted
 
+    def count_agents(self) -> int:
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) AS n FROM external_agents")
+        row = cursor.fetchone()
+        conn.close()
+        return int(row["n"] if row else 0)
+
     def owns_agent(
         self,
         agent: Dict[str, Any],
@@ -634,16 +703,20 @@ class AgentStore:
         conn.close()
         if not row:
             return False
-        if owner_user_id is not None and row["owner_user_id"] == owner_user_id:
-            return True
+        bound_user = row["owner_user_id"]
+        # Account-bound agents are only accessible to that account. Matching
+        # owner_browser_session alone used to let any later login (or logout)
+        # on the same browser GET/activate/claim another user's agents.
+        if bound_user is not None:
+            return owner_user_id is not None and bound_user == owner_user_id
         if owner_browser_session and row["owner_browser_session"] == owner_browser_session:
             return True
         # NOTE: session_id is NOT an ownership credential. It is an internal
         # trading-session identifier that is discoverable (it used to be returned
         # by the public /builtin listing), so matching it against a caller-supplied
         # session would let anyone who learned it take over the agent. Ownership
-        # requires owner_user_id or owner_browser_session (a real, private
-        # credential), or the agent API key (checked at the route layer).
+        # requires owner_user_id (for bound agents) or owner_browser_session (for
+        # still-unclaimed guest agents), or the agent API key (route layer).
         return False
 
 
