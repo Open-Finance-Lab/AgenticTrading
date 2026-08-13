@@ -69,14 +69,29 @@ def _integer(value: Any) -> int | None:
 class CreditsService:
     def __init__(self, *, store=None, gateway=None):
         self.store = store or credits_store
-        self.gateway = gateway or StripeTestGateway(load_billing_config())
+        # app.py loads the project .env after importing api_router. Resolve the
+        # default gateway lazily so the first billing request sees that loaded
+        # environment instead of permanently caching an import-time empty config.
+        self.gateway = gateway
+
+    def _gateway(self):
+        if self.gateway is None:
+            self.gateway = StripeTestGateway(load_billing_config())
+        return self.gateway
 
     def get_balance(self, user_id: int) -> BalanceResult:
-        self.store.ensure_account(user_id)
+        account = self.store.ensure_account(user_id)
         balance = self.store.get_balance_micro(user_id)
+        gateway = self.gateway
+        if gateway is None:
+            config = load_billing_config()
+        else:
+            config = getattr(gateway, "config", None)
         return BalanceResult(
             balance_micro=balance,
             display_credits=format_credits(balance),
+            account_status=account["status"],
+            billing_available=(True if config is None else bool(config.ready)),
         )
 
     def create_checkout(self, user_id: int, request: CheckoutRequest) -> CheckoutResult:
@@ -91,7 +106,7 @@ class CreditsService:
             credits_micro=credits_micro,
         )
 
-        session = self.gateway.create_checkout_session(
+        session = self._gateway().create_checkout_session(
             order_id=order["id"],
             user_reference=str(user_id),
             amount_usd_cents=order["amount_usd_cents"],
@@ -137,7 +152,7 @@ class CreditsService:
             amount_usd_cents=request.amount_usd_cents,
             credits_micro=credits_micro,
         )
-        result = self.gateway.create_refund(
+        result = self._gateway().create_refund(
             refund_id=reservation["id"],
             payment_intent_id=payment_intent_id,
             amount_usd_cents=reservation["amount_usd_cents"],
@@ -161,7 +176,7 @@ class CreditsService:
         )
 
     def handle_webhook(self, payload: bytes, signature_header: str) -> WebhookResult:
-        event = self.gateway.verify_webhook(payload, signature_header)
+        event = self._gateway().verify_webhook(payload, signature_header)
         if event.livemode:
             return self._record_event(
                 event,

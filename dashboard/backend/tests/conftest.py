@@ -170,6 +170,7 @@ def _reset_shared_scale_state(monkeypatch):
     from dashboard.backend.domain.agents import auth_cache
     from dashboard.backend import db_pool
     from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.routers import credits as credits_router
     from dashboard.backend.api.routers import leaderboard as leaderboard_router
 
     monkeypatch.setattr(db_pool, "POOL_TIMEOUT_SECONDS", 1.0)
@@ -187,6 +188,9 @@ def _reset_shared_scale_state(monkeypatch):
     # refresh budget would otherwise be consumed cumulatively across the suite
     # and later tests would start seeing 429s.
     leaderboard_router._daily_refresh_rate_limiter.reset()
+    credits_router._CHECKOUT_LIMITER.reset()
+    credits_router._ORDER_POLL_LIMITER.reset()
+    credits_router._ADMIN_REFUND_LIMITER.reset()
     yield
     # Best-effort drain so a job enqueued in this test doesn't leak into the
     # next. Note pytest tears fixtures down LIFO, so a test's own monkeypatches

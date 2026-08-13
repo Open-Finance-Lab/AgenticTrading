@@ -228,9 +228,27 @@ def test_balance_format_is_exact_and_not_float_based(tmp_path):
     assert service.get_balance(1).model_dump() == {
         "balance_micro": 0,
         "display_credits": "0.000000",
+        "account_status": "active",
+        "billing_available": True,
     }
     assert format_credits(10_000_001) == "10.000001"
     assert format_credits(-4_000_000) == "-4.000000"
+
+
+def test_default_gateway_reads_environment_after_service_construction(
+    tmp_path, monkeypatch
+):
+    service = CreditsService(store=_store(tmp_path), gateway=None)
+    monkeypatch.setenv("ATL_STRIPE_TEST_BILLING_ENABLED", "1")
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_loaded_after_import")
+    monkeypatch.setenv("STRIPE_WEBHOOK_SECRET", "whsec_loaded_after_import")
+    monkeypatch.setenv("PUBLIC_APP_URL", "https://atl.example")
+
+    balance = service.get_balance(1)
+
+    assert balance.billing_available is True
+    assert service.gateway is None
+    assert service._gateway().config.ready is True
 
 
 def test_checkout_retry_reuses_order_and_stripe_idempotency_key(tmp_path):

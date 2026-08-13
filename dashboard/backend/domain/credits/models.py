@@ -85,6 +85,8 @@ class BalanceResult(BaseModel):
 
     balance_micro: int
     display_credits: str
+    account_status: str
+    billing_available: bool
 
 
 class CheckoutResult(BaseModel):

@@ -15,6 +15,7 @@ from fastapi.routing import APIRoute
 from dashboard.backend.api.routers import admin as admin_canon
 from dashboard.backend.api.routers import backtests as backtests_canon
 from dashboard.backend.api.routers import config as config_canon
+from dashboard.backend.api.routers import credits as credits_canon
 from dashboard.backend.api.routers import health as health_canon
 from dashboard.backend.api.routers import market as market_canon
 from dashboard.backend import middleware as middleware_mod
@@ -35,6 +36,15 @@ EXPECTED_CONFIG_ROUTES = {
 EXPECTED_ADMIN_ROUTES = {
     ("DELETE", "/admin/runs/{run_id}", "admin_delete_run"),
 }
+EXPECTED_CREDITS_ROUTES = {
+    ("GET", "/credits/balance", "get_credit_balance"),
+    ("GET", "/credits/ledger", "get_credit_ledger"),
+    ("POST", "/credits/checkout-sessions", "create_credit_checkout"),
+    ("GET", "/credits/orders/{order_id}", "get_credit_order"),
+    ("GET", "/admin/credits/orders", "get_admin_credit_orders"),
+    ("POST", "/admin/credits/refunds", "create_admin_credit_refund"),
+    ("POST", "/webhooks/stripe", "stripe_webhook"),
+}
 EXPECTED_BACKTESTS_ROUTES = {
     ("POST", "/backtest/run", "run_backtest_endpoint"),
     ("GET", "/backtest/status", "get_backtest_status"),
@@ -54,6 +64,13 @@ EXPECTED_BACKTESTS_ROUTES = {
 
 # The complete, frozen external route contract (method, path) — no HEAD.
 EXPECTED_FULL_CONTRACT = {
+    ("GET", "/api/credits/balance"),
+    ("GET", "/api/credits/ledger"),
+    ("POST", "/api/credits/checkout-sessions"),
+    ("GET", "/api/credits/orders/{order_id}"),
+    ("GET", "/api/admin/credits/orders"),
+    ("POST", "/api/admin/credits/refunds"),
+    ("POST", "/api/webhooks/stripe"),
     ("GET", "/api/strategies/{code}"),
     ("POST", "/api/strategies"),
     ("GET", "/"),
@@ -242,6 +259,10 @@ def test_market_router_contract():
 
 def test_config_router_contract():
     assert _route_triples(config_canon.router) == EXPECTED_CONFIG_ROUTES
+
+
+def test_credits_router_contract():
+    assert _route_triples(credits_canon.router) == EXPECTED_CREDITS_ROUTES
 
 
 def test_admin_router_contract():
