@@ -811,6 +811,7 @@ class HourlyBacktester:
                         "suspended",
                         "limit_up_buy_blocked",
                         "limit_down_sell_blocked",
+                        "market_rule_unavailable",
                     )
                 }
                 market_rule_rejections = {

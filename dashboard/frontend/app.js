@@ -6203,6 +6203,7 @@ function formatOrderExecutionReason(reason, strategyReason = '') {
         suspended: 'Suspended',
         limit_up_buy_blocked: 'Buy blocked at upper limit',
         limit_down_sell_blocked: 'Sell blocked at lower limit',
+        market_rule_unavailable: 'No market rule for this symbol',
     };
     const code = String(reason || '').trim();
     if (labels[code]) return labels[code];
@@ -6282,6 +6283,10 @@ function normalizeOrderRecord(record) {
     };
 }
 
+// Only rows a rule actually spoke to. An ordinary fill on an ordinary day
+// carries the same audit payload as a blocked one, so rendering whenever the
+// official close is present puts a date-and-price line under every single
+// A-share order and buries the handful that mean something.
 function renderMarketRuleAudit(order) {
     if (!order.marketRuleDate) return '';
     const details = [];
@@ -6292,10 +6297,10 @@ function renderMarketRuleAudit(order) {
         const side = order.marketRuleClosingLimitState === 'upper' ? 'upper' : 'lower';
         details.push(`Official close: ${side} limit`);
     }
+    if (!details.length) return '';
     if (Number.isFinite(order.marketRuleOfficialClose)) {
         details.push(`¥${order.marketRuleOfficialClose.toFixed(2)}`);
     }
-    if (!details.length) return '';
     return `<div class="trading-log-native">${escapeHtml(order.marketRuleDate)} · ${escapeHtml(details.join(' · '))}</div>`;
 }
 
@@ -6727,6 +6732,7 @@ function renderBacktestRunConfig(
         suspended: 'Suspended',
         limit_up_buy_blocked: 'Upper-limit buys',
         limit_down_sell_blocked: 'Lower-limit sells',
+        market_rule_unavailable: 'Missing rule',
     };
     const ruleRejectionParts = Object.entries(marketRuleRejections || {})
         .filter(([, count]) => Number(count) > 0)

@@ -448,8 +448,6 @@ def execute_actions(
         market_rule = None
         if market_rules is not None and action_type in {"buy", "sell"}:
             market_rule = market_rules.get(symbol)
-            if market_rule is None:
-                raise ValueError(f"market rule is missing for symbol={symbol}")
 
             reference_price = None
             if symbol in market_data:
@@ -457,6 +455,41 @@ def execute_actions(
             elif fallback_prices is not None:
                 reference_price = fallback_prices.get(symbol)
             display_price = 0.0 if reference_price is None else reference_price
+
+            if market_rule is None:
+                # Fail closed, but do not take the run down with it. Every
+                # producer filters to the allowed universe before reaching here,
+                # so this is unreachable today — and if one ever stops, letting
+                # a symbol trade ungated would defeat the calendar, while
+                # raising would discard every bar already simulated for a single
+                # stray action. Reject it and leave a record instead.
+                _record_rejection(
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    action=action_type,
+                    requested_shares=shares,
+                    executed_shares=0,
+                    unfilled_shares=shares,
+                    reason="market_rule_unavailable",
+                )
+                _record_order_event(
+                    timestamp=timestamp,
+                    symbol=symbol,
+                    side=action_type.upper(),
+                    requested_shares=shares,
+                    executed_shares=0,
+                    price=display_price,
+                    status="rejected",
+                    reason="market_rule_unavailable",
+                    strategy_reason=reason,
+                    costs=(
+                        _zero_transaction_costs(display_price)
+                        if costs_enabled
+                        else None
+                    ),
+                )
+                continue
+
             current_market_rule_audit = market_rule.to_audit()
 
             if market_rule.suspended:

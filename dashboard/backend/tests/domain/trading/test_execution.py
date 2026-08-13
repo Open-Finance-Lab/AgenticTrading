@@ -1298,3 +1298,31 @@ def test_sellable_positions_is_none_without_t_plus_one():
     pm = bha.PortfolioManager(100000)
     pm.available_positions = {"AAPL": 0}
     assert pm.sellable_positions is None
+
+
+def test_symbol_outside_the_rule_calendar_is_rejected_not_raised():
+    """A stray symbol must not trade ungated, and must not kill the run either.
+
+    Every producer filters to the allowed universe before it gets here, so this
+    is unreachable today. If one ever stops, raising would discard every bar
+    already simulated for a single action — and the rejection record is what
+    makes the gap visible instead of silent.
+    """
+    result = _run_ashare(
+        [{"symbol": "600520.SH", "action": "buy", "shares": 100}],
+        cash=100000,
+        timestamp=datetime(2026, 4, 1, 10, 30, tzinfo=CN),
+        market_data={"600519.SH": _row(100.0), "600520.SH": _row(50.0)},
+        market_rule=_market_rule(),
+    )
+
+    assert result["cash"] == 100000
+    assert result["positions"] == {}
+    assert result["trades"] == []
+    assert result["rejected_orders"][0]["reason"] == "market_rule_unavailable"
+    assert result["rejected_orders"][0]["symbol"] == "600520.SH"
+    event = result["order_events"][0]
+    assert event["status"] == "rejected"
+    assert event["reason"] == "market_rule_unavailable"
+    # No rule means no audit to attach; the row must not claim one.
+    assert "market_rule_date" not in event
