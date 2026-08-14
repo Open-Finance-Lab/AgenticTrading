@@ -7,7 +7,7 @@ import pytest
 
 import dashboard.backend.users as users_module
 
-# >= admin_users._MIN_BOOTSTRAP_SECRET_LEN (32). A shorter value is now
+# >= admin_users._BOOTSTRAP_MIN_LENGTH (32). A shorter value is now
 # refused as if unset, so every bootstrap test has to use a realistic one.
 _SECRET = "correct-secret-value-long-enough-to-pass"
 _WRONG = "wrong-secret-value-long-enough-to-pass!!"
@@ -446,7 +446,7 @@ def test_bootstrap_refuses_a_weak_secret(isolated_auth, monkeypatch, capsys):
     from dashboard.backend.api.routers import admin_users as admin_mod
 
     weak = "hunter2!"
-    assert len(weak) < admin_mod._MIN_BOOTSTRAP_SECRET_LEN
+    assert len(weak) < admin_mod._BOOTSTRAP_MIN_LENGTH
     monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", weak)
     client, store = isolated_auth
     user = _signup(client, "boot-weak@example.com")

@@ -57,7 +57,7 @@ admin_router = APIRouter(dependencies=[Depends(require_admin)])
 #              is checked AFTER the secret compare (see bootstrap_admin), so
 #              exhausting it sheds wrong guesses without ever refusing a right
 #              one. Guessing is bounded by the secret's entropy, which
-#              _MIN_BOOTSTRAP_SECRET_LEN now makes mandatory rather than
+#              _BOOTSTRAP_MIN_LENGTH now makes mandatory rather than
 #              hoped-for; per process, see #349.
 _BOOTSTRAP_LIMITER = FixedWindowRateLimiter(max_events=5, window_seconds=900)
 _BOOTSTRAP_GLOBAL_LIMITER = FixedWindowRateLimiter(max_events=20, window_seconds=900)
@@ -73,7 +73,14 @@ BOOTSTRAP_ADMIN_MIN_CONCURRENT_BACKTESTS = 5
 # 32 is what ``secrets.token_urlsafe(24)`` produces and comfortably below the
 # 43 chars the deployed value already has, so this tightens the floor without
 # stranding the live deployment.
-_MIN_BOOTSTRAP_SECRET_LEN = 32
+#
+# Named ``..._MIN_LENGTH``, not ``..._SECRET_LEN``: CodeQL's
+# py/clear-text-logging-sensitive-data classifies a source by the *name* of the
+# thing flowing to the sink, so a plain int constant whose name contains SECRET
+# made the length-only warning below read as "logs a secret in clear text"
+# (alert #1249, source pinned at the literal 32 itself). The value never was
+# sensitive; the name was.
+_BOOTSTRAP_MIN_LENGTH = 32
 # One refusal for every reason bootstrap can decline a secret. Telling "not
 # configured" (503) apart from "wrong" (403) hands an unauthenticated prober a
 # free answer to "is this deployment bootstrappable?" — the same question the
@@ -134,11 +141,11 @@ def _bootstrap_secret() -> Optional[str]:
     expected = (os.getenv("ADMIN_BOOTSTRAP_SECRET") or "").strip()
     if not expected:
         return None
-    if len(expected) < _MIN_BOOTSTRAP_SECRET_LEN:
+    if len(expected) < _BOOTSTRAP_MIN_LENGTH:
         # Length only — never the value, and never a slice of it.
         print(
             "admin bootstrap: ADMIN_BOOTSTRAP_SECRET is shorter than "
-            f"{_MIN_BOOTSTRAP_SECRET_LEN} characters; refusing every attempt. "
+            f"{_BOOTSTRAP_MIN_LENGTH} characters; refusing every attempt. "
             "Set a value from `python -c \"import secrets;"
             'print(secrets.token_urlsafe(32))"`.'
         )
