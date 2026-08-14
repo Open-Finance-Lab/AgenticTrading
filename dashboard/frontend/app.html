@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=101">
+    <link rel="stylesheet" href="styles.css?v=111">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -36,7 +36,13 @@
             playground: { page: 'playground', playgroundTab: 'agents' },
             'my-algo': { page: 'playground', playgroundTab: 'agents' },
             contest: { page: 'competition', competitionTab: 'leaderboard' },
-            daily: { page: 'competition', competitionTab: 'daily' },
+            season: { page: 'competition', competitionTab: 'season' },
+            // The Daily Leaderboard was retired in favour of the Live Season
+            // board. Kept as an alias so links already in the wild (Discord,
+            // the nightly-refresh runbook) land on its successor rather than
+            // silently falling through to the Competition board.
+            daily: { page: 'competition', competitionTab: 'season' },
+            live: { page: 'competition', competitionTab: 'season' },
             competition: { page: 'competition', competitionTab: 'leaderboard' },
             leaderboard: { page: 'competition', competitionTab: 'leaderboard' },
             participants: { page: 'competition', competitionTab: 'participants' },
@@ -51,6 +57,13 @@
         function migrateSavedNavState(saved) {
             if (saved && saved.page === 'playground' && saved.playgroundTab === 'marketplace') {
                 return { page: 'community' };
+            }
+            // The Daily Leaderboard became the Live Season board. Anyone whose
+            // last visit was that tab has 'daily' in localStorage; left alone it
+            // matches no boot-CSS rule and no panel, so Competition paints empty.
+            if (saved && saved.page === 'competition'
+                && (saved.competitionTab === 'daily' || saved.competitionTab === 'live')) {
+                return Object.assign({}, saved, { competitionTab: 'season' });
             }
             return saved;
         }
@@ -138,11 +151,11 @@
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .main-container.playground-backtest-panel { display: grid !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #paperTradingView { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"] .competition-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
-    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="daily"] .competition-subtabs [data-competition-tab="daily"],
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="season"] .competition-subtabs [data-competition-tab="season"],
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="leaderboard"] .competition-subtabs [data-competition-tab="leaderboard"],
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="participants"] .competition-subtabs [data-competition-tab="participants"],
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="about"] .competition-subtabs [data-competition-tab="about"] { background: var(--info-color); color: white; }
-    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="daily"] #leaderboardView,
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="season"] #leaderboardView,
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="leaderboard"] #leaderboardView { display: flex !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="participants"] #competitionParticipantsPanel { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="about"] #competitionAboutPanel { display: block !important; }
@@ -588,7 +601,7 @@
 
                         <article class="home-module home-module--ranking" id="homeModuleRanking">
                             <header class="home-module-head">
-                                <h3 class="home-module-title">Leaderboard</h3>
+                                <h3 class="home-module-title">Competition Leaderboard</h3>
                             </header>
                             <div class="hm-rank-meta">
                                 <span>Backtest window · 2026-04-15 → 2026-05-15</span>
@@ -600,6 +613,14 @@
                             <ol class="home-module-rank-list" id="homeModuleRankList">
                                 <li class="home-module-rank-empty">Loading rankings…</li>
                             </ol>
+                            <p class="hm-rank-sample" id="homeModuleRankSample" hidden>
+                                Sample standings &mdash; live rankings could not be loaded.
+                            </p>
+                            <p class="hm-rank-season">
+                                Every model above ran one fixed window. The
+                                <button class="hm-inline-link" id="homeModuleSeasonBtn" type="button">Live Season</button>
+                                board advances nightly on bars nobody has seen yet.
+                            </p>
                             <button class="hm-footer-btn" id="homeModuleRankingBtn" type="button">Explore leaderboard</button>
                         </article>
                         </div>
@@ -1455,7 +1476,7 @@
     <div id="competitionView" class="page-view competition-view" style="display: none;">
         <div class="subtab-bar competition-subtabs">
             <button class="subtab-btn active" data-competition-tab="leaderboard">Competition Leaderboard</button>
-            <button class="subtab-btn" data-competition-tab="daily">Daily Leaderboard</button>
+            <button class="subtab-btn" data-competition-tab="season">Live Season</button>
             <button class="subtab-btn" data-competition-tab="participants">Participating Teams</button>
             <button class="subtab-btn" data-competition-tab="about">About</button>
         </div>
@@ -1475,8 +1496,11 @@
                     <p class="about-text">SecureFinAI Contest 2026 is a paper-trading competition for AI-powered agents. The contest is currently in <strong>Preseason</strong>. Participating teams join when the season starts (registration Aug 2026).</p>
                 </div>
                 <div class="section-card">
-                    <h3 class="section-title">Daily Leaderboard</h3>
-                    <p class="about-text">The Daily Leaderboard is the same chart + standings UI as Competition, but each entry is an hourly backtest over the <strong>last completed US cash session</strong> (after 16:00 ET that weekday; before the close, the prior session). Baseline and index lines refresh automatically on load. New AI entries appear when the leaderboard next updates.</p>
+                    <h3 class="section-title">Live Season</h3>
+                    <p class="about-text">A season runs <strong>two weeks</strong>, Monday to Friday. Each night after the 16:00 ET cash close, every entry is advanced one trading day: the model sees that day's real bars for the first time and its portfolio carries forward from where the previous day left it. Nobody &mdash; including us &mdash; knows what the next bar does when an entry locks, which is what separates a season from the fixed-window Competition board.</p>
+                    <p class="about-text">Seasons do not accumulate. Every season starts flat at $10,000, ranks only the days inside it, and ends. Entries do not carry over, so joining is a per-season decision.</p>
+                    <p class="about-text">If a night's advance fails, that day is <strong>marked as a gap</strong> and positions carry forward unchanged. It is never quietly re-run days later against a market that has already moved.</p>
+                    <p class="about-text about-text-muted">The season engine is not deployed yet. Until it is, this tab renders in preview and says so at the top of the board.</p>
                 </div>
                 <div class="section-card">
                     <h3 class="section-title">Competition Leaderboard</h3>
@@ -1540,7 +1564,43 @@
                     <a class="discord-nav-btn discord-nav-btn-sm" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                 </div>
             </div>
-            <p id="leaderboardDailyNotice" class="leaderboard-daily-notice" hidden></p>
+            <!-- Live Season chrome. Hidden entirely on the Competition board:
+                 every element below describes a season, and a season is the one
+                 thing the fixed contest window is not. -->
+            <div id="seasonPreviewBanner" class="season-preview-banner" role="status" hidden></div>
+
+            <section id="seasonStrip" class="season-strip" aria-label="Season status" hidden>
+                <div class="season-strip-top">
+                    <div class="season-identity">
+                        <span class="season-badge" id="seasonBadge">Season —</span>
+                        <span class="season-dates" id="seasonDates">—</span>
+                    </div>
+                    <div class="season-entry-state" id="seasonEntryState">
+                        <span class="season-entry-dot" aria-hidden="true"></span>
+                        <span id="seasonEntryText">—</span>
+                    </div>
+                </div>
+                <div class="season-strip-progress">
+                    <div class="season-progress-track" role="progressbar" id="seasonProgressBar"
+                         aria-valuemin="0" aria-valuemax="10" aria-valuenow="0"
+                         aria-label="Trading days completed this season">
+                        <div class="season-progress-fill" id="seasonProgressFill" style="width: 0%"></div>
+                    </div>
+                    <span class="season-progress-label" id="seasonProgressLabel">—</span>
+                    <span class="season-next-advance" id="seasonNextAdvance">—</span>
+                </div>
+                <p class="season-reset-note">
+                    Every season starts flat at $10,000 and ranks only the days inside it.
+                    Entries do not carry over &mdash; re-enter each season.
+                </p>
+            </section>
+
+            <!-- Missed nights are a hole in a cumulative curve, so they are stated
+                 rather than smoothed over. Copy differs by failure_kind on purpose:
+                 "the market was flat" and "our job died" must never read alike. -->
+            <ul id="seasonGaps" class="season-gaps" aria-label="Days this season did not advance" hidden></ul>
+
+            <p id="leaderboardBoardNotice" class="leaderboard-board-notice" hidden></p>
             <!-- Combined Header with Stats + Controls -->
             <div class="leaderboard-header-bar compact">
                 <!-- Left: Stats -->
@@ -1840,9 +1900,9 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=27" defer></script>
-    <script src="app.js?v=101" defer></script>
-    <script src="js/leaderboard.js?v=19" defer></script>
-    <script src="home-page.js?v=37" defer></script>
+    <script src="app.js?v=110" defer></script>
+    <script src="js/leaderboard.js?v=26" defer></script>
+    <script src="home-page.js?v=44" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads

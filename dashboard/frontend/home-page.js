@@ -592,6 +592,12 @@ function navigateToLeaderboard() {
     }
 }
 
+function navigateToSeasonBoard() {
+    if (typeof navigateToPage === 'function') {
+        navigateToPage('competition', { competitionTab: 'season' });
+    }
+}
+
 
 
 function initLandingPlaygroundChat() {
@@ -1451,7 +1457,17 @@ async function loadHomeLeaderboardModule() {
         return homeFormatMoney(n, 0);
     }
 
-    function renderEntries(entries) {
+    // The mock roster below is real model names with invented numbers. Rendered
+    // unmarked it is indistinguishable from live standings, so every fallback
+    // path flips this note on: a visitor who cannot reach the API should not be
+    // shown five plausible returns with no way to tell they are made up.
+    function markSample(isSample) {
+        const note = document.getElementById('homeModuleRankSample');
+        if (note) note.hidden = !isSample;
+    }
+
+    function renderEntries(entries, { sample = false } = {}) {
+        markSample(sample);
         if (!entries.length) {
             list.innerHTML = '<li class="home-module-rank-empty">No model rankings yet.</li>';
             return;
@@ -1478,20 +1494,20 @@ async function loadHomeLeaderboardModule() {
 
     try {
         if (typeof API === 'undefined' || typeof API_BASE === 'undefined') {
-            renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD));
+            renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: true });
             return;
         }
         const payload = await API.get(`${API_BASE}/api/v1/leaderboard?t=${Date.now()}`);
         const models = homeModelEntries(payload.entries || []);
 
         if (!models.length) {
-            renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD));
+            renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: true });
             return;
         }
         renderEntries(models);
     } catch (error) {
         console.warn('Home leaderboard module failed:', error.message);
-        renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD));
+        renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: true });
     }
 }
 
@@ -1782,6 +1798,7 @@ function initHomeModules() {
     });
     document.getElementById('homeModuleRankingBtn')?.addEventListener('click', navigateToLeaderboard);
     document.getElementById('homeViewLeaderboardBtn')?.addEventListener('click', navigateToLeaderboard);
+    document.getElementById('homeModuleSeasonBtn')?.addEventListener('click', navigateToSeasonBoard);
     const openFinSearch = () => window.open('https://agenticfinsearch.org/', '_blank', 'noopener,noreferrer');
     document.getElementById('homeModuleMarketBtn')?.addEventListener('click', openFinSearch);
     document.getElementById('homeModuleMarketBtn')?.addEventListener('keydown', (event) => {

@@ -7643,7 +7643,7 @@ function viewParamForNavState(state) {
         return 'agents';
     }
     if (state.page === 'competition') {
-        if (state.competitionTab === 'daily') return 'daily';
+        if (state.competitionTab === 'season') return 'season';
         if (state.competitionTab === 'participants') return 'participants';
         if (state.competitionTab === 'about') return 'about';
         return 'leaderboard';
@@ -7944,13 +7944,18 @@ function showPlaygroundPanel(tab) {
 }
 
 function showCompetitionPanel(tab) {
+    // The Daily Leaderboard was replaced by the Live Season board. A saved nav
+    // state or a cached boot script can still hand us the old key, and an
+    // unrecognised tab here shows no panel at all — a blank Competition page.
+    if (tab === 'daily' || tab === 'live') tab = 'season';
+
     competitionTab = tab;
     updateCompetitionSubtabs();
 
     const leaderboard = document.getElementById('leaderboardView');
     const participants = document.getElementById('competitionParticipantsPanel');
     const about = document.getElementById('competitionAboutPanel');
-    const showBoard = tab === 'leaderboard' || tab === 'daily';
+    const showBoard = tab === 'leaderboard' || tab === 'season';
 
     if (leaderboard) leaderboard.style.display = showBoard ? 'flex' : 'none';
     if (participants) participants.style.display = tab === 'participants' ? 'block' : 'none';
@@ -7958,7 +7963,7 @@ function showCompetitionPanel(tab) {
 
     if (showBoard) {
         currentMode = 'contest';
-        loadLeaderboardData(tab === 'daily' ? 'daily' : 'contest');
+        loadLeaderboardData(tab === 'season' ? 'season' : 'contest');
     } else {
         currentMode = tab;
     }
@@ -8001,7 +8006,15 @@ function navigateToPage(page, options = {}) {
     currentPage = page;
 
     if (options.playgroundTab) playgroundTab = options.playgroundTab;
-    if (options.competitionTab) competitionTab = options.competitionTab;
+    // Normalise the retired Daily key here rather than only in
+    // showCompetitionPanel: the boot stylesheet keys off data-nav-competition-tab,
+    // so a saved 'daily' written to the attribute below would leave the board
+    // hidden through first paint even though the panel is shown a tick later.
+    if (options.competitionTab) {
+        competitionTab = (options.competitionTab === 'daily' || options.competitionTab === 'live')
+            ? 'season'
+            : options.competitionTab;
+    }
 
     const html = document.documentElement;
     html.setAttribute('data-nav-page', page);

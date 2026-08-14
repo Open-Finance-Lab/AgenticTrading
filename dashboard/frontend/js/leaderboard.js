@@ -10,7 +10,13 @@ let equityCurvesData = null;
 let equityCurvesChartInstance = null;
 let currentChartView = 'absolute'; // default: money ($). 'cumulative' = % return
 let leaderboardListenersInitialized = false;
-let dailyLeaderboardPollTimer = null;
+let liveBoardPollTimer = null;
+// The board the user asked for, which is NOT always the board the API returned.
+// `_normalize_period` server-side coerces any period it does not know back to
+// 'contest', so asking for a season the backend cannot serve yields a perfectly
+// valid contest payload with no error anywhere. Keeping the request alongside
+// the response is the only thing that can tell those two apart.
+let requestedBoardPeriod = 'contest';
 
 // Chart visual-hierarchy state
 let hiddenSeries = new Set();
@@ -257,6 +263,37 @@ function setCurvePickerOpen(open) {
   if (open) renderCurvePicker();
 }
 
+// A season is two calendar weeks of US cash sessions, Monday through Friday.
+const SEASON_TRADING_DAYS = 10;
+
+/** The board the user is looking at, from the request rather than the response. */
+function isSeasonBoard() {
+  return requestedBoardPeriod === 'season';
+}
+
+/** True when the Live Season tab is rendering something that is not a season.
+ *
+ * The server coerces an unknown ``period`` back to 'contest' instead of 4xx-ing,
+ * so this is a perfectly successful HTTP 200 carrying the wrong board. Without
+ * an explicit comparison, "the season engine is not deployed" and "here are the
+ * live season standings" render byte-identically — the exact failure shape
+ * CLAUDE.md's fail-closed-is-not-fail-visible section is about.
+ */
+function isSeasonPreview(payload) {
+  return isSeasonBoard() && (payload || {}).period !== 'season';
+}
+
+function formatRelativeFromNow(iso) {
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return '';
+  const minutes = Math.round((then - Date.now()) / 60000);
+  if (minutes <= 0) return 'due now';
+  if (minutes < 60) return `in ${minutes} min`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `in ${hours}h`;
+  return `in ${Math.round(hours / 24)}d`;
+}
+
 function updateLeaderboardHeader(payload) {
   const entries = payload.entries || [];
   // Best LLM / provided model by cumulative return (not overall board rank).
@@ -271,8 +308,35 @@ function updateLeaderboardHeader(payload) {
   const leaderEl = document.getElementById('leaderTeam');
   const standingsEl = document.getElementById('leaderboardStandingsTitle');
   const subtitleEl = document.querySelector('#leaderboardView .contest-subtitle');
+  const titleEl = document.querySelector('#leaderboardView .contest-title');
+  const badgeEl = document.querySelector('#leaderboardView .contest-live-badge');
 
-  if (totalEl) totalEl.textContent = payload.phase_label || (payload.period === 'daily' ? 'Daily' : 'Preseason');
+  const season = payload.season || null;
+  const seasonBoard = isSeasonBoard();
+
+  if (titleEl) {
+    titleEl.textContent = seasonBoard
+      ? (season?.label || (season?.number ? `Season ${season.number}` : 'Live Season'))
+      : 'SecureFinAI Contest 2026';
+  }
+  if (badgeEl) {
+    const state = seasonBoard
+      ? (isSeasonPreview(payload) ? 'preview' : (season?.status || 'upcoming'))
+      : 'upcoming';
+    badgeEl.textContent = {
+      preview: 'Preview',
+      running: 'Running',
+      upcoming: 'Upcoming',
+      closed: 'Closed',
+    }[state] || 'Upcoming';
+    badgeEl.className = `status-badge contest-live-badge ${state}`;
+  }
+
+  if (totalEl) {
+    totalEl.textContent = seasonBoard
+      ? (isSeasonPreview(payload) ? 'Preview' : 'Season')
+      : (payload.phase_label || 'Preseason');
+  }
   if (windowEl) windowEl.textContent = payload.window?.label || '—';
   if (updatedEl) {
     updatedEl.textContent = payload.updated_at
@@ -289,26 +353,176 @@ function updateLeaderboardHeader(payload) {
     standingsEl.textContent = payload.standings_label || 'Ranking';
   }
   if (subtitleEl) {
-    subtitleEl.textContent = payload.period === 'daily'
-      ? formatDailyBoardSubtitle(payload)
+    subtitleEl.textContent = seasonBoard
+      ? formatLiveBoardSubtitle(payload)
       : 'Sep 1 – Oct 30, 2026';
   }
-  renderDailyLeaderboardNotice(payload);
+  renderSeasonPreviewBanner(payload);
+  renderSeasonStrip(payload);
+  renderSeasonGaps(payload);
+  renderLiveBoardNotice(payload);
   updateCurvePickerCount();
 }
 
-function formatDailyBoardSubtitle(payload) {
+function formatLiveBoardSubtitle(payload) {
+  const season = payload.season || null;
+  if (season?.start_date && season?.end_date) {
+    return `${formatShortDate(season.start_date)} – ${formatShortDate(season.end_date)} · advances nightly after the 16:00 ET cash session`;
+  }
   const date = payload.daily_status?.trading_date || payload.window?.start_date;
   if (date) {
-    return `Daily window · ${date} (last completed US cash session)`;
+    return `Advances nightly after the 16:00 ET cash session · last completed ${date}`;
   }
-  return 'Daily window · last completed US cash session';
+  return 'Advances nightly after the 16:00 ET cash session';
 }
 
-function renderDailyLeaderboardNotice(payload) {
-  const host = document.getElementById('leaderboardDailyNotice');
+/** The load-bearing honesty control for this tab.
+ *
+ * Everything else on the board renders identically whether or not a season ran,
+ * because the entry/curve/table shapes are shared with the Competition board.
+ * This banner is the only element that distinguishes them, so it is written
+ * first and deleted last.
+ */
+function renderSeasonPreviewBanner(payload) {
+  const host = document.getElementById('seasonPreviewBanner');
   if (!host) return;
-  if (payload.period !== 'daily') {
+  host.textContent = '';
+  if (!isSeasonPreview(payload)) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  const lead = document.createElement('strong');
+  lead.textContent = 'Preview — the season engine is not deployed.';
+  const body = document.createElement('span');
+  const label = payload.window?.label || 'the Competition window';
+  body.textContent = ` The curves below are the Competition board's fixed window (${label}), shown so this layout can be reviewed. No season has been run: nothing here is a live standing, and no ranking on this tab counts.`;
+  host.append(lead, body);
+}
+
+function renderSeasonStrip(payload) {
+  const host = document.getElementById('seasonStrip');
+  if (!host) return;
+  const season = payload.season || null;
+  if (!isSeasonBoard()) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  host.classList.toggle('is-placeholder', !season);
+
+  const total = Number(season?.trading_days_total) || SEASON_TRADING_DAYS;
+  const elapsed = Math.min(Math.max(Number(season?.trading_days_elapsed) || 0, 0), total);
+
+  const badge = document.getElementById('seasonBadge');
+  if (badge) {
+    badge.textContent = season?.number ? `Season ${season.number}` : 'Season —';
+  }
+
+  const dates = document.getElementById('seasonDates');
+  if (dates) {
+    dates.textContent = season?.start_date && season?.end_date
+      ? `${formatShortDate(season.start_date)} – ${formatShortDate(season.end_date)}`
+      : 'Dates set when the first season opens';
+  }
+
+  const entryText = document.getElementById('seasonEntryText');
+  const entryState = document.getElementById('seasonEntryState');
+  if (entryText && entryState) {
+    let state = 'pending';
+    let text = 'Entries not open yet';
+    if (season?.entries_open) {
+      state = 'open';
+      const closes = season.entry_closes_at ? ` · closes ${formatRelativeFromNow(season.entry_closes_at)}` : '';
+      const count = Number(season.entry_count);
+      text = `Entries open${Number.isFinite(count) ? ` · ${count} entered` : ''}${closes}`;
+    } else if (season?.status === 'running') {
+      state = 'closed';
+      text = 'Entries closed — season in progress';
+    } else if (season?.status === 'closed') {
+      state = 'closed';
+      text = 'Season finished';
+    }
+    entryState.className = `season-entry-state is-${state}`;
+    entryText.textContent = text;
+  }
+
+  const fill = document.getElementById('seasonProgressFill');
+  const bar = document.getElementById('seasonProgressBar');
+  const label = document.getElementById('seasonProgressLabel');
+  if (fill) fill.style.width = `${total ? (elapsed / total) * 100 : 0}%`;
+  if (bar) {
+    bar.setAttribute('aria-valuemax', String(total));
+    bar.setAttribute('aria-valuenow', String(elapsed));
+  }
+  if (label) {
+    label.textContent = season
+      ? `Day ${elapsed} of ${total}`
+      : `${total} trading days per season`;
+  }
+
+  const advance = document.getElementById('seasonNextAdvance');
+  if (advance) {
+    if (season?.status === 'closed') {
+      advance.textContent = 'No further advances';
+    } else if (season?.next_advance_at) {
+      const when = new Date(season.next_advance_at);
+      const relative = formatRelativeFromNow(season.next_advance_at);
+      advance.textContent = Number.isFinite(when.getTime())
+        ? `Next advance ${relative} (${when.toLocaleString()})`
+        : `Next advance ${relative}`;
+    } else {
+      advance.textContent = 'Next advance: nightly after the 16:00 ET close';
+    }
+  }
+}
+
+// Copy is deliberately different per failure_kind. A gap that reads the same
+// whatever caused it is worse than no gap marker at all: it teaches the reader
+// that a flat day and a dead job look alike, which is the thing this list exists
+// to prevent.
+const SEASON_GAP_COPY = {
+  market_data_unavailable: 'no usable market data for the session',
+  model_error: 'the model returned no usable decision',
+  job_not_run: 'the nightly advance never ran',
+  budget_exhausted: 'the model budget for the month was exhausted',
+};
+
+function renderSeasonGaps(payload) {
+  const host = document.getElementById('seasonGaps');
+  if (!host) return;
+  host.textContent = '';
+  const gaps = (isSeasonBoard() && payload.season?.gaps) || [];
+  if (!gaps.length) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  gaps.forEach((gap) => {
+    const item = document.createElement('li');
+    item.className = 'season-gap';
+    const date = document.createElement('span');
+    date.className = 'season-gap-date';
+    date.textContent = formatShortDate(gap.date) || gap.date || 'Unknown date';
+    const why = document.createElement('span');
+    why.className = 'season-gap-why';
+    const reason = SEASON_GAP_COPY[gap.failure_kind] || 'the advance did not complete';
+    why.textContent = `${reason} — positions carried forward unchanged, no trading counted`;
+    item.append(date, why);
+    if (gap.detail) {
+      const detail = document.createElement('span');
+      detail.className = 'season-gap-detail';
+      detail.textContent = gap.detail;
+      item.append(detail);
+    }
+    host.append(item);
+  });
+}
+
+function renderLiveBoardNotice(payload) {
+  const host = document.getElementById('leaderboardBoardNotice');
+  if (!host) return;
+  if (!isSeasonBoard() || !payload.daily_status) {
     host.hidden = true;
     host.textContent = '';
     return;
@@ -325,7 +539,7 @@ function renderDailyLeaderboardNotice(payload) {
     if (inProgress) {
       host.textContent = `Running competition models for ${date}… (${cached}/${total} ready). This page refreshes automatically.`;
     } else {
-      host.textContent = `${pending} competition model curve(s) pending for ${date}. Baselines are live; models appear once the daily job finishes.`;
+      host.textContent = `${pending} competition model curve(s) pending for ${date}. Baselines are live; models appear once the nightly advance finishes.`;
     }
     return;
   }
@@ -338,46 +552,49 @@ function renderDailyLeaderboardNotice(payload) {
   host.textContent = '';
 }
 
-function scheduleDailyLeaderboardPoll(payload) {
-  if (dailyLeaderboardPollTimer) {
-    clearTimeout(dailyLeaderboardPollTimer);
-    dailyLeaderboardPollTimer = null;
+function scheduleLiveBoardPoll(payload) {
+  if (liveBoardPollTimer) {
+    clearTimeout(liveBoardPollTimer);
+    liveBoardPollTimer = null;
   }
-  if (payload.period !== 'daily') return;
+  if (!isSeasonBoard()) return;
   const status = payload.daily_status || {};
   // Only poll while a refresh worker is running. Pending curves with no worker
   // wait for the nightly cron — polling forever just hammers the API.
   if (!status.refresh_in_progress) return;
-  dailyLeaderboardPollTimer = setTimeout(() => {
-    dailyLeaderboardPollTimer = null;
+  liveBoardPollTimer = setTimeout(() => {
+    liveBoardPollTimer = null;
     // Re-check on fire, not only on schedule: navigating away from Competition
     // never calls loadLeaderboardData again, so without this the poll would
     // keep re-fetching and re-rendering a hidden chart for the whole (possibly
-    // multi-hour) deploy. Landing back on the daily tab restarts it.
-    if (!isDailyBoardVisible()) return;
-    loadLeaderboardData('daily');
+    // multi-hour) deploy. Landing back on the season tab restarts it.
+    if (!isLiveBoardVisible()) return;
+    loadLeaderboardData('season');
   }, 30000);
 }
 
-/** True only while the Daily Leaderboard is the board actually on screen.
+/** True only while the Live Season board is the board actually on screen.
  *
  * Read from the DOM rather than the html[data-nav-*] boot attributes: those are
  * written by navigateToPage but not by showCompetitionPanel, so they go stale
  * on a plain subtab switch. The active subtab button and the board's own
  * display are what the user is actually looking at.
  */
-function isDailyBoardVisible() {
+function isLiveBoardVisible() {
   const view = document.getElementById('leaderboardView');
   // offsetParent covers the whole Competition page being hidden; style.display
   // covers the board being swapped out for Participants/About within it.
   if (!view || view.style.display === 'none' || view.offsetParent === null) return false;
   const activeTab = document.querySelector('.competition-subtabs .subtab-btn.active');
-  return activeTab?.dataset.competitionTab === 'daily';
+  return activeTab?.dataset.competitionTab === 'season';
 }
 
 async function loadLeaderboardData(period = 'contest') {
   console.log('Loading leaderboard from API...', period);
-  const boardPeriod = period === 'daily' ? 'daily' : 'contest';
+  // 'daily' is accepted so a stale deep link or a cached app.js cannot land on
+  // the retired board; it resolves to the season board like every other alias.
+  const boardPeriod = (period === 'season' || period === 'daily') ? 'season' : 'contest';
+  requestedBoardPeriod = boardPeriod;
 
   try {
     const url = `${API_BASE}/api/v1/leaderboard?period=${encodeURIComponent(boardPeriod)}&t=${Date.now()}`;
@@ -385,7 +602,7 @@ async function loadLeaderboardData(period = 'contest') {
     const entries = leaderboardPayload.entries || [];
     equityCurvesData = buildEquityCurvesFromEntries(entries);
 
-    // Reset chart visibility when switching boards so daily/contest don't share hide state.
+    // Reset chart visibility when switching boards so season/contest don't share hide state.
     hiddenSeries = new Set();
     hiddenInitialized = true;
 
@@ -399,7 +616,7 @@ async function loadLeaderboardData(period = 'contest') {
     }
 
     await renderEquityCurvesChart();
-    scheduleDailyLeaderboardPoll(leaderboardPayload);
+    scheduleLiveBoardPoll(leaderboardPayload);
   } catch (error) {
     console.error('Error loading leaderboard:', error);
     displayLeaderboardError(error.message);
@@ -704,9 +921,11 @@ function populateLeaderboardTable() {
 
   const filtered = getFilteredLeaderboardEntries();
   if (!filtered.length) {
-    const period = leaderboardPayload?.period;
-    const msg = period === 'daily'
-      ? 'No daily entries yet. Baselines compute on first load; competition models deploy automatically (local dev) or via the nightly refresh job.'
+    // Keyed on the board asked for, not the one returned: in preview the
+    // response says 'contest', and the season tab explaining itself as the
+    // contest board is how an empty season stops being legible as one.
+    const msg = isSeasonBoard()
+      ? 'No season entries yet. Baselines compute on first load; competition models advance via the nightly job.'
       : 'No leaderboard entries yet. Baselines compute on first load (requires market data).';
     tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">${msg}</td></tr>`;
     return;
