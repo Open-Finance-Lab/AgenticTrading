@@ -61,3 +61,45 @@ def test_admin_403_refreshes_the_cached_role():
 def test_request_errors_carry_their_status_code():
     """The 403 handling above is only reachable if the status survives."""
     assert "error.status = response.status;" in APP_JS
+
+
+def test_a_zero_quota_survives_the_console_round_trip():
+    """0 is the suspend value, and 0 is what a truthiness check drops.
+
+    The console has three places a quota can silently vanish: the input's own
+    ``min``, the diff that decides what to PATCH, and the repaint that writes
+    the server's answer back. Each has to be zero-safe, and each is written in
+    a style where the unsafe version reads perfectly natural (``if (value)``,
+    ``value || fallback``).
+    """
+    assert "max_concurrent_backtests: { min: 0, max: 20 }" in APP_JS
+
+    save = fn_body("async function saveAdminUserRow(rowEl)")
+    # String comparison, not a truthy diff: `if (maxField.value !== ...)` would
+    # still work, but `if (maxField.value && ...)` would drop the suspend.
+    assert "String(maxField.value) !== rowEl.getAttribute('data-server-max')" in save
+
+    repaint = fn_body("function _applyAdminRowFromUser(rowEl, userPayload)")
+    # `== null`, not `!value` — the server answering 0 must repaint as 0.
+    assert "if (value == null) return;" in repaint
+
+
+def test_credits_is_labelled_as_not_enforced():
+    """It has a column, bounds, a twin, an editable input and a slot on
+    /api/auth/me — and no reader in domain/. Without the label an operator
+    zeroes it on an abusive account, sees a 200, and believes they acted."""
+    assert "not enforced yet" in APP_HTML
+    assert ".admin-th-note" in STYLES
+
+
+def test_role_confirm_dialog_cannot_be_forged_by_an_address():
+    """confirm() is plain text with no markup to escape, and the prompts are
+    multi-line — so an address carrying newlines writes its own sentences into
+    the box an admin reads before granting admin."""
+    assert "function _adminConfirmEmail(value)" in APP_JS
+    helper = fn_body("function _adminConfirmEmail(value)")
+    assert "replace(/\\s+/g, ' ')" in helper
+
+    role_save = fn_body("async function saveAdminUserRole(rowEl, nextRole)")
+    assert "_adminConfirmEmail(" in role_save
+    assert "window.confirm(" in role_save
