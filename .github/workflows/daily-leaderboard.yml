@@ -8,11 +8,19 @@ name: Daily Leaderboard refresh
 #
 # Requires repository secret LEADERBOARD_DAILY_REFRESH_SECRET matching
 # the value configured on the Render service.
+#
+# SCHEDULE PAUSED. The Daily Leaderboard tab was replaced by the Live Season
+# board, so this job's output has no surface — left on schedule it would keep
+# deploying every competition LLM nightly, billable, for a board nobody can
+# open. The endpoint, the secret and workflow_dispatch all stay, because the
+# season engine's nightly advance is this same call.
+# To re-enable: uncomment the `schedule:` block below.
+# (Same pause Jinbo proposed in #335, adopted here so this PR supersedes it.)
 
 on:
-  schedule:
-    # 22:30 UTC Mon–Fri ≈ 18:30 EDT / 17:30 EST — after the 16:00 ET cash close.
-    - cron: "30 22 * * 1-5"
+  # schedule:
+  #   # 22:30 UTC Mon–Fri ≈ 18:30 EDT / 17:30 EST — after the 16:00 ET cash close.
+  #   - cron: "30 22 * * 1-5"
   workflow_dispatch:
     inputs:
       deploy_models:
