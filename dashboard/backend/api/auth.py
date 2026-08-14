@@ -24,6 +24,7 @@ from dashboard.backend.api.rate_limit import (
     FixedWindowRateLimiter,
     client_ip,
     client_key,
+    rate_limited_error,
 )
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
@@ -126,12 +127,9 @@ def _email_domain(email: str) -> str:
     return _DOMAIN_PREFIX.match(domain).group()[:64] or "?"
 
 
-def _auth_rate_limited(limiter: FixedWindowRateLimiter, key: str, detail: str) -> HTTPException:
-    return HTTPException(
-        status_code=429,
-        detail=detail,
-        headers={"Retry-After": str(limiter.retry_after_seconds(key))},
-    )
+# The 429 builder now lives in rate_limit.rate_limited_error, shared with every
+# other limited route; this name stays for the module's existing call sites.
+_auth_rate_limited = rate_limited_error
 
 
 def _login_ip_key(request: Request) -> str:
@@ -314,6 +312,17 @@ def get_current_user(
     if not user:
         raise HTTPException(status_code=401, detail="Invalid or expired session")
     return user
+
+
+def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Dependency: the signed-in caller, who must hold the admin role.
+
+    The one admin gate — routers depend on this rather than re-checking
+    ``role`` inline, so "who counts as an admin" cannot drift per route.
+    """
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return current_user
 
 
 def _auth_json(user: dict, raw_token: str) -> JSONResponse:

@@ -14,6 +14,32 @@ def store():
         yield users_module.UserStore(db_path=Path(tmpdir) / "users.db")
 
 
+@pytest.fixture
+def isolated_auth(monkeypatch):
+    """Fresh UserStore swapped in for the module singleton.
+
+    Every test that signs up accounts or grants the admin role uses this —
+    promoting an admin in the shared conftest store would leak the row into
+    every later test in the session, making admin counts (and the last-admin
+    guard) order-dependent.
+    """
+    from fastapi.testclient import TestClient
+    from dashboard.backend.app import app
+    from dashboard.backend.api.routers import admin_users as admin_mod
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = users_module.UserStore(db_path=Path(tmpdir) / "users.db")
+        monkeypatch.setattr(users_module, "user_store", store)
+        admin_mod.reset_bootstrap_limiters()
+        yield TestClient(app), store
+        admin_mod.reset_bootstrap_limiters()
+
+
+def _promote(store, user_id):
+    """Grant admin through the one production write path for role changes."""
+    return store.apply_admin_patch(user_id, role="admin")
+
+
 def test_entitlements_default_then_upsert(store):
     user = store.create_user("a@example.com", "A", "securepass1")
     defaults = store.get_entitlements(user["id"])
@@ -31,9 +57,9 @@ def test_entitlements_default_then_upsert(store):
     assert updated["updated_by_admin_id"] == user["id"]
 
 
-def test_set_user_role_and_list_admin(store):
+def test_apply_role_and_list_admin(store):
     user = store.create_user("a@example.com", "A", "securepass1")
-    store.set_user_role(user["id"], "admin")
+    _promote(store, user["id"])
     store.set_entitlements(user["id"], max_concurrent_backtests=5, credits=10)
 
     listed = store.list_users_admin()
@@ -44,9 +70,9 @@ def test_set_user_role_and_list_admin(store):
 
 def test_cannot_demote_last_admin(store):
     user = store.create_user("a@example.com", "A", "securepass1")
-    store.set_user_role(user["id"], "admin")
+    _promote(store, user["id"])
     with pytest.raises(ValueError, match="last_admin"):
-        store.set_user_role(user["id"], "user")
+        store.apply_admin_patch(user["id"], role="user")
 
 
 def _signup(client, email="admin@example.com"):
@@ -62,16 +88,13 @@ def _signup(client, email="admin@example.com"):
     return resp.json()["user"]
 
 
-def test_admin_users_requires_admin():
-    from fastapi.testclient import TestClient
-    from dashboard.backend.app import app
-
-    client = TestClient(app)
+def test_admin_users_requires_admin(isolated_auth):
+    client, store = isolated_auth
     user = _signup(client, "plain@example.com")
     resp = client.get("/api/admin/users")
     assert resp.status_code == 403
 
-    users_module.user_store.set_user_role(user["id"], "admin")
+    _promote(store, user["id"])
     me = client.get("/api/auth/me")
     assert me.status_code == 200
     assert me.json()["user"]["role"] == "admin"
@@ -83,16 +106,13 @@ def test_admin_users_requires_admin():
     assert "plain@example.com" in emails
 
 
-def test_admin_cannot_demote_self():
-    from fastapi.testclient import TestClient
-    from dashboard.backend.app import app
-
-    client = TestClient(app)
+def test_admin_cannot_demote_self(isolated_auth):
+    client, store = isolated_auth
     admin = _signup(client, "selfadmin@example.com")
-    users_module.user_store.set_user_role(admin["id"], "admin")
+    _promote(store, admin["id"])
     # Second admin so last_admin is not the reason for refusal.
     other = _signup(client, "otheradmin@example.com")
-    users_module.user_store.set_user_role(other["id"], "admin")
+    _promote(store, other["id"])
 
     client.post(
         "/api/auth/login",
@@ -104,17 +124,15 @@ def test_admin_cannot_demote_self():
     )
     assert resp.status_code == 400, resp.text
     assert "yourself" in resp.json()["detail"].lower()
-    assert users_module.user_store.get_user_by_id(admin["id"])["role"] == "admin"
+    assert store.get_user_by_id(admin["id"])["role"] == "admin"
 
 
-def test_admin_stats_endpoint():
-    from fastapi.testclient import TestClient
-    from dashboard.backend.app import app
+def test_admin_stats_endpoint(isolated_auth):
     from dashboard.backend.domain.agents.repository import agent_store
 
-    client = TestClient(app)
+    client, store = isolated_auth
     admin = _signup(client, "stats-admin@example.com")
-    users_module.user_store.set_user_role(admin["id"], "admin")
+    _promote(store, admin["id"])
     _signup(client, "stats-user@example.com")
     agent_store.create_agent(
         name="stats-agent",
@@ -129,19 +147,17 @@ def test_admin_stats_endpoint():
     resp = client.get("/api/admin/stats")
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert body["users"] >= 2
-    assert body["admins"] >= 1
+    # Exact on the isolated store: two signups, one admin.
+    assert body["users"] == 2
+    assert body["admins"] == 1
     assert body["agents"] >= 1
     assert "active_dashboard_backtests" in body
 
 
-def test_admin_patch_entitlements_and_role():
-    from fastapi.testclient import TestClient
-    from dashboard.backend.app import app
-
-    client = TestClient(app)
+def test_admin_patch_entitlements_and_role(isolated_auth):
+    client, store = isolated_auth
     admin = _signup(client, "boss@example.com")
-    users_module.user_store.set_user_role(admin["id"], "admin")
+    _promote(store, admin["id"])
     target = _signup(client, "member@example.com")
 
     client.post(
@@ -171,7 +187,8 @@ def test_promote_first_admin_then_refuse(store):
 
 
 def test_secrets_equal_matches_and_survives_hostile_input():
-    from dashboard.backend.api.routers.admin_users import secrets_equal
+    # Canonical home: session_tokens, shared by any shared-secret gate.
+    from dashboard.backend.session_tokens import secrets_equal
 
     assert secrets_equal("same-secret", "same-secret") is True
     assert secrets_equal("short-ok", "a-much-longer-secret") is False
@@ -192,13 +209,10 @@ def test_admin_users_unauthenticated_is_401():
     assert resp.status_code == 401
 
 
-def test_admin_patch_rejects_out_of_range_quotas():
-    from fastapi.testclient import TestClient
-    from dashboard.backend.app import app
-
-    client = TestClient(app)
+def test_admin_patch_rejects_out_of_range_quotas(isolated_auth):
+    client, store = isolated_auth
     admin = _signup(client, "quota-admin@example.com")
-    users_module.user_store.set_user_role(admin["id"], "admin")
+    _promote(store, admin["id"])
     target = _signup(client, "quota-member@example.com")
     client.post(
         "/api/auth/login",
@@ -211,19 +225,25 @@ def test_admin_patch_rejects_out_of_range_quotas():
     assert resp.status_code == 422
 
 
-@pytest.fixture
-def isolated_auth(monkeypatch):
-    """Fresh UserStore so bootstrap tests do not see admins from other cases."""
-    from fastapi.testclient import TestClient
-    from dashboard.backend.app import app
-    from dashboard.backend.api.routers import admin_users as admin_mod
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        store = users_module.UserStore(db_path=Path(tmpdir) / "users.db")
-        monkeypatch.setattr(users_module, "user_store", store)
-        admin_mod.reset_bootstrap_limiters()
-        yield TestClient(app), store
-        admin_mod.reset_bootstrap_limiters()
+def test_admin_patch_rejects_explicit_null(isolated_auth):
+    """``{"credits": null}`` used to be indistinguishable from omitting the
+    key — a 200 that changed nothing. The API now refuses the null."""
+    client, store = isolated_auth
+    admin = _signup(client, "null-admin@example.com")
+    _promote(store, admin["id"])
+    target = _signup(client, "null-member@example.com")
+    store.set_entitlements(target["id"], credits=7)
+    client.post(
+        "/api/auth/login",
+        json={"email": "null-admin@example.com", "password": "SecurePass1!"},
+    )
+    resp = client.patch(
+        f"/api/admin/users/{target['id']}",
+        json={"credits": None},
+    )
+    assert resp.status_code == 400, resp.text
+    assert "null" in resp.json()["detail"].lower()
+    assert store.get_entitlements(target["id"])["credits"] == 7
 
 
 def test_bootstrap_unset_is_503(isolated_auth, monkeypatch):
@@ -290,7 +310,7 @@ def test_partial_entitlement_patch_leaves_the_other_field_alone(store):
 def test_apply_admin_patch_is_all_or_nothing(store):
     """Role and entitlements land together, or neither does."""
     admin = store.create_user("keeper@example.com", "K", "securepass1")
-    store.set_user_role(admin["id"], "admin")
+    _promote(store, admin["id"])
     target = store.create_user("target@example.com", "T", "securepass1")
 
     updated = store.apply_admin_patch(
@@ -312,7 +332,7 @@ def test_apply_admin_patch_is_all_or_nothing(store):
 
 def test_last_admin_demotion_rolls_back_the_quota_half(store):
     user = store.create_user("solo@example.com", "S", "securepass1")
-    store.set_user_role(user["id"], "admin")
+    _promote(store, user["id"])
     store.set_entitlements(user["id"], credits=5)
 
     with pytest.raises(ValueError, match="last_admin"):
@@ -342,13 +362,10 @@ def test_admin_list_omits_avatars_and_reports_total(store):
     assert store.count_users() == 3
 
 
-def test_admin_users_endpoint_paginates():
-    from fastapi.testclient import TestClient
-    from dashboard.backend.app import app
-
-    client = TestClient(app)
+def test_admin_users_endpoint_paginates(isolated_auth):
+    client, store = isolated_auth
     admin = _signup(client, "pager-admin@example.com")
-    users_module.user_store.set_user_role(admin["id"], "admin")
+    _promote(store, admin["id"])
     for i in range(3):
         _signup(client, f"pager-member{i}@example.com")
     client.post(
@@ -362,7 +379,7 @@ def test_admin_users_endpoint_paginates():
     assert len(body["users"]) == 2
     assert body["limit"] == 2 and body["offset"] == 0
     # Without total the console cannot tell a full list from a first page.
-    assert body["total"] >= 4
+    assert body["total"] == 4
     assert all("avatar" not in row for row in body["users"])
 
     second = client.get("/api/admin/users?limit=2&offset=2")

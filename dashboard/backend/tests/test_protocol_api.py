@@ -855,6 +855,69 @@ def test_concurrent_run_cap(client, monkeypatch):
     assert third.json()["detail"]["error"]["code"] == "too_many_active_runs"
 
 
+def test_per_account_concurrent_run_cap(client):
+    """An account's agents share its ``max_concurrent_backtests`` entitlement.
+
+    The admin-console quota binds at protocol run creation (the only surface
+    where one account can hold several backtests in flight). Unclaimed agents
+    carry no account and stay covered by the per-agent cap above.
+    """
+    import dashboard.backend.users as users_module
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "runcap@example.com",
+            "display_name": "Cap",
+            "password": "SecurePass1!",
+        },
+    )
+    assert signup.status_code == 200, signup.text
+    user = signup.json()["user"]
+
+    headers = {"X-Session-Id": str(uuid.uuid4())}
+    made = client.post(
+        "/api/v1/agents", json={"name": "cap-agent"}, headers=headers
+    )
+    assert made.status_code == 200, made.text
+    agent = made.json()["agent"]
+    key = made.json()["api_key"]
+    # Signed-in create binds ownership — the premise of the account cap.
+    assert agent.get("owner_user_id") == user["id"]
+    version_id = _new_version(client, agent["agent_id"], key)
+
+    # Default entitlement: one concurrent backtest per account.
+    _create_run(client, key, version_id)
+    second = client.post(
+        "/api/v1/runs",
+        json={
+            "agent_version_id": version_id,
+            "environment": {"type": "backtest", "environment_id": "us-equity-hourly-v1"},
+            "config": {"start_date": "2026-04-15", "end_date": "2026-04-16", "symbols": ["AAPL", "MSFT"]},
+        },
+        headers={"X-API-Key": key},
+    )
+    assert second.status_code == 429, second.text
+    body = second.json()["detail"]["error"]
+    assert body["code"] == "too_many_active_runs_for_account"
+    assert body["details"]["limit"] == 1
+
+    # An admin-raised quota takes effect on the very next create.
+    users_module.user_store.set_entitlements(
+        user["id"], max_concurrent_backtests=2
+    )
+    third = client.post(
+        "/api/v1/runs",
+        json={
+            "agent_version_id": version_id,
+            "environment": {"type": "backtest", "environment_id": "us-equity-hourly-v1"},
+            "config": {"start_date": "2026-04-15", "end_date": "2026-04-16", "symbols": ["AAPL", "MSFT"]},
+        },
+        headers={"X-API-Key": key},
+    )
+    assert third.status_code == 200, third.text
+
+
 def test_idempotency_scoped_to_step(client):
     """The same idempotency_key reused on a DIFFERENT step must not replay the
     earlier step's result."""

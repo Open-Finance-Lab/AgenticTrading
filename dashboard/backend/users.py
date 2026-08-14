@@ -418,6 +418,51 @@ def entitlements_upsert_params(
     )
 
 
+# Parameter-free, so one literal serves both dialects. SUM(CASE) rather than
+# COUNT(*) FILTER only to keep it that way (SQLite grew FILTER late).
+USER_COUNTS_SQL = """
+    SELECT COUNT(*) AS n_users,
+           COALESCE(SUM(CASE WHEN role = 'admin' THEN 1 ELSE 0 END), 0) AS n_admins
+    FROM users
+"""
+
+
+def admin_user_rows_to_payloads(
+    rows: List[sqlite3.Row | Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Project ``list_users_admin`` join rows into the admin payload shape.
+
+    Shared by both twins so the projection cannot drift between them — the
+    parity guard compares signatures and DDL, never bodies, so a fork of this
+    loop would diverge invisibly. Distinguishes "no entitlements row" (every
+    joined column NULL → defaults) from a row that exists with stored values.
+    """
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        data = dict(row)
+        has_entitlement_row = (
+            data.get("max_concurrent_backtests") is not None
+            or data.get("credits") is not None
+            or data.get("entitlements_updated_at") is not None
+        )
+        entitlements = (
+            public_entitlements(
+                {
+                    "user_id": data["id"],
+                    "max_concurrent_backtests": data.get("max_concurrent_backtests"),
+                    "credits": data.get("credits"),
+                    "updated_at": data.get("entitlements_updated_at"),
+                    "updated_by_admin_id": data.get("updated_by_admin_id"),
+                },
+                int(data["id"]),
+            )
+            if has_entitlement_row
+            else default_entitlements(int(data["id"]))
+        )
+        results.append(public_user_with_entitlements(data, entitlements))
+    return results
+
+
 class UserStore:
     """Minimal user + auth session persistence."""
 
@@ -536,6 +581,10 @@ class UserStore:
                 credits INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT,
                 updated_by_admin_id INTEGER,
+                -- Declared but not enforced on SQLite; the Postgres twin does
+                -- enforce it (set_entitlements maps its violation to
+                -- user_not_found). Same trade-off, same reasons, as the
+                -- email_change_requests FK note above.
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             )
             """
@@ -1137,20 +1186,38 @@ class UserStore:
         if max_concurrent_backtests is None and credits is None:
             return self.get_entitlements(user_id)
 
-        if self.get_user_by_id(user_id) is None:
-            raise ValueError("user_not_found")
-
         next_max, next_credits = validate_entitlement_patch(
             max_concurrent_backtests, credits
         )
+        # One connection, one transaction: the user-existence check rides
+        # inside it (SQLite never enforces the FK here — see the DDL note on
+        # email_change_requests — so a check on a separate connection could
+        # pass for a row deleted before the write lands, leaving a ghost
+        # entitlements row), and the read-back does too, instead of a third
+        # round-trip after commit.
         conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute(ENTITLEMENTS_UPSERT_SQLITE, entitlements_upsert_params(
-            user_id, next_max, next_credits, updated_by_admin_id
-        ))
-        conn.commit()
-        conn.close()
-        return self.get_entitlements(user_id)
+        conn.isolation_level = None
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM users WHERE id = ?", (int(user_id),))
+            if not cursor.fetchone():
+                raise ValueError("user_not_found")
+            cursor.execute(ENTITLEMENTS_UPSERT_SQLITE, entitlements_upsert_params(
+                user_id, next_max, next_credits, updated_by_admin_id
+            ))
+            cursor.execute(
+                "SELECT * FROM user_entitlements WHERE user_id = ?",
+                (int(user_id),),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return public_entitlements(dict(row) if row else None, int(user_id))
 
     def apply_admin_patch(
         self,
@@ -1164,7 +1231,7 @@ class UserStore:
         """Role and entitlements for one user, in a single transaction.
 
         ``PATCH /api/admin/users/{id}`` advertises one atomic change. Doing it
-        as ``set_user_role`` then ``set_entitlements`` meant a failure on the
+        as a role write then ``set_entitlements`` meant a failure on the
         second leg left the role change committed behind a 500 response, so the
         console showed the old row while the database held the new one.
         """
@@ -1201,51 +1268,28 @@ class UserStore:
                 cursor.execute(ENTITLEMENTS_UPSERT_SQLITE, entitlements_upsert_params(
                     user_id, next_max, next_credits, updated_by_admin_id
                 ))
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-        finally:
-            conn.close()
-        return self.get_user_admin(user_id)
-
-    def set_user_role(self, user_id: int, role: str) -> Dict[str, Any]:
-        normalized = (role or "").strip().lower()
-        if normalized not in VALID_ROLES:
-            raise ValueError("invalid_role")
-
-        conn = self._get_connection()
-        conn.isolation_level = None
-        try:
-            conn.execute("BEGIN IMMEDIATE")
-            cursor = conn.cursor()
+            # Read back inside the transaction: what this returns is exactly
+            # what this patch committed, not whatever a concurrent admin wrote
+            # between commit and a fresh pair of lookups.
             cursor.execute("SELECT * FROM users WHERE id = ?", (int(user_id),))
-            row = cursor.fetchone()
-            if not row:
-                raise ValueError("user_not_found")
-            current_role = dict(row)["role"]
-            if normalized != "admin" and current_role == "admin":
-                cursor.execute(
-                    "SELECT COUNT(*) AS n FROM users WHERE role = 'admin'"
-                )
-                n = int(cursor.fetchone()["n"] or 0)
-                if n <= 1:
-                    raise ValueError("last_admin")
+            user_row = cursor.fetchone()
             cursor.execute(
-                "UPDATE users SET role = ? WHERE id = ?",
-                (normalized, int(user_id)),
+                "SELECT * FROM user_entitlements WHERE user_id = ?",
+                (int(user_id),),
             )
+            ent_row = cursor.fetchone()
             conn.commit()
-            cursor.execute("SELECT * FROM users WHERE id = ?", (int(user_id),))
-            row = cursor.fetchone()
         except Exception:
             conn.rollback()
             raise
         finally:
             conn.close()
-        if not row:
-            raise ValueError("user_not_found")
-        return public_user(row)
+        if not user_row:
+            return None
+        return public_user_with_entitlements(
+            user_row,
+            public_entitlements(dict(ent_row) if ent_row else None, int(user_id)),
+        )
 
     def promote_first_admin(self, user_id: int) -> Dict[str, Any]:
         """Promote ``user_id`` to admin iff no admin row exists yet."""
@@ -1278,13 +1322,23 @@ class UserStore:
             raise ValueError("user_not_found")
         return public_user(row)
 
-    def count_admins(self) -> int:
+    def count_users_and_admins(self) -> Dict[str, int]:
+        """Total accounts and how many are admins, in one query.
+
+        The admin stats header wants both; separate COUNTs were two
+        round-trips to answer one question. SUM(CASE) rather than COUNT(*)
+        FILTER so the literal is identical in both twins' dialects.
+        """
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")
+        cursor.execute(USER_COUNTS_SQL)
         row = cursor.fetchone()
         conn.close()
-        return int(row["n"] if row else 0)
+        data = dict(row) if row else {}
+        return {
+            "users": int(data.get("n_users") or 0),
+            "admins": int(data.get("n_admins") or 0),
+        }
 
     def count_users(self) -> int:
         conn = self._get_connection()
@@ -1317,30 +1371,7 @@ class UserStore:
         )
         rows = cursor.fetchall()
         conn.close()
-        results: List[Dict[str, Any]] = []
-        for row in rows:
-            data = dict(row)
-            has_entitlement_row = (
-                data.get("max_concurrent_backtests") is not None
-                or data.get("credits") is not None
-                or data.get("entitlements_updated_at") is not None
-            )
-            entitlements = (
-                public_entitlements(
-                    {
-                        "user_id": data["id"],
-                        "max_concurrent_backtests": data.get("max_concurrent_backtests"),
-                        "credits": data.get("credits"),
-                        "updated_at": data.get("entitlements_updated_at"),
-                        "updated_by_admin_id": data.get("updated_by_admin_id"),
-                    },
-                    int(data["id"]),
-                )
-                if has_entitlement_row
-                else default_entitlements(int(data["id"]))
-            )
-            results.append(public_user_with_entitlements(data, entitlements))
-        return results
+        return admin_user_rows_to_payloads(rows)
 
     def get_user_admin(self, user_id: int) -> Optional[Dict[str, Any]]:
         user = self.get_user_by_id(user_id)

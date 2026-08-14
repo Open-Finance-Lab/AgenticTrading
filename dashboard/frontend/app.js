@@ -3232,13 +3232,14 @@ function updateAccountPage() {
   }
 }
 
-function _adminEscape(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
+// Client-side mirror of MAX_CONCURRENT_BACKTESTS_CAP / MAX_CREDITS_CAP in
+// dashboard/backend/users.py — the API 422s outside these bounds regardless;
+// holding them in one place here just keeps the four spots that render or
+// validate them from drifting apart.
+const ADMIN_QUOTA_BOUNDS = {
+  max_concurrent_backtests: { min: 1, max: 20 },
+  credits: { min: 0, max: 1000000 },
+};
 
 function _setAdminFlash(kind, message) {
   const errorEl = document.getElementById('adminError');
@@ -3261,9 +3262,17 @@ async function loadAdminStats() {
     root.querySelectorAll('[data-stat]').forEach((el) => {
       const key = el.getAttribute('data-stat');
       const value = data?.[key];
-      el.textContent = Number.isFinite(Number(value)) ? String(value) : '—';
+      // Strict: the API sends numbers. Number(null) is 0 and
+      // Number.isFinite(0) is true, so the old coerce-then-check rendered a
+      // literal "null" for a missing counter instead of the dash.
+      el.textContent = typeof value === 'number' && Number.isFinite(value)
+        ? String(value)
+        : '—';
     });
   } catch (error) {
+    // Dashes alone make "stats endpoint down" identical to "no data yet";
+    // keep the failure visible somewhere an admin can find it.
+    console.warn('Admin stats failed to load:', error);
     root.querySelectorAll('[data-stat]').forEach((el) => {
       el.textContent = '—';
     });
@@ -3298,16 +3307,27 @@ async function _handleAdminAccessLost() {
   if (currentPage === 'admin') navigateToPage('home');
 }
 
+// Monotonic ticket for loadAdminUsers: pager clicks can overlap, responses
+// land in any order, and only the newest request may own the table —
+// otherwise a slow page 1 arriving late repaints over page 2 while the pager
+// still says page 2.
+let _adminUsersRequestSeq = 0;
+
 async function loadAdminUsers({ offset } = {}) {
   const body = document.getElementById('adminUsersBody');
   if (!body) return;
+  // Ticket taken before ANY paint: the "Admin access required." branch owns
+  // the table too, and must invalidate a slower authorized fetch still in
+  // flight — otherwise its late success repaints a live user table over the
+  // denial (reachable via a cross-tab logout/demotion, since AUTH_USER_KEY
+  // is shared localStorage and nothing listens for storage events).
+  const seq = ++_adminUsersRequestSeq;
   const user = getStoredAuthUser();
   if (!user || user.role !== 'admin') {
     body.innerHTML = '<tr><td colspan="6" class="admin-empty">Admin access required.</td></tr>';
     return;
   }
   if (Number.isFinite(offset)) adminUsersPage.offset = Math.max(0, offset);
-  loadAdminStats();
   body.innerHTML = '<tr><td colspan="6" class="admin-empty">Loading…</td></tr>';
   _setAdminFlash(null);
   try {
@@ -3315,6 +3335,7 @@ async function loadAdminUsers({ offset } = {}) {
       limit: adminUsersPage.limit,
       offset: adminUsersPage.offset,
     });
+    if (seq !== _adminUsersRequestSeq) return;
     const users = Array.isArray(data?.users) ? data.users : [];
     adminUsersPage.total = Number(data?.total) || users.length;
     // A page can go out of range when accounts are deleted between requests.
@@ -3326,6 +3347,8 @@ async function loadAdminUsers({ offset } = {}) {
       body.innerHTML = '<tr><td colspan="6" class="admin-empty">No users yet.</td></tr>';
       return;
     }
+    const maxBounds = ADMIN_QUOTA_BOUNDS.max_concurrent_backtests;
+    const creditBounds = ADMIN_QUOTA_BOUNDS.credits;
     body.innerHTML = users.map((row) => {
       const entitlements = row.entitlements || {};
       const maxConcurrent = Number(entitlements.max_concurrent_backtests ?? 1);
@@ -3333,24 +3356,29 @@ async function loadAdminUsers({ offset } = {}) {
       const role = row.role === 'admin' ? 'admin' : 'user';
       const isSelf = Boolean(user && Number(user.id) === Number(row.id));
       const roleControl = isSelf
-        ? `<span class="admin-role-locked" title="You cannot demote yourself">${_adminEscape(role)} (you)</span>`
-        : `<select data-field="role" aria-label="Role for ${_adminEscape(row.email)}">
+        ? `<span class="admin-role-locked" title="You cannot demote yourself">${escapeHtml(role)} (you)</span>`
+        : `<select data-field="role" aria-label="Role for ${escapeHtml(row.email)}">
             <option value="user"${role === 'user' ? ' selected' : ''}>user</option>
             <option value="admin"${role === 'admin' ? ' selected' : ''}>admin</option>
           </select>`;
-      return `<tr data-user-id="${_adminEscape(row.id)}" data-current-role="${_adminEscape(role)}">
-        <td class="admin-email">${_adminEscape(row.email)}</td>
-        <td>${_adminEscape(row.display_name || '—')}</td>
+      // data-server-*: the last value the server confirmed for this row.
+      // "Save quotas" diffs the inputs against these and sends only what the
+      // admin actually changed, so saving an untouched field can never revert
+      // a concurrent admin's edit with this page's stale copy.
+      return `<tr data-user-id="${escapeHtml(row.id)}" data-current-role="${escapeHtml(role)}"
+        data-server-max="${escapeHtml(maxConcurrent)}" data-server-credits="${escapeHtml(credits)}">
+        <td class="admin-email">${escapeHtml(row.email)}</td>
+        <td>${escapeHtml(row.display_name || '—')}</td>
         <td>${roleControl}</td>
         <td>
-          <input data-field="max_concurrent_backtests" type="number" min="1" max="20"
-            value="${_adminEscape(maxConcurrent)}"
-            aria-label="Max concurrent backtests for ${_adminEscape(row.email)}">
+          <input data-field="max_concurrent_backtests" type="number" min="${maxBounds.min}" max="${maxBounds.max}"
+            value="${escapeHtml(maxConcurrent)}"
+            aria-label="Max concurrent backtests for ${escapeHtml(row.email)}">
         </td>
         <td>
-          <input data-field="credits" type="number" min="0" max="1000000"
-            value="${_adminEscape(credits)}"
-            aria-label="Credits for ${_adminEscape(row.email)}">
+          <input data-field="credits" type="number" min="${creditBounds.min}" max="${creditBounds.max}"
+            value="${escapeHtml(credits)}"
+            aria-label="Credits for ${escapeHtml(row.email)}">
         </td>
         <td>
           <button type="button" class="auth-btn auth-btn-primary admin-save-btn" data-admin-save>Save quotas</button>
@@ -3358,12 +3386,13 @@ async function loadAdminUsers({ offset } = {}) {
       </tr>`;
     }).join('');
   } catch (error) {
+    if (seq !== _adminUsersRequestSeq) return;
     if (error?.status === 403 || error?.status === 401) {
       body.innerHTML = '<tr><td colspan="6" class="admin-empty">Admin access required.</td></tr>';
       await _handleAdminAccessLost();
       return;
     }
-    body.innerHTML = `<tr><td colspan="6" class="admin-empty">${_adminEscape(error.message || 'Failed to load users')}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="6" class="admin-empty">${escapeHtml(error.message || 'Failed to load users')}</td></tr>`;
     _setAdminFlash('error', error.message || 'Failed to load users');
   }
 }
@@ -3400,6 +3429,7 @@ async function saveAdminUserRole(rowEl, nextRole) {
   try {
     const data = await AdminAPI.patchUser(userId, { role: nextRole });
     rowEl.setAttribute('data-current-role', nextRole);
+    _applyAdminRowFromUser(rowEl, data?.user);
     _setAdminFlash('success', `${email} is now ${nextRole}`);
     loadAdminStats();
     const me = getStoredAuthUser();
@@ -3436,11 +3466,33 @@ function _readAdminQuota(rowEl, field, label, { min, max }) {
   return { value };
 }
 
+// Server truth after a PATCH: push the returned row back into the inputs and
+// the data-server-* baseline. Skips any input the admin is mid-typing in
+// (same focused-element rule updateAccountPage uses) so a concurrent-save
+// repaint never stomps a keystroke.
+function _applyAdminRowFromUser(rowEl, userPayload) {
+  if (!rowEl || !userPayload) return;
+  const role = userPayload.role === 'admin' ? 'admin' : 'user';
+  rowEl.setAttribute('data-current-role', role);
+  const roleSelect = rowEl.querySelector('select[data-field="role"]');
+  if (roleSelect) roleSelect.value = role;
+  const entitlements = userPayload.entitlements;
+  if (!entitlements) return;
+  const apply = (field, attr, value) => {
+    if (value == null) return;
+    rowEl.setAttribute(attr, String(value));
+    const input = rowEl.querySelector(`[data-field="${field}"]`);
+    if (input && document.activeElement !== input) input.value = String(value);
+  };
+  apply('max_concurrent_backtests', 'data-server-max', entitlements.max_concurrent_backtests);
+  apply('credits', 'data-server-credits', entitlements.credits);
+}
+
 async function saveAdminUserRow(rowEl) {
   if (!rowEl) return;
   const userId = Number(rowEl.getAttribute('data-user-id'));
-  const maxField = _readAdminQuota(rowEl, 'max_concurrent_backtests', 'Max concurrent backtests', { min: 1, max: 20 });
-  const creditsField = _readAdminQuota(rowEl, 'credits', 'Credits', { min: 0, max: 1000000 });
+  const maxField = _readAdminQuota(rowEl, 'max_concurrent_backtests', 'Max concurrent backtests', ADMIN_QUOTA_BOUNDS.max_concurrent_backtests);
+  const creditsField = _readAdminQuota(rowEl, 'credits', 'Credits', ADMIN_QUOTA_BOUNDS.credits);
   const btn = rowEl.querySelector('[data-admin-save]');
   const email = rowEl.querySelector('.admin-email')?.textContent || `user #${userId}`;
   const invalid = maxField.error || creditsField.error;
@@ -3448,18 +3500,37 @@ async function saveAdminUserRow(rowEl) {
     _setAdminFlash('error', `${email}: ${invalid}`);
     return;
   }
+  // Send only what this admin changed relative to the last server-confirmed
+  // values. The backend upsert COALESCEs omitted fields, so an untouched
+  // input stays whatever the database holds now — including an edit another
+  // admin committed after this page rendered — instead of being silently
+  // reverted to this page's stale copy.
+  const patch = {};
+  if (String(maxField.value) !== rowEl.getAttribute('data-server-max')) {
+    patch.max_concurrent_backtests = maxField.value;
+  }
+  if (String(creditsField.value) !== rowEl.getAttribute('data-server-credits')) {
+    patch.credits = creditsField.value;
+  }
+  if (!Object.keys(patch).length) {
+    _setAdminFlash('success', `No quota changes for ${email}`);
+    return;
+  }
   if (btn) btn.disabled = true;
   _setAdminFlash(null);
   try {
-    await AdminAPI.patchUser(userId, {
-      max_concurrent_backtests: maxField.value,
-      credits: creditsField.value,
-    });
+    const data = await AdminAPI.patchUser(userId, patch);
+    _applyAdminRowFromUser(rowEl, data?.user);
     _setAdminFlash('success', `Updated quotas for ${email}`);
     const me = getStoredAuthUser();
-    if (me && Number(me.id) === userId) {
-      const refreshed = await AuthAPI.me();
-      if (refreshed?.user) applyUpdatedUser(refreshed.user);
+    if (me && Number(me.id) === userId && data?.user) {
+      // The PATCH response carries the fresh entitlements; spreading over the
+      // stored user keeps the avatar the admin projection omits on purpose.
+      applyUpdatedUser({
+        ...me,
+        ...data.user,
+        entitlements: data.user.entitlements || me.entitlements,
+      });
     }
   } catch (error) {
     _setAdminFlash('error', error.message || 'Save failed');
@@ -3874,8 +3945,10 @@ function updateAuthUI() {
   // sets display:block and otherwise overrides the UA rule).
   const isAdmin = Boolean(user && user.role === 'admin');
   if (adminMenuBtn) {
+    // [hidden] alone is enough: styles.css's .account-menu-item[hidden]
+    // !important guard exists for exactly this toggle, and a second inline
+    // display write would just hide the coupling it documents.
     adminMenuBtn.hidden = !isAdmin;
-    adminMenuBtn.style.display = isAdmin ? '' : 'none';
   }
   if (!isAdmin && currentPage === 'admin') {
     navigateToPage('home');
@@ -4223,6 +4296,7 @@ function initAuthUI(options = {}) {
     navigateToPage('admin');
   });
   document.getElementById('adminRefreshBtn')?.addEventListener('click', () => {
+    loadAdminStats();
     loadAdminUsers();
   });
   document.getElementById('adminPrevBtn')?.addEventListener('click', () => {
@@ -7872,6 +7946,15 @@ function navigateToPage(page, options = {}) {
         page = 'community';
         options = { ...options, playgroundTab: 'agents' };
     }
+    // Role-gate the admin shell in the UI too, not only its APIs: without
+    // this, anyone landing on ?view=admin saw the empty console chrome until
+    // the deferred boot /me settled — tens of seconds on a cold free-tier
+    // start. The cached role decides; a stale cached admin still gets bounced
+    // by the APIs' 403 via _handleAdminAccessLost.
+    if (page === 'admin') {
+        const authUser = getStoredAuthUser();
+        if (!authUser || authUser.role !== 'admin') page = 'home';
+    }
 
     const historyMode = options.history || 'push';
     if (historyMode === 'push') userHasNavigated = true;
@@ -7955,6 +8038,9 @@ function navigateToPage(page, options = {}) {
         } else if (page === 'admin') {
             currentMode = 'admin';
             if (adminView) adminView.style.display = 'block';
+            // Stats load on entry and on explicit refresh — not on every
+            // pager click, which only changes the user page.
+            loadAdminStats();
             loadAdminUsers();
         }
     }

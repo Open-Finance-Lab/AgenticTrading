@@ -67,6 +67,22 @@
             if (legacy && NAV_VIEW_MAP[legacy]) {
                 // Copy: the map is shared with app.js and must stay immutable.
                 var mapped = NAV_VIEW_MAP[legacy];
+                // Role-gate the admin shell before hydration: without this,
+                // any visitor with ?view=admin sees the console chrome until
+                // app.js boots. The cached user decides here; app.js's
+                // navigateToPage re-checks after hydration, and the admin
+                // APIs 401/403 regardless.
+                if (mapped.page === 'admin') {
+                    var bootUser = null;
+                    try {
+                        bootUser = JSON.parse(
+                            localStorage.getItem('auth-user') || 'null',
+                        );
+                    } catch (e) { /* corrupt cache reads as signed out */ }
+                    if (!bootUser || bootUser.role !== 'admin') {
+                        mapped = { page: 'home' };
+                    }
+                }
                 return {
                     page: mapped.page,
                     playgroundTab: mapped.playgroundTab,

@@ -5,33 +5,40 @@ Mounted under ``/api/admin``. Separate from the legacy root-level
 external callers; this surface is the product admin console.
 """
 
-import hashlib
 import os
-import secrets
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from dashboard.backend import users as users_module
-from dashboard.backend.api.auth import get_current_user
-from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
+from dashboard.backend.api.auth import get_current_user, require_admin
+from dashboard.backend.api.rate_limit import (
+    FixedWindowRateLimiter,
+    client_ip,
+    rate_limited_error,
+)
+from dashboard.backend.session_tokens import secrets_equal
 from dashboard.backend.users import (
     MAX_CONCURRENT_BACKTESTS_CAP,
     MAX_CREDITS_CAP,
-    VALID_ROLES,
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 # Failed bootstrap guesses. Success does not consume a slot.
 #
-# Counting per signed-in user alone was not a bound at all: signup is open, so
-# an attacker who exhausts one account's five guesses just registers another
-# and gets a fresh budget, for as many accounts as they care to create. The
-# per-user counter stays (it is the friendliest 429 for an operator with a
-# typo), but the two that actually cap guessing are the per-client key and the
-# server-wide one below.
+# Three budgets, in honesty order:
+#   per-user   the friendliest 429 for an operator with a typo — not a bound
+#              (signup is open, so fresh accounts are free).
+#   per-IP     bounds naive abuse only. It deliberately keys on client_ip(),
+#              not client_key(): the x-browser-id/x-session-id headers
+#              client_key() prefers cost nothing to rotate per request, which
+#              made that budget a no-op, where forging a fresh X-Forwarded-For
+#              at least takes deliberate header surgery.
+#   global     the ceiling below is the only budget a header-rotating caller
+#              cannot dodge; it is what actually caps secret guessing (per
+#              process — see #349).
 _BOOTSTRAP_LIMITER = FixedWindowRateLimiter(max_events=5, window_seconds=900)
 # Server-wide ceiling across every account and address. Bootstrap is a one-shot
 # action a single operator performs once on a fresh deploy, so 20 wrong guesses
@@ -44,12 +51,6 @@ _BOOTSTRAP_RATE_DETAIL = "Too many bootstrap attempts; please try again later."
 # Slots the first admin gets seeded with, so the operator can actually run
 # something without editing their own row first.
 BOOTSTRAP_ADMIN_MIN_CONCURRENT_BACKTESTS = 5
-
-
-def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
-    if current_user.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin only")
-    return current_user
 
 
 class AdminUserPatch(BaseModel):
@@ -71,46 +72,13 @@ class AdminBootstrapRequest(BaseModel):
     secret: str = Field(min_length=8, max_length=256)
 
 
-def secrets_equal(provided: str, expected: str) -> bool:
-    """Constant-time compare that cannot 500 on a hostile guess.
-
-    ``secrets.compare_digest`` does **not** raise on a length mismatch —
-    buffers of different lengths simply compare unequal — but it does raise
-    ``TypeError`` when either side is a ``str`` holding a non-ASCII character,
-    and a JSON body can contain any character the caller likes. It also runs in
-    time proportional to the shorter operand, so comparing raw secrets leaks
-    the expected length. Hashing both sides to a fixed 32 bytes removes both:
-    every comparison is over the same length and over pure bytes. A SHA-256
-    collision is not a practical oracle here.
-    """
-    try:
-        left = hashlib.sha256(
-            (provided or "").encode("utf-8", "surrogateescape")
-        ).digest()
-        right = hashlib.sha256(
-            (expected or "").encode("utf-8", "surrogateescape")
-        ).digest()
-    except Exception:
-        return False
-    return secrets.compare_digest(left, right)
-
-
 def _bootstrap_key(user_id: int) -> str:
     return f"bootstrap:user:{int(user_id)}"
 
 
 def _bootstrap_client_key(request: Request) -> str:
-    return f"bootstrap:client:{client_key(request)}"
-
-
-def _bootstrap_rate_limited(
-    limiter: FixedWindowRateLimiter, key: str
-) -> HTTPException:
-    return HTTPException(
-        status_code=429,
-        detail=_BOOTSTRAP_RATE_DETAIL,
-        headers={"Retry-After": str(limiter.retry_after_seconds(key))},
-    )
+    # client_ip, not client_key: see the budget notes on _BOOTSTRAP_LIMITER.
+    return f"bootstrap:client:{client_ip(request)}"
 
 
 def reset_bootstrap_limiters() -> None:
@@ -125,9 +93,10 @@ def admin_stats(_admin: dict = Depends(require_admin)):
     from dashboard.backend.api.routers.backtests import count_active_dashboard_backtests
     from dashboard.backend.domain.agents.repository import agent_store
 
+    counts = users_module.user_store.count_users_and_admins()
     return {
-        "users": users_module.user_store.count_users(),
-        "admins": users_module.user_store.count_admins(),
+        "users": counts["users"],
+        "admins": counts["admins"],
         "agents": agent_store.count_agents(),
         "active_dashboard_backtests": count_active_dashboard_backtests(),
     }
@@ -164,6 +133,20 @@ def patch_user(
     payload: AdminUserPatch,
     admin: dict = Depends(require_admin),
 ):
+    # Explicit JSON null is not "leave unchanged": every field here defaults to
+    # None, so ``{"credits": null}`` was indistinguishable from omitting the key
+    # and PATCHed nothing behind a 200 — a silent no-op at the API contract.
+    # model_fields_set tells the two apart; reject the null outright.
+    explicit_nulls = sorted(
+        name
+        for name in payload.model_fields_set
+        if getattr(payload, name) is None
+    )
+    if explicit_nulls:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Fields cannot be null: {', '.join(explicit_nulls)}",
+        )
     if (
         payload.role is None
         and payload.max_concurrent_backtests is None
@@ -171,9 +154,10 @@ def patch_user(
     ):
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    # No VALID_ROLES re-check here: the model's Literal["user", "admin"] IS the
+    # route's validation (anything else 422s before this body runs), and the
+    # store re-validates for its non-HTTP callers.
     if payload.role is not None:
-        if payload.role not in VALID_ROLES:
-            raise HTTPException(status_code=400, detail="Invalid role")
         # Self-demotion is a lockout footgun: once you drop your own admin bit
         # you cannot open this page to undo it. Another admin (or SQL) must
         # demote you. Last-admin is a separate store-level guard.
@@ -204,14 +188,11 @@ def patch_user(
                 status_code=400,
                 detail="Cannot demote the last admin account",
             ) from exc
-        if code == "invalid_role":
-            raise HTTPException(status_code=400, detail="Invalid role") from exc
-        if code == "invalid_max_concurrent_backtests":
-            raise HTTPException(
-                status_code=400, detail="Invalid max_concurrent_backtests"
-            ) from exc
-        if code == "invalid_credits":
-            raise HTTPException(status_code=400, detail="Invalid credits") from exc
+        # invalid_role / invalid_* range errors are unreachable from this
+        # route — the Pydantic model's Literal and Field bounds reject those
+        # requests as 422 before the store runs — so they re-raise as the
+        # 500 an impossible state deserves rather than masquerading as
+        # handled input validation.
         raise
 
     if not updated:
@@ -232,9 +213,11 @@ def bootstrap_admin(
     keys = (_bootstrap_key(current_user["id"]), _bootstrap_client_key(request))
     for key in keys:
         if not _BOOTSTRAP_LIMITER.check(key):
-            raise _bootstrap_rate_limited(_BOOTSTRAP_LIMITER, key)
+            raise rate_limited_error(_BOOTSTRAP_LIMITER, key, _BOOTSTRAP_RATE_DETAIL)
     if not _BOOTSTRAP_GLOBAL_LIMITER.check(_BOOTSTRAP_GLOBAL_KEY):
-        raise _bootstrap_rate_limited(_BOOTSTRAP_GLOBAL_LIMITER, _BOOTSTRAP_GLOBAL_KEY)
+        raise rate_limited_error(
+            _BOOTSTRAP_GLOBAL_LIMITER, _BOOTSTRAP_GLOBAL_KEY, _BOOTSTRAP_RATE_DETAIL
+        )
 
     expected = (os.getenv("ADMIN_BOOTSTRAP_SECRET") or "").strip()
     if not expected:

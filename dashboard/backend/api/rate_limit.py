@@ -31,7 +31,7 @@ import time
 from collections import deque
 from typing import Callable, Deque, Dict
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 
 class FixedWindowRateLimiter:
@@ -154,6 +154,21 @@ class FixedWindowRateLimiter:
             return max(1, math.ceil(self.window_seconds))
         remaining = q[0] + self.window_seconds - self._clock()
         return max(1, math.ceil(remaining))
+
+
+def rate_limited_error(
+    limiter: FixedWindowRateLimiter, key: str, detail: str
+) -> HTTPException:
+    """A 429 whose ``Retry-After`` reports when ``key``'s budget frees up.
+
+    The one shared way to refuse on a limiter, so every limited route reports
+    the same recovery signal instead of each router growing its own copy.
+    """
+    return HTTPException(
+        status_code=429,
+        detail=detail,
+        headers={"Retry-After": str(limiter.retry_after_seconds(key))},
+    )
 
 
 # Longest textual IPv6 form ("ffff:...:255.255.255.255%eth0" territory). The

@@ -79,6 +79,93 @@ _reaper_lock = threading.Lock()
 # past the combined cap.
 _create_lock = threading.Lock()
 
+
+def resolve_owner_cap_context(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Prefetch the per-account cap's inputs; ``None`` means no cap applies.
+
+    Called BEFORE ``_create_lock`` on purpose: the two reads here are remote
+    Postgres round-trips in a durable deployment (entitlements on
+    ``USERS_DATABASE_URL``, ownership on ``CONTENT_DATABASE_URL``), and the
+    create lock serializes every v1+v2 run creation on the server — holding it
+    across network I/O would queue every unrelated create behind one owner's
+    DB latency. Only the local count-then-insert is a race the lock must close
+    (see ``check_owner_active_run_cap``); the limit and owned-id list are as
+    fresh just before the lock as inside it — an admin editing them mid-create
+    was never a race the lock protected against.
+
+    Fails open on store errors: run creation must not gain a hard dependency
+    on the users/content databases being reachable (before this cap it had
+    none), and the per-agent + global caps are local and still bound the
+    request. The print marks the boundary — an outage here otherwise looks
+    exactly like "no cap configured".
+    """
+    owner_user_id = agent.get("owner_user_id")
+    if not owner_user_id:
+        return None
+    # Lazy imports: users triggers store construction (SESSION_HASH_SECRET
+    # resolution) and agents may sit on CONTENT_DATABASE_URL Postgres; neither
+    # belongs in this module's import graph for callers that never create runs.
+    try:
+        from dashboard.backend import users as users_module
+        from dashboard.backend.domain.agents.repository import agent_store
+
+        limit = int(
+            users_module.user_store.get_entitlements(int(owner_user_id))[
+                "max_concurrent_backtests"
+            ]
+        )
+        owned = agent_store.list_agents(owner_user_id=int(owner_user_id))
+    except Exception as exc:  # noqa: BLE001 - the cap must not break creation
+        print(
+            "owner run cap: entitlement lookup failed for user "
+            f"{owner_user_id}; skipping the per-account cap this create: {exc!r}"
+        )
+        return None
+    agent_ids = [a.get("agent_id") for a in owned if a.get("agent_id")]
+    creating_id = agent.get("agent_id")
+    if creating_id and creating_id not in agent_ids:
+        agent_ids.append(creating_id)
+    return {"limit": limit, "agent_ids": agent_ids}
+
+
+def check_owner_active_run_cap(
+    context: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Per-account concurrency entitlement; ``None`` means clear to create.
+
+    ``max_concurrent_backtests`` (the admin-console entitlement) binds here:
+    every agent owned by one account shares the account's budget of active
+    protocol runs, across both the v1 and v2 surfaces. Both call this under
+    the shared ``_create_lock`` with a context prefetched OUTSIDE it by
+    ``resolve_owner_cap_context``, so the lock only ever waits on the local
+    SQLite count below — that count-then-insert is the one race it must
+    close. The dashboard's own runner needs no per-account gate (it is
+    single-flight for the whole process), and the legacy ``/api/v1/backtest/*``
+    surface carries no account identity to bill against.
+
+    Unclaimed agents (``owner_user_id`` NULL) have no account either; the
+    per-agent and global caps still bound them.
+
+    ``credits`` deliberately has no counterpart: nothing in the platform
+    defines what a credit buys yet, so there is no metering to enforce —
+    inventing one here would be a product decision, not a fix.
+    """
+    if context is None:
+        return None
+    active = run_store.count_active_runs_for_agents(context["agent_ids"])
+    if active >= context["limit"]:
+        return {"active_runs_for_account": active, "limit": context["limit"]}
+    return None
+
+
+def owner_cap_message(violation: Dict[str, Any]) -> str:
+    """One message for both surfaces, so the SDK sees a single wording."""
+    return (
+        "This account is at its concurrent-backtest limit "
+        f"({violation['active_runs_for_account']} of {violation['limit']} active); "
+        "wait for a run to finish, cancel one, or ask an admin to raise the limit"
+    )
+
 # Extra per-pass reaper work registered by other surfaces (the composition root
 # registers the v2 sweep here). Kept as a registry so this domain module never
 # imports api/* (layering: domain must not depend on the API layer).
@@ -431,6 +518,8 @@ def create_run(
     # creates from one agent can't both observe an under-limit count and both
     # proceed past the cap (check-then-act TOCTOU).
     agent_id = agent.get("agent_id")
+    # Possibly-remote reads (users/content Postgres) stay OFF the shared lock.
+    owner_cap_context = resolve_owner_cap_context(agent)
     with _create_lock:
         if agent_id:
             active = run_store.count_active_runs(agent_id)
@@ -442,6 +531,15 @@ def create_run(
                     429,
                     details={"active_runs": active, "limit": MAX_ACTIVE_RUNS_PER_AGENT},
                 )
+
+        violation = check_owner_active_run_cap(owner_cap_context)
+        if violation is not None:
+            raise ProtocolError(
+                "too_many_active_runs_for_account",
+                owner_cap_message(violation),
+                429,
+                details=violation,
+            )
 
         if MAX_ACTIVE_RUNS_GLOBAL > 0:
             total = run_store.count_active_runs_total()

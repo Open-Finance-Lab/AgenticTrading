@@ -186,6 +186,35 @@ def test_cap_ignores_other_agents_and_terminal_runs(monkeypatch):
     assert client.post("/api/v2/runs", json=body, headers=headers).status_code == 200
 
 
+def test_create_run_enforces_per_account_entitlement_cap(monkeypatch):
+    """The account-level ``max_concurrent_backtests`` entitlement binds on v2
+    exactly as on v1 (test_protocol_api covers that copy) — both surfaces call
+    the same check under the shared create lock, and this pins the v2 wiring
+    against the two call sites drifting apart."""
+    from dashboard.backend import users as users_module
+    from dashboard.backend.domain.agents.repository import agent_store
+
+    user = users_module.user_store.create_user(
+        email=f"v2cap-{uuid.uuid4().hex[:8]}@example.com",
+        display_name="V2 Cap",
+        password="SecurePass1!",
+    )
+    # v2 registration never binds an owner, so claim ownership at the store —
+    # the same state /api/v1/agents produces for a signed-in create.
+    agent = agent_store.create_agent(name="v2-acct-capped", owner_user_id=user["id"])
+    monkeypatch.setattr(runs_mod, "BacktestBackend", _StubBackend)
+
+    body = {"start_date": "2026-04-15", "end_date": "2026-04-16"}
+    headers = {"X-API-Key": agent["api_key"]}
+    # Default entitlement: one concurrent backtest per account.
+    assert client.post("/api/v2/runs", json=body, headers=headers).status_code == 200
+    second = client.post("/api/v2/runs", json=body, headers=headers)
+    assert second.status_code == 429
+    err = second.json()["error"]
+    assert err["code"] == "too_many_active_runs_for_account"
+    assert err["details"]["limit"] == 1
+
+
 # -- registration flood control ----------------------------------------------
 
 def test_v2_registration_is_rate_limited(monkeypatch):

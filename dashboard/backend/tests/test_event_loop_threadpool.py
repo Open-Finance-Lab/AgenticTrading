@@ -34,6 +34,7 @@ BLOCKING_IO_ROUTER_MODULES = {
     "dashboard.backend.api.routers.leaderboard",
     "dashboard.backend.api.routers.backtests",
     "dashboard.backend.api.routers.admin",
+    "dashboard.backend.api.routers.admin_users",
     "dashboard.backend.api.routers.discord",
     "dashboard.backend.api.routers.external_backtest",
     "dashboard.backend.api.v2.leaderboard",
