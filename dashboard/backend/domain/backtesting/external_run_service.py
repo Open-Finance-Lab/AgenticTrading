@@ -78,12 +78,24 @@ _lock = threading.Lock()
 # hold every authenticated agent to its quota while this route ran unbounded
 # beside it.
 #
-# The per-session budget bounds one naive or looping client — it is keyed on a
-# header the caller chooses, so it is not a bound against someone who rotates
-# it. MAX_LEGACY_ACTIVE_GLOBAL is the one that holds regardless, and it is the
-# memory bound that matters: every live session pins a loaded bar window on a
-# free-tier box. Both are env-overridable, and 0 disables (an operator who wants
-# the old unbounded behaviour back can have it explicitly).
+# Note this is the shipping SDK's path too (packaging/agentictrading calls
+# POST /api/v1/backtest/start), not only an abuse surface — hence a per-session
+# budget of 5, matching MAX_ACTIVE_RUNS_PER_AGENT, rather than something
+# punitive. It bounds one naive or looping client; keyed on a header the caller
+# chooses, it is not a bound against someone who rotates it.
+#
+# MAX_LEGACY_ACTIVE_GLOBAL is the one that holds regardless, and it counts
+# **every** resident session in the dict below — including the ones the v1/v2
+# protocol surfaces open through run_service.create_run, which share this
+# registry. That is deliberate on both halves: the quantity worth bounding is
+# resident bar windows on a free-tier box, whoever opened them; and when that
+# is scarce, the surface that gets refused first should be the one with no
+# account, agent or key behind it. So this ceiling can refuse a legacy start
+# while protocol runs (bounded separately by MAX_ACTIVE_RUNS_GLOBAL, 100) keep
+# creating — never the reverse.
+#
+# Both are env-overridable, and 0 disables (an operator who wants the old
+# unbounded behaviour back can have it explicitly).
 MAX_LEGACY_ACTIVE_PER_SESSION = int(os.getenv("MAX_LEGACY_ACTIVE_PER_SESSION", "5"))
 MAX_LEGACY_ACTIVE_GLOBAL = int(os.getenv("MAX_LEGACY_ACTIVE_GLOBAL", "50"))
 
