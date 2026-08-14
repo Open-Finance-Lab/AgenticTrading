@@ -115,15 +115,16 @@ def resolve_owner_cap_context(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]
             ]
         )
         owned = agent_store.list_agents(owner_user_id=int(owner_user_id))
-    except Exception as exc:  # noqa: BLE001 - the cap must not break creation
-        # Class name only, never the message: store exceptions can carry
-        # connection details (a psycopg error embeds the DSN), and this line
-        # exists to mark the outage, not describe it (CodeQL
-        # py/clear-text-logging-sensitive-data flags the repr here).
+    except Exception:  # noqa: BLE001 - the cap must not break creation
+        # Static marker, no payload: store exceptions can carry connection
+        # details (a psycopg error embeds the DSN), and CodeQL
+        # py/clear-text-logging-sensitive-data flags anything flowing here
+        # from the agent dict or the raised error. This line exists only to
+        # make the outage distinguishable from "no cap configured" — the
+        # failing store reports the details itself.
         print(
-            "owner run cap: entitlement lookup failed for user "
-            f"{owner_user_id}; skipping the per-account cap this create "
-            f"({type(exc).__name__})"
+            "owner run cap: entitlement lookup failed; "
+            "skipping the per-account cap for this create"
         )
         return None
     agent_ids = [a.get("agent_id") for a in owned if a.get("agent_id")]
