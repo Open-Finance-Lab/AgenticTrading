@@ -67,6 +67,52 @@ DECISION_TIMEOUT_SECONDS = int(os.getenv("EXTERNAL_AGENT_DECISION_TIMEOUT_SECOND
 _sessions: Dict[str, "ExternalBacktestSession"] = {}
 _lock = threading.Lock()
 
+# Budgets for the legacy ``/api/v1/backtest/*`` surface.
+#
+# That surface authenticates nothing: ``_require_session`` accepts any non-empty
+# ``X-Session-Id``, so a bare POST /api/v1/backtest/start — no account, no agent,
+# no API key — used to spawn a thread, load a market-data window into memory and
+# add a session to the dict below, without any limit whatsoever. It writes no
+# ``protocol_runs`` row either, so none of the three protocol caps
+# (per-agent / per-account / global) can see one: the entitlement plane could
+# hold every authenticated agent to its quota while this route ran unbounded
+# beside it.
+#
+# Note this is the shipping SDK's path too (packaging/agentictrading calls
+# POST /api/v1/backtest/start), not only an abuse surface — hence a per-session
+# budget of 5, matching MAX_ACTIVE_RUNS_PER_AGENT, rather than something
+# punitive. It bounds one naive or looping client; keyed on a header the caller
+# chooses, it is not a bound against someone who rotates it.
+#
+# MAX_LEGACY_ACTIVE_GLOBAL is the one that holds regardless, and it counts
+# **every** resident session in the dict below — including the ones the v1/v2
+# protocol surfaces open through run_service.create_run, which share this
+# registry. That is deliberate on both halves: the quantity worth bounding is
+# resident bar windows on a free-tier box, whoever opened them; and when that
+# is scarce, the surface that gets refused first should be the one with no
+# account, agent or key behind it. So this ceiling can refuse a legacy start
+# while protocol runs (bounded separately by MAX_ACTIVE_RUNS_GLOBAL, 100) keep
+# creating — never the reverse.
+#
+# Both are env-overridable, and 0 disables (an operator who wants the old
+# unbounded behaviour back can have it explicitly).
+MAX_LEGACY_ACTIVE_PER_SESSION = int(os.getenv("MAX_LEGACY_ACTIVE_PER_SESSION", "5"))
+MAX_LEGACY_ACTIVE_GLOBAL = int(os.getenv("MAX_LEGACY_ACTIVE_GLOBAL", "50"))
+
+
+class BacktestCapacityError(Exception):
+    """Legacy start refused: a session or the server is at capacity.
+
+    Carries the numbers so the router can build a 429 body without re-deriving
+    them (and without a second, racy count).
+    """
+
+    def __init__(self, scope: str, active: int, limit: int) -> None:
+        self.scope = scope
+        self.active = active
+        self.limit = limit
+        super().__init__(f"{scope} at capacity ({active} of {limit} active)")
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -859,6 +905,40 @@ def verify_session(session: ExternalBacktestSession, session_id: str) -> bool:
     return session.session_id == session_id
 
 
+def count_active_sessions(session_id: Optional[str] = None) -> int:
+    """Non-terminal in-memory sessions, all of them or just one caller's.
+
+    Counts what is actually resident, which is the quantity worth bounding:
+    a live session pins its loaded bar window whether it is still loading, or
+    parked mid-run waiting on a decision that will never come.
+    """
+    with _lock:
+        return _count_active_locked(session_id)
+
+
+def _count_active_locked(session_id: Optional[str]) -> int:
+    return sum(
+        1
+        for s in _sessions.values()
+        if s.status not in TERMINAL_STATUSES
+        and (session_id is None or s.session_id == session_id)
+    )
+
+
+def _raise_if_at_capacity(session_id: str) -> None:
+    """Caller must hold ``_lock``."""
+    if MAX_LEGACY_ACTIVE_GLOBAL > 0:
+        total = _count_active_locked(None)
+        if total >= MAX_LEGACY_ACTIVE_GLOBAL:
+            raise BacktestCapacityError("server", total, MAX_LEGACY_ACTIVE_GLOBAL)
+    if MAX_LEGACY_ACTIVE_PER_SESSION > 0:
+        mine = _count_active_locked(session_id)
+        if mine >= MAX_LEGACY_ACTIVE_PER_SESSION:
+            raise BacktestCapacityError(
+                "session", mine, MAX_LEGACY_ACTIVE_PER_SESSION
+            )
+
+
 # ------------------------------------------------------------------
 # Public registry
 # ------------------------------------------------------------------
@@ -874,7 +954,18 @@ def start_backtest(
     mode: str = "safe_trading",
     symbols: Optional[List[str]] = None,
     initial_capital: Optional[float] = None,
+    enforce_session_cap: bool = False,
 ) -> Dict[str, Any]:
+    """Open an external-agent backtest session.
+
+    ``enforce_session_cap`` is opt-in and set by the legacy
+    ``/api/v1/backtest/start`` route only. The protocol surfaces (v1 ``/runs``
+    and v2) reach this through ``run_service.create_run``, which has already
+    applied the per-agent, per-owner and global caps under ``_create_lock``;
+    charging them a second, differently-keyed budget here would refuse creates
+    the surface above just authorised. Raises ``BacktestCapacityError`` when the
+    caller is over budget.
+    """
     backtest_id = f"bt_{uuid.uuid4().hex[:12]}"
     session = ExternalBacktestSession(
         backtest_id=backtest_id,
@@ -890,6 +981,12 @@ def start_backtest(
     session.status = "loading"
 
     with _lock:
+        # Counted and inserted under one acquisition: as a check in the router
+        # followed by an insert here, N concurrent starts would all read the
+        # same under-limit count and all proceed (the check-then-act race the
+        # protocol path closes with _create_lock).
+        if enforce_session_cap:
+            _raise_if_at_capacity(session_id)
         _sessions[backtest_id] = session
 
     # Fast path: creation runs under the caller's _create_lock, where blocking

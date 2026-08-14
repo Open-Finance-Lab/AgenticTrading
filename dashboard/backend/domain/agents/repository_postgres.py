@@ -621,6 +621,50 @@ class PostgresAgentStore:
                 deleted = cur.rowcount > 0
         return deleted
 
+
+    def count_agents(self) -> int:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS n FROM external_agents")
+                row = cur.fetchone()
+        return int(row["n"] if row else 0)
+
+    def list_owner_scope_agent_ids(self, agent_id: str) -> List[str]:
+        """Postgres twin of ``AgentStore.list_owner_scope_agent_ids``.
+
+        Same contract, same ordering-insensitivity: see the SQLite twin for why
+        the owner is resolved in here rather than read off the agent dict.
+        """
+        if not agent_id:
+            return []
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT owner_user_id, owner_browser_session FROM external_agents "
+                    "WHERE agent_id = %s",
+                    (agent_id,),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return []
+                if row["owner_user_id"] is not None:
+                    cur.execute(
+                        "SELECT agent_id FROM external_agents WHERE owner_user_id = %s",
+                        (row["owner_user_id"],),
+                    )
+                elif row["owner_browser_session"]:
+                    cur.execute(
+                        "SELECT agent_id FROM external_agents "
+                        "WHERE owner_browser_session = %s AND owner_user_id IS NULL",
+                        (row["owner_browser_session"],),
+                    )
+                else:
+                    return [agent_id]
+                ids = [r["agent_id"] for r in cur.fetchall() if r["agent_id"]]
+        if agent_id not in ids:
+            ids.append(agent_id)
+        return ids
+
     def owns_agent(
         self,
         agent: Dict[str, Any],

@@ -22,14 +22,30 @@ from dashboard.backend.session_tokens import (
     should_touch_last_seen,
 )
 from dashboard.backend.users import (
+    ADMIN_ROLE_LOCK_KEY,
+    CREDITS_REFUND_POSTGRES,
+    CREDITS_SEED_POSTGRES,
+    CREDITS_SPEND_POSTGRES,
     EMAIL_CHANGE_TTL_MINUTES,
+    ENTITLEMENTS_UPSERT_POSTGRES,
+    USER_COUNTS_SQL,
+    VALID_ROLES,
     _utcnow,
     _utcnow_iso,
+    admin_user_rows_to_payloads,
+    credits_refund_params,
+    credits_seed_applies,
+    credits_seed_params,
+    credits_spend_params,
+    entitlements_upsert_params,
     format_stored_timestamp,
     hash_password,
     is_expired,
     parse_stored_timestamp,
+    public_entitlements,
     public_user,
+    public_user_with_entitlements,
+    validate_entitlement_patch,
     verify_password_for_account,
 )
 
@@ -165,6 +181,17 @@ class PostgresUserStore:
                     ON email_change_requests(user_id)
                     """
                 )
+                cur.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS user_entitlements (
+                        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                        max_concurrent_backtests INTEGER NOT NULL DEFAULT 1,
+                        credits INTEGER NOT NULL DEFAULT 0,
+                        updated_at TEXT,
+                        updated_by_admin_id INTEGER
+                    )
+                    """
+                )
 
     def create_user(self, email: str, display_name: str, password: str) -> Dict[str, Any]:
         normalized_email = email.strip().lower()
@@ -275,9 +302,17 @@ class PostgresUserStore:
                         auth_sessions.created_at AS session_created_at,
                         auth_sessions.last_seen_at AS session_last_seen_at,
                         auth_sessions.expires_at AS session_expires_at,
-                        auth_sessions.revoked_at AS session_revoked_at
+                        auth_sessions.revoked_at AS session_revoked_at,
+                        user_entitlements.max_concurrent_backtests
+                            AS ent_max_concurrent_backtests,
+                        user_entitlements.credits AS ent_credits,
+                        user_entitlements.updated_at AS ent_updated_at,
+                        user_entitlements.updated_by_admin_id
+                            AS ent_updated_by_admin_id
                     FROM auth_sessions
                     JOIN users ON users.id = auth_sessions.user_id
+                    LEFT JOIN user_entitlements
+                        ON user_entitlements.user_id = users.id
                     WHERE auth_sessions.token_hash = %s
                     """,
                     (token_hash,),
@@ -637,3 +672,241 @@ class PostgresUserStore:
         if not row:
             raise ValueError("user_not_found")
         return public_user(row)
+
+    def get_entitlements(self, user_id: int) -> Dict[str, Any]:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT * FROM user_entitlements WHERE user_id = %s",
+                    (int(user_id),),
+                )
+                row = cur.fetchone()
+        return public_entitlements(row, int(user_id))
+
+    def try_spend_credits(self, user_id: int, amount: int = 1) -> Optional[int]:
+        """Debit ``amount`` credits; ``None`` means the balance was too low.
+
+        Twin of the SQLite ``try_spend_credits`` — same contract, same three
+        statements, one transaction. The seed selects from ``users``, so the
+        enforced FK is never reached and a missing account simply seeds
+        nothing and is refused.
+        """
+        amount = int(amount)
+        if amount <= 0:
+            raise ValueError("invalid_credit_amount")
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                if credits_seed_applies(amount):
+                    cur.execute(CREDITS_SEED_POSTGRES, credits_seed_params(user_id))
+                cur.execute(
+                    CREDITS_SPEND_POSTGRES, credits_spend_params(user_id, amount)
+                )
+                if cur.rowcount != 1:
+                    return None
+                cur.execute(
+                    "SELECT credits FROM user_entitlements WHERE user_id = %s",
+                    (int(user_id),),
+                )
+                row = cur.fetchone()
+        return int(dict(row)["credits"]) if row else None
+
+    def refund_credits(self, user_id: int, amount: int = 1) -> Optional[int]:
+        """Return ``amount`` credits, clamped to ``MAX_CREDITS_CAP``.
+
+        ``None`` when the account has no entitlements row — nothing was ever
+        debited from it, so there is nothing to give back.
+        """
+        amount = int(amount)
+        if amount <= 0:
+            raise ValueError("invalid_credit_amount")
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    CREDITS_REFUND_POSTGRES, credits_refund_params(user_id, amount)
+                )
+                if cur.rowcount != 1:
+                    return None
+                cur.execute(
+                    "SELECT credits FROM user_entitlements WHERE user_id = %s",
+                    (int(user_id),),
+                )
+                row = cur.fetchone()
+        return int(dict(row)["credits"]) if row else None
+
+    def set_entitlements(
+        self,
+        user_id: int,
+        *,
+        max_concurrent_backtests: Optional[int] = None,
+        credits: Optional[int] = None,
+        updated_by_admin_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if max_concurrent_backtests is None and credits is None:
+            return self.get_entitlements(user_id)
+
+        next_max, next_credits = validate_entitlement_patch(
+            max_concurrent_backtests, credits
+        )
+        # Single statement on Neon: RETURNING replaces the read-back query, and
+        # the enforced FK replaces the pre-check SELECT — atomically, where the
+        # old check-then-write could pass for a user deleted in between. The
+        # FK violation maps to the same user_not_found the SQLite twin raises,
+        # instead of escaping as a 500 the console cannot explain.
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        ENTITLEMENTS_UPSERT_POSTGRES + "\nRETURNING *",
+                        entitlements_upsert_params(
+                            user_id, next_max, next_credits, updated_by_admin_id
+                        ),
+                    )
+                    row = cur.fetchone()
+        except psycopg.errors.ForeignKeyViolation as exc:
+            raise ValueError("user_not_found") from exc
+        return public_entitlements(dict(row) if row else None, int(user_id))
+
+    def apply_admin_patch(
+        self,
+        user_id: int,
+        *,
+        role: Optional[str] = None,
+        max_concurrent_backtests: Optional[int] = None,
+        credits: Optional[int] = None,
+        updated_by_admin_id: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Role and entitlements for one user, in a single transaction."""
+        normalized_role: Optional[str] = None
+        if role is not None:
+            normalized_role = (role or "").strip().lower()
+            if normalized_role not in VALID_ROLES:
+                raise ValueError("invalid_role")
+        next_max, next_credits = validate_entitlement_patch(
+            max_concurrent_backtests, credits
+        )
+        touches_entitlements = next_max is not None or next_credits is not None
+
+        try:
+            with self._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(%s)", (ADMIN_ROLE_LOCK_KEY,)
+                    )
+                    cur.execute("SELECT * FROM users WHERE id = %s", (int(user_id),))
+                    user_row = cur.fetchone()
+                    if not user_row:
+                        raise ValueError("user_not_found")
+                    if normalized_role is not None:
+                        current_role = dict(user_row)["role"]
+                        if normalized_role != "admin" and current_role == "admin":
+                            cur.execute(
+                                "SELECT COUNT(*) AS n FROM users WHERE role = 'admin'"
+                            )
+                            if int(cur.fetchone()["n"] or 0) <= 1:
+                                raise ValueError("last_admin")
+                        cur.execute(
+                            "UPDATE users SET role = %s WHERE id = %s RETURNING *",
+                            (normalized_role, int(user_id)),
+                        )
+                        user_row = cur.fetchone()
+                    if touches_entitlements:
+                        cur.execute(
+                            ENTITLEMENTS_UPSERT_POSTGRES + "\nRETURNING *",
+                            entitlements_upsert_params(
+                                user_id, next_max, next_credits, updated_by_admin_id
+                            ),
+                        )
+                        ent_row = cur.fetchone()
+                    else:
+                        cur.execute(
+                            "SELECT * FROM user_entitlements WHERE user_id = %s",
+                            (int(user_id),),
+                        )
+                        ent_row = cur.fetchone()
+        except psycopg.errors.ForeignKeyViolation as exc:
+            # Same latent race set_entitlements maps: the enforced FK is the
+            # real existence check, and its violation is "user not found", not
+            # an unexplained 500. (SQLite never enforces this FK, so only this
+            # twin can take the branch.)
+            raise ValueError("user_not_found") from exc
+        # Built from the rows this transaction read and wrote — not a pair of
+        # fresh post-commit lookups that cost two more Neon round-trips and can
+        # observe a concurrent admin's later write.
+        return public_user_with_entitlements(
+            user_row,
+            public_entitlements(dict(ent_row) if ent_row else None, int(user_id)),
+        )
+
+    def promote_first_admin(self, user_id: int) -> Dict[str, Any]:
+        """Promote ``user_id`` to admin iff no admin row exists yet."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_advisory_xact_lock(%s)", (ADMIN_ROLE_LOCK_KEY,))
+                cur.execute("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'")
+                n = int(cur.fetchone()["n"] or 0)
+                if n > 0:
+                    raise ValueError("admin_exists")
+                cur.execute(
+                    "SELECT * FROM users WHERE id = %s",
+                    (int(user_id),),
+                )
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError("user_not_found")
+                cur.execute(
+                    "UPDATE users SET role = 'admin' WHERE id = %s RETURNING *",
+                    (int(user_id),),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise ValueError("user_not_found")
+        return public_user(row)
+
+    def count_users_and_admins(self) -> Dict[str, int]:
+        """Total accounts and how many are admins, in one query (see the twin)."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(USER_COUNTS_SQL)
+                row = cur.fetchone()
+        data = dict(row) if row else {}
+        return {
+            "users": int(data.get("n_users") or 0),
+            "admins": int(data.get("n_admins") or 0),
+        }
+
+    def count_users(self) -> int:
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) AS n FROM users")
+                row = cur.fetchone()
+        return int(row["n"] if row else 0)
+
+    def list_users_admin(
+        self, *, limit: int = 100, offset: int = 0
+    ) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        offset = max(0, int(offset))
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT users.*,
+                           user_entitlements.max_concurrent_backtests,
+                           user_entitlements.credits,
+                           user_entitlements.updated_at AS entitlements_updated_at,
+                           user_entitlements.updated_by_admin_id
+                    FROM users
+                    LEFT JOIN user_entitlements ON user_entitlements.user_id = users.id
+                    ORDER BY users.id ASC
+                    LIMIT %s OFFSET %s
+                    """,
+                    (limit, offset),
+                )
+                rows = cur.fetchall()
+        return admin_user_rows_to_payloads(rows)
+
+    def get_user_admin(self, user_id: int) -> Optional[Dict[str, Any]]:
+        user = self.get_user_by_id(user_id)
+        if not user:
+            return None
+        return public_user_with_entitlements(user, self.get_entitlements(user_id))

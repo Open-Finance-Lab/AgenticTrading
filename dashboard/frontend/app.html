@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=87">
+    <link rel="stylesheet" href="styles.css?v=101">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -41,6 +41,7 @@
             leaderboard: { page: 'competition', competitionTab: 'leaderboard' },
             participants: { page: 'competition', competitionTab: 'participants' },
             about: { page: 'competition', competitionTab: 'about' },
+            admin: { page: 'admin' },
         };
         window.NAV_VIEW_MAP = NAV_VIEW_MAP;
         // Saved nav state written before the marketplace moved out of Playground.
@@ -66,6 +67,22 @@
             if (legacy && NAV_VIEW_MAP[legacy]) {
                 // Copy: the map is shared with app.js and must stay immutable.
                 var mapped = NAV_VIEW_MAP[legacy];
+                // Role-gate the admin shell before hydration: without this,
+                // any visitor with ?view=admin sees the console chrome until
+                // app.js boots. The cached user decides here; app.js's
+                // navigateToPage re-checks after hydration, and the admin
+                // APIs 401/403 regardless.
+                if (mapped.page === 'admin') {
+                    var bootUser = null;
+                    try {
+                        bootUser = JSON.parse(
+                            localStorage.getItem('auth-user') || 'null',
+                        );
+                    } catch (e) { /* corrupt cache reads as signed out */ }
+                    if (!bootUser || bootUser.role !== 'admin') {
+                        mapped = { page: 'home' };
+                    }
+                }
                 return {
                     page: mapped.page,
                     playgroundTab: mapped.playgroundTab,
@@ -106,6 +123,7 @@
     html[data-nav-boot][data-nav-page="competition"] #competitionView { display: block !important; }
     html[data-nav-boot][data-nav-page="community"] #communityView { display: block !important; }
     html[data-nav-boot][data-nav-page="account"] #accountView { display: block !important; }
+    html[data-nav-boot][data-nav-page="admin"] #adminView { display: block !important; }
     html[data-nav-boot] .primary-nav .mode-btn.active { background-color: transparent; color: var(--text-secondary); }
     html[data-nav-boot][data-nav-page="home"] .primary-nav [data-mode="home"] { background-color: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="playground"] .primary-nav [data-mode="playground"] { background-color: var(--info-color); color: white; }
@@ -208,6 +226,7 @@
                             <span id="accountMenuEmail" class="account-menu-email"></span>
                         </div>
                         <button id="accountMenuAccountBtn" class="account-menu-item" type="button">Account</button>
+                        <button id="accountMenuAdminBtn" class="account-menu-item" type="button" hidden>Admin</button>
                         <button id="accountMenuLogoutBtn" class="account-menu-item account-menu-item--danger" type="button">Log out</button>
                     </div>
                 </div>
@@ -1762,6 +1781,55 @@
         </div>
     </div>
 
+    <div id="adminView" class="page-view admin-view" style="display: none;">
+        <div class="page-header">
+            <div>
+                <h2 class="page-title">Admin</h2>
+                <p class="page-description">All registered accounts. Change role in one click (with confirm). Edit concurrent limits and credits, then Save quotas. Set a concurrent limit of 0 to suspend an account's backtests.</p>
+            </div>
+            <button id="adminRefreshBtn" class="auth-btn auth-btn-secondary" type="button">Refresh</button>
+        </div>
+        <div id="adminStats" class="admin-stats" aria-label="Site stats">
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="users">—</span><span class="admin-stat-label">Users</span></div>
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="admins">—</span><span class="admin-stat-label">Admins</span></div>
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="agents">—</span><span class="admin-stat-label">Agents</span></div>
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="active_dashboard_backtests">—</span><span class="admin-stat-label">Running backtests</span></div>
+        </div>
+        <p id="adminError" class="auth-error" hidden></p>
+        <p id="adminSuccess" class="account-success" hidden></p>
+        <div class="admin-table-wrap">
+            <table class="admin-users-table" aria-label="Users">
+                <thead>
+                    <tr>
+                        <th scope="col">Email</th>
+                        <th scope="col">Display name</th>
+                        <th scope="col">Role</th>
+                        <th scope="col">Max concurrent backtests</th>
+                        <!-- "Not enforced yet" is load-bearing, not a caveat.
+                             credits has a column, bounds, a Postgres twin, an
+                             editable input here and a slot on /api/auth/me, and
+                             is read by nothing in domain/ — so an operator
+                             zeroing it on an abusive account sees a 200 and
+                             walks away believing they stopped something. Delete
+                             this label only together with the enforcement. -->
+                        <th scope="col">Credits <span class="admin-th-note" id="adminCreditsNote">(checking…)</span></th>
+                        <th scope="col"></th>
+                    </tr>
+                </thead>
+                <tbody id="adminUsersBody">
+                    <tr><td colspan="6" class="admin-empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="admin-pager">
+            <span id="adminUsersRange" class="admin-pager-range" aria-live="polite"></span>
+            <div class="admin-pager-buttons">
+                <button id="adminPrevBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Previous</button>
+                <button id="adminNextBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Next</button>
+            </div>
+        </div>
+    </div>
+
 
     <!-- All deferred so the Chart.js CDN tag in <head> (also deferred) can
          stay first in execution order: deferred scripts run in document
@@ -1772,7 +1840,7 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=27" defer></script>
-    <script src="app.js?v=88" defer></script>
+    <script src="app.js?v=101" defer></script>
     <script src="js/leaderboard.js?v=19" defer></script>
     <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

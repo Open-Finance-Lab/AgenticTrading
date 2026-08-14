@@ -282,6 +282,39 @@ class RunStore:
         conn.close()
         return int(count)
 
+    def count_active_runs_for_agents(self, agent_ids: List[str]) -> int:
+        """Active runs across a set of agents — the per-account cap's count.
+
+        The account→agent mapping lives in the agents store (possibly a
+        different database under ``CONTENT_DATABASE_URL``), so the caller
+        resolves the id list and this counts locally; a JOIN is impossible
+        across that seam. Chunked because nothing bounds how many agents one
+        account may own, and SQLite refuses a statement whose bind-parameter
+        count exceeds SQLITE_MAX_VARIABLE_NUMBER (999 on older builds) — one
+        oversized IN list would turn this account's every create into a 500.
+        """
+        ids = [str(a) for a in agent_ids if a]
+        if not ids:
+            return 0
+        status_ph = ",".join("?" for _ in self._ACTIVE_STATUSES)
+        total = 0
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            for start in range(0, len(ids), 500):
+                chunk = ids[start:start + 500]
+                id_ph = ",".join("?" for _ in chunk)
+                cursor.execute(
+                    f"SELECT COUNT(*) FROM protocol_runs "
+                    f"WHERE agent_id IN ({id_ph}) AND status IN ({status_ph})",
+                    (*chunk, *self._ACTIVE_STATUSES),
+                )
+                (count,) = cursor.fetchone()
+                total += int(count)
+        finally:
+            conn.close()
+        return total
+
     def count_active_runs_total(self) -> int:
         """Active runs across ALL agents — the global backstop cap's count.
 

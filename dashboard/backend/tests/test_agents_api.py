@@ -1443,3 +1443,64 @@ def test_clone_does_not_validate_the_model_name(client):
     )
     assert cloned.status_code == 200, cloned.text
     assert cloned.json()["agent"]["model_name"] == "some/unreleased-model"
+
+
+def test_list_owner_scope_agent_ids_groups_by_the_real_owner(tmp_path):
+    """The grouping the concurrent-backtest cap bills against.
+
+    Resolved inside the store on purpose: ``_public_agent`` withholds
+    ``owner_browser_session``, and that is not an oversight to route around —
+    ``api/dependencies._owner_context`` accepts that value *as* an ownership
+    credential, so a projection returning it would hand one caller another's.
+    """
+    import dashboard.backend.domain.agents.repository as agent_store_module
+
+    store = agent_store_module.AgentStore(db_path=tmp_path / "scope.db")
+
+    mine_a = store.create_agent(name="a", owner_user_id=7)
+    mine_b = store.create_agent(name="b", owner_user_id=7)
+    theirs = store.create_agent(name="c", owner_user_id=8)
+    guest_a = store.create_agent(name="d", owner_browser_session="browser-1")
+    guest_b = store.create_agent(name="e", owner_browser_session="browser-1")
+    other_browser = store.create_agent(name="f", owner_browser_session="browser-2")
+
+    assert set(store.list_owner_scope_agent_ids(mine_a["agent_id"])) == {
+        mine_a["agent_id"],
+        mine_b["agent_id"],
+    }
+    assert theirs["agent_id"] not in store.list_owner_scope_agent_ids(
+        mine_a["agent_id"]
+    )
+    assert set(store.list_owner_scope_agent_ids(guest_a["agent_id"])) == {
+        guest_a["agent_id"],
+        guest_b["agent_id"],
+    }
+    assert other_browser["agent_id"] not in store.list_owner_scope_agent_ids(
+        guest_a["agent_id"]
+    )
+    # Unknown id: no scope at all, rather than a budget shared with everyone.
+    assert store.list_owner_scope_agent_ids("nope") == []
+    assert store.list_owner_scope_agent_ids("") == []
+
+
+def test_claimed_agents_are_billed_to_the_account_not_the_browser(tmp_path):
+    """Claiming must move an agent between scopes, not join them.
+
+    Otherwise a signed-in user's quota would still be reachable from a logged
+    -out browser that once created the agent — the inversion this cap exists to
+    remove, reintroduced from the other side.
+    """
+    import dashboard.backend.domain.agents.repository as agent_store_module
+
+    store = agent_store_module.AgentStore(db_path=tmp_path / "claim.db")
+    guest = store.create_agent(name="g", owner_browser_session="b-1")
+    claimed = store.create_agent(
+        name="h", owner_user_id=42, owner_browser_session="b-1"
+    )
+
+    # The claimed agent's scope is its account, and does not drag the guest in.
+    assert store.list_owner_scope_agent_ids(claimed["agent_id"]) == [
+        claimed["agent_id"]
+    ]
+    # The guest's scope is its browser, and excludes the claimed sibling.
+    assert store.list_owner_scope_agent_ids(guest["agent_id"]) == [guest["agent_id"]]

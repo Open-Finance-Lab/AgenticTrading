@@ -27,11 +27,12 @@ and cap the bcrypt work one naive client can queue; nothing more.
 from __future__ import annotations
 
 import math
+import threading
 import time
 from collections import deque
 from typing import Callable, Deque, Dict
 
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 
 class FixedWindowRateLimiter:
@@ -42,6 +43,15 @@ class FixedWindowRateLimiter:
     ``max_events=0`` disables the limiter entirely (every call is allowed and
     nothing is recorded), so an operator can switch a budget off through config
     without a deploy. Negative values are still a configuration error.
+
+    **Thread-safe.** Every route that limits here is a plain ``def`` handler,
+    which FastAPI runs on the threadpool — so concurrent requests hit one
+    limiter instance from different threads, and the buckets are mutated on
+    every call (``_pruned`` popleft()s from inside ``check``, not only inside
+    ``record``). Two threads interleaving there can drop the same entry twice
+    or lose an append. ``allow()`` is atomic for the same reason: as separate
+    ``check`` then ``record`` calls it was a check-then-act race that let N
+    concurrent callers all observe the last free slot.
     """
 
     def __init__(
@@ -59,6 +69,9 @@ class FixedWindowRateLimiter:
         self.max_keys = max_keys
         self._clock = clock
         self._events: Dict[str, Deque[float]] = {}
+        # Plain Lock, not RLock: the public methods below acquire it exactly
+        # once and delegate to ``_*_locked`` helpers that never re-acquire.
+        self._lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -87,6 +100,10 @@ class FixedWindowRateLimiter:
         """
         if not self.enabled:
             return True
+        with self._lock:
+            return self._check_locked(key)
+
+    def _check_locked(self, key: str) -> bool:
         q = self._pruned(key)
         return q is None or len(q) < self.max_events
 
@@ -98,6 +115,10 @@ class FixedWindowRateLimiter:
         """
         if not self.enabled:
             return
+        with self._lock:
+            self._record_locked(key)
+
+    def _record_locked(self, key: str) -> None:
         now = self._clock()
         q = self._pruned(key)
         if q is None:
@@ -120,11 +141,17 @@ class FixedWindowRateLimiter:
         A rejected attempt does NOT extend the window (we don't append its
         timestamp), so a client hammering the endpoint recovers exactly one
         window after its *allowed* burst, not after it stops trying.
+
+        Check and record happen under one lock acquisition, so the last free
+        slot goes to exactly one of N concurrent callers.
         """
-        if not self.check(key):
-            return False
-        self.record(key)
-        return True
+        if not self.enabled:
+            return True
+        with self._lock:
+            if not self._check_locked(key):
+                return False
+            self._record_locked(key)
+            return True
 
     def _sweep(self, cutoff: float) -> None:
         """Drop keys whose entire window has expired (newest event older than the
@@ -136,7 +163,8 @@ class FixedWindowRateLimiter:
 
     def reset(self) -> None:
         """Clear all state (used by tests and between logical sessions)."""
-        self._events.clear()
+        with self._lock:
+            self._events.clear()
 
     def retry_after_seconds(self, key: str) -> int:
         """Seconds until ``key`` can pass ``allow`` again (at least 1).
@@ -149,11 +177,27 @@ class FixedWindowRateLimiter:
         """
         if not self.enabled:
             return 1
-        q = self._pruned(key)
-        if not q:
-            return max(1, math.ceil(self.window_seconds))
-        remaining = q[0] + self.window_seconds - self._clock()
+        with self._lock:
+            q = self._pruned(key)
+            if not q:
+                return max(1, math.ceil(self.window_seconds))
+            remaining = q[0] + self.window_seconds - self._clock()
         return max(1, math.ceil(remaining))
+
+
+def rate_limited_error(
+    limiter: FixedWindowRateLimiter, key: str, detail: str
+) -> HTTPException:
+    """A 429 whose ``Retry-After`` reports when ``key``'s budget frees up.
+
+    The one shared way to refuse on a limiter, so every limited route reports
+    the same recovery signal instead of each router growing its own copy.
+    """
+    return HTTPException(
+        status_code=429,
+        detail=detail,
+        headers={"Retry-After": str(limiter.retry_after_seconds(key))},
+    )
 
 
 # Longest textual IPv6 form ("ffff:...:255.255.255.255%eth0" territory). The
