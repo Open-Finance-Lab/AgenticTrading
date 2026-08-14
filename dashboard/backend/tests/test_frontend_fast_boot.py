@@ -183,5 +183,5 @@ def test_cache_busters_bumped():
     # branch started from. Two branches cut from different bases can both
     # "bump" to the same number, merge without a conflict, and leave prod
     # serving new app.js content under a ?v= browsers have already cached.
-    assert "app.js?v=98" in APP_HTML
-    assert "styles.css?v=97" in APP_HTML
+    assert "app.js?v=100" in APP_HTML
+    assert "styles.css?v=100" in APP_HTML

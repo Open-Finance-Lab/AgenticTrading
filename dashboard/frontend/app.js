@@ -3237,9 +3237,23 @@ function updateAccountPage() {
 // holding them in one place here just keeps the four spots that render or
 // validate them from drifting apart.
 const ADMIN_QUOTA_BOUNDS = {
-  max_concurrent_backtests: { min: 1, max: 20 },
+  // min 0, not 1: 0 is "suspended". A floor equal to the default quota let an
+  // admin meter an account but never stop one.
+  max_concurrent_backtests: { min: 0, max: 20 },
   credits: { min: 0, max: 1000000 },
 };
+
+// Email as it goes into a confirm() dialog. escapeHtml is the wrong tool for a
+// native dialog — it has no markup to escape — and the risk there is line
+// forgery, not injection: the prompts below are multi-line, so an address
+// carrying its own newlines writes extra sentences into the box an admin reads
+// before granting admin. The backend now rejects those addresses at signup
+// (api/auth.py::_normalize_email); this collapses any that predate that rule,
+// and bounds the length so a 200-char address cannot push the real question
+// off the dialog.
+function _adminConfirmEmail(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+}
 
 function _setAdminFlash(kind, message) {
   const errorEl = document.getElementById('adminError');
@@ -3402,7 +3416,7 @@ async function saveAdminUserRole(rowEl, nextRole) {
   const userId = Number(rowEl.getAttribute('data-user-id'));
   const prevRole = rowEl.getAttribute('data-current-role') || 'user';
   const roleSelect = rowEl.querySelector('[data-field="role"]');
-  const email = rowEl.querySelector('.admin-email')?.textContent || `user #${userId}`;
+  const email = _adminConfirmEmail(rowEl.querySelector('.admin-email')?.textContent) || `user #${userId}`;
 
   if (nextRole === prevRole) return;
 
@@ -3494,7 +3508,7 @@ async function saveAdminUserRow(rowEl) {
   const maxField = _readAdminQuota(rowEl, 'max_concurrent_backtests', 'Max concurrent backtests', ADMIN_QUOTA_BOUNDS.max_concurrent_backtests);
   const creditsField = _readAdminQuota(rowEl, 'credits', 'Credits', ADMIN_QUOTA_BOUNDS.credits);
   const btn = rowEl.querySelector('[data-admin-save]');
-  const email = rowEl.querySelector('.admin-email')?.textContent || `user #${userId}`;
+  const email = _adminConfirmEmail(rowEl.querySelector('.admin-email')?.textContent) || `user #${userId}`;
   const invalid = maxField.error || creditsField.error;
   if (invalid) {
     _setAdminFlash('error', `${email}: ${invalid}`);

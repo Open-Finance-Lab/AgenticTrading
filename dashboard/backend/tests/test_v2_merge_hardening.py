@@ -206,7 +206,10 @@ def test_create_run_enforces_per_account_entitlement_cap(monkeypatch):
 
     body = {"start_date": "2026-04-15", "end_date": "2026-04-16"}
     headers = {"X-API-Key": agent["api_key"]}
-    # Default entitlement: one concurrent backtest per account.
+    # Set the quota rather than leaning on the default: the default is every
+    # pre-existing account's live limit on the deploy that ships this plane, so
+    # a test pinned to it makes lowering it look free.
+    users_module.user_store.set_entitlements(user["id"], max_concurrent_backtests=1)
     assert client.post("/api/v2/runs", json=body, headers=headers).status_code == 200
     second = client.post("/api/v2/runs", json=body, headers=headers)
     assert second.status_code == 429

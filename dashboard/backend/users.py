@@ -231,7 +231,6 @@ def verify_password_for_account(password: str, password_hash: Optional[str]) -> 
 
 
 VALID_ROLES = frozenset({"user", "admin"})
-DEFAULT_MAX_CONCURRENT_BACKTESTS = 1
 DEFAULT_CREDITS = 0
 # Hard caps for admin PATCH — keep a runaway slider from scheduling dozens of
 # LLM subprocesses on one Render box.
@@ -240,6 +239,54 @@ MAX_CREDITS_CAP = 1_000_000
 # Postgres advisory-lock key for serializing admin-role mutations (bootstrap
 # one-shot + last-admin demotion). SQLite uses BEGIN IMMEDIATE instead.
 ADMIN_ROLE_LOCK_KEY = 0xA71AD01
+# Built-in fallback for the default quota below. Mirrors
+# ``domain.runs.service.MAX_ACTIVE_RUNS_PER_AGENT``; not imported from there
+# because domain/runs imports this module's store, and users.py must stay
+# import-light for callers that never create runs.
+_BUILTIN_DEFAULT_CONCURRENT_BACKTESTS = 5
+
+
+def _default_concurrent_backtests() -> int:
+    """Slots an account gets before an admin has ever touched its row.
+
+    Deliberately **not** 1. Nothing seeds ``user_entitlements`` at signup and
+    nothing backfills it on deploy, so this constant is the live limit for
+    every account that exists today — the day this ships, it silently becomes
+    everyone's quota. At 1 that is a regression rather than a control: before
+    the entitlement plane, one account's concurrency was bounded only by
+    ``MAX_ACTIVE_RUNS_PER_AGENT`` (5) per agent it owned, so every multi-agent
+    user would have woken up throttled by an admin console none of them can
+    open. Matching that per-agent number keeps a single-agent account exactly
+    where it was and leaves the *control* intact: an admin lowers a specific
+    account, they do not have to raise everyone first.
+
+    Env-overridable like every other run-capacity knob
+    (``MAX_ACTIVE_RUNS_PER_AGENT``/``MAX_ACTIVE_RUNS_GLOBAL``), so an operator
+    can tighten the site-wide floor without a deploy. Out-of-range or
+    unparseable values fall back to the default rather than raising at import
+    time — a typo in a Render var must not take the process down.
+    """
+    raw = os.getenv("DEFAULT_MAX_CONCURRENT_BACKTESTS")
+    if raw is None or not raw.strip():
+        return _BUILTIN_DEFAULT_CONCURRENT_BACKTESTS
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        print(
+            "users: DEFAULT_MAX_CONCURRENT_BACKTESTS is not an integer; "
+            "using the built-in default"
+        )
+        return _BUILTIN_DEFAULT_CONCURRENT_BACKTESTS
+    if value < 0 or value > MAX_CONCURRENT_BACKTESTS_CAP:
+        print(
+            "users: DEFAULT_MAX_CONCURRENT_BACKTESTS is out of range "
+            f"(0..{MAX_CONCURRENT_BACKTESTS_CAP}); using the built-in default"
+        )
+        return _BUILTIN_DEFAULT_CONCURRENT_BACKTESTS
+    return value
+
+
+DEFAULT_MAX_CONCURRENT_BACKTESTS = _default_concurrent_backtests()
 
 
 def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
@@ -354,7 +401,13 @@ def validate_entitlement_patch(
     next_max: Optional[int] = None
     if max_concurrent_backtests is not None:
         next_max = int(max_concurrent_backtests)
-        if next_max < 1 or next_max > MAX_CONCURRENT_BACKTESTS_CAP:
+        # Floor is 0, not 1. A floor equal to the default meant the console
+        # could meter an account but never stop one: an admin watching an
+        # abusive signup burn LLM budget could only lower it to the value a
+        # fresh account already has. 0 reads as "suspended" and costs nothing
+        # to implement — check_owner_active_run_cap refuses at active >= limit,
+        # so a zero budget refuses the first run.
+        if next_max < 0 or next_max > MAX_CONCURRENT_BACKTESTS_CAP:
             raise ValueError("invalid_max_concurrent_backtests")
     next_credits: Optional[int] = None
     if credits is not None:

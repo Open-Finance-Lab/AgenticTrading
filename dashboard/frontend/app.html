@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=97">
+    <link rel="stylesheet" href="styles.css?v=100">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -1785,7 +1785,7 @@
         <div class="page-header">
             <div>
                 <h2 class="page-title">Admin</h2>
-                <p class="page-description">All registered accounts. Change role in one click (with confirm). Edit concurrent limits and credits, then Save quotas.</p>
+                <p class="page-description">All registered accounts. Change role in one click (with confirm). Edit concurrent limits and credits, then Save quotas. Set a concurrent limit of 0 to suspend an account's backtests.</p>
             </div>
             <button id="adminRefreshBtn" class="auth-btn auth-btn-secondary" type="button">Refresh</button>
         </div>
@@ -1805,7 +1805,14 @@
                         <th scope="col">Display name</th>
                         <th scope="col">Role</th>
                         <th scope="col">Max concurrent backtests</th>
-                        <th scope="col">Credits</th>
+                        <!-- "Not enforced yet" is load-bearing, not a caveat.
+                             credits has a column, bounds, a Postgres twin, an
+                             editable input here and a slot on /api/auth/me, and
+                             is read by nothing in domain/ — so an operator
+                             zeroing it on an abusive account sees a 200 and
+                             walks away believing they stopped something. Delete
+                             this label only together with the enforcement. -->
+                        <th scope="col">Credits <span class="admin-th-note">(not enforced yet)</span></th>
                         <th scope="col"></th>
                     </tr>
                 </thead>
@@ -1833,7 +1840,7 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=27" defer></script>
-    <script src="app.js?v=98" defer></script>
+    <script src="app.js?v=100" defer></script>
     <script src="js/leaderboard.js?v=19" defer></script>
     <script src="home-page.js?v=37" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

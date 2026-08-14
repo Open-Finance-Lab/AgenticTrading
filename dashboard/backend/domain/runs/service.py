@@ -100,8 +100,7 @@ def resolve_owner_cap_context(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]
     exactly like "no cap configured".
     """
     owner_user_id = agent.get("owner_user_id")
-    if not owner_user_id:
-        return None
+    creating_id = agent.get("agent_id")
     # Lazy imports: users triggers store construction (SESSION_HASH_SECRET
     # resolution) and agents may sit on CONTENT_DATABASE_URL Postgres; neither
     # belongs in this module's import graph for callers that never create runs.
@@ -109,12 +108,38 @@ def resolve_owner_cap_context(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]
         from dashboard.backend import users as users_module
         from dashboard.backend.domain.agents.repository import agent_store
 
-        limit = int(
-            users_module.user_store.get_entitlements(int(owner_user_id))[
-                "max_concurrent_backtests"
+        if owner_user_id:
+            limit = int(
+                users_module.user_store.get_entitlements(int(owner_user_id))[
+                    "max_concurrent_backtests"
+                ]
+            )
+            scope = "account"
+            agent_ids = [
+                a.get("agent_id")
+                for a in agent_store.list_agents(owner_user_id=int(owner_user_id))
+                if a.get("agent_id")
             ]
-        )
-        owned = agent_store.list_agents(owner_user_id=int(owner_user_id))
+        elif creating_id:
+            # Unclaimed agent. Returning None here — "no account, so no cap" —
+            # is what made signing in strictly worse than staying anonymous:
+            # a logged-in user shared one account budget across every agent
+            # they owned, while the same person logged out got the per-agent
+            # cap multiplied by however many agents they registered. Same
+            # engine, same LLM spend, opposite direction of travel. Bill the
+            # browser session the agents were created under at the default
+            # budget instead, so the entitlement is a floor everyone starts
+            # from rather than a penalty for having an account.
+            #
+            # Not a bound against a determined caller: a browser session is a
+            # self-chosen header, free to rotate, and no per-key budget can fix
+            # that. MAX_ACTIVE_RUNS_GLOBAL is what actually bounds the server;
+            # this closes the incentive, not the hole.
+            limit = int(users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS)
+            scope = "session"
+            agent_ids = list(agent_store.list_owner_scope_agent_ids(creating_id))
+        else:
+            return None
     except Exception:  # noqa: BLE001 - the cap must not break creation
         # Static marker, no payload: store exceptions can carry connection
         # details (a psycopg error embeds the DSN), and CodeQL
@@ -127,17 +152,15 @@ def resolve_owner_cap_context(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]
             "skipping the per-account cap for this create"
         )
         return None
-    agent_ids = [a.get("agent_id") for a in owned if a.get("agent_id")]
-    creating_id = agent.get("agent_id")
     if creating_id and creating_id not in agent_ids:
         agent_ids.append(creating_id)
-    return {"limit": limit, "agent_ids": agent_ids}
+    return {"limit": limit, "agent_ids": agent_ids, "scope": scope}
 
 
 def check_owner_active_run_cap(
     context: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    """Per-account concurrency entitlement; ``None`` means clear to create.
+    """Per-owner concurrency entitlement; ``None`` means clear to create.
 
     ``max_concurrent_backtests`` (the admin-console entitlement) binds here:
     every agent owned by one account shares the account's budget of active
@@ -146,11 +169,17 @@ def check_owner_active_run_cap(
     ``resolve_owner_cap_context``, so the lock only ever waits on the local
     SQLite count below — that count-then-insert is the one race it must
     close. The dashboard's own runner needs no per-account gate (it is
-    single-flight for the whole process), and the legacy ``/api/v1/backtest/*``
-    surface carries no account identity to bill against.
+    single-flight for the whole process).
 
-    Unclaimed agents (``owner_user_id`` NULL) have no account either; the
-    per-agent and global caps still bound them.
+    Unclaimed agents are billed to the browser session that created them at the
+    default quota, so the same person cannot enlarge their budget by logging
+    out — see ``resolve_owner_cap_context`` for why that is an incentive fix and
+    not a bound.
+
+    The legacy ``/api/v1/backtest/*`` surface still carries no owner identity to
+    bill against, and its runs never reach ``protocol_runs`` at all, so this
+    function cannot see them. It carries its own budgets instead
+    (``domain/backtesting/external_run_service``).
 
     ``credits`` deliberately has no counterpart: nothing in the platform
     defines what a credit buys yet, so there is no metering to enforce —
@@ -160,12 +189,25 @@ def check_owner_active_run_cap(
         return None
     active = run_store.count_active_runs_for_agents(context["agent_ids"])
     if active >= context["limit"]:
-        return {"active_runs_for_account": active, "limit": context["limit"]}
+        return {
+            "active_runs_for_account": active,
+            "limit": context["limit"],
+            "scope": context.get("scope", "account"),
+        }
     return None
 
 
 def owner_cap_message(violation: Dict[str, Any]) -> str:
     """One message for both surfaces, so the SDK sees a single wording."""
+    if violation.get("scope") == "session":
+        # An anonymous caller has no admin to ask and no account page to look
+        # at, so pointing them at one would be a dead end. Signing in is the
+        # action that actually changes their limit.
+        return (
+            "This browser session is at its concurrent-backtest limit "
+            f"({violation['active_runs_for_account']} of {violation['limit']} active); "
+            "wait for a run to finish, cancel one, or sign in to use an account limit"
+        )
     return (
         "This account is at its concurrent-backtest limit "
         f"({violation['active_runs_for_account']} of {violation['limit']} active); "

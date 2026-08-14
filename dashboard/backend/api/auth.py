@@ -153,6 +153,19 @@ def _app_redirect(query: dict[str, str]) -> RedirectResponse:
 
 def _normalize_email(value: str) -> str:
     email = value.strip().lower()
+    # Strip() only touches the ends, so an address whose *interior* holds a
+    # newline validated fine and was stored verbatim. Everything that later
+    # renders an email as plain text then inherits it: the admin console builds
+    # its role-change confirm() as
+    # ``Promote {email} to admin?\n\nThey will see Admin…``, and an address of
+    # the form ``a@b.com\n\nThis account is verified by SecureFinAI Lab.`` puts
+    # attacker-chosen lines into the dialog an admin reads while deciding
+    # whether to grant admin. Escaping cannot help there — a native dialog has
+    # no markup to escape — so the address must never contain the character.
+    # Same reasoning covers the log sinks; ``_email_domain`` above truncates
+    # for its own output, but that is a second guard, not this one.
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in email):
+        raise ValueError("invalid email address")
     if "@" not in email or "." not in email.split("@", 1)[-1]:
         raise ValueError("invalid email address")
     return email
@@ -325,12 +338,46 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
     return current_user
 
 
-def _auth_json(user: dict, raw_token: str) -> JSONResponse:
+def _issue_session(user: dict, request: Request) -> tuple[str, Optional[dict]]:
+    """Mint the session row and read the caller's entitlements — one hop.
+
+    Both of these are synchronous store calls, i.e. a network round trip to
+    pooled Postgres in a durable deployment, and the only two callers are the
+    ``async def`` signup/login handlers. Bundled into a single function so they
+    cross into the threadpool together: two ``asyncio.to_thread`` awaits would
+    pay two hops for work that has to happen in sequence anyway, and — worse —
+    leaving *either* of them inline puts blocking I/O back on the event loop,
+    where one slow query stalls every concurrent request server-wide.
+
+    ``test_event_loop_threadpool`` cannot catch that regression here: it pins
+    plain-``def`` handlers, and these two are exempt for already awaiting.
+    ``test_auth_async_handlers_offload_store_io`` is the guard that can.
+    """
+    token = users_module.user_store.create_session(
+        user["id"], **_session_client_context(request)
+    )
+    entitlements = (
+        users_module.user_store.get_entitlements(user["id"])
+        if user.get("id") is not None
+        else None
+    )
+    return token, entitlements
+
+
+def _auth_json(
+    user: dict, raw_token: str, entitlements: Optional[dict] = None
+) -> JSONResponse:
     from dashboard.backend.csrf import set_csrf_cookie
 
     payload = dict(user)
     if "entitlements" not in payload and payload.get("id") is not None:
-        payload["entitlements"] = users_module.user_store.get_entitlements(payload["id"])
+        # Prefetched by the caller when it had a threadpool hop to spend; the
+        # query below is the fallback for a caller that did not.
+        payload["entitlements"] = (
+            entitlements
+            if entitlements is not None
+            else users_module.user_store.get_entitlements(payload["id"])
+        )
     response = JSONResponse({"user": payload})
     set_session_cookie(response, raw_token)
     set_csrf_cookie(response)
@@ -389,10 +436,8 @@ async def signup(payload: SignupRequest, request: Request):
             raise HTTPException(status_code=409, detail="Email is already registered") from exc
         raise
 
-    token = users_module.user_store.create_session(
-        user["id"], **_session_client_context(request)
-    )
-    return _auth_json(user, token)
+    token, entitlements = await asyncio.to_thread(_issue_session, user, request)
+    return _auth_json(user, token, entitlements=entitlements)
 
 
 @router.post("/login", response_model=AuthResponse)
@@ -432,10 +477,8 @@ async def login(payload: LoginRequest, request: Request):
         print(f"auth.login_failed domain={_email_domain(payload.email)}")
         raise HTTPException(status_code=401, detail=LOGIN_FAILURE_DETAIL)
 
-    token = users_module.user_store.create_session(
-        user["id"], **_session_client_context(request)
-    )
-    return _auth_json(public_user(user), token)
+    token, entitlements = await asyncio.to_thread(_issue_session, user, request)
+    return _auth_json(public_user(user), token, entitlements=entitlements)
 
 
 @router.get("/me")

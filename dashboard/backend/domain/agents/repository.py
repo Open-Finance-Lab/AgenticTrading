@@ -702,6 +702,59 @@ class AgentStore:
         conn.close()
         return int(row["n"] if row else 0)
 
+    def list_owner_scope_agent_ids(self, agent_id: str) -> List[str]:
+        """Agent ids that share an owner with ``agent_id``.
+
+        "Owner" is the account when the agent is claimed, and otherwise the
+        browser session it was created under — the two identities the concurrent
+        -backtest entitlement has to be able to bill, so that signing in cannot
+        leave a user with a *smaller* budget than signing out (see
+        ``domain/runs/service.resolve_owner_cap_context``).
+
+        Resolved inside the store on purpose. ``_public_agent`` withholds
+        ``owner_browser_session``, and that is not an oversight to route around:
+        ``api/dependencies._owner_context`` accepts that value *as* an ownership
+        credential, so a projection that returned it would hand one caller
+        another's. Only ids come back out.
+
+        An agent with neither owner is its own scope, so the caller still gets a
+        budget rather than the ``[]`` that would read as "no agents".
+        """
+        if not agent_id:
+            return []
+        conn = self._get_connection()
+        cursor = conn.cursor()
+        try:
+            cursor.execute(
+                "SELECT owner_user_id, owner_browser_session FROM external_agents "
+                "WHERE agent_id = ?",
+                (agent_id,),
+            )
+            row = cursor.fetchone()
+            if row is None:
+                return []
+            if row["owner_user_id"] is not None:
+                cursor.execute(
+                    "SELECT agent_id FROM external_agents WHERE owner_user_id = ?",
+                    (row["owner_user_id"],),
+                )
+            elif row["owner_browser_session"]:
+                # owner_user_id IS NULL: a claimed agent is billed to its
+                # account, never to the browser that happened to create it.
+                cursor.execute(
+                    "SELECT agent_id FROM external_agents "
+                    "WHERE owner_browser_session = ? AND owner_user_id IS NULL",
+                    (row["owner_browser_session"],),
+                )
+            else:
+                return [agent_id]
+            ids = [r["agent_id"] for r in cursor.fetchall() if r["agent_id"]]
+        finally:
+            conn.close()
+        if agent_id not in ids:
+            ids.append(agent_id)
+        return ids
+
     def owns_agent(
         self,
         agent: Dict[str, Any],

@@ -41,6 +41,112 @@ def test_start_requires_session(client):
     assert resp.status_code == 400
 
 
+def _fake_session(svc_mod, session_id, status="loading"):
+    """A resident session without loading any market data."""
+    s = svc_mod.ExternalBacktestSession(
+        backtest_id=f"bt_{session_id}_{len(svc_mod._sessions)}",
+        session_id=session_id,
+        agent_name="a",
+        model_name="m",
+        start_date="2026-04-15",
+        end_date="2026-04-16",
+    )
+    s.status = status
+    svc_mod._sessions[s.backtest_id] = s
+    return s
+
+
+def test_legacy_start_is_capped_per_session(client, monkeypatch):
+    """This route authenticates nothing and used to have no limit at all.
+
+    ``_require_session`` accepts any non-empty X-Session-Id, so a bare POST
+    spawned a thread and pinned a market-data window with no account, no agent
+    and no API key behind it. It also writes no ``protocol_runs`` row, so the
+    per-agent / per-account / global protocol caps are all blind to it: the
+    entitlement plane could hold every authenticated agent to its quota while
+    this ran unbounded beside it.
+    """
+    monkeypatch.setattr(svc, "MAX_LEGACY_ACTIVE_PER_SESSION", 2)
+    monkeypatch.setattr(svc, "MAX_LEGACY_ACTIVE_GLOBAL", 0)  # isolate the per-session budget
+    session_id = "legacy-session"
+    _fake_session(svc, session_id)
+    _fake_session(svc, session_id)
+
+    resp = client.post(
+        "/api/v1/backtest/start",
+        json={"start_date": "2026-04-15", "end_date": "2026-04-16"},
+        headers={"X-Session-Id": session_id},
+    )
+    assert resp.status_code == 429, resp.text
+    assert "session" in resp.json()["detail"]
+    assert resp.headers["Retry-After"] == "30"
+
+    # Another caller is unaffected — the budget is per session, not global here.
+    other = client.post(
+        "/api/v1/backtest/start",
+        json={"start_date": "2026-04-15", "end_date": "2026-04-16"},
+        headers={"X-Session-Id": "someone-else"},
+    )
+    assert other.status_code in (200, 500), other.text
+
+
+def test_legacy_start_is_capped_server_wide(client, monkeypatch):
+    """The global ceiling is the one a header-rotating caller cannot dodge."""
+    monkeypatch.setattr(svc, "MAX_LEGACY_ACTIVE_GLOBAL", 2)
+    _fake_session(svc, "one")
+    _fake_session(svc, "two")
+
+    resp = client.post(
+        "/api/v1/backtest/start",
+        json={"start_date": "2026-04-15", "end_date": "2026-04-16"},
+        headers={"X-Session-Id": "three"},
+    )
+    assert resp.status_code == 429, resp.text
+    assert "server" in resp.json()["detail"]
+
+
+def test_terminal_sessions_do_not_consume_the_legacy_budget(client, monkeypatch):
+    """A finished run holds no market data, so it must not hold a slot."""
+    monkeypatch.setattr(svc, "MAX_LEGACY_ACTIVE_PER_SESSION", 1)
+    monkeypatch.setattr(svc, "MAX_LEGACY_ACTIVE_GLOBAL", 0)
+    _fake_session(svc, "done", status="completed")
+    _fake_session(svc, "done", status="failed")
+    assert svc.count_active_sessions("done") == 0
+
+    resp = client.post(
+        "/api/v1/backtest/start",
+        json={"start_date": "2026-04-15", "end_date": "2026-04-16"},
+        headers={"X-Session-Id": "done"},
+    )
+    assert resp.status_code != 429, resp.text
+
+
+def test_protocol_creates_do_not_pay_the_legacy_budget(monkeypatch):
+    """The protocol surfaces are already capped three ways above this layer.
+
+    Charging them a second, differently-keyed budget here would refuse creates
+    that ``run_service.create_run`` had just authorised — so the legacy budget
+    is opt-in, and only the legacy route opts in.
+    """
+    monkeypatch.setattr(svc, "MAX_LEGACY_ACTIVE_PER_SESSION", 1)
+    monkeypatch.setattr(svc, "MAX_LEGACY_ACTIVE_GLOBAL", 1)
+    _fake_session(svc, "proto")
+
+    kwargs = dict(
+        session_id="proto",
+        agent_name="a",
+        model_name="m",
+        start_date="2026-04-15",
+        end_date="2026-04-16",
+    )
+    # Opted in (the legacy route): refused.
+    with pytest.raises(svc.BacktestCapacityError):
+        svc.start_backtest(enforce_session_cap=True, **kwargs)
+    # Default (run_service.create_run's call): unaffected.
+    started = svc.start_backtest(**kwargs)
+    assert started["status"] == "loading"
+
+
 def test_parse_actions_payload_valid():
     payload = {
         "actions": [{

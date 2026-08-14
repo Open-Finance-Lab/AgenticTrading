@@ -26,37 +26,71 @@ from dashboard.backend.users import (
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+# Every route on this sub-router is admin-only, enforced once here rather than
+# per handler. The per-route ``Depends(require_admin)`` below stays — a handler
+# that needs the admin's own row still has to name it, and FastAPI caches the
+# dependency so it resolves once per request either way. What this adds is that
+# a route added later *without* naming it is still gated: the guard was
+# previously per-route opt-in spelled ``_admin:``, a leading-underscore
+# parameter that reads as deletable to anyone tidying unused arguments.
+#
+# POST /bootstrap is deliberately NOT on this router: it is the one route that
+# must work when no admin exists yet.
+admin_router = APIRouter(dependencies=[Depends(require_admin)])
+
 # Failed bootstrap guesses. Success does not consume a slot.
 #
 # Three budgets, in honesty order:
-#   per-user   the friendliest 429 for an operator with a typo — not a bound
-#              (signup is open, so fresh accounts are free).
+#   per-user   keyed on the authenticated caller's id, which is the one key
+#              here that is NOT attacker-chosen — the route requires a session,
+#              so spending someone else's budget means owning their account.
+#              Signup is open, so fresh accounts are cheap but not free (the
+#              signup limiters bound minting them), which makes this the budget
+#              that actually costs a guesser something.
 #   per-IP     bounds naive abuse only. It deliberately keys on client_ip(),
 #              not client_key(): the x-browser-id/x-session-id headers
 #              client_key() prefers cost nothing to rotate per request, which
 #              made that budget a no-op, where forging a fresh X-Forwarded-For
 #              at least takes deliberate header surgery.
-#   global     the ceiling below is the only budget a header-rotating caller
-#              cannot dodge; it is what actually caps secret guessing (per
-#              process — see #349).
+#   global     the only budget a header-rotating caller cannot dodge — and for
+#              that same reason the only one they can turn on the operator. It
+#              is checked AFTER the secret compare (see bootstrap_admin), so
+#              exhausting it sheds wrong guesses without ever refusing a right
+#              one. Guessing is bounded by the secret's entropy, which
+#              _MIN_BOOTSTRAP_SECRET_LEN now makes mandatory rather than
+#              hoped-for; per process, see #349.
 _BOOTSTRAP_LIMITER = FixedWindowRateLimiter(max_events=5, window_seconds=900)
-# Server-wide ceiling across every account and address. Bootstrap is a one-shot
-# action a single operator performs once on a fresh deploy, so 20 wrong guesses
-# per 15 minutes is far more than legitimate use needs. It can be used to lock
-# the operator out for a window, which is the right trade: the route is inert
-# the moment one admin exists, and SQL is always available as break-glass.
 _BOOTSTRAP_GLOBAL_LIMITER = FixedWindowRateLimiter(max_events=20, window_seconds=900)
 _BOOTSTRAP_GLOBAL_KEY = "bootstrap:global"
 _BOOTSTRAP_RATE_DETAIL = "Too many bootstrap attempts; please try again later."
 # Slots the first admin gets seeded with, so the operator can actually run
 # something without editing their own row first.
 BOOTSTRAP_ADMIN_MIN_CONCURRENT_BACKTESTS = 5
+# Shortest ADMIN_BOOTSTRAP_SECRET this route will honour. A shared secret that
+# promotes its bearer to admin is a password with no account behind it and no
+# lockout to hide behind, so "the operator picked something strong" cannot be
+# an assumption — anything shorter is refused as if unset, loudly, server-side.
+# 32 is what ``secrets.token_urlsafe(24)`` produces and comfortably below the
+# 43 chars the deployed value already has, so this tightens the floor without
+# stranding the live deployment.
+_MIN_BOOTSTRAP_SECRET_LEN = 32
+# One refusal for every reason bootstrap can decline a secret. Telling "not
+# configured" (503) apart from "wrong" (403) hands an unauthenticated prober a
+# free answer to "is this deployment bootstrappable?" — the same question the
+# repo already declines to answer for LEADERBOARD_DAILY_REFRESH_SECRET, which
+# 401s whether or not it is armed and sends the operator's signal to the log.
+_BOOTSTRAP_REFUSAL = "Invalid bootstrap secret"
 
 
 class AdminUserPatch(BaseModel):
     role: Optional[Literal["user", "admin"]] = None
+    # ge=0, not ge=1: a floor equal to the default quota is not a control. An
+    # admin watching a fresh account burn LLM budget could only lower it to the
+    # value that account already had; 0 is "suspended" and needs no new field
+    # or column to mean it (check_owner_active_run_cap refuses at
+    # active >= limit, so a zero budget refuses the first run).
     max_concurrent_backtests: Optional[int] = Field(
-        default=None, ge=1, le=MAX_CONCURRENT_BACKTESTS_CAP
+        default=None, ge=0, le=MAX_CONCURRENT_BACKTESTS_CAP
     )
     credits: Optional[int] = Field(default=None, ge=0, le=MAX_CREDITS_CAP)
 
@@ -87,7 +121,50 @@ def reset_bootstrap_limiters() -> None:
     _BOOTSTRAP_GLOBAL_LIMITER.reset()
 
 
-@router.get("/stats")
+def _bootstrap_secret() -> Optional[str]:
+    """The configured bootstrap secret, or ``None`` when the route must refuse.
+
+    Unset and too-weak collapse to the same answer on purpose: from the
+    caller's side both are "this deployment will not bootstrap", and the route
+    above turns both into the same 403. The distinction the *operator* needs
+    goes to the log, where reading it already implies server access.
+
+    print, not logging: logger output is invisible under deployed uvicorn.
+    """
+    expected = (os.getenv("ADMIN_BOOTSTRAP_SECRET") or "").strip()
+    if not expected:
+        return None
+    if len(expected) < _MIN_BOOTSTRAP_SECRET_LEN:
+        # Length only — never the value, and never a slice of it.
+        print(
+            "admin bootstrap: ADMIN_BOOTSTRAP_SECRET is shorter than "
+            f"{_MIN_BOOTSTRAP_SECRET_LEN} characters; refusing every attempt. "
+            "Set a value from `python -c \"import secrets;"
+            'print(secrets.token_urlsafe(32))"`.'
+        )
+        return None
+    return expected
+
+
+def _audit(event: str, **fields: object) -> None:
+    """One line per privileged mutation, on the operator's only real channel.
+
+    Role and quota changes are bare UPDATEs in both twins: no actor column, no
+    timestamp, no history. That is a real gap for a privilege system, and a
+    proper audit table is a schema change this PR should not grow — but "who
+    promoted whom" being *nowhere* is worse than it being in the log, so this
+    at least leaves a trail an operator can grep.
+
+    Values are ints and role literals only. Nothing here interpolates an
+    email, display name, or store exception: those are attacker-influenced
+    strings, and the log-injection guard in ``api/auth.py::_email_domain``
+    exists because one of them already reached a print sink.
+    """
+    parts = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
+    print(f"admin.{event} {parts}".rstrip())
+
+
+@admin_router.get("/stats")
 def admin_stats(_admin: dict = Depends(require_admin)):
     """Site-wide counters for the admin console header."""
     from dashboard.backend.api.routers.backtests import count_active_dashboard_backtests
@@ -102,7 +179,7 @@ def admin_stats(_admin: dict = Depends(require_admin)):
     }
 
 
-@router.get("/users")
+@admin_router.get("/users")
 def list_users(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -119,7 +196,7 @@ def list_users(
     }
 
 
-@router.get("/users/{user_id}")
+@admin_router.get("/users/{user_id}")
 def get_user(user_id: int, _admin: dict = Depends(require_admin)):
     payload = users_module.user_store.get_user_admin(user_id)
     if not payload:
@@ -127,7 +204,7 @@ def get_user(user_id: int, _admin: dict = Depends(require_admin)):
     return {"user": payload}
 
 
-@router.patch("/users/{user_id}")
+@admin_router.patch("/users/{user_id}")
 def patch_user(
     user_id: int,
     payload: AdminUserPatch,
@@ -197,6 +274,14 @@ def patch_user(
 
     if not updated:
         raise HTTPException(status_code=404, detail="User not found")
+    _audit(
+        "user_patched",
+        actor=int(admin["id"]),
+        target=int(user_id),
+        role=payload.role,
+        max_concurrent_backtests=payload.max_concurrent_backtests,
+        credits=payload.credits,
+    )
     return {"user": updated}
 
 
@@ -214,25 +299,32 @@ def bootstrap_admin(
     for key in keys:
         if not _BOOTSTRAP_LIMITER.check(key):
             raise rate_limited_error(_BOOTSTRAP_LIMITER, key, _BOOTSTRAP_RATE_DETAIL)
-    if not _BOOTSTRAP_GLOBAL_LIMITER.check(_BOOTSTRAP_GLOBAL_KEY):
-        raise rate_limited_error(
-            _BOOTSTRAP_GLOBAL_LIMITER, _BOOTSTRAP_GLOBAL_KEY, _BOOTSTRAP_RATE_DETAIL
-        )
 
-    expected = (os.getenv("ADMIN_BOOTSTRAP_SECRET") or "").strip()
-    if not expected:
-        raise HTTPException(
-            status_code=503,
-            detail="Admin bootstrap is not configured",
-        )
-    if not secrets_equal(payload.secret, expected):
+    # The compare runs before the global budget is consulted, so a *correct*
+    # secret is never refused by other people's wrong guesses. That ordering is
+    # the whole point: the global budget is the one key an attacker cannot
+    # dodge, which also made it the one they could aim at the operator —
+    # 20 wrong guesses per window, re-spent every window, previously locked the
+    # real operator out for as long as anyone cared to keep going, and the
+    # window it blocks is exactly the fresh-deploy window bootstrap exists for.
+    # Nothing is leaked by comparing first: secrets_equal is constant-time, and
+    # a wrong guess still leaves with 403/429 either way.
+    expected = _bootstrap_secret()
+    if expected is None or not secrets_equal(payload.secret, expected):
         for key in keys:
             _BOOTSTRAP_LIMITER.record(key)
-        _BOOTSTRAP_GLOBAL_LIMITER.record(_BOOTSTRAP_GLOBAL_KEY)
-        raise HTTPException(status_code=403, detail="Invalid bootstrap secret")
+        # allow(), not record()-then-check(): the budget is spent and tested in
+        # one atomic step, and a rejected attempt does not extend the window.
+        if not _BOOTSTRAP_GLOBAL_LIMITER.allow(_BOOTSTRAP_GLOBAL_KEY):
+            raise rate_limited_error(
+                _BOOTSTRAP_GLOBAL_LIMITER, _BOOTSTRAP_GLOBAL_KEY, _BOOTSTRAP_RATE_DETAIL
+            )
+        _audit("bootstrap_rejected", user=int(current_user["id"]))
+        raise HTTPException(status_code=403, detail=_BOOTSTRAP_REFUSAL)
 
     try:
         users_module.user_store.promote_first_admin(current_user["id"])
+        _audit("bootstrap_promoted", user=int(current_user["id"]))
     except ValueError as exc:
         code = str(exc)
         if code == "admin_exists":
@@ -261,10 +353,15 @@ def bootstrap_admin(
             ),
             updated_by_admin_id=current_user["id"],
         )
-    except Exception as exc:  # noqa: BLE001 - promotion already succeeded
-        # print, not logging: logger output is invisible under deployed uvicorn.
-        print(
-            "admin bootstrap: promoted user "
-            f"{current_user['id']} but could not seed entitlements: {exc!r}"
-        )
+    except Exception:  # noqa: BLE001 - promotion already succeeded
+        # No ``{exc!r}``: a psycopg error stringifies with its connection DSN
+        # embedded, and this line lands in the same log an operator pastes into
+        # a ticket. The failing store already reports its own details; all this
+        # line has to carry is which user needs a quota PATCH.
+        _audit("bootstrap_entitlements_failed", user=int(current_user["id"]))
     return {"user": users_module.user_store.get_user_admin(current_user["id"])}
+
+
+# Mounted last so the module reads top-down: the admin-gated routes are defined
+# above, then attached under the same ``/admin`` prefix as /bootstrap.
+router.include_router(admin_router)

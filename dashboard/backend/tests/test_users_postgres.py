@@ -526,7 +526,12 @@ def test_entitlements_upsert_partial_patch_postgres(temp_postgres_store):
     store = temp_postgres_store
     user = store.create_user("pgent@example.com", "PG Ent", "securepass1")
 
-    assert store.get_entitlements(user["id"])["max_concurrent_backtests"] == 1
+    import dashboard.backend.users as users_module
+
+    assert (
+        store.get_entitlements(user["id"])["max_concurrent_backtests"]
+        == users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS
+    )
 
     first = store.set_entitlements(
         user["id"], max_concurrent_backtests=7, credits=250
@@ -587,8 +592,64 @@ def test_admin_counts_and_listing_postgres(temp_postgres_store):
     by_email = {row["email"]: row for row in listed}
     assert set(by_email) == {"pgc1@example.com", "pgc2@example.com"}
     # No entitlements row yet -> defaults from the LEFT JOIN miss.
-    assert by_email["pgc2@example.com"]["entitlements"]["max_concurrent_backtests"] == 1
+    import dashboard.backend.users as users_module
+
+    assert (
+        by_email["pgc2@example.com"]["entitlements"]["max_concurrent_backtests"]
+        == users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS
+    )
     assert "avatar" not in by_email["pgc1@example.com"]
+
+
+@pg_only
+def test_promote_first_admin_is_one_shot_postgres(temp_postgres_store):
+    """Prod's copy of the bootstrap predicate, which had no test at all.
+
+    ``promote_first_admin`` appeared zero times in this file: the one-shot
+    guard — the thing standing between "no admin yet" and "anyone with the
+    secret is admin" — was only ever exercised on SQLite, while every
+    deployment with USERS_DATABASE_URL set runs this twin. The twin-parity
+    guard cannot cover it either: it compares method names and signatures, and
+    never reads a WHERE clause.
+    """
+    store = temp_postgres_store
+    first = store.create_user("pgboot1@example.com", "Boot One", "securepass1")
+    second = store.create_user("pgboot2@example.com", "Boot Two", "securepass1")
+
+    promoted = store.promote_first_admin(first["id"])
+    assert promoted["role"] == "admin"
+    assert store.get_user_by_id(first["id"])["role"] == "admin"
+
+    # Inert the moment ANY admin exists — including for the caller who already
+    # used it, whose retry must not silently succeed a second time.
+    with pytest.raises(ValueError, match="admin_exists"):
+        store.promote_first_admin(second["id"])
+    with pytest.raises(ValueError, match="admin_exists"):
+        store.promote_first_admin(first["id"])
+    assert store.get_user_by_id(second["id"])["role"] == "user"
+    assert store.count_users_and_admins()["admins"] == 1
+
+
+@pg_only
+def test_promote_first_admin_unknown_user_postgres(temp_postgres_store):
+    """No admin exists, so the one-shot check passes and the UPDATE matches
+    nothing — that has to be user_not_found, not a silent success."""
+    store = temp_postgres_store
+    with pytest.raises(ValueError, match="user_not_found"):
+        store.promote_first_admin(999_999)
+    assert store.count_users_and_admins()["admins"] == 0
+
+
+@pg_only
+def test_zero_quota_round_trips_postgres(temp_postgres_store):
+    """0 is the suspend value; ``COALESCE(%s::integer, …)`` must not read it
+    as "field omitted" and restore the previous quota."""
+    store = temp_postgres_store
+    user = store.create_user("pgzero@example.com", "PG Zero", "securepass1")
+    store.set_entitlements(user["id"], max_concurrent_backtests=7)
+    zeroed = store.set_entitlements(user["id"], max_concurrent_backtests=0)
+    assert zeroed["max_concurrent_backtests"] == 0
+    assert store.get_entitlements(user["id"])["max_concurrent_backtests"] == 0
 
 
 def test_store_twins_expose_the_same_public_surface():

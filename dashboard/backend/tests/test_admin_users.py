@@ -7,6 +7,11 @@ import pytest
 
 import dashboard.backend.users as users_module
 
+# >= admin_users._MIN_BOOTSTRAP_SECRET_LEN (32). A shorter value is now
+# refused as if unset, so every bootstrap test has to use a realistic one.
+_SECRET = "correct-secret-value-long-enough-to-pass"
+_WRONG = "wrong-secret-value-long-enough-to-pass!!"
+
 
 @pytest.fixture
 def store():
@@ -43,7 +48,14 @@ def _promote(store, user_id):
 def test_entitlements_default_then_upsert(store):
     user = store.create_user("a@example.com", "A", "securepass1")
     defaults = store.get_entitlements(user["id"])
-    assert defaults["max_concurrent_backtests"] == 1
+    # Read from the constant, not a literal: this value is every existing
+    # account's live quota on the deploy that ships the entitlement plane
+    # (nothing seeds a row at signup and nothing backfills), so pinning a
+    # number here would let a regression to 1 pass as "the test says 1".
+    assert (
+        defaults["max_concurrent_backtests"]
+        == users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS
+    )
     assert defaults["credits"] == 0
 
     updated = store.set_entitlements(
@@ -55,6 +67,30 @@ def test_entitlements_default_then_upsert(store):
     assert updated["max_concurrent_backtests"] == 5
     assert updated["credits"] == 100
     assert updated["updated_by_admin_id"] == user["id"]
+
+
+def test_default_quota_does_not_throttle_existing_accounts():
+    """The default has to cover what a user could already do before this PR.
+
+    Before the entitlement plane, one account's concurrency was bounded only by
+    MAX_ACTIVE_RUNS_PER_AGENT per agent it owned. A default below that number
+    silently demotes every account that exists on the day this ships — with no
+    backfill, and no way back that does not require an admin.
+    """
+    from dashboard.backend.domain.runs.service import MAX_ACTIVE_RUNS_PER_AGENT
+
+    assert users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS >= MAX_ACTIVE_RUNS_PER_AGENT
+
+
+def test_default_quota_is_env_overridable(monkeypatch):
+    monkeypatch.setenv("DEFAULT_MAX_CONCURRENT_BACKTESTS", "3")
+    assert users_module._default_concurrent_backtests() == 3
+    # A typo in a Render var must not take the process down, and must not
+    # silently become a quota of 0 either.
+    monkeypatch.setenv("DEFAULT_MAX_CONCURRENT_BACKTESTS", "not-a-number")
+    assert users_module._default_concurrent_backtests() == 5
+    monkeypatch.setenv("DEFAULT_MAX_CONCURRENT_BACKTESTS", "9999")
+    assert users_module._default_concurrent_backtests() == 5
 
 
 def test_apply_role_and_list_admin(store):
@@ -104,6 +140,97 @@ def test_admin_users_requires_admin(isolated_auth):
     assert listed.status_code == 200
     emails = {row["email"] for row in listed.json()["users"]}
     assert "plain@example.com" in emails
+
+
+def test_every_admin_route_refuses_a_non_admin(isolated_auth):
+    """All four, not just the one that happened to get a test.
+
+    ``GET /users`` was the only route with a non-admin case, which is exactly
+    the coverage shape that lets a missing guard ship: the console is small
+    enough that whoever adds route five will copy route four, and only route
+    one is pinned. Enumerated from the router itself so a new route without a
+    case here fails loudly rather than silently going ungated.
+    """
+    from dashboard.backend.api.routers.admin_users import router
+
+    client, store = isolated_auth
+    user = _signup(client, "outsider@example.com")
+
+    calls = {
+        ("GET", "/api/admin/stats"): lambda: client.get("/api/admin/stats"),
+        ("GET", "/api/admin/users"): lambda: client.get("/api/admin/users"),
+        ("GET", "/api/admin/users/{user_id}"): lambda: client.get(
+            f"/api/admin/users/{user['id']}"
+        ),
+        ("PATCH", "/api/admin/users/{user_id}"): lambda: client.patch(
+            f"/api/admin/users/{user['id']}", json={"role": "admin"}
+        ),
+    }
+    registered = {
+        (method, f"/api{route.path}")
+        for route in router.routes
+        for method in route.methods
+        if not route.path.endswith("/bootstrap")  # deliberately not admin-gated
+    }
+    assert registered == set(calls), (
+        "an admin route was added or renamed without a non-admin case here"
+    )
+
+    for (method, path), call in calls.items():
+        resp = call()
+        assert resp.status_code == 403, f"{method} {path} -> {resp.status_code}"
+    assert store.get_user_by_id(user["id"])["role"] == "user"
+
+
+def test_admin_routes_are_gated_at_the_router_not_per_handler():
+    """Defence in depth for the route nobody has written yet.
+
+    Before, the guard was a per-route opt-in spelled ``_admin:`` — a
+    leading-underscore parameter that reads as an unused argument to anyone
+    tidying the file, and whose absence on a new route is invisible.
+    """
+    from dashboard.backend.api.routers.admin_users import admin_router, router
+
+    assert admin_router.dependencies, "admin_router must carry require_admin"
+    assert admin_router.routes, "admin routes must live on the gated sub-router"
+    # /bootstrap is the deliberate exception: it is the one route that has to
+    # work when no admin exists yet.
+    bootstrap = [r for r in router.routes if r.path.endswith("/bootstrap")]
+    assert len(bootstrap) == 1
+    assert not bootstrap[0].dependencies
+
+
+def test_role_and_quota_changes_leave_an_audit_line(isolated_auth, capsys):
+    """Both twins write a bare UPDATE: no actor, no timestamp, no history.
+
+    A privilege system where "who promoted whom" is recorded nowhere is a real
+    gap, and an audit table is a schema change this PR should not grow — but
+    the log is better than nothing, and it is the operator's only real channel
+    in prod (logger output is invisible under deployed uvicorn).
+    """
+    client, store = isolated_auth
+    admin = _signup(client, "audit-admin@example.com")
+    _promote(store, admin["id"])
+    target = _signup(client, "audit-target@example.com")
+    client.post(
+        "/api/auth/login",
+        json={"email": "audit-admin@example.com", "password": "SecurePass1!"},
+    )
+    capsys.readouterr()
+    resp = client.patch(
+        f"/api/admin/users/{target['id']}",
+        json={"role": "admin", "max_concurrent_backtests": 9},
+    )
+    assert resp.status_code == 200, resp.text
+    out = capsys.readouterr().out
+    assert "admin.user_patched" in out
+    assert f"actor={admin['id']}" in out
+    assert f"target={target['id']}" in out
+    assert "role=admin" in out
+    assert "max_concurrent_backtests=9" in out
+    # Never the email: attacker-influenced strings do not go to a print sink
+    # (see api/auth.py::_email_domain for the log-injection that taught this).
+    assert "audit-target@example.com" not in out
 
 
 def test_admin_cannot_demote_self(isolated_auth):
@@ -220,9 +347,50 @@ def test_admin_patch_rejects_out_of_range_quotas(isolated_auth):
     )
     resp = client.patch(
         f"/api/admin/users/{target['id']}",
-        json={"max_concurrent_backtests": 0},
+        json={"max_concurrent_backtests": -1},
     )
     assert resp.status_code == 422
+    resp = client.patch(
+        f"/api/admin/users/{target['id']}",
+        json={"max_concurrent_backtests": 21},
+    )
+    assert resp.status_code == 422
+
+
+def test_admin_can_suspend_an_account_with_a_zero_quota(isolated_auth):
+    """0 is the only value that actually *stops* an account.
+
+    The floor used to be 1 — the same number a fresh signup already has — so
+    lowering a quota did nothing to the case an admin would reach for it in:
+    an account abusing the platform right now. 0 needs no new column to mean
+    "suspended": check_owner_active_run_cap refuses at ``active >= limit``.
+    """
+    from dashboard.backend.domain.runs.service import check_owner_active_run_cap
+
+    client, store = isolated_auth
+    admin = _signup(client, "suspend-admin@example.com")
+    _promote(store, admin["id"])
+    target = _signup(client, "suspend-member@example.com")
+    client.post(
+        "/api/auth/login",
+        json={"email": "suspend-admin@example.com", "password": "SecurePass1!"},
+    )
+    resp = client.patch(
+        f"/api/admin/users/{target['id']}",
+        json={"max_concurrent_backtests": 0},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["user"]["entitlements"]["max_concurrent_backtests"] == 0
+    assert store.get_entitlements(target["id"])["max_concurrent_backtests"] == 0
+    # A zero budget refuses the *first* run, not just the second.
+    violation = check_owner_active_run_cap(
+        {"limit": 0, "agent_ids": [], "scope": "account"}
+    )
+    assert violation == {
+        "active_runs_for_account": 0,
+        "limit": 0,
+        "scope": "account",
+    }
 
 
 def test_admin_patch_rejects_explicit_null(isolated_auth):
@@ -246,13 +414,49 @@ def test_admin_patch_rejects_explicit_null(isolated_auth):
     assert store.get_entitlements(target["id"])["credits"] == 7
 
 
-def test_bootstrap_unset_is_503(isolated_auth, monkeypatch):
+def test_bootstrap_unset_answers_exactly_like_a_wrong_secret(isolated_auth, monkeypatch):
+    """Unconfigured must not be distinguishable from wrong.
+
+    A 503 "not configured" told any caller who can sign up whether this
+    deployment is bootstrappable at all — i.e. whether guessing the secret is
+    worth their time, and whether an admin exists yet. The repo already makes
+    the opposite trade nowhere: LEADERBOARD_DAILY_REFRESH_SECRET 401s whether
+    or not it is armed and sends the operator's signal to the log. Same here.
+    """
     monkeypatch.delenv("ADMIN_BOOTSTRAP_SECRET", raising=False)
     client, _store = isolated_auth
     _signup(client, "boot-unset@example.com")
-    resp = client.post("/api/admin/bootstrap", json={"secret": "atleast8chars"})
-    assert resp.status_code == 503
-    assert "not configured" in resp.json()["detail"].lower()
+    unset = client.post("/api/admin/bootstrap", json={"secret": "atleast8chars"})
+
+    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", _SECRET)
+    wrong = client.post("/api/admin/bootstrap", json={"secret": _WRONG})
+
+    assert unset.status_code == 403
+    assert unset.json() == wrong.json()
+
+
+def test_bootstrap_refuses_a_weak_secret(isolated_auth, monkeypatch, capsys):
+    """A short ADMIN_BOOTSTRAP_SECRET is refused as if unset, and says so.
+
+    This value promotes its bearer to admin with no account behind it and no
+    lockout to hide behind, so "the operator picked something strong" cannot be
+    an assumption the route rests on. The operator's signal goes to the log —
+    which already implies server access — never to the caller.
+    """
+    from dashboard.backend.api.routers import admin_users as admin_mod
+
+    weak = "hunter2!"
+    assert len(weak) < admin_mod._MIN_BOOTSTRAP_SECRET_LEN
+    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", weak)
+    client, store = isolated_auth
+    user = _signup(client, "boot-weak@example.com")
+
+    resp = client.post("/api/admin/bootstrap", json={"secret": weak})
+    assert resp.status_code == 403, resp.text
+    assert store.get_user_by_id(user["id"])["role"] == "user"
+    out = capsys.readouterr().out
+    assert "shorter than" in out
+    assert weak not in out  # never the value, not even a slice of it
 
 
 def test_bootstrap_wrong_secret_is_403_even_on_length_mismatch(isolated_auth, monkeypatch):
@@ -266,11 +470,11 @@ def test_bootstrap_wrong_secret_is_403_even_on_length_mismatch(isolated_auth, mo
 
 
 def test_bootstrap_first_caller_succeeds_second_refused(isolated_auth, monkeypatch):
-    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", "correct-secret-value")
+    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", _SECRET)
     client, store = isolated_auth
     first = _signup(client, "boot-first@example.com")
     ok = client.post(
-        "/api/admin/bootstrap", json={"secret": "correct-secret-value"}
+        "/api/admin/bootstrap", json={"secret": _SECRET}
     )
     assert ok.status_code == 200, ok.text
     body = ok.json()["user"]
@@ -281,7 +485,7 @@ def test_bootstrap_first_caller_succeeds_second_refused(isolated_auth, monkeypat
     client.post("/api/auth/logout")
     second = _signup(client, "boot-second@example.com")
     denied = client.post(
-        "/api/admin/bootstrap", json={"secret": "correct-secret-value"}
+        "/api/admin/bootstrap", json={"secret": _SECRET}
     )
     assert denied.status_code == 403, denied.text
     assert "no admin exists" in denied.json()["detail"].lower()
@@ -421,7 +625,7 @@ def test_bootstrap_survives_a_failed_entitlement_grant(isolated_auth, monkeypatc
     A 500 here tells the operator bootstrap failed, and their retry then hits
     ``admin_exists`` -> 403 — while they have in fact been an admin all along.
     """
-    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", "correct-secret-value")
+    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", _SECRET)
     client, store = isolated_auth
     user = _signup(client, "boot-grant@example.com")
 
@@ -429,7 +633,7 @@ def test_bootstrap_survives_a_failed_entitlement_grant(isolated_auth, monkeypatc
         raise RuntimeError("entitlements table is on fire")
 
     monkeypatch.setattr(store, "set_entitlements", _boom)
-    resp = client.post("/api/admin/bootstrap", json={"secret": "correct-secret-value"})
+    resp = client.post("/api/admin/bootstrap", json={"secret": _SECRET})
     assert resp.status_code == 200, resp.text
     assert resp.json()["user"]["role"] == "admin"
     assert store.get_user_by_id(user["id"])["role"] == "admin"
@@ -440,14 +644,14 @@ def test_bootstrap_budget_is_not_reset_by_a_fresh_account(isolated_auth, monkeyp
     from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
     from dashboard.backend.api.routers import admin_users as admin_mod
 
-    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", "correct-secret-value")
+    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", _SECRET)
     monkeypatch.setattr(
         admin_mod,
         "_BOOTSTRAP_LIMITER",
         FixedWindowRateLimiter(max_events=2, window_seconds=900),
     )
     client, _store = isolated_auth
-    payload = {"secret": "wrong-secret-value"}
+    payload = {"secret": _WRONG}
 
     _signup(client, "burner-one@example.com")
     assert client.post("/api/admin/bootstrap", json=payload).status_code == 403
@@ -463,7 +667,7 @@ def test_bootstrap_global_ceiling_applies(isolated_auth, monkeypatch):
     from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
     from dashboard.backend.api.routers import admin_users as admin_mod
 
-    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", "correct-secret-value")
+    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", _SECRET)
     monkeypatch.setattr(
         admin_mod,
         "_BOOTSTRAP_GLOBAL_LIMITER",
@@ -471,18 +675,55 @@ def test_bootstrap_global_ceiling_applies(isolated_auth, monkeypatch):
     )
     client, _store = isolated_auth
     _signup(client, "global-cap@example.com")
-    payload = {"secret": "wrong-secret-value"}
+    payload = {"secret": _WRONG}
     assert client.post("/api/admin/bootstrap", json=payload).status_code == 403
     limited = client.post("/api/admin/bootstrap", json=payload)
     assert limited.status_code == 429
     assert "Retry-After" in limited.headers
 
 
+def test_a_spent_global_budget_still_lets_the_right_secret_through(
+    isolated_auth, monkeypatch
+):
+    """Wrong guesses must not be able to lock the real operator out.
+
+    The global ceiling is the one budget a header-rotating caller cannot dodge,
+    which made it the one they could aim at the operator: it was checked before
+    the secret was even read, so 20 wrong guesses per window — re-spent every
+    window, from any account — refused the correct secret indefinitely. And the
+    window it blocked is exactly the fresh-deploy window bootstrap exists for.
+    Comparing first leaks nothing: secrets_equal is constant-time and a wrong
+    guess still leaves with 403 or 429.
+    """
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+    from dashboard.backend.api.routers import admin_users as admin_mod
+
+    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", _SECRET)
+    monkeypatch.setattr(
+        admin_mod,
+        "_BOOTSTRAP_GLOBAL_LIMITER",
+        FixedWindowRateLimiter(max_events=1, window_seconds=900),
+    )
+    client, store = isolated_auth
+
+    # An attacker burns the whole server-wide budget from their own account.
+    _signup(client, "attacker@example.com")
+    assert client.post("/api/admin/bootstrap", json={"secret": _WRONG}).status_code == 403
+    assert client.post("/api/admin/bootstrap", json={"secret": _WRONG}).status_code == 429
+
+    # The operator, holding the real secret, is still let through.
+    client.post("/api/auth/logout")
+    operator = _signup(client, "operator@example.com")
+    ok = client.post("/api/admin/bootstrap", json={"secret": _SECRET})
+    assert ok.status_code == 200, ok.text
+    assert store.get_user_by_id(operator["id"])["role"] == "admin"
+
+
 def test_bootstrap_rate_limits_wrong_secret(isolated_auth, monkeypatch):
     from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
     from dashboard.backend.api.routers import admin_users as admin_mod
 
-    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", "correct-secret-value")
+    monkeypatch.setenv("ADMIN_BOOTSTRAP_SECRET", _SECRET)
     monkeypatch.setattr(
         admin_mod,
         "_BOOTSTRAP_LIMITER",
@@ -490,7 +731,7 @@ def test_bootstrap_rate_limits_wrong_secret(isolated_auth, monkeypatch):
     )
     client, store = isolated_auth
     user = _signup(client, "boot-limit@example.com")
-    payload = {"secret": "wrong-secret-value"}
+    payload = {"secret": _WRONG}
     assert client.post("/api/admin/bootstrap", json=payload).status_code == 403
     assert client.post("/api/admin/bootstrap", json=payload).status_code == 403
     limited = client.post("/api/admin/bootstrap", json=payload)

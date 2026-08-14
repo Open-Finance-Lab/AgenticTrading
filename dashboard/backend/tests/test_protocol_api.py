@@ -860,7 +860,7 @@ def test_per_account_concurrent_run_cap(client):
 
     The admin-console quota binds at protocol run creation (the only surface
     where one account can hold several backtests in flight). Unclaimed agents
-    carry no account and stay covered by the per-agent cap above.
+    are billed to their browser session instead — see the test below.
     """
     import dashboard.backend.users as users_module
 
@@ -886,7 +886,11 @@ def test_per_account_concurrent_run_cap(client):
     assert agent.get("owner_user_id") == user["id"]
     version_id = _new_version(client, agent["agent_id"], key)
 
-    # Default entitlement: one concurrent backtest per account.
+    # Set the quota explicitly rather than leaning on the default. The default
+    # is what every pre-existing account silently gets on the deploy that ships
+    # this plane, so it has to stay high enough not to throttle them — pinning
+    # a test to it makes lowering it look free.
+    users_module.user_store.set_entitlements(user["id"], max_concurrent_backtests=1)
     _create_run(client, key, version_id)
     second = client.post(
         "/api/v1/runs",
@@ -916,6 +920,58 @@ def test_per_account_concurrent_run_cap(client):
         headers={"X-API-Key": key},
     )
     assert third.status_code == 200, third.text
+
+
+def test_unclaimed_agents_are_capped_by_their_browser_session(client, monkeypatch):
+    """Signing out must not buy a bigger budget than signing in.
+
+    ``resolve_owner_cap_context`` used to return None the instant
+    ``owner_user_id`` was falsy — "no account, so no cap" — and agent creation
+    needs no login at all (``_require_owner_context`` accepts a self-chosen
+    X-Session-Id). So a signed-in user shared one account budget across every
+    agent they owned, while the same person logged out got the per-agent cap
+    times however many agents they registered: same engine, same LLM spend,
+    opposite direction of travel. Unclaimed agents are billed to the browser
+    session that created them instead.
+
+    Not a bound against a rotating caller — a browser session is a header the
+    caller picks. This pins the incentive, which is what was inverted.
+    """
+    import dashboard.backend.users as users_module
+
+    monkeypatch.setattr(users_module, "DEFAULT_MAX_CONCURRENT_BACKTESTS", 1)
+
+    browser = str(uuid.uuid4())
+    headers = {"X-Session-Id": browser, "X-Browser-Id": browser}
+    keys = []
+    for name in ("anon-one", "anon-two"):
+        made = client.post("/api/v1/agents", json={"name": name}, headers=headers)
+        assert made.status_code == 200, made.text
+        agent = made.json()["agent"]
+        assert agent.get("owner_user_id") is None, "premise: no account behind it"
+        keys.append((agent["agent_id"], made.json()["api_key"]))
+
+    first_agent, first_key = keys[0]
+    second_agent, second_key = keys[1]
+    _create_run(client, first_key, _new_version(client, first_agent, first_key))
+
+    # A *different* agent, so the per-agent cap cannot be what refuses it.
+    blocked = client.post(
+        "/api/v1/runs",
+        json={
+            "agent_version_id": _new_version(client, second_agent, second_key),
+            "environment": {"type": "backtest", "environment_id": "us-equity-hourly-v1"},
+            "config": {"start_date": "2026-04-15", "end_date": "2026-04-16", "symbols": ["AAPL", "MSFT"]},
+        },
+        headers={"X-API-Key": second_key},
+    )
+    assert blocked.status_code == 429, blocked.text
+    body = blocked.json()["detail"]["error"]
+    assert body["code"] == "too_many_active_runs_for_account"
+    assert body["details"]["scope"] == "session"
+    # An anonymous caller has no admin to ask; the message must not send them
+    # looking for one.
+    assert "sign in" in body["message"]
 
 
 def test_idempotency_scoped_to_step(client):

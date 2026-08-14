@@ -10189,6 +10189,15 @@ body.agent-editor-open {
     border-bottom: none;
 }
 
+/* Reads as a qualifier on the column, not a second column heading. */
+.admin-th-note {
+    display: block;
+    font-weight: 400;
+    font-size: 0.78em;
+    color: var(--text-tertiary, var(--text-secondary));
+    opacity: 0.85;
+}
+
 .admin-users-table input[type="number"],
 .admin-users-table select {
     width: 100%;
