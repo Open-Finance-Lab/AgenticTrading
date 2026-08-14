@@ -10189,13 +10189,14 @@ body.agent-editor-open {
     border-bottom: none;
 }
 
-/* Reads as a qualifier on the column, not a second column heading. */
+/* Reads as a qualifier on the column, not a second column heading. Inherits
+   the th's own --text-secondary and steps back with opacity rather than naming
+   a --text-tertiary token, which this stylesheet does not define. */
 .admin-th-note {
     display: block;
     font-weight: 400;
     font-size: 0.78em;
-    color: var(--text-tertiary, var(--text-secondary));
-    opacity: 0.85;
+    opacity: 0.75;
 }
 
 .admin-users-table input[type="number"],
