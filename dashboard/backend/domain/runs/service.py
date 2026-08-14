@@ -81,10 +81,16 @@ _create_lock = threading.Lock()
 
 
 def resolve_owner_cap_context(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """Prefetch the per-account cap's inputs; ``None`` means no cap applies.
+    """Prefetch the per-owner cap's inputs; ``None`` means no cap applies.
 
-    Called BEFORE ``_create_lock`` on purpose: the two reads here are remote
-    Postgres round-trips in a durable deployment (entitlements on
+    Two owner shapes, one budget each: an **account** (its
+    ``max_concurrent_backtests`` entitlement, shared by every agent it owns) or,
+    for an unclaimed agent, the **browser session** that created it at the
+    default quota. The second exists because the first alone made signing in
+    strictly worse than staying anonymous — see the branch comment below.
+
+    Called BEFORE ``_create_lock`` on purpose: every read here is a remote
+    Postgres round-trip in a durable deployment (entitlements on
     ``USERS_DATABASE_URL``, ownership on ``CONTENT_DATABASE_URL``), and the
     create lock serializes every v1+v2 run creation on the server — holding it
     across network I/O would queue every unrelated create behind one owner's
