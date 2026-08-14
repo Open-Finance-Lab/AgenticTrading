@@ -187,9 +187,12 @@ def check_owner_active_run_cap(
     function cannot see them. It carries its own budgets instead
     (``domain/backtesting/external_run_service``).
 
-    ``credits`` deliberately has no counterpart: nothing in the platform
-    defines what a credit buys yet, so there is no metering to enforce —
-    inventing one here would be a product decision, not a fix.
+    ``credits`` deliberately has no counterpart *here*. It meters the one
+    path that spends the operator's own LLM budget — the dashboard's backtest
+    runner — while these surfaces hand the agent a market context and take
+    back a decision the agent's own LLM client produced, at no cost to the
+    operator. Charging them would bill a user for a resource nobody bought.
+    See ``domain/entitlements/credits.py``.
     """
     if context is None:
         return None

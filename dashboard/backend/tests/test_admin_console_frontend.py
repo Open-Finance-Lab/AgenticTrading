@@ -84,11 +84,15 @@ def test_a_zero_quota_survives_the_console_round_trip():
     assert "if (value == null) return;" in repaint
 
 
-def test_credits_is_labelled_as_not_enforced():
-    """It has a column, bounds, a twin, an editable input and a slot on
-    /api/auth/me — and no reader in domain/. Without the label an operator
-    zeroes it on an abusive account, sees a 200, and believes they acted."""
-    assert "not enforced yet" in APP_HTML
+def test_credits_column_states_what_it_binds():
+    """Credits are metered now (issue #351), but only when the deployment arms
+    ``CREDITS_METERING_ENABLED`` — so the note is filled from the stats
+    response rather than written into the markup. The static label it replaced
+    said "not enforced yet", which would have gone on saying that forever.
+    Without an accurate note an operator zeroes an abusive account, sees a 200,
+    and believes they acted."""
+    assert 'id="adminCreditsNote"' in APP_HTML
+    assert "not enforced yet" not in APP_HTML
     assert ".admin-th-note" in STYLES
 
 

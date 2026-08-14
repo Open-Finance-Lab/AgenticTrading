@@ -231,7 +231,6 @@ def verify_password_for_account(password: str, password_hash: Optional[str]) -> 
 
 
 VALID_ROLES = frozenset({"user", "admin"})
-DEFAULT_CREDITS = 0
 # Hard caps for admin PATCH — keep a runaway slider from scheduling dozens of
 # LLM subprocesses on one Render box.
 MAX_CONCURRENT_BACKTESTS_CAP = 20
@@ -244,49 +243,76 @@ ADMIN_ROLE_LOCK_KEY = 0xA71AD01
 # because domain/runs imports this module's store, and users.py must stay
 # import-light for callers that never create runs.
 _BUILTIN_DEFAULT_CONCURRENT_BACKTESTS = 5
+# Built-in fallback for the default credit grant below. See
+# ``_default_entitlement`` for why neither default is 0.
+_BUILTIN_DEFAULT_CREDITS = 100
 
 
-def _default_concurrent_backtests() -> int:
-    """Slots an account gets before an admin has ever touched its row.
+def _default_entitlement(env_var: str, builtin: int, cap: int) -> int:
+    """Read an entitlement default from ``env_var``, bounded by ``0..cap``.
 
-    Deliberately **not** 1. Nothing seeds ``user_entitlements`` at signup and
-    nothing backfills it on deploy, so this constant is the live limit for
-    every account that exists today — the day this ships, it silently becomes
-    everyone's quota. At 1 that is a regression rather than a control: before
-    the entitlement plane, one account's concurrency was bounded only by
-    ``MAX_ACTIVE_RUNS_PER_AGENT`` (5) per agent it owned, so every multi-agent
-    user would have woken up throttled by an admin console none of them can
-    open. Matching that per-agent number keeps a single-agent account exactly
-    where it was and leaves the *control* intact: an admin lowers a specific
-    account, they do not have to raise everyone first.
-
-    Env-overridable like every other run-capacity knob
-    (``MAX_ACTIVE_RUNS_PER_AGENT``/``MAX_ACTIVE_RUNS_GLOBAL``), so an operator
-    can tighten the site-wide floor without a deploy. Out-of-range or
-    unparseable values fall back to the default rather than raising at import
-    time — a typo in a Render var must not take the process down.
+    Shared by both defaults because they answer the same question with the
+    same failure modes. Out-of-range or unparseable values fall back to the
+    built-in rather than raising at import time — a typo in a Render var must
+    not take the process down — and say so on the operator's only real channel
+    (print, not logging: logger output is invisible under deployed uvicorn).
     """
-    raw = os.getenv("DEFAULT_MAX_CONCURRENT_BACKTESTS")
+    raw = os.getenv(env_var)
     if raw is None or not raw.strip():
-        return _BUILTIN_DEFAULT_CONCURRENT_BACKTESTS
+        return builtin
     try:
         value = int(raw.strip())
     except ValueError:
+        print(f"users: {env_var} is not an integer; using the built-in default")
+        return builtin
+    if value < 0 or value > cap:
         print(
-            "users: DEFAULT_MAX_CONCURRENT_BACKTESTS is not an integer; "
+            f"users: {env_var} is out of range (0..{cap}); "
             "using the built-in default"
         )
-        return _BUILTIN_DEFAULT_CONCURRENT_BACKTESTS
-    if value < 0 or value > MAX_CONCURRENT_BACKTESTS_CAP:
-        print(
-            "users: DEFAULT_MAX_CONCURRENT_BACKTESTS is out of range "
-            f"(0..{MAX_CONCURRENT_BACKTESTS_CAP}); using the built-in default"
-        )
-        return _BUILTIN_DEFAULT_CONCURRENT_BACKTESTS
+        return builtin
     return value
 
 
-DEFAULT_MAX_CONCURRENT_BACKTESTS = _default_concurrent_backtests()
+# Slots an account gets before an admin has ever touched its row.
+#
+# Deliberately **not** 1. Nothing seeds ``user_entitlements`` at signup and
+# nothing backfills it on deploy, so this constant is the live limit for every
+# account that exists today — the day this ships, it silently becomes
+# everyone's quota. At 1 that is a regression rather than a control: before the
+# entitlement plane, one account's concurrency was bounded only by
+# ``MAX_ACTIVE_RUNS_PER_AGENT`` (5) per agent it owned, so every multi-agent
+# user would have woken up throttled by an admin console none of them can open.
+# Matching that per-agent number keeps a single-agent account exactly where it
+# was and leaves the *control* intact: an admin lowers a specific account, they
+# do not have to raise everyone first.
+#
+# Env-overridable like every other run-capacity knob
+# (``MAX_ACTIVE_RUNS_PER_AGENT``/``MAX_ACTIVE_RUNS_GLOBAL``), so an operator can
+# tighten the site-wide floor without a deploy.
+DEFAULT_MAX_CONCURRENT_BACKTESTS = _default_entitlement(
+    "DEFAULT_MAX_CONCURRENT_BACKTESTS",
+    _BUILTIN_DEFAULT_CONCURRENT_BACKTESTS,
+    MAX_CONCURRENT_BACKTESTS_CAP,
+)
+
+# LLM backtests an account may run before an admin has ever touched its row.
+#
+# Inert unless ``CREDITS_METERING_ENABLED`` is armed (see
+# ``domain/entitlements/credits.py``) — until then nothing reads a balance and
+# this is only what ``/auth/me`` reports. It matters at the moment metering is
+# switched on, which is exactly why it is **not** 0: nothing backfills
+# ``user_entitlements``, so a zero default would turn one env var into a
+# site-wide lockout, discovered through support tickets rather than a metric.
+# 100 is a real bound (an abusive signup cannot burn unbounded operator LLM
+# budget) that no ordinary user reaches — the per-client limiter already caps
+# ``/backtest/run`` at 10/hour, so 100 credits is at least ten hours of
+# continuous, deliberate use. An operator who wants stricter lowers
+# ``DEFAULT_CREDITS``; one who wants a specific account stopped sets that row
+# to 0, which reads as "suspended" exactly as it does for the quota above.
+DEFAULT_CREDITS = _default_entitlement(
+    "DEFAULT_CREDITS", _BUILTIN_DEFAULT_CREDITS, MAX_CREDITS_CAP
+)
 
 
 def public_user(row: sqlite3.Row | Dict[str, Any]) -> Dict[str, Any]:
@@ -469,6 +495,106 @@ def entitlements_upsert_params(
         next_max,
         next_credits,
     )
+
+
+# --- Credit metering -------------------------------------------------------
+#
+# Three statements rather than one upsert, because a spend is not an edit:
+#
+# 1. SEED materialises the defaults for an account that has never been touched.
+#    ``DO NOTHING`` on conflict, so it can never overwrite a balance — and it
+#    is skipped entirely when the default cannot cover the spend, so a refusal
+#    never freezes today's ``DEFAULT_CREDITS`` into a row that a later, more
+#    generous value would then fail to reach.
+# 2. SPEND is the whole guard: a single conditional UPDATE whose ``credits >=``
+#    predicate and decrement evaluate under the row lock the UPDATE already
+#    takes. ``rowcount`` distinguishes spent from refused. A read-then-write
+#    would need an explicit transaction to say the same thing, and would still
+#    be wrong on the branch where no row exists to lock.
+# 3. REFUND is unconditional but clamped, so a double refund cannot mint a
+#    balance past the cap an admin PATCH is held to.
+#
+# None of the three touches ``updated_at`` / ``updated_by_admin_id``: those
+# columns are admin-edit provenance, and stamping them on a metered spend would
+# make the console report every backtest as an entitlement change.
+# ``SELECT ... FROM users WHERE id`` rather than ``VALUES``: it inserts nothing
+# for an account that does not exist, which is what keeps the two twins
+# behaving alike. Postgres enforces the FK and would raise; SQLite does not
+# enforce it here (see the DDL note on email_change_requests) and would happily
+# strand a ghost entitlements row. Sourcing the row from ``users`` makes both
+# dialects agree without an exception handler on one side only.
+# ``{i}`` is an integer-typed parameter. Every one of them carries an explicit
+# ``::integer`` on the Postgres side, for the same reason the entitlements
+# upsert does: psycopg sends a parameter with no type OID and Postgres resolves
+# parameter types during parse analysis, where several of these sit in a
+# position that supplies no context to resolve from. The seed is the sharp
+# case -- ``INSERT ... SELECT $1`` analyses the SELECT *without* the insert
+# target's column types, so an uncast parameter is a hard 42P08 ("could not
+# determine data type of parameter") on every call. LEAST() is the other:
+# it is polymorphic, so its second argument has nothing to infer from either.
+# No SQLite test can catch any of this -- the same statements run clean there.
+_CREDITS_SEED_TEMPLATE = """
+INSERT INTO user_entitlements (
+    user_id, max_concurrent_backtests, credits, updated_at, updated_by_admin_id
+)
+SELECT {i}, {i}, {i}, NULL, NULL FROM users WHERE id = {i}
+ON CONFLICT (user_id) DO NOTHING
+"""
+
+_CREDITS_SPEND_TEMPLATE = """
+UPDATE user_entitlements
+   SET credits = credits - {i}
+ WHERE user_id = {i} AND credits >= {i}
+"""
+
+# SQLite spells the two-argument minimum MIN(); Postgres spells it LEAST() and
+# reserves MIN() for the aggregate.
+_CREDITS_REFUND_TEMPLATE = """
+UPDATE user_entitlements
+   SET credits = {least}(credits + {i}, {i})
+ WHERE user_id = {i}
+"""
+
+CREDITS_SEED_SQLITE = _CREDITS_SEED_TEMPLATE.format(i="?")
+CREDITS_SEED_POSTGRES = _CREDITS_SEED_TEMPLATE.format(i="%s::integer")
+CREDITS_SPEND_SQLITE = _CREDITS_SPEND_TEMPLATE.format(i="?")
+CREDITS_SPEND_POSTGRES = _CREDITS_SPEND_TEMPLATE.format(i="%s::integer")
+CREDITS_REFUND_SQLITE = _CREDITS_REFUND_TEMPLATE.format(i="?", least="MIN")
+CREDITS_REFUND_POSTGRES = _CREDITS_REFUND_TEMPLATE.format(i="%s::integer", least="LEAST")
+
+
+def credits_seed_params(user_id: int) -> tuple:
+    """Positional parameters for ``CREDITS_SEED_*`` (same order in both).
+
+    Reads the module defaults at call time, not import time, so a test (or an
+    operator restart with a new ``DEFAULT_CREDITS``) sees the current value.
+    """
+    return (
+        int(user_id),
+        DEFAULT_MAX_CONCURRENT_BACKTESTS,
+        DEFAULT_CREDITS,
+        int(user_id),
+    )
+
+
+def credits_seed_applies(amount: int) -> bool:
+    """Whether the default grant could cover a spend of ``amount``.
+
+    A function rather than a constant so both twins read the *current*
+    ``DEFAULT_CREDITS`` — ``users_postgres`` imports names once at module load,
+    and importing the int would pin it to whatever the value was at import.
+    """
+    return DEFAULT_CREDITS >= int(amount)
+
+
+def credits_spend_params(user_id: int, amount: int) -> tuple:
+    """Positional parameters for ``CREDITS_SPEND_*`` (same order in both)."""
+    return (int(amount), int(user_id), int(amount))
+
+
+def credits_refund_params(user_id: int, amount: int) -> tuple:
+    """Positional parameters for ``CREDITS_REFUND_*`` (same order in both)."""
+    return (int(amount), MAX_CREDITS_CAP, int(user_id))
 
 
 # Parameter-free, so one literal serves both dialects. SUM(CASE) rather than
@@ -1227,6 +1353,74 @@ class UserStore:
         row = cursor.fetchone()
         conn.close()
         return public_entitlements(row, int(user_id))
+
+    def try_spend_credits(self, user_id: int, amount: int = 1) -> Optional[int]:
+        """Debit ``amount`` credits; ``None`` means the balance was too low.
+
+        Returns the balance remaining after a successful debit. ``None`` is a
+        refusal, not a fault — an account at zero is the metering working — so
+        callers answer it with 402 rather than 500.
+        """
+        amount = int(amount)
+        if amount <= 0:
+            raise ValueError("invalid_credit_amount")
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            if credits_seed_applies(amount):
+                cursor.execute(CREDITS_SEED_SQLITE, credits_seed_params(user_id))
+            cursor.execute(CREDITS_SPEND_SQLITE, credits_spend_params(user_id, amount))
+            if cursor.rowcount != 1:
+                # Refused. Note this can never coincide with a fresh seed: the
+                # seed only runs when the default covers the spend, so either
+                # it just created a row that satisfies the predicate, or the
+                # row already existed and the seed was a no-op. A refusal
+                # therefore never leaves today's default frozen into a new row.
+                conn.rollback()
+                return None
+            cursor.execute(
+                "SELECT credits FROM user_entitlements WHERE user_id = ?",
+                (int(user_id),),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return int(dict(row)["credits"]) if row else None
+
+    def refund_credits(self, user_id: int, amount: int = 1) -> Optional[int]:
+        """Return ``amount`` credits, clamped to ``MAX_CREDITS_CAP``.
+
+        ``None`` when the account has no entitlements row — nothing was ever
+        debited from it, so there is nothing to give back.
+        """
+        amount = int(amount)
+        if amount <= 0:
+            raise ValueError("invalid_credit_amount")
+        conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                CREDITS_REFUND_SQLITE, credits_refund_params(user_id, amount)
+            )
+            if cursor.rowcount != 1:
+                conn.rollback()
+                return None
+            cursor.execute(
+                "SELECT credits FROM user_entitlements WHERE user_id = ?",
+                (int(user_id),),
+            )
+            row = cursor.fetchone()
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+        return int(dict(row)["credits"]) if row else None
 
     def set_entitlements(
         self,

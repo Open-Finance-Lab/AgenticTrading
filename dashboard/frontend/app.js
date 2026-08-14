@@ -3268,6 +3268,28 @@ function _setAdminFlash(kind, message) {
   }
 }
 
+// Say whether the Credits column binds anything. Metering is a backend env
+// var, so the console cannot infer it — a hardcoded "(not enforced yet)" would
+// keep claiming that after an operator armed it, and dropping the note
+// entirely would let an admin read a stored number as an enforced budget.
+// Three states, because "stats failed" must not read as "metering off".
+function setAdminCreditsNote(stats) {
+  const note = document.getElementById('adminCreditsNote');
+  if (!note) return;
+  if (!stats || typeof stats.credits_metering_enabled !== 'boolean') {
+    note.textContent = '(status unavailable)';
+    return;
+  }
+  if (!stats.credits_metering_enabled) {
+    note.textContent = '(metering off)';
+    return;
+  }
+  const fallback = Number(stats.default_credits);
+  note.textContent = Number.isFinite(fallback)
+    ? `(1 per LLM backtest; default ${fallback})`
+    : '(1 per LLM backtest)';
+}
+
 async function loadAdminStats() {
   const root = document.getElementById('adminStats');
   if (!root) return;
@@ -3283,6 +3305,7 @@ async function loadAdminStats() {
         ? String(value)
         : '—';
     });
+    setAdminCreditsNote(data);
   } catch (error) {
     // Dashes alone make "stats endpoint down" identical to "no data yet";
     // keep the failure visible somewhere an admin can find it.
@@ -3290,6 +3313,7 @@ async function loadAdminStats() {
     root.querySelectorAll('[data-stat]').forEach((el) => {
       el.textContent = '—';
     });
+    setAdminCreditsNote(null);
   }
 }
 

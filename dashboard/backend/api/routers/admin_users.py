@@ -176,6 +176,7 @@ def admin_stats(_admin: dict = Depends(require_admin)):
     """Site-wide counters for the admin console header."""
     from dashboard.backend.api.routers.backtests import count_active_dashboard_backtests
     from dashboard.backend.domain.agents.repository import agent_store
+    from dashboard.backend.domain.entitlements import credits
 
     counts = users_module.user_store.count_users_and_admins()
     return {
@@ -183,6 +184,13 @@ def admin_stats(_admin: dict = Depends(require_admin)):
         "admins": counts["admins"],
         "agents": agent_store.count_agents(),
         "active_dashboard_backtests": count_active_dashboard_backtests(),
+        # Whether the Credits column an admin is about to edit does anything.
+        # Shipped from the server rather than assumed by the console: metering
+        # is an env var on the backend, so the frontend has no other way to
+        # tell an enforced balance from a stored number, and an admin setting a
+        # quota that silently binds nothing is exactly what issue #351 was.
+        "credits_metering_enabled": credits.metering_enabled(),
+        "default_credits": users_module.DEFAULT_CREDITS,
     }
 
 

@@ -555,6 +555,52 @@ def test_entitlements_missing_user_is_user_not_found_postgres(temp_postgres_stor
 
 
 @pg_only
+def test_credit_spend_and_refund_postgres(temp_postgres_store):
+    """The credit ledger against real Postgres.
+
+    Every parameter in these three statements is cast ``::integer``, and the
+    seed is the reason: ``INSERT ... SELECT $1`` resolves parameter types from
+    the SELECT alone, without the insert target's columns, so an uncast
+    parameter is a hard 42P08 on the very first spend. LEAST()'s polymorphism
+    is the same trap in the refund. The SQLite twin runs all three clean
+    either way, so dropping a cast reddens nothing outside this tier and 500s
+    every metered backtest in prod.
+    """
+    import dashboard.backend.users as users_module
+
+    store = temp_postgres_store
+    user = store.create_user("pgcredit@example.com", "PG Credit", "securepass1")
+
+    # Seeds the defaults, then debits — the INSERT ... SELECT path.
+    assert store.try_spend_credits(user["id"]) == users_module.DEFAULT_CREDITS - 1
+    # Second spend takes the ON CONFLICT DO NOTHING path instead.
+    assert store.try_spend_credits(user["id"]) == users_module.DEFAULT_CREDITS - 2
+
+    # A metered spend is not an admin edit.
+    ent = store.get_entitlements(user["id"])
+    assert ent["updated_at"] is None
+    assert ent["updated_by_admin_id"] is None
+
+    store.set_entitlements(user["id"], credits=1, updated_by_admin_id=user["id"])
+    assert store.try_spend_credits(user["id"]) == 0
+    assert store.try_spend_credits(user["id"]) is None
+
+    assert store.refund_credits(user["id"]) == 1
+    store.set_entitlements(user["id"], credits=users_module.MAX_CREDITS_CAP)
+    assert store.refund_credits(user["id"]) == users_module.MAX_CREDITS_CAP
+
+
+@pg_only
+def test_credit_spend_for_missing_user_postgres(temp_postgres_store):
+    """The seed selects from ``users``, so it inserts nothing rather than
+    tripping the FK — a refusal, not the user_not_found that ``set_entitlements``
+    raises. Both twins answer the same way for the same reason."""
+    store = temp_postgres_store
+    assert store.try_spend_credits(999_999) is None
+    assert store.refund_credits(999_999) is None
+
+
+@pg_only
 def test_apply_admin_patch_atomic_postgres(temp_postgres_store):
     store = temp_postgres_store
     admin = store.create_user("pgboss@example.com", "PG Boss", "securepass1")

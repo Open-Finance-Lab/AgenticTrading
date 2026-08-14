@@ -56,7 +56,9 @@ def test_entitlements_default_then_upsert(store):
         defaults["max_concurrent_backtests"]
         == users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS
     )
-    assert defaults["credits"] == 0
+    # Same reasoning as above, and the same trap: this is the balance every
+    # existing account holds the moment an operator arms metering.
+    assert defaults["credits"] == users_module.DEFAULT_CREDITS
 
     updated = store.set_entitlements(
         user["id"],
@@ -82,15 +84,32 @@ def test_default_quota_does_not_throttle_existing_accounts():
     assert users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS >= MAX_ACTIVE_RUNS_PER_AGENT
 
 
-def test_default_quota_is_env_overridable(monkeypatch):
-    monkeypatch.setenv("DEFAULT_MAX_CONCURRENT_BACKTESTS", "3")
-    assert users_module._default_concurrent_backtests() == 3
+@pytest.mark.parametrize(
+    "env_var, builtin, cap",
+    [
+        (
+            "DEFAULT_MAX_CONCURRENT_BACKTESTS",
+            users_module._BUILTIN_DEFAULT_CONCURRENT_BACKTESTS,
+            users_module.MAX_CONCURRENT_BACKTESTS_CAP,
+        ),
+        (
+            "DEFAULT_CREDITS",
+            users_module._BUILTIN_DEFAULT_CREDITS,
+            users_module.MAX_CREDITS_CAP,
+        ),
+    ],
+)
+def test_entitlement_defaults_are_env_overridable(monkeypatch, env_var, builtin, cap):
+    monkeypatch.setenv(env_var, "3")
+    assert users_module._default_entitlement(env_var, builtin, cap) == 3
     # A typo in a Render var must not take the process down, and must not
     # silently become a quota of 0 either.
-    monkeypatch.setenv("DEFAULT_MAX_CONCURRENT_BACKTESTS", "not-a-number")
-    assert users_module._default_concurrent_backtests() == 5
-    monkeypatch.setenv("DEFAULT_MAX_CONCURRENT_BACKTESTS", "9999")
-    assert users_module._default_concurrent_backtests() == 5
+    for bad in ("not-a-number", str(cap + 1), "-1"):
+        monkeypatch.setenv(env_var, bad)
+        assert users_module._default_entitlement(env_var, builtin, cap) == builtin, bad
+    # 0 is a legal value, not a typo: it reads as "suspended" for both fields.
+    monkeypatch.setenv(env_var, "0")
+    assert users_module._default_entitlement(env_var, builtin, cap) == 0
 
 
 def test_apply_role_and_list_admin(store):

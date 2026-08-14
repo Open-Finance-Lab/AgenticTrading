@@ -64,6 +64,7 @@ from dashboard.backend.infrastructure.llm.providers import (
     ensure_llm_client_available,
 )
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
+from dashboard.backend.domain.entitlements import credits
 from dashboard.backend.domain.agents.service import agent_service
 from dashboard.backend.domain.agents.credential_store import (
     FINANCIAL_DATASETS_CREDENTIAL,
@@ -443,8 +444,14 @@ def run_backtest_background(
     runtime_type: str = DEFAULT_RUNTIME_TYPE,
     runtime_config: Optional[Dict[str, Any]] = None,
     financial_datasets_api_key: Optional[str] = None,
+    charged_credit_user_id: Optional[int] = None,
 ):
-    """Run backtest in background thread."""
+    """Run backtest in background thread.
+
+    ``charged_credit_user_id`` is set only when the endpoint actually took a
+    credit for this run (see ``domain/entitlements/credits.py``); the finally
+    block gives it back if the run turns out to have made no LLM call.
+    """
     global backtest_status, backtest_session_id
 
     strategy_prompt_path = None
@@ -618,6 +625,21 @@ def run_backtest_background(
         backtest_status["error"] = summary
         print(f"❌ Backtest exception: {summary}", flush=True)
     finally:
+        if charged_credit_user_id:
+            # Refund only a run that never reached the model. llm_calls is the
+            # billing counter (it ticks even on a truncated response, which
+            # still cost money), so >0 means the credit was genuinely consumed
+            # however the run ended.
+            try:
+                row = db.get_run(live_run_id) if live_run_id else None
+                llm_calls = int((row or {}).get("llm_calls") or 0)
+            except Exception:  # noqa: BLE001 - see below
+                # Usage unknown. Treat it as spent: refunding on a failed read
+                # would hand back a credit for a run that may have made forty
+                # LLM calls, and the error direction that leaks operator money
+                # is the worse one.
+                llm_calls = 1
+            credits.refund_llm_run(charged_credit_user_id, llm_calls=llm_calls)
         backtest_status["running"] = False
         backtest_status["started_at"] = None
         backtest_status["live_run_id"] = None
@@ -1268,6 +1290,23 @@ def run_backtest_endpoint(
             "error": "Backtest already running. Please wait for it to complete."
         }
 
+    # Meter operator LLM spend — one credit per LLM-driven run. Deliberately
+    # AFTER the single-flight check: a request turned away because someone
+    # else's backtest is already running never gets a run, and must not be
+    # charged for one. The owner lookup is skipped entirely when metering is
+    # disarmed or the run is rule-based, so an unarmed deployment pays no
+    # round-trip for a control it is not using.
+    charged_credit_user_id: Optional[int] = None
+    if resolved_decision_source == LLM_DECISION_SOURCE and credits.metering_enabled():
+        owner_user_id = _owner_context(
+            request, request.headers.get("authorization")
+        )["user_id"]
+        outcome = credits.authorize_llm_run(owner_user_id)
+        if not outcome.allowed:
+            raise HTTPException(status_code=402, detail=outcome.detail)
+        if outcome.charged:
+            charged_credit_user_id = int(owner_user_id)
+
     # Mint run id before the worker starts so callers (Discord job watcher)
     # can key notifications on a stable id from the HTTP response.
     live_run_id = f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
@@ -1313,11 +1352,25 @@ def run_backtest_endpoint(
             "initial_capital": initial_capital,
             "assets": selected_assets,
             "decision_source": resolved_decision_source,
+            "charged_credit_user_id": charged_credit_user_id,
         },
         daemon=True
     )
-    thread.start()
-    
+    try:
+        thread.start()
+    except Exception:
+        # The credit is debited before the worker exists, so a thread that
+        # never starts would otherwise bill a run that made no LLM call — the
+        # one refund case the background thread's own finally block cannot
+        # reach, because it never ran. Clearing "running" is part of the same
+        # unwind: leaving it set would wedge the single-flight runner for the
+        # life of the process.
+        backtest_status["running"] = False
+        backtest_status["started_at"] = None
+        backtest_status["live_run_id"] = None
+        credits.refund_llm_run(charged_credit_user_id, llm_calls=0)
+        raise
+
     response = {
         "success": True,
         "message": "Backtest started in background. Check /backtest/status for progress.",

@@ -23,6 +23,9 @@ from dashboard.backend.session_tokens import (
 )
 from dashboard.backend.users import (
     ADMIN_ROLE_LOCK_KEY,
+    CREDITS_REFUND_POSTGRES,
+    CREDITS_SEED_POSTGRES,
+    CREDITS_SPEND_POSTGRES,
     EMAIL_CHANGE_TTL_MINUTES,
     ENTITLEMENTS_UPSERT_POSTGRES,
     USER_COUNTS_SQL,
@@ -30,6 +33,10 @@ from dashboard.backend.users import (
     _utcnow,
     _utcnow_iso,
     admin_user_rows_to_payloads,
+    credits_refund_params,
+    credits_seed_applies,
+    credits_seed_params,
+    credits_spend_params,
     entitlements_upsert_params,
     format_stored_timestamp,
     hash_password,
@@ -675,6 +682,56 @@ class PostgresUserStore:
                 )
                 row = cur.fetchone()
         return public_entitlements(row, int(user_id))
+
+    def try_spend_credits(self, user_id: int, amount: int = 1) -> Optional[int]:
+        """Debit ``amount`` credits; ``None`` means the balance was too low.
+
+        Twin of the SQLite ``try_spend_credits`` — same contract, same three
+        statements, one transaction. The seed selects from ``users``, so the
+        enforced FK is never reached and a missing account simply seeds
+        nothing and is refused.
+        """
+        amount = int(amount)
+        if amount <= 0:
+            raise ValueError("invalid_credit_amount")
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                if credits_seed_applies(amount):
+                    cur.execute(CREDITS_SEED_POSTGRES, credits_seed_params(user_id))
+                cur.execute(
+                    CREDITS_SPEND_POSTGRES, credits_spend_params(user_id, amount)
+                )
+                if cur.rowcount != 1:
+                    return None
+                cur.execute(
+                    "SELECT credits FROM user_entitlements WHERE user_id = %s",
+                    (int(user_id),),
+                )
+                row = cur.fetchone()
+        return int(dict(row)["credits"]) if row else None
+
+    def refund_credits(self, user_id: int, amount: int = 1) -> Optional[int]:
+        """Return ``amount`` credits, clamped to ``MAX_CREDITS_CAP``.
+
+        ``None`` when the account has no entitlements row — nothing was ever
+        debited from it, so there is nothing to give back.
+        """
+        amount = int(amount)
+        if amount <= 0:
+            raise ValueError("invalid_credit_amount")
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    CREDITS_REFUND_POSTGRES, credits_refund_params(user_id, amount)
+                )
+                if cur.rowcount != 1:
+                    return None
+                cur.execute(
+                    "SELECT credits FROM user_entitlements WHERE user_id = %s",
+                    (int(user_id),),
+                )
+                row = cur.fetchone()
+        return int(dict(row)["credits"]) if row else None
 
     def set_entitlements(
         self,

@@ -90,6 +90,14 @@ os.environ.pop("MAX_LEGACY_ACTIVE_GLOBAL", None)
 # Read once at import into users.DEFAULT_MAX_CONCURRENT_BACKTESTS, which every
 # entitlement default and every per-account cap test resolves through.
 os.environ.pop("DEFAULT_MAX_CONCURRENT_BACKTESTS", None)
+os.environ.pop("DEFAULT_CREDITS", None)
+# Credit metering is strict opt-in and off by default (see
+# domain/entitlements/credits.py). A developer with it exported would otherwise
+# have every LLM-backtest test 402 on an empty balance -- and, worse, a suite
+# that passed for them would be asserting the metered path everywhere while CI
+# asserted the unmetered one. Tests that exercise metering set it via
+# monkeypatch.
+os.environ.pop("CREDITS_METERING_ENABLED", None)
 
 # Mail credentials: a developer with a real BREVO_API_KEY exported would
 # otherwise have the suite send live email, and would see the
