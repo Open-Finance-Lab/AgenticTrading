@@ -33,6 +33,9 @@ Sign in and out
 - **Log out** appears both in that menu and at the bottom of the **Account**
   page. Either one ends the session on this device only; your other devices
   stay signed in.
+- Logging out takes you back to the public homepage — the page you see before
+  signing in. Your browser's **Back** button will not return you to the
+  dashboard you just left; sign in again to get back to it.
 
 
 Manage your profile

@@ -1200,10 +1200,20 @@ async function submitDuplicateAgent() {
 
 function renderAgentRunningActions(agent) {
   const id = escapeHtml(agent.agent_id);
-  // Configure stays available while a backtest runs: the in-flight job already
-  // has its launch snapshot, so opening the editor does not cancel or mutate it.
-  // Run stays locked — a second click on the same agent would only fight the
-  // per-agent running map / confuse the card.
+  // Configure stays available while a backtest runs: the request that started
+  // the job carried its own copy of the pipeline, model and window, so a later
+  // save in the editor cannot reach, change or cancel it — and the run declines
+  // its own pipeline write-back when the agent changed while it was in flight
+  // (_maybe_writeback_adapted_pipeline, api/routers/backtests.py), so the edit
+  // does not lose a race against the run either.
+  //
+  // The card's Run button is replaced by this status pill, but that is NOT a
+  // lock on launching — the editor's own "Run Backtest" reaches the same modal
+  // through window.openRunBacktestModal (js/agent-editor.js). Starting another
+  // run is deliberately allowed (the dashboard runner takes several concurrent
+  // backtests per owner); openRunBacktestModal() is the single funnel both
+  // buttons go through, and it refuses the click once this browser is at the
+  // limit instead of firing a request the server would reject.
   return `
     <div class="agent-card-actions agent-card-actions--status">
       <button class="agent-card-cta agent-card-cta--configure agent-configure-btn" type="button" data-agent-id="${id}">Configure</button>
@@ -3030,7 +3040,13 @@ const AuthAPI = {
 
     if (!response.ok) {
       const message = data?.detail || data?.error || `HTTP ${response.status}`;
-      throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      const error = new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      // Callers need to tell "session is gone" (401) apart from "the server is
+      // cold/broken" (5xx, network) -- the message alone cannot carry that.
+      // The admin console reads the same field for 403: a refusal there means
+      // the cached role is stale, not that the request was malformed.
+      error.status = response.status;
+      throw error;
     }
 
     return data;
@@ -3117,9 +3133,13 @@ const AuthAPI = {
   },
 };
 
+const ADMIN_USERS_PAGE_SIZE = 50;
+const adminUsersPage = { offset: 0, total: 0, limit: ADMIN_USERS_PAGE_SIZE };
+
 const AdminAPI = {
-  listUsers() {
-    return AuthAPI.request('/api/admin/users');
+  listUsers({ limit = ADMIN_USERS_PAGE_SIZE, offset = 0 } = {}) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    return AuthAPI.request(`/api/admin/users?${params}`);
   },
   stats() {
     return AuthAPI.request('/api/admin/stats');
@@ -3166,6 +3186,27 @@ async function claimAgentsForUser({ reload = true } = {}) {
   }
 }
 
+// Drop the previous account's active agent so logout / the next login does not
+// keep sending that agent's trading session_id (list/activate used to treat it
+// as enough to surface or reclaim another user's agents).
+//
+// Deliberately NOT part of clearAuthState(): refreshAuthUser() funnels *every*
+// /api/auth/me failure through that function, including a free-tier cold start
+// or a first-request-after-idle 500. Wiping the agent selection there would
+// silently undo the restoreActiveAgentSession() that ran moments earlier on
+// boot. Only a real sign-out (logout, or a 401 that proves the session is gone)
+// should reach this.
+function clearActiveAgentSession() {
+  localStorage.removeItem(ACTIVE_AGENT_KEY);
+  localStorage.removeItem(ACTIVE_AGENT_NAME_KEY);
+  window.ACTIVE_AGENT = null;
+  const browserOwnerId = localStorage.getItem(BROWSER_OWNER_KEY) || window.BROWSER_OWNER_ID;
+  if (browserOwnerId) {
+    localStorage.setItem('trading-session-id', browserOwnerId);
+    window.SESSION_ID = browserOwnerId;
+  }
+}
+
 function clearAuthState() {
   clearLegacyAuthToken();
   localStorage.removeItem(AUTH_USER_KEY);
@@ -3205,12 +3246,27 @@ function updateAccountPage() {
   }
 }
 
-function _adminEscape(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+// Client-side mirror of MAX_CONCURRENT_BACKTESTS_CAP / MAX_CREDITS_CAP in
+// dashboard/backend/users.py — the API 422s outside these bounds regardless;
+// holding them in one place here just keeps the four spots that render or
+// validate them from drifting apart.
+const ADMIN_QUOTA_BOUNDS = {
+  // min 0, not 1: 0 is "suspended". A floor equal to the default quota let an
+  // admin meter an account but never stop one.
+  max_concurrent_backtests: { min: 0, max: 20 },
+  credits: { min: 0, max: 1000000 },
+};
+
+// Email as it goes into a confirm() dialog. escapeHtml is the wrong tool for a
+// native dialog — it has no markup to escape — and the risk there is line
+// forgery, not injection: the prompts below are multi-line, so an address
+// carrying its own newlines writes extra sentences into the box an admin reads
+// before granting admin. The backend now rejects those addresses at signup
+// (api/auth.py::_normalize_email); this collapses any that predate that rule,
+// and bounds the length so a 200-char address cannot push the real question
+// off the dialog.
+function _adminConfirmEmail(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
 }
 
 function _setAdminFlash(kind, message) {
@@ -3226,6 +3282,28 @@ function _setAdminFlash(kind, message) {
   }
 }
 
+// Say whether the Credits column binds anything. Metering is a backend env
+// var, so the console cannot infer it — a hardcoded "(not enforced yet)" would
+// keep claiming that after an operator armed it, and dropping the note
+// entirely would let an admin read a stored number as an enforced budget.
+// Three states, because "stats failed" must not read as "metering off".
+function setAdminCreditsNote(stats) {
+  const note = document.getElementById('adminCreditsNote');
+  if (!note) return;
+  if (!stats || typeof stats.credits_metering_enabled !== 'boolean') {
+    note.textContent = '(status unavailable)';
+    return;
+  }
+  if (!stats.credits_metering_enabled) {
+    note.textContent = '(metering off)';
+    return;
+  }
+  const fallback = Number(stats.default_credits);
+  note.textContent = Number.isFinite(fallback)
+    ? `(1 per LLM backtest; default ${fallback})`
+    : '(1 per LLM backtest)';
+}
+
 async function loadAdminStats() {
   const root = document.getElementById('adminStats');
   if (!root) return;
@@ -3234,33 +3312,95 @@ async function loadAdminStats() {
     root.querySelectorAll('[data-stat]').forEach((el) => {
       const key = el.getAttribute('data-stat');
       const value = data?.[key];
-      el.textContent = Number.isFinite(Number(value)) ? String(value) : '—';
+      // Strict: the API sends numbers. Number(null) is 0 and
+      // Number.isFinite(0) is true, so the old coerce-then-check rendered a
+      // literal "null" for a missing counter instead of the dash.
+      el.textContent = typeof value === 'number' && Number.isFinite(value)
+        ? String(value)
+        : '—';
     });
+    setAdminCreditsNote(data);
   } catch (error) {
+    // Dashes alone make "stats endpoint down" identical to "no data yet";
+    // keep the failure visible somewhere an admin can find it.
+    console.warn('Admin stats failed to load:', error);
     root.querySelectorAll('[data-stat]').forEach((el) => {
       el.textContent = '—';
     });
+    setAdminCreditsNote(null);
   }
 }
 
-async function loadAdminUsers() {
+function _renderAdminPager() {
+  const rangeEl = document.getElementById('adminUsersRange');
+  const prevBtn = document.getElementById('adminPrevBtn');
+  const nextBtn = document.getElementById('adminNextBtn');
+  const { offset, total, limit } = adminUsersPage;
+  const shown = Math.min(limit, Math.max(0, total - offset));
+  if (rangeEl) {
+    rangeEl.textContent = total
+      ? `Showing ${offset + 1}–${offset + shown} of ${total}`
+      : '';
+  }
+  if (prevBtn) prevBtn.disabled = offset <= 0;
+  if (nextBtn) nextBtn.disabled = offset + limit >= total;
+}
+
+// A 403 from an admin route means the cached role is stale — someone demoted
+// this account since the last /me. Re-read the server's answer so the menu
+// entry and the page disappear instead of sitting there erroring.
+async function _handleAdminAccessLost() {
+  try {
+    const refreshed = await AuthAPI.me();
+    if (refreshed?.user) applyUpdatedUser(refreshed.user);
+  } catch (_error) {
+    clearAuthState();
+  }
+  if (currentPage === 'admin') navigateToPage('home');
+}
+
+// Monotonic ticket for loadAdminUsers: pager clicks can overlap, responses
+// land in any order, and only the newest request may own the table —
+// otherwise a slow page 1 arriving late repaints over page 2 while the pager
+// still says page 2.
+let _adminUsersRequestSeq = 0;
+
+async function loadAdminUsers({ offset } = {}) {
   const body = document.getElementById('adminUsersBody');
   if (!body) return;
+  // Ticket taken before ANY paint: the "Admin access required." branch owns
+  // the table too, and must invalidate a slower authorized fetch still in
+  // flight — otherwise its late success repaints a live user table over the
+  // denial (reachable via a cross-tab logout/demotion, since AUTH_USER_KEY
+  // is shared localStorage and nothing listens for storage events).
+  const seq = ++_adminUsersRequestSeq;
   const user = getStoredAuthUser();
   if (!user || user.role !== 'admin') {
     body.innerHTML = '<tr><td colspan="6" class="admin-empty">Admin access required.</td></tr>';
     return;
   }
-  loadAdminStats();
+  if (Number.isFinite(offset)) adminUsersPage.offset = Math.max(0, offset);
   body.innerHTML = '<tr><td colspan="6" class="admin-empty">Loading…</td></tr>';
   _setAdminFlash(null);
   try {
-    const data = await AdminAPI.listUsers();
+    const data = await AdminAPI.listUsers({
+      limit: adminUsersPage.limit,
+      offset: adminUsersPage.offset,
+    });
+    if (seq !== _adminUsersRequestSeq) return;
     const users = Array.isArray(data?.users) ? data.users : [];
+    adminUsersPage.total = Number(data?.total) || users.length;
+    // A page can go out of range when accounts are deleted between requests.
+    if (!users.length && adminUsersPage.offset > 0) {
+      return loadAdminUsers({ offset: 0 });
+    }
+    _renderAdminPager();
     if (!users.length) {
       body.innerHTML = '<tr><td colspan="6" class="admin-empty">No users yet.</td></tr>';
       return;
     }
+    const maxBounds = ADMIN_QUOTA_BOUNDS.max_concurrent_backtests;
+    const creditBounds = ADMIN_QUOTA_BOUNDS.credits;
     body.innerHTML = users.map((row) => {
       const entitlements = row.entitlements || {};
       const maxConcurrent = Number(entitlements.max_concurrent_backtests ?? 1);
@@ -3268,24 +3408,29 @@ async function loadAdminUsers() {
       const role = row.role === 'admin' ? 'admin' : 'user';
       const isSelf = Boolean(user && Number(user.id) === Number(row.id));
       const roleControl = isSelf
-        ? `<span class="admin-role-locked" title="You cannot demote yourself">${_adminEscape(role)} (you)</span>`
-        : `<select data-field="role" aria-label="Role for ${_adminEscape(row.email)}">
+        ? `<span class="admin-role-locked" title="You cannot demote yourself">${escapeHtml(role)} (you)</span>`
+        : `<select data-field="role" aria-label="Role for ${escapeHtml(row.email)}">
             <option value="user"${role === 'user' ? ' selected' : ''}>user</option>
             <option value="admin"${role === 'admin' ? ' selected' : ''}>admin</option>
           </select>`;
-      return `<tr data-user-id="${_adminEscape(row.id)}" data-current-role="${_adminEscape(role)}">
-        <td class="admin-email">${_adminEscape(row.email)}</td>
-        <td>${_adminEscape(row.display_name || '—')}</td>
+      // data-server-*: the last value the server confirmed for this row.
+      // "Save quotas" diffs the inputs against these and sends only what the
+      // admin actually changed, so saving an untouched field can never revert
+      // a concurrent admin's edit with this page's stale copy.
+      return `<tr data-user-id="${escapeHtml(row.id)}" data-current-role="${escapeHtml(role)}"
+        data-server-max="${escapeHtml(maxConcurrent)}" data-server-credits="${escapeHtml(credits)}">
+        <td class="admin-email">${escapeHtml(row.email)}</td>
+        <td>${escapeHtml(row.display_name || '—')}</td>
         <td>${roleControl}</td>
         <td>
-          <input data-field="max_concurrent_backtests" type="number" min="1" max="20"
-            value="${_adminEscape(maxConcurrent)}"
-            aria-label="Max concurrent backtests for ${_adminEscape(row.email)}">
+          <input data-field="max_concurrent_backtests" type="number" min="${maxBounds.min}" max="${maxBounds.max}"
+            value="${escapeHtml(maxConcurrent)}"
+            aria-label="Max concurrent backtests for ${escapeHtml(row.email)}">
         </td>
         <td>
-          <input data-field="credits" type="number" min="0" max="1000000"
-            value="${_adminEscape(credits)}"
-            aria-label="Credits for ${_adminEscape(row.email)}">
+          <input data-field="credits" type="number" min="${creditBounds.min}" max="${creditBounds.max}"
+            value="${escapeHtml(credits)}"
+            aria-label="Credits for ${escapeHtml(row.email)}">
         </td>
         <td>
           <button type="button" class="auth-btn auth-btn-primary admin-save-btn" data-admin-save>Save quotas</button>
@@ -3293,7 +3438,13 @@ async function loadAdminUsers() {
       </tr>`;
     }).join('');
   } catch (error) {
-    body.innerHTML = `<tr><td colspan="6" class="admin-empty">${_adminEscape(error.message || 'Failed to load users')}</td></tr>`;
+    if (seq !== _adminUsersRequestSeq) return;
+    if (error?.status === 403 || error?.status === 401) {
+      body.innerHTML = '<tr><td colspan="6" class="admin-empty">Admin access required.</td></tr>';
+      await _handleAdminAccessLost();
+      return;
+    }
+    body.innerHTML = `<tr><td colspan="6" class="admin-empty">${escapeHtml(error.message || 'Failed to load users')}</td></tr>`;
     _setAdminFlash('error', error.message || 'Failed to load users');
   }
 }
@@ -3303,7 +3454,7 @@ async function saveAdminUserRole(rowEl, nextRole) {
   const userId = Number(rowEl.getAttribute('data-user-id'));
   const prevRole = rowEl.getAttribute('data-current-role') || 'user';
   const roleSelect = rowEl.querySelector('[data-field="role"]');
-  const email = rowEl.querySelector('.admin-email')?.textContent || `user #${userId}`;
+  const email = _adminConfirmEmail(rowEl.querySelector('.admin-email')?.textContent) || `user #${userId}`;
 
   if (nextRole === prevRole) return;
 
@@ -3330,7 +3481,9 @@ async function saveAdminUserRole(rowEl, nextRole) {
   try {
     const data = await AdminAPI.patchUser(userId, { role: nextRole });
     rowEl.setAttribute('data-current-role', nextRole);
+    _applyAdminRowFromUser(rowEl, data?.user);
     _setAdminFlash('success', `${email} is now ${nextRole}`);
+    loadAdminStats();
     const me = getStoredAuthUser();
     if (me && Number(me.id) === userId && data?.user) {
       applyUpdatedUser({
@@ -3342,33 +3495,98 @@ async function saveAdminUserRole(rowEl, nextRole) {
   } catch (error) {
     if (roleSelect) roleSelect.value = prevRole;
     _setAdminFlash('error', error.message || 'Role update failed');
+    if (error?.status === 403 || error?.status === 401) await _handleAdminAccessLost();
   } finally {
     if (roleSelect) roleSelect.disabled = false;
   }
 }
 
+// A blank <input type="number"> reads as '' and Number('') is 0 while
+// Number(' ') is 0 too — but the old code's Number(undefined) path produced
+// NaN, which JSON.stringify writes as null, which Pydantic reads as "field
+// omitted". The save then succeeded, changed nothing, and flashed "Updated
+// quotas". Refuse the submit instead of sending a value we cannot represent.
+function _readAdminQuota(rowEl, field, label, { min, max }) {
+  const el = rowEl.querySelector(`[data-field="${field}"]`);
+  const raw = String(el?.value ?? '').trim();
+  if (raw === '') return { error: `${label} cannot be blank` };
+  const value = Number(raw);
+  if (!Number.isInteger(value)) return { error: `${label} must be a whole number` };
+  if (value < min || value > max) {
+    return { error: `${label} must be between ${min} and ${max}` };
+  }
+  return { value };
+}
+
+// Server truth after a PATCH: push the returned row back into the inputs and
+// the data-server-* baseline. Skips any input the admin is mid-typing in
+// (same focused-element rule updateAccountPage uses) so a concurrent-save
+// repaint never stomps a keystroke.
+function _applyAdminRowFromUser(rowEl, userPayload) {
+  if (!rowEl || !userPayload) return;
+  const role = userPayload.role === 'admin' ? 'admin' : 'user';
+  rowEl.setAttribute('data-current-role', role);
+  const roleSelect = rowEl.querySelector('select[data-field="role"]');
+  if (roleSelect) roleSelect.value = role;
+  const entitlements = userPayload.entitlements;
+  if (!entitlements) return;
+  const apply = (field, attr, value) => {
+    if (value == null) return;
+    rowEl.setAttribute(attr, String(value));
+    const input = rowEl.querySelector(`[data-field="${field}"]`);
+    if (input && document.activeElement !== input) input.value = String(value);
+  };
+  apply('max_concurrent_backtests', 'data-server-max', entitlements.max_concurrent_backtests);
+  apply('credits', 'data-server-credits', entitlements.credits);
+}
+
 async function saveAdminUserRow(rowEl) {
   if (!rowEl) return;
   const userId = Number(rowEl.getAttribute('data-user-id'));
-  const maxConcurrent = Number(rowEl.querySelector('[data-field="max_concurrent_backtests"]')?.value);
-  const credits = Number(rowEl.querySelector('[data-field="credits"]')?.value);
+  const maxField = _readAdminQuota(rowEl, 'max_concurrent_backtests', 'Max concurrent backtests', ADMIN_QUOTA_BOUNDS.max_concurrent_backtests);
+  const creditsField = _readAdminQuota(rowEl, 'credits', 'Credits', ADMIN_QUOTA_BOUNDS.credits);
   const btn = rowEl.querySelector('[data-admin-save]');
-  const email = rowEl.querySelector('.admin-email')?.textContent || `user #${userId}`;
+  const email = _adminConfirmEmail(rowEl.querySelector('.admin-email')?.textContent) || `user #${userId}`;
+  const invalid = maxField.error || creditsField.error;
+  if (invalid) {
+    _setAdminFlash('error', `${email}: ${invalid}`);
+    return;
+  }
+  // Send only what this admin changed relative to the last server-confirmed
+  // values. The backend upsert COALESCEs omitted fields, so an untouched
+  // input stays whatever the database holds now — including an edit another
+  // admin committed after this page rendered — instead of being silently
+  // reverted to this page's stale copy.
+  const patch = {};
+  if (String(maxField.value) !== rowEl.getAttribute('data-server-max')) {
+    patch.max_concurrent_backtests = maxField.value;
+  }
+  if (String(creditsField.value) !== rowEl.getAttribute('data-server-credits')) {
+    patch.credits = creditsField.value;
+  }
+  if (!Object.keys(patch).length) {
+    _setAdminFlash('success', `No quota changes for ${email}`);
+    return;
+  }
   if (btn) btn.disabled = true;
   _setAdminFlash(null);
   try {
-    await AdminAPI.patchUser(userId, {
-      max_concurrent_backtests: maxConcurrent,
-      credits,
-    });
+    const data = await AdminAPI.patchUser(userId, patch);
+    _applyAdminRowFromUser(rowEl, data?.user);
     _setAdminFlash('success', `Updated quotas for ${email}`);
     const me = getStoredAuthUser();
-    if (me && Number(me.id) === userId) {
-      const refreshed = await AuthAPI.me();
-      if (refreshed?.user) applyUpdatedUser(refreshed.user);
+    if (me && Number(me.id) === userId && data?.user) {
+      // The PATCH response carries the fresh entitlements; spreading over the
+      // stored user keeps the avatar the admin projection omits on purpose.
+      applyUpdatedUser({
+        ...me,
+        ...data.user,
+        entitlements: data.user.entitlements || me.entitlements,
+      });
     }
   } catch (error) {
     _setAdminFlash('error', error.message || 'Save failed');
+    if (error?.status === 403 || error?.status === 401) await _handleAdminAccessLost();
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -3779,8 +3997,10 @@ function updateAuthUI() {
   // sets display:block and otherwise overrides the UA rule).
   const isAdmin = Boolean(user && user.role === 'admin');
   if (adminMenuBtn) {
+    // [hidden] alone is enough: styles.css's .account-menu-item[hidden]
+    // !important guard exists for exactly this toggle, and a second inline
+    // display write would just hide the coupling it documents.
     adminMenuBtn.hidden = !isAdmin;
-    adminMenuBtn.style.display = isAdmin ? '' : 'none';
   }
   if (!isAdmin && currentPage === 'admin') {
     navigateToPage('home');
@@ -3818,10 +4038,24 @@ async function logoutUser() {
     console.warn('Logout request failed:', error.message);
   } finally {
     clearAuthState();
-    await loadAgents();
-    if (currentPage === 'account' || currentPage === 'admin') {
-      navigateToPage('home');
-    }
+    clearActiveAgentSession();
+    // Signed out, home is the landing page again. index.html sends a visit
+    // carrying a cached auth-user straight to /app ("Landing is for first-time
+    // / logged-out visitors only"); this is the return trip, which was never
+    // built. Without it logout leaves the user on the signed-in shell, whose
+    // home re-renders as the "Guest Account" demo portfolio -- the screen a
+    // never-signed-in visitor gets -- so the only sign anything happened is the
+    // header swapping to "Sign in".
+    //
+    // Ordering is load-bearing: the two clears above must run first, or the
+    // landing sees a cached auth-user and bounces straight back to /app.
+    // replace() rather than href so Back cannot restore the shell just left,
+    // and it matches the verb the landing's own redirect uses.
+    //
+    // Nothing follows it: the old loadAgents() re-fetch and account/admin page
+    // hop both dressed a page that is being torn down, and awaiting a request
+    // first only delays the one action the user asked for.
+    window.location.replace('/');
   }
 }
 
@@ -4093,6 +4327,11 @@ async function refreshAuthUser() {
       console.warn('Auth session expired:', error.message);
     }
     clearAuthState();
+    // Only a 401 proves the session is really gone. A network error or a 5xx
+    // cold start must not cost the user their active agent selection.
+    if (error?.status === 401) {
+      clearActiveAgentSession();
+    }
   }
 }
 
@@ -4122,7 +4361,14 @@ function initAuthUI(options = {}) {
     navigateToPage('admin');
   });
   document.getElementById('adminRefreshBtn')?.addEventListener('click', () => {
+    loadAdminStats();
     loadAdminUsers();
+  });
+  document.getElementById('adminPrevBtn')?.addEventListener('click', () => {
+    loadAdminUsers({ offset: adminUsersPage.offset - adminUsersPage.limit });
+  });
+  document.getElementById('adminNextBtn')?.addEventListener('click', () => {
+    loadAdminUsers({ offset: adminUsersPage.offset + adminUsersPage.limit });
   });
   document.getElementById('adminUsersBody')?.addEventListener('click', (event) => {
     const btn = event.target.closest('[data-admin-save]');
@@ -4283,11 +4529,30 @@ let liveBacktestLaunchPending = false;
 let liveBacktestLaunchError = false;
 /** Active status-poll timer id (so dropdown can re-attach to a running job). */
 let backtestPollTimer = null;
+/** Consecutive failed status polls, keyed by live_run_id. A poll that throws
+ *  (offline, a 502 from a cold instance) reports nothing about whether the run
+ *  ended, so the run is carried as running-but-unknown until the budget below is
+ *  spent -- reading one dropped request as "finished" used to stop the poller
+ *  for every other in-flight run too. */
+let backtestPollFailures = Object.create(null);
+const BACKTEST_POLL_FAILURE_BUDGET = 5;
 
-// Which agents have a backtest in flight, so My Agents can show it. Mirrored to
-// sessionStorage: a refresh mid-run must not silently drop the indicator and
-// make a running backtest look like it never started.
+// Backtests in flight, so My Agents can show them. Keyed by the run's own id --
+// the only identity that is unique per run -- so a second backtest for the SAME
+// agent is a second entry instead of an overwrite that stranded the first card.
+// Mirrored to sessionStorage: a refresh mid-run must not silently drop the
+// indicator and make a running backtest look like it never started.
+//
+// Entry shape: { agentId, runId, startedAt }. A launch has no run id until its
+// POST answers, so it is filed under a local `pending:` key and re-filed under
+// the real live_run_id by promoteBacktestRunKey(). Entries written by an earlier
+// build were keyed by agent id and carry no `agentId` field; every read below
+// falls back to the key, so a reload mid-run across a deploy keeps its card.
 const RUNNING_BACKTESTS_KEY = 'running-backtests';
+// Paired with a timestamp in the key below: the counter alone restarts at 0 on
+// reload, and sessionStorage survives a reload, so a fresh launch would land on
+// a stale placeholder's key — the overwrite this registry exists to prevent.
+let pendingBacktestSeq = 0;
 
 function readRunningBacktests() {
     try {
@@ -4307,33 +4572,151 @@ function writeRunningBacktests(map) {
     }
 }
 
+/**
+ * Register a backtest as in flight and return its registry key.
+ *
+ * Callers keep that key and hand it back to clearAgentBacktestRunning() /
+ * promoteBacktestRunKey(), so a launch only ever touches its own entry. Clearing
+ * by agent id deleted whichever entry happened to sit in that agent's slot,
+ * which with two runs of one agent is the wrong one.
+ */
 function markAgentBacktestRunning(agentId, runId) {
-    if (!agentId) return;
+    if (!agentId) return null;
     const map = readRunningBacktests();
-    map[agentId] = { runId: runId || null, startedAt: Date.now() };
+    const key = runId || `pending:${Date.now()}:${(pendingBacktestSeq += 1)}`;
+    map[key] = { agentId, runId: runId || null, startedAt: Date.now() };
+    writeRunningBacktests(map);
+    return key;
+}
+
+/**
+ * Re-file a pending launch under the live_run_id the server just issued, and
+ * return the new key.
+ *
+ * `startedAt` is carried over rather than reset: the card's elapsed clock runs
+ * from the click, not from when the POST came back.
+ */
+function promoteBacktestRunKey(key, agentId, runId) {
+    if (!runId) return key;
+    const map = readRunningBacktests();
+    const previous = key ? map[key] : null;
+    if (key && key !== runId) delete map[key];
+    map[runId] = {
+        agentId: (previous && previous.agentId) || agentId || null,
+        runId,
+        startedAt: Number(previous && previous.startedAt) || Date.now(),
+    };
+    writeRunningBacktests(map);
+    return runId;
+}
+
+/**
+ * Drop one run from the registry.
+ *
+ * `runKey` is that run's live_run_id, or the `pending:` key of a launch whose
+ * POST has not answered yet -- never an agent id, which cannot identify a run.
+ */
+function clearAgentBacktestRunning(runKey) {
+    if (!runKey) return;
+    const map = readRunningBacktests();
+    if (!(runKey in map)) return;
+    delete map[runKey];
     writeRunningBacktests(map);
 }
 
-function clearAgentBacktestRunning(agentId) {
-    if (!agentId) return;
+/**
+ * Every run still in flight, oldest first, with dead entries swept.
+ *
+ * Entries older than the poll ceiling are discarded here as well as in
+ * getAgentBacktestRunning(): a run that died without a terminal status would
+ * otherwise count against the concurrency check below forever.
+ */
+function listRunningBacktests() {
     const map = readRunningBacktests();
-    if (!(agentId in map)) return;
-    delete map[agentId];
-    writeRunningBacktests(map);
+    const runs = [];
+    let swept = false;
+    Object.keys(map).forEach((key) => {
+        const entry = map[key];
+        const elapsed = (Date.now() - Number(entry && entry.startedAt)) / 1000;
+        if (!entry || !Number.isFinite(elapsed) || elapsed > BACKTEST_POLL_MAX_SECONDS) {
+            delete map[key];
+            swept = true;
+            return;
+        }
+        runs.push({
+            key,
+            // Legacy entries were keyed by agent id and carry no agentId field.
+            agentId: entry.agentId || key,
+            runId: entry.runId || null,
+            startedAt: Number(entry.startedAt) || 0,
+        });
+    });
+    if (swept) writeRunningBacktests(map);
+    runs.sort((a, b) => a.startedAt - b.startedAt);
+    return runs;
+}
+
+/**
+ * Refusal message when this browser is already at its concurrent-backtest
+ * limit, or null when there is room.
+ *
+ * The server is the authority -- `_try_acquire_backtest_slot`
+ * (api/routers/backtests.py) counts an owner's runs across every tab and device,
+ * which this cannot see. This only turns the refusal this browser can already
+ * predict into an immediate message, instead of a round-trip whose error lands
+ * after the modal has closed. A signed-out caller gets 1, matching the anonymous
+ * branch of the server's `_max_concurrent_for_user`; a stored session with no
+ * entitlements attached is left to the server rather than guessed at.
+ *
+ * A limit of 0 is NOT "unknown". It is the admin console's suspension value and
+ * the server refuses on it (`_count_active_for_owner(...) >= 0` is always true),
+ * so lumping it in with missing/unparseable would wave through exactly the one
+ * account that must never launch.
+ */
+function backtestConcurrencyRefusal() {
+    const user = getStoredAuthUser();
+    const raw = user ? user.entitlements?.max_concurrent_backtests : 1;
+    const limit = Number(raw);
+    if (raw === null || raw === undefined || !Number.isFinite(limit) || limit < 0) {
+        return null;
+    }
+    if (limit === 0) {
+        return 'Backtests are disabled for this account. Contact an administrator.';
+    }
+    if (listRunningBacktests().length < limit) return null;
+    return limit === 1
+        ? 'A backtest is already running. Wait for it to finish before starting another.'
+        : `You already have ${limit} backtests running. Wait for one to finish.`;
 }
 
 /**
  * Running entry for an agent, or null.
  *
+ * The registry is keyed per run, so one agent can hold several. The card has one
+ * indicator, so it reports the most recent launch -- the run the user just
+ * started; the others keep their own entries and clear themselves.
+ *
  * Entries older than the poll ceiling are discarded: a run that died without a
  * terminal status would otherwise pin a card to "Backtesting…" forever.
  */
 function getAgentBacktestRunning(agentId) {
-    const entry = readRunningBacktests()[agentId];
+    if (!agentId) return null;
+    const map = readRunningBacktests();
+    let entryKey = null;
+    let entry = null;
+    Object.keys(map).forEach((key) => {
+        const candidate = map[key];
+        // Legacy entries were keyed by agent id and carry no agentId field.
+        if (!candidate || (candidate.agentId || key) !== agentId) return;
+        if (!entry || Number(candidate.startedAt || 0) >= Number(entry.startedAt || 0)) {
+            entryKey = key;
+            entry = candidate;
+        }
+    });
     if (!entry) return null;
     const elapsed = (Date.now() - Number(entry.startedAt || 0)) / 1000;
     if (!Number.isFinite(elapsed) || elapsed > BACKTEST_POLL_MAX_SECONDS) {
-        clearAgentBacktestRunning(agentId);
+        clearAgentBacktestRunning(entryKey);
         return null;
     }
     // Attribute progress by this card's runId. An entry with no runId yet is
@@ -4367,7 +4750,15 @@ let lastRenderedRunningKey = null;
  */
 function refreshRunningAgentCards() {
     const running = readRunningBacktests();
-    const key = Object.keys(running).sort().join(',');
+    // The registry is keyed per run, so two runs of one agent are two entries;
+    // the cards to patch are the distinct agents behind them. (Legacy entries
+    // were keyed by agent id and carry no agentId field.)
+    const agentIds = [];
+    Object.keys(running).forEach((runKey) => {
+        const agentId = (running[runKey] && running[runKey].agentId) || runKey;
+        if (agentId && !agentIds.includes(agentId)) agentIds.push(agentId);
+    });
+    const key = agentIds.slice().sort().join(',');
     if (key !== lastRenderedRunningKey) {
         lastRenderedRunningKey = key;
         applyAgentFilters(false);
@@ -4399,7 +4790,7 @@ function refreshRunningAgentCards() {
             apply(el);
         });
     };
-    Object.keys(running).forEach((agentId) => {
+    agentIds.forEach((agentId) => {
         const entry = getAgentBacktestRunning(agentId);
         if (!entry) return;
         // Same derivation the full render uses, so the two cannot drift.
@@ -6154,9 +6545,17 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
     ensureBacktestPolling();
 }
 
-function showBacktestLaunchFailure(message, launchConfig) {
-    if (launchConfig?.agentId) {
-        clearAgentBacktestRunning(launchConfig.agentId);
+/**
+ * Paint a launch that was refused or failed.
+ *
+ * `runKey` is the registry key markAgentBacktestRunning() returned for THIS
+ * launch, and is the only entry dropped: clearing by agent id used to delete an
+ * earlier, genuinely running backtest for the same agent whenever a later launch
+ * was refused.
+ */
+function showBacktestLaunchFailure(message, launchConfig, runKey = null) {
+    if (runKey) {
+        clearAgentBacktestRunning(runKey);
         applyAgentFilters(false);
     }
     liveBacktestChartActive = false;
@@ -6183,6 +6582,9 @@ function stopBacktestPolling() {
         clearInterval(backtestPollTimer);
         backtestPollTimer = null;
     }
+    // Reset with the timer: counts left standing would spend a later run's
+    // budget on failures that belong to a poller which is no longer attached.
+    backtestPollFailures = Object.create(null);
 }
 
 function isViewingLiveBacktest(liveId = liveBacktestRunId) {
@@ -6198,17 +6600,18 @@ function ensureBacktestPolling() {
     backtestPollTimer = setInterval(async () => {
         attempts += 1;
         try {
-            const runningMap = readRunningBacktests();
             const jobs = [];
             const seen = new Set();
-            Object.entries(runningMap).forEach(([agentId, entry]) => {
-                const runId = entry?.runId;
-                if (!runId || seen.has(runId)) return;
-                seen.add(runId);
-                jobs.push({ agentId, runId });
+            listRunningBacktests().forEach((run) => {
+                // A pending launch has no run id to poll yet; it is still in the
+                // registry, so the stop check at the bottom keeps polling alive
+                // until its POST answers.
+                if (!run.runId || seen.has(run.runId)) return;
+                seen.add(run.runId);
+                jobs.push({ key: run.key, agentId: run.agentId, runId: run.runId });
             });
             if (liveBacktestRunId && !seen.has(liveBacktestRunId)) {
-                jobs.push({ agentId: null, runId: liveBacktestRunId });
+                jobs.push({ key: liveBacktestRunId, agentId: null, runId: liveBacktestRunId });
             }
             if (!jobs.length) {
                 const statusUrl = `${API_BASE}/backtest/status`;
@@ -6217,7 +6620,7 @@ function ensureBacktestPolling() {
                     stopBacktestPolling();
                     return;
                 }
-                jobs.push({ agentId: null, runId: status.live_run_id || null });
+                jobs.push({ key: null, agentId: null, runId: status.live_run_id || null });
             }
 
             const snapshots = await Promise.all(jobs.map(async (job) => {
@@ -6225,18 +6628,54 @@ function ensureBacktestPolling() {
                     ? `${API_BASE}/backtest/status?live_run_id=${encodeURIComponent(job.runId)}`
                     : `${API_BASE}/backtest/status`;
                 try {
-                    return { job, status: await API.get(statusUrl) };
+                    return { job, status: await API.get(statusUrl), failed: false };
                 } catch (error) {
+                    // Carried as an explicit failure rather than a bare null: a
+                    // request that never answered says nothing about whether the
+                    // run ended, and only the terminal branch below may act as
+                    // though it did.
                     console.error('Error polling backtest status:', error);
-                    return { job, status: null };
+                    return { job, status: null, failed: true };
                 }
             }));
 
             let anyRunning = false;
             let finishedFocused = null;
 
-            for (const { job, status } of snapshots) {
-                if (!status) continue;
+            for (const { job, status, failed } of snapshots) {
+                if (failed || !status) {
+                    const failureKey = job.runId || job.key || '';
+                    const misses = (backtestPollFailures[failureKey] || 0) + 1;
+                    backtestPollFailures[failureKey] = misses;
+                    if (misses < BACKTEST_POLL_FAILURE_BUDGET) {
+                        // Still running as far as anyone knows: hold the card and
+                        // keep the poller attached so a blip on one job cannot end
+                        // polling for the healthy ones.
+                        anyRunning = true;
+                        continue;
+                    }
+                    // Budget spent -- give up on this run, and say so. Dropping the
+                    // card silently is how a backtest that is still going
+                    // server-side comes to look like one that never started.
+                    delete backtestPollFailures[failureKey];
+                    const wasViewed = isViewingLiveBacktest(job.runId);
+                    if (job.key) clearAgentBacktestRunning(job.key);
+                    if (job.runId) delete liveBacktestProgressByRunId[job.runId];
+                    if (job.runId && job.runId === liveBacktestRunId) {
+                        liveBacktestRunId = null;
+                        liveBacktestProgress = null;
+                        liveBacktestChartActive = false;
+                    }
+                    const lostMessage = 'Lost contact with the backtest — it may still be running. Reload to check.';
+                    if (wasViewed) {
+                        showBacktestRunProgress(true, { isError: true });
+                        updateBacktestRunProgress({ elapsedSeconds: attempts, message: lostMessage });
+                    } else {
+                        showAppToast(lostMessage);
+                    }
+                    continue;
+                }
+                delete backtestPollFailures[job.runId || job.key || ''];
                 const liveId = status.live_run_id || job.runId;
                 const serverElapsed = Number(status.elapsed_seconds);
                 const displayElapsed = Number.isFinite(serverElapsed) && serverElapsed > 0
@@ -6246,7 +6685,15 @@ function ensureBacktestPolling() {
 
                 if (status.running) {
                     anyRunning = true;
-                    if (liveId && !liveBacktestRunId) liveBacktestRunId = liveId;
+                    // Adopt an unfocused run only when the Backtest panel is not
+                    // pinned to some other run. Adopting regardless meant that
+                    // after run A finished and loaded its results, run B became
+                    // the focused run and took the panel over the moment it
+                    // completed -- replacing the results the user was reading.
+                    const pinnedRunId = localStorage.getItem(SELECTED_BACKTEST_RUN_KEY);
+                    if (liveId && !liveBacktestRunId && (!pinnedRunId || pinnedRunId === liveId)) {
+                        liveBacktestRunId = liveId;
+                    }
                     const step = Number(status.progress?.step);
                     const total = Number(status.progress?.total_steps);
                     const stepPct = Number.isFinite(step) && Number.isFinite(total) && total > 0
@@ -6289,11 +6736,12 @@ function ensureBacktestPolling() {
                     }
                 } else {
                     if (liveId) delete liveBacktestProgressByRunId[liveId];
-                    Object.entries(readRunningBacktests()).forEach(([agentId, entry]) => {
-                        if (entry?.runId === liveId || (!liveId && agentId === job.agentId)) {
-                            clearAgentBacktestRunning(agentId);
-                        }
-                    });
+                    // Only this run's entry: the registry is keyed by run, so a
+                    // sibling run of the same agent keeps its card. `liveId` is
+                    // the key for anything this build filed; job.key also clears
+                    // an entry a previous build left filed under its agent id.
+                    if (liveId) clearAgentBacktestRunning(liveId);
+                    if (job.key && job.key !== liveId) clearAgentBacktestRunning(job.key);
                     if (viewingLive || liveId === liveBacktestRunId) {
                         finishedFocused = {
                             status,
@@ -6353,15 +6801,20 @@ function ensureBacktestPolling() {
                     showBacktestRunProgress(false);
                 }
 
-                const remaining = Object.values(readRunningBacktests())
-                    .map((entry) => entry?.runId)
-                    .filter(Boolean);
-                if (remaining.length) {
-                    attachToLiveBacktest(remaining[0], null, getBacktestLaunchConfig(remaining[0]));
-                } else if (!anyRunning) {
-                    stopBacktestPolling();
-                }
-            } else if (!anyRunning) {
+                // Deliberately does NOT re-attach the view to another still-running
+                // run. attachToLiveBacktest() rewrites SELECTED_BACKTEST_RUN_KEY
+                // and repaints the panel into live mode, which threw away the
+                // finished run's results loaded a few lines above -- the ones the
+                // user had been waiting for. The other runs keep polling and their
+                // cards keep updating; the run dropdown is how a user follows a
+                // different one, on purpose.
+            }
+
+            // Stop only when there is nothing left to watch. A run whose poll
+            // failed still counts as running above, so a transient network error
+            // cannot end polling for the healthy jobs; a pending launch has no
+            // status to report yet but is still in the registry.
+            if (!anyRunning && !listRunningBacktests().length) {
                 stopBacktestPolling();
             }
 
@@ -6490,6 +6943,10 @@ function formatOrderExecutionReason(reason, strategyReason = '') {
         insufficient_cash: 'Insufficient cash',
         t1_frozen: 'T+1 frozen',
         insufficient_position: 'Insufficient position',
+        suspended: 'Suspended',
+        limit_up_buy_blocked: 'Buy blocked at upper limit',
+        limit_down_sell_blocked: 'Sell blocked at lower limit',
+        market_rule_unavailable: 'No market rule for this symbol',
     };
     const code = String(reason || '').trim();
     if (labels[code]) return labels[code];
@@ -6558,7 +7015,36 @@ function normalizeOrderRecord(record) {
         nativeTransferFee: optionalNumber(record?.native_transfer_fee),
         nativeTotalFees: optionalNumber(record?.native_total_fees),
         nativeNetCashImpact: optionalNumber(record?.native_net_cash_impact),
+        marketRuleDate: record?.market_rule_date || null,
+        marketRuleSuspended: record?.market_rule_suspended === true
+            || record?.market_rule_suspended === 1,
+        marketRuleClosingLimitState: record?.market_rule_closing_limit_state || null,
+        marketRuleOfficialClose: optionalNumber(record?.market_rule_official_close),
+        marketRuleClosingGateEffective:
+            record?.market_rule_closing_gate_effective === true
+            || record?.market_rule_closing_gate_effective === 1,
     };
+}
+
+// Only rows a rule actually spoke to. An ordinary fill on an ordinary day
+// carries the same audit payload as a blocked one, so rendering whenever the
+// official close is present puts a date-and-price line under every single
+// A-share order and buries the handful that mean something.
+function renderMarketRuleAudit(order) {
+    if (!order.marketRuleDate) return '';
+    const details = [];
+    if (order.marketRuleSuspended) {
+        details.push('Official status: suspended');
+    } else if (order.marketRuleClosingLimitState
+        && order.marketRuleClosingLimitState !== 'none') {
+        const side = order.marketRuleClosingLimitState === 'upper' ? 'upper' : 'lower';
+        details.push(`Official close: ${side} limit`);
+    }
+    if (!details.length) return '';
+    if (Number.isFinite(order.marketRuleOfficialClose)) {
+        details.push(`¥${order.marketRuleOfficialClose.toFixed(2)}`);
+    }
+    return `<div class="trading-log-native">${escapeHtml(order.marketRuleDate)} · ${escapeHtml(details.join(' · '))}</div>`;
 }
 
 function formatTradingMoney(value, symbol) {
@@ -6663,6 +7149,7 @@ function paintTradingLog(normalizedRecords, options) {
         const assetName = resolveTradingAssetName(order.symbol);
         const quantity = `${order.executedShares.toLocaleString('en-US')} / ${order.requestedShares.toLocaleString('en-US')} shares`;
         const reason = formatOrderExecutionReason(order.reason, order.strategyReason);
+        const marketRuleAudit = renderMarketRuleAudit(order);
         // A rejection the agent re-issued on every bar of a day is stored once,
         // with its tally. Showing the tally is the difference between "this
         // blocked one order" and "this blocked the strategy all day".
@@ -6677,7 +7164,7 @@ function paintTradingLog(normalizedRecords, options) {
             <td>$${order.price.toFixed(2)}${priceAudit}</td>
             <td class="trading-log-value">${order.executedShares > 0 ? `${formatTradingMoney(order.value, '$')}${valueAudit}${costAudit}` : '--'}</td>
             <td><span class="order-status order-status-${order.status}" title="Order status: ${statusLabel}" aria-label="Order status: ${statusLabel}">${statusLabel}</span></td>
-            <td class="trading-log-reason">${escapeHtml(reason)}${repeatNote}</td>
+            <td class="trading-log-reason">${escapeHtml(reason)}${marketRuleAudit}${repeatNote}</td>
         </tr>`;
     }).join('');
 
@@ -6835,7 +7322,12 @@ function formatTransactionCostTotals(totals) {
 
 function renderBacktestRunConfig(
     run,
-    { running = false, launchConfig = null, statusLabel = null } = {},
+    {
+        running = false,
+        launchConfig = null,
+        statusLabel = null,
+        baselineRun = null,
+    } = {},
 ) {
     const empty = document.getElementById('backtestConfigEmpty');
     const list = document.getElementById('backtestConfigList');
@@ -6871,6 +7363,18 @@ function renderBacktestRunConfig(
         ?? run?.transaction_cost_profile;
     const transactionCostTotals = metadata.transaction_cost_totals
         ?? run?.transaction_cost_totals;
+    const marketRuleProfile = metadata.market_rule_profile
+        ?? run?.market_rule_profile;
+    const marketRuleRejections = metadata.market_rule_rejections
+        ?? run?.market_rule_rejections;
+    const baselineMetadata = baselineRun?.metadata
+        && typeof baselineRun.metadata === 'object'
+        ? baselineRun.metadata
+        : {};
+    const baselineAllocation = baselineMetadata.baseline_allocation
+        ?? baselineRun?.baseline_allocation
+        ?? metadata.baseline_allocation
+        ?? run?.baseline_allocation;
     // Absent (older runs) reads as applied; only an explicit false marks a
     // curve that carries the market's cost rules without ever paying them.
     const transactionCostsApplied = (metadata.transaction_costs_applied
@@ -6961,6 +7465,37 @@ function renderBacktestRunConfig(
                 : 'Not applicable — reference price curve',
         );
     }
+    const showMarketRules = marketRuleProfile?.enabled === true;
+    const marketRulesRow = document.getElementById('backtestConfigMarketRulesRow');
+    if (marketRulesRow) marketRulesRow.hidden = !showMarketRules;
+    if (showMarketRules) {
+        setBacktestConfigText('backtestConfigMarketRules', 'Enabled');
+    }
+    const rejectionLabels = {
+        suspended: 'Suspended',
+        limit_up_buy_blocked: 'Upper-limit buys',
+        limit_down_sell_blocked: 'Lower-limit sells',
+        market_rule_unavailable: 'Missing rule',
+    };
+    const ruleRejectionParts = Object.entries(marketRuleRejections || {})
+        .filter(([, count]) => Number(count) > 0)
+        .map(([reason, count]) => `${rejectionLabels[reason] || reason} ${Number(count)}`);
+    const ruleRejectionsRow = document.getElementById('backtestConfigRuleRejectionsRow');
+    if (ruleRejectionsRow) ruleRejectionsRow.hidden = ruleRejectionParts.length === 0;
+    if (ruleRejectionParts.length) {
+        setBacktestConfigText('backtestConfigRuleRejections', ruleRejectionParts.join(' · '));
+    }
+    const delayed = Number(baselineAllocation?.symbols_delayed || 0);
+    const unfilled = Number(baselineAllocation?.symbols_unfilled || 0);
+    const showBaselineRules = delayed > 0 || unfilled > 0;
+    const baselineRulesRow = document.getElementById('backtestConfigBaselineRulesRow');
+    if (baselineRulesRow) baselineRulesRow.hidden = !showBaselineRules;
+    if (showBaselineRules) {
+        setBacktestConfigText(
+            'backtestConfigBaselineRules',
+            `Delayed ${delayed} · Unfilled ${unfilled}`,
+        );
+    }
     setBacktestConfigText('backtestConfigUniverse', universe);
     setBacktestConfigText(
         'backtestConfigSymbols',
@@ -7008,6 +7543,16 @@ function openRunBacktestModal(agent) {
     }
     if (isDemoAgent(agent.agent_id)) {
         alert('Demo agents cannot run backtests. Create your own agent first.');
+        return;
+    }
+    // Both ways into a launch land here — this card's Run button and the agent
+    // editor's, which is reachable while a backtest is running (see
+    // renderAgentRunningActions). Refuse here rather than opening a modal whose
+    // submit the server would reject, using this file's alert() convention for
+    // launch-time refusals (see showBacktestLaunchFailure).
+    const concurrencyRefusal = backtestConcurrencyRefusal();
+    if (concurrencyRefusal) {
+        alert(concurrencyRefusal);
         return;
     }
 
@@ -7227,7 +7772,10 @@ async function runBacktest() {
     // repaints My Agents invisibly underneath the settings page.
     if (window.AgentEditor?.close) window.AgentEditor.close(true);
     prepareLiveBacktestView(launchConfigBase);
-    markAgentBacktestRunning(activeAgent.agent_id, null);
+    // Keyed per run, so this launch can clear or promote exactly its own entry —
+    // a concurrent run of the same agent keeps its card either way. The key is a
+    // `pending:` placeholder until the POST below hands back a live_run_id.
+    let runKey = markAgentBacktestRunning(activeAgent.agent_id, null);
     // A synchronous throw anywhere in here would otherwise leave the agent
     // marked running with no poller ever attached to clear it — narrow
     // try/catch (not the outer one below, which governs the API call) so we
@@ -7245,7 +7793,7 @@ async function runBacktest() {
                     : 'Starting backtest…'),
         });
     } catch (error) {
-        clearAgentBacktestRunning(activeAgent.agent_id);
+        clearAgentBacktestRunning(runKey);
         throw error;
     }
 
@@ -7288,14 +7836,16 @@ async function runBacktest() {
         if (!data.success) {
             const message = formatBacktestError(data.error || data.message, dataSource);
             console.error('❌ Backtest failed:', message);
-            showBacktestLaunchFailure(message, launchConfigBase);
+            showBacktestLaunchFailure(message, launchConfigBase, runKey);
             return;
         }
 
         const liveRunId = data.live_run_id || data.run_id;
         if (liveRunId) {
             stashBacktestLaunchConfig(liveRunId, launchConfigBase);
-            markAgentBacktestRunning(activeAgent.agent_id, liveRunId);
+            // Re-file the placeholder under the id the server issued rather than
+            // registering a second entry for the same run.
+            runKey = promoteBacktestRunKey(runKey, activeAgent.agent_id, liveRunId);
             attachToLiveBacktest(liveRunId, null, launchConfigBase);
         }
         
@@ -7305,7 +7855,7 @@ async function runBacktest() {
     } catch (error) {
         const message = formatBacktestError(error, dataSource);
         console.error('❌ Error starting backtest:', message);
-        showBacktestLaunchFailure(message, launchConfigBase);
+        showBacktestLaunchFailure(message, launchConfigBase, runKey);
     }
 }
 
@@ -7412,7 +7962,7 @@ function viewParamForNavState(state) {
         return 'agents';
     }
     if (state.page === 'competition') {
-        if (state.competitionTab === 'daily') return 'daily';
+        if (state.competitionTab === 'live') return 'live';
         if (state.competitionTab === 'participants') return 'participants';
         if (state.competitionTab === 'about') return 'about';
         return 'leaderboard';
@@ -7713,13 +8263,19 @@ function showPlaygroundPanel(tab) {
 }
 
 function showCompetitionPanel(tab) {
+    // The Daily Leaderboard was replaced by the Live Trading board. A saved
+    // nav state or a cached boot script can still hand us either retired key
+    // ('daily', or 'season' from an earlier build of this branch), and an
+    // unrecognised tab here shows no panel at all — a blank Competition page.
+    if (tab === 'daily' || tab === 'season') tab = 'live';
+
     competitionTab = tab;
     updateCompetitionSubtabs();
 
     const leaderboard = document.getElementById('leaderboardView');
     const participants = document.getElementById('competitionParticipantsPanel');
     const about = document.getElementById('competitionAboutPanel');
-    const showBoard = tab === 'leaderboard' || tab === 'daily';
+    const showBoard = tab === 'leaderboard' || tab === 'live';
 
     if (leaderboard) leaderboard.style.display = showBoard ? 'flex' : 'none';
     if (participants) participants.style.display = tab === 'participants' ? 'block' : 'none';
@@ -7727,7 +8283,7 @@ function showCompetitionPanel(tab) {
 
     if (showBoard) {
         currentMode = 'contest';
-        loadLeaderboardData(tab === 'daily' ? 'daily' : 'contest');
+        loadLeaderboardData(tab === 'live' ? 'live' : 'contest');
     } else {
         currentMode = tab;
     }
@@ -7753,6 +8309,22 @@ function navigateToPage(page, options = {}) {
         page = 'community';
         options = { ...options, playgroundTab: 'agents' };
     }
+    // (The PR #335 redirect that sent competitionTab 'daily' to 'leaderboard'
+    // stood here. It ran ahead of the alias normalisation below and undid it:
+    // every path where `options.competitionTab` was absent and the module-level
+    // `competitionTab` still held 'daily' — a cached app.html boot script, a
+    // caller restoring raw saved state — landed on Competition instead of the
+    // successor board. That is the silent fall-through to the wrong data the
+    // aliases exist to stop, so the redirect is gone rather than reordered.)
+    // Role-gate the admin shell in the UI too, not only its APIs: without
+    // this, anyone landing on ?view=admin saw the empty console chrome until
+    // the deferred boot /me settled — tens of seconds on a cold free-tier
+    // start. The cached role decides; a stale cached admin still gets bounced
+    // by the APIs' 403 via _handleAdminAccessLost.
+    if (page === 'admin') {
+        const authUser = getStoredAuthUser();
+        if (!authUser || authUser.role !== 'admin') page = 'home';
+    }
 
     const historyMode = options.history || 'push';
     if (historyMode === 'push') userHasNavigated = true;
@@ -7762,6 +8334,17 @@ function navigateToPage(page, options = {}) {
 
     if (options.playgroundTab) playgroundTab = options.playgroundTab;
     if (options.competitionTab) competitionTab = options.competitionTab;
+    // Normalise the retired Daily keys here rather than only in
+    // showCompetitionPanel: the boot stylesheet keys off
+    // data-nav-competition-tab, so a 'daily' written to the attribute below
+    // leaves the board hidden through first paint even though the panel is
+    // shown a tick later.
+    //
+    // Applied to the resolved value, not to `options.competitionTab`: the
+    // retired key reaches here just as often *without* an option — a caller
+    // restoring saved state, or a cached app.html boot script writing the old
+    // key — and a normaliser that only reads the argument misses exactly those.
+    if (competitionTab === 'daily' || competitionTab === 'season') competitionTab = 'live';
 
     const html = document.documentElement;
     html.setAttribute('data-nav-page', page);
@@ -7836,6 +8419,9 @@ function navigateToPage(page, options = {}) {
         } else if (page === 'admin') {
             currentMode = 'admin';
             if (adminView) adminView.style.display = 'block';
+            // Stats load on entry and on explicit refresh — not on every
+            // pager click, which only changes the user page.
+            loadAdminStats();
             loadAdminUsers();
         }
     }
@@ -8337,9 +8923,14 @@ async function loadData() {
             }
 
             localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, selectedRun.run_id);
+            const baselineIds = resolveBaselinesForRun(selectedRun, sessionRuns);
+            const selectedBuyholdRun = sessionRuns.find(
+                run => run.run_id === baselineIds.buyhold,
+            ) || null;
             renderBacktestRunConfig(selectedRun, {
                 running: false,
                 launchConfig: getBacktestLaunchConfig(selectedRun.run_id),
+                baselineRun: selectedBuyholdRun,
             });
 
             const chartUrl = `${API_BASE}/api/backtest/${encodeURIComponent(selectedRun.run_id)}/chart-data?t=${Date.now()}`;

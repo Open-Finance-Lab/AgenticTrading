@@ -2017,27 +2017,59 @@ def test_weak_password_signup_does_not_consume_the_signup_budget(
         )
 
 
-def test_login_logging_cannot_be_used_to_forge_log_lines(client, capsys):
-    """Log injection: the failure line is the record an operator reads while
-    deciding whether they are under attack, so an unauthenticated caller must
-    not be able to write entries into it.
+def test_email_with_interior_control_characters_is_rejected(client, capsys):
+    """The address never gets to hold a newline in the first place.
 
-    ``_normalize_email`` only strips the ends of the address, so an interior
-    newline survives validation. CodeQL reported this as py/log-injection while
-    these were ``logger`` calls and goes quiet at a ``print`` sink it does not
-    model -- the alert going away is not what makes it safe, this is.
+    ``_normalize_email`` used to ``strip()`` only the *ends*, so an interior
+    newline validated and was stored verbatim — and everything that later
+    renders an address as plain text inherited it. The log line below is one
+    sink; the admin console is the worse one, where the role-change prompt is
+    built as ``Promote {email} to admin?\\n\\nThey will see Admin…`` and a
+    native confirm() dialog has no markup to escape. Reject at the validator,
+    which covers every sink at once rather than one guard per renderer.
     """
     forged = "auth.login_failed domain=attacker.test"
-    resp = client.post(
-        "/api/auth/login",
-        json={"email": f"victim@example.com\n{forged}", "password": "whatever1"},
-    )
-    assert resp.status_code == 401
+    for address in (
+        f"victim@example.com\n{forged}",
+        "victim@example.com\r\nX: 1",
+        "vic tim@example.com",
+        "victim@exam\x00ple.com",
+    ):
+        resp = client.post(
+            "/api/auth/login", json={"email": address, "password": "whatever1"}
+        )
+        assert resp.status_code == 422, f"{address!r} -> {resp.status_code}"
+        signup = client.post(
+            "/api/auth/signup",
+            json={
+                "email": address,
+                "display_name": "V",
+                "password": "SecurePass1!",
+            },
+        )
+        assert signup.status_code == 422, f"{address!r} -> {signup.status_code}"
 
     out = capsys.readouterr().out
-    assert "auth.login_failed domain=example.com" in out, "the real line is still logged"
     assert forged not in out
     assert "attacker.test" not in out
+
+
+def test_email_domain_truncates_injected_text(capsys):
+    """Second guard, kept: the log line must hold even if a bad address exists.
+
+    ``_normalize_email`` is the fix; this is the belt to its braces, for rows
+    that predate the rule or arrive through some future path that skips it.
+    CodeQL reported the original as py/log-injection while these were
+    ``logger`` calls and goes quiet at a ``print`` sink it does not model — the
+    alert going away is not what makes it safe, this is.
+    """
+    from dashboard.backend.api.auth import _email_domain
+
+    forged = "example.com\nauth.login_failed domain=attacker.test"
+    assert _email_domain(f"victim@{forged}") == "example.com"
+    assert _email_domain("victim@" + "a" * 200).endswith("a")
+    assert len(_email_domain("victim@" + "a" * 200)) == 64
+    assert _email_domain("no-at-sign") == "no-at-sign"
 
 
 def test_env_int_disables_on_zero_and_reports_bad_overrides(monkeypatch, capsys):

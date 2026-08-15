@@ -391,6 +391,15 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
                     "transfer_fee": 0.1,
                     "total_fees": 5.1,
                 },
+                "market_rule_profile": {
+                    "enabled": True,
+                    "source": "ifind_http",
+                    "version": "ifind-ashare-closing-rules-v1",
+                },
+                "market_rule_rejections": {
+                    "suspended": 2,
+                    "limit_up_buy_blocked": 1,
+                },
                 # The records themselves are deliberately NOT projected onto
                 # RunMetadata (it backs two list routes); only the scalars are.
                 "rejected_orders": [{
@@ -426,6 +435,8 @@ def test_run_metadata_response_exposes_complete_ifind_profile():
     assert response.lot_size == 100
     assert response.transaction_cost_profile["minimum_commission"] == 5.0
     assert response.transaction_cost_totals["total_fees"] == 5.1
+    assert response.market_rule_profile["enabled"] is True
+    assert response.market_rule_rejections["suspended"] == 2
     assert response.rejected_orders_count == 7200
     assert response.rejected_orders_truncated == 7000
     assert response.order_events_count == 7300
@@ -456,6 +467,8 @@ def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
     assert response.lot_size is None
     assert response.transaction_cost_profile is None
     assert response.transaction_cost_totals is None
+    assert response.market_rule_profile is None
+    assert response.market_rule_rejections is None
     # None, not 0: a legacy run predates the feature, it did not record zero
     # rejections. Same convention as t_plus_one_enabled above.
     assert response.rejected_orders_count is None

@@ -65,6 +65,7 @@ from dashboard.backend.infrastructure.llm.providers import (
     ensure_llm_client_available,
 )
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
+from dashboard.backend.domain.entitlements import credits
 from dashboard.backend.domain.agents.service import agent_service
 from dashboard.backend.domain.agents.credential_store import (
     FINANCIAL_DATASETS_CREDENTIAL,
@@ -261,6 +262,8 @@ class RunMetadata(BaseModel):
     # curve places no orders, so it carries the profile with the flag false.
     transaction_costs_applied: Optional[bool] = None
     transaction_cost_totals: Optional[Dict[str, Any]] = None
+    market_rule_profile: Optional[Dict[str, Any]] = None
+    market_rule_rejections: Optional[Dict[str, int]] = None
     # How much of the buy & hold sleeve filled. A lot-constrained benchmark on
     # a small account can place fewer symbols than requested, and a partly
     # placed benchmark must be legible rather than read as a real flat curve.
@@ -342,6 +345,8 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "transaction_cost_profile",
             "transaction_costs_applied",
             "transaction_cost_totals",
+            "market_rule_profile",
+            "market_rule_rejections",
             "baseline_allocation",
             "rejected_orders_count",
             "rejected_orders_truncated",
@@ -383,7 +388,50 @@ _backtest_slots_lock = _BacktestSlotsLock()
 _active_slots: Dict[str, Dict[str, Any]] = {}
 _recent_slots: Dict[str, Dict[str, Any]] = {}
 
-MAX_ACTIVE_DASHBOARD_BACKTESTS = int(os.getenv("MAX_ACTIVE_DASHBOARD_BACKTESTS", "20"))
+# Server-wide default. Deliberately equal to ``DEFAULT_MAX_CONCURRENT_BACKTESTS``
+# so one default-entitlement account can actually reach its own quota, and no
+# higher: a dashboard backtest is a *subprocess* (unlike the protocol surfaces'
+# in-process step sessions, whose global caps are 50/100), and each one pins a
+# loaded bar window inside a 512MB free-tier instance. It is also the LLM spend
+# bound -- before this module grew slots the runner was single-flight, so the
+# ceiling was exactly 1. Operators on a larger plan raise it explicitly.
+_DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS = 5
+
+
+def _max_active_dashboard_backtests() -> int:
+    """Server-wide ceiling on concurrent dashboard backtests.
+
+    Parsed defensively for the same reason every other operator-set integer in
+    this repo is: a typo in the Render field must not take the whole app down
+    at import, and a negative value must not silently refuse every backtest
+    (0 is a legitimate "drain the runner" setting, ``-1`` is a typo). The
+    default is deliberately conservative -- each in-flight run pins a loaded
+    bar window in a 512MB free-tier dyno, and an LLM run spends operator money
+    per trading hour, so this is a spend bound as much as a memory one.
+    """
+    raw = os.getenv("MAX_ACTIVE_DASHBOARD_BACKTESTS")
+    if raw is None or not str(raw).strip():
+        return _DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        print(
+            "MAX_ACTIVE_DASHBOARD_BACKTESTS is not an integer "
+            f"({raw!r}); using {_DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS}",
+            flush=True,
+        )
+        return _DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS
+    if value < 0:
+        print(
+            f"MAX_ACTIVE_DASHBOARD_BACKTESTS is negative ({value}); "
+            f"using {_DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS}",
+            flush=True,
+        )
+        return _DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS
+    return value
+
+
+MAX_ACTIVE_DASHBOARD_BACKTESTS = _max_active_dashboard_backtests()
 
 
 def _reset_slots_for_tests() -> None:
@@ -410,18 +458,58 @@ def _reset_slots_for_tests() -> None:
     backtest_session_id = None
 
 
-def _backtest_owner_key(user_id: Optional[int], session_id: str) -> str:
+def _backtest_owner_key(user_id: Optional[int], owner_session: str) -> str:
+    """Who this run's concurrency is billed to.
+
+    ``owner_session`` is the *caller's* browser session, never the session the
+    run's results are filed under. For a built-in agent those differ: every
+    anonymous visitor who runs the same built-in agent inherits that agent's
+    session id, so keying the cap on it put the whole internet into one bucket
+    -- one visitor's backtest would refuse everyone else's.
+
+    A browser session is a caller-chosen header, so this is an incentive fix
+    rather than a bound, exactly as ``resolve_owner_cap_context`` documents for
+    the protocol surface: it stops signing out from being the cheaper option.
+    Rotating the header still buys concurrency; what actually bounds the server
+    is ``MAX_ACTIVE_DASHBOARD_BACKTESTS``.
+    """
     if user_id is not None:
         return f"user:{int(user_id)}"
-    return f"session:{session_id}"
+    return f"session:{owner_session}"
 
 
 def _max_concurrent_for_user(user_id: Optional[int]) -> int:
+    """Per-owner concurrent dashboard backtests.
+
+    Anonymous callers get 1 -- the pre-PR behaviour -- because there is no
+    account to hold an entitlement and no store lookup worth a round-trip.
+
+    Signed-in callers get their ``max_concurrent_backtests`` entitlement. Note
+    this is the SAME number the protocol surface applies to its own runs, and
+    the two are counted separately, so an account's true ceiling is that
+    entitlement on each surface rather than across both. Deliberate: making it
+    one shared budget would silently cut every existing protocol user's
+    capacity the moment this shipped, and the server-wide cap is the bound that
+    actually protects the instance.
+
+    Fails open on a store error for the same reason ``resolve_owner_cap_context``
+    does: concurrency must not gain a hard dependency on the users database
+    being reachable, and the server-wide cap still applies. The print marks the
+    boundary -- an outage here otherwise looks exactly like "no cap configured".
+    """
     if user_id is None:
         return 1
     from dashboard.backend.users import user_store
 
-    return int(user_store.get_entitlements(user_id)["max_concurrent_backtests"])
+    try:
+        return int(user_store.get_entitlements(user_id)["max_concurrent_backtests"])
+    except Exception as exc:  # noqa: BLE001 - see docstring
+        print(
+            f"⚠️ entitlement lookup failed for user {user_id}; "
+            f"falling back to server-wide cap only: {exc}",
+            flush=True,
+        )
+        return MAX_ACTIVE_DASHBOARD_BACKTESTS
 
 
 def _slot_snapshot(slot: Dict[str, Any]) -> Dict[str, Any]:
@@ -433,6 +521,7 @@ def _slot_snapshot(slot: Dict[str, Any]) -> Dict[str, Any]:
         "progress_file": slot.get("progress_file"),
         "live_run_id": slot.get("live_run_id"),
         "session_id": slot.get("session_id"),
+        "owner_session": slot.get("owner_session"),
         "user_id": slot.get("user_id"),
         "owner_key": slot.get("owner_key"),
     }
@@ -462,10 +551,20 @@ def _try_acquire_backtest_slot(
     *,
     live_run_id: str,
     session_id: str,
+    owner_session: Optional[str] = None,
     user_id: Optional[int],
 ) -> Optional[str]:
-    """Register a running slot or return a human-readable refusal reason."""
-    owner_key = _backtest_owner_key(user_id, session_id)
+    """Register a running slot or return a human-readable refusal reason.
+
+    ``session_id`` files the *results* (for a built-in agent that is the
+    agent's own session, so its runs land on its public card).
+    ``owner_session`` is the caller's browser session and is what the cap is
+    billed to; it defaults to ``session_id`` for callers that are the same
+    thing. Keeping them apart is what stops every anonymous visitor to one
+    built-in agent from sharing a single slot.
+    """
+    owner_session = owner_session or session_id
+    owner_key = _backtest_owner_key(user_id, owner_session)
     max_for_owner = _max_concurrent_for_user(user_id)
     with _backtest_slots_lock:
         active_global = sum(1 for s in _active_slots.values() if s.get("running"))
@@ -475,7 +574,16 @@ def _try_acquire_backtest_slot(
                 "Please wait for one to finish."
             )
         if _count_active_for_owner(owner_key) >= max_for_owner:
-            if max_for_owner <= 1:
+            if max_for_owner <= 0:
+                # An admin set this account's quota to 0, which the entitlement
+                # range documents as "suspended". Folded into the <= 1 branch it
+                # told a suspended user to "wait for it to complete" — waiting
+                # for a run they do not have, forever.
+                return (
+                    "Backtests are disabled for this account. "
+                    "Contact an administrator."
+                )
+            if max_for_owner == 1:
                 return "Backtest already running. Please wait for it to complete."
             return (
                 f"You already have {max_for_owner} backtests running. "
@@ -484,6 +592,7 @@ def _try_acquire_backtest_slot(
         slot = {
             "live_run_id": live_run_id,
             "session_id": session_id,
+            "owner_session": owner_session,
             "user_id": user_id,
             "owner_key": owner_key,
             "running": True,
@@ -501,10 +610,22 @@ def _update_slot(live_run_id: str, **fields: Any) -> None:
     with _backtest_slots_lock:
         slot = _active_slots.get(live_run_id) or _recent_slots.get(live_run_id)
         if not slot:
-            # Legacy / test path: mutate the mirrored dict only.
+            # Legacy / test path: no slot was ever registered, so the global
+            # mirror is the only place this run exists.
+            mirrored = backtest_status.get("live_run_id")
+            if mirrored and mirrored != live_run_id and mirrored in _active_slots:
+                # The mirror describes a registered run. Writing this
+                # un-slotted run's progress_file/started_at over it would
+                # publish a pair that never coexisted -- one run's id beside
+                # another's progress -- so leave it alone.
+                return
             for key, value in fields.items():
                 if key in backtest_status:
                     backtest_status[key] = value
+            # Stamp the id too. Without it the mirror advertised whichever run
+            # last owned it while carrying this run's fields, and both the
+            # status route and the concurrency count read that pair.
+            backtest_status["live_run_id"] = live_run_id
             return
         slot.update(fields)
         if backtest_status.get("live_run_id") == live_run_id:
@@ -539,27 +660,121 @@ def _finalize_slot(live_run_id: str, *, error: Optional[str], runs_count: int) -
             backtest_status["started_at"] = None
 
 
+def _release_slot(live_run_id: str) -> None:
+    """Drop a slot acquired for a run that never started.
+
+    Distinct from ``_finalize_slot``: nothing ran, so there is no outcome to
+    retain and nothing the poller should be able to find afterwards. Finalising
+    instead would park a ``runs_count: 0`` entry in ``_recent_slots``, and the
+    status route reads that as "completed, but no runs found for this session"
+    -- a failure message for a request that was simply refused.
+    """
+    with _backtest_slots_lock:
+        _active_slots.pop(live_run_id, None)
+        _recent_slots.pop(live_run_id, None)
+        if backtest_status.get("live_run_id") == live_run_id:
+            backtest_status["running"] = False
+            backtest_status["started_at"] = None
+            backtest_status["live_run_id"] = None
+            backtest_status["progress_file"] = None
+
+
+def _slot_visible_to(
+    slot: Dict[str, Any], *, session_id: str, user_id: Optional[int]
+) -> bool:
+    """Is this slot a run the caller is entitled to see?
+
+    Ownership is the same pair the cap ledger keys on. A signed-in caller sees
+    their own runs from any browser session; a run started anonymously stays
+    bound to the browser session that started it, including after that same
+    session signs in -- its slot predates the account and would otherwise
+    vanish from the poller mid-run.
+    """
+    if user_id is not None and slot.get("user_id") is not None:
+        return int(slot["user_id"]) == int(user_id)
+    if not session_id:
+        return False
+    # Either identity on the slot counts. For a built-in agent the two differ:
+    # ``session_id`` is the agent's (where results file) and ``owner_session``
+    # is the visitor's (who started it), and the visitor polls with their own.
+    return session_id in (slot.get("session_id"), slot.get("owner_session"))
+
+
 def _resolve_status_slot(
     *,
     session_id: str,
+    user_id: Optional[int],
     live_run_id: Optional[str],
 ) -> Optional[Dict[str, Any]]:
+    """Resolve the slot a status poll is asking about.
+
+    An explicit ``live_run_id`` is an *exact* lookup: it answers 404 unless it
+    resolves to a run this caller owns. Two properties matter and neither is
+    optional.
+
+    First, the ownership check. Without it the route hands any caller who
+    knows (or guesses) a run id that run's ``session_id`` -- and in this
+    codebase a session id is an access grant, not just a label (see
+    ``_owner_context``), so leaking one is an authorization break, not an
+    information leak. Unknown id and someone else's id return the same 404 on
+    purpose, so the route cannot be used to test whether a run id exists.
+
+    Second, no fallback. The unknown-id case must NOT drop through to the
+    session scan below: the caller supplied an id precisely to disambiguate
+    between their own concurrent runs, so answering with a sibling run turns
+    "how is run B doing?" into run A's progress -- silently, with HTTP 200.
+    """
     with _backtest_slots_lock:
         if live_run_id:
             slot = _active_slots.get(live_run_id) or _recent_slots.get(live_run_id)
-            if slot:
-                return _slot_snapshot(slot)
-        # Prefer an active run owned by this backtest session.
+            if slot is None and backtest_status.get("live_run_id") == live_run_id:
+                # Legacy mirror: a run that never registered a slot (tests, and
+                # the pre-slot code path) still sets the global status dict.
+                slot = {
+                    **backtest_status,
+                    "session_id": backtest_session_id,
+                    "user_id": None,
+                }
+            if slot is None or not _slot_visible_to(
+                slot, session_id=session_id, user_id=user_id
+            ):
+                raise HTTPException(status_code=404, detail="Backtest run not found")
+            return _slot_snapshot(slot)
+        # Prefer an active run owned by this backtest session. Matched on
+        # session identity only, not on user_id: this branch answers "what is
+        # THIS browser doing?", and widening it to the account would surface a
+        # run started in another tab or on another machine as though it were
+        # this page's.
         for slot in reversed(list(_active_slots.values())):
-            if slot.get("running") and slot.get("session_id") == session_id:
+            if slot.get("running") and session_id in (
+                slot.get("session_id"),
+                slot.get("owner_session"),
+            ):
                 return _slot_snapshot(slot)
         for slot in reversed(list(_recent_slots.values())):
-            if slot.get("session_id") == session_id:
+            if session_id in (slot.get("session_id"), slot.get("owner_session")):
                 return _slot_snapshot(slot)
     return None
 
 
-def _read_backtest_progress(progress_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
+def count_active_dashboard_backtests() -> int:
+    """How many dashboard-UI backtests are in flight on this process.
+
+    Counts the slot ledger, not the legacy ``backtest_status`` mirror. The
+    mirror tracks whichever slot changed most recently, so under the
+    multi-slot runner it reports 1 while five runs are live -- which is
+    exactly the "a future multi-slot runner changes this function, not its
+    callers" case its previous docstring anticipated.
+    """
+    with _backtest_slots_lock:
+        active = sum(1 for slot in _active_slots.values() if slot.get("running"))
+    if active:
+        return active
+    # Legacy/test path: a run that never registered a slot still sets the mirror.
+    return 1 if backtest_status.get("running") else 0
+
+
+def _read_progress_file(progress_file: Optional[str]) -> Optional[Dict[str, Any]]:
     """Load incremental equity snapshots written by the backtest subprocess.
 
     ``progress_updated_at`` (the file's mtime) and ``progress_age_seconds`` (how
@@ -578,7 +793,6 @@ def _read_backtest_progress(progress_file: Optional[str] = None) -> Optional[Dic
     them yields an mtime marginally older than the payload -- immaterial against
     a 120s staleness threshold, and not worth a lock to avoid.
     """
-    progress_file = progress_file or backtest_status.get("progress_file")
     if not progress_file:
         return None
     path = Path(progress_file)
@@ -599,6 +813,20 @@ def _read_backtest_progress(progress_file: Optional[str] = None) -> Optional[Dic
         "progress_age_seconds": max(0.0, time.time() - updated_at),
     }
 
+
+def _read_backtest_progress(progress_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Legacy reader: fall back to the global mirror when given no file.
+
+    Kept separate from ``_read_progress_file`` because that fallback is only
+    ever right for a *single-flight* caller. Folding it into the reader made a
+    slot whose ``progress_file`` is still None -- a run accepted a moment ago,
+    before the subprocess has written anything -- report whichever sibling run
+    last touched the mirror, so a freshly started backtest opened at 60%.
+    The status route reads ``_read_progress_file`` for that reason.
+    """
+    return _read_progress_file(progress_file or backtest_status.get("progress_file"))
+
+
 def run_backtest_background(
     start_date: str,
     end_date: str,
@@ -617,8 +845,14 @@ def run_backtest_background(
     runtime_type: str = DEFAULT_RUNTIME_TYPE,
     runtime_config: Optional[Dict[str, Any]] = None,
     financial_datasets_api_key: Optional[str] = None,
+    charged_credit_user_id: Optional[int] = None,
 ):
-    """Run backtest in background thread."""
+    """Run backtest in background thread.
+
+    ``charged_credit_user_id`` is set only when the endpoint actually took a
+    credit for this run (see ``domain/entitlements/credits.py``); the finally
+    block gives it back if the run turns out to have made no LLM call.
+    """
     global backtest_status, backtest_session_id
 
     strategy_prompt_path = None
@@ -627,6 +861,10 @@ def run_backtest_background(
     progress_file = None
     # Bound so finally can always finalize even if minting the id fails early.
     resolved_live_run_id = live_run_id
+    # Snapshot the agent's pipeline as this run sees it, so the adapted-pipeline
+    # write-back at the end can tell "nobody touched it" from "the user edited
+    # it mid-run" (Configure stays open, and sibling runs adapt too).
+    baseline_pipeline = _normalized_pipeline(pipeline) or _agent_pipeline_snapshot(agent_id)
     try:
         import subprocess
         import sys
@@ -791,7 +1029,9 @@ def run_backtest_background(
             print(f"✅ Backtest completed. Found {len(runs)} runs in database.", flush=True)
             if len(runs) > 0:
                 print(f"   Latest run IDs: {[r['run_id'] for r in runs[:3]]}", flush=True)
-            _maybe_writeback_adapted_pipeline(agent_id, resolved_live_run_id)
+            _maybe_writeback_adapted_pipeline(
+                agent_id, resolved_live_run_id, baseline_pipeline
+            )
         if resolved_live_run_id:
             _finalize_slot(
                 resolved_live_run_id, error=slot_error, runs_count=slot_runs_count
@@ -810,6 +1050,30 @@ def run_backtest_background(
     finally:
         if resolved_live_run_id:
             _finalize_slot(resolved_live_run_id, error=None, runs_count=0)
+        elif not live_run_id:
+            # No slot was ever registered (a caller that minted no run id), so
+            # _finalize_slot never ran and the legacy mirror is the only record
+            # of this run. Clear it, or the single-flight fallback stays wedged
+            # at running=True for the life of the process.
+            backtest_status["running"] = False
+            backtest_status["started_at"] = None
+            backtest_status["live_run_id"] = None
+            backtest_status["progress_file"] = None
+        if charged_credit_user_id:
+            # Refund only a run that never reached the model. llm_calls is the
+            # billing counter (it ticks even on a truncated response, which
+            # still cost money), so >0 means the credit was genuinely consumed
+            # however the run ended.
+            try:
+                row = db.get_run(live_run_id) if live_run_id else None
+                llm_calls = int((row or {}).get("llm_calls") or 0)
+            except Exception:  # noqa: BLE001 - see below
+                # Usage unknown. Treat it as spent: refunding on a failed read
+                # would hand back a credit for a run that may have made forty
+                # LLM calls, and the error direction that leaks operator money
+                # is the worse one.
+                llm_calls = 1
+            credits.refund_llm_run(charged_credit_user_id, llm_calls=llm_calls)
         if progress_file:
             try:
                 Path(progress_file).unlink(missing_ok=True)
@@ -934,8 +1198,48 @@ def _sanitize_backtest_error(
     return _redact_credentials(error, extra_secret)[-max_chars:]
 
 
-def _maybe_writeback_adapted_pipeline(agent_id: Optional[str], run_id: Optional[str]) -> None:
-    """Persist post-trade adapted pipeline back onto the agent row."""
+def _normalized_pipeline(value: Any) -> Optional[List[Dict[str, Any]]]:
+    """Coerce a stored-or-passed pipeline to a comparable list, else None."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+    return value if isinstance(value, list) else None
+
+
+def _agent_pipeline_snapshot(agent_id: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+    """The agent's pipeline as it stands right now, for a later staleness check."""
+    if not agent_id:
+        return None
+    try:
+        agent = agent_service.get_agent(agent_id) or {}
+    except Exception as exc:  # noqa: BLE001 - snapshot is best-effort
+        print(f"⚠️  Could not snapshot pipeline for agent {agent_id}: {exc}", flush=True)
+        return None
+    return _normalized_pipeline(agent.get("pipeline"))
+
+
+def _maybe_writeback_adapted_pipeline(
+    agent_id: Optional[str],
+    run_id: Optional[str],
+    started_from_pipeline: Optional[List[Dict[str, Any]]] = None,
+) -> None:
+    """Persist post-trade adapted pipeline back onto the agent row.
+
+    Declines to write when the agent's stored pipeline no longer matches the
+    one this run started from. That was always possible and is now routine:
+    Configure stays editable while a backtest runs, and several runs can be in
+    flight at once, so an unconditional write silently discards whatever the
+    user saved -- or whatever a sibling run adapted -- in the minutes since
+    this run began. Losing the user's own edit is the worst outcome available
+    here and the only unrecoverable one; skipping the write costs nothing,
+    because ``final_pipeline`` stays in the run's metadata either way.
+
+    ``started_from_pipeline`` of None means the caller could not establish a
+    baseline, which is treated as "cannot prove it is safe" -- the write is
+    skipped rather than forced.
+    """
     if not agent_id or not run_id:
         return
     run = db.get_run(run_id)
@@ -952,6 +1256,14 @@ def _maybe_writeback_adapted_pipeline(agent_id: Optional[str], run_id: Optional[
     adaptations = metadata.get("prompt_adaptations")
     final_pipeline = metadata.get("final_pipeline")
     if not adaptations or not isinstance(final_pipeline, list) or not final_pipeline:
+        return
+    current_pipeline = _agent_pipeline_snapshot(agent_id)
+    if started_from_pipeline is None or current_pipeline != started_from_pipeline:
+        print(
+            f"↩️  Skipping adapted-pipeline write-back for agent {agent_id}: "
+            "its pipeline changed while this run was in flight",
+            flush=True,
+        )
         return
     try:
         agent_service.update_agent(agent_id, pipeline=final_pipeline)
@@ -1464,6 +1776,9 @@ def run_backtest_endpoint(
     refusal = _try_acquire_backtest_slot(
         live_run_id=live_run_id,
         session_id=session_id,
+        # The caller's OWN session pays for the slot, even when the results
+        # file under a built-in agent's session — see _backtest_owner_key.
+        owner_session=request.state.session_id,
         user_id=user_id,
     )
     if refusal:
@@ -1472,6 +1787,28 @@ def run_backtest_endpoint(
             "success": False,
             "error": refusal,
         }
+
+    # Meter operator LLM spend — one credit per LLM-driven run. Deliberately
+    # AFTER the concurrency check: a request turned away because the caller is
+    # already at their slot limit never gets a run, and must not be charged for
+    # one. Order is load-bearing, not incidental — when the slot check sat
+    # below this block, every refusal silently debited a credit and returned
+    # success:false with nothing to refund it. The owner lookup is skipped
+    # entirely when metering is disarmed or the run is rule-based, so an
+    # unarmed deployment pays no round-trip for a control it is not using.
+    charged_credit_user_id: Optional[int] = None
+    if resolved_decision_source == LLM_DECISION_SOURCE and credits.metering_enabled():
+        owner_user_id = _owner_context(
+            request, request.headers.get("authorization")
+        )["user_id"]
+        outcome = credits.authorize_llm_run(owner_user_id)
+        if not outcome.allowed:
+            # Hand the slot back before 402ing: it was taken a few lines ago
+            # for a run that is not going to exist.
+            _release_slot(live_run_id)
+            raise HTTPException(status_code=402, detail=outcome.detail)
+        if outcome.charged:
+            charged_credit_user_id = int(owner_user_id)
 
     # Start backtest in background thread
     print(f"🧵 Starting background thread for backtest", flush=True)
@@ -1498,11 +1835,23 @@ def run_backtest_endpoint(
             "initial_capital": initial_capital,
             "assets": selected_assets,
             "decision_source": resolved_decision_source,
+            "charged_credit_user_id": charged_credit_user_id,
         },
         daemon=True
     )
-    thread.start()
-    
+    try:
+        thread.start()
+    except Exception:
+        # The credit is debited before the worker exists, so a thread that
+        # never starts would otherwise bill a run that made no LLM call — the
+        # one refund case the background thread's own finally block cannot
+        # reach, because it never ran. Releasing the slot is part of the same
+        # unwind: leaving it held would burn one of the owner's concurrent
+        # slots, and one of the server's, for the life of the process.
+        _release_slot(live_run_id)
+        credits.refund_llm_run(charged_credit_user_id, llm_calls=0)
+        raise
+
     response = {
         "success": True,
         "message": "Backtest started in background. Check /backtest/status for progress.",
@@ -1539,7 +1888,17 @@ def get_backtest_status(
     newest active (or recently finished) run for this session is returned.
     """
     session_id = request.state.session_id
-    slot = _resolve_status_slot(session_id=session_id, live_run_id=live_run_id)
+    from dashboard.backend.api.dependencies import _optional_user
+
+    viewer = _optional_user(
+        request,
+        request.headers.get("authorization") or request.headers.get("Authorization"),
+    )
+    slot = _resolve_status_slot(
+        session_id=session_id,
+        user_id=viewer["id"] if viewer else None,
+        live_run_id=live_run_id,
+    )
 
     # Tests and legacy callers still mutate ``backtest_status`` directly without
     # registering a slot — honour that mirror when no slot resolves.
@@ -1559,7 +1918,11 @@ def get_backtest_status(
         started_at = slot.get("started_at")
         if started_at:
             elapsed = max(0, int(time.time() - started_at))
-        progress = _read_backtest_progress(slot.get("progress_file"))
+        # _read_progress_file, not _read_backtest_progress: a slot whose
+        # progress_file is still None has simply not written one yet, and the
+        # legacy reader's fall-back to the global mirror would answer with
+        # whichever sibling run touched it last.
+        progress = _read_progress_file(slot.get("progress_file"))
         message = "Backtest is running… (multi-step agent pipeline; may take several minutes)"
         if progress:
             step = int(progress.get("step") or 0)

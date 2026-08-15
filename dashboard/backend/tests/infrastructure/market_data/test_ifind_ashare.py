@@ -27,12 +27,24 @@ class SpyClient:
         self.payload = {"errorcode": 0, "tables": []} if payload is None else payload
         self.error = error
         self.calls = []
+        self.market_rule_calls = []
 
     def fetch_hourly_bars(self, symbols, start, end):
         self.calls.append((symbols, start, end))
         if self.error is not None:
             raise self.error
         return self.payload
+
+    def fetch_daily_market_rules(self, symbols, start, end):
+        self.market_rule_calls.append((symbols, start, end))
+        if self.error is not None:
+            raise self.error
+        return self.payload
+
+    def fetch_basic_market_status(self, symbols, trading_date):
+        raise AssertionError(
+            f"unexpected basic status call for {symbols!r} on {trading_date}"
+        )
 
 
 class SpyAdapter:
@@ -146,6 +158,48 @@ def test_fetches_historical_fx_for_the_same_registered_universe():
     assert result == {date(2026, 3, 31): 7.0}
     assert fx_provider.calls == [(A_SHARE_DEMO_6_SYMBOLS, START, END)]
     assert client.calls == []
+
+
+def test_fetches_daily_rules_once_and_passes_combined_clock_to_adapter():
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        IFindAshareProvider,
+    )
+
+    payload = {"errorcode": 0, "tables": []}
+    client = SpyClient(payload)
+    expected = object()
+    adapter = SpyAdapter(expected)
+    provider = IFindAshareProvider(client=client, market_rule_adapter=adapter)
+    bars = {
+        A_SHARE_DEMO_6_SYMBOLS[0]: pd.DataFrame(
+            index=pd.DatetimeIndex(
+                [
+                    datetime(2026, 4, 1, 15, tzinfo=CN),
+                    datetime(2026, 4, 2, 15, tzinfo=CN),
+                ]
+            )
+        ),
+        A_SHARE_DEMO_6_SYMBOLS[1]: pd.DataFrame(
+            index=pd.DatetimeIndex([datetime(2026, 4, 2, 15, tzinfo=CN)])
+        ),
+    }
+
+    result = provider.fetch_market_rules(
+        A_SHARE_DEMO_6_SYMBOLS,
+        START,
+        END,
+        bars_by_symbol=bars,
+    )
+
+    assert result is expected
+    assert client.market_rule_calls == [(A_SHARE_DEMO_6_SYMBOLS, START, END)]
+    adapted_payload, kwargs = adapter.calls[0]
+    assert adapted_payload is payload
+    assert kwargs["expected_symbols"] == A_SHARE_DEMO_6_SYMBOLS
+    assert kwargs["required_dates"] == [date(2026, 4, 1), date(2026, 4, 2)]
+    assert kwargs["bars_by_symbol"] is bars
+    assert kwargs["fetch_basic_status"].__self__ is client
+    assert kwargs["price_tick"] == 0.01
 
 
 def test_fetches_selected_csi300_sample20_in_registered_order():

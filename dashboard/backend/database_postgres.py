@@ -186,6 +186,11 @@ class PostgresBacktestDatabase:
                         native_total_fees DOUBLE PRECISION,
                         native_net_cash_impact DOUBLE PRECISION,
                         fx_rate DOUBLE PRECISION,
+                        market_rule_date TEXT,
+                        market_rule_suspended BOOLEAN,
+                        market_rule_closing_limit_state TEXT,
+                        market_rule_official_close DOUBLE PRECISION,
+                        market_rule_closing_gate_effective BOOLEAN,
                         created_at TEXT NOT NULL {created_at_default}
                     )
                     """
@@ -399,6 +404,26 @@ class PostgresBacktestDatabase:
                 cur.execute(
                     "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
                     "fx_rate DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "market_rule_date TEXT"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "market_rule_suspended BOOLEAN"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "market_rule_closing_limit_state TEXT"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "market_rule_official_close DOUBLE PRECISION"
+                )
+                cur.execute(
+                    "ALTER TABLE trades ADD COLUMN IF NOT EXISTS "
+                    "market_rule_closing_gate_effective BOOLEAN"
                 )
 
                 # Postgres counterpart of SQLite's
@@ -683,10 +708,15 @@ class PostgresBacktestDatabase:
                          native_reference_price, native_gross_value,
                          native_slippage_amount, native_commission,
                          native_stamp_duty, native_transfer_fee,
-                         native_total_fees, native_net_cash_impact, fx_rate)
+                         native_total_fees, native_net_cash_impact, fx_rate,
+                         market_rule_date, market_rule_suspended,
+                         market_rule_closing_limit_state,
+                         market_rule_official_close,
+                         market_rule_closing_gate_effective)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s,
                                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                                %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                                %s, %s, %s, %s, %s)
                         """,
                         (
                             run_id,
@@ -716,6 +746,11 @@ class PostgresBacktestDatabase:
                             trade.get("native_total_fees"),
                             trade.get("native_net_cash_impact"),
                             trade.get("fx_rate"),
+                            trade.get("market_rule_date"),
+                            trade.get("market_rule_suspended"),
+                            trade.get("market_rule_closing_limit_state"),
+                            trade.get("market_rule_official_close"),
+                            trade.get("market_rule_closing_gate_effective"),
                         ),
                     )
 
@@ -980,7 +1015,11 @@ class PostgresBacktestDatabase:
                            native_reference_price, native_gross_value,
                            native_slippage_amount, native_commission,
                            native_stamp_duty, native_transfer_fee,
-                           native_total_fees, native_net_cash_impact, fx_rate
+                           native_total_fees, native_net_cash_impact, fx_rate,
+                           market_rule_date, market_rule_suspended,
+                           market_rule_closing_limit_state,
+                           market_rule_official_close,
+                           market_rule_closing_gate_effective
                     FROM trades WHERE run_id = %s
                     ORDER BY timestamp ASC, id ASC
                     """,

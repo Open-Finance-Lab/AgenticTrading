@@ -38,6 +38,11 @@ TRADE_OPTIONAL_AUDIT_FIELDS = (
     "native_total_fees",
     "native_net_cash_impact",
     "fx_rate",
+    "market_rule_date",
+    "market_rule_suspended",
+    "market_rule_closing_limit_state",
+    "market_rule_official_close",
+    "market_rule_closing_gate_effective",
 )
 
 
@@ -216,6 +221,11 @@ class BacktestDatabase:
                 native_total_fees REAL,
                 native_net_cash_impact REAL,
                 fx_rate REAL,
+                market_rule_date TEXT,
+                market_rule_suspended INTEGER,
+                market_rule_closing_limit_state TEXT,
+                market_rule_official_close REAL,
+                market_rule_closing_gate_effective INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 FOREIGN KEY (run_id) REFERENCES agent_runs(run_id)
             )
@@ -571,6 +581,11 @@ class BacktestDatabase:
                 ("native_total_fees", "ALTER TABLE trades ADD COLUMN native_total_fees REAL"),
                 ("native_net_cash_impact", "ALTER TABLE trades ADD COLUMN native_net_cash_impact REAL"),
                 ("fx_rate", "ALTER TABLE trades ADD COLUMN fx_rate REAL"),
+                ("market_rule_date", "ALTER TABLE trades ADD COLUMN market_rule_date TEXT"),
+                ("market_rule_suspended", "ALTER TABLE trades ADD COLUMN market_rule_suspended INTEGER"),
+                ("market_rule_closing_limit_state", "ALTER TABLE trades ADD COLUMN market_rule_closing_limit_state TEXT"),
+                ("market_rule_official_close", "ALTER TABLE trades ADD COLUMN market_rule_official_close REAL"),
+                ("market_rule_closing_gate_effective", "ALTER TABLE trades ADD COLUMN market_rule_closing_gate_effective INTEGER"),
             ),
         }
         for table, fields in additions.items():

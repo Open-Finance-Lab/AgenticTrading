@@ -52,6 +52,7 @@ from dashboard.backend.infrastructure.market_data.ifind_fx import (
     IFindFxError,
     MAX_RELATIVE_DEVIATION,
 )
+from dashboard.backend.domain.backtesting.market_rules import MarketRuleDataError
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
     create_market_data_provider,
@@ -190,6 +191,7 @@ class HourlyBacktester:
         self.prompt_adaptations: List[Dict] = []
         self.rejected_orders: List[Dict] = []
         self.order_events: List[Dict] = []
+        self.market_rule_calendar = None
         self.t1_deferrals: List[Dict] = []
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
@@ -336,6 +338,18 @@ class HourlyBacktester:
                 if field in trade:
                     record[field] = float(trade[field])
             for field in (
+                "market_rule_date",
+                "market_rule_suspended",
+                "market_rule_closing_limit_state",
+                "market_rule_closing_gate_effective",
+            ):
+                if field in trade:
+                    record[field] = trade[field]
+            if trade.get("market_rule_official_close") is not None:
+                record["market_rule_official_close"] = float(
+                    trade["market_rule_official_close"]
+                )
+            for field in (
                 # No native_executed_value here: executed_value belongs to an
                 # order event, never to a trade row, and the column list the
                 # trades table persists does not carry it either.
@@ -426,6 +440,10 @@ class HourlyBacktester:
             ):
                 if field in record:
                     record[field] = float(record[field])
+            if record.get("market_rule_official_close") is not None:
+                record["market_rule_official_close"] = float(
+                    record["market_rule_official_close"]
+                )
             serialized.append(record)
         return serialized
 
@@ -537,7 +555,26 @@ class HourlyBacktester:
             )
         if self.data_source == IFIND_ASHARE:
             self._ifind_common_start = self._validate_ifind_loaded_data()
+            self._initialize_ifind_market_rules()
             self._initialize_ifind_currency_context()
+
+    def _initialize_ifind_market_rules(self) -> None:
+        """Load and validate official rules before any order can execute."""
+        if not hasattr(self.data_loader, "fetch_market_rules"):
+            raise MarketDataUnavailableError(
+                "Market rule data unavailable: iFinD provider has no rule capability"
+            )
+        try:
+            self.market_rule_calendar = self.data_loader.fetch_market_rules(
+                self.symbols,
+                self.start_date,
+                self.end_date,
+                bars_by_symbol=self.all_data,
+            )
+        except (IFindClientError, MarketRuleDataError, ValueError) as exc:
+            raise MarketDataUnavailableError(
+                f"Market rule data unavailable: {exc}"
+            ) from exc
 
     def _initialize_ifind_currency_context(self) -> None:
         """Load the iFinD historical conversion series for this A-share run."""
@@ -705,6 +742,9 @@ class HourlyBacktester:
                     "t_plus_one_enabled": profile.t_plus_one_enabled,
                 }
             )
+            calendar = getattr(self, "market_rule_calendar", None)
+            if calendar is not None:
+                metadata["market_rule_profile"] = calendar.to_metadata()
             context = self._require_currency_context()
             # Frames arrive sorted (the adapter rejects non-increasing
             # timestamps), so read the ends instead of materializing every
@@ -765,6 +805,22 @@ class HourlyBacktester:
                 truncated = len(rejected) - REJECTED_ORDER_SAMPLE_LIMIT
                 if truncated > 0:
                     meta["rejected_orders_truncated"] = truncated
+                market_rule_rejections = {
+                    reason: sum(1 for item in rejected if item.get("reason") == reason)
+                    for reason in (
+                        "suspended",
+                        "limit_up_buy_blocked",
+                        "limit_down_sell_blocked",
+                        "market_rule_unavailable",
+                    )
+                }
+                market_rule_rejections = {
+                    reason: count
+                    for reason, count in market_rule_rejections.items()
+                    if count
+                }
+                if market_rule_rejections:
+                    meta["market_rule_rejections"] = market_rule_rejections
             deferrals = list(getattr(self, "t1_deferrals", []) or [])
             if deferrals:
                 # "How often did T+1 stop this agent exiting?" — the question a
@@ -940,6 +996,7 @@ class HourlyBacktester:
             t_plus_one_enabled=self.profile.t_plus_one_enabled,
             lot_size=self.profile.lot_size,
             transaction_cost_profile=self.profile.transaction_cost_profile,
+            market_rule_calendar=self.market_rule_calendar,
         )
         _decision_steps, post_trade_steps = split_pipeline(self.pipeline)
         if post_trade_steps:
@@ -1121,7 +1178,17 @@ class HourlyBacktester:
             
             # Execute trades (only if real data available)
             trades_before_execution = len(manager.trades)
-            manager.execute_actions(decision["actions"], market_data, timestamp)
+            fallback_prices = {
+                symbol: values[timestamp]
+                for symbol, values in price_cache.items()
+                if timestamp in values
+            }
+            manager.execute_actions(
+                decision["actions"],
+                market_data,
+                timestamp,
+                fallback_prices=fallback_prices,
+            )
             if runtime_invoked:
                 self.runtime_dispatcher.record_latest_execution(
                     len(manager.trades) - trades_before_execution
@@ -1282,6 +1349,7 @@ class HourlyBacktester:
             # fees but trades in single shares.
             lot_size=profile.lot_size,
             allocation_summary=baseline_allocation,
+            market_rule_calendar=self.market_rule_calendar,
         )
         
         if not equity_history:

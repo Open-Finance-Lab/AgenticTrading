@@ -77,6 +77,11 @@ def test_currency_audit_fields_round_trip_and_usd_rows_remain_nullable(tmp_path)
                 "native_total_fees": 0.77,
                 "native_net_cash_impact": -1_400.77,
                 "fx_rate": 7.0,
+                "market_rule_date": "2026-04-01",
+                "market_rule_suspended": False,
+                "market_rule_closing_limit_state": "upper",
+                "market_rule_official_close": 1_399.0,
+                "market_rule_closing_gate_effective": True,
             }
         ],
     )
@@ -98,6 +103,11 @@ def test_currency_audit_fields_round_trip_and_usd_rows_remain_nullable(tmp_path)
     assert trade["native_total_fees"] == 0.77
     assert trade["native_net_cash_impact"] == -1_400.77
     assert trade["fx_rate"] == 7.0
+    assert trade["market_rule_date"] == "2026-04-01"
+    assert trade["market_rule_suspended"] == 0
+    assert trade["market_rule_closing_limit_state"] == "upper"
+    assert trade["market_rule_official_close"] == 1_399.0
+    assert trade["market_rule_closing_gate_effective"] == 1
 
 
 def test_existing_schema_is_idempotently_migrated_with_nullable_audit_fields(tmp_path):
@@ -160,4 +170,9 @@ def test_existing_schema_is_idempotently_migrated_with_nullable_audit_fields(tmp
         "native_total_fees",
         "native_net_cash_impact",
         "fx_rate",
+        "market_rule_date",
+        "market_rule_suspended",
+        "market_rule_closing_limit_state",
+        "market_rule_official_close",
+        "market_rule_closing_gate_effective",
     } <= trade_columns

@@ -139,6 +139,33 @@ def hash_session_token(raw_token: str) -> str:
     ).hexdigest()
 
 
+def secrets_equal(provided: str, expected: str) -> bool:
+    """Constant-time compare of an untrusted string against a server secret.
+
+    The canonical helper for shared-secret gates (admin bootstrap today);
+    routes must import this rather than growing another ad-hoc compare.
+
+    ``secrets.compare_digest`` does **not** raise on a length mismatch —
+    buffers of different lengths simply compare unequal — but it does raise
+    ``TypeError`` when either side is a ``str`` holding a non-ASCII character,
+    and a JSON body can contain any character the caller likes. It also runs in
+    time proportional to the shorter operand, so comparing raw secrets leaks
+    the expected length. Hashing both sides to a fixed 32 bytes removes both:
+    every comparison is over the same length and over pure bytes. A SHA-256
+    collision is not a practical oracle here.
+    """
+    try:
+        left = hashlib.sha256(
+            (provided or "").encode("utf-8", "surrogateescape")
+        ).digest()
+        right = hashlib.sha256(
+            (expected or "").encode("utf-8", "surrogateescape")
+        ).digest()
+    except Exception:
+        return False
+    return secrets.compare_digest(left, right)
+
+
 def absolute_expiry(now: Optional[datetime] = None) -> datetime:
     current = now or datetime.now(timezone.utc)
     return (current + timedelta(days=session_ttl_days())).replace(microsecond=0)

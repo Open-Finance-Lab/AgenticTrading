@@ -1,6 +1,7 @@
 import { Button } from "@/components/ui/button";
 import { MessageSquare, Bot, Hash } from "lucide-react";
 import { DiscordMock } from "./DiscordMock";
+import { ChatWindow } from "./ChatSimulation";
 import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 
 export function Talk() {
@@ -38,6 +39,19 @@ export function Talk() {
             </Button>
           </div>
 
+          {/* Moved down from the hero, which now shows the board. This is the
+              act the conversation actually illustrates — it was demonstrating
+              "talk to an agent" one section above the section titled Talk. */}
+          <ChatWindow />
+        </div>
+
+        <div className="mt-16 lg:mt-20 grid lg:grid-cols-[minmax(0,0.9fr)_minmax(0,1.25fr)] gap-10 xl:gap-14 items-center">
+          <div>
+            <h3 className="text-2xl font-bold mb-3">Or say it in our Discord community</h3>
+            <p className="text-foreground/80 text-lg">
+              Same agent, same instruction — answered in a channel instead of a dashboard.
+            </p>
+          </div>
           <DiscordMock />
         </div>
       </div>
