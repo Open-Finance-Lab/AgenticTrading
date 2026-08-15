@@ -5299,17 +5299,89 @@ html[data-nav-page="home"] #homeView .home-landing-hero-copy {
     /* Extra inset so large headlines never sit on the viewport edge (Mac / wide laptops). */
     padding-inline-start: clamp(0px, 2vw, 24px);
 }
-html[data-nav-page="home"] #homeView .home-landing-playground {
+html[data-nav-page="home"] #homeView .home-landing-board {
     flex: 1 1 0;
     width: 100%;
     max-width: 42rem;
     min-width: 0;
     flex-shrink: 0;
+    display: flex;
 }
-html[data-nav-page="home"] #homeView .home-playground-window {
-    height: min(480px, calc(100dvh - var(--app-chrome-height) - 200px));
-    min-height: min(380px, calc(100dvh - var(--app-chrome-height) - 200px));
-    max-height: min(480px, calc(100dvh - var(--app-chrome-height) - 160px));
+/* The pager clips rather than scrolls (.home-pager-screen is overflow:hidden),
+   so the panel is sized against the viewport, not left to its content. */
+html[data-nav-page="home"] #homeView .home-landing-board .home-module {
+    height: min(520px, calc(100dvh - var(--app-chrome-height) - 160px));
+    min-height: min(400px, calc(100dvh - var(--app-chrome-height) - 160px));
+    max-height: min(520px, calc(100dvh - var(--app-chrome-height) - 140px));
+}
+
+/* Below 1200px the hero stacks to a column (see the unscoped rule further down).
+   On screen 1 that is harmless; here it is not. `.home-pager-screen` is
+   `height:100%; overflow:hidden` inside a scroll-snap pager, so a stacked
+   column taller than the screen is CLIPPED, not scrolled — the last standings
+   rows simply vanish and the scroll hint lands on top of the table. The board
+   is the content of this screen now, so it takes the leftover height and lets
+   its own row list scroll (`.home-module-rank-list` is already overflow-y:auto,
+   which needs a parent with a real bounded height to do anything). */
+@media (max-width: 1200px) {
+    /* Where even the shrunk copy is not enough — a short window, ~700px tall —
+       screen 0 scrolls rather than swallowing rows. Flexing the panel down to
+       nothing left a board with a visible header, a visible footer and ZERO
+       standings between them, which is worse than a scrollbar. The board keeps
+       a real minimum height and the screen gives way instead. */
+    html[data-nav-page="home"] #homeView #homeScreenLanding {
+        overflow-y: auto;
+        overscroll-behavior-y: contain;
+    }
+    html[data-nav-page="home"] #homeView .home-landing-hero {
+        height: auto;
+        min-height: 100%;
+        /* Reserves the scroll hint's own strip: it is position:absolute at
+           bottom:18px and stands ~50px tall, so anything less than ~90px of
+           padding lets the panel slide under it. */
+        padding-block: clamp(14px, 2vh, 28px) 96px;
+    }
+    html[data-nav-page="home"] #homeView .home-landing-hero-inner {
+        min-height: 0;
+        gap: clamp(14px, 2.2vh, 24px);
+    }
+    html[data-nav-page="home"] #homeView .home-landing-hero-copy {
+        flex: 0 0 auto;
+    }
+    /* The copy shrinks so the board keeps the height. Stacked, the two compete
+       for one clipped screen, and the headline winning meant a leaderboard
+       showing two of seven rows — the screen exists to show the board. */
+    html[data-nav-page="home"] #homeView .home-landing-headline {
+        font-size: clamp(1.75rem, 3.5vw, 2.4rem);
+        margin-bottom: 10px;
+    }
+    html[data-nav-page="home"] #homeView .home-landing-headline .home-headline-line--2,
+    html[data-nav-page="home"] #homeView .home-landing-headline .home-headline-accent {
+        margin-top: 0.2em;
+    }
+    html[data-nav-page="home"] #homeView .home-landing-lede {
+        margin: 0 auto 14px;
+        font-size: 14px;
+        line-height: 1.5;
+    }
+    html[data-nav-page="home"] #homeView .home-landing-cta {
+        min-height: 42px;
+        padding: 10px 22px;
+        font-size: 15px;
+    }
+    html[data-nav-page="home"] #homeView .home-landing-ctas {
+        gap: 12px;
+    }
+    html[data-nav-page="home"] #homeView .home-landing-board {
+        flex: 1 1 auto;
+        min-height: 0;
+        max-width: 100%;
+    }
+    html[data-nav-page="home"] #homeView .home-landing-board .home-module {
+        height: auto;
+        min-height: 400px;
+        max-height: none;
+    }
 }
 html[data-nav-page="home"] #homeView .home-dashboard-screen-inner {
     height: 100%;
@@ -5333,9 +5405,14 @@ html[data-nav-page="home"] #homeView .dashboard-top-grid {
     flex: 1.12 1 0;
     min-height: 0;
     display: grid;
-    /* Three equal columns so bottom row can span 2+1 and align to the same rails. */
+    /* Three equal columns so bottom row can span 2+1 and align to the same rails.
+       The ranking module left this grid for screen 0, so Portfolio takes the
+       2-wide slot Market holds below it and the rails still line up. */
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 16px;
+}
+html[data-nav-page="home"] #homeView .dashboard-top-grid .home-module--portfolio {
+    grid-column: span 2;
 }
 html[data-nav-page="home"] #homeView .dashboard-bottom-grid {
     flex: 0.98 1 0;
@@ -6449,7 +6526,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     html[data-nav-page="home"] #homeView .dashboard-top-grid {
         grid-template-columns: 1fr 1fr;
     }
-    html[data-nav-page="home"] #homeView .dashboard-top-grid .home-module--ranking {
+    html[data-nav-page="home"] #homeView .dashboard-top-grid .home-module--portfolio {
         grid-column: 1 / -1;
     }
     html[data-nav-page="home"] #homeView .dashboard-bottom-grid {
@@ -6677,179 +6754,53 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     border-radius: 9px;
     text-decoration: none;
 }
-.home-landing-playground {
+.home-landing-lede {
+    margin: -14px 0 28px;
+    max-width: 34rem;
+    font-size: 16px;
+    line-height: 1.6;
+    color: rgba(226, 232, 240, 0.82);
+}
+.home-landing-board {
     flex: 1 1 0;
     width: 100%;
     max-width: 42rem;
     min-width: 0;
     flex-shrink: 0;
-}
-.home-playground-window {
     display: flex;
-    flex-direction: column;
+}
+/* The promoted board is a hero element, not a dashboard tile. `.home-module`
+   takes `height: 100%`, which resolves against a sized grid cell on screen 1
+   and against nothing here — so the panel carries its own height. */
+.home-landing-board .home-module {
+    width: 100%;
     height: 480px;
     max-height: 480px;
-    min-height: 480px;
-    overflow: hidden;
-    border-radius: 12px;
-    border: 1px solid rgba(148, 163, 184, 0.16);
-    background: rgba(15, 27, 55, 0.92);
+    padding: 18px 20px;
+    border-radius: 14px;
     box-shadow: 0 24px 64px rgba(0, 0, 0, 0.45);
 }
-.home-playground-titlebar {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    height: 40px;
-    flex-shrink: 0;
-    padding: 0 16px;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.12);
-    background: rgba(8, 18, 40, 0.55);
-}
-.home-playground-dot {
-    width: 12px;
-    height: 12px;
-    border-radius: 50%;
-}
-.home-playground-dot--red { background: rgba(239, 68, 68, 0.85); }
-.home-playground-dot--yellow { background: rgba(148, 163, 184, 0.45); }
-.home-playground-dot--green { background: rgba(34, 197, 94, 0.85); }
-.home-playground-title {
+.home-landing-board .home-module-title {
     display: inline-flex;
     align-items: center;
     gap: 8px;
-    margin-left: 12px;
-    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 12px;
-    color: rgba(148, 163, 184, 0.85);
+    font-size: 20px;
 }
-.home-playground-chat {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-    flex: 1 1 auto;
-    min-height: 0;
-    padding: 16px;
-    overflow-x: hidden;
-    overflow-y: auto;
-    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 13px;
-    line-height: 1.45;
-}
-.home-chat-row {
-    display: flex;
-    gap: 12px;
-    align-items: flex-start;
-    animation: home-chat-fade-in 0.55s ease-out both;
-}
-.home-chat-row--user { flex-direction: row-reverse; }
-.home-chat-avatar {
-    width: 24px;
-    height: 24px;
-    border-radius: 6px;
-    display: grid;
-    place-items: center;
+.hm-rank-title-icon {
+    width: 18px;
+    height: 18px;
+    color: #fbbf24;
     flex-shrink: 0;
-    background: rgba(148, 163, 184, 0.12);
-    color: rgba(148, 163, 184, 0.9);
 }
-.home-chat-avatar--user {
-    background: rgba(34, 211, 238, 0.2);
-    color: var(--home-accent-cyan);
-}
-.home-chat-bubble {
-    max-width: 88%;
-    padding: 12px;
-    border-radius: 8px;
-}
-.home-chat-bubble--user {
-    border: 1px solid rgba(34, 211, 238, 0.25);
-    background: rgba(34, 211, 238, 0.15);
-    border-radius: 8px 8px 8px 2px;
-    color: var(--text-primary);
-}
-.home-chat-bubble--agent {
-    border: 1px solid rgba(148, 163, 184, 0.16);
-    background: rgba(8, 18, 40, 0.55);
-    border-radius: 8px 8px 2px 8px;
-    color: rgba(148, 163, 184, 0.95);
-}
-.home-chat-agent-line {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: var(--text-primary);
-    margin-bottom: 8px;
-}
-.home-chat-agent-line--muted {
-    margin-bottom: 0;
-    color: rgba(148, 163, 184, 0.85);
-    font-size: 12px;
-}
-.home-chat-agent-line--positive {
-    color: var(--home-positive-green);
-    margin-bottom: 4px;
-}
-.home-chat-icon-accent { color: var(--home-accent-cyan); }
-.home-chat-checklist {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    font-size: 12px;
-}
-.home-chat-checklist li {
-    display: flex;
-    align-items: flex-start;
+/* Wider rails than the one-third-width dashboard tile this markup was written
+   for: "Ending value" does not fit the 72px column it used to sit in. */
+.home-landing-board .hm-rank-table-head,
+.home-landing-board .home-module-rank-list li {
+    grid-template-columns: 26px minmax(0, 1.4fr) 96px 78px 62px;
     gap: 8px;
 }
-.home-chat-check { color: var(--home-positive-green); margin-top: 1px; }
-.home-chat-equity {
-    display: block;
-    width: 100%;
-    height: 56px;
-    margin: 8px 0 4px;
-}
-.home-chat-metrics {
-    display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
-    gap: 8px;
-    font-size: 12px;
-    margin-top: 4px;
-}
-.home-chat-metrics span { font-weight: 600; color: var(--text-primary); }
-.home-chat-metrics .positive { color: var(--home-positive-green); }
-.home-chat-metrics .negative { color: var(--home-negative-red); }
-.home-chat-prompt-text {
-    margin: 0 0 12px;
-    color: var(--text-primary);
-}
-.home-chat-actions {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-}
-.home-chat-action {
-    display: inline-flex;
-    align-items: center;
-    border: 1px solid rgba(148, 163, 184, 0.22);
-    border-radius: 6px;
-    padding: 6px 12px;
-    font-size: 12px;
-    font-weight: 600;
-    color: rgba(148, 163, 184, 0.9);
-}
-.home-chat-action--primary {
-    border-color: rgba(34, 211, 238, 0.5);
-    background: rgba(34, 211, 238, 0.1);
-    color: var(--home-accent-cyan);
-}
-@keyframes home-chat-fade-in {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: translateY(0); }
-}
+.home-landing-board .home-module-rank-list li { font-size: 13.5px; }
+.home-landing-board .hm-rank-value { font-size: 12px; }
 
 /* Live hero (former first screen: network + spotlight) */
 .home-hero {
@@ -7320,7 +7271,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     .home-landing-hero-copy { text-align: center; }
     .home-landing-headline { margin-left: auto; margin-right: auto; }
     .home-landing-ctas { justify-content: center; }
-    .home-landing-playground { max-width: 100%; }
+    .home-landing-board { max-width: 100%; }
     .nns-split { grid-template-columns: 1fr; }
 }
 
@@ -7334,8 +7285,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     .home-spotlight-stat { border-right: none !important; padding: 8px 0; border-bottom: 1px solid var(--home-border-subtle); }
     .home-spotlight-stat:last-child { border-bottom: none; }
     .home-landing-hero { min-height: auto; padding-top: 20px; }
-    .home-playground-window { height: 420px; min-height: 420px; max-height: 420px; }
-    .home-chat-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .home-landing-board .home-module { height: 420px; min-height: 420px; max-height: 420px; }
 }
 
 @media (max-width: 720px) {
@@ -7351,8 +7301,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 @media (prefers-reduced-motion: reduce) {
     .home-live-dot, .home-timeline-item, .home-live-toast, .home-spotlight,
-    .network-ring, .network-pulse-ring, .network-agent-node, .network-live-dot,
-    .home-chat-row {
+    .network-ring, .network-pulse-ring, .network-agent-node, .network-live-dot {
         animation: none !important; transition: none !important;
     }
 }

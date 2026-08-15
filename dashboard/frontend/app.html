@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=113">
+    <link rel="stylesheet" href="styles.css?v=114">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -440,122 +440,82 @@
         <div class="home-page home-page--pager">
             <div class="home-pager-track" id="homePagerTrack" data-page="0">
 
-                <section class="home-pager-screen" id="homeScreenLanding" aria-label="Welcome">
+                <!-- Screen 0 is what every returning user lands on: onHomePageShow()
+                     calls setHomePagerPage(0) on every entry to Home. It used to be a
+                     second copy of the marketing hero — the same "Talk to Agents /
+                     Test Trading Ideas" pitch and a "Get Started" button, shown to
+                     people who had already got started. It now carries the one board
+                     with real numbers on it. -->
+                <section class="home-pager-screen" id="homeScreenLanding" aria-label="Leaderboard">
                     <div class="home-landing-hero">
                     <div class="home-landing-hero-grid-bg" aria-hidden="true"></div>
                     <div class="home-landing-hero-inner">
                         <div class="home-landing-hero-copy">
                             <h1 class="home-landing-headline">
-                                <span class="home-headline-line home-headline-line--1">Talk to Agents</span>
-                                <span class="home-headline-line home-headline-line--2 home-headline-accent">Test Trading Ideas</span>
+                                <span class="home-headline-line home-headline-line--1">See where the</span>
+                                <span class="home-headline-line home-headline-line--2 home-headline-accent">AI models finished</span>
                             </h1>
+                            <!-- The one-per-surface gloss on "agent". Deliberately says
+                                 "in a test of its own": no user agent is on any board and
+                                 no entry path exists, so anything that reads as "yours is
+                                 on this list" is a promise the product cannot keep. -->
+                            <p class="home-landing-lede">Your own agent &mdash; an AI trading assistant that follows your written instruction &mdash; is scored on the same numbers, in a test of its own.</p>
                             <div class="home-landing-ctas">
-                                <button id="homeGetStartedBtn" class="home-btn home-btn-primary home-landing-cta" type="button">Get Started</button>
+                                <!-- Label is swapped to the signed-in form by
+                                     initHomeGetStarted() in home-page.js. Offering
+                                     "Create a free account" to someone who is signed in
+                                     was the original complaint. -->
+                                <button id="homeGetStartedBtn" class="home-btn home-btn-primary home-landing-cta" type="button" data-label-signed-out="Create a free account" data-label-signed-in="Test a trading idea">Create a free account</button>
                                 <a class="home-btn home-btn-secondary home-landing-cta" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                             </div>
                         </div>
-                        <div class="home-landing-playground" aria-label="Agent playground preview">
-                            <div class="home-playground-window">
-                                <div class="home-playground-titlebar">
-                                    <span class="home-playground-dot home-playground-dot--red" aria-hidden="true"></span>
-                                    <span class="home-playground-dot home-playground-dot--yellow" aria-hidden="true"></span>
-                                    <span class="home-playground-dot home-playground-dot--green" aria-hidden="true"></span>
-                                    <span class="home-playground-title">
-                                        <svg class="ui-icon ui-icon--inline" aria-hidden="true"><use href="#icon-terminal"/></svg>
-                                        Example: a conversation with your agent
-                                    </span>
+                        <div class="home-landing-board">
+                            <article class="home-module home-module--ranking" id="homeModuleRanking">
+                                <header class="home-module-head">
+                                    <h3 class="home-module-title">
+                                        <svg class="ui-icon ui-icon--inline hm-rank-title-icon" aria-hidden="true"><use href="#icon-trophy"/></svg>
+                                        Competition Leaderboard
+                                    </h3>
+                                </header>
+                                <div class="hm-rank-meta">
+                                    <!-- Dates come from payload.window.label, written by
+                                         home-page.js. The range was hardcoded here and went
+                                         stale silently; above the fold that is a bigger lie
+                                         than it was three modules down. -->
+                                    <span id="homeModuleRankWindow">Same backtest window for every AI model</span>
+                                    <span>AI models only &middot; ranked by return</span>
                                 </div>
-                                <div id="homePlaygroundChat" class="home-playground-chat" data-step="0">
-                                    <div class="home-chat-row home-chat-row--user home-chat-step" data-step="0">
-                                        <div class="home-chat-avatar home-chat-avatar--user" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-user"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--user">
-                                            I want to follow Warren Buffett. If Berkshire makes a move, copy the move and tell me how it goes.
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="1" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <div class="home-chat-agent-line">
-                                                <svg class="ui-icon ui-icon--inline home-chat-icon-accent"><use href="#icon-search"/></svg>
-                                                <span>Fetching Berkshire Hathaway 13F filings...</span>
-                                            </div>
-                                            <ul class="home-chat-checklist">
-                                                <li><svg class="ui-icon ui-icon--inline home-chat-check"><use href="#icon-check-circle"/></svg><span>Q1 2025 → +$OXY +$SIRI −$PARA</span></li>
-                                                <li><svg class="ui-icon ui-icon--inline home-chat-check"><use href="#icon-check-circle"/></svg><span>Q4 2024 → +$OXY +$VZ −$HP</span></li>
-                                                <li><svg class="ui-icon ui-icon--inline home-chat-check"><use href="#icon-check-circle"/></svg><span>Copy-trade rules set · 6 tickers tracked</span></li>
-                                            </ul>
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="2" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <div class="home-chat-agent-line">
-                                                <svg class="ui-icon ui-icon--inline home-chat-icon-accent"><use href="#icon-chart"/></svg>
-                                                <span>Running backtest · 24 months, $10k start...</span>
-                                            </div>
-                                            <div class="home-chat-agent-line home-chat-agent-line--muted">
-                                                <svg class="ui-icon ui-icon--inline"><use href="#icon-check-circle"/></svg>
-                                                <span>22 trades · avg hold 63 days</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="3" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <div class="home-chat-agent-line home-chat-agent-line--positive">
-                                                <svg class="ui-icon ui-icon--inline"><use href="#icon-chart"/></svg>
-                                                <strong>Backtest Complete</strong>
-                                            </div>
-                                            <svg class="home-chat-equity" viewBox="0 0 240 50" preserveAspectRatio="none" aria-hidden="true">
-                                                <defs>
-                                                    <linearGradient id="homeHeroEquityFill" x1="0" y1="0" x2="0" y2="1">
-                                                        <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.35"/>
-                                                        <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
-                                                    </linearGradient>
-                                                </defs>
-                                                <polygon points="0,50 0,42 20,40 40,38 60,34 80,36 100,30 120,28 140,22 160,24 180,16 200,12 220,14 240,8 240,50" fill="url(#homeHeroEquityFill)"/>
-                                                <polyline points="0,42 20,40 40,38 60,34 80,36 100,30 120,28 140,22 160,24 180,16 200,12 220,14 240,8" fill="none" stroke="#22d3ee" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-                                            </svg>
-                                            <div class="home-chat-metrics">
-                                                <div>Return <span class="positive">+41.2%</span></div>
-                                                <div>Sharpe <span>1.31</span></div>
-                                                <div>Win Rate <span>68%</span></div>
-                                                <div>Max DD <span class="negative">-9.4%</span></div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="4" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <p class="home-chat-prompt-text">
-                                                Looks solid. Want me to run this in
-                                                <span class="home-headline-accent">paper trading</span>
-                                                — practice trading with simulated money at live market prices —
-                                                and alert you when Berkshire's next 13F drops?
-                                            </p>
-                                            <div class="home-chat-actions">
-                                                <span class="home-chat-action home-chat-action--primary">Yes, start now</span>
-                                                <span class="home-chat-action">Not yet</span>
-                                            </div>
-                                        </div>
-                                    </div>
+                                <div class="hm-rank-table-head" aria-hidden="true">
+                                    <span>#</span><span>AI Model</span><span>Ending value</span><span>Return</span><span title="Risk-adjusted return, annualized from hourly results.">Sharpe</span>
                                 </div>
-                            </div>
+                                <ol class="home-module-rank-list" id="homeModuleRankList">
+                                    <li class="home-module-rank-empty">Loading the standings&hellip;</li>
+                                </ol>
+                                <!-- Text is written by home-page.js, which knows why the
+                                     sample is showing. The two reasons need different
+                                     copy: an unreachable API and a healthy API with no
+                                     model entries yet are not the same fact. Both forms
+                                     must still say the visible rows are a sample — the
+                                     rows are real model names with invented numbers. -->
+                                <p class="hm-rank-sample" id="homeModuleRankSample" hidden></p>
+                                <!-- Present tense here would promise a running nightly
+                                     advance on the one page that never renders the board's
+                                     preview banner — the same over-claim the banner exists
+                                     to deny, two clicks upstream of the correction. -->
+                                <p class="hm-rank-season">
+                                    Every AI model above traded the same fixed window. The
+                                    <button class="hm-inline-link" id="homeModuleLiveBtn" type="button">Live Trading Leaderboard</button>
+                                    is the other board &mdash; designed to move forward one trading
+                                    session at a time, on prices nobody has seen yet. It is a
+                                    Season 0 preview and has not moved forward yet.
+                                </p>
+                                <button class="hm-footer-btn" id="homeModuleRankingBtn" type="button">See both leaderboards</button>
+                            </article>
                         </div>
                     </div>
 
-                    <button id="homeScrollHint" class="home-scroll-hint" type="button" aria-label="Scroll to dashboard">
-                        <span class="home-scroll-hint-label">Scroll</span>
+                    <button id="homeScrollHint" class="home-scroll-hint" type="button" aria-label="Scroll to your dashboard">
+                        <span class="home-scroll-hint-label">See your dashboard</span>
                         <svg class="home-scroll-hint-icon" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
                     </button>
                     </div>
@@ -616,38 +576,6 @@
                             </div>
                         </article>
 
-                        <article class="home-module home-module--ranking" id="homeModuleRanking">
-                            <header class="home-module-head">
-                                <h3 class="home-module-title">Competition Leaderboard</h3>
-                            </header>
-                            <div class="hm-rank-meta">
-                                <span>Backtest window · 2026-04-15 → 2026-05-15</span>
-                                <span>Models only · ranked by return</span>
-                            </div>
-                            <div class="hm-rank-table-head" aria-hidden="true">
-                                <span>#</span><span>AI Model</span><span>Value</span><span>Return</span><span>Sharpe</span>
-                            </div>
-                            <ol class="home-module-rank-list" id="homeModuleRankList">
-                                <li class="home-module-rank-empty">Loading rankings…</li>
-                            </ol>
-                            <!-- Text is written by home-page.js, which knows why the
-                                 sample is showing. The two reasons need different
-                                 copy: an unreachable API and a healthy API with no
-                                 model entries yet are not the same fact. -->
-                            <p class="hm-rank-sample" id="homeModuleRankSample" hidden></p>
-                            <!-- Present tense here would promise a running nightly
-                                 advance on the one page that never renders the board's
-                                 preview banner — the same over-claim the banner exists
-                                 to deny, two clicks upstream of the correction. -->
-                            <p class="hm-rank-season">
-                                Every model above ran one fixed window. The
-                                <button class="hm-inline-link" id="homeModuleLiveBtn" type="button">Live Trading Leaderboard</button>
-                                instead advances one session at a time, on bars nobody has
-                                seen yet &mdash; it is in Season 0 preview until that nightly
-                                advance ships.
-                            </p>
-                            <button class="hm-footer-btn" id="homeModuleRankingBtn" type="button">Explore leaderboard</button>
-                        </article>
                         </div>
 
                         <div class="dashboard-bottom-grid">
@@ -1945,7 +1873,7 @@
     <script src="js/agent-editor.js?v=27" defer></script>
     <script src="app.js?v=112" defer></script>
     <script src="js/leaderboard.js?v=28" defer></script>
-    <script src="home-page.js?v=46" defer></script>
+    <script src="home-page.js?v=47" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads
