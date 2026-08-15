@@ -14,10 +14,7 @@ from uuid import UUID
 import pytest
 
 from dashboard.backend.domain.credits.models import AdminRefundRequest
-from dashboard.backend.domain.credits.service import (
-    AccountRestrictedError,
-    CreditsService,
-)
+from dashboard.backend.domain.credits.service import AccountRestrictedError
 from dashboard.backend.domain.credits.stripe_gateway import (
     StripeGatewayDefinitiveError,
     StripeGatewayError,
@@ -25,7 +22,6 @@ from dashboard.backend.domain.credits.stripe_gateway import (
 )
 
 from dashboard.backend.tests.domain.credits.test_service import (
-    CLIENT_REQUEST_ID,
     _checkout,
     _checkout_event,
     _pay,

@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import inspect
 
-import pytest
-
 from dashboard.backend.domain.credits.config import BillingConfigurationError
 
 from dashboard.backend.tests.test_credits_api import (  # noqa: F401 - fixture
