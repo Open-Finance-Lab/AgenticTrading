@@ -9,11 +9,13 @@ name: Daily Leaderboard refresh
 # Requires repository secret LEADERBOARD_DAILY_REFRESH_SECRET matching
 # the value configured on the Render service.
 #
-# UI is temporarily hidden (Daily Leaderboard subtab parked). The nightly
-# schedule is paused until model curves deploy reliably — keep
-# workflow_dispatch so operators can still trigger a refresh by hand.
-# To re-enable: restore the `schedule:` block below and un-hide the subtab
-# in dashboard/frontend/app.html (+ the navigateToPage redirect in app.js).
+# SCHEDULE PAUSED. The Daily Leaderboard tab was replaced by the Live Trading
+# Leaderboard, so this job's output has no surface — left on schedule it would keep
+# deploying every competition LLM nightly, billable, for a board nobody can
+# open. The endpoint, the secret and workflow_dispatch all stay, because the
+# season engine's nightly advance is this same call.
+# To re-enable: uncomment the `schedule:` block below.
+# (Same pause Jinbo proposed in #335, adopted here so this PR supersedes it.)
 
 on:
   # schedule:
@@ -22,9 +24,14 @@ on:
   workflow_dispatch:
     inputs:
       deploy_models:
-        description: "Deploy competition LLM models (expensive)"
+        # Defaults false while the schedule is paused. The pause exists because
+        # the output has no surface; a hand-triggered run defaulting to true
+        # deploys all seven competition LLMs — the same billable spend the pause
+        # is avoiding — for curves no route can display. Opting in has to be a
+        # deliberate tick, not the path of least resistance.
+        description: "Deploy competition LLM models (expensive — leave off unless a board can show the result)"
         type: boolean
-        default: true
+        default: false
 
 concurrency:
   group: daily-leaderboard

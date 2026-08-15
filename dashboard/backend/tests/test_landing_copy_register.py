@@ -102,6 +102,18 @@ _BANNED_FRAGMENTS = (
     "strategy prompt",
     "Strategy prompt",
     "Pick a model",
+    # Race's pre-2026-08-15 pitch. Each of these described a product that does
+    # not exist: entries come from the curated `config/leaderboard.json` roster,
+    # so no user agent is on any board and nothing "climbs"; the Competition
+    # board is a fixed historical window, so its prices are not live and its
+    # rankings do not update; and "paper trading on live markets" reads as
+    # brokered realtime execution, which is an explicit non-goal (PR #328) with
+    # `execution/paper_backend.py` still a stub.
+    "Race on the live leaderboard",
+    "Paper trading on live markets",
+    "Rankings update as agents trade",
+    "Live market prices — no real money at risk",
+    "climb against the community",
 )
 
 
@@ -178,3 +190,148 @@ def test_auth_error_gives_a_next_step():
     text = _shipped_text()
     assert "Something went wrong. Please try again." in text
     assert not re.search(r"Something went wrong\.(?! Please try again\.)", text)
+
+
+_RACE_TSX = (
+    Path(__file__).resolve().parents[2] / "landing" / "src" / "components" / "home" / "Race.tsx"
+)
+
+
+def test_race_names_the_two_boards_the_app_actually_serves():
+    """The landing sold one "live leaderboard"; the app serves two boards with
+    different contracts, and conflating them is what let the old copy promise a
+    live race over a fixed historical window. Both names ship."""
+    text = _shipped_text()
+    assert "Live Trading Leaderboard" in text
+    assert "Competition" in text
+
+
+def test_race_discloses_that_the_live_board_is_not_ranking_yet():
+    """Naming the board on the acquisition page while its nightly advance is
+    undeployed is the landing-side version of the preview banner. Without this
+    sentence the bullet above it ("runs forward in two-week seasons") reads as a
+    board that is running now — the same over-claim the banner exists to stop,
+    just moved one page upstream where nothing renders the banner."""
+    text = _shipped_text()
+    assert "in preview for Season 0" in text
+    assert "Season 1 is the first that counts" in text
+
+
+_LANDING_HOME = _RACE_TSX.parent
+
+# Sentences that contain a banned phrase because they *deny* the claim, listed
+# verbatim and stripped before the scan. An allowlist rather than a narrower
+# scope: the WhyCare guard in test_landing_value_band.py banned
+# `paper[\s-]?trad` inside WhyCare.tsx alone, and the claim simply moved to the
+# unguarded neighbour — Race shipped "Paper trading on live markets" for the
+# whole time the band was pinned clean. Scoping the replacement to Race would
+# have moved it one door further. Adding an entry here is a visible decision;
+# leaving a file unguarded is not.
+_CLAIM_DISCLAIMERS = (
+    # Hero's standing safety line, pinned verbatim by this suite (above) and by
+    # test_frontend_shelves. It is not an over-claim: the brokered path is real
+    # (api/routers/robinhood_live.py, mounted at api/router.py; ROBINHOOD_EXECUTE
+    # defaults false), and this sentence is the one place that states the
+    # condition accurately. Banning the phrase it needs would delete the
+    # disclaimer in order to satisfy the guard against the claim.
+    "Every test here uses simulated money. Real money is involved only if you "
+    "explicitly connect a brokerage account and turn on live trading.",
+    # Hero's gloss on what a Lab paper-trading run is. Accurate as written: the
+    # prices are real, the money is not, and the sentence says exactly that.
+    '<span className="text-primary font-semibold">paper trading</span> '
+    '{" "}— practice trading with simulated money at live market prices —',
+)
+
+# Claim shapes, not vocabulary. "live trading" is deliberately absent: it is now
+# a board name ("Live Trading Leaderboard"), so banning the bare phrase would
+# make naming the product a test failure — the mirror image of the scoping bug
+# above, and the reason the sibling guard in test_landing_value_band.py was
+# changed to match the claim instead.
+_BROKERED_CLAIM_PATTERNS = (
+    r"paper[\s\-]?trad",
+    r"real (capital|money|cash|funds|dollars)",
+    r"go live",
+    r"trade live",
+    r"turn on live trading",
+    r"connect (a|an|your) brokerage",
+)
+
+
+def test_no_landing_component_claims_brokered_or_real_capital_trading():
+    """Nothing on the narrative path puts real capital at risk — say nothing else.
+
+    Not because brokered execution does not exist: it does
+    (`api/routers/robinhood_live.py`), behind `ROBINHOOD_EXECUTE`, which defaults
+    false. It is a separate, opt-in, per-user path. What the landing sells — Talk
+    → Test → Race, the boards, the playground — is simulated throughout, and
+    `execution/paper_backend.py` is still a stub, so copy implying that running an
+    agent here trades real money describes something these flows do not do.
+
+    Hero's conditional sentence is the correct way to say it, which is why it is
+    allowlisted above rather than banned. Every home component is scanned because
+    the one thing this class of copy reliably does is relocate: the WhyCare-scoped
+    guard in test_landing_value_band.py was clean the whole time Race shipped
+    "Paper trading on live markets" next door.
+    """
+    components = sorted(_LANDING_HOME.glob("*.tsx"))
+    assert components, "no landing components found — the glob is wrong"
+    for component in components:
+        body = " ".join(component.read_text(encoding="utf-8").split())
+        for disclaimer in _CLAIM_DISCLAIMERS:
+            body = body.replace(disclaimer, " ")
+        lowered = body.lower()
+        for pattern in _BROKERED_CLAIM_PATTERNS:
+            hit = re.search(pattern, lowered)
+            assert hit is None, (
+                f"{component.name} claims brokered/real-capital trading: "
+                f"{hit.group(0)!r}. If the phrase is part of a disclaimer, add "
+                f"the sentence to _CLAIM_DISCLAIMERS rather than narrowing the scan."
+            )
+
+
+def test_the_disclaimer_allowlist_is_not_stale():
+    """Non-vacuity: an allowlist entry that no longer matches silently re-arms.
+
+    If Hero's wording is edited, the stale entry stops stripping anything and the
+    test above starts failing on a sentence that was always fine — which reads as
+    the guard being broken and invites deleting it.
+    """
+    hero = " ".join((_LANDING_HOME / "Hero.tsx").read_text(encoding="utf-8").split())
+    for disclaimer in _CLAIM_DISCLAIMERS:
+        assert disclaimer in hero, (
+            f"allowlisted disclaimer no longer ships verbatim: {disclaimer[:60]!r}…"
+        )
+
+
+def test_race_puts_no_user_agent_on_the_board():
+    """Board entries come from the curated `config/leaderboard.json` roster.
+
+    The prose was corrected to drop "race your agent", but the illustration kept
+    the story agent highlighted at rank 2 and drawn as the thickest curve — a
+    picture makes the entry-flow promise more vividly than the sentence that was
+    removed, and the fragment ban above only reads prose.
+    """
+    # Comments stripped first. The source explains at length *why* there is no
+    # "yours" curve, and a guard that reads its own rationale as a violation is
+    # the same defect one level up — it fails on the fix and passes on silence.
+    body = _BLOCK_COMMENT.sub("", _RACE_TSX.read_text(encoding="utf-8"))
+    assert "STORY_AGENT_NAME" not in body, (
+        "the storyline agent belongs to the Test run report, not to a board"
+    )
+    assert "yours" not in body, "no user curve on a board no user agent is on"
+    # Non-vacuity: the illustration must still draw the curated roster, or the
+    # assertions above pass on an empty chart.
+    assert "DeepSeek V4 Pro" in body and "dataKey=" in body
+
+
+def test_race_source_and_shipped_bundle_agree():
+    """The register's thesis applied to this section specifically: every other
+    assertion here reads the bundle, so a Race.tsx edit that was never rebuilt
+    into ../frontend/ would leave them green against stale text. Anchoring one
+    string on both sides makes the missing `npm run build` the failure."""
+    source = _RACE_TSX.read_text(encoding="utf-8")
+    assert "Live Trading Leaderboard" in source, "Race.tsx no longer names the board"
+    assert "Live Trading Leaderboard" in _shipped_text(), (
+        "Race.tsx names the board but the shipped bundle does not — "
+        "rebuild per dashboard/landing/README.md"
+    )

@@ -7643,7 +7643,7 @@ function viewParamForNavState(state) {
         return 'agents';
     }
     if (state.page === 'competition') {
-        // Daily tab is hidden; never emit ?view=daily while it is parked.
+        if (state.competitionTab === 'live') return 'live';
         if (state.competitionTab === 'participants') return 'participants';
         if (state.competitionTab === 'about') return 'about';
         return 'leaderboard';
@@ -7944,12 +7944,11 @@ function showPlaygroundPanel(tab) {
 }
 
 function showCompetitionPanel(tab) {
-    // Belt and braces with navigateToPage's redirect: a stray click on the
-    // hidden Daily button (or a caller that bypasses navigateToPage) must not
-    // paint the unfinished board.
-    if (tab === 'daily') {
-        tab = 'leaderboard';
-    }
+    // The Daily Leaderboard was replaced by the Live Trading board. A saved
+    // nav state or a cached boot script can still hand us either retired key
+    // ('daily', or 'season' from an earlier build of this branch), and an
+    // unrecognised tab here shows no panel at all — a blank Competition page.
+    if (tab === 'daily' || tab === 'season') tab = 'live';
 
     competitionTab = tab;
     updateCompetitionSubtabs();
@@ -7957,7 +7956,7 @@ function showCompetitionPanel(tab) {
     const leaderboard = document.getElementById('leaderboardView');
     const participants = document.getElementById('competitionParticipantsPanel');
     const about = document.getElementById('competitionAboutPanel');
-    const showBoard = tab === 'leaderboard' || tab === 'daily';
+    const showBoard = tab === 'leaderboard' || tab === 'live';
 
     if (leaderboard) leaderboard.style.display = showBoard ? 'flex' : 'none';
     if (participants) participants.style.display = tab === 'participants' ? 'block' : 'none';
@@ -7965,7 +7964,7 @@ function showCompetitionPanel(tab) {
 
     if (showBoard) {
         currentMode = 'contest';
-        loadLeaderboardData(tab === 'daily' ? 'daily' : 'contest');
+        loadLeaderboardData(tab === 'live' ? 'live' : 'contest');
     } else {
         currentMode = tab;
     }
@@ -7991,13 +7990,13 @@ function navigateToPage(page, options = {}) {
         page = 'community';
         options = { ...options, playgroundTab: 'agents' };
     }
-    // Daily Leaderboard UI is parked (models not deploying reliably). Keep the
-    // backend + leaderboard.js path, but never land on the hidden subtab —
-    // including ?view=daily bookmarks and a session that still has competitionTab
-    // saved as 'daily'.
-    if (page === 'competition' && (options.competitionTab || competitionTab) === 'daily') {
-        options = { ...options, competitionTab: 'leaderboard' };
-    }
+    // (The PR #335 redirect that sent competitionTab 'daily' to 'leaderboard'
+    // stood here. It ran ahead of the alias normalisation below and undid it:
+    // every path where `options.competitionTab` was absent and the module-level
+    // `competitionTab` still held 'daily' — a cached app.html boot script, a
+    // caller restoring raw saved state — landed on Competition instead of the
+    // successor board. That is the silent fall-through to the wrong data the
+    // aliases exist to stop, so the redirect is gone rather than reordered.)
     // Role-gate the admin shell in the UI too, not only its APIs: without
     // this, anyone landing on ?view=admin saw the empty console chrome until
     // the deferred boot /me settled — tens of seconds on a cold free-tier
@@ -8016,6 +8015,17 @@ function navigateToPage(page, options = {}) {
 
     if (options.playgroundTab) playgroundTab = options.playgroundTab;
     if (options.competitionTab) competitionTab = options.competitionTab;
+    // Normalise the retired Daily keys here rather than only in
+    // showCompetitionPanel: the boot stylesheet keys off
+    // data-nav-competition-tab, so a 'daily' written to the attribute below
+    // leaves the board hidden through first paint even though the panel is
+    // shown a tick later.
+    //
+    // Applied to the resolved value, not to `options.competitionTab`: the
+    // retired key reaches here just as often *without* an option — a caller
+    // restoring saved state, or a cached app.html boot script writing the old
+    // key — and a normaliser that only reads the argument misses exactly those.
+    if (competitionTab === 'daily' || competitionTab === 'season') competitionTab = 'live';
 
     const html = document.documentElement;
     html.setAttribute('data-nav-page', page);

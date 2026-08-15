@@ -2943,15 +2943,204 @@ a.header-brand:hover .title-section h1 {
     border-radius: 6px;
 }
 
-.leaderboard-daily-notice {
+/* ── Live Trading Leaderboard ────────────────────────────────────────────────
+   The live board reuses the Competition chart, table and curve picker
+   wholesale; everything below is the chrome that makes it a *season* rather
+   than a window — and, in the preview banner's case, the only thing on screen
+   that can tell a real season from a stand-in. */
+
+.season-preview-banner {
     margin: 8px 0 0;
-    padding: 10px 12px;
+    padding: 12px 14px;
     border-radius: 6px;
-    border: 1px solid rgba(56, 189, 248, 0.25);
-    background: rgba(56, 189, 248, 0.08);
+    border: 1px solid rgba(255, 165, 0, 0.45);
+    border-left: 4px solid var(--warning-color);
+    background: rgba(255, 165, 0, 0.10);
+    color: var(--text-primary);
+    font-size: 13px;
+    line-height: 1.55;
+}
+
+.season-preview-banner strong {
+    color: var(--warning-color);
+    font-weight: 700;
+}
+
+.season-strip {
+    margin: 8px 0 0;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    background-color: var(--bg-card);
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+}
+
+/* `display: flex` on a class beats the UA stylesheet's `[hidden] {display:none}`,
+   so without these the season chrome renders on the Competition board — the
+   strip fully drawn, the gap list as an empty red bar. Any future `.season-*`
+   container that sets `display` needs the same override. */
+.season-strip[hidden],
+.season-gaps[hidden] {
+    display: none;
+}
+
+/* No season has run yet, so the numbers are structural rather than measured.
+   Dimming them keeps "Day 0 of 10" from reading as a real standing. */
+.season-strip.is-placeholder .season-progress-label,
+.season-strip.is-placeholder .season-dates,
+.season-strip.is-placeholder .season-next-advance {
+    color: var(--text-muted);
+}
+
+.season-strip-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.season-identity {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    min-width: 0;
+}
+
+.season-badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background-color: rgba(34, 211, 238, 0.14);
+    color: var(--home-accent-cyan);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+}
+
+.season-dates {
     color: var(--text-secondary);
     font-size: 13px;
-    line-height: 1.45;
+}
+
+.season-entry-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.season-entry-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background-color: var(--text-muted);
+    flex: none;
+}
+
+.season-entry-state.is-open .season-entry-dot { background-color: var(--success-color); }
+.season-entry-state.is-closed .season-entry-dot { background-color: var(--warning-color); }
+.season-entry-state.is-open { color: var(--success-color); }
+
+.season-strip-progress {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.season-progress-track {
+    position: relative;
+    flex: 1 1 180px;
+    min-width: 120px;
+    height: 6px;
+    border-radius: 999px;
+    background-color: var(--bg-input);
+    overflow: hidden;
+}
+
+.season-progress-fill {
+    height: 100%;
+    border-radius: 999px;
+    background-color: var(--home-accent-cyan);
+    transition: width 0.3s ease;
+}
+
+.season-progress-label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    white-space: nowrap;
+}
+
+.season-next-advance {
+    font-size: 12px;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.season-reset-note {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.season-gaps {
+    margin: 8px 0 0;
+    padding: 10px 12px;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    border: 1px solid rgba(255, 65, 65, 0.28);
+    background: rgba(255, 65, 65, 0.07);
+    border-radius: 6px;
+}
+
+.season-gap {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 12px;
+    line-height: 1.5;
+}
+
+.season-gap-date {
+    font-weight: 700;
+    color: var(--danger-color);
+    white-space: nowrap;
+}
+
+.season-gap-why {
+    color: var(--text-secondary);
+}
+
+.season-gap-detail {
+    width: 100%;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+@media (max-width: 640px) {
+    .season-strip-top,
+    .season-strip-progress {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 8px;
+    }
+
+    .season-progress-track {
+        width: 100%;
+        flex-basis: auto;
+    }
 }
 
 .contest-identity {
@@ -3809,6 +3998,24 @@ a.header-brand:hover .title-section h1 {
 .status-badge.upcoming {
     background-color: rgba(56, 189, 248, 0.15);
     color: #38bdf8;
+}
+
+/* Live Trading board states. `preview` deliberately borrows the warning colour
+   rather than a neutral grey: it is the badge saying the numbers beside it are
+   not real, which is a louder claim than "idle". */
+.status-badge.preview {
+    background-color: rgba(255, 165, 0, 0.15);
+    color: var(--warning-color);
+}
+
+.status-badge.running {
+    background-color: rgba(0, 200, 81, 0.15);
+    color: var(--success-color);
+}
+
+.status-badge.closed {
+    background-color: rgba(156, 163, 175, 0.15);
+    color: var(--text-secondary);
 }
 
 .status-badge.baseline {
@@ -5222,6 +5429,40 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     margin: -4px 0 10px;
     font-size: 11.5px;
     color: var(--text-muted);
+}
+
+/* Shown only when the rankings above are the hard-coded sample roster. */
+.hm-rank-sample {
+    margin: 8px 0 0;
+    padding: 6px 8px;
+    border-radius: 4px;
+    border: 1px solid rgba(255, 165, 0, 0.35);
+    background: rgba(255, 165, 0, 0.09);
+    color: var(--warning-color);
+    font-size: 11.5px;
+    line-height: 1.45;
+}
+
+.hm-rank-season {
+    margin: 10px 0 0;
+    font-size: 11.5px;
+    line-height: 1.5;
+    color: var(--text-muted);
+}
+
+.hm-inline-link {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    color: rgba(34, 211, 238, 0.9);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
+.hm-inline-link:hover {
+    color: var(--home-accent-cyan);
 }
 .hm-method-link {
     color: rgba(34, 211, 238, 0.85);
@@ -8671,6 +8912,16 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     color: var(--text-secondary);
     font-size: 13px;
     line-height: 1.6;
+}
+
+.about-text + .about-text {
+    margin-top: 10px;
+}
+
+/* "This is not built yet" sits below the description of what it will do. */
+.about-text-muted {
+    color: var(--text-muted);
+    font-style: italic;
 }
 
 .about-list {
