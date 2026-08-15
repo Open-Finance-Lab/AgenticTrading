@@ -305,11 +305,17 @@ def test_competition_only_chrome_is_hidden_on_the_live_board():
     of, under a Rules button whose rules do not govern it.
     """
     header = _fn_body("updateLeaderboardHeader")
-    for element_id in ("contestOrganizerLine", "competitionRulesBtn"):
-        assert f"'{element_id}'" in header or f'"{element_id}"' in header, (
-            f"{element_id} is Competition-only and must be toggled per board"
-        )
+    # The assignment, not the id string. Looking one up and doing nothing with it
+    # reads identically to a substring check, which is how a "toggle" guard stays
+    # green over an element that never moves.
+    for element_id, var in (("contestOrganizerLine", "organizerEl"), ("competitionRulesBtn", "rulesBtn")):
         assert f'id="{element_id}"' in _APP_HTML, f"{element_id} must exist to be toggled"
+        assert f"getElementById('{element_id}')" in header, (
+            f"{element_id} is Competition-only and must be resolved per board"
+        )
+        assert re.search(rf"{var}\.hidden\s*=\s*liveBoard\b", header), (
+            f"{element_id} must actually be hidden on the live board, not merely looked up"
+        )
     assert re.search(r"phaseLabelEl\.textContent\s*=\s*liveBoard", header), (
         "the stat label must move with its value; 'Phase: Season 0' captions one "
         "board's noun with the other's"
