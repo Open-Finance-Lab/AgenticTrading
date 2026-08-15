@@ -2,7 +2,50 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
+> # ⚠ Status: reconciled 2026-08-15 — DO NOT EXECUTE TASKS 5, 7 OR 8 AS WRITTEN
+>
+> This plan was written on 2026-08-09. Six days later PR #352 (`7db504d`) and
+> PR #357 (`60fa01f`) shipped a leaderboard redesign and a leaderboard-first
+> landing page. Neither was written against this plan, and between them they
+> delivered part of Phase 1 by other means — in one case in the **opposite**
+> direction.
+>
+> **Nothing in Phase 0 has been implemented.** Verified 2026-08-15 against
+> `origin/main` @ `88c7b8c`, and across every ref in the repo: no branch anywhere
+> adds `strategy_prompt` to `llm_agent.py`.
+>
+> ## Task status
+>
+> | # | Task | Status | Evidence checked 2026-08-15 |
+> |---|---|---|---|
+> | 1 | `LLMAgentStrategy` forwards `strategy_prompt` | **TODO — valid as written** | No `strategy_prompt` or `_run_decision_loop` in `llm_agent.py`; the loop is still inlined in `run()` |
+> | 2 | Instruction-sensitivity probe script | **TODO — valid** | `dashboard/scripts/probe_instruction_sensitivity.py` absent |
+> | 3 | Run the probe, record the gate | **TODO — blocked on spend approval** | `docs/superpowers/probe-results/` does not exist |
+> | 4 | Six Open Track seed entries | **TODO — valid** | `leaderboard.json` still holds exactly 12 entries (5 baselines + 7 Model); no `label: "Open Track"`, `authored_by` or `strategy_prompt` anywhere |
+> | 5 | `landing/src/lib/leaderboard.ts` | **BLOCKED — premise withdrawn** | Needed only if the landing page fetches live data. #357 chose labelled sample data instead. Do not build until that decision is reopened |
+> | 6 | `landing/src/lib/analytics.ts` | **TODO — still valid** | No `track()` import anywhere in `landing/src/`; `<Analytics />` is mount-only. Independent of the board-data decision |
+> | 7 | `Race` renders the live board | **SUPERSEDED — and partly reversed** | See the task's own status note. Its guard test would now *delete* a guard #357 added deliberately |
+> | 8 | Promote the board above the fold | **DONE, by different means — one loose end** | `BoardPreview` mounted at `Hero.tsx:144`. `Race` never moved and is still last. Loose end: `FooterCTA.tsx:10` still says `Talk → Test → Race` |
+> | 9 | Social share card (`og:image`) | **TODO — valid, unchanged** | `index.html` still declares `twitter:card="summary_large_image"` with no image — the exact "worst of both" state the task describes |
+> | 10 | Community→Agent Marketplace, Teams→Traders | **TODO — valid, line numbers moved** | `app.html:243` `Community`, `:1691` `<h2>Community</h2>`, `:1433` `Participating Teams`, `:1439` `Season hasn't started yet` |
+> | 11 | Rebuild the shipped landing bundle | **MECHANICAL — only if landing source changes** | #357 already rebuilt it (`index-XgaRai2O.js`). Re-run only after touching `dashboard/landing/src/` |
+> | 12 | Full verification and PR | **Rewrite** — scope is now Tasks 1–4, 6, 9, 10 | — |
+>
+> **What is actually left of Phase 1:** the seed field (1–4), funnel events (6),
+> `og:image` (9), and the two renames (10). That is a materially smaller PR than
+> the one this plan describes, and it no longer touches the landing page's data
+> path at all.
+>
+> **Line numbers throughout this document are as of 2026-08-09** unless a task's
+> status note gives a newer one. Re-verify before editing.
+
 **Goal:** Prove that a trading instruction measurably changes a pinned LLM's backtest return, then ship a landing page whose hero is the real leaderboard showing most models losing to buy-and-hold, with a CTA inviting visitors to beat them.
+
+> **Half of this goal is met and half changed shape (2026-08-15).** The board *is*
+> the hero and the CTA *is* in place — #357 did that. But the landing hero shows
+> labelled **illustrative** numbers, not the real board; the real board is on the
+> `/app` home screen. The first clause — proving an instruction moves the return —
+> is untouched and remains the whole point of Phase 0.
 
 **Architecture:** Phase 0 adds one two-line capability to `LLMAgentStrategy` (`strategy_prompt` reaches the prompt builder) and uses it to run a 12-run sensitivity probe across two models. If the probe passes, the five surviving instructions become permanent house-authored seed entries in `leaderboard.json`, and Phase 1 wires the landing page's existing `Race` section to the live leaderboard API, promotes it above the fold, and instruments the funnel. **No new database tables, no new routes, no user-submitted entries.**
 
@@ -21,7 +64,8 @@ Every task's requirements implicitly include this section.
 - **Any test importing an optional dep (`vnpy`, `discord`) must `importorskip`.** An unguarded import raises during *collection*, and a collection error aborts the whole pytest session — 0 tests run, and the deploy hook that gates on backend tests never fires.
 - **Frontend cache-busters:** every touched `/app` asset needs its own `?v=` bump in `dashboard/frontend/app.html` — they are versioned independently, not globally. **The landing bundle needs none**: Vite asset names are content-hashed, and the hash is the cache bust.
 - **Merging to Open-Finance-Lab `main` auto-deploys prod.** A CI job hits the Render deploy hook once backend tests pass on `main`.
-- **PR #326 is open and touches `dashboard/frontend/js/leaderboard.js`.** Rebase onto it before starting Phase 1 frontend work; do not resolve conflicts by discarding its hover-gate fixes.
+- ~~**PR #326 is open and touches `dashboard/frontend/js/leaderboard.js`.** Rebase onto it before starting Phase 1 frontend work; do not resolve conflicts by discarding its hover-gate fixes.~~ **Void — #326 merged 2026-08-09.** The live hazard is now different: `js/leaderboard.js` went 1,037 → 1,600 lines across #326, #352 and #357, so every line reference into it in this plan is stale.
+- **Cache-buster collisions are the recurring merge hazard on this repo.** Two PRs bumping the same `?v=` produce a conflict that resolves silently to the *lower* number if taken carelessly. Resolve upward, always.
 - **`OPENROUTER_API_KEY` must be set locally** for Phase 0. Nemotron and DeepSeek are reached through OpenRouter, which is never auto-selected (`providers/__init__.py:11`). Unset, every probe run silently falls back to rule-based and the probe measures nothing.
 - **Copy rule:** user-facing text says **"instruction"**, never "strategy" (`domain/strategies/` is an existing product noun) and never "prompt". Entrants are **"traders"**, never "teams".
 - **Never claim the market is easy to beat.** Headline numbers are stated against the house instruction's curve; beating the market is a separate, scarce badge.
@@ -61,10 +105,30 @@ Every task's requirements implicitly include this section.
 # PHASE 0 — The Gate
 
 **This is not a PR. It is a decision.** The entire design rests on an unverified
-assumption: that better instructions produce better returns on a 30B nano model
-whose prompt is dominated by an unconditional `SAFE_TRADING_PROMPT`
-(`validator.py:545-664`). If instruction quality does not move the return, the
-leaderboard ranks noise and Phase 2 must not be built.
+assumption: that better instructions produce better returns on a 30B nano model.
+If instruction quality does not move the return, the leaderboard ranks noise and
+Phase 2 must not be built.
+
+> **Premise correction, 2026-08-15.** This paragraph originally justified the
+> gate by saying the model's prompt "is dominated by an unconditional
+> `SAFE_TRADING_PROMPT` (`validator.py:545-664`)". **That is not what the code
+> does.** A caller-supplied instruction *replaces* the `SAFE_TRADING_PROMPT`
+> strategy body; only a fixed execution-contract scaffold is concatenated after
+> it — `CUSTOM_STRATEGY_OUTPUT_CONTRACT` (`validator.py:667-711`), joined by
+> `create_custom_prompt` (`:730`), in place since `edc186b`, 2026-06-26. The
+> instruction owns the whole strategy slot.
+>
+> The gate still matters — the open question is whether a nano model *acts* on
+> instruction content — but two things change in how you read the result:
+>
+> - **A flat spread is more damning than this plan assumed.** There is no
+>   prompt-dilution fix to try next; "the model ignores the instruction" is what
+>   is left.
+> - **The control is the load-bearing measurement**, not the spread. A nonsense
+>   control still yields a valid run, so a control landing mid-pack means the
+>   model responds to *having* a strategy body rather than to its content — which
+>   passes a naive spread check while the board ranks noise. Task 3's gate table
+>   already encodes this; do not relax it.
 
 Task 1's code ships in Phase 1 regardless. Tasks 2–3 are throwaway measurement.
 
@@ -81,10 +145,17 @@ Task 1's code ships in Phase 1 regardless. Tasks 2–3 are throwaway measurement
 - Produces: `LLMAgentStrategy(config)` now reads `config["strategy_prompt"]` into `self.strategy_prompt: str | None` (empty/whitespace-only → `None`) and passes it as the `strategy_prompt=` keyword to `PortfolioManager.make_trading_decision_with_llm`. Every later task and both later phases depend on this exact attribute name and this exact keyword.
 
 **Why this is two lines:** `make_trading_decision_with_llm` already declares
-`strategy_prompt: str = None` (`portfolio_manager.py:233`) and already threads it
-to `create_prompt(custom_prompt=strategy_prompt)` (`:453`). The house path simply
-never passes it, so `custom_prompt` is always `None`. No downstream signature
-changes.
+`strategy_prompt: str = None` (`portfolio_manager.py:233` — **`:245` as of
+2026-08-15**) and already threads it to
+`create_prompt(custom_prompt=strategy_prompt)` (`:453` — **`:462-465`**). The
+house path simply never passes it, so `custom_prompt` is always `None`. No
+downstream signature changes.
+
+> **Re-verified 2026-08-15 and still true.** The wiring is intact, the method is
+> still one method with one `if pipeline:` branch (`:440`), and `llm_agent.py`
+> still passes neither argument. `self.temperature` remains at `llm_agent.py:81`,
+> exactly where Step 3 says to insert. This task is unaffected by #352/#357 and
+> is the one piece of Phase 0/1 that can be executed exactly as written.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -560,7 +631,7 @@ check while the leaderboard still ranks noise.
 | Outcome | Action |
 |---|---|
 | Nemotron spread ≥1pp **and** control is an outlier | **PASS.** Proceed to Phase 1 as written. |
-| Nemotron flat, DeepSeek spread ≥1pp | **PASS with contingency.** Pin DeepSeek. Per the spec, the budget holds and the grant shrinks: Replay attempts 5 → 1. Update the spec's cost tables and every `nvidia/nemotron-3-nano-30b-a3b` reference in Task 4 before proceeding. |
+| Nemotron flat, DeepSeek spread ≥1pp | **PASS with contingency.** Pin DeepSeek. Per the spec, the budget holds and the grant shrinks: Competition attempts 5 → 1. Update the spec's cost tables and every `nvidia/nemotron-3-nano-30b-a3b` reference in Task 4 before proceeding. |
 | Both flat, **or** the control scores mid-pack on both | **FAIL. Stop.** The instruction axis does not exist. Phase 1's hero chart would advertise a competition that cannot be won on merit. Report back rather than proceeding. |
 
 - [ ] **Step 4: Commit the result**
@@ -582,8 +653,17 @@ otherwise** — the `#homeGetStartedBtn` dead-CTA failure is the thing this desi
 exists to fix, so a CTA that leads nowhere is a Phase 1 bug, not a Phase 2
 placeholder.
 
-**Before starting:** `git fetch origin && git rebase origin/main`, and rebase
-onto PR #326 if it has not yet merged.
+**Before starting:** `git fetch origin && git rebase origin/main`. ~~and rebase
+onto PR #326 if it has not yet merged.~~ (#326 merged 2026-08-09.)
+
+> **Scope reduced 2026-08-15.** Phase 1 as described below is larger than what is
+> left to do. #352/#357 delivered the above-the-fold board and rewrote the
+> landing's data story; Tasks 5, 7 and 8 are withdrawn, superseded or done. The
+> remaining PR is **Tasks 1–4, 6, 9 and 10**, and it no longer touches the
+> landing page's data path. The paragraph below still describes the phase's
+> *purpose* correctly, and the dead-CTA principle in it is worth keeping — it is
+> now the standard the shipped page is being held to, not a change this phase
+> makes.
 
 ---
 
@@ -808,6 +888,23 @@ git commit -m "feat(leaderboard): seed the Open Track with six house-authored en
 
 ### Task 5: Typed leaderboard client for the landing page
 
+> ## ⛔ BLOCKED 2026-08-15 — premise withdrawn, do not build
+>
+> This module exists solely to let the landing page fetch the live board. PR #357
+> decided the landing page ships **labelled sample data** instead
+> (`BoardPreview.tsx`), and put the live board on the `/app` home screen, which
+> fetches through `home-page.js:1518` and needs nothing from here.
+>
+> There is a real argument for that choice, not just an accident: the landing is
+> served from Vercel while the API is on Render's **free tier, which spins down**,
+> so an above-the-fold cross-origin fetch to a cold backend is the weakest
+> possible first impression.
+>
+> **Build this only if the sample-vs-live decision is deliberately reopened** —
+> and if it is, budget for the cold-start problem first, because a spinner or an
+> error card above the fold is worse than an honest labelled sample. Tasks 6, 9
+> and 10 do not depend on this one.
+
 **Files:**
 - Create: `dashboard/landing/src/lib/leaderboard.ts`
 
@@ -1025,6 +1122,36 @@ git commit -m "feat(landing): funnel event wrapper"
 ---
 
 ### Task 7: `Race` renders the live board
+
+> ## ⛔ SUPERSEDED 2026-08-15 — and its guard test is now *wrong*
+>
+> PR #357 resolved this task in the opposite direction, deliberately.
+>
+> **What shipped instead:** the chart moved out of `Race.tsx` into a new
+> `BoardPreview.tsx` mounted in the hero, and it renders `SAMPLE_CURVES` /
+> `SAMPLE_STANDINGS` — hardcoded illustrative numbers — under a visible
+> "Illustrative example" badge. `Race.tsx` keeps the full standings table and
+> imports `SAMPLE_STANDINGS` from `BoardPreview`.
+>
+> **Why the guard below must not be written as specified.** Step 1 creates
+> `test_landing_race_copy.py` asserting `"Illustrative" not in RACE` and that
+> `SAMPLE_CURVES`/`SAMPLE_STANDINGS` are gone. Main now ships the inverse
+> assertion:
+> `test_landing_copy_register.py::test_illustrative_example_label_appears_at_least_twice`
+> counts `"Illustrative example"` in the **shipped bundle** and requires ≥ 2.
+> Implementing this task means deleting that guard. That is a decision to make
+> explicitly with the person who added it, not a step to execute.
+>
+> **One detail worth preserving if this is ever revisited.** `BoardPreview.tsx`
+> spells the label out as a literal in each card rather than sharing an exported
+> constant, and says so in a comment. That is not sloppiness: esbuild collapses a
+> shared constant to a single string literal, so the DRY version renders the label
+> on both cards while the bundle-level guard drops from 3 hits to 1. Do not
+> "clean it up".
+>
+> The parts of this task that are *not* superseded — the CTA naming the beatable
+> number rather than the market, and the ban on "strategy"/"teams" in user-facing
+> copy — remain live requirements and are already honoured by the shipped copy.
 
 **Files:**
 - Modify: `dashboard/landing/src/components/home/Race.tsx`
@@ -1355,6 +1482,28 @@ git commit -m "feat(landing): Race renders the live leaderboard"
 
 ### Task 8: Promote the board above the fold and renumber the storyline
 
+> ## ✅ DONE 2026-08-15 by different means — one loose end remains
+>
+> PR #357 achieved the goal without the reorder this task specifies.
+>
+> | Step | Status |
+> |---|---|
+> | Move `Race` under `Hero` in `landing-page.tsx` | **Not done, and not needed.** The chart was extracted into `BoardPreview` and mounted at `Hero.tsx:144` instead. Section order is unchanged: `Hero → WhyCare → Talk → Test → Race` |
+> | `Talk` keeps `01`, `Test` keeps `02` | **Done** — `Talk.tsx:13`, `Test.tsx:143` |
+> | The board drops its `03 — Race` line | **Done** — no `03 —` remains anywhere in `landing/src/` |
+> | `FooterCTA.tsx:10`: `Talk → Test → Race` → `Race → Talk → Test` | **⚠ NOT DONE** |
+>
+> **The loose end is real and small.** `FooterCTA.tsx:10` is now the only place on
+> the page asserting a sequence the page no longer has — the board is the frame,
+> and `Race` lost its number, but the footer still narrates `Talk → Test → Race`.
+> Worth fixing whenever the landing source is next touched; it forces a bundle
+> rebuild (Task 11), so it is not worth a PR of its own.
+>
+> **The sign-off this task required never happened.** The `01/02/03` sequence is
+> Allan's copy, and #357 renumbered it without asking. That is water under the
+> bridge, but if the footer line is changed, mention it rather than slipping a
+> second unreviewed copy edit past the same person.
+
 **Files:**
 - Modify: `dashboard/landing/src/pages/landing-page.tsx:18-22`
 - Modify: `dashboard/landing/src/components/home/Talk.tsx:12`
@@ -1417,6 +1566,19 @@ git commit -m "feat(landing): promote the leaderboard above the fold"
 
 ### Task 9: Social share card
 
+> **✅ Still valid, unchanged, and still worth doing. Re-verified 2026-08-15:**
+> `index.html` declares `twitter:card="summary_large_image"` and supplies no
+> image — the exact state this task describes. `dashboard/frontend/images/`
+> contains five logo variants plus `snapshot.png`, and no `og-card.png`. The
+> `<head>` runs to `:22`, with the description/OG/Twitter meta tags at `:7-14`;
+> insert after `:14` as the task says.
+>
+> One addition: if the card is produced by screenshotting the hero, note the hero
+> now shows **illustrative** numbers. A share card built from sample data and
+> presented as a result would be the dishonesty the badge exists to prevent.
+> Either shoot the `/app` board (live data) or keep the card to product name +
+> hook sentence with no numbers on it.
+
 **Files:**
 - Create: `dashboard/frontend/images/og-card.png` (1200×630)
 - Modify: `dashboard/frontend/index.html:9-14`
@@ -1475,6 +1637,32 @@ git commit -m "feat(landing): social share card"
 ---
 
 ### Task 10: Rename Community → Agent Marketplace, Teams → Traders
+
+> **✅ Still valid. Every line number below moved — use these instead
+> (verified 2026-08-15 against `origin/main` @ `88c7b8c`):**
+>
+> | This task says | Actual | Current content |
+> |---|---|---|
+> | `app.html:195` | **`:243`** | `<button class="mode-btn" data-mode="community">Community</button>` |
+> | `app.html:1600` | **`:1691`** | `<h2 class="page-title">Community</h2>` |
+> | `app.html:1403-1410` | **`:1428-1439`** | the participants empty state |
+> | `Participating Teams` subtab | **`:1433`** | `data-competition-tab="participants">Participating Teams<` |
+>
+> **The subtab roster changed under this task.** PR #352 replaced the Daily
+> Leaderboard subtab with Live Trading, so the four are now `leaderboard`,
+> `live`, `participants`, `about` (`:1431-1434`). This does not change what Task
+> 10 renames, but Step 3's empty-state replacement copy needs a rewrite: it
+> currently says *"The Ranking board shows AI models and baseline strategies
+> only"*, which describes one board when there are now two. Suggested:
+>
+> > `No traders yet` / `Traders will appear here when the season opens. Both
+> > boards currently show AI models, baseline strategies and house-authored
+> > instructions.`
+>
+> Also note `:1439` still reads *"Season hasn't started yet"* — which is now
+> **accidentally accurate** for Live Trading's Season 0, on a panel that belongs
+> to the Competition tab. Rename it anyway; two boards make "the season" ambiguous
+> and that ambiguity is worth removing, not preserving.
 
 **Files:**
 - Modify: `dashboard/frontend/app.html:195`, `:1600`, `:1403-1410`
@@ -1558,6 +1746,18 @@ git commit -m "ux(app): Agent Marketplace and Participating Traders"
 
 ### Task 11: Rebuild the shipped landing bundle
 
+> **Mechanical, and conditional. Run this only if `dashboard/landing/src/` was
+> touched.** With Tasks 5, 7 and 8 withdrawn or done, the reduced Phase 1 (1–4,
+> 6, 9, 10) changes React source only in Task 6 (`lib/analytics.ts`), so the
+> rebuild is needed only if that module is actually imported by a component. Task
+> 9 edits `index.html`'s `<head>` by hand and Task 10 edits `app.html`, neither of
+> which is Vite output.
+>
+> #357 already rebuilt the bundle (current: `index-XgaRai2O.js`,
+> `index-BbJpUuy3.css`). The four hand-written auth blocks survived that rebuild,
+> which is evidence the procedure below works — follow it exactly rather than
+> improvising, and let `test_frontend_bundle_integrity.py` confirm it.
+
 **Files:**
 - Modify: `dashboard/frontend/index.html` (asset hashes only)
 - Modify/Create/Delete: `dashboard/frontend/assets/*`
@@ -1619,6 +1819,16 @@ git commit -m "build(landing): refresh shipped bundle"
 ---
 
 ### Task 12: Full verification and PR
+
+> **The PR body in Step 4 is stale — rewrite it.** It advertises "`Race` renders
+> the live board, promoted above the fold", which is now either superseded or
+> already shipped. The reduced Phase 1 ships: C1, the six seed entries, funnel
+> events, `og:image`, and the two `/app` renames. Say that instead, and keep the
+> title short per the repo's convention.
+>
+> The verification steps themselves (Steps 1–3, 5) are unchanged and still
+> correct. Step 2's expectation holds with extra force: the reduced scope adds no
+> routes, so a golden-set failure means something unintended was added.
 
 - [ ] **Step 1: Full backend suite**
 
@@ -1695,19 +1905,19 @@ result means the deploy reset it and the entries could not recompute.
 
 Each gets its own plan, written when its prerequisites resolve.
 
-**Phase 2 (Replay qualifier)** is blocked on the Task 3 gate. Its pinned model,
-attempt grant and cost tables all change if the probe forces DeepSeek, so
+**Phase 2 (Competition qualifier)** is blocked on the Task 3 gate. Its pinned
+model, attempt grant and cost tables all change if the probe forces DeepSeek, so
 detailed tasks written now would be discarded. It covers C3/C4/C5/C7,
 `leaderboard_entries` + `leaderboard_attempts` with Postgres twins, the attempt
 ledger, email verification at signup, the checklist card, the Submit action, the
 two-worker queue, and graduation into Loop A.
 
-**Phase 3 (Forward Seasons)** is blocked on Phase 2 — Forward entry requires a
-completed Replay attempt. It covers C8, `forward_positions`, derived weekly
-seasons, the Friday result email, the share-card download, and the notification
-channel abstraction with Discord stubbed.
+**Phase 3 (Live Trading seasons)** is blocked on Phase 2 — Live Trading entry
+requires a completed Competition attempt. It covers C8, `forward_positions`,
+derived **two-week** seasons, the season-close email, the share-card download,
+and the notification channel abstraction with Discord stubbed.
 
-Two items to carry into Phase 2's planning:
+Four items to carry into planning:
 
 1. **Worker concurrency against issue #202**, which reports blocking sync I/O on
    exactly the leaderboard routes. The spec says two workers; that must be
@@ -1715,3 +1925,16 @@ Two items to carry into Phase 2's planning:
 2. **`BREVO_API_KEY` becomes a hard signup dependency** once verification gates
    account creation. It must be set in Render *before* that PR merges, or every
    signup breaks.
+3. **Added 2026-08-15 — consider pulling C8 out of Phase 3 and landing it
+   first.** The Live Trading board is already in prod as a Season 0 preview that
+   has never advanced. C8 against the existing house roster needs no user
+   entries, no ledger, and nothing from Phase 2, and it does not depend on the
+   Phase 0 gate — whether *instructions* move returns is a separate question from
+   whether the board can advance. The Phase 2→3 ordering constraint is about user
+   entry, and a house-only advance has no users in it. See §Rollout in the spec
+   for the invariants it must respect and the cost question it must answer first.
+4. **Added 2026-08-15 — the instruction-lock trade-off is reopened.** The
+   two-week cadence doubles how long a user waits to correct a bad instruction,
+   and the original "user's call" decision rested on a one-week season. Resolve
+   it in Phase 3 planning (one pre-advance edit? a mid-season re-entry slot?)
+   rather than inheriting a decision made under different terms.

@@ -1,7 +1,48 @@
 # Participatory competition: two boards users can enter
 
 **Date:** 2026-08-09 (rewritten same day after a design grilling)
-**Status:** Design approved, pending implementation plan
+**Reconciled:** 2026-08-15 against `origin/main` @ `88c7b8c`
+**Status:** Phase 0 pending (gated on spend). Phases 2–3 designed, unbuilt.
+
+> ## Reconciliation notice — read before acting on this document
+>
+> This spec was written on 2026-08-09 and describes **two boards that did not
+> exist yet**, named "Replay" and "Forward Season". Six days later, PR #352
+> shipped two boards to prod with different names and a different cadence, and
+> PR #357 rewrote the landing page around them. Neither PR was written against
+> this spec.
+>
+> **The shipped boards are the house-only halves of the two designed here.** They
+> carry the same windows and the same substrate; what they lack is the user entry
+> path this document exists to specify. So this design is no longer "add two
+> boards" — it is **"add user entry to the two boards that now exist"**, which is
+> strictly less work and removes the risk of shipping a parallel, competing pair.
+>
+> | This spec called it | Prod calls it | Same? |
+> |---|---|---|
+> | Replay — perpetual qualifier over a fixed month | **Competition Leaderboard** | Same window and substrate; prod has no entry path and no attempt ledger |
+> | Forward Season — forward execution on real bars | **Live Trading Leaderboard** | Same substrate and intent; **cadence changed weekly → two weeks**, and prod has no advance engine at all |
+>
+> The vocabulary throughout this document has been updated to the shipped names.
+> Three substantive consequences are recorded inline where they bite, and are
+> **not** cosmetic:
+>
+> 1. **The instruction lock is now two weeks, not one** (§Decisions taken). The
+>    original argument for the lock rested on the next season being days away.
+>    That argument is weaker at 10 trading days and is restated honestly rather
+>    than carried over.
+> 2. **C8 is no longer only a Phase 3 feature.** The Live Trading board is *in
+>    prod today* in a Season 0 preview with no nightly advance. C8 is what makes
+>    the already-shipped board real, independent of user entry (§Rollout).
+> 3. **Phase 1 is largely obsolete.** #352/#357 delivered its landing-page half
+>    by other means, and in one case in the opposite direction — the landing board
+>    ships *illustrative* data under a guard test that requires the label. See the
+>    plan document's task table.
+>
+> **Line numbers below are as of 2026-08-09 unless a note says otherwise.** The
+> files they point into have since moved (`js/leaderboard.js` alone went 1,037 →
+> 1,600 lines). Re-verify any reference before acting on it; the surrounding
+> claims were checked at reconciliation and hold.
 
 ## Goal
 
@@ -26,11 +67,11 @@ is also the cheap one.
 
 ### Come, and stay — the two mechanisms, named
 
-- **Come** is the Replay board: seven named frontier models, six of which lost
-  to buy-and-hold over a real month, on one chart above the fold, with a CTA
+- **Come** is the Competition board: seven named frontier models, six of which
+  lost to buy-and-hold over a real month, on one chart above the fold, with a CTA
   that points at a specific beatable number.
-- **Stay** is the weekly Forward Season cycle: submit Monday, watch the board
-  move daily, get a result email Friday, next season opens Monday.
+- **Stay** is the Live Trading season cycle: submit at season open, watch the
+  board move daily, get a result email at season close, next season opens after.
 
 A fixed replay alone cannot produce a return visit — the race ends the moment
 you submit. That is why there are two boards and not one.
@@ -39,15 +80,15 @@ you submit. That is why there are two boards and not one.
 
 | Decision | Choice | Why |
 |---|---|---|
-| Board count | Two: Replay (perpetual) + Forward Season (weekly) | Replay is the argument; Forward is the habit |
-| Replay window | The existing fixed month, never reset | A fixed replay's result never changes; resetting deletes history and re-charges for the same curve |
-| Forward substrate | **Simulated** forward execution on real bars | Decouples the season from broker paper trading, which does not exist |
-| Forward cadence | One week, Mon open → Fri close | Locked instructions cost little when the next season is days away |
-| Instruction lock | Locks when the run begins | User's call; the weekly cadence is what makes it survivable |
+| Board count | Two: Competition (perpetual) + Live Trading (seasonal) | Competition is the argument; Live Trading is the habit |
+| Competition window | The existing fixed month, never reset | A fixed replay's result never changes; resetting deletes history and re-charges for the same curve |
+| Live Trading substrate | **Simulated** forward execution on real bars | Decouples the season from broker paper trading, which does not exist |
+| Live Trading cadence | **Two weeks — 10 trading days** | *Changed 2026-08-15.* Was "one week, Mon→Fri". PR #352 shipped two-week seasons and `SEASON_TRADING_DAYS = 10` (`js/leaderboard.js:276`); the season strip, progress meter and Season 0 chrome are all built to it. Matching prod beats re-litigating a cadence that already has UI |
+| Instruction lock | Locks when the run begins | **Weakened by the cadence change.** The original argument was that a locked instruction costs little when the next season is days away; at 10 trading days the user waits twice as long to correct a bad instruction. Two mitigations, neither free: allow one instruction edit before the first advance, or grant a mid-season re-entry slot. **Resolve this in Phase 3 planning — do not treat the original "user's call" as still-decided** |
 | Competition axis | One pinned model, instructions compete | One variable; predictable cost; the unoccupied axis |
 | Season 1 model | Nemotron 3 Nano 30B, `temperature: 0` | Cheapest by 10×, and the house lost with it — the prompt carries the signal |
 | Entry shape | An agent with **exactly one** pipeline step | Matches how the product already stores instructions |
-| Attempts | 5 lifetime on Replay; Forward is a slot, not a ledger | Under a locked forward run there is nothing to spend a second attempt on |
+| Attempts | 5 lifetime on Competition; Live Trading is a slot, not a ledger | Under a locked forward run there is nothing to spend a second attempt on |
 | Abuse control | Email verification at **account creation** + a hard global monthly spend ceiling | Accounts are free and instant; attempts cost real money |
 | Funding | Platform pays, capped at $50/month | No credit system exists yet |
 | Graduation | Carry the instruction text only into Loop A | Loop A cannot reproduce season conditions; pretending otherwise invites bug reports |
@@ -56,16 +97,16 @@ you submit. That is why there are two boards and not one.
 
 The earlier draft accepted that a fixed historical window lets entrants iterate
 against a known outcome, and that the window may sit inside competing models'
-training data. **The Forward Season resolves this** rather than merely
-disclosing it: it runs on bars that do not exist when the instruction locks.
+training data. **Live Trading resolves this** rather than merely disclosing it:
+it runs on bars that do not exist when the instruction locks.
 
-Replay keeps the known-outcome property and is therefore explicitly positioned
-as a **qualifier**, not the competitive board. Its purpose is evidence (the
-hero chart) and practice (the cheap, repeatable loop). A Replay rank is a score
-against a fixed replay; a Forward rank is a forecast. User-facing copy must say
-so.
+Competition keeps the known-outcome property and is therefore explicitly
+positioned as a **qualifier**, not the competitive board. Its purpose is evidence
+(the hero chart) and practice (the cheap, repeatable loop). A Competition rank is
+a score against a fixed replay; a Live Trading rank is a forecast. User-facing
+copy must say so.
 
-Two facts still reduce Replay's gameability and are load-bearing:
+Two facts still reduce Competition's gameability and are load-bearing:
 
 1. **Nemotron is pinned to `temperature: 0`** — uniquely among the seven house
    entries, which otherwise run at provider default. Verified at
@@ -129,12 +170,15 @@ pipeline-less agents. This is why C7 (below) exists.
 
 ### What already exists and is better than assumed
 
-- **The Replay board is a one-month backtest already.** `leaderboard.json` fixes
-  `initial_capital: 10000`, `start_date: 2026-04-15`, `end_date: 2026-05-15`,
-  `reference_start_date: 2026-03-15`. 12 entries live in prod: 5 baselines +
-  7 LLM models.
+- **The Competition board is a one-month backtest already.** `leaderboard.json`
+  fixes `initial_capital: 10000`, `start_date: 2026-04-15`, `end_date:
+  2026-05-15`, `reference_start_date: 2026-03-15`. 12 entries live in prod: 5
+  baselines + 7 LLM models. *(Re-verified 2026-08-15: still exactly 12 entries,
+  5 + 7, and still no `strategy_prompt`, `label: "Open Track"` or `authored_by`
+  key anywhere in the config.)*
 - **The chart is the most developed frontend in the repo.**
-  `dashboard/frontend/js/leaderboard.js` (1,037 lines): three visual tiers by
+  `dashboard/frontend/js/leaderboard.js` (1,037 lines; **1,600 as of
+  2026-08-15** — #326, #352 and #357 all landed in it): three visual tiers by
   `kind` (benchmark / strategy / model / **team**), a hand-built custom legend
   (`buildCustomLegend`, `:810-847`) with Chart.js's own legend disabled, a
   grouped curve picker (`renderCurvePicker`, `:185-230`) driving a shared
@@ -148,11 +192,20 @@ pipeline-less agents. This is why C7 (below) exists.
 - **The board is already fully public.** No auth dependency on
   `GET /api/v1/leaderboard`; `middleware.py:47-49` exempts `/api/*` from session
   enforcement.
-- **Two pieces of dead scaffolding already exist for this feature.**
-  `app.html:1403-1410` renders a permanent empty state — *"Season hasn't started
-  yet. Participating teams will appear here when the contest season opens."* And
-  `#homeGetStartedBtn` (`app.html:411`) has zero JS wiring. Both get filled, not
-  deleted.
+- **One piece of dead scaffolding already exists for this feature.**
+  `app.html:1403-1410` (**`:1428-1439` as of 2026-08-15**) renders a permanent
+  empty state — *"Season hasn't started yet. Participating teams will appear here
+  when the contest season opens."* It gets filled, not deleted.
+
+  > **Correction (2026-08-15).** This bullet originally also claimed
+  > `#homeGetStartedBtn` (`app.html:411`, now `:468`) "has zero JS wiring". That
+  > was **already false when written**: `initHomeGetStarted()` was added to
+  > `home-page.js` in `08c85aa` on **2026-07-25**, two weeks earlier. The button
+  > opens the signup modal when signed out and navigates to the agents playground
+  > when signed in, and its label swaps between the two states. Nothing here needs
+  > wiring. The dead-CTA *lesson* stands and is still worth honouring — a CTA that
+  > leads nowhere is a bug — but it is a past failure to avoid repeating, not an
+  > open defect this design gets credit for fixing.
 - **Simulated forward execution is nearly assembled.**
   `domain/trading/execution.py:1-6` is in-memory execution over explicit
   cash/positions/trades, extracted from the backtester, and `paper_session.py`
@@ -174,10 +227,10 @@ pipeline-less agents. This is why C7 (below) exists.
 
 From prod `GET /api/v1/leaderboard`, 160–161 LLM calls over the month window:
 
-| Model | Replay (month, ~160 calls) | Forward (week, ~36 calls) |
+| Model | Competition (month, ~160 calls) | Live Trading (2 weeks, ~73 calls) |
 |---|---|---|
-| **Nemotron 3 Nano 30B** | **$0.072** | **~$0.016** |
-| DeepSeek V4 Pro | $0.756 | ~$0.17 |
+| **Nemotron 3 Nano 30B** | **$0.072** | **~$0.033** |
+| DeepSeek V4 Pro | $0.756 | ~$0.35 |
 | Qwen3.7 Plus | $1.593 | — |
 | Claude Haiku 4.5 | $1.726 | — |
 | Claude Sonnet 4.6 | $4.941 | — |
@@ -185,6 +238,13 @@ From prod `GET /api/v1/leaderboard`, 160–161 LLM calls over the month window:
 | GPT-5.5 | $13.888 | — |
 
 Full board rebuild: $34.24.
+
+> **Cadence change, 2026-08-15.** The right-hand column was "Forward (week, ~36
+> calls)". A two-week season is 10 trading days at the observed ~7.3 calls/day,
+> so per-entry cost roughly doubles — but seasons arrive half as often, so
+> **monthly spend per active user is unchanged** and every figure in §Cost model
+> at scale still holds. This is the one place the cadence change is free; the
+> instruction lock (§Decisions taken) is where it is not.
 
 ### What does not exist
 
@@ -229,7 +289,16 @@ the no-coverage-filter timestamp set, neither of which Loop A has.
 
 ## The two boards
 
-### Replay — the qualifier
+> **Both boards now exist in prod as house-only boards** (PR #352, merged
+> 2026-08-15 as `7db504d`). What follows describes the *participatory* versions.
+> Read every requirement below as an addition to a shipped board, not as a new
+> board to stand up. What prod is missing in both cases is identical: an entry
+> path, an attempt ledger, and a user-owned row.
+
+### Competition — the qualifier
+
+*(Designed here as "Replay". Shipped as the **Competition Leaderboard**;
+`period=contest`, `VALID_PERIODS[0]`.)*
 
 Perpetual, over the existing fixed month. Never resets: a fixed replay's result
 never changes, so resetting would delete history and re-charge everyone to
@@ -244,43 +313,106 @@ produce on any re-deploy, break reproducibility of published curves, and flip
 tests across `test_prompts.py`, `test_validator.py`, `test_llm_validator.py` and
 `test_portfolio_manager_move.py`.
 
-### Forward Season — the competition
+**Prod gap:** `get_leaderboard` builds every row from the curated `strategies`
+roster in `dashboard/config/leaderboard.json`, and `api/routers/leaderboard.py`
+exposes no submission route. The board is display-only by construction.
 
-Weekly, Monday open → Friday close, simulated forward execution on real bars.
-The instruction locks when the run begins. Entry requires **at least one
-completed Replay attempt** — Replay is the qualifier in fact, not just in copy.
+### Live Trading — the competition
+
+*(Designed here as "Forward Season". Shipped as the **Live Trading
+Leaderboard**.)*
+
+**Two weeks — 10 consecutive trading days** — of simulated forward execution on
+real bars. The instruction locks when the run begins. Entry requires **at least
+one completed Competition attempt** — Competition is the qualifier in fact, not
+just in copy.
 
 A nightly job advances each entry's persisted portfolio one trading day, reusing
 `domain/trading/execution.py` and the shape of the existing daily-refresh cron.
 Note the daily leaderboard is **not** reusable as-is: `daily_window_dates()`
 (`service.py:79-91`) returns the last completed weekday as both start *and* end,
 re-running a fresh one-day backtest each night with no portfolio carried across
-days. The Forward Season needs persisted state the daily board deliberately does
-not keep.
+days. Live Trading needs persisted state the daily board deliberately does not
+keep.
 
 **This is simulated, not brokered.** It must not be called "paper trading" in
 the UI: `app.html:847` already has a **Paper Trading** subtab under My Agents,
 and "Paper Trading Allocated Capital (max $3,000)" appears in four places tied
-to reserving cash from My Portfolio. The two must stay distinguishable.
+to reserving cash from My Portfolio. The two must stay distinguishable. *(Prod
+already honours this: the shipped tab is "Live Trading", and the landing copy
+states outright that "Live" names the direction the board runs, not brokered
+execution.)*
+
+#### What prod shipped, and the three invariants any advance engine must respect
+
+The shipped board is a **Season 0 preview**: real Competition curves rendered
+under season chrome, plus a banner saying nothing on it has advanced. Four facts
+constrain Phase 3, and three of them are guarded by tests that will fail loudly:
+
+1. **There is no season engine and no `live` period.** `VALID_PERIODS =
+   ("contest", "daily")` (`service.py:50`); `live` and `season` are *frontend*
+   vocabulary only (`normalizeBoardPeriod()`, `js/leaderboard.js:636`).
+   `_normalize_period` coerces anything unrecognised back to `contest` rather
+   than 4xx-ing, so `GET /api/v1/leaderboard?period=live` returns a perfectly
+   successful **200 carrying the Competition board**. Adding `"live"` to
+   `VALID_PERIODS` is the natural first commit and is safe — see (2).
+2. **The preview banner is anchored on evidence of an advance, not on the
+   period.** `isLivePreview()` is `isLiveBoard() && !seasonHasAdvanced(payload)`,
+   and `seasonHasAdvanced()` tests `season.last_advanced_date` /
+   `trading_days_elapsed > 0` — fields only a real advance can write. This is
+   deliberate and is pinned by a source-shape test: an earlier `payload.period
+   !== 'live'` form would have let the season engine's first commit silently
+   clear every banner while nothing had run. **Do not simplify it back to a
+   period check.** The happy consequence is that C8 needs no banner work at all —
+   the first successful advance clears it by writing the field.
+3. **Season 0 is falsy.** Every read of the season number goes through
+   `displayedSeasonNumber()` + `Number.isFinite`, because `season?.number ? … :
+   '—'` renders the shakedown season as no season at all. Any payload C8 emits
+   must keep season 0 distinguishable from a missing season.
+4. **Season length is `SEASON_TRADING_DAYS = 10`** (`js/leaderboard.js:276`),
+   used as the denominator of the season progress meter when the payload omits
+   `trading_days_total`. An advance engine emitting a different total will render
+   a progress bar that disagrees with the chrome.
+
+**Consequence for sequencing:** C8 is currently the only thing standing between
+prod and Season 1 of a board users can already open. See §Rollout.
 
 ## Season configuration
 
-**Replay lives in config. Forward seasons are derived, not configured.**
+**Competition lives in config. Live Trading seasons are derived, not
+configured.**
 
-A new Forward Season opens every Monday, so hand-editing config weekly would
-mean a deploy per season — unworkable. Forward seasons are computed from a
-template plus date arithmetic, exactly as `daily_window_dates()`
-(`service.py:79-91`) already derives the daily window: `season_id` is
-`fwd-<ISO year>-W<week>`, the window is that week's Monday→Friday, and
-everything else comes from the template. No table, no weekly deploy.
+A new season opens every two weeks, so hand-editing config per season would mean
+a deploy per season — unworkable. Seasons are computed from a template plus date
+arithmetic, in the spirit of `daily_window_dates()` (`service.py:79-91`), which
+already derives the daily window.
 
-The Replay config:
+**The derivation changed with the cadence (2026-08-15).** The original scheme was
+`season_id = fwd-<ISO year>-W<week>`, which works only for week-aligned seasons —
+a fortnight has no ISO name, and the ISO-week counter resets mid-season at every
+year boundary. Derive from an explicit anchor instead:
+
+```
+season_number = floor(trading_days_between(anchor, today) / 10) + 1
+season_id     = "live-s<season_number>"
+window        = the 10 consecutive trading days starting at
+                anchor + 14 calendar days × (season_number - 1)
+```
+
+Counting in **trading days, not calendar days**, is what keeps a holiday week
+from silently shortening a season to 9 sessions. Before the anchor date the
+derivation yields **season 0**, which is exactly the shakedown state prod renders
+today — so the preview is a natural value of this function rather than a special
+case bolted beside it. Keep it distinguishable from a *missing* season (see
+invariant 3 above). No table, no per-season deploy.
+
+The Competition config:
 
 ```json
 {
-  "season_id": "replay-s1",
-  "kind": "replay",
-  "label": "Replay Qualifier",
+  "season_id": "competition-s1",
+  "kind": "competition",
+  "label": "Competition Qualifier",
   "perpetual": true,
   "pinned_model": {
     "model_id": "nvidia/nemotron-3-nano-30b-a3b",
@@ -293,13 +425,19 @@ The Replay config:
               "reference_start_date": "2026-03-15" },
   "initial_capital": 10000,
   "attempts_granted": 5,
-  "house_reference_entry_id": "replay_s1_house_reference"
+  "house_reference_entry_id": "competition_s1_house_reference"
 }
 ```
 
-The Forward template carries the same shape with `kind: "forward"`,
-`perpetual: false`, no `window` (derived) and no `attempts_granted` (a Forward
-entry is a slot, so the column defaults to 0).
+The Live Trading template carries the same shape with `kind: "live"`,
+`perpetual: false`, an `anchor_date`, `trading_days: 10`, no `window` (derived)
+and no `attempts_granted` (a Live Trading entry is a slot, so the column defaults
+to 0).
+
+`kind: "live"` matches the period string the frontend already sends, so adding
+`"live"` to `VALID_PERIODS` (`service.py:50`) is the one-line backend change that
+makes the shipped tab stop silently serving the Competition board. It is safe to
+land on its own — the preview banner does not key on the period.
 
 ## Data model
 
@@ -320,7 +458,7 @@ leaderboard_entries
                                     -- entry's first attempt is submitted
   best_run_id        TEXT           -- FK-in-spirit to agent_runs.run_id
   best_return        REAL
-  attempts_granted   INTEGER NOT NULL DEFAULT 0   -- replay seasons only
+  attempts_granted   INTEGER NOT NULL DEFAULT 0   -- competition seasons only
   attempts_used      INTEGER NOT NULL DEFAULT 0
   created_at, updated_at
 
@@ -336,7 +474,7 @@ leaderboard_attempts
   failure_kind       TEXT               -- NULL | 'h6_rejected' | 'infrastructure'
   created_at
 
-forward_positions                       -- forward seasons only
+forward_positions                       -- Live Trading seasons only
   entry_id           TEXT NOT NULL
   as_of_date         TEXT NOT NULL
   cash               REAL NOT NULL
@@ -397,10 +535,20 @@ path tops up — same table, no migration.
   reference. The step's `outputFormat` is **ignored** — the UI must say so,
   because silently dropping a field the editor displays is exactly what produces
   "the leaderboard is broken" reports.
-- **C8 — forward advance job.** A daily job that loads each active forward
-  entry's `forward_positions` row, fetches the day's bars, runs the pinned model
-  over that day's steps, executes via `domain/trading/execution.py`, and writes
-  the next row. Idempotent on `(entry_id, as_of_date)`.
+- **C8 — the nightly advance job.** A daily job that loads each active Live
+  Trading entry's `forward_positions` row, fetches the day's bars, runs the
+  pinned model over that day's steps, executes via
+  `domain/trading/execution.py`, and writes the next row. Idempotent on
+  `(entry_id, as_of_date)`.
+
+  The table keeps the name `forward_positions` rather than `live_positions`
+  deliberately: the whole point of §Live Trading is that "live" names the
+  *direction* the board runs and never brokered execution, and a table called
+  `live_positions` sitting next to `infrastructure/brokers/` is the one name most
+  likely to be misread as real positions by someone skimming.
+
+  **C8 is not only a Phase 3 concern.** It is the sole missing piece between prod
+  and Season 1 of a board users can already open — see §Rollout.
 
 ## Integrity, abuse and spend
 
@@ -446,23 +594,36 @@ money. Ten accounts is ten minutes of work; a script makes it a thousand.
 
 ### Cost model at scale
 
-Free tier: **5 lifetime Replay attempts + 1 Forward entry per week.**
+Free tier: **5 lifetime Competition attempts + 1 Live Trading entry per season.**
 
 | Policy | At 100 users | At 500 users |
 |---|---|---|
-| Replay, 5 lifetime | $36 one-time | **$180 one-time** |
-| Forward, 1 entry/week | ~$7/month | **~$34/month** |
-| *(rejected)* Replay +1/day refill | ~$216/month | ~$1,080/month |
+| Competition, 5 lifetime | $36 one-time | **$180 one-time** |
+| Live Trading, 1 entry/season | ~$7/month | **~$34/month** |
+| *(rejected)* Competition +1/day refill | ~$216/month | ~$1,080/month |
 
-A daily Replay refill was considered and rejected: it is 97% of total spend and
-buys a return-visit mechanic the Forward Season and weekly email already
+The monthly figures are **unchanged by the two-week cadence**: a season costs
+twice as much and arrives half as often (§Measured cost per entry).
+
+A daily Competition refill was considered and rejected: it is 97% of total spend
+and buys a return-visit mechanic the season cycle and its result email already
 provide. Daily refills become the first thing credits buy once billing exists —
 which is the shape the ledger was designed for.
 
+> **Watch item added 2026-08-15.** The rejection assumed a *weekly* return-visit
+> mechanic. A two-week cycle is a materially weaker habit loop, and the daily
+> board that used to fill the gap between seasons is retired — PR #352 replaced
+> the Daily Leaderboard tab and commented out its nightly cron, so **nothing
+> refreshes automatically in prod today**. If retention is the goal, the gap
+> between season close and next season open now needs its own answer. Do not
+> close it by re-arming `LEADERBOARD_DAILY_AUTO_DEPLOY`: that flag lets an
+> anonymous GET trigger seven billable model deploys, which is the exact hazard
+> its strict opt-in exists to prevent.
+
 **Contingency:** if the Phase 0 probe forces the pinned model to DeepSeek V4
 Pro, every figure multiplies ~10.5× and the free tier at 500 users becomes
-~$1,890. **The budget holds and the grant shrinks** (5 lifetime Replay attempts
-→ 1; Forward stays weekly).
+~$1,890. **The budget holds and the grant shrinks** (5 lifetime Competition
+attempts → 1; Live Trading stays 1 per season).
 
 ## The board
 
@@ -500,14 +661,23 @@ speculative at 12.
 
 ## Information architecture
 
-The Competition tab keeps its four subtabs (`app.html:1396-1401`), remapped:
+The Competition tab keeps its four subtabs. **The roster changed under this
+section on 2026-08-15** (PR #352): the Daily Leaderboard subtab is gone and Live
+Trading took its slot, so the mapping below is rewritten against what prod
+actually renders (`app.html:1431-1434`).
 
-| Subtab | Today | After |
+| Subtab (`data-competition-tab`) | Today in prod | After |
 |---|---|---|
-| Daily Leaderboard | rolling 1-day model board | unchanged |
-| Competition Leaderboard | frozen contest board | **season board** with a Replay / Forward switch |
-| Participating Teams | permanent empty state | **Participating Traders** — the entrant list, finally populated |
-| About | contest rules | + season rules |
+| `leaderboard` — Competition Leaderboard | fixed-window house board | + user entries and the attempt ledger |
+| `live` — Live Trading Leaderboard | Season 0 preview, serving Competition curves under season chrome | the real season board, once C8 advances it |
+| `participants` — Participating Teams | permanent empty state | **Participating Traders** — the entrant list, finally populated |
+| `about` | contest rules | + season rules |
+
+> **This is strictly less work than designed.** The original plan was to turn one
+> subtab into a season board carrying a Replay/Forward switch modelled on the
+> `%`/`$` toggle. Prod already ships the two boards as **two separate subtabs**,
+> so the switch is unnecessary — delete that idea rather than building it. What
+> remains is populating boards that already have their own navigation.
 
 Two renames, no new navigation. **"Teams" becomes "Traders"** in user-visible
 copy — each entrant is one person. Note the styling layer keeps `kind: 'team'`
@@ -515,8 +685,8 @@ and `TEAM_COLOR_PALETTE` internally; that is deliberate (renaming the series kin
 would churn `js/leaderboard.js` for no user-visible gain), but it means the word
 persists in code while the UI says "trader".
 
-The Replay/Forward switch reuses the interaction shape of the existing `%`/`$`
-toggle.
+*(The Replay/Forward switch described here is withdrawn — prod ships the two
+boards as separate subtabs. See the note above.)*
 
 ## Isolation contract
 
@@ -531,8 +701,8 @@ toggle.
    exception escapes `CORSMiddleware` un-headered and presents in the browser as
    a CORS error, so "we turned it off" and "it is broken" would otherwise look
    identical at exactly the moment they must be told apart.
-4. **Separate queue paths**, so a Replay queue backup cannot stall the Forward
-   advance job.
+4. **Separate queue paths**, so a Competition queue backup cannot stall the Live
+   Trading advance job.
 
 A consequence: swapping which chart leads the landing page is a **one-line move**
 in `landing-page.tsx:18-22` plus the standard bundle refresh. No swap mechanism
@@ -542,6 +712,35 @@ is built — building one would be more complex than the swap.
 
 ### Landing
 
+> **Largely delivered by PR #357 (2026-08-15), by different means. Read the
+> status note before implementing anything in this subsection.**
+>
+> **Done:** the board is above the fold. #357 extracted the chart into a new
+> `BoardPreview` component and mounted it in `Hero.tsx:144`, rather than
+> reordering `landing-page.tsx`. `Race` never moved — it is still the last
+> section, and `FooterCTA` still reads `Talk → Test → Race`.
+>
+> **Done differently, on the other surface:** the *live* board landed on the
+> `/app` home screen, not the landing page. `home-page.js:1518` fetches
+> `GET /api/v1/leaderboard` and renders real standings with a labelled sample
+> fallback.
+>
+> **Reversed:** the Vercel landing page deliberately ships **illustrative**
+> data. `BoardPreview.tsx` hardcodes `SAMPLE_CURVES`/`SAMPLE_STANDINGS` under a
+> visible "Illustrative example" badge, and
+> `test_landing_copy_register.py::test_illustrative_example_label_appears_at_least_twice`
+> now **requires** that label to appear at least twice in the shipped bundle.
+> The requirement below to remove the badges is therefore not merely undone —
+> acting on it means deleting a guard a merged PR added on purpose.
+>
+> **If the live-data-on-landing idea is revived, argue it on the merits first.**
+> The landing page is served from Vercel while the API is on Render's free tier,
+> which spins down; an above-the-fold cross-origin fetch to a cold backend is the
+> weakest possible first impression, and that is a real reason to prefer a
+> labelled sample here even though `/app` gets live data. Whatever is decided,
+> the honesty rule is non-negotiable: **sample data must be visibly labelled as
+> sample.** Both current cards are.
+
 Wire the existing `Race` section to `GET /api/v1/leaderboard`, following the
 fetch pattern `MarketTicker.tsx:13-19,77-117` establishes. Remove the
 "Illustrative" badges (`Race.tsx:74,107`) once the data is real, and fetch
@@ -549,11 +748,16 @@ same-origin through the Vercel rewrite rather than hardcoding
 `agentictrading.onrender.com`.
 
 **Layout:** move `Race` directly under the hero (it is currently section 5 of 5,
-immediately before `FooterCTA`). Above the chart, a **Forward Season status
-strip** — *"Season 12 · day 3 of 5 · 44 traders"* or *"Next season opens
-Monday"* — which doubles as the between-seasons CTA. Below the Replay chart, the
-Forward chart as its own clearly-labelled section. When Forward proves out, the
-two sections swap by reordering one line.
+immediately before `FooterCTA`). Above the chart, a **season status strip** —
+*"Season 12 · day 3 of 10 · 44 traders"* or *"Next season opens soon"* — which
+doubles as the between-seasons CTA. Below the Competition chart, the Live Trading
+chart as its own clearly-labelled section. When Live Trading proves out, the two
+sections swap by reordering one line.
+
+*(A season strip already exists on `/app` — `renderSeasonStrip`, hidden on the
+Competition board. The landing equivalent should read from the same payload
+fields, `trading_days_elapsed` / `trading_days_total`, rather than inventing a
+second source of season truth.)*
 
 `Race.tsx` draws with **recharts** (`:3-12`), not Chart.js. The landing board is
 therefore a second implementation; none of `js/leaderboard.js`'s custom legend,
@@ -570,6 +774,13 @@ Renumber `Talk`/`Test` to 01/02 and make the board an unnumbered frame above
 them. **This copy is Allan's** (`storyline.ts`, `WhyCare.tsx:5`,
 `FooterCTA.tsx:10`) and needs his sign-off.
 
+> **Mostly done as a side effect of #357, and one loose end.** `Talk.tsx:13` and
+> `Test.tsx:143` carry `01 — Talk` / `02 — Test`, and the board's `03 — Race`
+> line is gone — which is exactly the end state described here, reached without
+> anyone asking for the sign-off. The loose end is `FooterCTA.tsx:10`, which
+> still restates the old sequence as `Talk → Test → Race`. It is now the only
+> place claiming an ordering the page no longer has.
+
 Post-signup redirect is unchanged: `/app?view=agents` with `nav-state`
 pre-seeded — plus a verification interstitial (see Abuse).
 
@@ -583,7 +794,7 @@ Instead, a **persistent Season checklist card** pinned at the top of My Agents �
 a card in the existing shelf renderer, not an overlay framework:
 
 ```
-Replay Qualifier · Nemotron 3 Nano                5 attempts left
+Competition Qualifier · Nemotron 3 Nano           5 attempts left
 The house instruction lost 0.22%. Beat it.
 
   [x] Your starter agent is ready
@@ -592,7 +803,7 @@ The house instruction lost 0.22%. Beat it.
 ```
 
 On first successful attempt it collapses into a permanent season HUD —
-`Replay · rank 34 of 112 · 3 attempts left · Forward Season opens Monday` — so it
+`Competition · rank 34 of 112 · 3 attempts left · next season opens soon` — so it
 never becomes dead weight.
 
 The checklist and the ledger are the **same state object**: the card renders
@@ -607,8 +818,11 @@ cancelled**, stated before submission rather than discovered after.
 One welcome screen shown once after signup, stating the goal in a sentence with
 a button that scrolls to the checklist. One screen, not a sequence.
 
-**Fix while here:** wire `#homeGetStartedBtn` (`app.html:411`) to the checklist,
-or remove it.
+~~**Fix while here:** wire `#homeGetStartedBtn` (`app.html:411`) to the
+checklist, or remove it.~~ **Withdrawn 2026-08-15** — the button was already
+wired on 2026-07-25 (`08c85aa`); see the correction in §Background. If the
+checklist ships, deciding whether this CTA should point at it instead of the
+agents playground is a live question, but it is a redirect, not a fix.
 
 ### Submission surface
 
@@ -676,20 +890,20 @@ exactly when the link matters — would render nothing.
 
 ## Notifications
 
-One email at Friday close: *"Season 12 closed. You placed 8th of 44. Next season
+One email at season close: *"Season 12 closed. You placed 8th of 44. Next season
 opens Monday."* Built on `send_email` (`sender.py:45`). Requires an opt-out from
 the start. `send_email` is `async` while ATL routes must stay sync `def`
 (#292), so it is called from the cron path, never from a request handler.
 
-Discord posting of weekly top entries is **deferred but designed for**: the
+Discord posting of each season's top entries is **deferred but designed for**: the
 notification layer takes a channel abstraction with email implemented and
 Discord stubbed, so adding it later is a new channel rather than a refactor.
 
 ## Non-goals
 
 - Broker-backed live paper trading, real-time execution, or order submission.
-  `execution/paper_backend.py` stays a stub. The Forward Season is **simulated**
-  and does not depend on it.
+  `execution/paper_backend.py` stays a stub. Live Trading is **simulated** and
+  does not depend on it.
 - Real capital. Ever, on this surface.
 - Changing the published Model Track curves.
 - Raising `MAX_BACKTEST_INITIAL_CAPITAL`.
@@ -750,11 +964,36 @@ control) run through `deploy_model_run` on **two models**: Nemotron and DeepSeek
 V4 Pro. Total **$4.97**. Needs `OPENROUTER_API_KEY` locally.
 
 The entire design rests on an unverified assumption — that better instructions
-produce better returns on a 30B nano model whose prompt is dominated by an
-unconditional `SAFE_TRADING_PROMPT`. If the spread across genuinely opposite
-instructions is under ~1pp on Nemotron but not DeepSeek, pin DeepSeek and apply
-the contingency above. **If both are flat, the instruction axis does not exist
-and Phase 2 must not be built.**
+produce better returns on a 30B nano model. If the spread across genuinely
+opposite instructions is under ~1pp on Nemotron but not DeepSeek, pin DeepSeek
+and apply the contingency above. **If both are flat, the instruction axis does
+not exist and Phase 2 must not be built.**
+
+> **Correction (2026-08-15) — the stated reason for expecting failure was
+> wrong, and the gate is more favourable than this document claimed.**
+>
+> The original sentence read "…a 30B nano model **whose prompt is dominated by an
+> unconditional `SAFE_TRADING_PROMPT`**". That is not what the code does. A
+> caller-supplied instruction **replaces** the `SAFE_TRADING_PROMPT` strategy body
+> outright; only a fixed execution-contract scaffold is concatenated after it —
+> `CUSTOM_STRATEGY_OUTPUT_CONTRACT` (`validator.py:667-711`), joined by
+> `create_custom_prompt` (`:730`). The instruction gets the entire strategy slot,
+> not a corner of one.
+>
+> This does not remove the need for the gate — a nano model may still fail to act
+> on instruction content, which is the real question — but it does remove the
+> specific mechanism this document predicted would suppress the signal, and it
+> raises the prior on a pass. Two knock-on effects worth holding in mind when
+> reading the probe results:
+>
+> - **A flat result is now more damning, not less.** With the instruction owning
+>   the whole strategy body, "the model ignores it" is the remaining explanation,
+>   and there is no prompt-dilution fix to try next.
+> - **The control instruction matters even more than stated.** Since instructions
+>   fully replace the strategy body, a nonsense control still produces a
+>   *syntactically valid* run. A control landing mid-pack means the model responds
+>   to having a strategy body at all rather than to its content — the outcome that
+>   passes a naive spread check while the board ranks noise.
 
 The five non-control instructions become the seed field, so this spend also
 solves the cold-start problem below.
@@ -767,6 +1006,14 @@ seeds **visibly labelled house-authored**, the first-party beacon, static
 `og:image`, CTA copy, Community→Agent Marketplace rename, "Teams"→"Traders".
 No user entries yet.
 
+> **Status 2026-08-15: mostly overtaken. Do not execute this phase as written.**
+> The landing-page half was delivered by #352/#357 through different components,
+> and the "hero chart on real data" item was resolved in the opposite direction
+> on the landing page (labelled sample data, now guarded). What genuinely remains
+> from Phase 1 is a short list — C1, the seed field, `og:image`, and the two
+> renames — enumerated task-by-task with current line numbers in the companion
+> plan document. Read that table before touching anything here.
+
 **Incremental cost: ~$0.** The six curves are the Nemotron half of the Phase 0
 probe; C1 is what makes a config entry able to carry an instruction at all, so a
 seed and a probe run are the same object. Regenerating them costs $0.43.
@@ -777,7 +1024,7 @@ phase whose entire purpose is testing whether the board converts. Seeds are
 config-driven house entries, not database rows — the committed `backtest.db` is
 the prod database, so seeding by committing rows is not an option.
 
-**Phase 2 — the Replay qualifier.** C3/C4/C5/C7 (C1 shipped in Phase 1),
+**Phase 2 — the Competition qualifier.** C3/C4/C5/C7 (C1 shipped in Phase 1),
 `leaderboard_entries` and `leaderboard_attempts` with their Postgres twins, the
 attempt ledger, email verification at signup, the checklist, the Submit action,
 the queue (**two workers**, one env var, redeploy to change), graduation.
@@ -787,29 +1034,70 @@ Two concurrent workers rather than the three or four originally floated: issue
 agent-scale investigation measured throughput collapsing under load. Starting at
 two makes the first real measurement cheap to recover from.
 
-**Phase 3 — Forward Seasons.** C8, `forward_positions` and its twin, derived
-weekly seasons, the Friday result email with opt-out, the share-card download,
-the notification channel abstraction with Discord stubbed.
+**Phase 3 — Live Trading seasons.** C8, `forward_positions` and its twin,
+derived two-week seasons, the season-close email with opt-out, the share-card
+download, the notification channel abstraction with Discord stubbed.
 
-Ordering is forced, not chosen: Forward entry is gated on a completed Replay
-attempt, so Phase 3 cannot precede Phase 2.
+Ordering is forced, not chosen: Live Trading entry is gated on a completed
+Competition attempt, so Phase 3 cannot precede Phase 2.
+
+> **C8's priority changed on 2026-08-15, and the forced ordering above does not
+> apply to it.** The Live Trading Leaderboard is *in prod now*, in a Season 0
+> preview that has never advanced, because no advance engine exists. C8 is what
+> makes that shipped board real — and it needs no user entries, no attempt
+> ledger, and nothing from Phase 2 to run against the existing house roster.
+>
+> **Consider splitting C8 out and landing it before Phase 2.** The gating
+> argument ("Live Trading entry requires a completed Competition attempt") is
+> about *user entry*, and C8 with a house-only roster has no users in it. Landing
+> it early converts a preview banner into a board that moves, which is the
+> `Stay` half of the goal, and it does so without waiting on the Phase 0 probe —
+> advancing seven existing house entries does not depend on whether *instructions*
+> move returns.
+>
+> Two things to carry into that decision: the four invariants in §Live Trading
+> (the banner clears itself when the advance writes `last_advanced_date`, so no
+> frontend work is implied), and the cost. Advancing the full house roster nightly
+> is the expensive shape — price it against the pinned-model-only alternative
+> before arming any schedule, and remember that PR #352 paused the nightly cron
+> precisely because it was deploying seven billable models for a board nobody
+> could open.
 
 **Watch item:** Phase 1 is the only phase shipping without users being able to
 act. If Phase 0 comes back strong, consider collapsing 1 and 2 — a hero chart
-with a CTA leading to a season nobody can enter is the `#homeGetStartedBtn`
-failure at the largest scale yet.
+with a CTA leading to a season nobody can enter is the dead-CTA failure at the
+largest scale yet.
+
+> **This watch item is now live, not hypothetical.** #352/#357 shipped the hero
+> chart without the entry path, so the state this warned about is the state prod
+> is in. It is handled honestly for the moment — the landing board is labelled
+> illustrative and the Season 0 banner says nothing has advanced — but the
+> mitigation is a disclaimer, not a destination. This strengthens the case for
+> collapsing what remains of Phase 1 into Phase 2 rather than shipping another
+> display-only increment.
 
 ## Recorded assumptions
 
 Stated rather than left implicit; correct any that are wrong before planning.
 
 1. **Existing prod accounts are grandfathered as verified.**
-2. **Forward seasons source bars from Alpaca**, same as Replay.
-3. **The Daily Leaderboard is untouched** by this work.
-4. **`attempts_granted = 5`** for the Replay qualifier, lifetime.
-5. **Replay keeps the current window** (`2026-04-15 → 2026-05-15`) — its
-   look-ahead exposure is acceptable because Forward is the competitive board.
+2. **Live Trading seasons source bars from Alpaca**, same as Competition.
+3. ~~**The Daily Leaderboard is untouched** by this work.~~ **Void 2026-08-15.**
+   PR #352 retired the Daily Leaderboard tab in favour of Live Trading and
+   commented out its nightly `schedule:`. The route, the secret and the cron line
+   all survive in `.github/workflows/daily-leaderboard.yml` because the season
+   engine's nightly advance is the same call — re-enable by uncommenting, do not
+   rewrite. Consequence: **nothing refreshes any board automatically in prod
+   today.**
+4. **`attempts_granted = 5`** for the Competition qualifier, lifetime.
+5. **Competition keeps the current window** (`2026-04-15 → 2026-05-15`) — its
+   look-ahead exposure is acceptable because Live Trading is the competitive
+   board.
 6. **The pinned model survives Phase 0.** If not, the contingency applies.
+7. **Added 2026-08-15: the two-week cadence is taken as fixed**, because prod
+   already renders it. If a future round wants weekly back, it is a UI change in
+   `js/leaderboard.js` as well as a config one — reopen §Decisions taken, where
+   the instruction-lock trade-off is recorded as unresolved.
 
 ## References
 
@@ -819,6 +1107,12 @@ Stated rather than left implicit; correct any that are wrong before planning.
 - `docs/superpowers/specs/2026-08-05-asset-class-shelves-design.md` — the shelf
   renderer the checklist card sits inside.
 - PR #325 (`45ccbc0`) — daily refresh cron and status UI.
-- PR #326 — open at time of writing, touches `js/leaderboard.js`; rebase onto it.
+- ~~PR #326 — open at time of writing, touches `js/leaderboard.js`; rebase onto
+  it.~~ **Merged 2026-08-09**; the rebase constraint is void.
+- **PR #352 (`7db504d`, merged 2026-08-15)** — the two-board redesign this spec
+  was reconciled against: Competition + Live Trading, two-week seasons, Season 0
+  preview, Daily Leaderboard tab retired and its cron paused.
+- **PR #357 (`60fa01f`, merged 2026-08-15)** — leaderboard-first landing and
+  `/app` home; added `BoardPreview.tsx` and the "Illustrative example" guard.
 - Issues #145 (scheduler), #202 (event-loop blocking), #230 (`decide()` seam),
   #258 (run cancellation).
