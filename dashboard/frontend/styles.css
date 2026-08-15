@@ -2954,8 +2954,8 @@ a.header-brand:hover .title-section h1 {
     line-height: 1.45;
 }
 
-/* ── Live Season board ───────────────────────────────────────────────────────
-   The season board reuses the Competition chart, table and curve picker
+/* ── Live Trading Leaderboard ────────────────────────────────────────────────
+   The live board reuses the Competition chart, table and curve picker
    wholesale; everything below is the chrome that makes it a *season* rather
    than a window — and, in the preview banner's case, the only thing on screen
    that can tell a real season from a stand-in. */
@@ -4011,7 +4011,7 @@ a.header-brand:hover .title-section h1 {
     color: #38bdf8;
 }
 
-/* Live Season board states. `preview` deliberately borrows the warning colour
+/* Live Trading board states. `preview` deliberately borrows the warning colour
    rather than a neutral grey: it is the badge saying the numbers beside it are
    not real, which is a louder claim than "idle". */
 .status-badge.preview {

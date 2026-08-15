@@ -13,9 +13,9 @@ let leaderboardListenersInitialized = false;
 let liveBoardPollTimer = null;
 // The board the user asked for, which is NOT always the board the API returned.
 // `_normalize_period` server-side coerces any period it does not know back to
-// 'contest', so asking for a season the backend cannot serve yields a perfectly
-// valid contest payload with no error anywhere. Keeping the request alongside
-// the response is the only thing that can tell those two apart.
+// 'contest', so asking for the live board the backend cannot serve yields a
+// perfectly valid contest payload with no error anywhere. Keeping the request
+// alongside the response is the only thing that can tell those two apart.
 let requestedBoardPeriod = 'contest';
 
 // Chart visual-hierarchy state
@@ -266,21 +266,39 @@ function setCurvePickerOpen(open) {
 // A season is two calendar weeks of US cash sessions, Monday through Friday.
 const SEASON_TRADING_DAYS = 10;
 
+// The season the board is in before the engine ships. Season 0 is the shakedown
+// season by convention: numbered, so the board has a real identity to show and
+// so Season 1 means "the first one that counted", but explicitly the one whose
+// results nobody should read as a standing. The preview banner says the rest.
+const PREVIEW_SEASON_NUMBER = 0;
+
 /** The board the user is looking at, from the request rather than the response. */
-function isSeasonBoard() {
-  return requestedBoardPeriod === 'season';
+function isLiveBoard() {
+  return requestedBoardPeriod === 'live';
 }
 
-/** True when the Live Season tab is rendering something that is not a season.
+/** True when the Live Trading tab is rendering something that is not a season.
  *
  * The server coerces an unknown ``period`` back to 'contest' instead of 4xx-ing,
  * so this is a perfectly successful HTTP 200 carrying the wrong board. Without
  * an explicit comparison, "the season engine is not deployed" and "here are the
- * live season standings" render byte-identically — the exact failure shape
- * CLAUDE.md's fail-closed-is-not-fail-visible section is about.
+ * live standings" render byte-identically — the exact failure shape CLAUDE.md's
+ * fail-closed-is-not-fail-visible section is about.
  */
-function isSeasonPreview(payload) {
-  return isSeasonBoard() && (payload || {}).period !== 'season';
+function isLivePreview(payload) {
+  return isLiveBoard() && (payload || {}).period !== 'live';
+}
+
+/** The season number to show, or null when there is genuinely none.
+ *
+ * Season 0 is a real season here, so the number can never be tested for
+ * truthiness: `season?.number ? ... : '—'` renders the shakedown season as
+ * "no season at all". Every read of the number goes through this.
+ */
+function displayedSeasonNumber(payload) {
+  const n = Number((payload || {}).season?.number);
+  if (Number.isFinite(n)) return n;
+  return isLivePreview(payload) ? PREVIEW_SEASON_NUMBER : null;
 }
 
 function formatRelativeFromNow(iso) {
@@ -312,16 +330,19 @@ function updateLeaderboardHeader(payload) {
   const badgeEl = document.querySelector('#leaderboardView .contest-live-badge');
 
   const season = payload.season || null;
-  const seasonBoard = isSeasonBoard();
+  const liveBoard = isLiveBoard();
 
   if (titleEl) {
-    titleEl.textContent = seasonBoard
-      ? (season?.label || (season?.number ? `Season ${season.number}` : 'Live Season'))
+    // The board names itself; the season strip below names the season. Folding
+    // the season number in here instead would leave the board unnamed on screen
+    // the moment a season is running.
+    titleEl.textContent = liveBoard
+      ? 'Live Trading Leaderboard'
       : 'SecureFinAI Contest 2026';
   }
   if (badgeEl) {
-    const state = seasonBoard
-      ? (isSeasonPreview(payload) ? 'preview' : (season?.status || 'upcoming'))
+    const state = liveBoard
+      ? (isLivePreview(payload) ? 'preview' : (season?.status || 'upcoming'))
       : 'upcoming';
     badgeEl.textContent = {
       preview: 'Preview',
@@ -333,8 +354,9 @@ function updateLeaderboardHeader(payload) {
   }
 
   if (totalEl) {
-    totalEl.textContent = seasonBoard
-      ? (isSeasonPreview(payload) ? 'Preview' : 'Season')
+    const seasonNo = displayedSeasonNumber(payload);
+    totalEl.textContent = liveBoard
+      ? (seasonNo === null ? 'Season —' : `Season ${seasonNo}`)
       : (payload.phase_label || 'Preseason');
   }
   if (windowEl) windowEl.textContent = payload.window?.label || '—';
@@ -353,11 +375,11 @@ function updateLeaderboardHeader(payload) {
     standingsEl.textContent = payload.standings_label || 'Ranking';
   }
   if (subtitleEl) {
-    subtitleEl.textContent = seasonBoard
+    subtitleEl.textContent = liveBoard
       ? formatLiveBoardSubtitle(payload)
       : 'Sep 1 – Oct 30, 2026';
   }
-  renderSeasonPreviewBanner(payload);
+  renderLivePreviewBanner(payload);
   renderSeasonStrip(payload);
   renderSeasonGaps(payload);
   renderLiveBoardNotice(payload);
@@ -369,9 +391,14 @@ function formatLiveBoardSubtitle(payload) {
   if (season?.start_date && season?.end_date) {
     return `${formatShortDate(season.start_date)} – ${formatShortDate(season.end_date)} · advances nightly after the 16:00 ET cash session`;
   }
-  const date = payload.daily_status?.trading_date || payload.window?.start_date;
-  if (date) {
-    return `Advances nightly after the 16:00 ET cash session · last completed ${date}`;
+  // `window.start_date` is the board's display window, NOT a record that an
+  // advance ran, and falling back to it printed the Competition window's first
+  // day as "last completed" on a board that has never advanced once. Only
+  // daily_status carries a real advance — and in preview there is none, by
+  // definition, whatever the payload happens to contain.
+  const advanced = isLivePreview(payload) ? null : payload.daily_status?.trading_date;
+  if (advanced) {
+    return `Advances nightly after the 16:00 ET cash session · last completed ${advanced}`;
   }
   return 'Advances nightly after the 16:00 ET cash session';
 }
@@ -383,11 +410,11 @@ function formatLiveBoardSubtitle(payload) {
  * This banner is the only element that distinguishes them, so it is written
  * first and deleted last.
  */
-function renderSeasonPreviewBanner(payload) {
+function renderLivePreviewBanner(payload) {
   const host = document.getElementById('seasonPreviewBanner');
   if (!host) return;
   host.textContent = '';
-  if (!isSeasonPreview(payload)) {
+  if (!isLivePreview(payload)) {
     host.hidden = true;
     return;
   }
@@ -396,7 +423,7 @@ function renderSeasonPreviewBanner(payload) {
   lead.textContent = 'Preview — the season engine is not deployed.';
   const body = document.createElement('span');
   const label = payload.window?.label || 'the Competition window';
-  body.textContent = ` The curves below are the Competition board's fixed window (${label}), shown so this layout can be reviewed. No season has been run: nothing here is a live standing, and no ranking on this tab counts.`;
+  body.textContent = ` Season ${PREVIEW_SEASON_NUMBER} has not been run. The curves below are the Competition board's fixed window (${label}), shown so this layout can be reviewed: nothing here is a live standing, and no ranking on this tab counts.`;
   host.append(lead, body);
 }
 
@@ -404,7 +431,7 @@ function renderSeasonStrip(payload) {
   const host = document.getElementById('seasonStrip');
   if (!host) return;
   const season = payload.season || null;
-  if (!isSeasonBoard()) {
+  if (!isLiveBoard()) {
     host.hidden = true;
     return;
   }
@@ -416,7 +443,8 @@ function renderSeasonStrip(payload) {
 
   const badge = document.getElementById('seasonBadge');
   if (badge) {
-    badge.textContent = season?.number ? `Season ${season.number}` : 'Season —';
+    const seasonNo = displayedSeasonNumber(payload);
+    badge.textContent = seasonNo === null ? 'Season —' : `Season ${seasonNo}`;
   }
 
   const dates = document.getElementById('seasonDates');
@@ -471,6 +499,10 @@ function renderSeasonStrip(payload) {
       advance.textContent = Number.isFinite(when.getTime())
         ? `Next advance ${relative} (${when.toLocaleString()})`
         : `Next advance ${relative}`;
+    } else if (isLivePreview(payload)) {
+      // Describing the cadence here would promise a nightly advance that no
+      // deployed job performs.
+      advance.textContent = 'No advance scheduled';
     } else {
       advance.textContent = 'Next advance: nightly after the 16:00 ET close';
     }
@@ -492,7 +524,7 @@ function renderSeasonGaps(payload) {
   const host = document.getElementById('seasonGaps');
   if (!host) return;
   host.textContent = '';
-  const gaps = (isSeasonBoard() && payload.season?.gaps) || [];
+  const gaps = (isLiveBoard() && payload.season?.gaps) || [];
   if (!gaps.length) {
     host.hidden = true;
     return;
@@ -522,7 +554,7 @@ function renderSeasonGaps(payload) {
 function renderLiveBoardNotice(payload) {
   const host = document.getElementById('leaderboardBoardNotice');
   if (!host) return;
-  if (!isSeasonBoard() || !payload.daily_status) {
+  if (!isLiveBoard() || !payload.daily_status) {
     host.hidden = true;
     host.textContent = '';
     return;
@@ -557,7 +589,7 @@ function scheduleLiveBoardPoll(payload) {
     clearTimeout(liveBoardPollTimer);
     liveBoardPollTimer = null;
   }
-  if (!isSeasonBoard()) return;
+  if (!isLiveBoard()) return;
   const status = payload.daily_status || {};
   // Only poll while a refresh worker is running. Pending curves with no worker
   // wait for the nightly cron — polling forever just hammers the API.
@@ -567,13 +599,13 @@ function scheduleLiveBoardPoll(payload) {
     // Re-check on fire, not only on schedule: navigating away from Competition
     // never calls loadLeaderboardData again, so without this the poll would
     // keep re-fetching and re-rendering a hidden chart for the whole (possibly
-    // multi-hour) deploy. Landing back on the season tab restarts it.
+    // multi-hour) deploy. Landing back on the live tab restarts it.
     if (!isLiveBoardVisible()) return;
-    loadLeaderboardData('season');
+    loadLeaderboardData('live');
   }, 30000);
 }
 
-/** True only while the Live Season board is the board actually on screen.
+/** True only while the Live Trading board is the board actually on screen.
  *
  * Read from the DOM rather than the html[data-nav-*] boot attributes: those are
  * written by navigateToPage but not by showCompetitionPanel, so they go stale
@@ -586,14 +618,17 @@ function isLiveBoardVisible() {
   // covers the board being swapped out for Participants/About within it.
   if (!view || view.style.display === 'none' || view.offsetParent === null) return false;
   const activeTab = document.querySelector('.competition-subtabs .subtab-btn.active');
-  return activeTab?.dataset.competitionTab === 'season';
+  return activeTab?.dataset.competitionTab === 'live';
 }
 
 async function loadLeaderboardData(period = 'contest') {
   console.log('Loading leaderboard from API...', period);
-  // 'daily' is accepted so a stale deep link or a cached app.js cannot land on
-  // the retired board; it resolves to the season board like every other alias.
-  const boardPeriod = (period === 'season' || period === 'daily') ? 'season' : 'contest';
+  // 'daily' is the retired board and 'season' is what this tab was called
+  // before it was named. Both are accepted so a stale deep link or a cached
+  // app.js resolves to the live board rather than silently to Competition.
+  const boardPeriod = (period === 'live' || period === 'season' || period === 'daily')
+    ? 'live'
+    : 'contest';
   requestedBoardPeriod = boardPeriod;
 
   try {
@@ -924,8 +959,8 @@ function populateLeaderboardTable() {
     // Keyed on the board asked for, not the one returned: in preview the
     // response says 'contest', and the season tab explaining itself as the
     // contest board is how an empty season stops being legible as one.
-    const msg = isSeasonBoard()
-      ? 'No season entries yet. Baselines compute on first load; competition models advance via the nightly job.'
+    const msg = isLiveBoard()
+      ? 'No entries in this season yet. Baselines compute on first load; competition models advance via the nightly job.'
       : 'No leaderboard entries yet. Baselines compute on first load (requires market data).';
     tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">${msg}</td></tr>`;
     return;

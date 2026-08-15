@@ -1,4 +1,4 @@
-# Live Season leaderboard — UI and payload contract
+# Live Trading Leaderboard — UI and payload contract
 
 **Status:** UI shipped in preview; season engine not built.
 **Supersedes:** the Daily Leaderboard tab (`?period=daily`), retired by this change.
@@ -24,20 +24,28 @@ the same Monday, on the same flat $10,000, and is ranked only over the days insi
 
 | # | Decision |
 |---|----------|
-| 1 | Two boards: **Competition** (fixed window, the acquisition hook) and **Live Season**. The Daily Leaderboard is retired; its window math, nightly cron and 202-background refresh are the season engine's foundation. |
+| 1 | Two boards: **Competition** (fixed window, the acquisition hook) and the **Live Trading Leaderboard**. The Daily Leaderboard is retired; its window math, nightly cron and 202-background refresh are the season engine's foundation. |
 | 2 | A season is **two weeks** — 10 US cash sessions, Monday to Friday. |
 | 3 | **Every season resets.** Entries do not carry across seasons; joining is a per-season decision. This is also the cost control: perpetual entries would bill every signup ever, every night, forever. |
 | 4 | A failed night **carries positions forward flat and is marked as a visible gap**. It is never re-run days later against a market that has already moved. |
 | 5 | Gap copy differs per `failure_kind`. "The market was flat" and "our job died" must never render alike. |
+| 6 | The board is the **Live Trading Leaderboard**. "Live" names the *direction* it runs, not brokered execution — the About card says "simulated trading on real market data, no broker, no real capital" because the name on its own over-claims. |
+| 7 | The current season is **Season 0**, the shakedown season. Season 1 is the first that counts. |
 
-Still open at the time of writing (the grilling session was cut short): what the board is
-finally named, whether the Replay qualifier gate survives once Replay is unranked, and
-whether `instruction_sha256` config-freeze applies to user-owned editable entries.
+Decision 7 has a trap attached. Season 0 is falsy, so `season?.number ? … : '—'` renders
+the live season as *no season at all* — silently, and only for the season shipping right
+now. Every read of the number goes through `displayedSeasonNumber()` and its explicit
+`Number.isFinite` check, guarded by a source-shape test rather than a value test (a test
+that passes `3` cannot see this bug).
+
+Still open at the time of writing (the grilling session was cut short): whether the Replay
+qualifier gate survives once Replay is unranked, and whether `instruction_sha256`
+config-freeze applies to user-owned editable entries.
 
 ## The preview state, and why it is loud
 
 The season engine does not exist. `_normalize_period` coerces any period it does not
-recognise back to `contest` rather than 4xx-ing it, so `GET /api/v1/leaderboard?period=season`
+recognise back to `contest` rather than 4xx-ing it, so `GET /api/v1/leaderboard?period=live`
 returns **HTTP 200 carrying the Competition board**. Every other element on the tab —
 chart, table, curve picker, rankings — renders identically either way, because those
 shapes are shared between the two boards.
@@ -50,24 +58,21 @@ alone cannot see a coerced period, which is the whole failure mode.
 
 This is the `CLAUDE.md` fail-closed-is-not-fail-visible rule applied before the fact
 rather than after it. When the engine ships, the banner disappears on its own — no
-frontend change required, because the payload starts answering `period: "season"`.
+frontend change required, because the payload starts answering `period: "live"`.
 
 ## Payload contract (proposed, not yet served)
 
-`GET /api/v1/leaderboard?period=season` should return today's leaderboard payload plus a
+`GET /api/v1/leaderboard?period=live` should return today's leaderboard payload plus a
 `season` object. Everything below is optional from the frontend's point of view: each
 field has a defined absent-state, so a partial rollout degrades rather than breaks.
 
 ```jsonc
 {
-  "period": "season",              // MUST be exactly this, or the UI renders preview
-  "board_title": "Live Season",
-  "phase_label": "Season",
+  "period": "live",                // MUST be exactly this, or the UI renders preview
   "window":   { "start_date": "…", "end_date": "…", "label": "…" },
   "entries":  [ /* unchanged shape */ ],
   "season": {
-    "number": 3,
-    "label": "Season 3",           // optional; falls back to "Season {number}"
+    "number": 3,                   // 0 is valid and is the current season
     "status": "upcoming" | "running" | "closed",
     "start_date": "2026-08-17",    // Monday
     "end_date":   "2026-08-28",    // Friday, two weeks later
@@ -96,7 +101,7 @@ cannot explain is still a gap the reader must see.
 
 ## What is NOT in this change
 
-* **No backend.** No `season` period, no `forward_positions` table, no nightly advance
+* **No backend.** No `live` period, no `forward_positions` table, no nightly advance
   job. When those land, `forward_positions` belongs on `AGENT_RUNS_DATABASE_URL` — the
   Render free tier has no disk, so local SQLite resets to the seed DB on every deploy.
 * **No user entries.** The board shows the same model + baseline roster as Competition.

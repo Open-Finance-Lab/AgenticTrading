@@ -7643,7 +7643,7 @@ function viewParamForNavState(state) {
         return 'agents';
     }
     if (state.page === 'competition') {
-        if (state.competitionTab === 'season') return 'season';
+        if (state.competitionTab === 'live') return 'live';
         if (state.competitionTab === 'participants') return 'participants';
         if (state.competitionTab === 'about') return 'about';
         return 'leaderboard';
@@ -7944,10 +7944,11 @@ function showPlaygroundPanel(tab) {
 }
 
 function showCompetitionPanel(tab) {
-    // The Daily Leaderboard was replaced by the Live Season board. A saved nav
-    // state or a cached boot script can still hand us the old key, and an
+    // The Daily Leaderboard was replaced by the Live Trading board. A saved
+    // nav state or a cached boot script can still hand us either retired key
+    // ('daily', or 'season' from an earlier build of this branch), and an
     // unrecognised tab here shows no panel at all — a blank Competition page.
-    if (tab === 'daily' || tab === 'live') tab = 'season';
+    if (tab === 'daily' || tab === 'season') tab = 'live';
 
     competitionTab = tab;
     updateCompetitionSubtabs();
@@ -7955,7 +7956,7 @@ function showCompetitionPanel(tab) {
     const leaderboard = document.getElementById('leaderboardView');
     const participants = document.getElementById('competitionParticipantsPanel');
     const about = document.getElementById('competitionAboutPanel');
-    const showBoard = tab === 'leaderboard' || tab === 'season';
+    const showBoard = tab === 'leaderboard' || tab === 'live';
 
     if (leaderboard) leaderboard.style.display = showBoard ? 'flex' : 'none';
     if (participants) participants.style.display = tab === 'participants' ? 'block' : 'none';
@@ -7963,7 +7964,7 @@ function showCompetitionPanel(tab) {
 
     if (showBoard) {
         currentMode = 'contest';
-        loadLeaderboardData(tab === 'season' ? 'season' : 'contest');
+        loadLeaderboardData(tab === 'live' ? 'live' : 'contest');
     } else {
         currentMode = tab;
     }
@@ -8018,8 +8019,8 @@ function navigateToPage(page, options = {}) {
     // so a saved 'daily' written to the attribute below would leave the board
     // hidden through first paint even though the panel is shown a tick later.
     if (options.competitionTab) {
-        competitionTab = (options.competitionTab === 'daily' || options.competitionTab === 'live')
-            ? 'season'
+        competitionTab = (options.competitionTab === 'daily' || options.competitionTab === 'season')
+            ? 'live'
             : options.competitionTab;
     }
 

@@ -592,9 +592,9 @@ function navigateToLeaderboard() {
     }
 }
 
-function navigateToSeasonBoard() {
+function navigateToLiveBoard() {
     if (typeof navigateToPage === 'function') {
-        navigateToPage('competition', { competitionTab: 'season' });
+        navigateToPage('competition', { competitionTab: 'live' });
     }
 }
 
@@ -1798,7 +1798,7 @@ function initHomeModules() {
     });
     document.getElementById('homeModuleRankingBtn')?.addEventListener('click', navigateToLeaderboard);
     document.getElementById('homeViewLeaderboardBtn')?.addEventListener('click', navigateToLeaderboard);
-    document.getElementById('homeModuleSeasonBtn')?.addEventListener('click', navigateToSeasonBoard);
+    document.getElementById('homeModuleLiveBtn')?.addEventListener('click', navigateToLiveBoard);
     const openFinSearch = () => window.open('https://agenticfinsearch.org/', '_blank', 'noopener,noreferrer');
     document.getElementById('homeModuleMarketBtn')?.addEventListener('click', openFinSearch);
     document.getElementById('homeModuleMarketBtn')?.addEventListener('keydown', (event) => {
