@@ -117,7 +117,15 @@
     } else if (!balance.billing_available) {
       setStatus(accountStatus, 'Stripe Test Mode is not configured on this server.', 'error');
     } else {
-      setStatus(accountStatus, 'Available for model runs and backtests.', 'success');
+      // Not "Available for model runs and backtests." Purchased Credits land in
+      // credit_ledger_entries, and the only metered surface in this repo
+      // (POST /backtest/run, domain/entitlements/credits.py) spends a different
+      // counter — user_entitlements.credits — which nothing here tops up. This
+      // PR ships the purchase side deliberately and defers consumption, so the
+      // balance is real money that currently buys nothing. Saying otherwise
+      // tells the buyer they have spending power they do not have. Change this
+      // string only together with the code that actually debits this ledger.
+      setStatus(accountStatus, 'Held on your account. Spending Credits on model runs is not enabled yet.', 'success');
     }
     setPurchaseEnabled(!restricted && balance.billing_available);
   }
@@ -363,7 +371,21 @@
       if (cents === null || cents <= 0 || cents > order.refundable_usd_cents) {
         throw new Error(`Enter an amount up to ${formatUsdCents(order.refundable_usd_cents)}.`);
       }
-      if (!state.pendingRefund) {
+      // Reuse the pending request verbatim on a retry: the server derives the
+      // refund id from client_request_id, so the same id reuses the existing
+      // reservation and Stripe's idempotency key instead of stacking a second
+      // reservation against the order's refundable amount.
+      //
+      // But only while the request is genuinely the same. Editing the amount
+      // after a failed attempt and pressing Submit used to validate the new
+      // number and then send the old one, so the admin was told a refund they
+      // could see on screen had been requested while a different amount went to
+      // Stripe. A changed amount is a different request and gets a new id.
+      if (
+        !state.pendingRefund
+        || state.pendingRefund.payment_order_id !== order.order_id
+        || state.pendingRefund.amount_usd_cents !== cents
+      ) {
         state.pendingRefund = {
           client_request_id: crypto.randomUUID(),
           payment_order_id: order.order_id,

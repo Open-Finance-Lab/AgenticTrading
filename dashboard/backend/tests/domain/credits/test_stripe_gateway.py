@@ -9,6 +9,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
+import stripe
 
 from dashboard.backend.domain.credits.config import (
     BillingUnavailableError,
@@ -16,6 +17,8 @@ from dashboard.backend.domain.credits.config import (
 )
 from dashboard.backend.domain.credits.stripe_gateway import (
     InvalidWebhookSignatureError,
+    StripeGatewayDefinitiveError,
+    StripeGatewayError,
     StripeTestGateway,
 )
 
@@ -195,3 +198,88 @@ def test_unconfigured_gateway_fails_only_when_an_operation_is_attempted():
             credits_micro=10_000_000,
             idempotency_key="checkout:ord_123",
         )
+
+
+# ---------------------------------------------------------------------------
+# The one thing every other test in this file mocks away: the real SDK.
+# ---------------------------------------------------------------------------
+
+def test_real_stripe_client_exposes_the_service_paths_this_adapter_calls():
+    """Pin `client.v1.checkout.sessions` / `client.v1.refunds` against the SDK.
+
+    Every other case here injects a hand-built SimpleNamespace mirroring the
+    adapter's own assumptions, so `_ready_client()`'s real branch has no
+    coverage at all. If stripe-python moves or renames that namespace on a
+    version bump, `client.v1...` raises AttributeError at the first live
+    checkout while CI stays green.
+
+    Constructs the client but makes no request: StripeClient does no network
+    I/O at construction, and a test-mode-shaped key is enough to build it.
+    """
+    import stripe
+
+    client = stripe.StripeClient("sk_test_notarealkey")
+
+    assert callable(getattr(client.v1.checkout.sessions, "create", None))
+    assert callable(getattr(client.v1.refunds, "create", None))
+
+
+def test_definitive_and_ambiguous_stripe_failures_are_distinguishable():
+    """A caller holding a refund reservation must be able to tell them apart.
+
+    Releasing on an ambiguous failure (the Refund may exist) would let the same
+    money be refunded twice, so the gateway has to classify rather than
+    collapse every StripeError into one type.
+    """
+    import stripe
+
+    from dashboard.backend.domain.credits.stripe_gateway import (
+        StripeGatewayDefinitiveError,
+        StripeGatewayError,
+        _DEFINITIVE_STRIPE_ERRORS,
+    )
+
+    assert issubclass(StripeGatewayDefinitiveError, StripeGatewayError)
+    for definitive in _DEFINITIVE_STRIPE_ERRORS:
+        assert issubclass(definitive, stripe.StripeError)
+    # Anything that may have created the object despite erroring must NOT be
+    # treated as definitive.
+    for ambiguous in (stripe.APIConnectionError, stripe.RateLimitError):
+        assert ambiguous not in _DEFINITIVE_STRIPE_ERRORS
+
+
+def test_refused_refund_raises_the_definitive_error():
+    client, _sessions, refunds = _client()
+
+    def _refuse(*_args, **_kwargs):
+        raise stripe.InvalidRequestError("charge already refunded", param=None)
+
+    refunds.create = _refuse
+    gateway = StripeTestGateway(_config(), client=client)
+
+    with pytest.raises(StripeGatewayDefinitiveError):
+        gateway.create_refund(
+            refund_id="rfnd_1",
+            payment_intent_id="pi_test_123",
+            amount_usd_cents=400,
+            idempotency_key="refund:rfnd_1",
+        )
+
+
+def test_connection_failure_raises_the_ambiguous_error():
+    client, _sessions, refunds = _client()
+
+    def _drop(*_args, **_kwargs):
+        raise stripe.APIConnectionError("connection dropped")
+
+    refunds.create = _drop
+    gateway = StripeTestGateway(_config(), client=client)
+
+    with pytest.raises(StripeGatewayError) as excinfo:
+        gateway.create_refund(
+            refund_id="rfnd_2",
+            payment_intent_id="pi_test_123",
+            amount_usd_cents=400,
+            idempotency_key="refund:rfnd_2",
+        )
+    assert not isinstance(excinfo.value, StripeGatewayDefinitiveError)

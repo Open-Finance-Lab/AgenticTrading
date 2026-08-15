@@ -210,6 +210,7 @@ def _reset_shared_scale_state(monkeypatch):
     credits_router._CHECKOUT_LIMITER.reset()
     credits_router._ORDER_POLL_LIMITER.reset()
     credits_router._ADMIN_REFUND_LIMITER.reset()
+    credits_router._WEBHOOK_LIMITER.reset()
     # Dashboard backtest slots are process-global. Tests mock the worker so
     # _finalize_slot never runs; without a reset the 20-slot process cap
     # refuses later /backtest/run calls with success:false.

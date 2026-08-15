@@ -423,7 +423,11 @@ class PostgresCreditsStore:
                     reason = "payment order not found"
                 elif livemode or order["stripe_mode"] != "test":
                     reason = "Live Mode payment is not accepted"
-                elif checkout_session_id != order["stripe_checkout_session_id"]:
+                # NULL means "not recorded yet" — see settle_paid_checkout.
+                elif order["stripe_checkout_session_id"] not in (
+                    None,
+                    checkout_session_id,
+                ):
                     reason = "Checkout Session does not match the order"
                 elif object_id != checkout_session_id:
                     reason = "event object does not match the Checkout Session"
@@ -524,7 +528,21 @@ class PostgresCreditsStore:
                     reason = "payment currency does not match the order"
                 elif amount_usd_cents != order["amount_usd_cents"]:
                     reason = "payment amount does not match the order"
-                elif checkout_session_id != order["stripe_checkout_session_id"]:
+                # NULL means "not recorded yet", not "mismatch" — the same idiom
+                # the PaymentIntent check below already uses.
+                # attach_checkout_session runs *after* Stripe has created a
+                # payable session, so a crash or restart in that window leaves
+                # this column NULL; treating that as a mismatch permanently
+                # rejects the payment webhook for an order the customer has
+                # already been charged for, and writes an event row that makes
+                # the rejection unreplayable. Provenance does not rest on this
+                # column: the caller has already matched the signed event's
+                # atl_order_id / atl_user_reference / atl_credits_micro metadata
+                # against the order, and currency and amount are checked above.
+                elif order["stripe_checkout_session_id"] not in (
+                    None,
+                    checkout_session_id,
+                ):
                     reason = "Checkout Session does not match the order"
                 elif object_id != checkout_session_id:
                     reason = "event object does not match the Checkout Session"
@@ -601,10 +619,12 @@ class PostgresCreditsStore:
                     """
                     UPDATE credit_payment_orders
                     SET status = 'paid', stripe_payment_intent_id = %s,
+                        stripe_checkout_session_id =
+                            COALESCE(stripe_checkout_session_id, %s),
                         updated_at = %s, paid_at = COALESCE(paid_at, %s)
                     WHERE id = %s
                     """,
-                    (payment_intent_id, now, now, order_id),
+                    (payment_intent_id, checkout_session_id, now, now, order_id),
                 )
                 return {
                     "outcome": "processed",
@@ -691,6 +711,22 @@ class PostgresCreditsStore:
                 cur.execute(
                     """
                     UPDATE credit_accounts SET status = 'restricted'
+                    WHERE user_id = %s
+                    RETURNING *
+                    """,
+                    (user_id,),
+                )
+                return dict(cur.fetchone())
+
+    def reinstate_account(self, user_id: int) -> dict[str, Any]:
+        """Twin of ``CreditsStore.reinstate_account``."""
+        _positive_integer(user_id, "user_id")
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                self._ensure_account_in_transaction(cur, user_id)
+                cur.execute(
+                    """
+                    UPDATE credit_accounts SET status = 'active'
                     WHERE user_id = %s
                     RETURNING *
                     """,
@@ -962,6 +998,40 @@ class PostgresCreditsStore:
                 "Stripe Refund is already attached to another request"
             ) from exc
 
+    def cancel_refund_reservation(self, refund_id: str) -> dict[str, Any] | None:
+        """Release a reservation whose Stripe call never landed.
+
+        Twin of ``CreditsStore.cancel_refund_reservation``; see that docstring
+        for why ``cancelled`` exists and why only a still-``pending`` row with
+        no Stripe Refund attached may be released.
+        """
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT * FROM credit_refund_requests WHERE id = %s
+                    FOR UPDATE
+                    """,
+                    (refund_id,),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return None
+                if row["status"] != "pending" or row["stripe_refund_id"]:
+                    return dict(row)
+                cur.execute(
+                    """
+                    UPDATE credit_refund_requests
+                    SET status = 'cancelled', updated_at = %s
+                    WHERE id = %s AND status = 'pending'
+                      AND stripe_refund_id IS NULL
+                    RETURNING *
+                    """,
+                    (_utcnow_iso(), refund_id),
+                )
+                updated = cur.fetchone()
+                return dict(updated) if updated else dict(row)
+
     def settle_succeeded_refund(
         self,
         *,
@@ -1000,22 +1070,46 @@ class PostgresCreditsStore:
                     )
                     return {"outcome": "duplicate", "balance_micro": balance}
 
+                # Lock ORDER first, then REFUND. That ordering is load-bearing,
+                # not stylistic: reserve_refund and reserve_reconciliation_refund
+                # both take the two row locks in that order, and taking them the
+                # other way round here deadlocks an admin's second partial
+                # refund against a webhook settling the first one on the same
+                # order. Postgres resolves that with 40P01, which no caller
+                # catches — it escapes as a bare 500 to the admin and as an
+                # un-retried 500 to Stripe. The SQLite twin cannot reproduce it
+                # (one whole-DB BEGIN IMMEDIATE serializes both paths), so the
+                # entire SQLite suite stays green either way.
+                #
+                # The unlocked probe only resolves payment_order_id, which is
+                # write-once on a refund row; every value the decision below
+                # rests on is re-read under FOR UPDATE afterwards.
                 cur.execute(
                     """
-                    SELECT * FROM credit_refund_requests WHERE id = %s FOR UPDATE
+                    SELECT payment_order_id FROM credit_refund_requests
+                    WHERE id = %s
                     """,
                     (refund_id,),
                 )
-                refund = cur.fetchone()
+                probe = cur.fetchone()
+                refund = None
                 order = None
-                if refund:
+                if probe:
                     cur.execute(
                         """
                         SELECT * FROM credit_payment_orders WHERE id = %s FOR UPDATE
                         """,
-                        (refund["payment_order_id"],),
+                        (probe["payment_order_id"],),
                     )
                     order = cur.fetchone()
+                    cur.execute(
+                        """
+                        SELECT * FROM credit_refund_requests WHERE id = %s
+                        FOR UPDATE
+                        """,
+                        (refund_id,),
+                    )
+                    refund = cur.fetchone()
 
                 reason = None
                 if not refund or not order:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -31,11 +33,37 @@ class CreditsStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
-    def _get_connection(self) -> sqlite3.Connection:
+    @contextmanager
+    def _get_connection(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection that is committed/rolled back **and closed**.
+
+        ``with sqlite3.connect(...) as conn`` is sqlite3's *transaction*
+        context manager: it commits on success and rolls back on an exception,
+        but it never closes the connection. Every one of this store's methods
+        used it that way, so each call leaked an OS file handle and — in WAL
+        mode — a read mark that holds off checkpointing until CPython happens
+        to collect it. Under the Credits page's order poll (120 requests per
+        minute per user, one connection each) that accumulates against a
+        512MB instance and an ever-growing ``-wal`` sidecar.
+
+        Every other store in this repo (``users.py``, ``domain/agents``,
+        ``domain/strategies``) closes explicitly instead. Wrapping the helper
+        keeps that guarantee in one place rather than repeating a ``finally``
+        in all ~20 callers, which is also why no call site changed.
+
+        ``PRAGMA foreign_keys = ON`` stays: the ledger's ``ON DELETE RESTRICT``
+        foreign keys are what stop a purchase row from being deleted out from
+        under the money it accounts for. It is scoped to this connection, so
+        with the close in place it no longer outlives the call.
+        """
         conn = sqlite3.connect(str(self.db_path), timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         with self._get_connection() as conn:
@@ -414,7 +442,11 @@ class CreditsStore:
                 reason = "payment order not found"
             elif livemode or order["stripe_mode"] != "test":
                 reason = "Live Mode payment is not accepted"
-            elif checkout_session_id != order["stripe_checkout_session_id"]:
+            # NULL means "not recorded yet" — see settle_paid_checkout.
+            elif order["stripe_checkout_session_id"] not in (
+                None,
+                checkout_session_id,
+            ):
                 reason = "Checkout Session does not match the order"
             elif object_id != checkout_session_id:
                 reason = "event object does not match the Checkout Session"
@@ -505,7 +537,20 @@ class CreditsStore:
                 reason = "payment currency does not match the order"
             elif amount_usd_cents != order["amount_usd_cents"]:
                 reason = "payment amount does not match the order"
-            elif checkout_session_id != order["stripe_checkout_session_id"]:
+            # NULL means "not recorded yet", not "mismatch" — the same idiom the
+            # PaymentIntent check below already uses. attach_checkout_session
+            # runs *after* Stripe has created a payable session, so a crash or
+            # restart in that window leaves this column NULL; treating that as a
+            # mismatch permanently rejects the payment webhook for an order the
+            # customer has already been charged for, and writes an event row
+            # that makes the rejection unreplayable. Provenance does not rest on
+            # this column: the caller has already matched the signed event's
+            # atl_order_id / atl_user_reference / atl_credits_micro metadata
+            # against the order, and currency and amount are checked above.
+            elif order["stripe_checkout_session_id"] not in (
+                None,
+                checkout_session_id,
+            ):
                 reason = "Checkout Session does not match the order"
             elif object_id != checkout_session_id:
                 reason = "event object does not match the Checkout Session"
@@ -579,10 +624,12 @@ class CreditsStore:
                 """
                 UPDATE credit_payment_orders
                 SET status = 'paid', stripe_payment_intent_id = ?,
+                    stripe_checkout_session_id =
+                        COALESCE(stripe_checkout_session_id, ?),
                     updated_at = ?, paid_at = COALESCE(paid_at, ?)
                 WHERE id = ?
                 """,
-                (payment_intent_id, now, now, order_id),
+                (payment_intent_id, checkout_session_id, now, now, order_id),
             )
             return {
                 "outcome": "processed",
@@ -659,6 +706,29 @@ class CreditsStore:
             self._ensure_account_in_transaction(conn, user_id)
             conn.execute(
                 "UPDATE credit_accounts SET status = 'restricted' WHERE user_id = ?",
+                (user_id,),
+            )
+            row = conn.execute(
+                "SELECT * FROM credit_accounts WHERE user_id = ?", (user_id,)
+            ).fetchone()
+            return dict(row)
+
+    def reinstate_account(self, user_id: int) -> dict[str, Any]:
+        """Clear a restriction after an admin has reconciled the refund.
+
+        ``restrict_account`` is written automatically when an out-of-band Stripe
+        refund exceeds an order's refundable amount. With the purchase gate now
+        enforced server-side rather than only in the browser, that flag is a
+        hard stop, so leaving it clearable only by hand-written SQL would make
+        an automatic action permanently un-undoable by the operator it is
+        pointed at.
+        """
+        _positive_integer(user_id, "user_id")
+        with self._get_connection() as conn:
+            self._begin(conn)
+            self._ensure_account_in_transaction(conn, user_id)
+            conn.execute(
+                "UPDATE credit_accounts SET status = 'active' WHERE user_id = ?",
                 (user_id,),
             )
             row = conn.execute(
@@ -905,6 +975,44 @@ class CreditsStore:
                     raise OrderConflictError(
                         "Stripe Refund is already attached to another request"
                     ) from exc
+            updated = conn.execute(
+                "SELECT * FROM credit_refund_requests WHERE id = ?", (refund_id,)
+            ).fetchone()
+            return dict(updated)
+
+    def cancel_refund_reservation(self, refund_id: str) -> dict[str, Any] | None:
+        """Release a reservation whose Stripe call never landed.
+
+        ``_refundable_in_transaction`` counts ``pending``/``submitted``/
+        ``succeeded`` against the order's refundable lot, so a reservation left
+        ``pending`` by a failed Stripe call subtracts from that lot forever: one
+        transient 5xx on a full refund makes the order permanently
+        un-refundable. ``cancelled`` is declared in both twins' CHECK
+        constraints for exactly this and was previously never written.
+
+        Only a still-``pending`` row with no Stripe Refund attached is
+        cancellable. Once ``attach_stripe_refund`` has moved it to
+        ``submitted`` the money is genuinely in flight, and releasing the lot
+        then would let an admin over-refund the order.
+        """
+        with self._get_connection() as conn:
+            self._begin(conn)
+            row = conn.execute(
+                "SELECT * FROM credit_refund_requests WHERE id = ?", (refund_id,)
+            ).fetchone()
+            if not row:
+                return None
+            if row["status"] != "pending" or row["stripe_refund_id"]:
+                return dict(row)
+            conn.execute(
+                """
+                UPDATE credit_refund_requests
+                SET status = 'cancelled', updated_at = ?
+                WHERE id = ? AND status = 'pending'
+                  AND stripe_refund_id IS NULL
+                """,
+                (_utcnow_iso(), refund_id),
+            )
             updated = conn.execute(
                 "SELECT * FROM credit_refund_requests WHERE id = ?", (refund_id,)
             ).fetchone()

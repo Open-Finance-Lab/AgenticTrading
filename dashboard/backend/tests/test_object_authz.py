@@ -20,6 +20,7 @@ import dashboard.backend.users as users_module
 from dashboard.backend.app import app
 from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 from dashboard.backend.domain.credits.repository import CreditsStore
+from dashboard.backend.domain.credits.service import CreditsService
 
 
 @pytest.fixture
@@ -33,10 +34,14 @@ def client(monkeypatch):
         monkeypatch.setattr(users_module, "user_store", user_store)
         monkeypatch.setattr(agent_repo, "agent_store", agent_store)
         monkeypatch.setattr(portfolio_repo, "portfolio_store", portfolio_store)
+        # A real service, not SimpleNamespace(store=...). The stub only worked
+        # while the router reached past the service into the repository; the
+        # ownership scoping this module tests belongs to the service, so a stub
+        # that fakes it away would leave the boundary untested.
         monkeypatch.setattr(
             credits_router,
             "credits_service",
-            SimpleNamespace(store=credits_store),
+            CreditsService(store=credits_store, gateway=SimpleNamespace()),
         )
         yield TestClient(app)
 

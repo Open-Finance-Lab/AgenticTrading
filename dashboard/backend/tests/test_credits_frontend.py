@@ -61,3 +61,38 @@ def test_credits_layout_has_mobile_contract():
     assert "@media (max-width: 600px)" in STYLES
     assert '<th aria-label="Action"></th>' in APP_HTML
     assert '<span class="sr-only">Action</span>' not in APP_HTML
+
+
+# ---------------------------------------------------------------------------
+# The balance must not claim spending power the platform does not have.
+# ---------------------------------------------------------------------------
+
+def test_balance_does_not_claim_credits_are_spendable():
+    """Purchased Credits currently buy nothing, by design.
+
+    They land in credit_ledger_entries; the only metered surface in this repo
+    (POST /backtest/run via domain/entitlements/credits.py) spends
+    user_entitlements.credits, which nothing here tops up. This PR ships the
+    purchase side and defers consumption, so telling the buyer the balance is
+    "available for model runs and backtests" sells spending power that does not
+    exist. Delete this test only together with the code that debits this ledger.
+    """
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    banned = "Available for model runs and backtests."
+    # The claim is also spelled out in a comment above the corrected string, so
+    # match on the rendered call rather than raw presence anywhere in the file.
+    assert f"setStatus(accountStatus, '{banned}'" not in source
+    assert "not enabled yet" in source
+    assert ">Available balance<" not in APP_HTML
+
+
+def test_refund_retry_reuses_its_request_id_only_while_unchanged():
+    """The server derives the refund id from client_request_id.
+
+    Reusing it on retry is what makes the retry idempotent instead of stacking a
+    second reservation. But reusing it after the admin edits the amount sent the
+    OLD amount while the UI showed and validated the new one.
+    """
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    assert "state.pendingRefund.amount_usd_cents !== cents" in source
+    assert "state.pendingRefund.payment_order_id !== order.order_id" in source

@@ -20,6 +20,28 @@ class StripeGatewayError(RuntimeError):
     """Stripe returned an unusable response or rejected an operation."""
 
 
+class StripeGatewayDefinitiveError(StripeGatewayError):
+    """Stripe refused the request, so the object was definitely not created.
+
+    Separated from the base class because the safe response differs: a caller
+    holding a reservation may release it here, but must NOT release it for an
+    ambiguous failure (a timeout, a dropped connection, a 5xx), where the
+    object may exist despite the error.
+    """
+
+
+# Errors Stripe raises only after receiving and refusing the request. Anything
+# not listed — APIConnectionError, RateLimitError, the generic APIError — is
+# treated as ambiguous, which is the conservative direction: the cost of
+# wrongly holding a reservation is an understated refundable amount the admin
+# can retry, while the cost of wrongly releasing one is refunding twice.
+_DEFINITIVE_STRIPE_ERRORS = (
+    stripe.InvalidRequestError,
+    stripe.AuthenticationError,
+    stripe.PermissionError,
+)
+
+
 @dataclass(frozen=True)
 class CheckoutSessionResult:
     session_id: str
@@ -181,6 +203,15 @@ class StripeTestGateway:
             refund = client.v1.refunds.create(
                 params, {"idempotency_key": operation}
             )
+        except _DEFINITIVE_STRIPE_ERRORS as exc:
+            # Stripe received the request and refused it, so no Refund object
+            # exists and the caller's reservation can be released. Kept narrow
+            # on purpose: for anything ambiguous (a dropped connection, a 5xx,
+            # a timeout) a Refund may well have been created, and releasing the
+            # reservation then would let an admin refund the same money twice.
+            raise StripeGatewayDefinitiveError(
+                "Stripe refused the refund request"
+            ) from exc
         except stripe.StripeError as exc:
             raise StripeGatewayError("Stripe refund request failed") from exc
         return RefundResult(

@@ -43,6 +43,11 @@ EXPECTED_CREDITS_ROUTES = {
     ("GET", "/credits/orders/{order_id}", "get_credit_order"),
     ("GET", "/admin/credits/orders", "get_admin_credit_orders"),
     ("POST", "/admin/credits/refunds", "create_admin_credit_refund"),
+    (
+        "POST",
+        "/admin/credits/accounts/{user_id}/reinstate",
+        "reinstate_credit_account",
+    ),
     ("POST", "/webhooks/stripe", "stripe_webhook"),
 }
 EXPECTED_BACKTESTS_ROUTES = {
@@ -70,6 +75,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/credits/orders/{order_id}"),
     ("GET", "/api/admin/credits/orders"),
     ("POST", "/api/admin/credits/refunds"),
+    ("POST", "/api/admin/credits/accounts/{user_id}/reinstate"),
     ("POST", "/api/webhooks/stripe"),
     ("GET", "/api/strategies/{code}"),
     ("POST", "/api/strategies"),
