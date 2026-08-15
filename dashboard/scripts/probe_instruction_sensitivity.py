@@ -154,6 +154,13 @@ assert set(KEY_BY_INTEGRATION) == set(KNOWN_INTEGRATIONS), (
 SEEDABLE = [slug for slug, _ in PROBE_INSTRUCTIONS if not slug.startswith("control_")]
 CONTROLS = [slug for slug, _ in PROBE_INSTRUCTIONS if slug.startswith("control_")]
 
+# How far outside the seeded range a control must land before it counts as
+# separated. A placeholder floor, deliberately declared rather than left implicit
+# at 0: the honest bar is the *measured* run-to-run noise of one instruction, so
+# run a control twice and require the margin to clear that gap. Until a leg does
+# that, treat a margin near this constant as "not separated" rather than a pass.
+CONTROL_MARGIN_PP = 0.25
+
 EXIT_PASS = 0
 EXIT_FAIL = 1
 EXIT_CONFIG = 2
@@ -354,9 +361,9 @@ def main() -> int:
                     f"{MIN_LLM_DECISION_COVERAGE:.0%}). It is not evidence."
                 )
 
-    exit_code = _report(results, spent)
-
-    if args.out:
+    def _write(exit_code: int | None) -> None:
+        if not args.out:
+            return
         payload = {
             "window": {"start_date": start_date, "end_date": end_date},
             "initial_capital": initial_capital,
@@ -367,6 +374,16 @@ def main() -> int:
             "exit_code": exit_code,
         }
         Path(args.out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    # Persist BEFORE reporting, then again to record the exit code. _report only
+    # formats numbers already in hand, so a bug in it must never be able to
+    # discard runs that cost real money — which is exactly what it did to the
+    # first DeepSeek smoke run (an empty-`seeded` ValueError threw away a
+    # completed $0.03 run; at $0.76/run that is not a survivable ordering).
+    _write(None)
+    exit_code = _report(results, spent)
+    _write(exit_code)
+    if args.out:
         print(f"\nWrote {args.out}")
 
     return exit_code
@@ -379,6 +396,10 @@ def _report(results: dict[str, dict[str, dict]], spent: float) -> int:
 
     any_pass = False
     any_invalid = False
+    # Whether ANY model in this invocation carried both a seeded instruction and
+    # a control — i.e. whether a gate is even answerable here. A single-instruction
+    # shard cannot answer it, and must not print a verdict that says it did.
+    any_comparable = False
 
     for model_slug, rows in results.items():
         invalid = [s for s, r in rows.items() if not r["valid"]]
@@ -404,12 +425,29 @@ def _report(results: dict[str, dict[str, dict]], spent: float) -> int:
         # check while the board ranks noise.
         seeded = [r for s, r in rets.items() if not s.startswith("control_")]
         controls = {s: r for s, r in rets.items() if s.startswith("control_")}
+        if controls and not seeded:
+            print("  control(s) ran, but no seeded instruction in this invocation —")
+            print("  a control is only meaningful *positioned against* seeded returns.")
+            print("  Merge with the seeded runs before reading any gate off this.")
+            continue
+        any_comparable = any_comparable or bool(controls)
         for cslug, cret in controls.items():
-            outlier = cret < min(seeded) or cret > max(seeded)
+            # Margin, not a bare boundary test. `cret < min(seeded)` is true when
+            # the control beats the best seeded run by 0.01pp — noise wearing the
+            # word OUTLIER, which is how the Nemotron leg printed "OUTLIER (good)"
+            # for a result that separates nothing. Same defect class as the
+            # `payload.period !== 'live'` banner check in leaderboard.js: a
+            # boundary that inverts its own meaning at small margins.
+            margin = max(min(seeded) - cret, cret - max(seeded))
+            outlier = margin >= CONTROL_MARGIN_PP
             rank = sorted(rets.values(), reverse=True).index(cret) + 1
+            verdict = (
+                "OUTLIER (good)"
+                if outlier
+                else f"NOT SEPARATED (margin {margin:+.2f}pp < {CONTROL_MARGIN_PP}pp)"
+            )
             print(
-                f"  control {cslug}: {cret:+.2f}% — rank {rank}/{len(rets)}, "
-                f"{'OUTLIER (good)' if outlier else 'MID-PACK (gate fails)'}"
+                f"  control {cslug}: {cret:+.2f}% — rank {rank}/{len(rets)}, {verdict}"
             )
             if spread >= 1.0 and outlier:
                 any_pass = True
@@ -427,6 +465,16 @@ def _report(results: dict[str, dict[str, dict]], spent: float) -> int:
         print("control lands outside the seeded range.")
         print("=" * 64)
         return EXIT_PASS
+    if not any_comparable:
+        # A shard — one instruction per process, so the leg's runs can proceed
+        # independently. Printing FAIL here would leave every shard log asserting
+        # "do NOT build Phase 2" on evidence that cannot support any verdict, and
+        # a confidently-wrong FAIL is the failure mode this probe exists to avoid.
+        print("GATE: N/A — this invocation has no seeded/control pair to compare.")
+        print("It is a shard, not a verdict. Merge the leg's outputs and read the")
+        print("gate off the combined set.")
+        print("=" * 64)
+        return EXIT_INCONCLUSIVE
     print("GATE: FAIL — no model both separates instructions and isolates the")
     print("control. Per the gate table, do NOT build Phase 2.")
     print("=" * 64)
