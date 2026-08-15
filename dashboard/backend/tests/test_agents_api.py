@@ -195,6 +195,84 @@ def test_import_session_from_backtest_runs(client):
     assert len(listed.json()["agents"]) == 1
 
 
+def test_import_session_rejects_another_accounts_session(client):
+    """import-session derives its session_id from a caller-supplied header.
+
+    Nothing there proves ownership, so re-importing a session already bound to
+    another account must 403 rather than silently re-own and rename it.
+    """
+    session_id = str(uuid.uuid4())
+    import dashboard.backend.database as db_module
+
+    db_module.db.insert_run(
+        run_id="ext_test_import_403",
+        session_id=session_id,
+        agent_name="victim-strategy",
+        mode="backtest",
+        start_date="2026-04-15",
+        end_date="2026-04-16",
+        initial_equity=100000,
+        final_equity=101000,
+        total_return=0.01,
+        sharpe_ratio=0.5,
+        max_drawdown=-0.02,
+        num_trades=3,
+        llm_model="rsi-demo",
+    )
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "import-owner@example.com",
+            "display_name": "Import Owner",
+            "password": "securepass123",
+        },
+    )
+    assert signup.status_code == 200
+    owner_token = _cookie_session_token(client)
+    owned = client.post(
+        "/api/v1/agents/import-session",
+        json={},
+        headers={
+            "X-Session-Id": session_id,
+            "Authorization": f"Bearer {owner_token}",
+        },
+    )
+    assert owned.status_code == 200
+    agent_id = owned.json()["agent"]["agent_id"]
+
+    client.cookies.clear()
+    signup2 = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "import-thief@example.com",
+            "display_name": "Import Thief",
+            "password": "securepass123",
+        },
+    )
+    assert signup2.status_code == 200
+    thief_token = _cookie_session_token(client)
+    stolen = client.post(
+        "/api/v1/agents/import-session",
+        json={"name": "stolen"},
+        headers={
+            "X-Session-Id": session_id,
+            "Authorization": f"Bearer {thief_token}",
+        },
+    )
+    assert stolen.status_code == 403
+
+    listed = client.get(
+        "/api/v1/agents",
+        headers={
+            "X-Session-Id": session_id,
+            "Authorization": f"Bearer {owner_token}",
+        },
+    )
+    agents = {a["agent_id"]: a for a in listed.json()["agents"]}
+    assert agents[agent_id]["name"] == "victim-strategy"
+
+
 def test_claim_account_links_browser_agents(client):
     browser_session = str(uuid.uuid4())
     anon_headers = {"X-Session-Id": browser_session, "X-Browser-Id": browser_session}
@@ -233,6 +311,62 @@ def test_claim_account_links_browser_agents(client):
     assert listed.status_code == 200
     assert len(listed.json()["agents"]) == 1
     assert listed.json()["agents"][0]["agent_id"] == agent_id
+
+
+def test_logout_list_hides_account_bound_agents(client):
+    """Same browser after logout must not keep seeing the signed-in user's agents."""
+    browser_session = str(uuid.uuid4())
+    anon_headers = {"X-Session-Id": browser_session, "X-Browser-Id": browser_session}
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "bound-logout@example.com",
+            "display_name": "Bound Logout",
+            "password": "securepass123",
+        },
+    )
+    assert signup.status_code == 200
+    token = _cookie_session_token(client)
+    auth_headers = {
+        **anon_headers,
+        "Authorization": f"Bearer {token}",
+    }
+
+    created = client.post(
+        "/api/v1/agents",
+        json={"name": "account-agent"},
+        headers=auth_headers,
+    )
+    assert created.status_code == 200
+    agent_id = created.json()["agent"]["agent_id"]
+
+    listed_auth = client.get("/api/v1/agents", headers=auth_headers)
+    assert any(a["agent_id"] == agent_id for a in listed_auth.json()["agents"])
+
+    # Drop auth cookie/session so the next list is anonymous on the same browser.
+    client.cookies.clear()
+    listed_anon = client.get("/api/v1/agents", headers=anon_headers)
+    assert listed_anon.status_code == 200
+    assert all(a["agent_id"] != agent_id for a in listed_anon.json()["agents"])
+
+    # A second account on the same browser must not inherit the first's agents.
+    signup2 = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "other-logout@example.com",
+            "display_name": "Other Logout",
+            "password": "securepass123",
+        },
+    )
+    assert signup2.status_code == 200
+    token2 = _cookie_session_token(client)
+    listed_other = client.get(
+        "/api/v1/agents",
+        headers={**anon_headers, "Authorization": f"Bearer {token2}"},
+    )
+    assert listed_other.status_code == 200
+    assert all(a["agent_id"] != agent_id for a in listed_other.json()["agents"])
 
 
 def test_signed_in_list_includes_unclaimed_browser_foundation_agent(client):
@@ -1309,3 +1443,64 @@ def test_clone_does_not_validate_the_model_name(client):
     )
     assert cloned.status_code == 200, cloned.text
     assert cloned.json()["agent"]["model_name"] == "some/unreleased-model"
+
+
+def test_list_owner_scope_agent_ids_groups_by_the_real_owner(tmp_path):
+    """The grouping the concurrent-backtest cap bills against.
+
+    Resolved inside the store on purpose: ``_public_agent`` withholds
+    ``owner_browser_session``, and that is not an oversight to route around —
+    ``api/dependencies._owner_context`` accepts that value *as* an ownership
+    credential, so a projection returning it would hand one caller another's.
+    """
+    import dashboard.backend.domain.agents.repository as agent_store_module
+
+    store = agent_store_module.AgentStore(db_path=tmp_path / "scope.db")
+
+    mine_a = store.create_agent(name="a", owner_user_id=7)
+    mine_b = store.create_agent(name="b", owner_user_id=7)
+    theirs = store.create_agent(name="c", owner_user_id=8)
+    guest_a = store.create_agent(name="d", owner_browser_session="browser-1")
+    guest_b = store.create_agent(name="e", owner_browser_session="browser-1")
+    other_browser = store.create_agent(name="f", owner_browser_session="browser-2")
+
+    assert set(store.list_owner_scope_agent_ids(mine_a["agent_id"])) == {
+        mine_a["agent_id"],
+        mine_b["agent_id"],
+    }
+    assert theirs["agent_id"] not in store.list_owner_scope_agent_ids(
+        mine_a["agent_id"]
+    )
+    assert set(store.list_owner_scope_agent_ids(guest_a["agent_id"])) == {
+        guest_a["agent_id"],
+        guest_b["agent_id"],
+    }
+    assert other_browser["agent_id"] not in store.list_owner_scope_agent_ids(
+        guest_a["agent_id"]
+    )
+    # Unknown id: no scope at all, rather than a budget shared with everyone.
+    assert store.list_owner_scope_agent_ids("nope") == []
+    assert store.list_owner_scope_agent_ids("") == []
+
+
+def test_claimed_agents_are_billed_to_the_account_not_the_browser(tmp_path):
+    """Claiming must move an agent between scopes, not join them.
+
+    Otherwise a signed-in user's quota would still be reachable from a logged
+    -out browser that once created the agent — the inversion this cap exists to
+    remove, reintroduced from the other side.
+    """
+    import dashboard.backend.domain.agents.repository as agent_store_module
+
+    store = agent_store_module.AgentStore(db_path=tmp_path / "claim.db")
+    guest = store.create_agent(name="g", owner_browser_session="b-1")
+    claimed = store.create_agent(
+        name="h", owner_user_id=42, owner_browser_session="b-1"
+    )
+
+    # The claimed agent's scope is its account, and does not drag the guest in.
+    assert store.list_owner_scope_agent_ids(claimed["agent_id"]) == [
+        claimed["agent_id"]
+    ]
+    # The guest's scope is its browser, and excludes the claimed sibling.
+    assert store.list_owner_scope_agent_ids(guest["agent_id"]) == [guest["agent_id"]]

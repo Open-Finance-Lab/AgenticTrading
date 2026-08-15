@@ -33,6 +33,9 @@ from dashboard.backend.domain.runs.service import (
     MAX_ACTIVE_RUNS_GLOBAL,
     MAX_ACTIVE_RUNS_PER_AGENT,
     _create_lock as _shared_create_lock,
+    check_owner_active_run_cap,
+    owner_cap_message,
+    resolve_owner_cap_context,
 )
 # Late-bound module reference (run_repo.run_store) so tests that swap the
 # run_store singleton cover this module too.
@@ -344,6 +347,8 @@ def create_run(body: CreateRunBody, response: Response,
     DB and the engine session synchronously (B0/H4 convention).
     """
     enforce(agent["agent_id"], response)
+    # Possibly-remote reads (users/content Postgres) stay OFF the shared lock.
+    owner_cap_context = resolve_owner_cap_context(agent)
     with _shared_create_lock:
         active = _active_run_count(agent["agent_id"])
         if active >= MAX_ACTIVE_RUNS_PER_AGENT:
@@ -354,6 +359,14 @@ def create_run(body: CreateRunBody, response: Response,
                 "or cancel one",
                 status=429, retryable=True,
                 details={"active_runs": active, "limit": MAX_ACTIVE_RUNS_PER_AGENT},
+            )
+        violation = check_owner_active_run_cap(owner_cap_context)
+        if violation is not None:
+            raise ApiError(
+                "too_many_active_runs_for_account",
+                owner_cap_message(violation),
+                status=429, retryable=True,
+                details=violation,
             )
         if MAX_ACTIVE_RUNS_GLOBAL > 0:
             total = run_repo.run_store.count_active_runs_total()

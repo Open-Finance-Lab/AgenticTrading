@@ -79,6 +79,150 @@ _reaper_lock = threading.Lock()
 # past the combined cap.
 _create_lock = threading.Lock()
 
+
+def resolve_owner_cap_context(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Prefetch the per-owner cap's inputs; ``None`` means no cap applies.
+
+    Two owner shapes, one budget each: an **account** (its
+    ``max_concurrent_backtests`` entitlement, shared by every agent it owns) or,
+    for an unclaimed agent, the **browser session** that created it at the
+    default quota. The second exists because the first alone made signing in
+    strictly worse than staying anonymous — see the branch comment below.
+
+    Called BEFORE ``_create_lock`` on purpose: every read here is a remote
+    Postgres round-trip in a durable deployment (entitlements on
+    ``USERS_DATABASE_URL``, ownership on ``CONTENT_DATABASE_URL``), and the
+    create lock serializes every v1+v2 run creation on the server — holding it
+    across network I/O would queue every unrelated create behind one owner's
+    DB latency. Only the local count-then-insert is a race the lock must close
+    (see ``check_owner_active_run_cap``); the limit and owned-id list are as
+    fresh just before the lock as inside it — an admin editing them mid-create
+    was never a race the lock protected against.
+
+    Fails open on store errors: run creation must not gain a hard dependency
+    on the users/content databases being reachable (before this cap it had
+    none), and the per-agent + global caps are local and still bound the
+    request. The print marks the boundary — an outage here otherwise looks
+    exactly like "no cap configured".
+    """
+    owner_user_id = agent.get("owner_user_id")
+    creating_id = agent.get("agent_id")
+    # Lazy imports: users triggers store construction (SESSION_HASH_SECRET
+    # resolution) and agents may sit on CONTENT_DATABASE_URL Postgres; neither
+    # belongs in this module's import graph for callers that never create runs.
+    try:
+        from dashboard.backend import users as users_module
+        from dashboard.backend.domain.agents.repository import agent_store
+
+        if owner_user_id:
+            limit = int(
+                users_module.user_store.get_entitlements(int(owner_user_id))[
+                    "max_concurrent_backtests"
+                ]
+            )
+            scope = "account"
+            agent_ids = [
+                a.get("agent_id")
+                for a in agent_store.list_agents(owner_user_id=int(owner_user_id))
+                if a.get("agent_id")
+            ]
+        elif creating_id:
+            # Unclaimed agent. Returning None here — "no account, so no cap" —
+            # is what made signing in strictly worse than staying anonymous:
+            # a logged-in user shared one account budget across every agent
+            # they owned, while the same person logged out got the per-agent
+            # cap multiplied by however many agents they registered. Same
+            # engine, same LLM spend, opposite direction of travel. Bill the
+            # browser session the agents were created under at the default
+            # budget instead, so the entitlement is a floor everyone starts
+            # from rather than a penalty for having an account.
+            #
+            # Not a bound against a determined caller: a browser session is a
+            # self-chosen header, free to rotate, and no per-key budget can fix
+            # that. MAX_ACTIVE_RUNS_GLOBAL is what actually bounds the server;
+            # this closes the incentive, not the hole.
+            limit = int(users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS)
+            scope = "session"
+            agent_ids = list(agent_store.list_owner_scope_agent_ids(creating_id))
+        else:
+            return None
+    except Exception:  # noqa: BLE001 - the cap must not break creation
+        # Static marker, no payload: store exceptions can carry connection
+        # details (a psycopg error embeds the DSN), and CodeQL
+        # py/clear-text-logging-sensitive-data flags anything flowing here
+        # from the agent dict or the raised error. This line exists only to
+        # make the outage distinguishable from "no cap configured" — the
+        # failing store reports the details itself.
+        print(
+            "owner run cap: entitlement lookup failed; "
+            "skipping the per-account cap for this create"
+        )
+        return None
+    if creating_id and creating_id not in agent_ids:
+        agent_ids.append(creating_id)
+    return {"limit": limit, "agent_ids": agent_ids, "scope": scope}
+
+
+def check_owner_active_run_cap(
+    context: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Per-owner concurrency entitlement; ``None`` means clear to create.
+
+    ``max_concurrent_backtests`` (the admin-console entitlement) binds here:
+    every agent owned by one account shares the account's budget of active
+    protocol runs, across both the v1 and v2 surfaces. Both call this under
+    the shared ``_create_lock`` with a context prefetched OUTSIDE it by
+    ``resolve_owner_cap_context``, so the lock only ever waits on the local
+    SQLite count below — that count-then-insert is the one race it must
+    close. The dashboard's own runner needs no per-account gate (it is
+    single-flight for the whole process).
+
+    Unclaimed agents are billed to the browser session that created them at the
+    default quota, so the same person cannot enlarge their budget by logging
+    out — see ``resolve_owner_cap_context`` for why that is an incentive fix and
+    not a bound.
+
+    The legacy ``/api/v1/backtest/*`` surface still carries no owner identity to
+    bill against, and its runs never reach ``protocol_runs`` at all, so this
+    function cannot see them. It carries its own budgets instead
+    (``domain/backtesting/external_run_service``).
+
+    ``credits`` deliberately has no counterpart *here*. It meters the one
+    path that spends the operator's own LLM budget — the dashboard's backtest
+    runner — while these surfaces hand the agent a market context and take
+    back a decision the agent's own LLM client produced, at no cost to the
+    operator. Charging them would bill a user for a resource nobody bought.
+    See ``domain/entitlements/credits.py``.
+    """
+    if context is None:
+        return None
+    active = run_store.count_active_runs_for_agents(context["agent_ids"])
+    if active >= context["limit"]:
+        return {
+            "active_runs_for_account": active,
+            "limit": context["limit"],
+            "scope": context.get("scope", "account"),
+        }
+    return None
+
+
+def owner_cap_message(violation: Dict[str, Any]) -> str:
+    """One message for both surfaces, so the SDK sees a single wording."""
+    if violation.get("scope") == "session":
+        # An anonymous caller has no admin to ask and no account page to look
+        # at, so pointing them at one would be a dead end. Signing in is the
+        # action that actually changes their limit.
+        return (
+            "This browser session is at its concurrent-backtest limit "
+            f"({violation['active_runs_for_account']} of {violation['limit']} active); "
+            "wait for a run to finish, cancel one, or sign in to use an account limit"
+        )
+    return (
+        "This account is at its concurrent-backtest limit "
+        f"({violation['active_runs_for_account']} of {violation['limit']} active); "
+        "wait for a run to finish, cancel one, or ask an admin to raise the limit"
+    )
+
 # Extra per-pass reaper work registered by other surfaces (the composition root
 # registers the v2 sweep here). Kept as a registry so this domain module never
 # imports api/* (layering: domain must not depend on the API layer).
@@ -431,6 +575,8 @@ def create_run(
     # creates from one agent can't both observe an under-limit count and both
     # proceed past the cap (check-then-act TOCTOU).
     agent_id = agent.get("agent_id")
+    # Possibly-remote reads (users/content Postgres) stay OFF the shared lock.
+    owner_cap_context = resolve_owner_cap_context(agent)
     with _create_lock:
         if agent_id:
             active = run_store.count_active_runs(agent_id)
@@ -442,6 +588,15 @@ def create_run(
                     429,
                     details={"active_runs": active, "limit": MAX_ACTIVE_RUNS_PER_AGENT},
                 )
+
+        violation = check_owner_active_run_cap(owner_cap_context)
+        if violation is not None:
+            raise ProtocolError(
+                "too_many_active_runs_for_account",
+                owner_cap_message(violation),
+                429,
+                details=violation,
+            )
 
         if MAX_ACTIVE_RUNS_GLOBAL > 0:
             total = run_store.count_active_runs_total()

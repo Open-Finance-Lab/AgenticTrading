@@ -85,6 +85,19 @@ os.environ.pop("BASELINE_QUEUE_MAX", None)
 os.environ.pop("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", None)
 os.environ.pop("MAX_ACTIVE_RUNS_GLOBAL", None)
 os.environ.pop("AGENT_AUTH_CACHE_TTL_SECONDS", None)
+os.environ.pop("MAX_LEGACY_ACTIVE_PER_SESSION", None)
+os.environ.pop("MAX_LEGACY_ACTIVE_GLOBAL", None)
+# Read once at import into users.DEFAULT_MAX_CONCURRENT_BACKTESTS, which every
+# entitlement default and every per-account cap test resolves through.
+os.environ.pop("DEFAULT_MAX_CONCURRENT_BACKTESTS", None)
+os.environ.pop("DEFAULT_CREDITS", None)
+# Credit metering is strict opt-in and off by default (see
+# domain/entitlements/credits.py). A developer with it exported would otherwise
+# have every LLM-backtest test 402 on an empty balance -- and, worse, a suite
+# that passed for them would be asserting the metered path everywhere while CI
+# asserted the unmetered one. Tests that exercise metering set it via
+# monkeypatch.
+os.environ.pop("CREDITS_METERING_ENABLED", None)
 
 # Mail credentials: a developer with a real BREVO_API_KEY exported would
 # otherwise have the suite send live email, and would see the
@@ -101,6 +114,10 @@ os.environ.pop("ACCOUNT_EMAIL_FROM_NAME", None)
 # secret-gate tests see a known-unset baseline rather than the shell's value.
 os.environ.pop("LEADERBOARD_DAILY_AUTO_DEPLOY", None)
 os.environ.pop("LEADERBOARD_DAILY_REFRESH_SECRET", None)
+# Same known-unset baseline for the first-admin bootstrap secret: a developer
+# with it exported would otherwise make the unconfigured-refusal tests fail,
+# and could accidentally promote the suite's throwaway accounts.
+os.environ.pop("ADMIN_BOOTSTRAP_SECRET", None)
 
 
 @atexit.register
@@ -109,7 +126,10 @@ def _cleanup_test_db_dir() -> None:
     shutil.rmtree(_TEST_DB_DIR, ignore_errors=True)
 
 
+from types import SimpleNamespace  # noqa: E402
+
 import pytest  # noqa: E402
+import requests  # noqa: E402
 
 
 def pytest_configure(config):
@@ -190,3 +210,37 @@ def _reset_shared_scale_state(monkeypatch):
     market_data_store._reset_for_tests()
     auth_cache._reset_for_tests()
     db_pool._reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
+def _no_live_yahoo(monkeypatch):
+    """No test may reach query1.finance.yahoo.com.
+
+    Restores a failure signal the outage guard would otherwise erase. Now that
+    ``market_index_baselines_with_status`` swallows ``requests.RequestException``
+    — and ``ConnectionError`` is exactly what a socket-blocked CI box raises —
+    a test that forgets to stub the fetch no longer fails. It *passes*, silently,
+    with empty baselines. That is the signal issue #320 and PRs #331/#334 relied
+    on to notice tests depending on live Yahoo.
+
+    Narrow on purpose: blocking sockets wholesale would break the @pg_only tier,
+    which needs a real connection to TEST_POSTGRES_URL.
+
+    Rebinds the *name* ``requests`` inside the ``_yahoo`` module rather than
+    setting an attribute on the requests module itself — the latter is one
+    shared object, so it would swap HTTP for the whole process.
+    """
+    from dashboard.backend.domain.leaderboard.strategies import _yahoo
+
+    def _blocked(*_args, **_kwargs):
+        raise AssertionError(
+            "test reached live Yahoo. Stub "
+            "'dashboard.backend.equity_plot.fetch_index_hourly' (or _yahoo.requests) "
+            "-- an unstubbed fetch now degrades silently instead of failing."
+        )
+
+    monkeypatch.setattr(
+        _yahoo,
+        "requests",
+        SimpleNamespace(get=_blocked, RequestException=requests.RequestException),
+    )

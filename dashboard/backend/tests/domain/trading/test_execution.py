@@ -6,7 +6,9 @@ Locks in the exact behavior of
 canonical package path; no external services are touched.
 """
 
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pytest
@@ -15,6 +17,10 @@ from dashboard.backend.domain.trading import execution as execution_module
 from dashboard.backend.domain.trading.execution import (
     calculate_transaction_costs,
     execute_actions,
+)
+from dashboard.backend.domain.backtesting.market_rules import (
+    ClosingLimitState,
+    DailyMarketRule,
 )
 from dashboard.backend.infrastructure.market_data.profiles import (
     ASHARE_TRANSACTION_COST_PROFILE,
@@ -52,7 +58,8 @@ def _run(actions, market_data, timestamp="t0", **state):
 
 
 def _run_ashare(actions, *, cash=100000, positions=None, available_positions=None,
-                frozen_lots=None, timestamp=None):
+                frozen_lots=None, timestamp=None, market_data=None,
+                market_rule=None, fallback_prices=None):
     timestamp = timestamp or datetime(2026, 4, 1, 10)
     positions = dict(positions or {})
     entry_prices = {
@@ -63,7 +70,9 @@ def _run_ashare(actions, *, cash=100000, positions=None, available_positions=Non
     rejected_orders = []
     new_cash = execute_actions(
         actions=actions,
-        market_data={"600519.SH": _row(100.0)},
+        market_data=(
+            {"600519.SH": _row(100.0)} if market_data is None else market_data
+        ),
         timestamp=timestamp,
         cash=cash,
         positions=positions,
@@ -76,6 +85,10 @@ def _run_ashare(actions, *, cash=100000, positions=None, available_positions=Non
         lot_size=100,
         order_events=order_events,
         transaction_cost_profile=ASHARE_TRANSACTION_COST_PROFILE,
+        market_rules=(
+            {"600519.SH": market_rule} if market_rule is not None else None
+        ),
+        fallback_prices=fallback_prices,
     )
     return {
         "cash": new_cash,
@@ -84,6 +97,108 @@ def _run_ashare(actions, *, cash=100000, positions=None, available_positions=Non
         "order_events": order_events,
         "rejected_orders": rejected_orders,
     }
+
+
+CN = ZoneInfo("Asia/Shanghai")
+
+
+def _market_rule(*, suspended=False, state=ClosingLimitState.NONE):
+    if suspended:
+        return DailyMarketRule(
+            symbol="600519.SH",
+            trading_date=date(2026, 4, 1),
+            suspended=True,
+        )
+    return DailyMarketRule(
+        symbol="600519.SH",
+        trading_date=date(2026, 4, 1),
+        suspended=False,
+        closing_limit_state=state,
+        official_close_price=Decimal("100.00"),
+        final_bar_timestamp=datetime(2026, 4, 1, 15, tzinfo=CN),
+    )
+
+
+@pytest.mark.parametrize("side", ["buy", "sell"])
+def test_suspension_rejects_both_sides_before_price_lot_or_t1_checks(side):
+    result = _run_ashare(
+        [{"symbol": "600519.SH", "action": side, "shares": 50}],
+        cash=100000,
+        positions={"600519.SH": 100},
+        available_positions={"600519.SH": 100},
+        timestamp=datetime(2026, 4, 1, 10, 30, tzinfo=CN),
+        market_data={},
+        market_rule=_market_rule(suspended=True),
+        fallback_prices={"600519.SH": 99.5},
+    )
+
+    assert result["cash"] == 100000
+    assert result["positions"] == {"600519.SH": 100}
+    assert result["trades"] == []
+    assert result["rejected_orders"][0]["reason"] == "suspended"
+    event = result["order_events"][0]
+    assert event["reason"] == "suspended"
+    assert event["price"] == 99.5
+    assert event["total_fees"] == 0
+    assert event["net_cash_impact"] == 0
+    assert event["market_rule_suspended"] is True
+
+
+def test_closing_upper_limit_blocks_buy_only_on_final_bar():
+    rule = _market_rule(state=ClosingLimitState.UPPER)
+    earlier = _run_ashare(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+        timestamp=datetime(2026, 4, 1, 14, tzinfo=CN),
+        market_rule=rule,
+    )
+    closing = _run_ashare(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+        timestamp=datetime(2026, 4, 1, 15, tzinfo=CN),
+        market_rule=rule,
+    )
+
+    assert earlier["positions"] == {"600519.SH": 100}
+    assert len(earlier["trades"]) == 1
+    assert closing["positions"] == {}
+    assert closing["cash"] == 100000
+    assert closing["trades"] == []
+    assert closing["order_events"][0]["reason"] == "limit_up_buy_blocked"
+    assert closing["order_events"][0]["market_rule_closing_gate_effective"] is True
+
+
+def test_closing_upper_limit_still_allows_sell():
+    result = _run_ashare(
+        [{"symbol": "600519.SH", "action": "sell", "shares": 100}],
+        positions={"600519.SH": 100},
+        available_positions={"600519.SH": 100},
+        timestamp=datetime(2026, 4, 1, 15, tzinfo=CN),
+        market_rule=_market_rule(state=ClosingLimitState.UPPER),
+    )
+
+    assert result["positions"] == {}
+    assert result["trades"][0]["side"] == "SELL"
+
+
+def test_closing_lower_limit_blocks_sell_but_allows_buy():
+    rule = _market_rule(state=ClosingLimitState.LOWER)
+    sell = _run_ashare(
+        [{"symbol": "600519.SH", "action": "sell", "shares": 100}],
+        positions={"600519.SH": 100},
+        available_positions={"600519.SH": 100},
+        timestamp=datetime(2026, 4, 1, 15, tzinfo=CN),
+        market_rule=rule,
+    )
+    buy = _run_ashare(
+        [{"symbol": "600519.SH", "action": "buy", "shares": 100}],
+        timestamp=datetime(2026, 4, 1, 15, tzinfo=CN),
+        market_rule=rule,
+    )
+
+    assert sell["positions"] == {"600519.SH": 100}
+    assert sell["cash"] == 100000
+    assert sell["order_events"][0]["reason"] == "limit_down_sell_blocked"
+    assert buy["positions"] == {"600519.SH": 100}
+    assert buy["trades"][0]["side"] == "BUY"
 
 
 # ---------------------------------------------------------------------------
@@ -1183,3 +1298,31 @@ def test_sellable_positions_is_none_without_t_plus_one():
     pm = bha.PortfolioManager(100000)
     pm.available_positions = {"AAPL": 0}
     assert pm.sellable_positions is None
+
+
+def test_symbol_outside_the_rule_calendar_is_rejected_not_raised():
+    """A stray symbol must not trade ungated, and must not kill the run either.
+
+    Every producer filters to the allowed universe before it gets here, so this
+    is unreachable today. If one ever stops, raising would discard every bar
+    already simulated for a single action — and the rejection record is what
+    makes the gap visible instead of silent.
+    """
+    result = _run_ashare(
+        [{"symbol": "600520.SH", "action": "buy", "shares": 100}],
+        cash=100000,
+        timestamp=datetime(2026, 4, 1, 10, 30, tzinfo=CN),
+        market_data={"600519.SH": _row(100.0), "600520.SH": _row(50.0)},
+        market_rule=_market_rule(),
+    )
+
+    assert result["cash"] == 100000
+    assert result["positions"] == {}
+    assert result["trades"] == []
+    assert result["rejected_orders"][0]["reason"] == "market_rule_unavailable"
+    assert result["rejected_orders"][0]["symbol"] == "600520.SH"
+    event = result["order_events"][0]
+    assert event["status"] == "rejected"
+    assert event["reason"] == "market_rule_unavailable"
+    # No rule means no audit to attach; the row must not claim one.
+    assert "market_rule_date" not in event

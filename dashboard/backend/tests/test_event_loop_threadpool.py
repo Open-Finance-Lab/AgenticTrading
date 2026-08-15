@@ -34,6 +34,7 @@ BLOCKING_IO_ROUTER_MODULES = {
     "dashboard.backend.api.routers.leaderboard",
     "dashboard.backend.api.routers.backtests",
     "dashboard.backend.api.routers.admin",
+    "dashboard.backend.api.routers.admin_users",
     "dashboard.backend.api.routers.discord",
     "dashboard.backend.api.routers.external_backtest",
     "dashboard.backend.api.v2.leaderboard",
@@ -163,4 +164,41 @@ def test_slow_ticker_fetch_does_not_stall_concurrent_requests(monkeypatch):
     assert health_elapsed < 0.5, (
         f"/health took {health_elapsed:.3f}s while /ticker was fetching quotes "
         "-- the ticker handler is blocking the event loop"
+    )
+
+
+def test_auth_async_handlers_offload_store_io():
+    """The two ``async def`` auth routes must not call the store inline.
+
+    ``signup`` and ``login`` cannot be pinned by the guards above: they are
+    exempt from BLOCKING_IO_HANDLERS for already containing an ``await``, and
+    ``api.auth`` is not in BLOCKING_IO_ROUTER_MODULES because its OAuth
+    callbacks genuinely await. That exemption is a hole a new blocking call
+    walks straight into — a sync ``get_entitlements()`` was added to
+    ``_auth_json`` (called from both) and no guard here saw it, even though
+    both handlers already take deliberate care to keep bcrypt off the loop.
+
+    A store call passed to ``asyncio.to_thread`` appears as a bare attribute
+    reference, so it does not match; only an actual ``(``-suffixed call does.
+    """
+    import inspect
+    import re
+
+    from dashboard.backend.api import auth as auth_module
+
+    offenders = {}
+    for name in ("signup", "login"):
+        handler = inspect.unwrap(getattr(auth_module, name))
+        assert inspect.iscoroutinefunction(handler), (
+            f"{name} is no longer async -- move it into BLOCKING_IO_HANDLERS "
+            "instead, which is the stronger guarantee"
+        )
+        source = inspect.getsource(handler)
+        found = re.findall(r"user_store\.\w+\s*\(", source)
+        if found:
+            offenders[name] = sorted(set(found))
+
+    assert not offenders, (
+        f"blocking store calls on the event loop: {offenders}. "
+        "Wrap them in asyncio.to_thread (see _issue_session)."
     )

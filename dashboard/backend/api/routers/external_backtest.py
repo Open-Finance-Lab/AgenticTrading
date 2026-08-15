@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 
 from dashboard.backend.domain.backtesting.external_run_service import (
     DECISION_TIMEOUT_SECONDS,
+    BacktestCapacityError,
     get_backtest_decisions,
     get_current_step,
     get_decision_format,
@@ -100,14 +101,29 @@ def api_start_backtest(
     Use the same X-Session-Id as the dashboard to see results on the website.
     """
     session_id = _require_session(x_session_id)
-    result = start_backtest(
-        session_id=session_id,
-        agent_name=body.agent_name,
-        model_name=body.model_name,
-        start_date=body.start_date,
-        end_date=body.end_date,
-        mode=body.mode,
-    )
+    try:
+        result = start_backtest(
+            session_id=session_id,
+            agent_name=body.agent_name,
+            model_name=body.model_name,
+            start_date=body.start_date,
+            end_date=body.end_date,
+            mode=body.mode,
+            # The only caller that opts in. Nothing else gates this route —
+            # any non-empty X-Session-Id reaches it — and its runs never enter
+            # protocol_runs, so the entitlement/per-agent/global caps on the
+            # /v1/runs and /v2 surfaces are all blind to them.
+            enforce_session_cap=True,
+        )
+    except BacktestCapacityError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"This {exc.scope} is at its concurrent-backtest limit "
+                f"({exc.active} of {exc.limit} active); wait for one to finish"
+            ),
+            headers={"Retry-After": "30"},
+        ) from exc
     if result.get("status") == "failed":
         raise HTTPException(status_code=500, detail=result.get("error", "Backtest failed to start"))
     return result

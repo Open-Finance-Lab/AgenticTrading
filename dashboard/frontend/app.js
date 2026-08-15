@@ -3026,7 +3026,13 @@ const AuthAPI = {
 
     if (!response.ok) {
       const message = data?.detail || data?.error || `HTTP ${response.status}`;
-      throw new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      const error = new Error(typeof message === 'string' ? message : JSON.stringify(message));
+      // Callers need to tell "session is gone" (401) apart from "the server is
+      // cold/broken" (5xx, network) -- the message alone cannot carry that.
+      // The admin console reads the same field for 403: a refusal there means
+      // the cached role is stale, not that the request was malformed.
+      error.status = response.status;
+      throw error;
     }
 
     return data;
@@ -3113,6 +3119,25 @@ const AuthAPI = {
   },
 };
 
+const ADMIN_USERS_PAGE_SIZE = 50;
+const adminUsersPage = { offset: 0, total: 0, limit: ADMIN_USERS_PAGE_SIZE };
+
+const AdminAPI = {
+  listUsers({ limit = ADMIN_USERS_PAGE_SIZE, offset = 0 } = {}) {
+    const params = new URLSearchParams({ limit: String(limit), offset: String(offset) });
+    return AuthAPI.request(`/api/admin/users?${params}`);
+  },
+  stats() {
+    return AuthAPI.request('/api/admin/stats');
+  },
+  patchUser(userId, patch) {
+    return AuthAPI.request(`/api/admin/users/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  },
+};
+
 let authMode = 'login';
 
 function getStoredAuthUser() {
@@ -3144,6 +3169,27 @@ async function claimAgentsForUser({ reload = true } = {}) {
     // Ungated on purpose: this call IS the claim-then-load ordering the auth
     // boot gate exists to protect, and it runs before the gate opens.
     await loadAgentsNow();
+  }
+}
+
+// Drop the previous account's active agent so logout / the next login does not
+// keep sending that agent's trading session_id (list/activate used to treat it
+// as enough to surface or reclaim another user's agents).
+//
+// Deliberately NOT part of clearAuthState(): refreshAuthUser() funnels *every*
+// /api/auth/me failure through that function, including a free-tier cold start
+// or a first-request-after-idle 500. Wiping the agent selection there would
+// silently undo the restoreActiveAgentSession() that ran moments earlier on
+// boot. Only a real sign-out (logout, or a 401 that proves the session is gone)
+// should reach this.
+function clearActiveAgentSession() {
+  localStorage.removeItem(ACTIVE_AGENT_KEY);
+  localStorage.removeItem(ACTIVE_AGENT_NAME_KEY);
+  window.ACTIVE_AGENT = null;
+  const browserOwnerId = localStorage.getItem(BROWSER_OWNER_KEY) || window.BROWSER_OWNER_ID;
+  if (browserOwnerId) {
+    localStorage.setItem('trading-session-id', browserOwnerId);
+    window.SESSION_ID = browserOwnerId;
   }
 }
 
@@ -3183,6 +3229,352 @@ function updateAccountPage() {
   } else {
     signedIn.hidden = true;
     signedOut.hidden = false;
+  }
+}
+
+// Client-side mirror of MAX_CONCURRENT_BACKTESTS_CAP / MAX_CREDITS_CAP in
+// dashboard/backend/users.py — the API 422s outside these bounds regardless;
+// holding them in one place here just keeps the four spots that render or
+// validate them from drifting apart.
+const ADMIN_QUOTA_BOUNDS = {
+  // min 0, not 1: 0 is "suspended". A floor equal to the default quota let an
+  // admin meter an account but never stop one.
+  max_concurrent_backtests: { min: 0, max: 20 },
+  credits: { min: 0, max: 1000000 },
+};
+
+// Email as it goes into a confirm() dialog. escapeHtml is the wrong tool for a
+// native dialog — it has no markup to escape — and the risk there is line
+// forgery, not injection: the prompts below are multi-line, so an address
+// carrying its own newlines writes extra sentences into the box an admin reads
+// before granting admin. The backend now rejects those addresses at signup
+// (api/auth.py::_normalize_email); this collapses any that predate that rule,
+// and bounds the length so a 200-char address cannot push the real question
+// off the dialog.
+function _adminConfirmEmail(value) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, 120);
+}
+
+function _setAdminFlash(kind, message) {
+  const errorEl = document.getElementById('adminError');
+  const successEl = document.getElementById('adminSuccess');
+  if (errorEl) {
+    errorEl.hidden = kind !== 'error';
+    if (kind === 'error') errorEl.textContent = message || '';
+  }
+  if (successEl) {
+    successEl.hidden = kind !== 'success';
+    if (kind === 'success') successEl.textContent = message || '';
+  }
+}
+
+// Say whether the Credits column binds anything. Metering is a backend env
+// var, so the console cannot infer it — a hardcoded "(not enforced yet)" would
+// keep claiming that after an operator armed it, and dropping the note
+// entirely would let an admin read a stored number as an enforced budget.
+// Three states, because "stats failed" must not read as "metering off".
+function setAdminCreditsNote(stats) {
+  const note = document.getElementById('adminCreditsNote');
+  if (!note) return;
+  if (!stats || typeof stats.credits_metering_enabled !== 'boolean') {
+    note.textContent = '(status unavailable)';
+    return;
+  }
+  if (!stats.credits_metering_enabled) {
+    note.textContent = '(metering off)';
+    return;
+  }
+  const fallback = Number(stats.default_credits);
+  note.textContent = Number.isFinite(fallback)
+    ? `(1 per LLM backtest; default ${fallback})`
+    : '(1 per LLM backtest)';
+}
+
+async function loadAdminStats() {
+  const root = document.getElementById('adminStats');
+  if (!root) return;
+  try {
+    const data = await AdminAPI.stats();
+    root.querySelectorAll('[data-stat]').forEach((el) => {
+      const key = el.getAttribute('data-stat');
+      const value = data?.[key];
+      // Strict: the API sends numbers. Number(null) is 0 and
+      // Number.isFinite(0) is true, so the old coerce-then-check rendered a
+      // literal "null" for a missing counter instead of the dash.
+      el.textContent = typeof value === 'number' && Number.isFinite(value)
+        ? String(value)
+        : '—';
+    });
+    setAdminCreditsNote(data);
+  } catch (error) {
+    // Dashes alone make "stats endpoint down" identical to "no data yet";
+    // keep the failure visible somewhere an admin can find it.
+    console.warn('Admin stats failed to load:', error);
+    root.querySelectorAll('[data-stat]').forEach((el) => {
+      el.textContent = '—';
+    });
+    setAdminCreditsNote(null);
+  }
+}
+
+function _renderAdminPager() {
+  const rangeEl = document.getElementById('adminUsersRange');
+  const prevBtn = document.getElementById('adminPrevBtn');
+  const nextBtn = document.getElementById('adminNextBtn');
+  const { offset, total, limit } = adminUsersPage;
+  const shown = Math.min(limit, Math.max(0, total - offset));
+  if (rangeEl) {
+    rangeEl.textContent = total
+      ? `Showing ${offset + 1}–${offset + shown} of ${total}`
+      : '';
+  }
+  if (prevBtn) prevBtn.disabled = offset <= 0;
+  if (nextBtn) nextBtn.disabled = offset + limit >= total;
+}
+
+// A 403 from an admin route means the cached role is stale — someone demoted
+// this account since the last /me. Re-read the server's answer so the menu
+// entry and the page disappear instead of sitting there erroring.
+async function _handleAdminAccessLost() {
+  try {
+    const refreshed = await AuthAPI.me();
+    if (refreshed?.user) applyUpdatedUser(refreshed.user);
+  } catch (_error) {
+    clearAuthState();
+  }
+  if (currentPage === 'admin') navigateToPage('home');
+}
+
+// Monotonic ticket for loadAdminUsers: pager clicks can overlap, responses
+// land in any order, and only the newest request may own the table —
+// otherwise a slow page 1 arriving late repaints over page 2 while the pager
+// still says page 2.
+let _adminUsersRequestSeq = 0;
+
+async function loadAdminUsers({ offset } = {}) {
+  const body = document.getElementById('adminUsersBody');
+  if (!body) return;
+  // Ticket taken before ANY paint: the "Admin access required." branch owns
+  // the table too, and must invalidate a slower authorized fetch still in
+  // flight — otherwise its late success repaints a live user table over the
+  // denial (reachable via a cross-tab logout/demotion, since AUTH_USER_KEY
+  // is shared localStorage and nothing listens for storage events).
+  const seq = ++_adminUsersRequestSeq;
+  const user = getStoredAuthUser();
+  if (!user || user.role !== 'admin') {
+    body.innerHTML = '<tr><td colspan="6" class="admin-empty">Admin access required.</td></tr>';
+    return;
+  }
+  if (Number.isFinite(offset)) adminUsersPage.offset = Math.max(0, offset);
+  body.innerHTML = '<tr><td colspan="6" class="admin-empty">Loading…</td></tr>';
+  _setAdminFlash(null);
+  try {
+    const data = await AdminAPI.listUsers({
+      limit: adminUsersPage.limit,
+      offset: adminUsersPage.offset,
+    });
+    if (seq !== _adminUsersRequestSeq) return;
+    const users = Array.isArray(data?.users) ? data.users : [];
+    adminUsersPage.total = Number(data?.total) || users.length;
+    // A page can go out of range when accounts are deleted between requests.
+    if (!users.length && adminUsersPage.offset > 0) {
+      return loadAdminUsers({ offset: 0 });
+    }
+    _renderAdminPager();
+    if (!users.length) {
+      body.innerHTML = '<tr><td colspan="6" class="admin-empty">No users yet.</td></tr>';
+      return;
+    }
+    const maxBounds = ADMIN_QUOTA_BOUNDS.max_concurrent_backtests;
+    const creditBounds = ADMIN_QUOTA_BOUNDS.credits;
+    body.innerHTML = users.map((row) => {
+      const entitlements = row.entitlements || {};
+      const maxConcurrent = Number(entitlements.max_concurrent_backtests ?? 1);
+      const credits = Number(entitlements.credits ?? 0);
+      const role = row.role === 'admin' ? 'admin' : 'user';
+      const isSelf = Boolean(user && Number(user.id) === Number(row.id));
+      const roleControl = isSelf
+        ? `<span class="admin-role-locked" title="You cannot demote yourself">${escapeHtml(role)} (you)</span>`
+        : `<select data-field="role" aria-label="Role for ${escapeHtml(row.email)}">
+            <option value="user"${role === 'user' ? ' selected' : ''}>user</option>
+            <option value="admin"${role === 'admin' ? ' selected' : ''}>admin</option>
+          </select>`;
+      // data-server-*: the last value the server confirmed for this row.
+      // "Save quotas" diffs the inputs against these and sends only what the
+      // admin actually changed, so saving an untouched field can never revert
+      // a concurrent admin's edit with this page's stale copy.
+      return `<tr data-user-id="${escapeHtml(row.id)}" data-current-role="${escapeHtml(role)}"
+        data-server-max="${escapeHtml(maxConcurrent)}" data-server-credits="${escapeHtml(credits)}">
+        <td class="admin-email">${escapeHtml(row.email)}</td>
+        <td>${escapeHtml(row.display_name || '—')}</td>
+        <td>${roleControl}</td>
+        <td>
+          <input data-field="max_concurrent_backtests" type="number" min="${maxBounds.min}" max="${maxBounds.max}"
+            value="${escapeHtml(maxConcurrent)}"
+            aria-label="Max concurrent backtests for ${escapeHtml(row.email)}">
+        </td>
+        <td>
+          <input data-field="credits" type="number" min="${creditBounds.min}" max="${creditBounds.max}"
+            value="${escapeHtml(credits)}"
+            aria-label="Credits for ${escapeHtml(row.email)}">
+        </td>
+        <td>
+          <button type="button" class="auth-btn auth-btn-primary admin-save-btn" data-admin-save>Save quotas</button>
+        </td>
+      </tr>`;
+    }).join('');
+  } catch (error) {
+    if (seq !== _adminUsersRequestSeq) return;
+    if (error?.status === 403 || error?.status === 401) {
+      body.innerHTML = '<tr><td colspan="6" class="admin-empty">Admin access required.</td></tr>';
+      await _handleAdminAccessLost();
+      return;
+    }
+    body.innerHTML = `<tr><td colspan="6" class="admin-empty">${escapeHtml(error.message || 'Failed to load users')}</td></tr>`;
+    _setAdminFlash('error', error.message || 'Failed to load users');
+  }
+}
+
+async function saveAdminUserRole(rowEl, nextRole) {
+  if (!rowEl) return;
+  const userId = Number(rowEl.getAttribute('data-user-id'));
+  const prevRole = rowEl.getAttribute('data-current-role') || 'user';
+  const roleSelect = rowEl.querySelector('[data-field="role"]');
+  const email = _adminConfirmEmail(rowEl.querySelector('.admin-email')?.textContent) || `user #${userId}`;
+
+  if (nextRole === prevRole) return;
+
+  if (nextRole === 'admin') {
+    const ok = window.confirm(
+      `Promote ${email} to admin?\n\nThey will see Admin in their profile menu and can manage all accounts.`
+    );
+    if (!ok) {
+      if (roleSelect) roleSelect.value = prevRole;
+      return;
+    }
+  } else if (prevRole === 'admin') {
+    const ok = window.confirm(
+      `Demote ${email} to user?\n\nThey will lose Admin access immediately.`
+    );
+    if (!ok) {
+      if (roleSelect) roleSelect.value = prevRole;
+      return;
+    }
+  }
+
+  if (roleSelect) roleSelect.disabled = true;
+  _setAdminFlash(null);
+  try {
+    const data = await AdminAPI.patchUser(userId, { role: nextRole });
+    rowEl.setAttribute('data-current-role', nextRole);
+    _applyAdminRowFromUser(rowEl, data?.user);
+    _setAdminFlash('success', `${email} is now ${nextRole}`);
+    loadAdminStats();
+    const me = getStoredAuthUser();
+    if (me && Number(me.id) === userId && data?.user) {
+      applyUpdatedUser({
+        ...me,
+        ...data.user,
+        entitlements: data.user.entitlements || me.entitlements,
+      });
+    }
+  } catch (error) {
+    if (roleSelect) roleSelect.value = prevRole;
+    _setAdminFlash('error', error.message || 'Role update failed');
+    if (error?.status === 403 || error?.status === 401) await _handleAdminAccessLost();
+  } finally {
+    if (roleSelect) roleSelect.disabled = false;
+  }
+}
+
+// A blank <input type="number"> reads as '' and Number('') is 0 while
+// Number(' ') is 0 too — but the old code's Number(undefined) path produced
+// NaN, which JSON.stringify writes as null, which Pydantic reads as "field
+// omitted". The save then succeeded, changed nothing, and flashed "Updated
+// quotas". Refuse the submit instead of sending a value we cannot represent.
+function _readAdminQuota(rowEl, field, label, { min, max }) {
+  const el = rowEl.querySelector(`[data-field="${field}"]`);
+  const raw = String(el?.value ?? '').trim();
+  if (raw === '') return { error: `${label} cannot be blank` };
+  const value = Number(raw);
+  if (!Number.isInteger(value)) return { error: `${label} must be a whole number` };
+  if (value < min || value > max) {
+    return { error: `${label} must be between ${min} and ${max}` };
+  }
+  return { value };
+}
+
+// Server truth after a PATCH: push the returned row back into the inputs and
+// the data-server-* baseline. Skips any input the admin is mid-typing in
+// (same focused-element rule updateAccountPage uses) so a concurrent-save
+// repaint never stomps a keystroke.
+function _applyAdminRowFromUser(rowEl, userPayload) {
+  if (!rowEl || !userPayload) return;
+  const role = userPayload.role === 'admin' ? 'admin' : 'user';
+  rowEl.setAttribute('data-current-role', role);
+  const roleSelect = rowEl.querySelector('select[data-field="role"]');
+  if (roleSelect) roleSelect.value = role;
+  const entitlements = userPayload.entitlements;
+  if (!entitlements) return;
+  const apply = (field, attr, value) => {
+    if (value == null) return;
+    rowEl.setAttribute(attr, String(value));
+    const input = rowEl.querySelector(`[data-field="${field}"]`);
+    if (input && document.activeElement !== input) input.value = String(value);
+  };
+  apply('max_concurrent_backtests', 'data-server-max', entitlements.max_concurrent_backtests);
+  apply('credits', 'data-server-credits', entitlements.credits);
+}
+
+async function saveAdminUserRow(rowEl) {
+  if (!rowEl) return;
+  const userId = Number(rowEl.getAttribute('data-user-id'));
+  const maxField = _readAdminQuota(rowEl, 'max_concurrent_backtests', 'Max concurrent backtests', ADMIN_QUOTA_BOUNDS.max_concurrent_backtests);
+  const creditsField = _readAdminQuota(rowEl, 'credits', 'Credits', ADMIN_QUOTA_BOUNDS.credits);
+  const btn = rowEl.querySelector('[data-admin-save]');
+  const email = _adminConfirmEmail(rowEl.querySelector('.admin-email')?.textContent) || `user #${userId}`;
+  const invalid = maxField.error || creditsField.error;
+  if (invalid) {
+    _setAdminFlash('error', `${email}: ${invalid}`);
+    return;
+  }
+  // Send only what this admin changed relative to the last server-confirmed
+  // values. The backend upsert COALESCEs omitted fields, so an untouched
+  // input stays whatever the database holds now — including an edit another
+  // admin committed after this page rendered — instead of being silently
+  // reverted to this page's stale copy.
+  const patch = {};
+  if (String(maxField.value) !== rowEl.getAttribute('data-server-max')) {
+    patch.max_concurrent_backtests = maxField.value;
+  }
+  if (String(creditsField.value) !== rowEl.getAttribute('data-server-credits')) {
+    patch.credits = creditsField.value;
+  }
+  if (!Object.keys(patch).length) {
+    _setAdminFlash('success', `No quota changes for ${email}`);
+    return;
+  }
+  if (btn) btn.disabled = true;
+  _setAdminFlash(null);
+  try {
+    const data = await AdminAPI.patchUser(userId, patch);
+    _applyAdminRowFromUser(rowEl, data?.user);
+    _setAdminFlash('success', `Updated quotas for ${email}`);
+    const me = getStoredAuthUser();
+    if (me && Number(me.id) === userId && data?.user) {
+      // The PATCH response carries the fresh entitlements; spreading over the
+      // stored user keeps the avatar the admin projection omits on purpose.
+      applyUpdatedUser({
+        ...me,
+        ...data.user,
+        entitlements: data.user.entitlements || me.entitlements,
+      });
+    }
+  } catch (error) {
+    _setAdminFlash('error', error.message || 'Save failed');
+    if (error?.status === 403 || error?.status === 401) await _handleAdminAccessLost();
+  } finally {
+    if (btn) btn.disabled = false;
   }
 }
 
@@ -3581,8 +3973,23 @@ function updateAuthUI() {
   const label = document.getElementById('authUserLabel');
   const signInBtn = document.getElementById('authSignInBtn');
   const menuWrap = document.getElementById('accountMenuWrap');
+  const adminMenuBtn = document.getElementById('accountMenuAdminBtn');
   if (!signInBtn || !menuWrap) {
     return;
+  }
+
+  // Profile-dropdown only — never a primary-nav tab. Ordinary users must not
+  // see this entry at all (CSS also forces [hidden] because .account-menu-item
+  // sets display:block and otherwise overrides the UA rule).
+  const isAdmin = Boolean(user && user.role === 'admin');
+  if (adminMenuBtn) {
+    // [hidden] alone is enough: styles.css's .account-menu-item[hidden]
+    // !important guard exists for exactly this toggle, and a second inline
+    // display write would just hide the coupling it documents.
+    adminMenuBtn.hidden = !isAdmin;
+  }
+  if (!isAdmin && currentPage === 'admin') {
+    navigateToPage('home');
   }
 
   if (user) {
@@ -3617,8 +4024,9 @@ async function logoutUser() {
     console.warn('Logout request failed:', error.message);
   } finally {
     clearAuthState();
+    clearActiveAgentSession();
     await loadAgents();
-    if (currentPage === 'account') {
+    if (currentPage === 'account' || currentPage === 'admin') {
       navigateToPage('home');
     }
   }
@@ -3892,6 +4300,11 @@ async function refreshAuthUser() {
       console.warn('Auth session expired:', error.message);
     }
     clearAuthState();
+    // Only a 401 proves the session is really gone. A network error or a 5xx
+    // cold start must not cost the user their active agent selection.
+    if (error?.status === 401) {
+      clearActiveAgentSession();
+    }
   }
 }
 
@@ -3915,6 +4328,32 @@ function initAuthUI(options = {}) {
   document.getElementById('accountMenuAccountBtn')?.addEventListener('click', () => {
     closeAccountMenu();
     navigateToPage('account');
+  });
+  document.getElementById('accountMenuAdminBtn')?.addEventListener('click', () => {
+    closeAccountMenu();
+    navigateToPage('admin');
+  });
+  document.getElementById('adminRefreshBtn')?.addEventListener('click', () => {
+    loadAdminStats();
+    loadAdminUsers();
+  });
+  document.getElementById('adminPrevBtn')?.addEventListener('click', () => {
+    loadAdminUsers({ offset: adminUsersPage.offset - adminUsersPage.limit });
+  });
+  document.getElementById('adminNextBtn')?.addEventListener('click', () => {
+    loadAdminUsers({ offset: adminUsersPage.offset + adminUsersPage.limit });
+  });
+  document.getElementById('adminUsersBody')?.addEventListener('click', (event) => {
+    const btn = event.target.closest('[data-admin-save]');
+    if (!btn) return;
+    saveAdminUserRow(btn.closest('tr'));
+  });
+  // Role changes save immediately (SaaS members-table pattern). Quotas still
+  // use the row Save button so typing a number does not fire mid-edit.
+  document.getElementById('adminUsersBody')?.addEventListener('change', (event) => {
+    const select = event.target.closest('select[data-field="role"]');
+    if (!select) return;
+    saveAdminUserRole(select.closest('tr'), select.value);
   });
   document.getElementById('accountMenuLogoutBtn')?.addEventListener('click', () => {
     closeAccountMenu();
@@ -6200,6 +6639,10 @@ function formatOrderExecutionReason(reason, strategyReason = '') {
         insufficient_cash: 'Insufficient cash',
         t1_frozen: 'T+1 frozen',
         insufficient_position: 'Insufficient position',
+        suspended: 'Suspended',
+        limit_up_buy_blocked: 'Buy blocked at upper limit',
+        limit_down_sell_blocked: 'Sell blocked at lower limit',
+        market_rule_unavailable: 'No market rule for this symbol',
     };
     const code = String(reason || '').trim();
     if (labels[code]) return labels[code];
@@ -6268,7 +6711,36 @@ function normalizeOrderRecord(record) {
         nativeTransferFee: optionalNumber(record?.native_transfer_fee),
         nativeTotalFees: optionalNumber(record?.native_total_fees),
         nativeNetCashImpact: optionalNumber(record?.native_net_cash_impact),
+        marketRuleDate: record?.market_rule_date || null,
+        marketRuleSuspended: record?.market_rule_suspended === true
+            || record?.market_rule_suspended === 1,
+        marketRuleClosingLimitState: record?.market_rule_closing_limit_state || null,
+        marketRuleOfficialClose: optionalNumber(record?.market_rule_official_close),
+        marketRuleClosingGateEffective:
+            record?.market_rule_closing_gate_effective === true
+            || record?.market_rule_closing_gate_effective === 1,
     };
+}
+
+// Only rows a rule actually spoke to. An ordinary fill on an ordinary day
+// carries the same audit payload as a blocked one, so rendering whenever the
+// official close is present puts a date-and-price line under every single
+// A-share order and buries the handful that mean something.
+function renderMarketRuleAudit(order) {
+    if (!order.marketRuleDate) return '';
+    const details = [];
+    if (order.marketRuleSuspended) {
+        details.push('Official status: suspended');
+    } else if (order.marketRuleClosingLimitState
+        && order.marketRuleClosingLimitState !== 'none') {
+        const side = order.marketRuleClosingLimitState === 'upper' ? 'upper' : 'lower';
+        details.push(`Official close: ${side} limit`);
+    }
+    if (!details.length) return '';
+    if (Number.isFinite(order.marketRuleOfficialClose)) {
+        details.push(`¥${order.marketRuleOfficialClose.toFixed(2)}`);
+    }
+    return `<div class="trading-log-native">${escapeHtml(order.marketRuleDate)} · ${escapeHtml(details.join(' · '))}</div>`;
 }
 
 function formatTradingMoney(value, symbol) {
@@ -6373,6 +6845,7 @@ function paintTradingLog(normalizedRecords, options) {
         const assetName = resolveTradingAssetName(order.symbol);
         const quantity = `${order.executedShares.toLocaleString('en-US')} / ${order.requestedShares.toLocaleString('en-US')} shares`;
         const reason = formatOrderExecutionReason(order.reason, order.strategyReason);
+        const marketRuleAudit = renderMarketRuleAudit(order);
         // A rejection the agent re-issued on every bar of a day is stored once,
         // with its tally. Showing the tally is the difference between "this
         // blocked one order" and "this blocked the strategy all day".
@@ -6387,7 +6860,7 @@ function paintTradingLog(normalizedRecords, options) {
             <td>$${order.price.toFixed(2)}${priceAudit}</td>
             <td class="trading-log-value">${order.executedShares > 0 ? `${formatTradingMoney(order.value, '$')}${valueAudit}${costAudit}` : '--'}</td>
             <td><span class="order-status order-status-${order.status}" title="Order status: ${statusLabel}" aria-label="Order status: ${statusLabel}">${statusLabel}</span></td>
-            <td class="trading-log-reason">${escapeHtml(reason)}${repeatNote}</td>
+            <td class="trading-log-reason">${escapeHtml(reason)}${marketRuleAudit}${repeatNote}</td>
         </tr>`;
     }).join('');
 
@@ -6545,7 +7018,12 @@ function formatTransactionCostTotals(totals) {
 
 function renderBacktestRunConfig(
     run,
-    { running = false, launchConfig = null, statusLabel = null } = {},
+    {
+        running = false,
+        launchConfig = null,
+        statusLabel = null,
+        baselineRun = null,
+    } = {},
 ) {
     const empty = document.getElementById('backtestConfigEmpty');
     const list = document.getElementById('backtestConfigList');
@@ -6581,6 +7059,18 @@ function renderBacktestRunConfig(
         ?? run?.transaction_cost_profile;
     const transactionCostTotals = metadata.transaction_cost_totals
         ?? run?.transaction_cost_totals;
+    const marketRuleProfile = metadata.market_rule_profile
+        ?? run?.market_rule_profile;
+    const marketRuleRejections = metadata.market_rule_rejections
+        ?? run?.market_rule_rejections;
+    const baselineMetadata = baselineRun?.metadata
+        && typeof baselineRun.metadata === 'object'
+        ? baselineRun.metadata
+        : {};
+    const baselineAllocation = baselineMetadata.baseline_allocation
+        ?? baselineRun?.baseline_allocation
+        ?? metadata.baseline_allocation
+        ?? run?.baseline_allocation;
     // Absent (older runs) reads as applied; only an explicit false marks a
     // curve that carries the market's cost rules without ever paying them.
     const transactionCostsApplied = (metadata.transaction_costs_applied
@@ -6669,6 +7159,37 @@ function renderBacktestRunConfig(
             transactionCostsApplied
                 ? formatTransactionCostTotals(transactionCostTotals)
                 : 'Not applicable — reference price curve',
+        );
+    }
+    const showMarketRules = marketRuleProfile?.enabled === true;
+    const marketRulesRow = document.getElementById('backtestConfigMarketRulesRow');
+    if (marketRulesRow) marketRulesRow.hidden = !showMarketRules;
+    if (showMarketRules) {
+        setBacktestConfigText('backtestConfigMarketRules', 'Enabled');
+    }
+    const rejectionLabels = {
+        suspended: 'Suspended',
+        limit_up_buy_blocked: 'Upper-limit buys',
+        limit_down_sell_blocked: 'Lower-limit sells',
+        market_rule_unavailable: 'Missing rule',
+    };
+    const ruleRejectionParts = Object.entries(marketRuleRejections || {})
+        .filter(([, count]) => Number(count) > 0)
+        .map(([reason, count]) => `${rejectionLabels[reason] || reason} ${Number(count)}`);
+    const ruleRejectionsRow = document.getElementById('backtestConfigRuleRejectionsRow');
+    if (ruleRejectionsRow) ruleRejectionsRow.hidden = ruleRejectionParts.length === 0;
+    if (ruleRejectionParts.length) {
+        setBacktestConfigText('backtestConfigRuleRejections', ruleRejectionParts.join(' · '));
+    }
+    const delayed = Number(baselineAllocation?.symbols_delayed || 0);
+    const unfilled = Number(baselineAllocation?.symbols_unfilled || 0);
+    const showBaselineRules = delayed > 0 || unfilled > 0;
+    const baselineRulesRow = document.getElementById('backtestConfigBaselineRulesRow');
+    if (baselineRulesRow) baselineRulesRow.hidden = !showBaselineRules;
+    if (showBaselineRules) {
+        setBacktestConfigText(
+            'backtestConfigBaselineRules',
+            `Delayed ${delayed} · Unfilled ${unfilled}`,
         );
     }
     setBacktestConfigText('backtestConfigUniverse', universe);
@@ -7115,6 +7636,7 @@ function viewParamForNavState(state) {
     if (state.page === 'home') return 'home';
     if (state.page === 'community') return 'community';
     if (state.page === 'account') return 'account';
+    if (state.page === 'admin') return 'admin';
     if (state.page === 'playground') {
         if (state.playgroundTab === 'backtest') return 'backtest';
         if (state.playgroundTab === 'paper') return 'paper';
@@ -7476,6 +7998,15 @@ function navigateToPage(page, options = {}) {
     if (page === 'competition' && (options.competitionTab || competitionTab) === 'daily') {
         options = { ...options, competitionTab: 'leaderboard' };
     }
+    // Role-gate the admin shell in the UI too, not only its APIs: without
+    // this, anyone landing on ?view=admin saw the empty console chrome until
+    // the deferred boot /me settled — tens of seconds on a cold free-tier
+    // start. The cached role decides; a stale cached admin still gets bounced
+    // by the APIs' 403 via _handleAdminAccessLost.
+    if (page === 'admin') {
+        const authUser = getStoredAuthUser();
+        if (!authUser || authUser.role !== 'admin') page = 'home';
+    }
 
     const historyMode = options.history || 'push';
     if (historyMode === 'push') userHasNavigated = true;
@@ -7500,6 +8031,7 @@ function navigateToPage(page, options = {}) {
     const competitionView = document.getElementById('competitionView');
     const communityView = document.getElementById('communityView');
     const accountView = document.getElementById('accountView');
+    const adminView = document.getElementById('adminView');
     const backtestPanel = document.querySelector('.playground-backtest-panel')
       || document.querySelector('.main-container');
     const paperView = document.getElementById('paperTradingView');
@@ -7515,6 +8047,7 @@ function navigateToPage(page, options = {}) {
     hide(competitionView);
     hide(communityView);
     hide(accountView);
+    hide(adminView);
     hide(backtestPanel);
     hide(paperView);
     hide(myAlgoView);
@@ -7554,6 +8087,13 @@ function navigateToPage(page, options = {}) {
             currentMode = 'account';
             if (accountView) accountView.style.display = 'block';
             updateAccountPage();
+        } else if (page === 'admin') {
+            currentMode = 'admin';
+            if (adminView) adminView.style.display = 'block';
+            // Stats load on entry and on explicit refresh — not on every
+            // pager click, which only changes the user page.
+            loadAdminStats();
+            loadAdminUsers();
         }
     }
 
@@ -8054,9 +8594,14 @@ async function loadData() {
             }
 
             localStorage.setItem(SELECTED_BACKTEST_RUN_KEY, selectedRun.run_id);
+            const baselineIds = resolveBaselinesForRun(selectedRun, sessionRuns);
+            const selectedBuyholdRun = sessionRuns.find(
+                run => run.run_id === baselineIds.buyhold,
+            ) || null;
             renderBacktestRunConfig(selectedRun, {
                 running: false,
                 launchConfig: getBacktestLaunchConfig(selectedRun.run_id),
+                baselineRun: selectedBuyholdRun,
             });
 
             const chartUrl = `${API_BASE}/api/backtest/${encodeURIComponent(selectedRun.run_id)}/chart-data?t=${Date.now()}`;
@@ -8089,6 +8634,14 @@ function initializeCharts() {
     if (!backtestChartData || !backtestChartData.series || !backtestChartData.series.length) {
         console.warn('No backtest chart data available');
         return;
+    }
+
+    // Missing index benchmarks are only visible as *fewer lines*, which reads as
+    // "this agent has no benchmark". Say which it is. Older payloads omit the
+    // flag entirely, so only an explicit false shows the notice.
+    const baselineNotice = document.getElementById('chartBaselineNotice');
+    if (baselineNotice) {
+        baselineNotice.hidden = backtestChartData.index_baselines_ok !== false;
     }
 
     const perfCtx = document.getElementById('performanceChart');

@@ -21,6 +21,120 @@ def _slice(source: str, start: str, end: str) -> str:
     return source[start_index:end_index]
 
 
+def _analyst_metadata_records() -> list[tuple[str, str, str]]:
+    metadata = _slice(
+        _EDITOR_JS,
+        "const AI_HEDGE_FUND_ANALYSTS = [",
+        "];",
+    )
+    return re.findall(
+        r"\{\s*id: '([^']+)',\s*label: '([^']+)',\s*"
+        r"description: '([^']+)',\s*\}",
+        metadata,
+    )
+
+
+def test_every_selectable_analyst_has_a_concise_description():
+    records = _analyst_metadata_records()
+    expected_ids_and_labels = [
+        ("aswath_damodaran", "Aswath Damodaran"),
+        ("ben_graham", "Ben Graham"),
+        ("bill_ackman", "Bill Ackman"),
+        ("cathie_wood", "Cathie Wood"),
+        ("charlie_munger", "Charlie Munger"),
+        ("michael_burry", "Michael Burry"),
+        ("mohnish_pabrai", "Mohnish Pabrai"),
+        ("nassim_taleb", "Nassim Taleb"),
+        ("peter_lynch", "Peter Lynch"),
+        ("phil_fisher", "Phil Fisher"),
+        ("rakesh_jhunjhunwala", "Rakesh Jhunjhunwala"),
+        ("stanley_druckenmiller", "Stanley Druckenmiller"),
+        ("warren_buffett", "Warren Buffett"),
+        ("technical_analyst", "Technical"),
+        ("fundamentals_analyst", "Fundamentals"),
+        ("growth_analyst", "Growth"),
+        ("news_sentiment_analyst", "News Sentiment"),
+        ("sentiment_analyst", "Sentiment"),
+        ("valuation_analyst", "Valuation"),
+    ]
+
+    assert [(analyst_id, label) for analyst_id, label, _ in records] == (
+        expected_ids_and_labels
+    )
+    for _, _, description in records:
+        assert description == description.strip()
+        assert description
+        assert len(description.split()) <= 30
+        assert description[-1] in ".!?"
+
+
+def test_analyst_tooltips_support_pointer_and_keyboard_users():
+    renderer = _slice(
+        _EDITOR_JS,
+        "function renderAiHedgeFundAnalysts(agent)",
+        "function selectedAiHedgeFundAnalysts()",
+    )
+
+    assert 'value="${escapeHtml(id)}"' in renderer
+    assert 'aria-labelledby="${escapeHtml(labelId)}"' in renderer
+    assert 'aria-describedby="${escapeHtml(tooltipId)}"' in renderer
+    assert 'role="tooltip"' in renderer
+    assert "${escapeHtml(description)}" in renderer
+    assert "${selected.has(id) ? 'checked' : ''}" in renderer
+    assert "option.addEventListener('mouseenter'" in renderer
+    assert "option.addEventListener('mouseleave'" in renderer
+    assert "option.addEventListener('focusin'" in renderer
+    assert "option.addEventListener('focusout'" in renderer
+
+    positioner = _slice(
+        _EDITOR_JS,
+        "function positionAiHedgeFundTooltip(option)",
+        "function renderAiHedgeFundAnalysts(agent)",
+    )
+    assert "getBoundingClientRect()" in positioner
+    assert "window.visualViewport" in positioner
+    assert "--analyst-tooltip-left" in positioner
+    assert "--analyst-tooltip-top" in positioner
+    assert "'resize'" in _EDITOR_JS
+    assert "'scroll'" in _EDITOR_JS
+
+    assert ".agent-editor-analyst-option:has(input:focus-visible)" in _STYLES_CSS
+    assert ".agent-editor-analyst-option.is-tooltip-visible" in _STYLES_CSS
+    tooltip_styles = _slice(
+        _STYLES_CSS,
+        ".agent-editor-analyst-tooltip {",
+        ".agent-editor-analyst-option.is-tooltip-visible",
+    )
+    reveal_styles = _slice(
+        _STYLES_CSS,
+        ".agent-editor-analyst-option.is-tooltip-visible",
+        "@media (prefers-reduced-motion: reduce)",
+    )
+    assert "position: fixed" in tooltip_styles
+    assert "visibility: hidden" in tooltip_styles
+    assert "pointer-events: none" in tooltip_styles
+    assert "max-width:" in tooltip_styles
+    assert "overflow-wrap: anywhere" in tooltip_styles
+    assert "opacity: 1" in reveal_styles
+    assert "visibility: visible" in reveal_styles
+
+
+def test_analyst_tooltips_do_not_change_runtime_config_submission():
+    selected = _slice(
+        _EDITOR_JS,
+        "function selectedAiHedgeFundAnalysts()",
+        "function setFinancialDatasetsStatus",
+    )
+    editor_state = _slice(
+        _EDITOR_JS,
+        "function getEditorState()",
+        "function snapshotState()",
+    )
+
+    assert ').map((input) => input.value);' in selected
+    assert "? { analysts: selectedAiHedgeFundAnalysts() }" in editor_state
+
+
 def test_hosted_editor_replaces_model_picker_with_managed_metadata():
     assert 'id="agentEditorModelField"' in _APP_HTML
     assert 'id="agentEditorManagedModelField"' in _APP_HTML
@@ -154,5 +268,5 @@ def test_editor_asset_cache_bust_advances_with_its_source():
     editor_version = int(re.search(r"js/agent-editor\.js\?v=(\d+)", _APP_HTML).group(1))
     styles_version = int(re.search(r"styles\.css\?v=(\d+)", _APP_HTML).group(1))
 
-    assert editor_version >= 17
-    assert styles_version >= 71
+    assert editor_version >= 27
+    assert styles_version >= 87

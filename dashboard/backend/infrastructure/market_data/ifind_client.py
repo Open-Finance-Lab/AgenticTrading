@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "https://quantapi.51ifind.com"
 HIGH_FREQUENCY_ENDPOINT = "/api/v1/high_frequency"
 HISTORY_QUOTATION_ENDPOINT = "/api/v1/cmd_history_quotation"
+BASIC_DATA_ENDPOINT = "/api/v1/basic_data_service"
 DEFAULT_TIMEOUT = (3.0, 20.0)
 _RETRY_DELAYS = (0.5, 1.0)
 # Honour a server-supplied Retry-After, but never park a backtest thread on an
@@ -155,6 +156,51 @@ class IFindHttpClient:
             normalized_symbols,
             start,
             end,
+            payload,
+        )
+
+    def fetch_daily_market_rules(
+        self,
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+    ) -> Mapping[str, object]:
+        """Fetch official daily status, closing limit state, and close in CNY."""
+        normalized_symbols = self._validate_request(symbols, start, end)
+        payload = self._build_daily_market_rules_payload(
+            normalized_symbols, start, end
+        )
+        return self._request_json(
+            HISTORY_QUOTATION_ENDPOINT,
+            normalized_symbols,
+            start,
+            end,
+            payload,
+        )
+
+    def fetch_basic_market_status(
+        self,
+        symbols: Sequence[str],
+        trading_date: date,
+    ) -> Mapping[str, object]:
+        """Fetch official same-date status supplements for blank history rows."""
+        if isinstance(symbols, (str, bytes)):
+            raise IFindRequestError("symbols must be a non-empty sequence")
+        if any(not isinstance(symbol, str) for symbol in symbols):
+            raise IFindRequestError("symbols must contain only strings")
+        normalized_symbols = tuple(symbol.strip() for symbol in symbols)
+        if not normalized_symbols or any(not symbol for symbol in normalized_symbols):
+            raise IFindRequestError("symbols must be a non-empty sequence")
+        if not isinstance(trading_date, date):
+            raise IFindRequestError("trading_date must be a date value")
+        payload = self._build_basic_market_status_payload(
+            normalized_symbols, trading_date
+        )
+        return self._request_json(
+            BASIC_DATA_ENDPOINT,
+            normalized_symbols,
+            trading_date,
+            trading_date + timedelta(days=1),
             payload,
         )
 
@@ -319,7 +365,7 @@ class IFindHttpClient:
             "endtime": f"{effective_last_day.isoformat()} 15:00:00",
             "functionpara": {
                 "Interval": "60",
-                "CPS": "forward1",
+                "CPS": "no",
                 "Timeformat": "LocalTime",
                 "Limitstart": "09:30:00",
                 "Limitend": "15:00:00",
@@ -345,6 +391,49 @@ class IFindHttpClient:
                 "Currency": currency,
                 "Fill": "Blank",
             },
+        }
+
+    @staticmethod
+    def _build_daily_market_rules_payload(
+        symbols: Sequence[str],
+        start: date,
+        end: date,
+    ) -> dict[str, object]:
+        effective_last_day = end - timedelta(days=1)
+        return {
+            "codes": ",".join(symbols),
+            "indicators": (
+                "close,ths_trading_status_stock,"
+                "ths_up_and_down_status_stock"
+            ),
+            "startdate": start.isoformat(),
+            "enddate": effective_last_day.isoformat(),
+            "functionpara": {
+                "Interval": "D",
+                "CPS": "1",
+                "Currency": "RMB",
+                "Fill": "Blank",
+            },
+        }
+
+    @staticmethod
+    def _build_basic_market_status_payload(
+        symbols: Sequence[str],
+        trading_date: date,
+    ) -> dict[str, object]:
+        date_value = trading_date.isoformat()
+        return {
+            "codes": ",".join(symbols),
+            "indipara": [
+                {
+                    "indicator": "ths_trading_status_stock",
+                    "indiparams": [date_value],
+                },
+                {
+                    "indicator": "ths_up_and_down_status_stock",
+                    "indiparams": [date_value],
+                },
+            ],
         }
 
     @staticmethod

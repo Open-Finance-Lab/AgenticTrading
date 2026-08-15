@@ -16,6 +16,10 @@ import pytest
 from dashboard.backend.domain.backtesting import engine as engine_module
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 from dashboard.backend.domain.backtesting.currency import CurrencyContext
+from dashboard.backend.domain.backtesting.market_rules import (
+    DailyMarketRule,
+    MarketRuleCalendar,
+)
 from dashboard.backend.infrastructure.llm import backtest_harness as llm_harness
 from dashboard.backend.infrastructure.market_data.profiles import (
     ALPACA,
@@ -44,6 +48,7 @@ class RecordingProvider:
         self.bars = bars
         self.calls = []
         self.fx_calls = []
+        self.rule_calls = []
 
     def fetch_bars(self, symbols, start, end):
         self.calls.append((symbols, start, end))
@@ -55,6 +60,35 @@ class RecordingProvider:
             datetime(2026, 3, 31).date(): 7.0,
             datetime(2026, 4, 15).date(): 7.1,
         }
+
+    def fetch_market_rules(self, symbols, start, end, *, bars_by_symbol):
+        self.rule_calls.append((symbols, start, end, bars_by_symbol))
+        rules = []
+        required_dates = sorted({
+            timestamp.date()
+            for frame in bars_by_symbol.values()
+            for timestamp in frame.index
+        })
+        for symbol in symbols:
+            frame = bars_by_symbol[symbol]
+            for trading_date in required_dates:
+                daily = frame[frame.index.date == trading_date]
+                if daily.empty:
+                    rules.append(DailyMarketRule(
+                        symbol=symbol,
+                        trading_date=trading_date,
+                        suspended=True,
+                    ))
+                    continue
+                final_bar = daily.index[-1].to_pydatetime()
+                rules.append(DailyMarketRule(
+                    symbol=symbol,
+                    trading_date=trading_date,
+                    suspended=False,
+                    official_close_price=daily.iloc[-1]["close"],
+                    final_bar_timestamp=final_bar,
+                ))
+        return MarketRuleCalendar(rules)
 
 
 class RecordingDB:
@@ -161,6 +195,56 @@ def test_order_event_serializer_converts_currency_and_preserves_fractional_reque
         "fx_rate": 7.0,
     }]
     json.dumps(serialized)
+
+
+def test_serializers_preserve_market_rule_audit_in_native_cny():
+    backtester = object.__new__(HourlyBacktester)
+    backtester.currency_context = CurrencyContext(
+        native_currency="CNY",
+        reporting_currency="USD",
+        timezone="Asia/Shanghai",
+        rates={datetime(2026, 4, 1).date(): 7.0},
+    )
+    timestamp = pd.Timestamp("2026-04-01T15:00:00", tz=CN)
+    audit = {
+        "market_rule_date": "2026-04-01",
+        "market_rule_suspended": False,
+        "market_rule_closing_limit_state": "upper",
+        "market_rule_official_close": 1_400.0,
+        "market_rule_closing_gate_effective": True,
+    }
+
+    trade = backtester._serialize_trades([{
+        "timestamp": timestamp,
+        "symbol": "600519.SH",
+        "side": "SELL",
+        "shares": 100,
+        "price": 1_400.0,
+        "proceeds": 140_000.0,
+        **audit,
+    }])[0]
+    event = backtester._serialize_order_events([{
+        "timestamp": timestamp,
+        "symbol": "600519.SH",
+        "side": "BUY",
+        "requested_shares": 100,
+        "executed_shares": 0,
+        "unfilled_shares": 100,
+        "price": 1_400.0,
+        "executed_value": 0,
+        "status": "rejected",
+        "reason": "limit_up_buy_blocked",
+        **audit,
+    }])[0]
+
+    for record in (trade, event):
+        assert record["market_rule_date"] == "2026-04-01"
+        assert record["market_rule_closing_limit_state"] == "upper"
+        assert record["market_rule_official_close"] == 1_400.0
+        assert record["market_rule_closing_gate_effective"] is True
+    assert trade["price"] == 200.0
+    assert event["price"] == 200.0
+    json.dumps([trade, event])
 
 
 def test_live_progress_keeps_bounded_order_event_tail(tmp_path):
@@ -369,7 +453,14 @@ def test_ifind_engine_uses_profile_symbols_in_explicit_rule_mode(monkeypatch):
         # An agent run executes through the cost path, so it did pay. The flag
         # separates the market's rule from this run's ledger — see the index
         # baseline, which carries the same profile with this set False.
-        "transaction_costs_applied": True,
+            "transaction_costs_applied": True,
+            "market_rule_profile": {
+                "enabled": True,
+                "source": "ifind_http",
+                "version": "ifind-ashare-closing-rules-v1",
+                "observations": 90,
+                "scope": "full_day_suspension_and_closing_limits",
+            },
         # No rejected_orders* keys at all: a clean run writes nothing rather
         # than an empty array on every A-share row.
     }
@@ -439,6 +530,13 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
         # Bare _run_metadata() is the provenance-only call the index baseline
         # makes; it advertises the market's cost rules without charging them.
         "transaction_costs_applied": False,
+        "market_rule_profile": {
+            "enabled": True,
+            "source": "ifind_http",
+            "version": "ifind-ashare-closing-rules-v1",
+            "observations": 300,
+            "scope": "full_day_suspension_and_closing_limits",
+        },
     }
 
 
@@ -753,9 +851,19 @@ def test_provider_without_fx_capability_is_named_not_blamed_on_credentials(monke
 
         def __init__(self, bars):
             self.bars = bars
+            self.rule_calls = []
 
         def fetch_bars(self, symbols, start, end):
             return {symbol: self.bars[symbol] for symbol in symbols}
+
+        def fetch_market_rules(self, symbols, start, end, *, bars_by_symbol):
+            return RecordingProvider.fetch_market_rules(
+                self,
+                symbols,
+                start,
+                end,
+                bars_by_symbol=bars_by_symbol,
+            )
 
     backtester = _ifind_backtester(monkeypatch, NoFxProvider(make_cn_bars()))
 
@@ -846,6 +954,24 @@ def test_agent_metadata_keeps_a_small_rejection_list_whole(monkeypatch):
     assert meta["rejected_orders"] == records
     assert meta["rejected_orders_count"] == 3
     assert "rejected_orders_truncated" not in meta
+
+
+def test_agent_metadata_counts_market_rule_rejections(monkeypatch):
+    records = [
+        {"reason": "suspended"},
+        {"reason": "suspended"},
+        {"reason": "limit_up_buy_blocked"},
+        {"reason": "limit_down_sell_blocked"},
+        {"reason": "t1_frozen"},
+    ]
+
+    meta = _metadata_stub(records, monkeypatch)
+
+    assert meta["market_rule_rejections"] == {
+        "suspended": 2,
+        "limit_up_buy_blocked": 1,
+        "limit_down_sell_blocked": 1,
+    }
 
 
 def test_agent_metadata_caps_the_sample_and_reports_the_true_total(monkeypatch):

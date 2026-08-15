@@ -515,6 +515,189 @@ def test_update_email_conflict_postgres(temp_postgres_store):
         store.update_email(user["id"], "pgtaken@example.com")
 
 
+@pg_only
+def test_entitlements_upsert_partial_patch_postgres(temp_postgres_store):
+    """The ``::integer`` casts + COALESCE merge, against real Postgres.
+
+    The whole local suite runs on SQLite, so psycopg's None -> OID-0 trap
+    (Postgres refuses an untyped NULL inside COALESCE) is invisible anywhere
+    but this tier — removing a cast passes every other test and 500s in prod.
+    """
+    store = temp_postgres_store
+    user = store.create_user("pgent@example.com", "PG Ent", "securepass1")
+
+    import dashboard.backend.users as users_module
+
+    assert (
+        store.get_entitlements(user["id"])["max_concurrent_backtests"]
+        == users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS
+    )
+
+    first = store.set_entitlements(
+        user["id"], max_concurrent_backtests=7, credits=250
+    )
+    assert first["max_concurrent_backtests"] == 7
+    assert first["credits"] == 250
+
+    # Partial patch: the omitted field must ride COALESCE, not a stale read.
+    only_credits = store.set_entitlements(user["id"], credits=999)
+    assert only_credits["credits"] == 999
+    assert only_credits["max_concurrent_backtests"] == 7
+
+
+@pg_only
+def test_entitlements_missing_user_is_user_not_found_postgres(temp_postgres_store):
+    """The enforced FK is the existence check on this twin; its violation
+    must surface as user_not_found (the SQLite twin's answer), not a 500."""
+    store = temp_postgres_store
+    with pytest.raises(ValueError, match="user_not_found"):
+        store.set_entitlements(999_999, credits=5)
+
+
+@pg_only
+def test_credit_spend_and_refund_postgres(temp_postgres_store):
+    """The credit ledger against real Postgres.
+
+    Every parameter in these three statements is cast ``::integer``, and the
+    seed is the reason: ``INSERT ... SELECT $1`` resolves parameter types from
+    the SELECT alone, without the insert target's columns, so an uncast
+    parameter is a hard 42P08 on the very first spend. LEAST()'s polymorphism
+    is the same trap in the refund. The SQLite twin runs all three clean
+    either way, so dropping a cast reddens nothing outside this tier and 500s
+    every metered backtest in prod.
+    """
+    import dashboard.backend.users as users_module
+
+    store = temp_postgres_store
+    user = store.create_user("pgcredit@example.com", "PG Credit", "securepass1")
+
+    # Seeds the defaults, then debits — the INSERT ... SELECT path.
+    assert store.try_spend_credits(user["id"]) == users_module.DEFAULT_CREDITS - 1
+    # Second spend takes the ON CONFLICT DO NOTHING path instead.
+    assert store.try_spend_credits(user["id"]) == users_module.DEFAULT_CREDITS - 2
+
+    # A metered spend is not an admin edit.
+    ent = store.get_entitlements(user["id"])
+    assert ent["updated_at"] is None
+    assert ent["updated_by_admin_id"] is None
+
+    store.set_entitlements(user["id"], credits=1, updated_by_admin_id=user["id"])
+    assert store.try_spend_credits(user["id"]) == 0
+    assert store.try_spend_credits(user["id"]) is None
+
+    assert store.refund_credits(user["id"]) == 1
+    store.set_entitlements(user["id"], credits=users_module.MAX_CREDITS_CAP)
+    assert store.refund_credits(user["id"]) == users_module.MAX_CREDITS_CAP
+
+
+@pg_only
+def test_credit_spend_for_missing_user_postgres(temp_postgres_store):
+    """The seed selects from ``users``, so it inserts nothing rather than
+    tripping the FK — a refusal, not the user_not_found that ``set_entitlements``
+    raises. Both twins answer the same way for the same reason."""
+    store = temp_postgres_store
+    assert store.try_spend_credits(999_999) is None
+    assert store.refund_credits(999_999) is None
+
+
+@pg_only
+def test_apply_admin_patch_atomic_postgres(temp_postgres_store):
+    store = temp_postgres_store
+    admin = store.create_user("pgboss@example.com", "PG Boss", "securepass1")
+    store.apply_admin_patch(admin["id"], role="admin")
+    target = store.create_user("pgmember@example.com", "PG Member", "securepass1")
+
+    updated = store.apply_admin_patch(
+        target["id"],
+        role="admin",
+        max_concurrent_backtests=4,
+        credits=12,
+        updated_by_admin_id=admin["id"],
+    )
+    assert updated["role"] == "admin"
+    assert updated["entitlements"]["max_concurrent_backtests"] == 4
+    assert updated["entitlements"]["credits"] == 12
+
+    demoted = store.apply_admin_patch(target["id"], role="user")
+    assert demoted["role"] == "user"
+    # Last-admin guard, serialized by the advisory lock.
+    with pytest.raises(ValueError, match="last_admin"):
+        store.apply_admin_patch(admin["id"], role="user")
+
+
+@pg_only
+def test_admin_counts_and_listing_postgres(temp_postgres_store):
+    store = temp_postgres_store
+    first = store.create_user("pgc1@example.com", "C1", "securepass1")
+    store.create_user("pgc2@example.com", "C2", "securepass1")
+    store.apply_admin_patch(first["id"], role="admin")
+
+    assert store.count_users_and_admins() == {"users": 2, "admins": 1}
+
+    listed = store.list_users_admin()
+    by_email = {row["email"]: row for row in listed}
+    assert set(by_email) == {"pgc1@example.com", "pgc2@example.com"}
+    # No entitlements row yet -> defaults from the LEFT JOIN miss.
+    import dashboard.backend.users as users_module
+
+    assert (
+        by_email["pgc2@example.com"]["entitlements"]["max_concurrent_backtests"]
+        == users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS
+    )
+    assert "avatar" not in by_email["pgc1@example.com"]
+
+
+@pg_only
+def test_promote_first_admin_is_one_shot_postgres(temp_postgres_store):
+    """Prod's copy of the bootstrap predicate, which had no test at all.
+
+    ``promote_first_admin`` appeared zero times in this file: the one-shot
+    guard — the thing standing between "no admin yet" and "anyone with the
+    secret is admin" — was only ever exercised on SQLite, while every
+    deployment with USERS_DATABASE_URL set runs this twin. The twin-parity
+    guard cannot cover it either: it compares method names and signatures, and
+    never reads a WHERE clause.
+    """
+    store = temp_postgres_store
+    first = store.create_user("pgboot1@example.com", "Boot One", "securepass1")
+    second = store.create_user("pgboot2@example.com", "Boot Two", "securepass1")
+
+    promoted = store.promote_first_admin(first["id"])
+    assert promoted["role"] == "admin"
+    assert store.get_user_by_id(first["id"])["role"] == "admin"
+
+    # Inert the moment ANY admin exists — including for the caller who already
+    # used it, whose retry must not silently succeed a second time.
+    with pytest.raises(ValueError, match="admin_exists"):
+        store.promote_first_admin(second["id"])
+    with pytest.raises(ValueError, match="admin_exists"):
+        store.promote_first_admin(first["id"])
+    assert store.get_user_by_id(second["id"])["role"] == "user"
+    assert store.count_users_and_admins()["admins"] == 1
+
+
+@pg_only
+def test_promote_first_admin_unknown_user_postgres(temp_postgres_store):
+    """No admin exists, so the one-shot check passes and the UPDATE matches
+    nothing — that has to be user_not_found, not a silent success."""
+    store = temp_postgres_store
+    with pytest.raises(ValueError, match="user_not_found"):
+        store.promote_first_admin(999_999)
+    assert store.count_users_and_admins()["admins"] == 0
+
+
+@pg_only
+def test_zero_quota_round_trips_postgres(temp_postgres_store):
+    """0 is the suspend value; ``COALESCE(%s::integer, …)`` must not read it
+    as "field omitted" and restore the previous quota."""
+    store = temp_postgres_store
+    user = store.create_user("pgzero@example.com", "PG Zero", "securepass1")
+    store.set_entitlements(user["id"], max_concurrent_backtests=7)
+    zeroed = store.set_entitlements(user["id"], max_concurrent_backtests=0)
+    assert zeroed["max_concurrent_backtests"] == 0
+    assert store.get_entitlements(user["id"])["max_concurrent_backtests"] == 0
+
+
 def test_store_twins_expose_the_same_public_surface():
     """A method in one twin and not the other is a prod-only crash.
 
