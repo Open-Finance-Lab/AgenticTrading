@@ -600,43 +600,32 @@ function navigateToLiveBoard() {
 
 
 
-function initLandingPlaygroundChat() {
-    const root = document.getElementById('homePlaygroundChat');
-    if (!root || root.dataset.simStarted === '1') return;
-    root.dataset.simStarted = '1';
-
-    const steps = Array.from(root.querySelectorAll('.home-chat-step'));
-    let step = 0;
-    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-
-    function revealThrough(n) {
-        steps.forEach((el) => {
-            const s = Number(el.dataset.step || 0);
-            if (s <= n) el.hidden = false;
-        });
-        root.dataset.step = String(n);
-        // Keep latest agent bubble in view as steps advance.
-        const latest = steps.find((el) => Number(el.dataset.step || 0) === n);
-        if (latest && typeof latest.scrollIntoView === 'function') {
-            latest.scrollIntoView({ block: 'nearest', behavior: reduceMotion ? 'auto' : 'smooth' });
-        }
-    }
-
-    if (reduceMotion) {
-        revealThrough(4);
-        return;
-    }
-
-    revealThrough(0);
-    const timer = setInterval(() => {
-        step += 1;
-        revealThrough(step);
-        if (step >= 4) clearInterval(timer);
-    }, 2200);
+/**
+ * Home screen 0's primary CTA reads differently depending on who is looking.
+ *
+ * The button used to say "Get Started" to everyone, including people who were
+ * already signed in and had agents — a marketing funnel shown to someone past
+ * the end of the funnel. The two labels live on the element as data attributes
+ * so the HTML stays the single source for copy.
+ */
+function syncHomeGetStartedLabel() {
+    const btn = document.getElementById('homeGetStartedBtn');
+    if (!btn) return;
+    const label = isHomeSignedIn()
+        ? btn.dataset.labelSignedIn
+        : btn.dataset.labelSignedOut;
+    if (label) btn.textContent = label;
 }
 
 function initHomeGetStarted() {
+    syncHomeGetStartedLabel();
     document.getElementById('homeGetStartedBtn')?.addEventListener('click', () => {
+        if (!isHomeSignedIn()) {
+            if (typeof openAuthModal === 'function') {
+                openAuthModal('signup');
+                return;
+            }
+        }
         if (typeof navigateToPage === 'function') {
             navigateToPage('playground', { playgroundTab: 'agents' });
             return;
@@ -1467,9 +1456,14 @@ async function loadHomeLeaderboardModule() {
     // on the board yet" are different facts, and the second is an ordinary live
     // state — baselines compute on first load and models deploy after — so
     // reporting it as a failed request diagnoses a healthy backend as broken.
+    //
+    // Both forms still open with "Sample standings —". That prefix is the only
+    // thing distinguishing five invented returns from five real ones, and it is
+    // load-bearing now that this board is the first thing on the page rather
+    // than the third module on the second screen.
     const SAMPLE_NOTES = {
-        unreachable: 'Sample standings — live rankings could not be loaded.',
-        empty: 'Sample standings — no model has been ranked on the board yet.',
+        unreachable: 'Sample standings — the real ones are not loading right now. That is a connection problem on our side, not an empty board.',
+        empty: 'Sample standings — no AI model has finished this backtest window yet. Real results appear here as soon as the first one is in.',
     };
     function markSample(reason) {
         const note = document.getElementById('homeModuleRankSample');
@@ -1478,10 +1472,22 @@ async function loadHomeLeaderboardModule() {
         note.textContent = reason ? (SAMPLE_NOTES[reason] || SAMPLE_NOTES.unreachable) : '';
     }
 
+    // The window range used to be hardcoded in app.html. Promoted above the fold
+    // it is the first factual claim on the page, so it comes off the payload —
+    // `window.label` is `"<start> → <end>"` for the contest board
+    // (domain/leaderboard/service.py). Absent, the line stays date-free rather
+    // than printing a range nothing produced.
+    const WINDOW_BASE = 'Same backtest window for every AI model';
+    function markWindow(label) {
+        const el = document.getElementById('homeModuleRankWindow');
+        if (!el) return;
+        el.textContent = label ? `${WINDOW_BASE} · ${label}` : WINDOW_BASE;
+    }
+
     function renderEntries(entries, { sample = null } = {}) {
         markSample(sample);
         if (!entries.length) {
-            list.innerHTML = '<li class="home-module-rank-empty">No model rankings yet.</li>';
+            list.innerHTML = '<li class="home-module-rank-empty">No AI model has finished this backtest window yet.</li>';
             return;
         }
         list.innerHTML = entries.map((entry) => {
@@ -1510,6 +1516,7 @@ async function loadHomeLeaderboardModule() {
             return;
         }
         const payload = await API.get(`${API_BASE}/api/v1/leaderboard?t=${Date.now()}`);
+        markWindow(payload?.window?.label);
         const models = homeModelEntries(payload.entries || []);
 
         if (!models.length) {
@@ -1726,6 +1733,9 @@ function setHomeMarketTab(tab) {
 }
 
 function refreshHomeModules() {
+    // Sign-in can change without a reload (the in-app auth modal), and screen 0's
+    // CTA is the one control whose *text* depends on it.
+    syncHomeGetStartedLabel();
     Promise.resolve(updateHomePortfolioModule()).catch((error) => {
         console.warn('Home portfolio refresh failed:', error?.message || error);
     });
@@ -1852,7 +1862,6 @@ function initHomePage() {
         initMarketPulseTabs();
     }
     initActivityFeedHover();
-    initLandingPlaygroundChat();
     initHomeGetStarted();
     initHomeSnapScroll();
     initHomeModules();

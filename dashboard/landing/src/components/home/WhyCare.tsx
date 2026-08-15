@@ -2,8 +2,12 @@ import { MessageSquare, LineChart, Trophy, Cpu, Code2, Hash } from "lucide-react
 import { Button } from "@/components/ui/button";
 import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 
-/** Unnumbered on purpose: Talk/Test/Race below run the 01/02/03 sequence, and a
- *  second one here made the summary compete with the narrative it introduces. */
+/** Unnumbered on purpose: Talk/Test below run the numbered sequence, and a
+ *  second one here made the summary compete with the narrative it introduces.
+ *  Race lost its own number when the board moved into the hero — the board is
+ *  the first thing on the page now, so numbering it third described the wrong
+ *  page. (Do not write that number as a quoted string anywhere in this file:
+ *  test_band_runs_no_second_step_sequence greps for one.) */
 const ACTS = [
   {
     icon: MessageSquare,
@@ -18,7 +22,10 @@ const ACTS = [
   {
     icon: Trophy,
     title: "See how it ranks",
-    body: "Same window, same rules as everyone else's agents.",
+    // Not "everyone else's agents": no user agent is on any board, and the
+    // roster is curated (`dashboard/config/leaderboard.json`). The comparison
+    // that actually exists is against the AI models and the passive baselines.
+    body: "The same days and the same starting capital as every AI model on the board.",
   },
 ] as const;
 
