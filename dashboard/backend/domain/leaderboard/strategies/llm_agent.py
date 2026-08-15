@@ -79,6 +79,10 @@ class LLMAgentStrategy(BaselineStrategy):
                 "Messages API. Disable reasoning or drop temperature."
             )
         self.temperature = temperature
+        # C1: the Open Track's competing variable. Absent on the seven published
+        # Model Track entries, which must keep producing their existing curves —
+        # so blank collapses to None rather than "".
+        self.strategy_prompt = (self.config.get("strategy_prompt") or "").strip() or None
         # Populated during run() for reporting / cost tracking.
         self.llm_calls = 0
         self.llm_decisions = 0  # steps the model actually drove (H6 guard numerator)
@@ -109,6 +113,65 @@ class LLMAgentStrategy(BaselineStrategy):
                 f"Known integrations: {', '.join(KNOWN_INTEGRATIONS)}"
             )
         return client
+
+    def _run_decision_loop(
+        self,
+        client,
+        timestamps,
+        symbols,
+        data,
+        price_cache,
+        initial_capital,
+        model_id=None,
+    ):
+        """One decision per timestamp, executed against a fresh PortfolioManager.
+
+        Extracted from run() so the strategy_prompt hand-off is reachable in a
+        test without live bars or an LLM client — an untestable call site is
+        exactly where a silently-dropped keyword hides.
+        """
+        # Contest entries replay the hourly DJIA window over Alpaca bars, so the
+        # execution rules come from that profile rather than a constructor
+        # default — a leaderboard curve must never be produced under settlement
+        # semantics its market does not have.
+        profile = get_market_profile(ALPACA)
+        manager = PortfolioManager(
+            initial_capital=initial_capital,
+            t_plus_one_enabled=profile.t_plus_one_enabled,
+        )
+        model_id = model_id or self.model_id or default_model_name(self.integration)
+        total = len(timestamps)
+
+        for i, ts in enumerate(timestamps):
+            market_data = {}
+            for sym in symbols:
+                df = data.get(sym)
+                if df is not None and ts in df.index:
+                    market_data[sym] = df.loc[ts]
+
+            state = manager.get_portfolio_state(market_data, price_cache, ts)
+            state["timestamp"] = ts
+
+            if client is not None:
+                decision = manager.make_trading_decision_with_llm(
+                    state,
+                    client,
+                    mode=self.mode,
+                    model=model_id,
+                    strategy_prompt=self.strategy_prompt,
+                    temperature=self.temperature,
+                )
+            else:
+                decision = manager.make_trading_decision(state)
+
+            manager.execute_actions(decision.get("actions", []), market_data, ts)
+            manager.update_equity(market_data, price_cache, ts)
+
+            if (i + 1) % 25 == 0 or (i + 1) == total:
+                equity = manager.equity_history[-1]["equity"] if manager.equity_history else initial_capital
+                print(f"      step {i + 1}/{total} · equity ${equity:,.0f} · calls {manager.llm_calls}")
+
+        return manager
 
     def run(
         self,
@@ -145,15 +208,6 @@ class LLMAgentStrategy(BaselineStrategy):
         # rejects.
         model_id = self.model_id or default_model_name(self.integration)
 
-        # Contest entries replay the hourly DJIA window over Alpaca bars, so the
-        # execution rules come from that profile rather than a constructor
-        # default — a leaderboard curve must never be produced under settlement
-        # semantics its market does not have.
-        profile = get_market_profile(ALPACA)
-        manager = PortfolioManager(
-            initial_capital=initial_capital,
-            t_plus_one_enabled=profile.t_plus_one_enabled,
-        )
         total = len(timestamps)
         integration_label = self.integration or "auto"
         print(
@@ -162,33 +216,15 @@ class LLMAgentStrategy(BaselineStrategy):
             f"steps={total} llm={'on' if self.used_llm else 'off (rule-based)'}"
         )
 
-        for i, ts in enumerate(timestamps):
-            market_data = {}
-            for sym in symbols:
-                df = data.get(sym)
-                if df is not None and ts in df.index:
-                    market_data[sym] = df.loc[ts]
-
-            state = manager.get_portfolio_state(market_data, price_cache, ts)
-            state["timestamp"] = ts
-
-            if client is not None:
-                decision = manager.make_trading_decision_with_llm(
-                    state,
-                    client,
-                    mode=self.mode,
-                    model=model_id,
-                    temperature=self.temperature,
-                )
-            else:
-                decision = manager.make_trading_decision(state)
-
-            manager.execute_actions(decision.get("actions", []), market_data, ts)
-            manager.update_equity(market_data, price_cache, ts)
-
-            if (i + 1) % 25 == 0 or (i + 1) == total:
-                equity = manager.equity_history[-1]["equity"] if manager.equity_history else initial_capital
-                print(f"      step {i + 1}/{total} · equity ${equity:,.0f} · calls {manager.llm_calls}")
+        manager = self._run_decision_loop(
+            client=client,
+            timestamps=timestamps,
+            symbols=symbols,
+            data=data,
+            price_cache=price_cache,
+            initial_capital=initial_capital,
+            model_id=model_id,
+        )
 
         curve = manager.get_equity_curve()
         for entry in curve:
