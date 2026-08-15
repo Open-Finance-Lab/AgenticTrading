@@ -230,10 +230,11 @@ def test_default_ceiling_lets_one_account_reach_its_own_quota():
     Read from the constants rather than pinned to a literal: whichever one
     moves, this is the relationship that has to survive.
     """
-    from dashboard.backend.users import DEFAULT_MAX_CONCURRENT_BACKTESTS
+    import dashboard.backend.users as users_module
 
     assert (
-        bt._DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS >= DEFAULT_MAX_CONCURRENT_BACKTESTS
+        bt._DEFAULT_MAX_ACTIVE_DASHBOARD_BACKTESTS
+        >= users_module.DEFAULT_MAX_CONCURRENT_BACKTESTS
     )
 
 
