@@ -38,6 +38,21 @@
 >
 > **Line numbers throughout this document are as of 2026-08-09** unless a task's
 > status note gives a newer one. Re-verify before editing.
+>
+> ## Read these three before starting Phase 2
+>
+> - **`docs/superpowers/specs/2026-08-15-live-trading-leaderboard-ui.md`** — the
+>   newer board-side spec. Authoritative over the companion design doc on the
+>   boards' UI and payload contract; that doc stays authoritative on user entry.
+> - **Issue #354** — the Live Trading season engine (C8), already filed.
+> - **Issue #355** — two open design questions that **explicitly block this PR and
+>   Phase 2**: whether the qualifier gate survives now that the practice board is
+>   unranked, and what `instruction_sha256` config-freeze means for user-owned
+>   editable entries.
+>
+> **Phase 0 (Tasks 1–3) is not blocked by #355.** It measures whether instructions
+> move returns, which is upstream of every question in that issue and answers none
+> of them. It can proceed the moment the spend is approved.
 
 **Goal:** Prove that a trading instruction measurably changes a pinned LLM's backtest return, then ship a landing page whose hero is the real leaderboard showing most models losing to buy-and-hold, with a CTA inviting visitors to beat them.
 

@@ -43,6 +43,29 @@
 > files they point into have since moved (`js/leaderboard.js` alone went 1,037 →
 > 1,600 lines). Re-verify any reference before acting on it; the surrounding
 > claims were checked at reconciliation and hold.
+>
+> ### Where authority now lives
+>
+> This document is no longer the only design doc covering these boards, and on the
+> boards' own UI and payload contract it is **not** the authority:
+>
+> - **`docs/superpowers/specs/2026-08-15-live-trading-leaderboard-ui.md`** — the
+>   newer spec, written alongside #352. It owns the Live Trading UI, the proposed
+>   payload contract, the preview state and the settled data-feasibility question.
+>   Where the two documents disagree about *the boards*, that one wins. This
+>   document remains the authority on **user entry** — the attempt ledger, the
+>   submission path, integrity and spend — which that one explicitly places out of
+>   scope.
+> - **Issue #354** — build the Live Trading season engine. This is C8, already
+>   filed with the invariants and the `AGENT_RUNS_DATABASE_URL` placement. **Do not
+>   file a second issue for C8**; the §Rollout note below proposing it be split out
+>   ahead of Phase 2 is a scheduling argument to make *on #354*.
+> - **Issue #355** — the two frontier questions the 2026-08-15 grilling left open.
+>   It states outright that both **block this PR and Phase 2**: whether the
+>   qualifier gate survives now that the practice board is unranked, and whether
+>   `instruction_sha256` config-freeze means anything for user-owned, editable
+>   entries. Neither is resolved here, and neither should be resolved by inference
+>   from this document's older framing.
 
 ## Goal
 
@@ -374,8 +397,28 @@ constrain Phase 3, and three of them are guarded by tests that will fail loudly:
    `trading_days_total`. An advance engine emitting a different total will render
    a progress bar that disagrees with the chrome.
 
+#### Seasons reset — a decision made after this document and adopted here
+
+`2026-08-15-live-trading-leaderboard-ui.md`, decision 3: **every season resets.
+Entries do not carry across seasons; joining is a per-season decision.** That
+document records it as the cost control — perpetual entries would bill every
+signup ever, every night, forever.
+
+This is *compatible* with what this spec already said ("Live Trading is a slot,
+not a ledger") and makes it sharper: a slot is per-season by construction, so
+there is no carry-forward state to design and no lifetime grant to track on this
+board. Two consequences to carry into Phase 3 rather than rediscover:
+
+- The §Cost model figure of "1 entry per season" is now a *structural* property,
+  not a policy that could be relaxed. Relaxing it re-introduces the unbounded
+  nightly bill that decision 3 exists to prevent.
+- Re-entry each season is the return-visit mechanic. That partially answers the
+  watch item in §Cost model about the two-week gap — the user has to come back to
+  re-enter, which a perpetual entry would not require.
+
 **Consequence for sequencing:** C8 is currently the only thing standing between
-prod and Season 1 of a board users can already open. See §Rollout.
+prod and Season 1 of a board users can already open. Tracked as **issue #354**.
+See §Rollout.
 
 ## Season configuration
 
@@ -1047,6 +1090,9 @@ Competition attempt, so Phase 3 cannot precede Phase 2.
 > makes that shipped board real — and it needs no user entries, no attempt
 > ledger, and nothing from Phase 2 to run against the existing house roster.
 >
+> **Already filed as issue #354** — make the scheduling argument there rather
+> than opening anything new.
+>
 > **Consider splitting C8 out and landing it before Phase 2.** The gating
 > argument ("Live Trading entry requires a completed Competition attempt") is
 > about *user entry*, and C8 with a house-only roster has no users in it. Landing
@@ -1114,5 +1160,10 @@ Stated rather than left implicit; correct any that are wrong before planning.
   preview, Daily Leaderboard tab retired and its cron paused.
 - **PR #357 (`60fa01f`, merged 2026-08-15)** — leaderboard-first landing and
   `/app` home; added `BoardPreview.tsx` and the "Illustrative example" guard.
+- **`docs/superpowers/specs/2026-08-15-live-trading-leaderboard-ui.md`** — the
+  newer board-side spec; authoritative on the Live Trading UI and payload
+  contract. See "Where authority now lives" at the top of this document.
+- **Issues #354** (season engine = C8) and **#355** (qualifier gate and
+  `instruction_sha256` scope — both stated to block this PR and Phase 2).
 - Issues #145 (scheduler), #202 (event-loop blocking), #230 (`decide()` seam),
   #258 (run cancellation).
