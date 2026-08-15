@@ -4025,10 +4025,23 @@ async function logoutUser() {
   } finally {
     clearAuthState();
     clearActiveAgentSession();
-    await loadAgents();
-    if (currentPage === 'account' || currentPage === 'admin') {
-      navigateToPage('home');
-    }
+    // Signed out, home is the landing page again. index.html sends a visit
+    // carrying a cached auth-user straight to /app ("Landing is for first-time
+    // / logged-out visitors only"); this is the return trip, which was never
+    // built. Without it logout leaves the user on the signed-in shell, whose
+    // home re-renders as the "Guest Account" demo portfolio -- the screen a
+    // never-signed-in visitor gets -- so the only sign anything happened is the
+    // header swapping to "Sign in".
+    //
+    // Ordering is load-bearing: the two clears above must run first, or the
+    // landing sees a cached auth-user and bounces straight back to /app.
+    // replace() rather than href so Back cannot restore the shell just left,
+    // and it matches the verb the landing's own redirect uses.
+    //
+    // Nothing follows it: the old loadAgents() re-fetch and account/admin page
+    // hop both dressed a page that is being torn down, and awaiting a request
+    // first only delays the one action the user asked for.
+    window.location.replace('/');
   }
 }
 
