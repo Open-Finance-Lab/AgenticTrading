@@ -292,36 +292,77 @@ def test_no_landing_component_claims_brokered_or_real_capital_trading():
 def test_the_disclaimer_allowlist_is_not_stale():
     """Non-vacuity: an allowlist entry that no longer matches silently re-arms.
 
-    If Hero's wording is edited, the stale entry stops stripping anything and the
+    If the wording is edited, the stale entry stops stripping anything and the
     test above starts failing on a sentence that was always fine — which reads as
     the guard being broken and invites deleting it.
+
+    Scanned across every component rather than Hero.tsx alone. Both sentences
+    started in Hero; the second travelled to ChatSimulation.tsx when the board
+    took the hero's right column and the conversation demo moved down to the
+    Talk act. A file-scoped freshness check turns any such relocation into a
+    failure that looks like a deleted disclaimer, when the disclaimer is right
+    there one file over — and the pressure then is to drop the allowlist entry,
+    which re-arms the ban on a sentence that must keep shipping.
     """
-    hero = " ".join((_LANDING_HOME / "Hero.tsx").read_text(encoding="utf-8").split())
+    bodies = {
+        path.name: " ".join(path.read_text(encoding="utf-8").split())
+        for path in sorted(_LANDING_HOME.glob("*.tsx"))
+    }
+    assert bodies, "no landing components found — the glob is wrong"
     for disclaimer in _CLAIM_DISCLAIMERS:
-        assert disclaimer in hero, (
+        assert any(disclaimer in body for body in bodies.values()), (
             f"allowlisted disclaimer no longer ships verbatim: {disclaimer[:60]!r}…"
         )
 
 
-def test_race_puts_no_user_agent_on_the_board():
+def test_no_landing_component_puts_a_user_agent_on_the_board():
     """Board entries come from the curated `config/leaderboard.json` roster.
 
     The prose was corrected to drop "race your agent", but the illustration kept
     the story agent highlighted at rank 2 and drawn as the thickest curve — a
     picture makes the entry-flow promise more vividly than the sentence that was
     removed, and the fragment ban above only reads prose.
+
+    Scanned across every component, not Race.tsx alone. The chart and its sample
+    rows moved to BoardPreview.tsx when the board was promoted into the hero,
+    and a guard pinned to the file the drawing *used* to live in is the same
+    defect as the WhyCare-scoped paper-trading ban: it stays green while the
+    claim redraws itself next door. The whole point is that no component may
+    draw a user curve, wherever the drawing lives.
     """
     # Comments stripped first. The source explains at length *why* there is no
     # "yours" curve, and a guard that reads its own rationale as a violation is
     # the same defect one level up — it fails on the fix and passes on silence.
-    body = _BLOCK_COMMENT.sub("", _RACE_TSX.read_text(encoding="utf-8"))
-    assert "STORY_AGENT_NAME" not in body, (
-        "the storyline agent belongs to the Test run report, not to a board"
+    components = sorted(_LANDING_HOME.glob("*.tsx"))
+    assert components, "no landing components found — the glob is wrong"
+    bodies = {
+        component.name: _BLOCK_COMMENT.sub("", component.read_text(encoding="utf-8"))
+        for component in components
+    }
+
+    # The story agent is not banned page-wide — Test.tsx is its home, and a
+    # backtest run report is exactly where a named user agent belongs. What is
+    # banned is its arrival anywhere else, which is how it would reach a board.
+    # Asserting the *set* rather than per-file absence is what makes this survive
+    # the components being reorganised: a new file that names it changes the set.
+    naming_story_agent = {name for name, body in bodies.items() if "STORY_AGENT_NAME" in body}
+    assert naming_story_agent == {"Test.tsx"}, (
+        f"the storyline agent belongs to the Test run report only; found in "
+        f"{sorted(naming_story_agent)}"
     )
-    assert "yours" not in body, "no user curve on a board no user agent is on"
-    # Non-vacuity: the illustration must still draw the curated roster, or the
-    # assertions above pass on an empty chart.
-    assert "DeepSeek V4 Pro" in body and "dataKey=" in body
+
+    for name, body in bodies.items():
+        assert "yours" not in body, f"{name}: no user curve on a board no user agent is on"
+
+    # Non-vacuity, scoped to whatever actually draws the board today. Membership
+    # is derived from the shared sample rows rather than hardcoded to Race.tsx:
+    # the chart moved to BoardPreview.tsx when the board was promoted into the
+    # hero, and a filename-pinned check would have passed on the file that no
+    # longer draws anything.
+    board = {name: body for name, body in bodies.items() if "SAMPLE_STANDINGS" in body}
+    assert board, "no component renders the board sample rows"
+    corpus = "".join(board.values())
+    assert "DeepSeek V4 Pro" in corpus and "dataKey=" in corpus
 
 
 def test_race_source_and_shipped_bundle_agree():
