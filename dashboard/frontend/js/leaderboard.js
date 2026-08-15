@@ -658,6 +658,7 @@ async function loadLeaderboardData(period = 'contest') {
   if (renderedBoardPeriod !== boardPeriod) {
     leaderboardPayload = null;
     updateLeaderboardHeader({}, boardPeriod);
+    showLeaderboardTableLoading();
   }
 
   try {
@@ -1569,6 +1570,21 @@ function transformLeaderboardChartData(curveValues, viewType, initialValue) {
     return curveValues.slice();
   }
   return curveValues.map((v) => (v == null ? null : (v - base) / base));
+}
+
+/** Neutral table state for the gap between asking for a board and being given it.
+ *
+ * Deliberately not `populateLeaderboardTable()` over an empty payload: that
+ * renders "No entries in this season yet", which during a 30-60s free-tier cold
+ * start is a claim about the board nobody is in a position to make. Nor the rows
+ * already on screen — those belong to the board the user just left, and under
+ * the new board's title they read as its standings.
+ */
+function showLeaderboardTableLoading() {
+  const tbody = document.getElementById('leaderboardTableBody');
+  if (!tbody) return;
+  tbody.innerHTML =
+    '<tr><td colspan="6" style="text-align:center;padding:24px;color:var(--text-secondary);">Loading…</td></tr>';
 }
 
 function displayLeaderboardError(message) {

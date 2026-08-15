@@ -166,6 +166,19 @@ def test_the_board_identity_is_painted_before_the_request():
     assert "updateLeaderboardHeader(" in head, (
         "the board's identity must be painted before awaiting the response"
     )
+    # The table has to move with the header. Re-running the normal renderer over
+    # an empty payload prints "No entries in this season yet", which for the
+    # length of a cold start is a claim about the board nobody can make yet;
+    # leaving the previous rows re-attributes them to the board being opened.
+    assert "showLeaderboardTableLoading()" in head, (
+        "the table must show a loading state across the switch, not an emptiness "
+        "claim and not the previous board's rows"
+    )
+    loading = _fn_body("showLeaderboardTableLoading")
+    assert "No entries" not in loading and "${" not in loading, (
+        "the placeholder must be a static string: neither an emptiness claim nor "
+        "an interpolation into innerHTML"
+    )
 
 
 def test_a_failed_load_repaints_the_board_rather_than_leaving_the_last_one():
