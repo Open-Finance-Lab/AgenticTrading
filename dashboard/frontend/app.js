@@ -7643,7 +7643,7 @@ function viewParamForNavState(state) {
         return 'agents';
     }
     if (state.page === 'competition') {
-        if (state.competitionTab === 'daily') return 'daily';
+        // Daily tab is hidden; never emit ?view=daily while it is parked.
         if (state.competitionTab === 'participants') return 'participants';
         if (state.competitionTab === 'about') return 'about';
         return 'leaderboard';
@@ -7944,6 +7944,13 @@ function showPlaygroundPanel(tab) {
 }
 
 function showCompetitionPanel(tab) {
+    // Belt and braces with navigateToPage's redirect: a stray click on the
+    // hidden Daily button (or a caller that bypasses navigateToPage) must not
+    // paint the unfinished board.
+    if (tab === 'daily') {
+        tab = 'leaderboard';
+    }
+
     competitionTab = tab;
     updateCompetitionSubtabs();
 
@@ -7983,6 +7990,13 @@ function navigateToPage(page, options = {}) {
     if (page === 'playground' && (options.playgroundTab || playgroundTab) === 'marketplace') {
         page = 'community';
         options = { ...options, playgroundTab: 'agents' };
+    }
+    // Daily Leaderboard UI is parked (models not deploying reliably). Keep the
+    // backend + leaderboard.js path, but never land on the hidden subtab —
+    // including ?view=daily bookmarks and a session that still has competitionTab
+    // saved as 'daily'.
+    if (page === 'competition' && (options.competitionTab || competitionTab) === 'daily') {
+        options = { ...options, competitionTab: 'leaderboard' };
     }
     // Role-gate the admin shell in the UI too, not only its APIs: without
     // this, anyone landing on ?view=admin saw the empty console chrome until

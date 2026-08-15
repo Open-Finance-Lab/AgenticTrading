@@ -8,11 +8,17 @@ name: Daily Leaderboard refresh
 #
 # Requires repository secret LEADERBOARD_DAILY_REFRESH_SECRET matching
 # the value configured on the Render service.
+#
+# UI is temporarily hidden (Daily Leaderboard subtab parked). The nightly
+# schedule is paused until model curves deploy reliably — keep
+# workflow_dispatch so operators can still trigger a refresh by hand.
+# To re-enable: restore the `schedule:` block below and un-hide the subtab
+# in dashboard/frontend/app.html (+ the navigateToPage redirect in app.js).
 
 on:
-  schedule:
-    # 22:30 UTC Mon–Fri ≈ 18:30 EDT / 17:30 EST — after the 16:00 ET cash close.
-    - cron: "30 22 * * 1-5"
+  # schedule:
+  #   # 22:30 UTC Mon–Fri ≈ 18:30 EDT / 17:30 EST — after the 16:00 ET cash close.
+  #   - cron: "30 22 * * 1-5"
   workflow_dispatch:
     inputs:
       deploy_models:
