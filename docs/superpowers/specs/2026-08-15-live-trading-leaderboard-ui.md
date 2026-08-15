@@ -104,16 +104,29 @@ cannot explain is still a gap the reader must see.
 * **No backend.** No `live` period, no `forward_positions` table, no nightly advance
   job. When those land, `forward_positions` belongs on `AGENT_RUNS_DATABASE_URL` — the
   Render free tier has no disk, so local SQLite resets to the seed DB on every deploy.
-* **No user entries.** The board shows the same model + baseline roster as Competition.
-  Entry flow, the qualifier gate and the practice range are downstream of the unresolved
-  frontier questions above.
-* **No change to the React landing at `/`.** `dashboard/landing/src/components/home/Race.tsx`
-  renders a hardcoded sample board under the heading "Race on the live leaderboard" and
-  the line "Paper trading on live markets" — copy that is wrong twice over under this
-  design (it is simulated, not brokered, and there are no user agents on the board).
-  Fixing it requires a `vite build` plus the hand-patch recipe in `dashboard/landing/README.md`,
-  guarded by `test_frontend_bundle_integrity.py`. Filed as follow-up rather than done
-  unattended.
+* **No user entries.** The board shows the same model + baseline roster as Competition —
+  entries come from the curated `dashboard/config/leaderboard.json` roster, not from
+  submissions. Entry flow, the qualifier gate and the practice range are downstream of
+  the unresolved frontier questions above.
+
+## What the landing page had to say instead
+
+`Race.tsx` sold one "live leaderboard" you could enter: *"Race on the live leaderboard /
+Paper trading on live markets. Watch your agent climb against the community"*, over
+bullets promising live prices and rankings that "update as agents trade". Every clause
+was false — there is no user entry path, the Competition board is a fixed historical
+window, and brokered execution is a PR #328 non-goal with `paper_backend.py` a stub.
+
+Rewritten to what the app serves: **"See where the bar is"**, naming both boards, plus a
+preview note that the Live Trading Leaderboard is not ranking until Season 1. Requires a
+`vite build` and the hand-patch recipe in `dashboard/landing/README.md` (the shipped
+`frontend/index.html` keeps an inline auth layer the React bundle cannot carry).
+
+The claim survived this long because its guard was scoped one file too narrowly:
+`test_band_makes_no_paper_trading_claim` bans `paper[\s-]?trad` in `WhyCare.tsx` only,
+so the claim lived on in the neighbouring section, pinned clean the whole time. The new
+guards in `test_landing_copy_register.py` read the **shipped bundle**, so an unbuilt TSX
+edit fails rather than passing against stale text.
 
 ## Data feasibility (settled, do not re-derive)
 

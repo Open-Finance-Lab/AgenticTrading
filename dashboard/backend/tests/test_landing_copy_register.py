@@ -102,6 +102,18 @@ _BANNED_FRAGMENTS = (
     "strategy prompt",
     "Strategy prompt",
     "Pick a model",
+    # Race's pre-2026-08-15 pitch. Each of these described a product that does
+    # not exist: entries come from the curated `config/leaderboard.json` roster,
+    # so no user agent is on any board and nothing "climbs"; the Competition
+    # board is a fixed historical window, so its prices are not live and its
+    # rankings do not update; and "paper trading on live markets" reads as
+    # brokered realtime execution, which is an explicit non-goal (PR #328) with
+    # `execution/paper_backend.py` still a stub.
+    "Race on the live leaderboard",
+    "Paper trading on live markets",
+    "Rankings update as agents trade",
+    "Live market prices — no real money at risk",
+    "climb against the community",
 )
 
 
@@ -178,3 +190,58 @@ def test_auth_error_gives_a_next_step():
     text = _shipped_text()
     assert "Something went wrong. Please try again." in text
     assert not re.search(r"Something went wrong\.(?! Please try again\.)", text)
+
+
+_RACE_TSX = (
+    Path(__file__).resolve().parents[2] / "landing" / "src" / "components" / "home" / "Race.tsx"
+)
+
+
+def test_race_names_the_two_boards_the_app_actually_serves():
+    """The landing sold one "live leaderboard"; the app serves two boards with
+    different contracts, and conflating them is what let the old copy promise a
+    live race over a fixed historical window. Both names ship."""
+    text = _shipped_text()
+    assert "Live Trading Leaderboard" in text
+    assert "Competition" in text
+
+
+def test_race_discloses_that_the_live_board_is_not_ranking_yet():
+    """Naming the board on the acquisition page while its nightly advance is
+    undeployed is the landing-side version of the preview banner. Without this
+    sentence the bullet above it ("runs forward in two-week seasons") reads as a
+    board that is running now — the same over-claim the banner exists to stop,
+    just moved one page upstream where nothing renders the banner."""
+    text = _shipped_text()
+    assert "in preview for Season 0" in text
+    assert "Season 1 is the first that counts" in text
+
+
+def test_race_makes_no_paper_trading_or_brokered_claim():
+    """Shape-matched on the Race source, mirroring the WhyCare guard in
+    test_landing_value_band.py.
+
+    That guard bans `paper[\\s-]?trad` — but only inside WhyCare.tsx, and the
+    claim simply lived in the unguarded neighbour instead: Race shipped "Paper
+    trading on live markets" the whole time the band was pinned clean. Scoped
+    to Race rather than the bundle because Hero's "practice trading with
+    simulated money at live market prices" is an accurate description of a real
+    feature and must keep shipping.
+    """
+    body = _RACE_TSX.read_text(encoding="utf-8").lower()
+    for pattern in (r"paper[\s\-]?trad", r"real (capital|money|cash|funds)", r"go live"):
+        hit = re.search(pattern, body)
+        assert hit is None, f"Race claims brokered/real-capital trading: {hit.group(0)!r}"
+
+
+def test_race_source_and_shipped_bundle_agree():
+    """The register's thesis applied to this section specifically: every other
+    assertion here reads the bundle, so a Race.tsx edit that was never rebuilt
+    into ../frontend/ would leave them green against stale text. Anchoring one
+    string on both sides makes the missing `npm run build` the failure."""
+    source = _RACE_TSX.read_text(encoding="utf-8")
+    assert "Live Trading Leaderboard" in source, "Race.tsx no longer names the board"
+    assert "Live Trading Leaderboard" in _shipped_text(), (
+        "Race.tsx names the board but the shipped bundle does not — "
+        "rebuild per dashboard/landing/README.md"
+    )

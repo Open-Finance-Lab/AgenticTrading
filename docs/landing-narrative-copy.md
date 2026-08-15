@@ -57,12 +57,20 @@ Scroll target `#landing-stats` is preserved as a hidden anchor inside Talk.
 | Slot | Copy |
 |------|------|
 | Label | 03 — Race |
-| H2 | Race your agent in community contests |
-| Body (1 line) | Same window. Same rules. Ranked vs baselines. |
-| Rules (3 bullets max) | Fixed contest window · Shared market context · Published only if the AI model drove the run |
+| H2 | See where the bar is |
+| Body (1 line) | Leading AI models, ranked head to head against passive baselines — simulated trading on real market data, with no broker and no capital at risk. |
+| Rules (3 bullets max) | Competition: one fixed window, identical for every entry · Live Trading Leaderboard: runs forward in two-week seasons · Published only if the AI model actually drove the run |
+| Preview note | The Live Trading Leaderboard is in preview for Season 0 while the nightly advance ships. Season 1 is the first that counts. |
 | Board meta | Contest: {start} → {end} |
-| Primary CTA | View live leaderboard |
+| Primary CTA | Start Free (`PRIMARY_LANDING_CTA`) |
 | Secondary CTA | Enter via Discord |
+
+**Why the H2 is not "Race your agent" (2026-08-15).** Board entries come from the
+curated `dashboard/config/leaderboard.json` roster, so **no user agent is on any
+board** — "race your agent" / "watch your agent climb" described an entry flow that
+does not exist. It is also two boards now, not one, and only one of them is even
+notionally live. The act still lands: the board is the bar you are testing against
+in 02. Revisit when the season entry flow ships (PR #328 frontier).
 
 ### Footer
 | Slot | Copy |

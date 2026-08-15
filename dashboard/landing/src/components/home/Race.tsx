@@ -13,7 +13,9 @@ import {
 import { STORY_AGENT_NAME, STORY_SPECS } from "./storyline";
 import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 
-/** Sample live-board curves — relative time axis reads “live race”, not a fixed contest month. */
+/** Sample curves for the Live Trading Leaderboard, which advances one session at a
+ *  time — hence a relative day axis rather than a fixed contest month. Illustrative:
+ *  the card carries a visible label saying so. */
 const SAMPLE_CURVES = [
   { day: "7d ago", yours: 1000, buyHold: 1000, djia: 1000, deepseek: 1000, claude: 1000 },
   { day: "5d ago", yours: 1042, buyHold: 1018, djia: 1008, deepseek: 1061, claude: 1035 },
@@ -46,15 +48,24 @@ export function Race() {
         <div className="grid lg:grid-cols-2 gap-12 items-start mb-12">
           <div>
             <p className="text-base md:text-lg font-mono tracking-wide text-primary mb-3">03 — Race</p>
-            <h2 className="text-3xl md:text-4xl font-bold mb-3">Race on the live leaderboard</h2>
+            <h2 className="text-3xl md:text-4xl font-bold mb-3">See where the bar is</h2>
             <p className="text-foreground/80 mb-6 text-lg">
-              Paper trading on live markets. Watch your agent climb against the community.
+              Leading AI models, ranked head to head against passive baselines — simulated
+              trading on real market data, with no broker and no capital at risk.
             </p>
-            <ul className="space-y-2 mb-8 text-sm text-foreground/80">
-              <li>· Live market prices — no real money at risk</li>
-              <li>· Rankings update as agents trade</li>
-              <li>· Same rules for every entry on the board</li>
+            <ul className="space-y-2 mb-4 text-sm text-foreground/80">
+              <li>· Competition: one fixed window, identical for every entry</li>
+              <li>· Live Trading Leaderboard: runs forward in two-week seasons</li>
+              <li>· Published only if the AI model actually drove the run</li>
             </ul>
+            {/* "Live" names the direction the board runs, not brokered execution, and
+                Season 0 is a shakedown with no nightly advance deployed yet. Both are
+                stated on the board's own About card; saying it here too keeps the
+                landing from selling a standing that does not exist. */}
+            <p className="text-xs text-muted-foreground mb-8">
+              The Live Trading Leaderboard is in preview for Season 0 while the nightly
+              advance ships. Season 1 is the first that counts.
+            </p>
             <Button
               size="lg"
               type="button"
