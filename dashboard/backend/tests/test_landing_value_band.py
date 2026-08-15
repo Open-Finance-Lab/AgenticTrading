@@ -75,9 +75,22 @@ def test_band_makes_no_paper_trading_claim():
 
 
 def test_band_makes_no_real_capital_claim():
-    """Same reasoning as the paper-trading guard: shapes, not a phrase list."""
+    """Same reasoning as the paper-trading guard: shapes, not a phrase list.
+
+    The bare phrase "live trading" used to be on this list. It came off on
+    2026-08-15: "Live Trading Leaderboard" is now a board name, so banning the
+    words would make *naming the product here* a test failure while the claim
+    itself walked in through any other wording. What is banned is the claim —
+    turning live trading on, connecting a broker — not the noun.
+    """
     body = _BAND.read_text(encoding="utf-8").lower()
-    for pattern in (r"real (capital|money|cash|funds|dollars)", r"go live", r"trade live", r"live trading"):
+    for pattern in (
+        r"real (capital|money|cash|funds|dollars)",
+        r"go live",
+        r"trade live",
+        r"turn on live trading",
+        r"connect (a|an|your) brokerage",
+    ):
         hit = re.search(pattern, body)
         assert hit is None, f"band claims real capital: {hit.group(0)!r}"
 

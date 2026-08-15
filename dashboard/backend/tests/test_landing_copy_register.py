@@ -217,21 +217,101 @@ def test_race_discloses_that_the_live_board_is_not_ranking_yet():
     assert "Season 1 is the first that counts" in text
 
 
-def test_race_makes_no_paper_trading_or_brokered_claim():
-    """Shape-matched on the Race source, mirroring the WhyCare guard in
-    test_landing_value_band.py.
+_LANDING_HOME = _RACE_TSX.parent
 
-    That guard bans `paper[\\s-]?trad` — but only inside WhyCare.tsx, and the
-    claim simply lived in the unguarded neighbour instead: Race shipped "Paper
-    trading on live markets" the whole time the band was pinned clean. Scoped
-    to Race rather than the bundle because Hero's "practice trading with
-    simulated money at live market prices" is an accurate description of a real
-    feature and must keep shipping.
+# Sentences that contain a banned phrase because they *deny* the claim, listed
+# verbatim and stripped before the scan. An allowlist rather than a narrower
+# scope: the WhyCare guard in test_landing_value_band.py banned
+# `paper[\s-]?trad` inside WhyCare.tsx alone, and the claim simply moved to the
+# unguarded neighbour — Race shipped "Paper trading on live markets" for the
+# whole time the band was pinned clean. Scoping the replacement to Race would
+# have moved it one door further. Adding an entry here is a visible decision;
+# leaving a file unguarded is not.
+_CLAIM_DISCLAIMERS = (
+    # Hero's standing safety line, pinned verbatim by this suite (above) and by
+    # test_frontend_shelves. It is the sentence that tells a visitor no real
+    # money is at stake, so banning the phrase it needs would delete the
+    # disclaimer to satisfy the guard against the claim.
+    "Every test here uses simulated money. Real money is involved only if you "
+    "explicitly connect a brokerage account and turn on live trading.",
+    # Hero's gloss on what a Lab paper-trading run is. Accurate as written: the
+    # prices are real, the money is not, and the sentence says exactly that.
+    '<span className="text-primary font-semibold">paper trading</span> '
+    '{" "}— practice trading with simulated money at live market prices —',
+)
+
+# Claim shapes, not vocabulary. "live trading" is deliberately absent: it is now
+# a board name ("Live Trading Leaderboard"), so banning the bare phrase would
+# make naming the product a test failure — the mirror image of the scoping bug
+# above, and the reason the sibling guard in test_landing_value_band.py was
+# changed to match the claim instead.
+_BROKERED_CLAIM_PATTERNS = (
+    r"paper[\s\-]?trad",
+    r"real (capital|money|cash|funds|dollars)",
+    r"go live",
+    r"trade live",
+    r"turn on live trading",
+    r"connect (a|an|your) brokerage",
+)
+
+
+def test_no_landing_component_claims_brokered_or_real_capital_trading():
+    """Brokered execution is an explicit non-goal (PR #328).
+
+    `execution/paper_backend.py` is still a stub, so any component promising that
+    an agent trades through a broker, or that real capital is at stake, describes
+    a product that does not exist. Every home component is scanned, because the
+    one thing this class of copy reliably does is relocate.
     """
-    body = _RACE_TSX.read_text(encoding="utf-8").lower()
-    for pattern in (r"paper[\s\-]?trad", r"real (capital|money|cash|funds)", r"go live"):
-        hit = re.search(pattern, body)
-        assert hit is None, f"Race claims brokered/real-capital trading: {hit.group(0)!r}"
+    components = sorted(_LANDING_HOME.glob("*.tsx"))
+    assert components, "no landing components found — the glob is wrong"
+    for component in components:
+        body = " ".join(component.read_text(encoding="utf-8").split())
+        for disclaimer in _CLAIM_DISCLAIMERS:
+            body = body.replace(disclaimer, " ")
+        lowered = body.lower()
+        for pattern in _BROKERED_CLAIM_PATTERNS:
+            hit = re.search(pattern, lowered)
+            assert hit is None, (
+                f"{component.name} claims brokered/real-capital trading: "
+                f"{hit.group(0)!r}. If the phrase is part of a disclaimer, add "
+                f"the sentence to _CLAIM_DISCLAIMERS rather than narrowing the scan."
+            )
+
+
+def test_the_disclaimer_allowlist_is_not_stale():
+    """Non-vacuity: an allowlist entry that no longer matches silently re-arms.
+
+    If Hero's wording is edited, the stale entry stops stripping anything and the
+    test above starts failing on a sentence that was always fine — which reads as
+    the guard being broken and invites deleting it.
+    """
+    hero = " ".join((_LANDING_HOME / "Hero.tsx").read_text(encoding="utf-8").split())
+    for disclaimer in _CLAIM_DISCLAIMERS:
+        assert disclaimer in hero, (
+            f"allowlisted disclaimer no longer ships verbatim: {disclaimer[:60]!r}…"
+        )
+
+
+def test_race_puts_no_user_agent_on_the_board():
+    """Board entries come from the curated `config/leaderboard.json` roster.
+
+    The prose was corrected to drop "race your agent", but the illustration kept
+    the story agent highlighted at rank 2 and drawn as the thickest curve — a
+    picture makes the entry-flow promise more vividly than the sentence that was
+    removed, and the fragment ban above only reads prose.
+    """
+    # Comments stripped first. The source explains at length *why* there is no
+    # "yours" curve, and a guard that reads its own rationale as a violation is
+    # the same defect one level up — it fails on the fix and passes on silence.
+    body = _BLOCK_COMMENT.sub("", _RACE_TSX.read_text(encoding="utf-8"))
+    assert "STORY_AGENT_NAME" not in body, (
+        "the storyline agent belongs to the Test run report, not to a board"
+    )
+    assert "yours" not in body, "no user curve on a board no user agent is on"
+    # Non-vacuity: the illustration must still draw the curated roster, or the
+    # assertions above pass on an empty chart.
+    assert "DeepSeek V4 Pro" in body and "dataKey=" in body
 
 
 def test_race_source_and_shipped_bundle_agree():

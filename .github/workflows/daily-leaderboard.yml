@@ -24,9 +24,14 @@ on:
   workflow_dispatch:
     inputs:
       deploy_models:
-        description: "Deploy competition LLM models (expensive)"
+        # Defaults false while the schedule is paused. The pause exists because
+        # the output has no surface; a hand-triggered run defaulting to true
+        # deploys all seven competition LLMs — the same billable spend the pause
+        # is avoiding — for curves no route can display. Opting in has to be a
+        # deliberate tick, not the path of least resistance.
+        description: "Deploy competition LLM models (expensive — leave off unless a board can show the result)"
         type: boolean
-        default: true
+        default: false
 
 concurrency:
   group: daily-leaderboard

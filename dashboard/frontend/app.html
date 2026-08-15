@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=112">
+    <link rel="stylesheet" href="styles.css?v=113">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -163,6 +163,19 @@
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="leaderboard"] #leaderboardView { display: flex !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="participants"] #competitionParticipantsPanel { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="about"] #competitionAboutPanel { display: block !important; }
+    /* The rule above reveals #leaderboardView for the live tab, but every word
+       inside it is still the Competition board's: its title, its Sep–Oct dates,
+       its "Upcoming" badge and its contest Rules button, with the preview banner
+       shipped `hidden`. Painted as-is, a shared ?view=live link opens on the
+       contest's identity with no disclaimer at all. So for that tab the wrong
+       identity is suppressed and the banner — which ships with real static text,
+       not an empty div — is revealed until leaderboard.js repaints both.
+       (This only covers up to app.js executing; loadLeaderboardData repaints the
+       chrome synchronously before its fetch, which is what covers the cold-start
+       window after data-nav-boot is gone.) */
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #leaderboardView .contest-identity,
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #competitionRulesBtn { visibility: hidden; }
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #seasonPreviewBanner { display: block !important; }
     </style>
 </head>
 <body>
@@ -617,13 +630,21 @@
                             <ol class="home-module-rank-list" id="homeModuleRankList">
                                 <li class="home-module-rank-empty">Loading rankings…</li>
                             </ol>
-                            <p class="hm-rank-sample" id="homeModuleRankSample" hidden>
-                                Sample standings &mdash; live rankings could not be loaded.
-                            </p>
+                            <!-- Text is written by home-page.js, which knows why the
+                                 sample is showing. The two reasons need different
+                                 copy: an unreachable API and a healthy API with no
+                                 model entries yet are not the same fact. -->
+                            <p class="hm-rank-sample" id="homeModuleRankSample" hidden></p>
+                            <!-- Present tense here would promise a running nightly
+                                 advance on the one page that never renders the board's
+                                 preview banner — the same over-claim the banner exists
+                                 to deny, two clicks upstream of the correction. -->
                             <p class="hm-rank-season">
                                 Every model above ran one fixed window. The
                                 <button class="hm-inline-link" id="homeModuleLiveBtn" type="button">Live Trading Leaderboard</button>
-                                advances nightly on bars nobody has seen yet.
+                                instead advances one session at a time, on bars nobody has
+                                seen yet &mdash; it is in Season 0 preview until that nightly
+                                advance ships.
                             </p>
                             <button class="hm-footer-btn" id="homeModuleRankingBtn" type="button">Explore leaderboard</button>
                         </article>
@@ -1561,10 +1582,19 @@
                         <h2 class="contest-title">SecureFinAI Contest 2026</h2>
                         <span class="status-badge upcoming contest-live-badge">Upcoming</span>
                     </div>
-                    <p class="contest-subtitle">Sep 1 – Oct 30, 2026</p>
-                    <p class="contest-subtitle">Organized by SecureFinAI Lab with Agentic Trading Lab.</p>
+                    <p class="contest-subtitle" id="boardSubtitle">Sep 1 – Oct 30, 2026</p>
+                    <!-- Competition-only, and hidden on the live board by
+                         leaderboard.js. The board name and the first subtitle
+                         are rewritten per board; this line is not, so left
+                         alone it captions the Live Trading Leaderboard as a
+                         SecureFinAI Lab contest event, which it is not. -->
+                    <p class="contest-subtitle" id="contestOrganizerLine">Organized by SecureFinAI Lab with Agentic Trading Lab.</p>
                 </div>
                 <div class="contest-actions">
+                    <!-- Opens the SecureFinAI Contest 2026 rules modal, which
+                         describes a fixed window and a registration deadline —
+                         neither of which governs a season. Hidden with the
+                         organizer line above. -->
                     <button id="competitionRulesBtn" class="agent-action-btn agent-action-secondary contest-action-btn" type="button">Rules</button>
                     <a class="discord-nav-btn discord-nav-btn-sm" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                 </div>
@@ -1572,7 +1602,12 @@
             <!-- Live Trading season chrome. Hidden entirely on the Competition board:
                  every element below describes a season, and a season is the one
                  thing the fixed contest window is not. -->
-            <div id="seasonPreviewBanner" class="season-preview-banner" role="status" hidden></div>
+            <!-- Ships with real text rather than empty. The boot stylesheet
+                 reveals this element for ?view=live before any script runs, and
+                 an empty div revealed at boot is indistinguishable from no
+                 disclaimer. leaderboard.js replaces the body once the payload
+                 names the window the curves actually came from. -->
+            <div id="seasonPreviewBanner" class="season-preview-banner" role="status" hidden><strong>Preview — the season engine is not deployed.</strong><span> Season 0 has not been run: nothing on this tab is a live standing, and no ranking on it counts.</span></div>
 
             <section id="seasonStrip" class="season-strip" aria-label="Season status" hidden>
                 <div class="season-strip-top">
@@ -1605,13 +1640,16 @@
                  "the market was flat" and "our job died" must never read alike. -->
             <ul id="seasonGaps" class="season-gaps" aria-label="Days this season did not advance" hidden></ul>
 
-            <p id="leaderboardBoardNotice" class="leaderboard-board-notice" hidden></p>
             <!-- Combined Header with Stats + Controls -->
             <div class="leaderboard-header-bar compact">
                 <!-- Left: Stats -->
                 <div class="header-stats compact">
                     <div class="stat-item compact">
-                        <span class="stat-label">Phase</span>
+                        <!-- Relabelled per board: the value below is the
+                             contest phase on Competition and the season number
+                             on the live board, and "Phase: Season 0" captions
+                             one with the other's noun. -->
+                        <span class="stat-label" id="boardPhaseLabel">Phase</span>
                         <span class="stat-value" id="totalTeams">Preseason</span>
                     </div>
                     <div class="stat-item compact">
@@ -1905,9 +1943,9 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=27" defer></script>
-    <script src="app.js?v=111" defer></script>
-    <script src="js/leaderboard.js?v=27" defer></script>
-    <script src="home-page.js?v=45" defer></script>
+    <script src="app.js?v=112" defer></script>
+    <script src="js/leaderboard.js?v=28" defer></script>
+    <script src="home-page.js?v=46" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads

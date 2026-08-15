@@ -1461,12 +1461,24 @@ async function loadHomeLeaderboardModule() {
     // unmarked it is indistinguishable from live standings, so every fallback
     // path flips this note on: a visitor who cannot reach the API should not be
     // shown five plausible returns with no way to tell they are made up.
-    function markSample(isSample) {
+    //
+    // The reason travels with the flag rather than being collapsed into one
+    // message. "We could not reach the API" and "the API answered, with no model
+    // on the board yet" are different facts, and the second is an ordinary live
+    // state — baselines compute on first load and models deploy after — so
+    // reporting it as a failed request diagnoses a healthy backend as broken.
+    const SAMPLE_NOTES = {
+        unreachable: 'Sample standings — live rankings could not be loaded.',
+        empty: 'Sample standings — no model has been ranked on the board yet.',
+    };
+    function markSample(reason) {
         const note = document.getElementById('homeModuleRankSample');
-        if (note) note.hidden = !isSample;
+        if (!note) return;
+        note.hidden = !reason;
+        note.textContent = reason ? (SAMPLE_NOTES[reason] || SAMPLE_NOTES.unreachable) : '';
     }
 
-    function renderEntries(entries, { sample = false } = {}) {
+    function renderEntries(entries, { sample = null } = {}) {
         markSample(sample);
         if (!entries.length) {
             list.innerHTML = '<li class="home-module-rank-empty">No model rankings yet.</li>';
@@ -1494,20 +1506,20 @@ async function loadHomeLeaderboardModule() {
 
     try {
         if (typeof API === 'undefined' || typeof API_BASE === 'undefined') {
-            renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: true });
+            renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: 'unreachable' });
             return;
         }
         const payload = await API.get(`${API_BASE}/api/v1/leaderboard?t=${Date.now()}`);
         const models = homeModelEntries(payload.entries || []);
 
         if (!models.length) {
-            renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: true });
+            renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: 'empty' });
             return;
         }
         renderEntries(models);
     } catch (error) {
         console.warn('Home leaderboard module failed:', error.message);
-        renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: true });
+        renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: 'unreachable' });
     }
 }
 

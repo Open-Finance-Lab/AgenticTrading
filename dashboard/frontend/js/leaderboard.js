@@ -10,13 +10,22 @@ let equityCurvesData = null;
 let equityCurvesChartInstance = null;
 let currentChartView = 'absolute'; // default: money ($). 'cumulative' = % return
 let leaderboardListenersInitialized = false;
-let liveBoardPollTimer = null;
-// The board the user asked for, which is NOT always the board the API returned.
-// `_normalize_period` server-side coerces any period it does not know back to
-// 'contest', so asking for the live board the backend cannot serve yields a
-// perfectly valid contest payload with no error anywhere. Keeping the request
-// alongside the response is the only thing that can tell those two apart.
-let requestedBoardPeriod = 'contest';
+// The board the payload *on screen* was requested for, which is NOT always the
+// board the API returned. `_normalize_period` server-side coerces any period it
+// does not know back to 'contest', so asking for the live board the backend
+// cannot serve yields a perfectly valid contest payload with no error anywhere.
+// Keeping the request alongside the response is the only thing that can tell
+// those two apart.
+//
+// Written only where `leaderboardPayload` is written, and never before the
+// await: a global assigned at request time belongs to whichever request was
+// issued last, not to the response currently being rendered. Set it early and a
+// slow live response repaints itself under the Competition board's name.
+let renderedBoardPeriod = 'contest';
+// Monotonic request id. Board switches are user-paced and the API is not, so two
+// loads can be in flight at once and resolve out of order; only the newest may
+// touch the DOM.
+let boardRequestSeq = 0;
 
 // Chart visual-hierarchy state
 let hiddenSeries = new Set();
@@ -272,21 +281,38 @@ const SEASON_TRADING_DAYS = 10;
 // results nobody should read as a standing. The preview banner says the rest.
 const PREVIEW_SEASON_NUMBER = 0;
 
-/** The board the user is looking at, from the request rather than the response. */
+/** The board on screen, from the request that produced the payload being shown. */
 function isLiveBoard() {
-  return requestedBoardPeriod === 'live';
+  return renderedBoardPeriod === 'live';
+}
+
+/** True when a season has actually advanced at least one session.
+ *
+ * The anchor under every preview disclaimer on this tab, and deliberately not
+ * `payload.period !== 'live'`. That tests whether the *backend recognises the
+ * word* — so adding "live" to VALID_PERIODS, the natural first commit of the
+ * season engine and one that needs no season payload at all, would clear the
+ * banner, flip the badge to "Running" and promise a nightly advance while no
+ * season had ever run. What the banner claims is that nothing here advanced, so
+ * that is what it tests: a date the engine can only write after a real advance.
+ */
+function seasonHasAdvanced(payload) {
+  const season = (payload || {}).season;
+  if (!season) return false;
+  if (season.last_advanced_date) return true;
+  return Number(season.trading_days_elapsed) > 0;
 }
 
 /** True when the Live Trading tab is rendering something that is not a season.
  *
  * The server coerces an unknown ``period`` back to 'contest' instead of 4xx-ing,
- * so this is a perfectly successful HTTP 200 carrying the wrong board. Without
- * an explicit comparison, "the season engine is not deployed" and "here are the
- * live standings" render byte-identically — the exact failure shape CLAUDE.md's
+ * so the wrong board arrives as a perfectly successful HTTP 200. Without this,
+ * "the season engine is not deployed" and "here are the live standings" render
+ * byte-identically — the exact failure shape CLAUDE.md's
  * fail-closed-is-not-fail-visible section is about.
  */
 function isLivePreview(payload) {
-  return isLiveBoard() && (payload || {}).period !== 'live';
+  return isLiveBoard() && !seasonHasAdvanced(payload);
 }
 
 /** The season number to show, or null when there is genuinely none.
@@ -301,18 +327,39 @@ function displayedSeasonNumber(payload) {
   return isLivePreview(payload) ? PREVIEW_SEASON_NUMBER : null;
 }
 
+/** A relative phrase, or null when the timestamp is absent or unparseable.
+ *
+ * Null rather than '': both call sites interpolate this into a label, so an
+ * empty string renders as a dangling "Next advance " or "closes " — a caption
+ * with its value silently deleted, which reads as a broken template rather than
+ * as missing data. Callers drop the whole clause on null instead.
+ *
+ * Past timestamps say "now", not "due now": the phrase is composed into
+ * "closes …" as well as "Next advance …", and an entry window cannot be
+ * "closes due now".
+ */
 function formatRelativeFromNow(iso) {
   const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return '';
+  if (!Number.isFinite(then)) return null;
   const minutes = Math.round((then - Date.now()) / 60000);
-  if (minutes <= 0) return 'due now';
+  if (minutes <= 0) return 'now';
   if (minutes < 60) return `in ${minutes} min`;
   const hours = Math.round(minutes / 60);
   if (hours < 24) return `in ${hours}h`;
   return `in ${Math.round(hours / 24)}d`;
 }
 
-function updateLeaderboardHeader(payload) {
+/** Repaint the whole board identity for `payload`, which `board` was asked for.
+ *
+ * The single entry point of the render path, and the single place the
+ * request/response pair is committed: every helper below — plus
+ * populateLeaderboardTable, which the sort and filter handlers call long after
+ * this returns — reads `renderedBoardPeriod`, so it must be written here from
+ * the response's own request rather than by whoever fetched most recently.
+ */
+function updateLeaderboardHeader(payload, board = renderedBoardPeriod) {
+  renderedBoardPeriod = board;
+  payload = payload || {};
   const entries = payload.entries || [];
   // Best LLM / provided model by cumulative return (not overall board rank).
   const models = entries
@@ -325,7 +372,9 @@ function updateLeaderboardHeader(payload) {
   const updatedEl = document.getElementById('lastUpdate');
   const leaderEl = document.getElementById('leaderTeam');
   const standingsEl = document.getElementById('leaderboardStandingsTitle');
-  const subtitleEl = document.querySelector('#leaderboardView .contest-subtitle');
+  // By id, not `querySelector('.contest-subtitle')`: there are two, and the
+  // positional selector silently retargets if either is ever reordered.
+  const subtitleEl = document.getElementById('boardSubtitle');
   const titleEl = document.querySelector('#leaderboardView .contest-title');
   const badgeEl = document.querySelector('#leaderboardView .contest-live-badge');
 
@@ -353,10 +402,25 @@ function updateLeaderboardHeader(payload) {
     badgeEl.className = `status-badge contest-live-badge ${state}`;
   }
 
+  // Competition-only chrome, hidden rather than left standing. Both name the
+  // SecureFinAI contest specifically — an organizing body, and a rules document
+  // written around a fixed window and a registration deadline — so on a season
+  // board they caption the wrong event, and the Rules button opens a modal that
+  // describes rules this board does not run under.
+  const organizerEl = document.getElementById('contestOrganizerLine');
+  if (organizerEl) organizerEl.hidden = liveBoard;
+  const rulesBtn = document.getElementById('competitionRulesBtn');
+  if (rulesBtn) rulesBtn.hidden = liveBoard;
+
+  // The stat is a label/value pair, so the label has to move with the value:
+  // leaving it as "Phase" captions a season number with the contest's noun, and
+  // making the value carry the word instead reads "Season: Season 0".
+  const phaseLabelEl = document.getElementById('boardPhaseLabel');
+  if (phaseLabelEl) phaseLabelEl.textContent = liveBoard ? 'Season' : 'Phase';
   if (totalEl) {
     const seasonNo = displayedSeasonNumber(payload);
     totalEl.textContent = liveBoard
-      ? (seasonNo === null ? 'Season —' : `Season ${seasonNo}`)
+      ? (seasonNo === null ? '—' : String(seasonNo))
       : (payload.phase_label || 'Preseason');
   }
   if (windowEl) windowEl.textContent = payload.window?.label || '—';
@@ -382,25 +446,31 @@ function updateLeaderboardHeader(payload) {
   renderLivePreviewBanner(payload);
   renderSeasonStrip(payload);
   renderSeasonGaps(payload);
-  renderLiveBoardNotice(payload);
   updateCurvePickerCount();
 }
 
 function formatLiveBoardSubtitle(payload) {
   const season = payload.season || null;
-  if (season?.start_date && season?.end_date) {
-    return `${formatShortDate(season.start_date)} – ${formatShortDate(season.end_date)} · advances nightly after the 16:00 ET cash session`;
+  const dates = season?.start_date && season?.end_date
+    ? `${formatShortDate(season.start_date)} – ${formatShortDate(season.end_date)} · `
+    : '';
+  if (isLivePreview(payload)) {
+    // Stating the cadence here would promise a nightly advance that no deployed
+    // job performs. The banner above carries the full explanation; this is the
+    // one-line version that has to survive next to it.
+    return `${dates}Season ${PREVIEW_SEASON_NUMBER} preview — no advance has run`;
   }
   // `window.start_date` is the board's display window, NOT a record that an
   // advance ran, and falling back to it printed the Competition window's first
-  // day as "last completed" on a board that has never advanced once. Only
-  // daily_status carries a real advance — and in preview there is none, by
-  // definition, whatever the payload happens to contain.
-  const advanced = isLivePreview(payload) ? null : payload.daily_status?.trading_date;
-  if (advanced) {
-    return `Advances nightly after the 16:00 ET cash session · last completed ${advanced}`;
-  }
-  return 'Advances nightly after the 16:00 ET cash session';
+  // day as "last completed" on a board that had never advanced once. The season
+  // payload contract defines exactly one field that only a real advance can
+  // write, so that is the one read here. (`daily_status.trading_date` was the
+  // retired Daily board's shape; the server never sends it for this board.)
+  const advanced = season?.last_advanced_date;
+  const cadence = 'Advances nightly after the 16:00 ET cash session';
+  return advanced
+    ? `${dates}${cadence} · last completed ${advanced}`
+    : `${dates}${cadence}`;
 }
 
 /** The load-bearing honesty control for this tab.
@@ -461,7 +531,11 @@ function renderSeasonStrip(payload) {
     let text = 'Entries not open yet';
     if (season?.entries_open) {
       state = 'open';
-      const closes = season.entry_closes_at ? ` · closes ${formatRelativeFromNow(season.entry_closes_at)}` : '';
+      // Composed from the formatted value, not from the raw field: an
+      // unparseable `entry_closes_at` is present-but-useless, and testing the
+      // field instead of the phrase renders a bare "· closes ".
+      const closesIn = formatRelativeFromNow(season.entry_closes_at);
+      const closes = closesIn ? ` · closes ${closesIn}` : '';
       const count = Number(season.entry_count);
       text = `Entries open${Number.isFinite(count) ? ` · ${count} entered` : ''}${closes}`;
     } else if (season?.status === 'running') {
@@ -491,18 +565,19 @@ function renderSeasonStrip(payload) {
 
   const advance = document.getElementById('seasonNextAdvance');
   if (advance) {
-    if (season?.status === 'closed') {
-      advance.textContent = 'No further advances';
-    } else if (season?.next_advance_at) {
-      const when = new Date(season.next_advance_at);
-      const relative = formatRelativeFromNow(season.next_advance_at);
-      advance.textContent = Number.isFinite(when.getTime())
-        ? `Next advance ${relative} (${when.toLocaleString()})`
-        : `Next advance ${relative}`;
-    } else if (isLivePreview(payload)) {
-      // Describing the cadence here would promise a nightly advance that no
-      // deployed job performs.
+    // The formatted phrase is the only proof the timestamp was readable, so an
+    // unparseable `next_advance_at` is treated as absent. Branching on the raw
+    // field instead renders "Next advance null".
+    const relative = formatRelativeFromNow(season?.next_advance_at);
+    if (isLivePreview(payload)) {
+      // Tested ahead of the timestamp rather than after it: a payload carrying
+      // a schedule but no completed advance would otherwise announce a nightly
+      // job that is not deployed — the one claim this tab exists to deny.
       advance.textContent = 'No advance scheduled';
+    } else if (season?.status === 'closed') {
+      advance.textContent = 'No further advances';
+    } else if (relative) {
+      advance.textContent = `Next advance ${relative} (${new Date(season.next_advance_at).toLocaleString()})`;
     } else {
       advance.textContent = 'Next advance: nightly after the 16:00 ET close';
     }
@@ -551,97 +626,52 @@ function renderSeasonGaps(payload) {
   });
 }
 
-function renderLiveBoardNotice(payload) {
-  const host = document.getElementById('leaderboardBoardNotice');
-  if (!host) return;
-  if (!isLiveBoard() || !payload.daily_status) {
-    host.hidden = true;
-    host.textContent = '';
-    return;
-  }
-  const status = payload.daily_status || {};
-  const pending = Number(status.models_pending) || 0;
-  const total = Number(status.models_total) || 0;
-  const cached = Number(status.models_cached) || 0;
-  const inProgress = Boolean(status.refresh_in_progress);
-
-  if (inProgress || pending > 0) {
-    host.hidden = false;
-    const date = status.trading_date || payload.window?.start_date || 'today';
-    if (inProgress) {
-      host.textContent = `Running competition models for ${date}… (${cached}/${total} ready). This page refreshes automatically.`;
-    } else {
-      host.textContent = `${pending} competition model curve(s) pending for ${date}. Baselines are live; models appear once the nightly advance finishes.`;
-    }
-    return;
-  }
-  if (total > 0 && cached === total) {
-    host.hidden = false;
-    host.textContent = `All ${total} competition models loaded for ${status.trading_date || payload.window?.start_date}.`;
-    return;
-  }
-  host.hidden = true;
-  host.textContent = '';
-}
-
-function scheduleLiveBoardPoll(payload) {
-  if (liveBoardPollTimer) {
-    clearTimeout(liveBoardPollTimer);
-    liveBoardPollTimer = null;
-  }
-  if (!isLiveBoard()) return;
-  const status = payload.daily_status || {};
-  // Only poll while a refresh worker is running. Pending curves with no worker
-  // wait for the nightly cron — polling forever just hammers the API.
-  if (!status.refresh_in_progress) return;
-  liveBoardPollTimer = setTimeout(() => {
-    liveBoardPollTimer = null;
-    // Re-check on fire, not only on schedule: navigating away from Competition
-    // never calls loadLeaderboardData again, so without this the poll would
-    // keep re-fetching and re-rendering a hidden chart for the whole (possibly
-    // multi-hour) deploy. Landing back on the live tab restarts it.
-    if (!isLiveBoardVisible()) return;
-    loadLeaderboardData('live');
-  }, 30000);
-}
-
-/** True only while the Live Trading board is the board actually on screen.
+/** Resolve a caller's board name to one of the two the API actually serves.
  *
- * Read from the DOM rather than the html[data-nav-*] boot attributes: those are
- * written by navigateToPage but not by showCompetitionPanel, so they go stale
- * on a plain subtab switch. The active subtab button and the board's own
- * display are what the user is actually looking at.
+ * 'daily' is the retired Daily Leaderboard and 'season' was this tab's working
+ * title before the board was named. Both are accepted so a stale deep link or a
+ * cached app.js lands on the successor board rather than silently on
+ * Competition, which looks like a working link to the wrong data.
  */
-function isLiveBoardVisible() {
-  const view = document.getElementById('leaderboardView');
-  // offsetParent covers the whole Competition page being hidden; style.display
-  // covers the board being swapped out for Participants/About within it.
-  if (!view || view.style.display === 'none' || view.offsetParent === null) return false;
-  const activeTab = document.querySelector('.competition-subtabs .subtab-btn.active');
-  return activeTab?.dataset.competitionTab === 'live';
+function normalizeBoardPeriod(period) {
+  return (period === 'live' || period === 'season' || period === 'daily')
+    ? 'live'
+    : 'contest';
 }
 
 async function loadLeaderboardData(period = 'contest') {
   console.log('Loading leaderboard from API...', period);
-  // 'daily' is the retired board and 'season' is what this tab was called
-  // before it was named. Both are accepted so a stale deep link or a cached
-  // app.js resolves to the live board rather than silently to Competition.
-  const boardPeriod = (period === 'live' || period === 'season' || period === 'daily')
-    ? 'live'
-    : 'contest';
-  requestedBoardPeriod = boardPeriod;
+  const boardPeriod = normalizeBoardPeriod(period);
+  // Claimed before the await, re-checked after it. Subtab clicks are user-paced
+  // and the API is not, so a slow first request can resolve after a fast second
+  // one; without this the loser repaints the winner's board — and because the
+  // two boards share every element except the chrome, it repaints it silently.
+  const seq = ++boardRequestSeq;
+
+  // Paint the board's identity before the request, not after it. Until the
+  // fetch resolves the chrome on screen belongs to whichever board was there
+  // last — for a shared ?view=live link that is the static Competition markup:
+  // its name, its Sep–Oct dates, its "Upcoming" badge, its Rules button, and
+  // the preview banner still hidden. On the free tier a cold start is 30–60s,
+  // so that is not a flash, it is the whole first impression. The boot
+  // stylesheet only covers up to app.js executing; this covers the rest.
+  if (renderedBoardPeriod !== boardPeriod) {
+    leaderboardPayload = null;
+    updateLeaderboardHeader({}, boardPeriod);
+  }
 
   try {
     const url = `${API_BASE}/api/v1/leaderboard?period=${encodeURIComponent(boardPeriod)}&t=${Date.now()}`;
-    leaderboardPayload = await API.get(url);
-    const entries = leaderboardPayload.entries || [];
-    equityCurvesData = buildEquityCurvesFromEntries(entries);
+    const payload = await API.get(url);
+    if (seq !== boardRequestSeq) return;
+    leaderboardPayload = payload;
+    equityCurvesData = buildEquityCurvesFromEntries(payload.entries || []);
 
     // Reset chart visibility when switching boards so season/contest don't share hide state.
     hiddenSeries = new Set();
     hiddenInitialized = true;
 
-    updateLeaderboardHeader(leaderboardPayload);
+    updateLeaderboardHeader(payload, boardPeriod);
     populateLeaderboardTable();
     renderCurvePicker();
 
@@ -651,9 +681,23 @@ async function loadLeaderboardData(period = 'contest') {
     }
 
     await renderEquityCurvesChart();
-    scheduleLiveBoardPoll(leaderboardPayload);
   } catch (error) {
+    if (seq !== boardRequestSeq) return;
     console.error('Error loading leaderboard:', error);
+    // The board is torn down on the way out rather than left as it was. A
+    // failed switch used to keep the previous board's identity on screen: the
+    // preview banner stranded over Competition, or — the direction that
+    // matters — the Competition title and curves still showing while the user
+    // sits on the Live tab, with no preview banner anywhere. Free-tier cold
+    // starts make a failed switch an ordinary path, not a corner case.
+    leaderboardPayload = null;
+    equityCurvesData = null;
+    if (equityCurvesChartInstance) {
+      equityCurvesChartInstance.destroy();
+      equityCurvesChartInstance = null;
+    }
+    updateLeaderboardHeader({}, boardPeriod);
+    renderCurvePicker();
     displayLeaderboardError(error.message);
   }
 }
