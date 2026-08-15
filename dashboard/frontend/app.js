@@ -7989,6 +7989,13 @@ function navigateToPage(page, options = {}) {
         page = 'community';
         options = { ...options, playgroundTab: 'agents' };
     }
+    // Daily Leaderboard UI is parked (models not deploying reliably). Keep the
+    // backend + leaderboard.js path, but never land on the hidden subtab —
+    // including ?view=daily bookmarks and a session that still has competitionTab
+    // saved as 'daily'.
+    if (page === 'competition' && (options.competitionTab || competitionTab) === 'daily') {
+        options = { ...options, competitionTab: 'leaderboard' };
+    }
     // Role-gate the admin shell in the UI too, not only its APIs: without
     // this, anyone landing on ?view=admin saw the empty console chrome until
     // the deferred boot /me settled — tens of seconds on a cold free-tier
