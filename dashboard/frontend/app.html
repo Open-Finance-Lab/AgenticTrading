@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=98">
+    <link rel="stylesheet" href="styles.css?v=115">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -37,11 +37,20 @@
             playground: { page: 'playground', playgroundTab: 'agents' },
             'my-algo': { page: 'playground', playgroundTab: 'agents' },
             contest: { page: 'competition', competitionTab: 'leaderboard' },
-            daily: { page: 'competition', competitionTab: 'daily' },
+            live: { page: 'competition', competitionTab: 'live' },
+            // Two retired names for this tab: 'daily' was the Daily Leaderboard
+            // it replaced, 'season' was its working title before the board was
+            // named. Both stay as aliases so links already in the wild (Discord,
+            // the nightly-refresh runbook, PR #352's own screenshots) land on
+            // the successor board rather than silently falling through to
+            // Competition, which looks like a working link to the wrong data.
+            daily: { page: 'competition', competitionTab: 'live' },
+            season: { page: 'competition', competitionTab: 'live' },
             competition: { page: 'competition', competitionTab: 'leaderboard' },
             leaderboard: { page: 'competition', competitionTab: 'leaderboard' },
             participants: { page: 'competition', competitionTab: 'participants' },
             about: { page: 'competition', competitionTab: 'about' },
+            admin: { page: 'admin' },
         };
         window.NAV_VIEW_MAP = NAV_VIEW_MAP;
         // Saved nav state written before the marketplace moved out of Playground.
@@ -51,6 +60,15 @@
         function migrateSavedNavState(saved) {
             if (saved && saved.page === 'playground' && saved.playgroundTab === 'marketplace') {
                 return { page: 'community' };
+            }
+            // The Daily Leaderboard became the Live Trading Leaderboard.
+            // Anyone whose last visit was that tab has 'daily' in localStorage
+            // (or 'season' from a build of this branch); left alone the key
+            // matches no boot-CSS rule and no panel, so Competition paints
+            // empty — a blank page, not a wrong one, which is harder to report.
+            if (saved && saved.page === 'competition'
+                && (saved.competitionTab === 'daily' || saved.competitionTab === 'season')) {
+                return Object.assign({}, saved, { competitionTab: 'live' });
             }
             return saved;
         }
@@ -67,6 +85,22 @@
             if (legacy && NAV_VIEW_MAP[legacy]) {
                 // Copy: the map is shared with app.js and must stay immutable.
                 var mapped = NAV_VIEW_MAP[legacy];
+                // Role-gate the admin shell before hydration: without this,
+                // any visitor with ?view=admin sees the console chrome until
+                // app.js boots. The cached user decides here; app.js's
+                // navigateToPage re-checks after hydration, and the admin
+                // APIs 401/403 regardless.
+                if (mapped.page === 'admin') {
+                    var bootUser = null;
+                    try {
+                        bootUser = JSON.parse(
+                            localStorage.getItem('auth-user') || 'null',
+                        );
+                    } catch (e) { /* corrupt cache reads as signed out */ }
+                    if (!bootUser || bootUser.role !== 'admin') {
+                        mapped = { page: 'home' };
+                    }
+                }
                 return {
                     page: mapped.page,
                     playgroundTab: mapped.playgroundTab,
@@ -108,6 +142,7 @@
     html[data-nav-boot][data-nav-page="community"] #communityView { display: block !important; }
     html[data-nav-boot][data-nav-page="account"] #accountView { display: block !important; }
     html[data-nav-boot][data-nav-page="credits"] #creditsView { display: block !important; }
+    html[data-nav-boot][data-nav-page="admin"] #adminView { display: block !important; }
     html[data-nav-boot] .primary-nav .mode-btn.active { background-color: transparent; color: var(--text-secondary); }
     html[data-nav-boot][data-nav-page="home"] .primary-nav [data-mode="home"] { background-color: var(--info-color); color: white; }
     html[data-nav-boot][data-nav-page="playground"] .primary-nav [data-mode="playground"] { background-color: var(--info-color); color: white; }
@@ -122,14 +157,27 @@
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="backtest"] .main-container.playground-backtest-panel { display: grid !important; }
     html[data-nav-boot][data-nav-page="playground"][data-nav-playground-tab="paper"] #paperTradingView { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"] .competition-subtabs .subtab-btn.active { background: transparent; color: var(--text-secondary); }
-    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="daily"] .competition-subtabs [data-competition-tab="daily"],
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] .competition-subtabs [data-competition-tab="live"],
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="leaderboard"] .competition-subtabs [data-competition-tab="leaderboard"],
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="participants"] .competition-subtabs [data-competition-tab="participants"],
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="about"] .competition-subtabs [data-competition-tab="about"] { background: var(--info-color); color: white; }
-    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="daily"] #leaderboardView,
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #leaderboardView,
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="leaderboard"] #leaderboardView { display: flex !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="participants"] #competitionParticipantsPanel { display: block !important; }
     html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="about"] #competitionAboutPanel { display: block !important; }
+    /* The rule above reveals #leaderboardView for the live tab, but every word
+       inside it is still the Competition board's: its title, its Sep–Oct dates,
+       its "Upcoming" badge and its contest Rules button, with the preview banner
+       shipped `hidden`. Painted as-is, a shared ?view=live link opens on the
+       contest's identity with no disclaimer at all. So for that tab the wrong
+       identity is suppressed and the banner — which ships with real static text,
+       not an empty div — is revealed until leaderboard.js repaints both.
+       (This only covers up to app.js executing; loadLeaderboardData repaints the
+       chrome synchronously before its fetch, which is what covers the cold-start
+       window after data-nav-boot is gone.) */
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #leaderboardView .contest-identity,
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #competitionRulesBtn { visibility: hidden; }
+    html[data-nav-boot][data-nav-page="competition"][data-nav-competition-tab="live"] #seasonPreviewBanner { display: block !important; }
     </style>
 </head>
 <body>
@@ -213,6 +261,7 @@
                         </div>
                         <button id="accountMenuAccountBtn" class="account-menu-item" type="button">Account</button>
                         <button id="accountMenuCreditsBtn" class="account-menu-item" type="button">Credits &amp; Billing</button>
+                        <button id="accountMenuAdminBtn" class="account-menu-item" type="button" hidden>Admin</button>
                         <button id="accountMenuLogoutBtn" class="account-menu-item account-menu-item--danger" type="button">Log out</button>
                     </div>
                 </div>
@@ -396,122 +445,82 @@
         <div class="home-page home-page--pager">
             <div class="home-pager-track" id="homePagerTrack" data-page="0">
 
-                <section class="home-pager-screen" id="homeScreenLanding" aria-label="Welcome">
+                <!-- Screen 0 is what every returning user lands on: onHomePageShow()
+                     calls setHomePagerPage(0) on every entry to Home. It used to be a
+                     second copy of the marketing hero — the same "Talk to Agents /
+                     Test Trading Ideas" pitch and a "Get Started" button, shown to
+                     people who had already got started. It now carries the one board
+                     with real numbers on it. -->
+                <section class="home-pager-screen" id="homeScreenLanding" aria-label="Leaderboard">
                     <div class="home-landing-hero">
                     <div class="home-landing-hero-grid-bg" aria-hidden="true"></div>
                     <div class="home-landing-hero-inner">
                         <div class="home-landing-hero-copy">
                             <h1 class="home-landing-headline">
-                                <span class="home-headline-line home-headline-line--1">Talk to Agents</span>
-                                <span class="home-headline-line home-headline-line--2 home-headline-accent">Test Trading Ideas</span>
+                                <span class="home-headline-line home-headline-line--1">See where the</span>
+                                <span class="home-headline-line home-headline-line--2 home-headline-accent">AI models finished</span>
                             </h1>
+                            <!-- The one-per-surface gloss on "agent". Deliberately says
+                                 "in a test of its own": no user agent is on any board and
+                                 no entry path exists, so anything that reads as "yours is
+                                 on this list" is a promise the product cannot keep. -->
+                            <p class="home-landing-lede">Your own agent &mdash; an AI trading assistant that follows your written instruction &mdash; is scored on the same numbers, in a test of its own.</p>
                             <div class="home-landing-ctas">
-                                <button id="homeGetStartedBtn" class="home-btn home-btn-primary home-landing-cta" type="button">Get Started</button>
+                                <!-- Label is swapped to the signed-in form by
+                                     initHomeGetStarted() in home-page.js. Offering
+                                     "Create a free account" to someone who is signed in
+                                     was the original complaint. -->
+                                <button id="homeGetStartedBtn" class="home-btn home-btn-primary home-landing-cta" type="button" data-label-signed-out="Create a free account" data-label-signed-in="Test a trading idea">Create a free account</button>
                                 <a class="home-btn home-btn-secondary home-landing-cta" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                             </div>
                         </div>
-                        <div class="home-landing-playground" aria-label="Agent playground preview">
-                            <div class="home-playground-window">
-                                <div class="home-playground-titlebar">
-                                    <span class="home-playground-dot home-playground-dot--red" aria-hidden="true"></span>
-                                    <span class="home-playground-dot home-playground-dot--yellow" aria-hidden="true"></span>
-                                    <span class="home-playground-dot home-playground-dot--green" aria-hidden="true"></span>
-                                    <span class="home-playground-title">
-                                        <svg class="ui-icon ui-icon--inline" aria-hidden="true"><use href="#icon-terminal"/></svg>
-                                        Example: a conversation with your agent
-                                    </span>
+                        <div class="home-landing-board">
+                            <article class="home-module home-module--ranking" id="homeModuleRanking">
+                                <header class="home-module-head">
+                                    <h3 class="home-module-title">
+                                        <svg class="ui-icon ui-icon--inline hm-rank-title-icon" aria-hidden="true"><use href="#icon-trophy"/></svg>
+                                        Competition Leaderboard
+                                    </h3>
+                                </header>
+                                <div class="hm-rank-meta">
+                                    <!-- Dates come from payload.window.label, written by
+                                         home-page.js. The range was hardcoded here and went
+                                         stale silently; above the fold that is a bigger lie
+                                         than it was three modules down. -->
+                                    <span id="homeModuleRankWindow">Same backtest window for every AI model</span>
+                                    <span>AI models only &middot; ranked by return</span>
                                 </div>
-                                <div id="homePlaygroundChat" class="home-playground-chat" data-step="0">
-                                    <div class="home-chat-row home-chat-row--user home-chat-step" data-step="0">
-                                        <div class="home-chat-avatar home-chat-avatar--user" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-user"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--user">
-                                            I want to follow Warren Buffett. If Berkshire makes a move, copy the move and tell me how it goes.
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="1" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <div class="home-chat-agent-line">
-                                                <svg class="ui-icon ui-icon--inline home-chat-icon-accent"><use href="#icon-search"/></svg>
-                                                <span>Fetching Berkshire Hathaway 13F filings...</span>
-                                            </div>
-                                            <ul class="home-chat-checklist">
-                                                <li><svg class="ui-icon ui-icon--inline home-chat-check"><use href="#icon-check-circle"/></svg><span>Q1 2025 → +$OXY +$SIRI −$PARA</span></li>
-                                                <li><svg class="ui-icon ui-icon--inline home-chat-check"><use href="#icon-check-circle"/></svg><span>Q4 2024 → +$OXY +$VZ −$HP</span></li>
-                                                <li><svg class="ui-icon ui-icon--inline home-chat-check"><use href="#icon-check-circle"/></svg><span>Copy-trade rules set · 6 tickers tracked</span></li>
-                                            </ul>
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="2" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <div class="home-chat-agent-line">
-                                                <svg class="ui-icon ui-icon--inline home-chat-icon-accent"><use href="#icon-chart"/></svg>
-                                                <span>Running backtest · 24 months, $10k start...</span>
-                                            </div>
-                                            <div class="home-chat-agent-line home-chat-agent-line--muted">
-                                                <svg class="ui-icon ui-icon--inline"><use href="#icon-check-circle"/></svg>
-                                                <span>22 trades · avg hold 63 days</span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="3" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <div class="home-chat-agent-line home-chat-agent-line--positive">
-                                                <svg class="ui-icon ui-icon--inline"><use href="#icon-chart"/></svg>
-                                                <strong>Backtest Complete</strong>
-                                            </div>
-                                            <svg class="home-chat-equity" viewBox="0 0 240 50" preserveAspectRatio="none" aria-hidden="true">
-                                                <defs>
-                                                    <linearGradient id="homeHeroEquityFill" x1="0" y1="0" x2="0" y2="1">
-                                                        <stop offset="0%" stop-color="#22d3ee" stop-opacity="0.35"/>
-                                                        <stop offset="100%" stop-color="#22d3ee" stop-opacity="0"/>
-                                                    </linearGradient>
-                                                </defs>
-                                                <polygon points="0,50 0,42 20,40 40,38 60,34 80,36 100,30 120,28 140,22 160,24 180,16 200,12 220,14 240,8 240,50" fill="url(#homeHeroEquityFill)"/>
-                                                <polyline points="0,42 20,40 40,38 60,34 80,36 100,30 120,28 140,22 160,24 180,16 200,12 220,14 240,8" fill="none" stroke="#22d3ee" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
-                                            </svg>
-                                            <div class="home-chat-metrics">
-                                                <div>Return <span class="positive">+41.2%</span></div>
-                                                <div>Sharpe <span>1.31</span></div>
-                                                <div>Win Rate <span>68%</span></div>
-                                                <div>Max DD <span class="negative">-9.4%</span></div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <div class="home-chat-row home-chat-row--agent home-chat-step" data-step="4" hidden>
-                                        <div class="home-chat-avatar" aria-hidden="true">
-                                            <svg class="ui-icon ui-icon--inline"><use href="#icon-bot"/></svg>
-                                        </div>
-                                        <div class="home-chat-bubble home-chat-bubble--agent">
-                                            <p class="home-chat-prompt-text">
-                                                Looks solid. Want me to run this in
-                                                <span class="home-headline-accent">paper trading</span>
-                                                — practice trading with simulated money at live market prices —
-                                                and alert you when Berkshire's next 13F drops?
-                                            </p>
-                                            <div class="home-chat-actions">
-                                                <span class="home-chat-action home-chat-action--primary">Yes, start now</span>
-                                                <span class="home-chat-action">Not yet</span>
-                                            </div>
-                                        </div>
-                                    </div>
+                                <div class="hm-rank-table-head" aria-hidden="true">
+                                    <span>#</span><span>AI Model</span><span>Ending value</span><span>Return</span><span title="Risk-adjusted return, annualized from hourly results.">Sharpe</span>
                                 </div>
-                            </div>
+                                <ol class="home-module-rank-list" id="homeModuleRankList">
+                                    <li class="home-module-rank-empty">Loading the standings&hellip;</li>
+                                </ol>
+                                <!-- Text is written by home-page.js, which knows why the
+                                     sample is showing. The two reasons need different
+                                     copy: an unreachable API and a healthy API with no
+                                     model entries yet are not the same fact. Both forms
+                                     must still say the visible rows are a sample — the
+                                     rows are real model names with invented numbers. -->
+                                <p class="hm-rank-sample" id="homeModuleRankSample" hidden></p>
+                                <!-- Present tense here would promise a running nightly
+                                     advance on the one page that never renders the board's
+                                     preview banner — the same over-claim the banner exists
+                                     to deny, two clicks upstream of the correction. -->
+                                <p class="hm-rank-season">
+                                    Every AI model above traded the same fixed window. The
+                                    <button class="hm-inline-link" id="homeModuleLiveBtn" type="button">Live Trading Leaderboard</button>
+                                    is the other board &mdash; designed to move forward one trading
+                                    session at a time, on prices nobody has seen yet. It is a
+                                    Season 0 preview and has not moved forward yet.
+                                </p>
+                                <button class="hm-footer-btn" id="homeModuleRankingBtn" type="button">See both leaderboards</button>
+                            </article>
                         </div>
                     </div>
 
-                    <button id="homeScrollHint" class="home-scroll-hint" type="button" aria-label="Scroll to dashboard">
-                        <span class="home-scroll-hint-label">Scroll</span>
+                    <button id="homeScrollHint" class="home-scroll-hint" type="button" aria-label="Scroll to your dashboard">
+                        <span class="home-scroll-hint-label">See your dashboard</span>
                         <svg class="home-scroll-hint-icon" aria-hidden="true"><use href="#icon-chevron-down"/></svg>
                     </button>
                     </div>
@@ -572,22 +581,6 @@
                             </div>
                         </article>
 
-                        <article class="home-module home-module--ranking" id="homeModuleRanking">
-                            <header class="home-module-head">
-                                <h3 class="home-module-title">Leaderboard</h3>
-                            </header>
-                            <div class="hm-rank-meta">
-                                <span>Backtest window · 2026-04-15 → 2026-05-15</span>
-                                <span>Models only · ranked by return</span>
-                            </div>
-                            <div class="hm-rank-table-head" aria-hidden="true">
-                                <span>#</span><span>AI Model</span><span>Value</span><span>Return</span><span>Sharpe</span>
-                            </div>
-                            <ol class="home-module-rank-list" id="homeModuleRankList">
-                                <li class="home-module-rank-empty">Loading rankings…</li>
-                            </ol>
-                            <button class="hm-footer-btn" id="homeModuleRankingBtn" type="button">Explore leaderboard</button>
-                        </article>
                         </div>
 
                         <div class="dashboard-bottom-grid">
@@ -1441,7 +1434,7 @@
     <div id="competitionView" class="page-view competition-view" style="display: none;">
         <div class="subtab-bar competition-subtabs">
             <button class="subtab-btn active" data-competition-tab="leaderboard">Competition Leaderboard</button>
-            <button class="subtab-btn" data-competition-tab="daily">Daily Leaderboard</button>
+            <button class="subtab-btn" data-competition-tab="live">Live Trading Leaderboard</button>
             <button class="subtab-btn" data-competition-tab="participants">Participating Teams</button>
             <button class="subtab-btn" data-competition-tab="about">About</button>
         </div>
@@ -1461,8 +1454,12 @@
                     <p class="about-text">SecureFinAI Contest 2026 is a paper-trading competition for AI-powered agents. The contest is currently in <strong>Preseason</strong>. Participating teams join when the season starts (registration Aug 2026).</p>
                 </div>
                 <div class="section-card">
-                    <h3 class="section-title">Daily Leaderboard</h3>
-                    <p class="about-text">The Daily Leaderboard is the same chart + standings UI as Competition, but each entry is an hourly backtest over the <strong>last completed US cash session</strong> (after 16:00 ET that weekday; before the close, the prior session). Baseline and index lines refresh automatically on load. New AI entries appear when the leaderboard next updates.</p>
+                    <h3 class="section-title">Live Trading Leaderboard</h3>
+                    <p class="about-text">This board runs <strong>forward</strong>, in seasons of <strong>two weeks</strong>, Monday to Friday. &ldquo;Live&rdquo; describes the direction, not the money: this is <strong>simulated trading on real market data</strong> &mdash; no broker account, no real capital, and no order ever leaves this system.</p>
+                    <p class="about-text">Each night after the 16:00 ET cash close, every entry is advanced one trading day: the model sees that day's real bars for the first time and its portfolio carries forward from where the previous day left it. Nobody &mdash; including us &mdash; knows what the next bar does when an entry locks, which is what separates this board from the fixed-window Competition one.</p>
+                    <p class="about-text">Seasons do not accumulate. Every season starts flat at $10,000, ranks only the days inside it, and ends. Entries do not carry over, so joining is a per-season decision.</p>
+                    <p class="about-text">If a night's advance fails, that day is <strong>marked as a gap</strong> and positions carry forward unchanged. It is never quietly re-run days later against a market that has already moved.</p>
+                    <p class="about-text about-text-muted">We are in <strong>Season 0</strong>, the shakedown season: the engine that advances it is not deployed yet, so nothing on this tab is a standing. Until it ships, the board renders in preview and says so across the top. Season 1 is the first one that will count.</p>
                 </div>
                 <div class="section-card">
                     <h3 class="section-title">Competition Leaderboard</h3>
@@ -1518,21 +1515,74 @@
                         <h2 class="contest-title">SecureFinAI Contest 2026</h2>
                         <span class="status-badge upcoming contest-live-badge">Upcoming</span>
                     </div>
-                    <p class="contest-subtitle">Sep 1 – Oct 30, 2026</p>
-                    <p class="contest-subtitle">Organized by SecureFinAI Lab with Agentic Trading Lab.</p>
+                    <p class="contest-subtitle" id="boardSubtitle">Sep 1 – Oct 30, 2026</p>
+                    <!-- Competition-only, and hidden on the live board by
+                         leaderboard.js. The board name and the first subtitle
+                         are rewritten per board; this line is not, so left
+                         alone it captions the Live Trading Leaderboard as a
+                         SecureFinAI Lab contest event, which it is not. -->
+                    <p class="contest-subtitle" id="contestOrganizerLine">Organized by SecureFinAI Lab with Agentic Trading Lab.</p>
                 </div>
                 <div class="contest-actions">
+                    <!-- Opens the SecureFinAI Contest 2026 rules modal, which
+                         describes a fixed window and a registration deadline —
+                         neither of which governs a season. Hidden with the
+                         organizer line above. -->
                     <button id="competitionRulesBtn" class="agent-action-btn agent-action-secondary contest-action-btn" type="button">Rules</button>
                     <a class="discord-nav-btn discord-nav-btn-sm" href="https://discord.gg/9HnQ6XDG98" target="_blank" rel="noopener noreferrer">Join our Discord community</a>
                 </div>
             </div>
-            <p id="leaderboardDailyNotice" class="leaderboard-daily-notice" hidden></p>
+            <!-- Live Trading season chrome. Hidden entirely on the Competition board:
+                 every element below describes a season, and a season is the one
+                 thing the fixed contest window is not. -->
+            <!-- Ships with real text rather than empty. The boot stylesheet
+                 reveals this element for ?view=live before any script runs, and
+                 an empty div revealed at boot is indistinguishable from no
+                 disclaimer. leaderboard.js replaces the body once the payload
+                 names the window the curves actually came from. -->
+            <div id="seasonPreviewBanner" class="season-preview-banner" role="status" hidden><strong>Preview — the season engine is not deployed.</strong><span> Season 0 has not been run: nothing on this tab is a live standing, and no ranking on it counts.</span></div>
+
+            <section id="seasonStrip" class="season-strip" aria-label="Season status" hidden>
+                <div class="season-strip-top">
+                    <div class="season-identity">
+                        <span class="season-badge" id="seasonBadge">Season —</span>
+                        <span class="season-dates" id="seasonDates">—</span>
+                    </div>
+                    <div class="season-entry-state" id="seasonEntryState">
+                        <span class="season-entry-dot" aria-hidden="true"></span>
+                        <span id="seasonEntryText">—</span>
+                    </div>
+                </div>
+                <div class="season-strip-progress">
+                    <div class="season-progress-track" role="progressbar" id="seasonProgressBar"
+                         aria-valuemin="0" aria-valuemax="10" aria-valuenow="0"
+                         aria-label="Trading days completed this season">
+                        <div class="season-progress-fill" id="seasonProgressFill" style="width: 0%"></div>
+                    </div>
+                    <span class="season-progress-label" id="seasonProgressLabel">—</span>
+                    <span class="season-next-advance" id="seasonNextAdvance">—</span>
+                </div>
+                <p class="season-reset-note">
+                    Every season starts flat at $10,000 and ranks only the days inside it.
+                    Entries do not carry over &mdash; re-enter each season.
+                </p>
+            </section>
+
+            <!-- Missed nights are a hole in a cumulative curve, so they are stated
+                 rather than smoothed over. Copy differs by failure_kind on purpose:
+                 "the market was flat" and "our job died" must never read alike. -->
+            <ul id="seasonGaps" class="season-gaps" aria-label="Days this season did not advance" hidden></ul>
+
             <!-- Combined Header with Stats + Controls -->
             <div class="leaderboard-header-bar compact">
                 <!-- Left: Stats -->
                 <div class="header-stats compact">
                     <div class="stat-item compact">
-                        <span class="stat-label">Phase</span>
+                        <!-- Relabelled per board: the value below is the
+                             contest phase on Competition and the season number
+                             on the live board, and "Phase: Season 0" captions
+                             one with the other's noun. -->
+                        <span class="stat-label" id="boardPhaseLabel">Phase</span>
                         <span class="stat-value" id="totalTeams">Preseason</span>
                     </div>
                     <div class="stat-item compact">
@@ -1862,6 +1912,55 @@
         </div>
     </div>
 
+    <div id="adminView" class="page-view admin-view" style="display: none;">
+        <div class="page-header">
+            <div>
+                <h2 class="page-title">Admin</h2>
+                <p class="page-description">All registered accounts. Change role in one click (with confirm). Edit concurrent limits and credits, then Save quotas. Set a concurrent limit of 0 to suspend an account's backtests.</p>
+            </div>
+            <button id="adminRefreshBtn" class="auth-btn auth-btn-secondary" type="button">Refresh</button>
+        </div>
+        <div id="adminStats" class="admin-stats" aria-label="Site stats">
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="users">—</span><span class="admin-stat-label">Users</span></div>
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="admins">—</span><span class="admin-stat-label">Admins</span></div>
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="agents">—</span><span class="admin-stat-label">Agents</span></div>
+            <div class="admin-stat"><span class="admin-stat-value" data-stat="active_dashboard_backtests">—</span><span class="admin-stat-label">Running backtests</span></div>
+        </div>
+        <p id="adminError" class="auth-error" hidden></p>
+        <p id="adminSuccess" class="account-success" hidden></p>
+        <div class="admin-table-wrap">
+            <table class="admin-users-table" aria-label="Users">
+                <thead>
+                    <tr>
+                        <th scope="col">Email</th>
+                        <th scope="col">Display name</th>
+                        <th scope="col">Role</th>
+                        <th scope="col">Max concurrent backtests</th>
+                        <!-- "Not enforced yet" is load-bearing, not a caveat.
+                             credits has a column, bounds, a Postgres twin, an
+                             editable input here and a slot on /api/auth/me, and
+                             is read by nothing in domain/ — so an operator
+                             zeroing it on an abusive account sees a 200 and
+                             walks away believing they stopped something. Delete
+                             this label only together with the enforcement. -->
+                        <th scope="col">Credits <span class="admin-th-note" id="adminCreditsNote">(checking…)</span></th>
+                        <th scope="col"></th>
+                    </tr>
+                </thead>
+                <tbody id="adminUsersBody">
+                    <tr><td colspan="6" class="admin-empty">Loading…</td></tr>
+                </tbody>
+            </table>
+        </div>
+        <div class="admin-pager">
+            <span id="adminUsersRange" class="admin-pager-range" aria-live="polite"></span>
+            <div class="admin-pager-buttons">
+                <button id="adminPrevBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Previous</button>
+                <button id="adminNextBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Next</button>
+            </div>
+        </div>
+    </div>
+
     <dialog id="creditsRefundDialog" class="credits-refund-dialog" aria-labelledby="creditsRefundTitle">
         <form id="creditsRefundForm" method="dialog">
             <div class="credits-refund-head">
@@ -1888,7 +1987,6 @@
         </form>
     </dialog>
 
-
     <!-- All deferred so the Chart.js CDN tag in <head> (also deferred) can
          stay first in execution order: deferred scripts run in document
          order, all before DOMContentLoaded. -->
@@ -1898,10 +1996,10 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=27" defer></script>
-    <script src="app.js?v=99" defer></script>
+    <script src="app.js?v=115" defer></script>
     <script src="js/credits.js?v=2" defer></script>
-    <script src="js/leaderboard.js?v=19" defer></script>
-    <script src="home-page.js?v=37" defer></script>
+    <script src="js/leaderboard.js?v=28" defer></script>
+    <script src="home-page.js?v=47" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
          market-events/marketEventRelativeTime.js (formatMarketEventRelativeTime),
          both loaded above — not beside the market-events/* block, which loads

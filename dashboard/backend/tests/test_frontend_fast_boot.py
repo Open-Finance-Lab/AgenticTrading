@@ -178,6 +178,20 @@ def test_slow_boot_notice_is_wired():
 # ---------------------------------------------------------------------------
 
 def test_cache_busters_bumped():
-    # Floor advances whenever app.js/styles.css change and their ?v= must ship.
-    assert "app.js?v=99" in APP_HTML
-    assert "styles.css?v=98" in APP_HTML
+    # Floor advances whenever one of these files changes and its ?v= must ship.
+    # The floor must clear whatever main already ships, not just whatever this
+    # branch started from. Two branches cut from different bases can both
+    # "bump" to the same number, merge without a conflict, and leave prod
+    # serving new app.js content under a ?v= browsers have already cached.
+    #
+    # THE SINGLE OWNER of this invariant, for every busted asset — do not add a
+    # second cache-buster guard in a feature suite. A `>=` floor and an exact
+    # match are different rules for the same fact: the floor stays green through
+    # the next bump, so the exact one looks like the broken guard and gets
+    # "fixed" by loosening it. That collision has already cost this repo one
+    # round of follow-ups (#347/#348).
+    assert "app.js?v=115" in APP_HTML
+    assert "styles.css?v=115" in APP_HTML
+    assert "js/leaderboard.js?v=28" in APP_HTML
+    assert "home-page.js?v=47" in APP_HTML
+    assert "js/credits.js?v=2" in APP_HTML

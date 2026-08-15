@@ -224,8 +224,16 @@ def test_join_discord_expands_on_home_community_and_competition():
 
 
 def test_playground_home_preview_title_is_plain_language():
+    """The filename-as-chrome title is banned app-wide.
+
+    The positive half used to pin its plain-language replacement, "Example: a
+    conversation with your agent". That title belonged to the mock chat on Home
+    screen 0, which was removed when the screen became the Competition board --
+    so the assertion is now carried by the landing page, which still runs the
+    same conversation demo under the Talk act (`ChatSimulation.tsx`). What
+    survives here is the ban, which is app-wide and outlives any one panel.
+    """
     assert "agent-playground.exe" not in _HTML
-    assert "Example: a conversation with your agent" in _HTML
 
 
 def test_resource_subtitles_are_plain_language():
@@ -269,29 +277,38 @@ def test_account_description_is_plain_language():
     assert "Signed-in profile and session." not in _HTML
 
 
-def test_home_mock_chat_gloss_matches_landing():
-    """The row names "Paper Trading tab first mention," but the tab's own
-    content (`#paperTradingView`) has no bare "paper trading" prose -- only
-    metric labels ("Portfolio Value", "Cash Available", ...). An earlier bare
-    mention exists in document order (the auth modal subtitle, "Optional --
-    backtest and paper trading work without an account."), but that's a
-    compact overlay shown only on user action, outside the page's normal
-    reading flow -- the term there is incidental to the sentence's point
-    ("works without an account"), and splicing in the long landing gloss
-    would bloat a small dialog. The one this row's "gloss identical to
-    landing" phrase actually points at is the home page's mock chat demo:
-    the same chat-bubble sentence PR A1 already glossed on the landing
-    page's Hero.tsx. Applying it here mirrors that precedent rather than
-    inventing a new location.
+def test_home_screen_zero_leads_with_the_board_not_a_second_marketing_hero():
+    """Home screen 0 is the first thing a signed-in user sees, every time.
+
+    `onHomePageShow()` calls `setHomePagerPage(0)` on every entry to Home, so
+    whatever sits on screen 0 is the app's front page for people who already
+    have an account. It used to be a verbatim second copy of the landing hero --
+    "Talk to Agents / Test Trading Ideas" over a "Get Started" button -- which
+    meant a signed-in user with agents was shown the acquisition pitch and an
+    invitation to begin. It now carries `#homeModuleRanking`, the one board with
+    real numbers on it.
+
+    This replaces `test_home_mock_chat_gloss_matches_landing`, whose subject was
+    the mock chat demo that lived on that screen. The demo was not weakened, it
+    moved: it runs on the landing page under the Talk act
+    (`landing/src/components/home/ChatSimulation.tsx`), where its simulated-money
+    gloss is pinned verbatim by
+    `test_landing_copy_register.py::test_the_disclaimer_allowlist_is_not_stale`.
+    That gloss no longer needs an app-side twin because the app no longer makes
+    the claim it glossed.
     """
-    start = _HTML.index('id="homePlaygroundChat"')
-    end = _HTML.index("</section>", start)
-    region = _HTML[start:end]
-    assert '<span class="home-headline-accent">paper trading</span>' in region
-    assert (
-        "— practice trading with simulated money at live market prices —"
-    ) in region
-    assert "and alert you when Berkshire's next 13F drops?" in region
+    assert 'id="homePlaygroundChat"' not in _HTML, (
+        "the mock chat moved to the landing page; a copy here needs its own gloss"
+    )
+    assert "Talk to Agents" not in _HTML, "the app must not re-run the landing pitch"
+
+    start = _HTML.index('id="homeScreenLanding"')
+    end = _HTML.index('id="homeScreenDashboard"')
+    screen_zero = _HTML[start:end]
+    assert 'id="homeModuleRanking"' in screen_zero
+    assert 'id="homeModuleRankList"' in screen_zero
+    # Non-vacuity: the slice must actually be the screen, not an empty span.
+    assert 'id="homeScrollHint"' in screen_zero
 
 
 def test_builtin_agent_placeholder_asks_what_makes_it_different():

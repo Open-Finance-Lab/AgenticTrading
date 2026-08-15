@@ -84,7 +84,21 @@ os.environ.pop("MARKET_DATA_CACHE_MAX_ENTRIES", None)
 os.environ.pop("BASELINE_QUEUE_MAX", None)
 os.environ.pop("EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS", None)
 os.environ.pop("MAX_ACTIVE_RUNS_GLOBAL", None)
+os.environ.pop("MAX_ACTIVE_DASHBOARD_BACKTESTS", None)
 os.environ.pop("AGENT_AUTH_CACHE_TTL_SECONDS", None)
+os.environ.pop("MAX_LEGACY_ACTIVE_PER_SESSION", None)
+os.environ.pop("MAX_LEGACY_ACTIVE_GLOBAL", None)
+# Read once at import into users.DEFAULT_MAX_CONCURRENT_BACKTESTS, which every
+# entitlement default and every per-account cap test resolves through.
+os.environ.pop("DEFAULT_MAX_CONCURRENT_BACKTESTS", None)
+os.environ.pop("DEFAULT_CREDITS", None)
+# Credit metering is strict opt-in and off by default (see
+# domain/entitlements/credits.py). A developer with it exported would otherwise
+# have every LLM-backtest test 402 on an empty balance -- and, worse, a suite
+# that passed for them would be asserting the metered path everywhere while CI
+# asserted the unmetered one. Tests that exercise metering set it via
+# monkeypatch.
+os.environ.pop("CREDITS_METERING_ENABLED", None)
 
 # Mail credentials: a developer with a real BREVO_API_KEY exported would
 # otherwise have the suite send live email, and would see the
@@ -107,6 +121,10 @@ os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
 # secret-gate tests see a known-unset baseline rather than the shell's value.
 os.environ.pop("LEADERBOARD_DAILY_AUTO_DEPLOY", None)
 os.environ.pop("LEADERBOARD_DAILY_REFRESH_SECRET", None)
+# Same known-unset baseline for the first-admin bootstrap secret: a developer
+# with it exported would otherwise make the unconfigured-refusal tests fail,
+# and could accidentally promote the suite's throwaway accounts.
+os.environ.pop("ADMIN_BOOTSTRAP_SECRET", None)
 
 
 @atexit.register
@@ -172,6 +190,7 @@ def _reset_shared_scale_state(monkeypatch):
     from dashboard.backend.api import auth as auth_api
     from dashboard.backend.api.routers import credits as credits_router
     from dashboard.backend.api.routers import leaderboard as leaderboard_router
+    from dashboard.backend.api.routers import backtests as backtests_router
 
     monkeypatch.setattr(db_pool, "POOL_TIMEOUT_SECONDS", 1.0)
     market_data_store._reset_for_tests()
@@ -191,6 +210,11 @@ def _reset_shared_scale_state(monkeypatch):
     credits_router._CHECKOUT_LIMITER.reset()
     credits_router._ORDER_POLL_LIMITER.reset()
     credits_router._ADMIN_REFUND_LIMITER.reset()
+    # Dashboard backtest slots are process-global. Tests mock the worker so
+    # _finalize_slot never runs; without a reset the 20-slot process cap
+    # refuses later /backtest/run calls with success:false.
+    backtests_router._reset_slots_for_tests()
+    backtests_router._backtest_rate_limiter.reset()
     yield
     # Best-effort drain so a job enqueued in this test doesn't leak into the
     # next. Note pytest tears fixtures down LIFO, so a test's own monkeypatches
@@ -203,6 +227,8 @@ def _reset_shared_scale_state(monkeypatch):
     market_data_store._reset_for_tests()
     auth_cache._reset_for_tests()
     db_pool._reset_for_tests()
+    backtests_router._reset_slots_for_tests()
+    backtests_router._backtest_rate_limiter.reset()
 
 
 @pytest.fixture(autouse=True)

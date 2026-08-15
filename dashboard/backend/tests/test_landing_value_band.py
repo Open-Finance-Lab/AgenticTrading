@@ -4,10 +4,15 @@ A tester could not tell what the platform's core advantage was without clicking
 in and exploring. The narrative sections (Talk/Test/Race) each describe an act
 but never state the problem being solved or who it is for.
 
-Also pins the two claims that must never appear. Both contradict the code: no
-order-submission route exists on any surface, and ROBINHOOD_EXECUTE defaults to
-false. docs/source/lab/operating_modes.rst says the same. Copy that promises
-either would be the fabricated-Performance-Drivers failure again.
+Also pins the two claims that must never appear here. Corrected 2026-08-15: the
+old rationale said "no order-submission route exists on any surface", which is
+stale — `execution/robinhood_live_service.py` is the live-money path and
+`api/routers/robinhood_live.py` mounts it. It is armed only by ROBINHOOD_EXECUTE,
+which defaults false, and it is a separate opt-in per-user path, not something
+this band's subject (the Lab's simulated Talk/Test/Race flow) reaches. So the ban
+is on implying *these* flows trade real money, not on the platform having a
+brokered path at all. docs/source/lab/operating_modes.rst draws the same line.
+Copy that blurs it would be the fabricated-Performance-Drivers failure again.
 """
 
 import re
@@ -75,9 +80,22 @@ def test_band_makes_no_paper_trading_claim():
 
 
 def test_band_makes_no_real_capital_claim():
-    """Same reasoning as the paper-trading guard: shapes, not a phrase list."""
+    """Same reasoning as the paper-trading guard: shapes, not a phrase list.
+
+    The bare phrase "live trading" used to be on this list. It came off on
+    2026-08-15: "Live Trading Leaderboard" is now a board name, so banning the
+    words would make *naming the product here* a test failure while the claim
+    itself walked in through any other wording. What is banned is the claim —
+    turning live trading on, connecting a broker — not the noun.
+    """
     body = _BAND.read_text(encoding="utf-8").lower()
-    for pattern in (r"real (capital|money|cash|funds|dollars)", r"go live", r"trade live", r"live trading"):
+    for pattern in (
+        r"real (capital|money|cash|funds|dollars)",
+        r"go live",
+        r"trade live",
+        r"turn on live trading",
+        r"connect (a|an|your) brokerage",
+    ):
         hit = re.search(pattern, body)
         assert hit is None, f"band claims real capital: {hit.group(0)!r}"
 

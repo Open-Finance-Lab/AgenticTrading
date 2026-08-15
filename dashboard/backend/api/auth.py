@@ -24,6 +24,7 @@ from dashboard.backend.api.rate_limit import (
     FixedWindowRateLimiter,
     client_ip,
     client_key,
+    rate_limited_error,
 )
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
@@ -126,12 +127,9 @@ def _email_domain(email: str) -> str:
     return _DOMAIN_PREFIX.match(domain).group()[:64] or "?"
 
 
-def _auth_rate_limited(limiter: FixedWindowRateLimiter, key: str, detail: str) -> HTTPException:
-    return HTTPException(
-        status_code=429,
-        detail=detail,
-        headers={"Retry-After": str(limiter.retry_after_seconds(key))},
-    )
+# The 429 builder now lives in rate_limit.rate_limited_error, shared with every
+# other limited route; this name stays for the module's existing call sites.
+_auth_rate_limited = rate_limited_error
 
 
 def _login_ip_key(request: Request) -> str:
@@ -155,6 +153,19 @@ def _app_redirect(query: dict[str, str]) -> RedirectResponse:
 
 def _normalize_email(value: str) -> str:
     email = value.strip().lower()
+    # Strip() only touches the ends, so an address whose *interior* holds a
+    # newline validated fine and was stored verbatim. Everything that later
+    # renders an email as plain text then inherits it: the admin console builds
+    # its role-change confirm() as
+    # ``Promote {email} to admin?\n\nThey will see Admin…``, and an address of
+    # the form ``a@b.com\n\nThis account is verified by SecureFinAI Lab.`` puts
+    # attacker-chosen lines into the dialog an admin reads while deciding
+    # whether to grant admin. Escaping cannot help there — a native dialog has
+    # no markup to escape — so the address must never contain the character.
+    # Same reasoning covers the log sinks; ``_email_domain`` above truncates
+    # for its own output, but that is a second guard, not this one.
+    if any(ch.isspace() or ord(ch) < 0x20 or ord(ch) == 0x7F for ch in email):
+        raise ValueError("invalid email address")
     if "@" not in email or "." not in email.split("@", 1)[-1]:
         raise ValueError("invalid email address")
     return email
@@ -316,10 +327,58 @@ def get_current_user(
     return user
 
 
-def _auth_json(user: dict, raw_token: str) -> JSONResponse:
+def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Dependency: the signed-in caller, who must hold the admin role.
+
+    The one admin gate — routers depend on this rather than re-checking
+    ``role`` inline, so "who counts as an admin" cannot drift per route.
+    """
+    if current_user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin only")
+    return current_user
+
+
+def _issue_session(user: dict, request: Request) -> tuple[str, Optional[dict]]:
+    """Mint the session row and read the caller's entitlements — one hop.
+
+    Both of these are synchronous store calls, i.e. a network round trip to
+    pooled Postgres in a durable deployment, and the only two callers are the
+    ``async def`` signup/login handlers. Bundled into a single function so they
+    cross into the threadpool together: two ``asyncio.to_thread`` awaits would
+    pay two hops for work that has to happen in sequence anyway, and — worse —
+    leaving *either* of them inline puts blocking I/O back on the event loop,
+    where one slow query stalls every concurrent request server-wide.
+
+    ``test_event_loop_threadpool`` cannot catch that regression here: it pins
+    plain-``def`` handlers, and these two are exempt for already awaiting.
+    ``test_auth_async_handlers_offload_store_io`` is the guard that can.
+    """
+    token = users_module.user_store.create_session(
+        user["id"], **_session_client_context(request)
+    )
+    entitlements = (
+        users_module.user_store.get_entitlements(user["id"])
+        if user.get("id") is not None
+        else None
+    )
+    return token, entitlements
+
+
+def _auth_json(
+    user: dict, raw_token: str, entitlements: Optional[dict] = None
+) -> JSONResponse:
     from dashboard.backend.csrf import set_csrf_cookie
 
-    response = JSONResponse({"user": user})
+    payload = dict(user)
+    if "entitlements" not in payload and payload.get("id") is not None:
+        # Prefetched by the caller when it had a threadpool hop to spend; the
+        # query below is the fallback for a caller that did not.
+        payload["entitlements"] = (
+            entitlements
+            if entitlements is not None
+            else users_module.user_store.get_entitlements(payload["id"])
+        )
+    response = JSONResponse({"user": payload})
     set_session_cookie(response, raw_token)
     set_csrf_cookie(response)
     return response
@@ -377,10 +436,8 @@ async def signup(payload: SignupRequest, request: Request):
             raise HTTPException(status_code=409, detail="Email is already registered") from exc
         raise
 
-    token = users_module.user_store.create_session(
-        user["id"], **_session_client_context(request)
-    )
-    return _auth_json(user, token)
+    token, entitlements = await asyncio.to_thread(_issue_session, user, request)
+    return _auth_json(user, token, entitlements=entitlements)
 
 
 @router.post("/login", response_model=AuthResponse)
@@ -420,10 +477,8 @@ async def login(payload: LoginRequest, request: Request):
         print(f"auth.login_failed domain={_email_domain(payload.email)}")
         raise HTTPException(status_code=401, detail=LOGIN_FAILURE_DETAIL)
 
-    token = users_module.user_store.create_session(
-        user["id"], **_session_client_context(request)
-    )
-    return _auth_json(public_user(user), token)
+    token, entitlements = await asyncio.to_thread(_issue_session, user, request)
+    return _auth_json(public_user(user), token, entitlements=entitlements)
 
 
 @router.get("/me")
@@ -432,7 +487,20 @@ def me(
     authorization: Optional[str] = Header(default=None),
     current_user: dict = Depends(get_current_user),
 ):
-    response = JSONResponse({"user": public_user(current_user)})
+    user_payload = public_user(current_user)
+    # /me is on the page-boot critical path, where every query is a round-trip
+    # to pooled Postgres. get_user_for_token already LEFT JOINs the
+    # entitlements row, so read it off the session row instead of paying a
+    # second one. The fallback covers a store whose session query has not been
+    # taught the join -- it returns None rather than silently reporting
+    # defaults for a user who has real quotas.
+    entitlements = users_module.entitlements_from_session_row(
+        current_user, current_user["id"]
+    )
+    if entitlements is None:
+        entitlements = users_module.user_store.get_entitlements(current_user["id"])
+    user_payload["entitlements"] = entitlements
+    response = JSONResponse({"user": user_payload})
     # Migration bridge: a browser signed in before the HttpOnly-cookie change
     # holds a valid session only in localStorage. app.js sends it once as
     # Bearer on the boot /me probe; upgrading it to a cookie here keeps that

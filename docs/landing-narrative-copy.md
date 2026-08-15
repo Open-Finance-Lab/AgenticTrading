@@ -23,8 +23,21 @@ Tone: short lines, one job per section. No feature dumps.
 | CTA | Get Started → Discord (same as Hero primary) |
 
 ### Hero
-**Frozen — do not change.** Keep current `Talk to Agents` / `Test Trading Ideas`, CTAs, and visual.
-Scroll target `#landing-stats` is preserved as a hidden anchor inside Talk.
+**Headline and CTAs frozen.** Keep `Talk to Agents` / `Test Trading Ideas` and `Start Free`.
+Scroll target `#landing-stats` is preserved as a hidden anchor inside WhyCare.
+
+**The visual is no longer frozen (2026-08-15).** The right column was the agent
+conversation demo; it is now the board — `BoardPreview.tsx`, a compact equity
+chart plus the top five standings, above the fold at 1440×900. The conversation
+demo moved down to the Talk act (`ChatSimulation.tsx`), which is the beat it
+illustrates. The hero also gained one supporting line under the headline: the
+one-per-surface gloss on "agent", because the headline uses the word before
+anything else on the page defines it and the board is now the only other thing
+above the fold.
+
+Why: the leaderboard was the page's only piece of evidence and sat roughly four
+screens down, so the last thing a visitor saw was the one thing that would have
+convinced them.
 
 ### 01 — Talk
 | Slot | Copy |
@@ -53,22 +66,55 @@ Scroll target `#landing-stats` is preserved as a hidden anchor inside Talk.
 | Log | Decision log with step, size, rationale |
 | Primary CTA | Race this agent ↓ |
 
-### 03 — Race
+### Race (unnumbered since 2026-08-15)
 | Slot | Copy |
 |------|------|
-| Label | 03 — Race |
-| H2 | Race your agent in community contests |
-| Body (1 line) | Same window. Same rules. Ranked vs baselines. |
-| Rules (3 bullets max) | Fixed contest window · Shared market context · Published only if the AI model drove the run |
-| Board meta | Contest: {start} → {end} |
-| Primary CTA | View live leaderboard |
-| Secondary CTA | Enter via Discord |
+| Label | **none** — the `03 — Race` mono-label was dropped when the board moved into the hero. Talk (01) and Test (02) keep theirs; the board is the first thing on the page, so numbering it third described the wrong page. |
+| H2 | What the AI models actually returned |
+| Body (1 line) | Seven leading AI models traded the same days with simulated money, ranked against buy-and-hold and the index. Only one finished ahead of both. |
+| Rules (3 bullets max, each with an icon) | Competition: one fixed window of market history — the same days and the same starting capital for every contender. (`CalendarClock`) · Live Trading Leaderboard: designed to move forward one trading session at a time, in two-week seasons. (`TrendingUp`) · Published only if the AI model itself made at least 95% of the decisions. (`ShieldCheck`) |
+| Preview note | The Live Trading Leaderboard is in preview for Season 0. It has not moved forward a session yet, and nothing on it is a record. Season 1 is the first that counts. |
+| Standings card | Competition Standings (`Illustrative example` chip) |
+| Primary CTA | Start Free (`PRIMARY_LANDING_CTA`) |
+
+**Two counts in the body are facts, not flourishes.** "Seven" is the LLM entry
+count in `dashboard/config/leaderboard.json`; "only one finished ahead of both"
+is the real result (DeepSeek V4 Pro). Re-check both against that file when the
+roster changes — the sentence is the page's main credibility move precisely
+because it volunteers an unflattering number.
+
+**Why the numbered label went, not the bullets.** The rules are the section's
+whole job: they are what makes a return figure mean anything. What stopped
+making sense was calling the board "act three" on a page that opens with it.
+
+**No chart here any more.** The equity chart lives in the hero
+(`BoardPreview.tsx`); Race keeps the full standings table and the rules. The
+sample rows are shared — `Race.tsx` imports `SAMPLE_STANDINGS` — so the two
+cards cannot drift.
+
+**Why the H2 is not "Race your agent" (2026-08-15).** Board entries come from the
+curated `dashboard/config/leaderboard.json` roster, so **no user agent is on any
+board** — "race your agent" / "watch your agent climb" described an entry flow that
+does not exist. It is also two boards now, not one, and only one of them is even
+notionally live. The act still lands: the board is the bar you are testing against
+in 02. Revisit when the season entry flow ships (PR #328 frontier).
 
 ### Footer
 | Slot | Copy |
 |------|------|
 | Line | Talk → Test → Race |
 | CTAs | Join Discord · Open Leaderboard |
+
+### App-side twin (`app.html` Home screen 0)
+
+Not part of the marketing page, but written to the same register and changed in
+the same pass. Signed-in visitors never see `/` at all — `index.html` redirects
+them to `/app` — and Home's pager screen 0 was a second copy of this hero,
+"Talk to Agents / Test Trading Ideas" over a **Get Started** button, shown to
+people who had already got started. It now carries the real Competition
+Leaderboard (`#homeModuleRanking`, moved off the screen-1 dashboard grid), and
+the CTA reads by sign-in state: *Create a free account* signed out, *Test a
+trading idea* signed in.
 
 ### Kill / avoid
 - Fake stats (“Agents Online”, etc.)
