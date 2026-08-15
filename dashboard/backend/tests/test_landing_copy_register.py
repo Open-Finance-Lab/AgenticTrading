@@ -229,9 +229,11 @@ _LANDING_HOME = _RACE_TSX.parent
 # leaving a file unguarded is not.
 _CLAIM_DISCLAIMERS = (
     # Hero's standing safety line, pinned verbatim by this suite (above) and by
-    # test_frontend_shelves. It is the sentence that tells a visitor no real
-    # money is at stake, so banning the phrase it needs would delete the
-    # disclaimer to satisfy the guard against the claim.
+    # test_frontend_shelves. It is not an over-claim: the brokered path is real
+    # (api/routers/robinhood_live.py, mounted at api/router.py; ROBINHOOD_EXECUTE
+    # defaults false), and this sentence is the one place that states the
+    # condition accurately. Banning the phrase it needs would delete the
+    # disclaimer in order to satisfy the guard against the claim.
     "Every test here uses simulated money. Real money is involved only if you "
     "explicitly connect a brokerage account and turn on live trading.",
     # Hero's gloss on what a Lab paper-trading run is. Accurate as written: the
@@ -256,12 +258,20 @@ _BROKERED_CLAIM_PATTERNS = (
 
 
 def test_no_landing_component_claims_brokered_or_real_capital_trading():
-    """Brokered execution is an explicit non-goal (PR #328).
+    """Nothing on the narrative path puts real capital at risk — say nothing else.
 
-    `execution/paper_backend.py` is still a stub, so any component promising that
-    an agent trades through a broker, or that real capital is at stake, describes
-    a product that does not exist. Every home component is scanned, because the
-    one thing this class of copy reliably does is relocate.
+    Not because brokered execution does not exist: it does
+    (`api/routers/robinhood_live.py`), behind `ROBINHOOD_EXECUTE`, which defaults
+    false. It is a separate, opt-in, per-user path. What the landing sells — Talk
+    → Test → Race, the boards, the playground — is simulated throughout, and
+    `execution/paper_backend.py` is still a stub, so copy implying that running an
+    agent here trades real money describes something these flows do not do.
+
+    Hero's conditional sentence is the correct way to say it, which is why it is
+    allowlisted above rather than banned. Every home component is scanned because
+    the one thing this class of copy reliably does is relocate: the WhyCare-scoped
+    guard in test_landing_value_band.py was clean the whole time Race shipped
+    "Paper trading on live markets" next door.
     """
     components = sorted(_LANDING_HOME.glob("*.tsx"))
     assert components, "no landing components found — the glob is wrong"

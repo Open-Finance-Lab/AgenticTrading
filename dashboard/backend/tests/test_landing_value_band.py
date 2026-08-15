@@ -4,10 +4,15 @@ A tester could not tell what the platform's core advantage was without clicking
 in and exploring. The narrative sections (Talk/Test/Race) each describe an act
 but never state the problem being solved or who it is for.
 
-Also pins the two claims that must never appear. Both contradict the code: no
-order-submission route exists on any surface, and ROBINHOOD_EXECUTE defaults to
-false. docs/source/lab/operating_modes.rst says the same. Copy that promises
-either would be the fabricated-Performance-Drivers failure again.
+Also pins the two claims that must never appear here. Corrected 2026-08-15: the
+old rationale said "no order-submission route exists on any surface", which is
+stale — `execution/robinhood_live_service.py` is the live-money path and
+`api/routers/robinhood_live.py` mounts it. It is armed only by ROBINHOOD_EXECUTE,
+which defaults false, and it is a separate opt-in per-user path, not something
+this band's subject (the Lab's simulated Talk/Test/Race flow) reaches. So the ban
+is on implying *these* flows trade real money, not on the platform having a
+brokered path at all. docs/source/lab/operating_modes.rst draws the same line.
+Copy that blurs it would be the fabricated-Performance-Drivers failure again.
 """
 
 import re
