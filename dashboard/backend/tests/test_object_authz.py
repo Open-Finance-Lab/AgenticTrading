@@ -5,6 +5,7 @@ from __future__ import annotations
 import tempfile
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -14,9 +15,12 @@ from fastapi.testclient import TestClient
 # py/import-and-import-from stays quiet.
 import dashboard.backend.domain.agents.repository as agent_repo
 import dashboard.backend.domain.portfolios.repository as portfolio_repo
+import dashboard.backend.api.routers.credits as credits_router
 import dashboard.backend.users as users_module
 from dashboard.backend.app import app
 from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
+from dashboard.backend.domain.credits.repository import CreditsStore
+from dashboard.backend.domain.credits.service import CreditsService
 
 
 @pytest.fixture
@@ -26,9 +30,19 @@ def client(monkeypatch):
         user_store = users_module.UserStore(db_path=root / "users.db")
         agent_store = agent_repo.AgentStore(db_path=root / "content.db")
         portfolio_store = portfolio_repo.PortfolioStore(db_path=root / "content.db")
+        credits_store = CreditsStore(db_path=root / "users.db")
         monkeypatch.setattr(users_module, "user_store", user_store)
         monkeypatch.setattr(agent_repo, "agent_store", agent_store)
         monkeypatch.setattr(portfolio_repo, "portfolio_store", portfolio_store)
+        # A real service, not SimpleNamespace(store=...). The stub only worked
+        # while the router reached past the service into the repository; the
+        # ownership scoping this module tests belongs to the service, so a stub
+        # that fakes it away would leave the boundary untested.
+        monkeypatch.setattr(
+            credits_router,
+            "credits_service",
+            CreditsService(store=credits_store, gateway=SimpleNamespace()),
+        )
         yield TestClient(app)
 
 
@@ -120,3 +134,22 @@ def test_admin_run_delete_requires_admin_role(client):
 def test_paper_start_session_requires_login(client):
     resp = client.post("/paper/start-session", params={"agent_name": "anon"})
     assert resp.status_code == 401
+
+
+def test_credit_order_endpoint_hides_another_users_order(client):
+    alice = _auth(_signup(client, "alice-credit-authz@example.com"))
+    bob = _auth(_signup(client, "bob-credit-authz@example.com"))
+    store = credits_router.credits_service.store
+    store.create_or_get_order(
+        order_id="ord_alice_private",
+        user_id=1,
+        client_request_id="99999999-9999-4999-8999-999999999999",
+        amount_usd_cents=500,
+        credits_micro=5_000_000,
+    )
+
+    own = client.get("/api/credits/orders/ord_alice_private", headers=alice)
+    hidden = client.get("/api/credits/orders/ord_alice_private", headers=bob)
+
+    assert own.status_code == 200
+    assert hidden.status_code == 404

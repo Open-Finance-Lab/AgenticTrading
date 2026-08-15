@@ -108,6 +108,12 @@ os.environ.pop("BREVO_API_KEY", None)
 os.environ.pop("ACCOUNT_EMAIL_FROM", None)
 os.environ.pop("ACCOUNT_EMAIL_FROM_NAME", None)
 
+# Billing tests must never inherit a developer's Stripe credentials or enable
+# Test Mode accidentally. Individual tests set explicit fake values.
+os.environ.pop("ATL_STRIPE_TEST_BILLING_ENABLED", None)
+os.environ.pop("STRIPE_SECRET_KEY", None)
+os.environ.pop("STRIPE_WEBHOOK_SECRET", None)
+
 # Daily Leaderboard knobs. LEADERBOARD_DAILY_AUTO_DEPLOY is the flag that lets a
 # public GET of ?period=daily kick off deploy_model_run for every competition
 # entry -- real, billable LLM calls. A developer with it exported would have the
@@ -182,6 +188,7 @@ def _reset_shared_scale_state(monkeypatch):
     from dashboard.backend.domain.agents import auth_cache
     from dashboard.backend import db_pool
     from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.routers import credits as credits_router
     from dashboard.backend.api.routers import leaderboard as leaderboard_router
     from dashboard.backend.api.routers import backtests as backtests_router
 
@@ -200,6 +207,10 @@ def _reset_shared_scale_state(monkeypatch):
     # refresh budget would otherwise be consumed cumulatively across the suite
     # and later tests would start seeing 429s.
     leaderboard_router._daily_refresh_rate_limiter.reset()
+    credits_router._CHECKOUT_LIMITER.reset()
+    credits_router._ORDER_POLL_LIMITER.reset()
+    credits_router._ADMIN_REFUND_LIMITER.reset()
+    credits_router._WEBHOOK_LIMITER.reset()
     # Dashboard backtest slots are process-global. Tests mock the worker so
     # _finalize_slot never runs; without a reset the 20-slot process cap
     # refuses later /backtest/run calls with success:false.

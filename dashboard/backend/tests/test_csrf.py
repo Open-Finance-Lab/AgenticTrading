@@ -130,3 +130,85 @@ def test_forged_api_key_cannot_bypass_csrf_with_session_cookie(csrf_client):
     )
     assert resp.status_code == 403
     assert "CSRF" in resp.json()["detail"]
+
+
+def test_credit_checkout_requires_csrf_for_cookie_session(csrf_client, monkeypatch):
+    from dashboard.backend.api.routers import credits as credits_router
+    from dashboard.backend.domain.credits.models import CheckoutResult
+
+    _signup(csrf_client, email="credits-csrf@example.com")
+
+    class FakeCreditsService:
+        def create_checkout(self, user_id, payload):
+            return CheckoutResult(
+                order_id="ord_csrf",
+                checkout_session_id="cs_test_csrf",
+                checkout_url="https://checkout.stripe.test/csrf",
+                amount_usd_cents=500,
+                credits_micro=5_000_000,
+                order_status="pending",
+            )
+
+    monkeypatch.setattr(credits_router, "credits_service", FakeCreditsService())
+    payload = {
+        "client_request_id": "77777777-7777-4777-8777-777777777777",
+        "package_id": "usd_5",
+    }
+
+    blocked = csrf_client.post(
+        "/api/credits/checkout-sessions",
+        headers={"Origin": "http://testserver"},
+        json=payload,
+    )
+    allowed = csrf_client.post(
+        "/api/credits/checkout-sessions",
+        headers=_csrf_headers(csrf_client),
+        json=payload,
+    )
+
+    assert blocked.status_code == 403
+    assert "CSRF" in blocked.json()["detail"]
+    assert allowed.status_code == 200
+
+
+def test_admin_credit_refund_requires_csrf_for_cookie_session(csrf_client, monkeypatch):
+    from dashboard.backend import users
+    from dashboard.backend.api.routers import credits as credits_router
+    from dashboard.backend.domain.credits.models import RefundCreationResult
+
+    _signup(csrf_client, email="credits-admin-csrf@example.com")
+    with users.user_store._get_connection() as conn:
+        conn.execute("UPDATE users SET role = 'admin'")
+
+    class FakeCreditsService:
+        def create_admin_refund(self, admin_user_id, payload):
+            return RefundCreationResult(
+                refund_id="rfnd_csrf",
+                stripe_refund_id="re_test_csrf",
+                payment_order_id="ord_csrf",
+                amount_usd_cents=400,
+                credits_micro=4_000_000,
+                refund_status="submitted",
+            )
+
+    monkeypatch.setattr(credits_router, "credits_service", FakeCreditsService())
+    payload = {
+        "client_request_id": "88888888-8888-4888-8888-888888888888",
+        "payment_order_id": "ord_csrf",
+        "amount_usd_cents": 400,
+    }
+
+    blocked = csrf_client.post(
+        "/api/admin/credits/refunds",
+        headers={"Origin": "http://testserver"},
+        json=payload,
+    )
+    allowed = csrf_client.post(
+        "/api/admin/credits/refunds",
+        headers=_csrf_headers(csrf_client),
+        json=payload,
+    )
+
+    assert blocked.status_code == 403
+    assert "CSRF" in blocked.json()["detail"]
+    assert allowed.status_code == 200
