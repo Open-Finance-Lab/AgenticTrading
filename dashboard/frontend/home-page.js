@@ -1491,6 +1491,92 @@ function homeChartSeries(entries, build) {
     return { times, series };
 }
 
+let homeRankChart = null;
+
+/** Draw screen 0's equity chart, or nothing at all.
+ *
+ *  Returns null -- and creates no element -- when there are no series or when
+ *  Chart.js has not landed yet. Both cases leave the panel laid out exactly as
+ *  it is today, list and all, which is the point: a blank reserved box reads as
+ *  a chart that failed. */
+function renderHomeLeaderboardChart(series, times) {
+    if (!series.length) return null;
+    if (typeof window.Chart !== 'function') return null;
+    const panel = document.getElementById('homeModuleRanking');
+    const anchor = panel && panel.querySelector('.hm-rank-table-head');
+    if (!panel || !anchor) return null;
+
+    let wrap = document.getElementById('homeModuleRankChartWrap');
+    if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.id = 'homeModuleRankChartWrap';
+        wrap.className = 'hm-rank-chart';
+        const canvas = document.createElement('canvas');
+        canvas.id = 'homeModuleRankChart';
+        canvas.setAttribute('role', 'img');
+        canvas.setAttribute('aria-label', 'Return for each AI model over the competition window');
+        wrap.appendChild(canvas);
+        panel.insertBefore(wrap, anchor);
+    }
+    if (homeRankChart) homeRankChart.destroy();
+
+    const axis = { color: 'rgba(148, 163, 184, 0.85)', font: { size: 14 } };
+    homeRankChart = new window.Chart(wrap.querySelector('canvas'), {
+        type: 'line',
+        data: {
+            labels: times,
+            datasets: series.map((s) => ({
+                label: s.label,
+                data: s.values,
+                borderColor: s.color,
+                borderWidth: s.isBaseline ? 1.5 : 2,
+                borderDash: s.dash,
+                pointRadius: 0,
+                spanGaps: true,
+                tension: 0,
+            })),
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            animation: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+                // The rank list beneath is the key -- each row carries the
+                // curve's colour swatch. A legend here would be the same five
+                // names twice, in a panel that has no height to spare.
+                legend: { display: false },
+                tooltip: {
+                    enabled: true,
+                    callbacks: {
+                        // Without this the tooltip prints the raw fraction
+                        // (0.0749). Two decimals, not the axis's one: this
+                        // readout sits beside the rank row for the same model,
+                        // and that row renders `homeFormatReturnPct` -- which
+                        // is toFixed(2), so `+7.49%`. Pinned by
+                        // `test_the_chart_readout_matches_the_rank_lists_own_precision`.
+                        label: (c) =>
+                            `${c.dataset.label}: ${c.parsed.y >= 0 ? '+' : ''}${(c.parsed.y * 100).toFixed(2)}%`,
+                    },
+                },
+            },
+            scales: {
+                x: { ticks: { ...axis, maxTicksLimit: 6 }, grid: { display: false } },
+                y: {
+                    // Percent, not dollars -- see "Units" in the plan's Global
+                    // Constraints. ONE decimal here, unlike the tooltip above:
+                    // an axis tick is a scale marker with no neighbour to
+                    // match, and over a narrow domain zero decimals renders
+                    // duplicate labels while two renders noise.
+                    ticks: { ...axis, callback: (v) => `${(v * 100).toFixed(1)}%` },
+                    grid: { color: 'rgba(148, 163, 184, 0.12)' },
+                },
+            },
+        },
+    });
+    return homeRankChart;
+}
+
 async function loadHomeLeaderboardModule() {
     const list = document.getElementById('homeModuleRankList');
     if (!list) return;
@@ -1608,6 +1694,14 @@ async function loadHomeLeaderboardModule() {
             return;
         }
         renderEntries(models);
+        const build = window.buildEquityCurvesFromEntries;
+        if (typeof build !== 'function') {
+            // Distinguishable in the console from the honest no-curves case,
+            // which is silent. Absent and broken must not look identical.
+            console.warn('Home chart: buildEquityCurvesFromEntries is unavailable.');
+        }
+        const chart = homeChartSeries(payload.entries || [], build);
+        renderHomeLeaderboardChart(chart.series, chart.times);
     } catch (error) {
         console.warn('Home leaderboard module failed:', error.message);
         renderEntries(homeModelEntries(HOME_MOCK_LEADERBOARD), { sample: 'unreachable' });

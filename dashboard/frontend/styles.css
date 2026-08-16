@@ -6210,6 +6210,23 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     .hm-agent-stat-value { font-size: 18px; }
 }
 
+/* Screen 0's equity chart. `clamp(140px, 26vh, 280px)` yields 187-280px across
+   1280x720 -> 1920x1080 -- verified alongside 7/7 visible standings rows and
+   zero pager clip. Deliberately smaller than /'s clamp: this panel is bounded
+   by the pager, / 's card by the document. `flex: 0 0 auto` so the list, which
+   is `flex: 1 1 auto; overflow-y: auto`, absorbs the remaining height rather
+   than the chart collapsing. */
+.hm-rank-chart {
+    flex: 0 0 auto;
+    position: relative;
+    height: clamp(140px, 26vh, 280px);
+    margin-bottom: 10px;
+}
+.hm-rank-chart canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
 /* Leaderboard */
 .hm-rank-table-head {
     display: grid;

@@ -367,3 +367,82 @@ def test_home_chart_matches_the_leaderboards_percent_formula():
         assert pair["home"] == pair["leaderboard"], (
             f"{pair['label']}: screen 0 and the leaderboard tab disagree on percent"
         )
+
+
+def test_the_curve_builder_is_an_explicit_cross_file_export():
+    """home-page.js consumes this from js/leaderboard.js. Both are classic
+    scripts sharing global scope, so an implicit top-level function would work
+    -- and would break silently on rename, degrading to "no chart", which is
+    indistinguishable from the honest no-curves state by design (see above).
+    Pinning both sides of the seam is what turns that into a red test.
+
+    Sits with the render guards rather than the gate's, because the consuming
+    half is the call site in `loadHomeLeaderboardModule`, which the render task
+    adds. Asserting it a task earlier pins a seam that only has one side.
+    """
+    assert (
+        "window.buildEquityCurvesFromEntries = buildEquityCurvesFromEntries;"
+        in _LEADERBOARD_JS
+    )
+    assert "window.buildEquityCurvesFromEntries" in _HOME_JS
+
+
+def test_the_chart_element_is_created_only_when_there_are_series():
+    """Reserve nothing. Chart.js is a deferred third-party script and screen 0 is
+    now the first thing /app paints, so there is a window -- longer on a
+    free-tier cold start -- where the panel knows its chart's height and has
+    nothing to draw in it. A reserved-but-blank 234px box looks like a chart that
+    FAILED rather than one that has not arrived, which is the same absent-vs-
+    broken confusion the gate exists to prevent. One downward layout shift, of
+    content nobody has started reading, is the cheaper cost.
+    """
+    body = _extract(_HOME_JS, "renderHomeLeaderboardChart")
+    assert "if (!series.length) return null;" in body, (
+        "no series must mean no canvas -- not an empty canvas"
+    )
+    # The insertion is guarded, not unconditional at module scope.
+    assert "document.createElement('canvas')" in body or "<canvas" in body
+    assert "typeof window.Chart" in body, (
+        "Chart.js is deferred; the render path must tolerate it not having landed"
+    )
+
+
+def test_chart_axis_ticks_are_14px():
+    """Spec §2's type scale is the only thing keeping the two surfaces looking
+    like one product, and nothing enforces it across stacks -- so it is pinned on
+    each. The cross-surface pair check is in test_landing_chart_first.py.
+    """
+    body = _extract(_HOME_JS, "renderHomeLeaderboardChart")
+    assert re.search(r"font:\s*\{\s*size:\s*14\s*\}", body), (
+        "11px axis ticks were one of the three reported problems"
+    )
+
+
+def test_the_chart_readout_matches_the_rank_lists_own_precision():
+    """The tooltip is a per-series readout sitting beside the rank row showing
+    the same number, so the two must not disagree on decimals.
+
+    The rank list renders `homeFormatReturnPct` (home-page.js), which is
+    `toFixed(2)` -- `+7.49%`, not `+7.5%`. The AXIS keeps one decimal, for the
+    unrelated reason in its own comment: tick labels over a narrow domain
+    collapse into duplicates at zero decimals and turn noisy at two. Different
+    jobs, different precision; only the tooltip has a neighbour to match.
+    """
+    assert "toFixed(2)" in _extract(_HOME_JS, "homeFormatReturnPct"), (
+        "the rank list's formatter changed -- re-check the tooltip's precision"
+    )
+    body = _extract(_HOME_JS, "renderHomeLeaderboardChart")
+    assert "(c.parsed.y * 100).toFixed(2)" in body, (
+        "the tooltip must read in the same precision as the row beside it"
+    )
+
+
+def test_chart_height_is_the_app_clamp_and_not_the_landing_one():
+    """The surfaces have different vertical envelopes and therefore different
+    formulas. /app's panel is bounded by the pager; /'s card by the document.
+    A shared assertion here would be a bug, not a simplification.
+    """
+    blocks = css_blocks(".hm-rank-chart")
+    assert blocks, ".hm-rank-chart was renamed or deleted"
+    assert "clamp(140px, 26vh, 280px)" in blocks[0]
+    assert "100dvh" not in blocks[0], "that is /'s formula, measured against the fold"
