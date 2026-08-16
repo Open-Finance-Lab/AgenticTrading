@@ -1,24 +1,65 @@
 # Phase 0 probe: does a trading instruction change a pinned LLM's return?
 
-**Date run:** 2026-08-15 (Nemotron), 2026-08-16 (DeepSeek)
+**Date run:** 2026-08-15 (Nemotron @ $10k, invalid), 2026-08-16 (DeepSeek @ $10k, invalid;
+DeepSeek @ **$100k**, the result)
 **Plan:** `docs/superpowers/plans/2026-08-09-participatory-competition-phase-0-1.md`, Task 3
-**Script:** `dashboard/scripts/probe_instruction_sensitivity.py` (commit `6ce95bb`)
-**Verdict:** 🚫 **NO RESULT. Both legs are invalid — they ran at the wrong capital base.**
-**Spend so far:** $2.2431 of the plan's $4.97 sanction.
+**Script:** `dashboard/scripts/probe_instruction_sensitivity.py` (commit `9388465`)
+**Verdict:** ✅ **GATE PASSES** on DeepSeek V4 Pro. A trading instruction moves the return by
+**3.61pp** against a **0.20pp** run-to-run noise floor — signal/noise **18×**.
+**Spend:** $3.6100 of the plan's $4.97 sanction ($2.2431 on the invalid legs, $1.3669 on the valid one).
 
 ---
 
-## Read this first: the probe measured nothing, and an earlier draft of this file said otherwise
+## The result
 
-Both legs ran at `initial_capital = $10,000`. **Every published board curve they are compared
-against was computed at `$100,000`.** At $10,000, a single DJIA share is 2.49% of the portfolio
-while the effect under test is ~0.6pp — the measuring instrument is four times coarser than the
-thing it is measuring.
+Re-run at the board's capital base, `initial_capital = $100,000`, DeepSeek V4 Pro, `temperature=0`,
+161 decision steps, window 2026-04-15 → 2026-05-15. The control was run **twice** so that the
+noise floor is measured rather than assumed.
 
-An earlier version of this document reported "GATE FAILS on both models — do not build Phase 2."
-That conclusion is withdrawn. It was not merely unsupported; it was the kind of confident wrong
-answer this probe was written to prevent, and it survived a full write-up because nobody checked
-the resolution of the apparatus against the size of the effect.
+| Run | Instruction | Return | Coverage | Calls | Decisions | Trades | Cost |
+|---|---|---:|---:|---:|---:|---:|---:|
+| e1 | `aggressive_momentum` | **+3.83%** | 100.0% | 185 | 161 | 656 | $0.4427 |
+| e3 | `control_nonsense` **A** | +0.33% | 100.0% | 177 | 161 | 712 | $0.4489 |
+| e4 | `control_nonsense` **B** | +0.13% | 99.4% | 185 | 160 | 661 | $0.4753 |
+
+| Measure | Value |
+|---|---:|
+| noise floor — same instruction, two runs | **0.20pp** |
+| signal — seeded vs. control mean (+0.23%) | **3.61pp** |
+| signal / noise | **18.1×** |
+| naive spread (max − min), plan's ≥1pp threshold | 3.71pp |
+| seeded return outside the control band? | **yes** |
+
+All three cleared H6 (`MIN_LLM_DECISION_COVERAGE = 0.95`), so every curve here is publishable.
+
+The pass holds on the strict reading, not just the naive one. The plan warns that a spread can
+come from *having* an instruction rather than from its content; here the two controls — same
+nonsense instruction, same seed, same temperature — land 0.20pp apart, and the seeded run sits
+**18× that distance away and outside their band**. On the invalid $10k leg the opposite was true:
+one control fell *inside* the seeded range.
+
+The returns are also coherent against the rest of the board. `aggressive_momentum` at +3.83% sits
+inside the passive baseline band for this window (+2.24% to +5.95%), while both controls badly
+underperform passive despite ~700 trades each — nonsense instruction produces churn without edge,
+which is what a working instrument should show.
+
+**Two limits, stated plainly.** The noise floor is one pair, so it is an estimate with no error
+bar of its own; and `contrarian_reversion` was dropped to stay inside the sanction, so this
+measures instruction-vs-control, **not** instruction-vs-instruction. Neither weakens the gate as
+the plan posed it — "does an instruction move the return at all" is answered — but ranking two
+*good* instructions against each other is untested, and Phase 2 depends on that.
+
+## Read this first: an earlier draft of this file said the gate fails
+
+That conclusion is withdrawn, and the numbers above are why. Both earlier legs ran at
+`initial_capital = $10,000` while **every published board curve they were compared against was
+computed at `$100,000`.** At $10,000 a single DJIA share is 2.49% of the portfolio, against an
+effect under test of ~0.6pp — the measuring instrument was four times coarser than the thing it
+was measuring, and it reported a null.
+
+It was not merely unsupported; it was the kind of confident wrong answer this probe was written to
+prevent, and it survived a full write-up because nobody checked the resolution of the apparatus
+against the size of the effect. The record of that failure is kept below deliberately.
 
 ## What is for the gate
 
@@ -96,7 +137,7 @@ twice) 1.18pp, signal (two different instructions) 0.66pp, naive 4-run spread 1.
 
 ## What survives the capital problem
 
-Three findings do not depend on return, and are worth carrying into Phase 2 regardless:
+Four findings do not depend on return, and are worth carrying into Phase 2 regardless:
 
 **1. Instructions separate *behaviour* strongly, even when return says nothing.** Trade counts on
 Nemotron ranged 0 → 517, and `defensive_cash` held exactly $10,000.00 for all 161 steps — literal,
@@ -121,9 +162,12 @@ DeepSeek run (184/158, 203/155, 180/158, 184/160): **120 billed calls across the
 decision.** For contrast, the published DeepSeek run made exactly 161 calls for 161 steps — zero
 retries. The retry burst is a property of the custom-prompt path, and it is unbudgeted.
 
-**4. `temperature=0` did not pin the outcome.** Two identical control runs landed 1.18pp apart.
-How much of that is model nondeterminism versus the share quantum is unknown — separating them is
-the main reason to re-run.
+**4. `temperature=0` did not pin the outcome, at either capital base.** Two identical control runs
+landed 1.18pp apart at $10k and **0.20pp apart at $100k**. The re-run settles the attribution the
+$10k leg could not: most of that 1.18pp was share granularity, but 0.20pp of genuine run-to-run
+variance survives at a capital base where rounding is negligible. `temperature=0` buys a small
+noise floor, not a reproducible one — so a Phase 2 leaderboard cannot treat a re-run of the same
+entry as guaranteed to reproduce its rank, and margins inside ~0.2pp are not real.
 
 ## Defect found in the probe itself — now fixed
 
@@ -169,42 +213,38 @@ invisible until someone refreshes. Dormant, not live: the daily cron is paused a
 
 | Plan's outcome row | Status |
 |---|---|
-| Nemotron spread ≥1pp **and** control an outlier | ⛔ Cannot be evaluated — wrong capital base |
-| Nemotron flat, DeepSeek spread ≥1pp | ⛔ Cannot be evaluated — wrong capital base |
-| Both flat, **or** control mid-pack on both | ⛔ Cannot be claimed |
+| Nemotron spread ≥1pp **and** control an outlier | ⛔ Not evaluated — the Nemotron leg ran at $10k and was not re-run |
+| Nemotron flat, DeepSeek spread ≥1pp | ✅ **This is the outcome.** DeepSeek separates at 3.71pp; Nemotron is unmeasured, not flat |
+| Both flat, **or** control mid-pack on both | ❌ Refuted for DeepSeek — the control is not mid-pack, it is the floor |
 
-**Phase 0 has no result.** Do not proceed to Phase 1/2, and do not cancel Phase 2 on this
-evidence either — nothing here bears on the question.
+**Phase 0 passes, and DeepSeek V4 Pro is the pinned model** for every later task, which is the
+disposition the plan specifies for this row. Say "unmeasured" rather than "fails" about Nemotron:
+its leg was invalidated by capital, not by a null result, and nothing here licenses a claim about
+small models. If Phase 2 ever wants a second model on the board, that leg has to be paid for.
 
-## To finish Phase 0
+## What is still needed before Phase 2
 
-Re-run the DeepSeek leg at `initial_capital = 100000`, keeping the duplicated control:
+The gate answers *whether* an instruction moves the return. Phase 2 ranks instructions against
+each other, and that is a strictly harder question this leg does not answer:
 
-```bash
-# one instruction per process, as before, so a crash cannot lose the whole leg
-python dashboard/scripts/probe_instruction_sensitivity.py \
-  --models deepseek --initial-capital 100000 \
-  --instructions aggressive_momentum --out probe-e1.json
-# ... likewise contrarian_reversion, then control_nonsense TWICE (e3, e4)
-```
+- **Instruction-vs-instruction separation is untested.** `contrarian_reversion` was cut for
+  budget. Two *plausible* strategies may well land inside each other's noise even though nonsense
+  is separable from momentum — which is the case that decides whether a board of user entries is
+  a ranking or a lottery.
+- **The noise floor rests on one pair.** 0.20pp from two runs is enough to clear an 18× margin;
+  it is not enough to size a leaderboard's tie-breaking.
+- **The default-prompt anchor was never run.** The published DeepSeek run scored +7.49% at default
+  temperature and no `strategy_prompt`; this leg's seeded run scored +3.83% at `temperature=0`.
+  How much of that 3.7pp is prompt-replacement versus temperature is still unattributed, and it
+  matters because Phase 2 replaces the house prompt for every entrant.
 
-The run header now prints the capital and its source, and the resolution guard refuses to spend
-if the base is too coarse — so a repeat of this mistake fails closed instead of billing.
+Cost for those, at measured prices: **~$0.46/run**.
 
-- **Cost, and it is higher than the $10k leg:** the published $100k run cost **$0.756** against a
-  $10k probe average of **$0.465** — 1.63×, despite *fewer* calls (161 vs 180–203), because more
-  affordable positions make both the snapshot and the response longer. Budget **~$0.70–0.80/run**.
-  - 4 runs (2 seeded + control ×2) ≈ **$2.80–3.20** → Phase 0 total **$5.04–5.44**, which
-    **exceeds the plan's $4.97 sanction** and needs a fresh decision.
-  - 3 runs (1 seeded + control ×2) ≈ **$2.10–2.40** → total **$4.34–4.64**, inside the sanction.
-    Still measures the noise floor and one instruction-vs-control margin; loses only the
-    instruction-vs-instruction comparison.
-- **The published +7.49% run is a free anchor** — already computed at $100k, no new spend.
-- **Keep both controls.** Running the control twice is the only thing that revealed the noise
-  floor, and at $100k it is the only way to separate model nondeterminism from share granularity.
-- **Consider also running one leg with no `strategy_prompt`** (i.e. stock `SAFE_TRADING_PROMPT`)
-  as an upper anchor. The published run scored +7.49% at default temperature; an anchor at $100k
-  and `temperature=0` isolates how much of the gap is prompt-replacement versus temperature.
+**Note on the estimate in the previous draft.** It said "budget ~$0.70–0.80/run" by scaling from
+the published $100k run's $0.756. Actual was **$0.4556/run** — the leg came in at $1.3669 against
+a $2.10–2.40 forecast. So the earlier 1.63× "more capital costs more" inference does not hold
+either; two consecutive cost predictions here were wrong in opposite directions, and per-run cost
+on this path should be read off a measured run rather than extrapolated from a stored one.
 
 ## Methodological lesson
 
@@ -217,3 +257,9 @@ It was caught only because the gap between the published DeepSeek curve (+7.49%)
 run (−0.25% to −1.85%) was chased down instead of being written off as "different prompt." An
 unexplained 8pp sitting next to a 0.66pp "signal" is the finding, not a footnote — whenever a
 control comparison is an order of magnitude larger than the effect, the apparatus is the suspect.
+
+The correction did not merely widen the error bars, it **reversed the verdict**: the same model,
+the same window and the same instructions went from a 0.55× signal-to-noise null to an 18× pass
+on a capital change alone. A coarse instrument does not return a noisy version of the right
+answer — here it returned a confident wrong one, and the whole participatory competition would
+have been cancelled on it for $2.24.
