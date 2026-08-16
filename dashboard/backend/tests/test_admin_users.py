@@ -321,6 +321,47 @@ def test_admin_patch_entitlements_and_role(isolated_auth):
     assert body["entitlements"]["credits"] == 50
 
 
+def test_backtest_slot_respects_entitlement(monkeypatch, tmp_path):
+    """The dashboard runner's per-owner slots read the same entitlement.
+
+    Swaps the module singleton rather than using the shared conftest store:
+    ``_max_concurrent_for_user`` resolves ``users.user_store`` at call time, so
+    the patched attribute is what it reads, and an account created here must
+    not leak into later tests' admin counts.
+    """
+    import dashboard.backend.api.routers.backtests as bt
+
+    store = users_module.UserStore(db_path=tmp_path / "users.db")
+    monkeypatch.setattr(users_module, "user_store", store)
+
+    bt._reset_slots_for_tests()
+    try:
+        assert bt._try_acquire_backtest_slot(
+            live_run_id="r1", session_id="s1", user_id=None
+        ) is None
+        assert bt._try_acquire_backtest_slot(
+            live_run_id="r2", session_id="s1", user_id=None
+        ) == "Backtest already running. Please wait for it to complete."
+
+        bt._reset_slots_for_tests()
+
+        user = store.create_user("slot@example.com", "Slot", "SecurePass1!")
+        store.set_entitlements(user["id"], max_concurrent_backtests=2)
+
+        assert bt._try_acquire_backtest_slot(
+            live_run_id="a1", session_id="sx", user_id=user["id"]
+        ) is None
+        assert bt._try_acquire_backtest_slot(
+            live_run_id="a2", session_id="sx", user_id=user["id"]
+        ) is None
+        refused = bt._try_acquire_backtest_slot(
+            live_run_id="a3", session_id="sx", user_id=user["id"]
+        )
+        assert refused and "2 backtests" in refused
+    finally:
+        bt._reset_slots_for_tests()
+
+
 def test_promote_first_admin_then_refuse(store):
     user = store.create_user("a@example.com", "A", "securepass1")
     other = store.create_user("b@example.com", "B", "securepass1")

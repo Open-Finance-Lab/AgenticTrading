@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=114">
+    <link rel="stylesheet" href="styles.css?v=115">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -29,6 +29,7 @@
             home: { page: 'home' },
             community: { page: 'community' },
             account: { page: 'account' },
+            credits: { page: 'credits' },
             backtest: { page: 'playground', playgroundTab: 'backtest' },
             paper: { page: 'playground', playgroundTab: 'paper' },
             agents: { page: 'playground', playgroundTab: 'agents' },
@@ -110,7 +111,7 @@
                 var saved = migrateSavedNavState(
                     JSON.parse(localStorage.getItem(NAV_STATE_KEY) || 'null'),
                 );
-                var valid = ['home', 'playground', 'competition', 'community', 'account'];
+                var valid = ['home', 'playground', 'competition', 'community', 'account', 'credits'];
                 if (saved && valid.indexOf(saved.page) !== -1) {
                     return saved;
                 }
@@ -140,6 +141,7 @@
     html[data-nav-boot][data-nav-page="competition"] #competitionView { display: block !important; }
     html[data-nav-boot][data-nav-page="community"] #communityView { display: block !important; }
     html[data-nav-boot][data-nav-page="account"] #accountView { display: block !important; }
+    html[data-nav-boot][data-nav-page="credits"] #creditsView { display: block !important; }
     html[data-nav-boot][data-nav-page="admin"] #adminView { display: block !important; }
     html[data-nav-boot] .primary-nav .mode-btn.active { background-color: transparent; color: var(--text-secondary); }
     html[data-nav-boot][data-nav-page="home"] .primary-nav [data-mode="home"] { background-color: var(--info-color); color: white; }
@@ -212,6 +214,8 @@
       <symbol id="icon-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
       <symbol id="icon-search" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
       <symbol id="icon-check-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></symbol>
+      <symbol id="icon-wallet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7V5a2 2 0 0 0-2-2H5a3 3 0 0 0 0 6h15v10a2 2 0 0 1-2 2H5a3 3 0 0 1-3-3V6"/><path d="M16 13h4"/></symbol>
+      <symbol id="icon-refresh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M20 11a8.1 8.1 0 0 0-15.5-2M4 4v5h5"/><path d="M4 13a8.1 8.1 0 0 0 15.5 2M20 20v-5h-5"/></symbol>
 </svg>
     <!-- Header -->
     <header class="header">
@@ -256,6 +260,7 @@
                             <span id="accountMenuEmail" class="account-menu-email"></span>
                         </div>
                         <button id="accountMenuAccountBtn" class="account-menu-item" type="button">Account</button>
+                        <button id="accountMenuCreditsBtn" class="account-menu-item" type="button">Credits &amp; Billing</button>
                         <button id="accountMenuAdminBtn" class="account-menu-item" type="button" hidden>Admin</button>
                         <button id="accountMenuLogoutBtn" class="account-menu-item account-menu-item--danger" type="button">Log out</button>
                     </div>
@@ -1812,6 +1817,101 @@
         </div>
     </div>
 
+    <div id="creditsView" class="page-view credits-view" style="display: none;">
+        <div class="credits-shell">
+            <div class="page-header credits-page-header">
+                <div>
+                    <div class="credits-title-row">
+                        <h2 class="page-title">Credits &amp; Billing</h2>
+                        <span id="creditsTestModeBadge" class="credits-test-badge">Test Mode</span>
+                    </div>
+                    <p class="page-description">Buy ATL Credits with Stripe test cards. No real charge is made.</p>
+                </div>
+                <button id="creditsRefreshBtn" class="credits-icon-btn" type="button" aria-label="Refresh Credits" title="Refresh Credits">
+                    <svg aria-hidden="true"><use href="#icon-refresh"/></svg>
+                </button>
+            </div>
+
+            <section id="creditsSignedOut" class="credits-empty-state" hidden>
+                <h3>Sign in to manage Credits</h3>
+                <p>Your balance and purchase history belong to your ATL account.</p>
+                <button id="creditsSignInBtn" class="auth-btn auth-btn-primary" type="button">Sign in</button>
+            </section>
+
+            <div id="creditsSignedIn" hidden>
+                <section class="credits-balance-band" aria-labelledby="creditsBalanceHeading">
+                    <div>
+                        <p id="creditsBalanceHeading" class="credits-section-kicker">Credit balance</p>
+                        <p id="creditsBalance" class="credits-balance" aria-live="polite">—</p>
+                        <p id="creditsAccountStatus" class="credits-account-status">Loading account…</p>
+                    </div>
+                    <div class="credits-balance-note">
+                        <svg aria-hidden="true"><use href="#icon-shield-check"/></svg>
+                        <span>Credits are added only after a signed Stripe webhook is verified.</span>
+                    </div>
+                </section>
+
+                <section class="credits-section" aria-labelledby="creditsPurchaseHeading">
+                    <div class="credits-section-head">
+                        <div>
+                            <p class="credits-section-kicker">Top up</p>
+                            <h3 id="creditsPurchaseHeading">Choose an amount</h3>
+                        </div>
+                        <span class="credits-rate">$1 = 1 Credit</span>
+                    </div>
+                    <div id="creditsPackageGrid" class="credits-package-grid" role="radiogroup" aria-label="Credit package">
+                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_5" data-credit-cents="500"><strong>$5</strong><span>5 Credits</span></button>
+                        <button class="credits-package-btn is-selected" type="button" role="radio" aria-checked="true" data-credit-package="usd_10" data-credit-cents="1000"><strong>$10</strong><span>10 Credits</span></button>
+                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_20" data-credit-cents="2000"><strong>$20</strong><span>20 Credits</span></button>
+                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_50" data-credit-cents="5000"><strong>$50</strong><span>50 Credits</span></button>
+                    </div>
+                    <div class="credits-custom-row">
+                        <label for="creditsCustomAmount">Custom amount</label>
+                        <div class="credits-money-input">
+                            <span aria-hidden="true">$</span>
+                            <input id="creditsCustomAmount" inputmode="decimal" autocomplete="off" placeholder="5.00–200.00" aria-describedby="creditsCustomHint">
+                        </div>
+                        <p id="creditsCustomHint">Minimum $5, maximum $200.</p>
+                    </div>
+                    <button id="creditsPurchaseBtn" class="auth-btn auth-btn-primary credits-purchase-btn" type="button">
+                        <svg aria-hidden="true"><use href="#icon-wallet"/></svg>
+                        <span>Continue to Stripe</span>
+                    </button>
+                    <p id="creditsPurchaseStatus" class="credits-status" role="status" aria-live="polite"></p>
+                </section>
+
+                <section class="credits-section" aria-labelledby="creditsActivityHeading">
+                    <div class="credits-section-head">
+                        <div>
+                            <p class="credits-section-kicker">Ledger</p>
+                            <h3 id="creditsActivityHeading">Recent activity</h3>
+                        </div>
+                    </div>
+                    <div id="creditsLedgerList" class="credits-ledger-list" aria-live="polite">
+                        <p class="credits-muted">Loading activity…</p>
+                    </div>
+                </section>
+
+                <section id="creditsAdminSection" class="credits-section credits-admin-section" aria-labelledby="creditsAdminHeading" hidden>
+                    <div class="credits-section-head">
+                        <div>
+                            <p class="credits-section-kicker">Administration</p>
+                            <h3 id="creditsAdminHeading">Payment orders</h3>
+                        </div>
+                        <span class="credits-admin-badge">Admin</span>
+                    </div>
+                    <div class="credits-table-wrap">
+                        <table class="credits-admin-table">
+                            <thead><tr><th>Order</th><th>User</th><th>Paid</th><th>Status</th><th>Refundable</th><th aria-label="Action"></th></tr></thead>
+                            <tbody id="creditsAdminOrders"></tbody>
+                        </table>
+                    </div>
+                    <p id="creditsAdminStatus" class="credits-status" role="status" aria-live="polite"></p>
+                </section>
+            </div>
+        </div>
+    </div>
+
     <div id="adminView" class="page-view admin-view" style="display: none;">
         <div class="page-header">
             <div>
@@ -1861,6 +1961,31 @@
         </div>
     </div>
 
+    <dialog id="creditsRefundDialog" class="credits-refund-dialog" aria-labelledby="creditsRefundTitle">
+        <form id="creditsRefundForm" method="dialog">
+            <div class="credits-refund-head">
+                <div>
+                    <p class="credits-section-kicker">Admin refund</p>
+                    <h2 id="creditsRefundTitle">Refund Credits purchase</h2>
+                </div>
+                <button id="creditsRefundClose" class="credits-icon-btn" type="button" aria-label="Close refund dialog" title="Close">
+                    <svg aria-hidden="true"><use href="#icon-x"/></svg>
+                </button>
+            </div>
+            <p id="creditsRefundOrder" class="credits-refund-order"></p>
+            <label class="credits-refund-field" for="creditsRefundAmount">Refund amount</label>
+            <div class="credits-money-input">
+                <span aria-hidden="true">$</span>
+                <input id="creditsRefundAmount" inputmode="decimal" autocomplete="off" required>
+            </div>
+            <p id="creditsRefundLimit" class="credits-muted"></p>
+            <p id="creditsRefundStatus" class="credits-status" role="status" aria-live="polite"></p>
+            <div class="credits-refund-actions">
+                <button id="creditsRefundCancel" class="auth-btn auth-btn-secondary" type="button">Cancel</button>
+                <button id="creditsRefundSubmit" class="auth-btn auth-btn-danger" type="submit">Issue refund</button>
+            </div>
+        </form>
+    </dialog>
 
     <!-- All deferred so the Chart.js CDN tag in <head> (also deferred) can
          stay first in execution order: deferred scripts run in document
@@ -1871,7 +1996,8 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=27" defer></script>
-    <script src="app.js?v=113" defer></script>
+    <script src="app.js?v=115" defer></script>
+    <script src="js/credits.js?v=2" defer></script>
     <script src="js/leaderboard.js?v=28" defer></script>
     <script src="home-page.js?v=47" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

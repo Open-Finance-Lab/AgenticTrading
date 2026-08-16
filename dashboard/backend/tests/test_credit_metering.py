@@ -325,18 +325,36 @@ def test_a_rule_based_run_is_never_charged(metered):
     assert store.get_entitlements(user["id"])["credits"] == 0
 
 
-def test_a_run_refused_by_single_flight_is_not_charged(metered):
+def test_a_run_refused_for_capacity_is_not_charged(metered):
     client, store = metered
     user = _signup(client)
     before = store.get_entitlements(user["id"])["credits"]
 
-    bt.backtest_status["running"] = True
-    resp = _llm_run(client)
-    assert resp.status_code == 200
-    assert resp.json()["success"] is False
-    # The debit sits after the single-flight check on purpose: a caller turned
-    # away because someone else's backtest is running never got a run.
-    assert store.get_entitlements(user["id"])["credits"] == before
+    bt._reset_slots_for_tests()
+    try:
+        # Fill the server-wide ceiling with other people's runs.
+        #
+        # This test used to set ``backtest_status["running"] = True``, back when
+        # one global flag WAS the refusal. Under the slot ledger that flag
+        # refuses nothing, so left as it was this test would have gone on
+        # passing while every capacity-refused caller was silently charged --
+        # the assertion still holds when the request is *accepted*, because an
+        # accepted run is legitimately debited.
+        for index in range(bt.MAX_ACTIVE_DASHBOARD_BACKTESTS):
+            assert bt._try_acquire_backtest_slot(
+                live_run_id=f"other-run-{index}",
+                session_id=f"other-session-{index}",
+                user_id=None,
+            ) is None
+
+        resp = _llm_run(client)
+        assert resp.status_code == 200
+        assert resp.json()["success"] is False
+        # The debit sits after the concurrency check on purpose: a caller turned
+        # away because someone else's backtest is running never got a run.
+        assert store.get_entitlements(user["id"])["credits"] == before
+    finally:
+        bt._reset_slots_for_tests()
 
 
 def test_a_disarmed_deployment_does_not_debit(metered, monkeypatch):
@@ -367,8 +385,11 @@ def test_a_thread_that_never_starts_gives_the_credit_back(metered, monkeypatch):
 
     # The one refund case the worker's own finally block cannot reach.
     assert store.get_entitlements(user["id"])["credits"] == before
-    # And the single-flight flag is released, or the runner wedges for the
-    # life of the process.
+    # And the slot is released, or it burns one of the owner's concurrent slots
+    # and one of the server's for the life of the process. Asserted on the
+    # ledger, not just the legacy mirror: the mirror tracks whichever slot
+    # changed last, so it reads False while the slot is still held.
+    assert bt.count_active_dashboard_backtests() == 0
     assert bt.backtest_status["running"] is False
 
 

@@ -10277,6 +10277,557 @@ body.agent-editor-open {
     display: none;
 }
 
+/* Credits & Billing — compact, audit-first checkout surface. */
+.sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
+
+.credits-view {
+    max-width: 1120px;
+    margin: 0 auto;
+    color: var(--text-primary);
+}
+
+.credits-shell {
+    width: 100%;
+}
+
+.credits-page-header {
+    align-items: center;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.credits-title-row,
+.credits-section-head,
+.credits-refund-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.credits-title-row {
+    justify-content: flex-start;
+}
+
+.credits-title-row .page-title {
+    margin-bottom: 4px;
+}
+
+.credits-test-badge,
+.credits-admin-badge,
+.credits-rate {
+    display: inline-flex;
+    align-items: center;
+    min-height: 22px;
+    padding: 3px 8px;
+    border: 1px solid rgba(245, 158, 11, 0.42);
+    border-radius: 4px;
+    background: rgba(245, 158, 11, 0.1);
+    color: #fbbf24;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0;
+    white-space: nowrap;
+}
+
+.credits-admin-badge {
+    border-color: rgba(34, 211, 238, 0.35);
+    background: rgba(34, 211, 238, 0.08);
+    color: #67e8f9;
+}
+
+.credits-rate {
+    border-color: var(--border-color);
+    background: var(--bg-input);
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+
+.credits-icon-btn {
+    display: inline-grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    flex: 0 0 34px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-card);
+    color: var(--text-secondary);
+    cursor: pointer;
+}
+
+.credits-icon-btn:hover,
+.credits-icon-btn:focus-visible {
+    border-color: var(--info-color);
+    color: var(--info-color);
+}
+
+.credits-icon-btn svg,
+.credits-purchase-btn svg,
+.credits-balance-note svg {
+    width: 17px;
+    height: 17px;
+    fill: none;
+    stroke: currentColor;
+}
+
+.credits-empty-state {
+    max-width: 520px;
+    padding: 28px 0;
+}
+
+.credits-empty-state h3,
+.credits-section h3,
+.credits-refund-head h2 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0;
+}
+
+.credits-empty-state p {
+    margin: 8px 0 16px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.credits-balance-band {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 28px;
+    padding: 24px 0 26px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.credits-section-kicker {
+    margin: 0 0 7px;
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+}
+
+.credits-balance {
+    margin: 0;
+    color: #f8fafc;
+    font-family: var(--font-mono);
+    font-size: 34px;
+    font-weight: 700;
+    line-height: 1.15;
+    letter-spacing: 0;
+    font-variant-numeric: tabular-nums;
+}
+
+.credits-account-status,
+.credits-status,
+.credits-muted,
+.credits-refund-order {
+    margin: 7px 0 0;
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.5;
+    letter-spacing: 0;
+}
+
+.credits-account-status.is-success,
+.credits-status.is-success {
+    color: #4ade80;
+}
+
+.credits-account-status.is-error,
+.credits-status.is-error {
+    color: #f87171;
+}
+
+.credits-status.is-pending {
+    color: #fbbf24;
+}
+
+.credits-balance-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    max-width: 360px;
+    padding: 12px 14px;
+    border-left: 2px solid rgba(74, 222, 128, 0.6);
+    background: rgba(34, 197, 94, 0.06);
+    color: var(--text-secondary);
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.credits-balance-note svg {
+    flex: 0 0 17px;
+    margin-top: 1px;
+    color: #4ade80;
+}
+
+.credits-section {
+    padding: 24px 0;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.credits-section-head {
+    align-items: flex-end;
+    margin-bottom: 16px;
+}
+
+.credits-package-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(120px, 1fr));
+    gap: 8px;
+}
+
+.credits-package-btn {
+    min-height: 76px;
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    cursor: pointer;
+    text-align: left;
+}
+
+.credits-package-btn:hover:not(:disabled) {
+    border-color: rgba(34, 211, 238, 0.5);
+    background: var(--bg-hover);
+}
+
+.credits-package-btn.is-selected {
+    border-color: #22d3ee;
+    background: rgba(34, 211, 238, 0.08);
+    box-shadow: inset 0 0 0 1px rgba(34, 211, 238, 0.18);
+}
+
+.credits-package-btn strong,
+.credits-package-btn span {
+    display: block;
+    letter-spacing: 0;
+}
+
+.credits-package-btn strong {
+    font-family: var(--font-mono);
+    font-size: 18px;
+    font-weight: 700;
+}
+
+.credits-package-btn span {
+    margin-top: 7px;
+    color: var(--text-secondary);
+    font-size: 11px;
+}
+
+.credits-package-btn:disabled,
+.credits-purchase-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.credits-custom-row {
+    display: grid;
+    grid-template-columns: 120px minmax(180px, 260px) minmax(180px, 1fr);
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+}
+
+.credits-custom-row label,
+.credits-refund-field {
+    color: var(--text-primary);
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.credits-custom-row p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.credits-money-input {
+    display: flex;
+    align-items: center;
+    height: 38px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-input);
+    overflow: hidden;
+}
+
+.credits-money-input:focus-within {
+    border-color: var(--info-color);
+    box-shadow: 0 0 0 2px rgba(0, 191, 255, 0.12);
+}
+
+.credits-money-input > span {
+    padding-left: 11px;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 13px;
+}
+
+.credits-money-input input {
+    width: 100%;
+    min-width: 0;
+    height: 100%;
+    padding: 0 10px 0 4px;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 13px;
+}
+
+.credits-purchase-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-width: 210px;
+    min-height: 40px;
+    margin-top: 16px;
+}
+
+.credits-ledger-list {
+    border-top: 1px solid var(--border-color);
+}
+
+.credits-ledger-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    min-height: 58px;
+    padding: 10px 2px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+}
+
+.credits-ledger-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.credits-ledger-meta strong {
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.credits-ledger-meta span {
+    color: var(--text-muted);
+    font-size: 11px;
+}
+
+.credits-ledger-amount {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+}
+
+.credits-ledger-amount.is-positive { color: #4ade80; }
+.credits-ledger-amount.is-negative { color: #f87171; }
+
+.credits-table-wrap {
+    width: 100%;
+    overflow-x: auto;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+}
+
+.credits-admin-table {
+    width: 100%;
+    min-width: 760px;
+    border-collapse: collapse;
+    color: var(--text-primary);
+    font-size: 11px;
+}
+
+.credits-admin-table th,
+.credits-admin-table td {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--border-color);
+    text-align: left;
+    white-space: nowrap;
+}
+
+.credits-admin-table th {
+    background: var(--bg-input);
+    color: var(--text-secondary);
+    font-weight: 700;
+}
+
+.credits-admin-table td:first-child,
+.credits-admin-table td:nth-child(2),
+.credits-admin-table td:nth-child(3),
+.credits-admin-table td:nth-child(5) {
+    font-family: var(--font-mono);
+}
+
+.credits-admin-table tr:last-child td {
+    border-bottom: none;
+}
+
+.credits-admin-empty {
+    padding: 20px 12px !important;
+    color: var(--text-muted);
+    text-align: center !important;
+}
+
+.credits-order-status {
+    color: #fbbf24;
+    text-transform: capitalize;
+}
+
+.credits-refund-btn {
+    min-width: 64px;
+    min-height: 28px;
+    padding: 4px 10px;
+    border: 1px solid rgba(248, 113, 113, 0.45);
+    border-radius: 4px;
+    background: rgba(248, 113, 113, 0.08);
+    color: #f87171;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.credits-refund-btn:hover {
+    border-color: #f87171;
+    background: rgba(248, 113, 113, 0.16);
+}
+
+.credits-refund-dialog {
+    width: min(440px, calc(100vw - 32px));
+    margin: auto;
+    padding: 0;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: var(--bg-card);
+    color: var(--text-primary);
+    box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+}
+
+.credits-refund-dialog::backdrop {
+    background: rgba(3, 7, 18, 0.78);
+}
+
+.credits-refund-dialog form {
+    padding: 20px;
+}
+
+.credits-refund-head {
+    align-items: flex-start;
+    margin-bottom: 16px;
+}
+
+.credits-refund-order {
+    padding: 9px 10px;
+    border-left: 2px solid var(--warning-color);
+    background: rgba(245, 158, 11, 0.06);
+    font-family: var(--font-mono);
+    overflow-wrap: anywhere;
+}
+
+.credits-refund-field {
+    display: block;
+    margin: 16px 0 7px;
+}
+
+.credits-refund-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 20px;
+}
+
+@media (max-width: 760px) {
+    .credits-balance-band {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .credits-balance-note {
+        max-width: none;
+    }
+
+    .credits-package-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .credits-custom-row {
+        grid-template-columns: 110px minmax(0, 1fr);
+    }
+
+    .credits-custom-row p {
+        grid-column: 2;
+    }
+}
+
+@media (max-width: 600px) {
+    .credits-view {
+        padding: 12px 14px 36px;
+    }
+
+    .credits-page-header {
+        flex-direction: row;
+    }
+
+    .credits-title-row {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 4px;
+    }
+
+    .credits-balance {
+        font-size: 28px;
+    }
+
+    .credits-section-head {
+        align-items: flex-start;
+    }
+
+    .credits-custom-row {
+        grid-template-columns: 1fr;
+        gap: 7px;
+    }
+
+    .credits-custom-row p {
+        grid-column: 1;
+    }
+
+    .credits-purchase-btn {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .credits-ledger-row {
+        gap: 12px;
+    }
+
+    .credits-refund-actions .auth-btn {
+        flex: 1;
+    }
+}
+
 /* Determinate: width is data, so the indeterminate sweep must not also run. */
 .agent-card-running-bar.is-determinate {
     animation: none;
