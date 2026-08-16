@@ -44,11 +44,18 @@ export const LINE_COLORS = {
   djia: "#64748b",
 } as const;
 
-/** `swatch` is the identity link between a row and its curve. The chart ships
- *  no Recharts <Legend>: at this card's width a five-item legend wraps to two
- *  rows and pushes the plot area down, and a legend and a standings table
- *  listing the same five names is the same information twice. Colouring the
- *  rows makes the table the key.
+/** `swatch` is the identity link between an entry and its curve. The chart
+ *  ships no Recharts <Legend>: at this card's width a five-item legend wraps
+ *  to two rows and pushes the plot area down, and a legend beside a list of
+ *  the same five names is the same information twice. Colouring the entries
+ *  makes that list the key.
+ *
+ *  On this card the list is now the wrapping chip strip below the plot, not a
+ *  table -- the table it started as lives in Race.tsx, which renders this same
+ *  array and carries no swatches. So these five colours are the only thing
+ *  keying five drawn curves anywhere on the page, which is why the strip must
+ *  wrap rather than clip and why the PNG in README.md must not be
+ *  palette-quantised (amber is the first casualty; see the follow-up issue).
  *
  *  Which is also why rank 1 no longer renders its name in the accent colour.
  *  The accent is cyan, DeepSeek's curve is purple, and cyan is GPT-5.5's curve
@@ -212,13 +219,21 @@ export function BoardPreview() {
             </span>
           ))}
         </div>
-        {/* Names no window, for the same reason the header above stopped naming
-            one. `SAMPLE_CURVES` is documented as Live-board shape -- one
-            session at a time -- and the axis it labels reads "7d ago ... Now",
-            so "the competition window" was a claim the data beside it
+        {/* Names the window the axis directly above it draws, and only that.
+            `SAMPLE_CURVES` is documented as Live-board shape -- one session at
+            a time -- and its axis reads "7d ago ... Now", so the previous
+            wording ("the competition window") was a claim the data beside it
             contradicts, reintroduced eight lines under the edit that removed
-            it. Under an "Illustrative example" chip, on the acquisition page,
-            an invented window is the one detail that must not be invented. */}
+            it from the header. Under an "Illustrative example" chip, on the
+            acquisition page, a window the chart does not draw is the one
+            detail that must not be invented.
+
+            Still not reconciled, and pre-existing: the chip returns beside it
+            (+21.0%, ...) are Competition-window figures over roughly a month,
+            and `SAMPLE_CURVES` was built to land on them. So this caption
+            truthfully describes the axis while the axis compresses a month of
+            return into seven days. Fixing that means re-deriving the sample
+            data, not rewording the caption -- see the follow-up issue. */}
         <p className="mt-3 text-sm text-foreground/65">
           Account value over the last seven days.
         </p>
