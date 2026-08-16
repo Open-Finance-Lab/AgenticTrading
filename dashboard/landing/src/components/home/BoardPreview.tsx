@@ -104,25 +104,36 @@ export function BoardPreview() {
           does take a responsive prefix.
 
           TWO RESERVES, BOTH MEASURED, because the card's non-chart height is
-          not one number. Beside the copy at >=lg it is ~227px; stacked at 390px
-          wide it is 335px, because the title, the "Illustrative example" chip
-          and the caption all wrap. One constant cannot serve both, and the
-          desktop one applied to a phone put the card 77px past the fold.
+          not one number. Beside the copy at >=lg it is 218-241px; stacked at
+          390px wide it is 443px, because the title, the "Illustrative example"
+          chip and the caption all wrap AND the chip strip goes to five rows.
+          One constant cannot serve both, and the desktop one applied to a phone
+          put the card 77px past the fold.
 
-            lg+     390 = ~227 non-chart + 120 chrome + ~43 fold margin
-            below   480 = 335 non-chart + 132 section padding + ~13 margin
+            lg+     390 = ~218-241 non-chart + 120 chrome + ~14-43 fold margin
+            below   590 = 443 non-chart + 132 section padding + ~9 margin
 
-          RE-DERIVE BOTH if the caption, the title or the chip strip changes
-          height. The failure mode is a silently half-visible card, not a broken
-          build. A shared clamp with /app was measured and rejected outright: it
-          puts this card 25-46px below the fold at four ordinary laptop heights.
+          RE-DERIVED at 390x844 when the strip stopped clipping: chips that were
+          being cut off the end now wrap, which took the strip from 24px to
+          152px and the stacked reserve from 480 to 590. The 300px floor then
+          became the binding constraint on a phone -- it exceeded the 269px the
+          card had left -- so the floor moved to 260 with it. That is the trade,
+          stated: 104px of chart at 390px wide, for the four model names that
+          were invisible. The strip is the chart's only legend, and five unnamed
+          curves are not worth more than a slightly shorter plot.
 
-          Below ~667px tall the 300px floor wins and the card overflows again;
+          RE-DERIVE BOTH AGAIN if the caption, the title or the chip strip
+          changes height. The failure mode is a silently half-visible card, not
+          a broken build. A shared clamp with /app was measured and rejected
+          outright: it puts this card 25-46px below the fold at four ordinary
+          laptop heights.
+
+          Below ~640px tall the 260px floor wins and the card overflows again;
           that is inherent to having a floor, and untested territory here. */}
       <div
-        className="w-full px-3 pt-4 [--board-chart-reserve:480px] lg:[--board-chart-reserve:390px]"
+        className="w-full px-3 pt-4 [--board-chart-reserve:590px] lg:[--board-chart-reserve:390px]"
         style={{
-          height: "clamp(300px, calc(100dvh - var(--board-chart-reserve)), 520px)",
+          height: "clamp(260px, calc(100dvh - var(--board-chart-reserve)), 520px)",
         }}
       >
         <ResponsiveContainer width="100%" height="100%">
@@ -135,7 +146,12 @@ export function BoardPreview() {
               tickLine={false}
               axisLine={false}
               domain={[960, 1240]}
-              width={44}
+              /* 56, not 44. The tick font went 11 -> 14 with this width left
+                 alone, and a `$1030` measures 42px against a 44px band once
+                 Recharts' own tick offset is taken out: four of the five labels
+                 started left of the SVG edge and had their leading `$` sliced
+                 in half. Re-measure if the formatter or the font changes. */
+              width={56}
               tickFormatter={(v) => `$${v}`}
             />
             <Tooltip
@@ -162,8 +178,22 @@ export function BoardPreview() {
             its corpus to files containing the standings constant and requires a
             Recharts data key in it, and the only ones are on the line elements
             above. Splitting this strip into its own component reddens that
-            guard though nothing was deleted. */}
-        <div className="flex flex-nowrap items-center gap-x-4 gap-y-2 overflow-hidden text-base">
+            guard though nothing was deleted.
+
+            WRAPS, and must. `flex-nowrap` + `overflow-hidden` silently cut
+            entries off the end whenever the strip was narrower than its
+            content: measured scrollWidth 910 against clientWidth 285 at 390
+            (four of five chips gone, leaving one model to key five drawn
+            curves), 663 at 768, 895 at 1024 -- so the whole lg band and every
+            phone. No scrollbar, no ellipsis, nothing failing. A legend that
+            cannot show its entries is not a legend, and Race.tsx -- the detail
+            home this strip defers to -- carries no swatches, so there was no
+            fallback key anywhere on the page. The reserves above account for
+            the extra rows; re-derive them if this strip's content changes. */}
+        <div
+          data-testid="board-chip-strip"
+          className="flex flex-wrap items-center gap-x-4 gap-y-2 text-base"
+        >
           {SAMPLE_STANDINGS.map((item) => (
             <span key={item.rank} className="flex items-center gap-2 whitespace-nowrap">
               <span
@@ -182,8 +212,15 @@ export function BoardPreview() {
             </span>
           ))}
         </div>
+        {/* Names no window, for the same reason the header above stopped naming
+            one. `SAMPLE_CURVES` is documented as Live-board shape -- one
+            session at a time -- and the axis it labels reads "7d ago ... Now",
+            so "the competition window" was a claim the data beside it
+            contradicts, reintroduced eight lines under the edit that removed
+            it. Under an "Illustrative example" chip, on the acquisition page,
+            an invented window is the one detail that must not be invented. */}
         <p className="mt-3 text-sm text-foreground/65">
-          Account value over the competition window.
+          Account value over the last seven days.
         </p>
       </div>
     </div>

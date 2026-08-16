@@ -95,7 +95,18 @@ export function Hero() {
             this block in source: that would put the board's <h2> ahead of the
             page's only <h1> and open the document outline on the board's
             title. */}
-        <div className="flex-1 lg:basis-1/3 lg:grow-0 order-last lg:order-last text-center lg:text-left">
+        {/* `lg:grow`, not `lg:grow-0`. The board takes
+            `lg:ms-[calc((100%-100vw)/2)]`, which frees the container's left
+            gutter as flex free space -- 152px at 1920 -- and with grow-0 on
+            both columns nothing claimed it, so the copy column stopped short of
+            the container's right edge for no stated reason. The board keeps
+            grow-0 so it stays exactly the declared 2/3; the copy absorbs the
+            slack the negative margin created.
+
+            `order-last` alone: the `lg:order-last` that used to sit beside it
+            restated an unconditional base class, and the guard asserted both,
+            so the dead prefix was pinned in place. */}
+        <div className="flex-1 lg:basis-1/3 lg:grow order-last text-center lg:text-left">
           <h1 className="mb-6 max-w-xl text-[clamp(2.85rem,3.9vw,4.25rem)] font-extrabold leading-[1.05] tracking-[-0.04em] text-[#e5e7eb] mx-auto lg:mx-0">
             <span className="block">
               <HeadlineWords words={HEADLINE_LINE_1} startDelay={LINE1_START} />
@@ -158,7 +169,7 @@ export function Hero() {
             container's padding was giving this edge, so the chart runs flush to
             the viewport without its axis labels touching it. */}
         <motion.div
-          className="w-full flex-1 lg:basis-2/3 lg:grow-0 shrink-0 order-first lg:order-first lg:ms-[calc((100%-100vw)/2)] lg:ps-6"
+          className="w-full flex-1 lg:basis-2/3 lg:grow-0 shrink-0 order-first lg:ms-[calc((100%-100vw)/2)] lg:ps-6"
           initial={{ opacity: 0, scale: 0.95 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.7, delay: 0.3 }}

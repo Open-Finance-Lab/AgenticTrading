@@ -92,7 +92,32 @@ def test_the_columns_are_ordered_with_utilities_not_by_source_order():
     assert hero.index("<h1") < hero.index("<BoardPreview"), (
         "the h1 block must stay first in source"
     )
-    assert "order-first" in hero and "lg:order-first" in hero
+    # Unprefixed only. `order-first` is unconditional, so a `lg:order-first`
+    # beside it restates the base class and does nothing -- and asserting both,
+    # as this did, pinned the dead prefix in place: deleting it reddened CI.
+    assert "order-first" in hero and "order-last" in hero
+    assert "lg:order-first" not in hero and "lg:order-last" not in hero, (
+        "a responsive prefix that repeats the unconditional base is dead weight; "
+        "add one back only if the two orders actually differ by breakpoint"
+    )
+
+
+def test_the_hero_row_leaves_no_unclaimed_width():
+    """The board's negative inline-start margin turns the container's left
+    gutter into flex FREE SPACE -- ~152px at 1920 -- and free space in a row
+    where every item is `grow-0` simply sits at the end. The copy column
+    stopped short of the container's right edge with nothing able to absorb it.
+
+    The board keeps `lg:grow-0`, so the 2/3 split above stays exactly what it
+    declares; the copy column takes the slack.
+    """
+    assert "lg:basis-1/3 lg:grow " in _HERO or "lg:basis-1/3 lg:grow\"" in _HERO, (
+        "the copy column must absorb the width the negative margin frees"
+    )
+    board = _HERO[_HERO.index("<motion.div") :]
+    assert "lg:basis-2/3 lg:grow-0" in board, (
+        "the board must not grow, or the declared two-thirds is not what renders"
+    )
 
 
 def test_the_chart_column_escapes_the_container_on_its_left_edge_only():
@@ -111,25 +136,29 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
     largest formula with non-negative fold slack at every tested viewport.
 
     Both reserves are derived, not taste, and there are TWO because the card's
-    non-chart height is not one number: ~227px beside the copy at >=lg, but
-    335px stacked at 390px wide, where the title, the "Illustrative example"
-    chip and the caption all wrap.
+    non-chart height is not one number: 218-241px beside the copy at >=lg, but
+    443px stacked at 390px wide, where the title, the "Illustrative example"
+    chip and the caption all wrap and the chip strip runs to five rows.
 
-        lg+     390 = ~227 non-chart + 120 chrome + ~43 fold margin
-        below   480 = 335 non-chart + 132 section padding + ~13 margin
+        lg+     390 = ~218-241 non-chart + 120 chrome + ~14-43 fold margin
+        below   590 = 443 non-chart + 132 section padding + ~9 margin
 
     Measured, not derived: the single desktop constant put the card 77px past
     the fold at 390x844. RE-DERIVE BOTH if the caption, title or chip strip
     changes height -- the failure mode is a silently half-visible card, not a
-    broken build.
+    broken build. That is not hypothetical: unclipping the chip strip took it
+    from 24px to 152px at 390px wide, the stacked reserve from 480 to 590, and
+    then the FLOOR from 300 to 260 -- because at 844px tall the card had 269px
+    left for a chart whose floor was 300, so the floor, not the reserve, was
+    what put it 95px past the fold on the second pass.
 
     The var() indirection is load-bearing and not a tidy-up: the formula's
     commas defeat Tailwind's arbitrary-VALUE parser, so the breakpoint-dependent
     number rides an arbitrary PROPERTY instead, which does take a prefix.
     """
     board = _BOARD.replace(" ", "")
-    assert "clamp(300px,calc(100dvh-var(--board-chart-reserve)),520px)" in board
-    assert "[--board-chart-reserve:480px]" in board, "the stacked-phone reserve"
+    assert "clamp(260px,calc(100dvh-var(--board-chart-reserve)),520px)" in board
+    assert "[--board-chart-reserve:590px]" in board, "the stacked-phone reserve"
     assert "lg:[--board-chart-reserve:390px]" in board, "the side-by-side reserve"
     assert "56vh" not in _BOARD, "the first draft's clamp fails at four viewports"
     assert "h-[210px]" not in _BOARD and "md:h-[240px]" not in _BOARD
@@ -146,15 +175,31 @@ def test_the_panel_title_is_text_xl():
     assert 'className="text-xl font-bold flex items-center gap-2 min-w-0"' in _BOARD
 
 
-def test_the_standings_table_becomes_a_one_row_chip_strip():
+def test_the_standings_table_becomes_a_chip_strip_that_can_show_every_chip():
     """Demotion, not deletion: the chart ships no <Legend> (a five-item legend
     wraps to two rows at this width), so the table is the ONLY thing linking a
     curve colour to a model name. The chips preserve that swatch-to-curve link
     at a fraction of the height. The full table already lives in Race.tsx.
+
+    THE STRIP MUST WRAP. `flex-nowrap` with `overflow-hidden` cut entries off
+    the end wherever the strip was narrower than its content: measured
+    scrollWidth 910 against clientWidth 285 at 390 (one chip survives, keying
+    five drawn curves), 663 at 768, 895 at 1024 -- the whole lg band and every
+    phone, silently, because the only live-browser guard on it ran at 1440.
+    "One row" was the intent at the design width, not a constraint worth
+    dropping four of five model names for; and Race.tsx carries no swatches, so
+    a clipped chip has no fallback key anywhere on the page.
     """
     board = _BOARD
     assert "grid-cols-12" not in board, "the 5-row table is what the chart needs the height of"
-    assert "flex-nowrap" in board, "five chips, one row"
+    assert "flex-wrap" in board and "flex-nowrap" not in board, (
+        "a legend that cannot show its entries is not a legend"
+    )
+    strip = board[board.index("SAMPLE_STANDINGS.map") - 400 : board.index("SAMPLE_STANDINGS.map")]
+    assert "overflow-hidden" not in strip, (
+        "clipping the strip is the same failure by another route -- no scrollbar, "
+        "no ellipsis, and nothing fails"
+    )
     assert "text-base" in board, "text-sm rows were one of the three reported problems"
     # The identity link and the guard corpus both depend on these staying here.
     assert "SAMPLE_STANDINGS" in board
