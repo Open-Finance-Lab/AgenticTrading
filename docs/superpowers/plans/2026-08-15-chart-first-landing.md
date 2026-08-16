@@ -10,6 +10,23 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-15-chart-first-landing-design.md` (amended 2026-08-16 — every height in it is a browser measurement; do not re-derive by arithmetic).
 
+> **⚠ EXECUTED, THEN CORRECTED IN REVIEW (2026-08-16). The task bodies below are the
+> historical record of what was written; several of their constants and code blocks no
+> longer ship.** Read the code and the spec's §3a table for current values. What changed and
+> why:
+>
+> | Task | Shipped as written | Corrected to |
+> |---|---|---|
+> | 1 (`/app` panel) | `height: 100%` on the panel | + `align-self: stretch` on `.home-landing-board` — without it the percentage resolved against an indefinite height, and the panel was **cut** by the hero's `overflow: hidden` at four viewports |
+> | 3 (`/app` chart) | `flex: 0 0 auto` | `flex: 0 1 auto` + a 132px floor, so the chart yields before the standings |
+> | 5 (`/` clamp) | `clamp(300px, … 390px …, 520px)` | `clamp(260px, … var(--board-chart-reserve) …, 520px)`, reserve 590/390 |
+> | 8 (chip strip) | `flex-nowrap … overflow-hidden` | `flex-wrap` — the strip was clipping one to four of its five chips below ~1100px |
+> | 12 (measurement) | probes `#homeScreenLanding` | probes `.home-landing-hero` — **the screen cannot see this clip**, which is why Task 12 passed over it |
+>
+> The lesson worth carrying forward is Task 12's: a measurement pass is only as good as the
+> element it measures. This one aimed one node above the `overflow: hidden` ancestor and
+> reported a clean sweep across a layout that was visibly cut at 1280×720.
+
 ---
 
 ## Why this is one plan and not two
