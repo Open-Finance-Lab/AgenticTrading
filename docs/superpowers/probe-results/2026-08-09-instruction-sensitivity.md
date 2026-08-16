@@ -146,19 +146,24 @@ stored run's parameters match its own** (`initial_equity`, data feed, window) ra
 that the config which produced them is the config it reads. Same shape as the feed-drift trap
 documented under `ALPACA_DATA_FEED` in `CLAUDE.md`.
 
-## Related repo defect (not filed — needs the owner's go-ahead)
+## Related repo defect — filed as issue #365
 
 `_find_cached_run` (`domain/leaderboard/service.py:615`) keys on
 `(mode, start_date, end_date, llm_model)` — **not** `initial_equity`. Combined with the config
-drift above:
+drift above and the `auto_compute` split:
 
-- A forced refresh (`POST /api/v1/leaderboard/refresh?force=true`) recomputes at $10k, silently
-  replacing curves computed at $100k.
-- A *partial* refresh leaves $100k rows ranking head-to-head against $10k rows on one board.
+- the **5 baselines** (`auto_compute` unset → true) are recomputed by `?refresh=true` at the
+  config's **$10k**;
+- the **7 LLM entries** (`auto_compute: false`) are written only by `deploy_model_run()`, so they
+  stay at **$100k**.
+
+One refresh therefore leaves the board comparing $10k baselines against $100k model curves — the
+exact comparison the board exists to make — with `equal_weight_djia` and `buy_hold_djia` carrying
+~35% stranded cash, making the models look better than they are.
 
 Display is unaffected — `service.py:1205` reads each row's stored `initial_equity` — so this stays
-invisible until someone refreshes. Note this is dormant, not live: the daily cron is paused as of
-PR #352 and `LEADERBOARD_DAILY_AUTO_DEPLOY` is off.
+invisible until someone refreshes. Dormant, not live: the daily cron is paused as of PR #352 and
+`LEADERBOARD_DAILY_AUTO_DEPLOY` is off.
 
 ## Gate application
 
