@@ -72,8 +72,14 @@ const teamColorMap = {};
 
 // Provided LLM models get their own warm, distinct palette (solid lines) so
 // they read as a separate category from rule-based strategy baselines.
+// Ten, not five: `getModelColor` assigns `PALETTE[n % len]` in first-seen
+// order, and the board carries seven models -- at five, models 6 and 7 were
+// handed models 1 and 2's colours. That was cosmetic while the colour was
+// decoration and is not, now that screen 0's rank-row swatch is the chart's
+// only key to which curve is which.
 const MODEL_COLOR_PALETTE = [
   '#FBBF24', '#FB923C', '#F472B6', '#A78BFA', '#34D399',
+  '#22D3EE', '#F87171', '#A3E635', '#E879F9', '#60A5FA',
 ];
 const modelColorMap = {};
 
@@ -1598,3 +1604,20 @@ function displayLeaderboardError(message) {
 
 window.loadLeaderboardData = loadLeaderboardData;
 window.selectLeaderboardTeam = selectLeaderboardTeam;
+// Consumed by home-page.js for screen 0's chart. Explicit rather than relying
+// on the implicit global these classic scripts share: on rename the implicit
+// form degrades to "no chart", which this design deliberately makes
+// indistinguishable from the honest no-curves state -- so the break would be
+// invisible. The export is pinned from both sides by
+// test_frontend_chart_first_home.py.
+window.buildEquityCurvesFromEntries = buildEquityCurvesFromEntries;
+// Screen 0's rank rows read their swatch from here, so a row's colour and its
+// curve's colour cannot disagree -- the swatch is the chart's only key.
+window.getSeriesStyle = getSeriesStyle;
+// Both axis formatters, for the same reason the two above are exported: screen
+// 0 plots the SAME hourly `equity_curve` timestamps this tab does, and without
+// these it printed them raw -- "2026-04-15T00:00", rotated 45 degrees and
+// colliding across a chart 187px tall. A tick label is not copy either surface
+// gets to invent; it is a rendering of the other's data.
+window.formatShortDate = formatShortDate;
+window.formatChartTooltipLabel = formatChartTooltipLabel;

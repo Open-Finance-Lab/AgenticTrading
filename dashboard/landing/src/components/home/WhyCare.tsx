@@ -12,12 +12,12 @@ const ACTS = [
   {
     icon: MessageSquare,
     title: "Describe it in plain English",
-    body: "No code, no formulas. Write how you want to trade the way you would explain it to a person.",
+    body: "No code, no formulas — write it the way you would explain it to a person.",
   },
   {
     icon: LineChart,
     title: "Prove it on real market data",
-    body: "Real prices, real market hours, measured against buy-and-hold and the index — so you learn whether the idea was good, not whether it felt good.",
+    body: "Real prices and real market hours, measured against buy-and-hold and the index.",
   },
   {
     icon: Trophy,
@@ -67,9 +67,8 @@ export function WhyCare() {
             <span className="block text-[#22d3ee]">Testing it properly is the expensive part.</span>
           </h2>
           <p className="text-foreground/80 text-lg">
-            Normally that means writing code, buying data, and waiting months to find out you
-            were wrong. Here you get a rigorous, data-backed test in minutes — no code, no data
-            subscription, no waiting months.
+            Normally that means writing code, buying data, and waiting months to find out you were
+            wrong.
           </p>
         </div>
 

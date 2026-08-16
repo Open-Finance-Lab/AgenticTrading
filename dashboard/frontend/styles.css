@@ -5299,6 +5299,15 @@ html[data-nav-page="home"] #homeView .home-landing-hero-copy {
     /* Extra inset so large headlines never sit on the viewport edge (Mac / wide laptops). */
     padding-inline-start: clamp(0px, 2vw, 24px);
 }
+/* `align-self: stretch` is what makes the panel's own `height: 100%` mean
+   anything. `.home-landing-hero-inner` is `align-items: center`, so without
+   this the board's cross size comes from its CONTENT, the percentage below
+   resolves against an indefinite height and falls back to `auto`, and the
+   panel grows past the hero -- which is `overflow: hidden`, so it is silently
+   CUT rather than scrolled. That shipped: the panel header and the footer
+   button were off-screen at 1280x720, 1366x768, 1201x760 and 1240x700, with no
+   scrollbar and nothing failing. Stretch gives the board the row's definite
+   height, which is the only thing that lets the rules below bound the panel. */
 html[data-nav-page="home"] #homeView .home-landing-board {
     flex: 1 1 0;
     width: 100%;
@@ -5306,13 +5315,32 @@ html[data-nav-page="home"] #homeView .home-landing-board {
     min-width: 0;
     flex-shrink: 0;
     display: flex;
+    align-self: stretch;
+    min-height: 0;
 }
 /* The pager clips rather than scrolls (.home-pager-screen is overflow:hidden),
-   so the panel is sized against the viewport, not left to its content. */
+   so the panel is sized against the viewport, not left to its content.
+   It takes the whole hero row: measured at 1440x900 the panel's fixed chrome
+   (head 44 + meta 49 + table head 26 + Season-0 note 62 + footer button 36 +
+   padding 36 = 253) leaves 267px of a 520px cap, and seven rows need 202 -- so
+   under the old cap a chart had ~0px, and a negative budget at 1366x768.
+   Above 1200px the hero is a flex ROW, so the cap was never load-bearing for
+   the copy column; it was a card proportion chosen when this panel held only a
+   table.
+
+   SEVEN ROWS DO NOT FIT AT EVERY HEIGHT, and that is the honest outcome rather
+   than a shortfall. At 1280x720 the hero row is 571px against 642px of
+   content (253 chrome + 187 chart + 202 rows), so something has to give; the
+   list is `overflow-y: auto` precisely so it is the thing that gives. An
+   earlier revision of this comment claimed "7/7 rows visible with zero clip
+   across 1280x720 -> 1920x1080", which was true only because the panel was
+   overflowing the hero -- every row was inside the LIST, and the list was
+   outside the SCREEN. Re-measure rather than re-reason if the chrome above
+   changes; every height in this design is a browser measurement. */
 html[data-nav-page="home"] #homeView .home-landing-board .home-module {
-    height: min(520px, calc(100dvh - var(--app-chrome-height) - 160px));
-    min-height: min(400px, calc(100dvh - var(--app-chrome-height) - 160px));
-    max-height: min(520px, calc(100dvh - var(--app-chrome-height) - 140px));
+    height: 100%;
+    min-height: 0;
+    max-height: none;
 }
 
 /* Below 1200px the hero stacks to a column (see the unscoped rule further down).
@@ -6201,6 +6229,32 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     .hm-agent-stat-value { font-size: 18px; }
 }
 
+/* Screen 0's equity chart. `clamp(140px, 26vh, 280px)` yields 187-280px across
+   1280x720 -> 1920x1080. Deliberately smaller than /'s clamp: this panel is
+   bounded by the pager, / 's card by the document.
+
+   `flex-grow: 0` so the list, which is `flex: 1 1 auto; overflow-y: auto`,
+   absorbs SURPLUS height rather than the chart stretching. But `flex-shrink`
+   is 1, not 0, so the chart also gives way first under a DEFICIT -- and there
+   is a real deficit: at 1240x700 the panel gets 509px against 637px of
+   content, and with a rigid chart the list was left showing ONE row of seven.
+   The standings are this panel's subject and the chart is its illustration, so
+   the illustration is what shrinks. `min-height` keeps it from collapsing to a
+   sliver, which is the failure `flex: 0 0 auto` was originally guarding
+   against -- a floor states that directly instead of buying it by refusing to
+   shrink at all. */
+.hm-rank-chart {
+    flex: 0 1 auto;
+    position: relative;
+    height: clamp(140px, 26vh, 280px);
+    min-height: 132px;
+    margin-bottom: 10px;
+}
+.hm-rank-chart canvas {
+    width: 100% !important;
+    height: 100% !important;
+}
+
 /* Leaderboard */
 .hm-rank-table-head {
     display: grid;
@@ -6242,6 +6296,26 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     align-items: center;
     gap: 6px;
     font-size: 12.5px;
+    /* Tighter than the 8px list gap: the chart above took the height these rows
+       used to spread into, and seven of them still have to fit without the
+       pager clipping (it is overflow:hidden with no scrollbar). */
+    padding-block: 3px;
+    line-height: 1.35;
+}
+/* The identity link between a row and its curve; the list is the chart's
+   legend, which is why the chart ships none of its own.
+
+   Lives inside `.hm-rank-entry` (a flex cell) rather than as a direct child of
+   the `<li>`, which is a five-column grid whose template mirrors
+   `.hm-rank-table-head`. A sixth grid child shifts every cell one column right
+   and silently unaligns the table from its own head -- `flex: 0 0 auto` below
+   only means anything because the parent is the flex cell. Spacing comes from
+   that parent's `gap: 4px`, so no margin here. */
+.hm-rank-swatch {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex: 0 0 auto;
 }
 .home-module-rank {
     width: 22px;

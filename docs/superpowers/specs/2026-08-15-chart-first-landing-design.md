@@ -127,6 +127,28 @@ was actively wrong.
 - **`/app` — `clamp(140px, 26vh, 280px)`.** Yields 187–280px across 1280×720 → 1920×1080.
   Smaller than `/`'s because the panel it sits in is bounded by the pager, not the document.
 
+> **⚠ Both formulas above are superseded — 2026-08-16. The source is the code, not this
+> section.** Every `clamp(300px, calc(100dvh - 390px), 520px)` in this document is the
+> original single-constant form; it was replaced twice during execution and review.
+>
+> - **`/` is now `clamp(260px, calc(100dvh - var(--board-chart-reserve)), 520px)`** with the
+>   reserve **390px at `lg`+ and 590px below**. One constant could not serve both: the card's
+>   non-chart height is 218–241px beside the copy but **443px** stacked at 390px wide, where
+>   the title, the chip and the caption wrap *and* the chip strip runs to five rows. The
+>   `~227px` figure quoted above was measured against a strip that was silently clipping four
+>   of its five entries; unclipping it moved the strip from 24px to 152px, the stacked reserve
+>   from 480 to 590, and then the **floor** from 300 to 260 — at 844px tall the card had 269px
+>   left for a chart whose floor was 300, so the floor, not the reserve, was what put it 95px
+>   past the fold on the second pass.
+> - **`/app` keeps `clamp(140px, 26vh, 280px)` as a ceiling**, but `.hm-rank-chart` is now
+>   `flex: 0 1 auto` with a 132px floor, so it renders shorter than the clamp wherever the
+>   panel is tight. The clamp is no longer a prediction of the rendered height — see the
+>   corrected table in §3a.
+>
+> The live values are pinned by `test_landing_chart_first.py` and
+> `test_frontend_chart_first_home.py`, and measured by
+> `dashboard/scripts/verify_chart_first_layout.py`.
+
 **The standings table stops being the main event.** This is the "chart, not a ranking
 board" change — but it is *demotion, not deletion*, and the two surfaces demote differently
 because they carry different information.
@@ -231,18 +253,44 @@ footer and ZERO standings between them, which is worse than a scrollbar."*
 > never load-bearing for the copy column; it was a card-proportion choice made when the
 > panel held only a table. With the board as the screen's subject, the panel takes the row.
 
-**Verified, not asserted.** Applying that rule plus a `clamp(140px, 26vh, 280px)` chart, at
-today's row pitch (deliberately conservative — the compact restyle only adds headroom):
+**⚠ CORRECTED 2026-08-16 — the table below was measured through a broken probe.**
+`height: 100%` on the panel is inert unless the board column is *stretched*:
+`.home-landing-hero-inner` is `align-items: center`, so the board's cross size came from its
+content, the percentage resolved against an indefinite height and fell back to `auto`. The
+panel then sized itself to its content and **overran `.home-landing-hero`, which is
+`overflow: hidden`** — cut, with no scrollbar. The pass that produced these numbers probed
+`#homeScreenLanding` for overflow, but the hero is `height: 100%` of that screen and absorbs
+its own overflow, so the screen reported a clean `0` at every viewport. "7/7 rows visible"
+was true of the **list**, and the list was outside the **screen**.
 
-| viewport | panel | chart | rows visible | screen clip |
+The fix adds `align-self: stretch` to `.home-landing-board` and makes `.hm-rank-chart`
+`flex: 0 1 auto` with a 132px floor, so the chart — the illustration — yields before the
+standings do. Re-measured against a probe aimed at the hero:
+
+| viewport | panel | chart | rows visible | hero clip |
 |---|---|---|---|---|
-| 1920×1080 | 722 | 280 | 7/7 | 0px |
-| 1600×900 | 676 | 234 | 7/7 | 0px |
-| 1440×900 | 700 | 234 | 7/7 | 0px |
-| 1440×768 | 666 | 200 | 7/7 | 0px |
-| 1366×768 | 666 | 200 | 7/7 | 0px |
-| 1280×800 | 674 | 208 | 7/7 | 0px |
-| 1280×720 | 653 | 187 | 7/7 | 0px |
+| 1920×1080 | 866 | 280 | 7/7 | 0px |
+| 1600×900 | 697 | 224 | 6/7 | 0px |
+| 1440×900 | 697 | 212 | 6/7 | 0px |
+| 1440×768 | 573 | 139 | 4/7 | 0px |
+| 1366×768 | 573 | 139 | 4/7 | 0px |
+| 1280×800 | 603 | 156 | 5/7 | 0px |
+| 1280×720 | 528 | 132 | 3/7 | 0px |
+| 1240×700 | 509 | 132 | 3/7 | 0px |
+| 1201×760 | 565 | 132 | 4/7 | 0px |
+| 1152×864 | — | 225 | 7/7 | 0px |
+| 1024×900 | — | 234 | 7/7 | 0px |
+
+**Seven rows do not fit at every height, and that is the honest outcome.** At 1280×720 the
+panel gets 528px against 642px of content (253 chrome + 187 chart at full clamp + 202 rows);
+something has to give, and `.home-module-rank-list` is `overflow-y: auto` precisely so it is
+the thing that gives. The rows below its fold are scrolled, not lost. Nothing can show all
+seven *and* a chart *and* the panel chrome in 528px — the original table only appeared to
+because the overflow was being hidden.
+
+Previously recorded (do not restore — every "screen clip: 0px" here is the probe's blind
+spot, not a measurement): 1920×1080 722/280, 1600×900 676/234, 1440×900 700/234,
+1440×768 666/200, 1366×768 666/200, 1280×800 674/208, 1280×720 653/187, all "7/7, 0px".
 
 Below 1200px the existing `@media (max-width: 1200px)` block already lets
 `#homeScreenLanding` scroll and gives the panel `height: auto; min-height: 400px`, so the
