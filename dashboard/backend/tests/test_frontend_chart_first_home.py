@@ -21,8 +21,36 @@ import pytest
 from dashboard.backend.tests._frontend_source import STYLES, css_blocks
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
-_HOME_JS = (_FRONTEND / "home-page.js").read_text(encoding="utf-8")
-_LEADERBOARD_JS = (_FRONTEND / "js" / "leaderboard.js").read_text(encoding="utf-8")
+_CONFIG = Path(__file__).resolve().parents[2] / "config"
+
+
+def _strip_comments(source: str) -> str:
+    """JS with its comments removed, so a scan reads code and never prose.
+
+    NOT optional, and the reason is specific to this file: the two functions
+    guarded below are the most heavily commented in home-page.js, and those
+    comments quote the guarded strings almost verbatim -- "is toFixed(2), so
+    `+7.49%`", "Pinned by test_the_chart_readout...". Every `in` assertion here
+    was therefore satisfiable by a comment ABOUT an implementation that had been
+    deleted: remove the tooltip callback, leave the paragraph explaining it, and
+    the guard stays green over the regression it exists to catch.
+
+    test_landing_chart_first.py has stripped for exactly this reason since it
+    was written; the /app half of the same pass did not. Brace matching also
+    gets safer as a side effect -- `_extract` counts braces, and a comment
+    containing an unbalanced one silently returns the wrong region.
+
+    Whole-line `//` only: an inline `//` would eat the tail of any line holding
+    a URL, and this file has ten of them in HOME_MOCK_NEWS.
+    """
+    source = re.sub(r"/\*.*?\*/", "", source, flags=re.S)
+    return re.sub(r"(?m)^\s*//.*$", "", source)
+
+
+_HOME_JS = _strip_comments((_FRONTEND / "home-page.js").read_text(encoding="utf-8"))
+_LEADERBOARD_JS = _strip_comments(
+    (_FRONTEND / "js" / "leaderboard.js").read_text(encoding="utf-8")
+)
 
 _PANEL_SELECTOR = (
     'html[data-nav-page="home"] #homeView .home-landing-board .home-module'
@@ -54,6 +82,51 @@ def test_board_panel_is_not_capped_at_a_fixed_height():
     assert "max-height: none" in block
     assert "520px" not in block, (
         "the 520px cap leaves ~0px for the chart at 1440x900 and is negative at 1366x768"
+    )
+
+
+def test_the_board_column_is_stretched_so_the_panels_height_resolves():
+    """`height: 100%` on the panel is inert without this, and inert SILENTLY.
+
+    `.home-landing-hero-inner` is `align-items: center`, so the board's cross
+    size comes from its content unless it is stretched; the percentage then
+    resolves against an indefinite height and CSS falls back to `auto`. The
+    panel sized itself to its content, overran `.home-landing-hero` -- which is
+    `overflow: hidden` -- and was cut with no scrollbar: measured 62px of
+    overflow at 1280x720, 44px at 1366x768, 56px at 1201x760, 70px at 1240x700,
+    with the panel header and the footer button off-screen at each.
+
+    Asserted on the board rather than the panel because the panel's own rule
+    reads perfectly correct in isolation. That is what made this survive a
+    measurement pass: nothing about `height: 100%` looks wrong, and the probe
+    that was supposed to catch it measured `#homeScreenLanding`, whose own
+    overflow stays 0 because the hero absorbs and hides the excess.
+    """
+    blocks = css_blocks(
+        'html[data-nav-page="home"] #homeView .home-landing-board'
+    )
+    assert blocks, "the board column rule was renamed or deleted"
+    assert "align-self: stretch" in blocks[0], (
+        "without this the panel's height: 100% resolves to auto and the hero clips it"
+    )
+
+
+def test_the_chart_yields_height_before_the_standings_do():
+    """A rigid chart plus a bounded panel left the list showing ONE row of seven.
+
+    Once the panel stops overrunning the hero there is a real deficit at short
+    viewports -- 509px of panel against 637px of content at 1240x700 -- and
+    something has to absorb it. `flex-shrink: 0` on the chart meant the list
+    absorbed all of it. The standings are this panel's subject and the chart is
+    its illustration, so the illustration gives way, down to a floor.
+    """
+    blocks = css_blocks(".hm-rank-chart")
+    assert blocks, ".hm-rank-chart was renamed or deleted"
+    assert "flex: 0 1 auto" in blocks[0], (
+        "flex-grow must stay 0 (the list absorbs surplus) but shrink must not"
+    )
+    assert re.search(r"min-height:\s*\d+px", blocks[0]), (
+        "a shrinkable chart needs a floor, or it collapses to a sliver"
     )
 
 
@@ -405,13 +478,184 @@ def test_the_chart_element_is_created_only_when_there_are_series():
     content nobody has started reading, is the cheaper cost.
     """
     body = _extract(_HOME_JS, "renderHomeLeaderboardChart")
-    assert "if (!series.length) return null;" in body, (
+    assert "if (!series.length) {" in body, (
         "no series must mean no canvas -- not an empty canvas"
     )
     # The insertion is guarded, not unconditional at module scope.
     assert "document.createElement('canvas')" in body or "<canvas" in body
     assert "typeof window.Chart" in body, (
         "Chart.js is deferred; the render path must tolerate it not having landed"
+    )
+
+
+def test_no_chart_paths_take_an_existing_chart_down_with_them():
+    """"No chart this time" is a state this panel arrives at WITH ONE DRAWN.
+
+    `onHomePageShow` calls `refreshHomeModules()` on every return to Home, and
+    an IntersectionObserver calls it again, so every no-chart path is a
+    re-render path. Returning early left the previous window's nine real curves
+    on screen above five invented sample rows -- and because the mock roster is
+    a different set of models, each row's swatch then keyed the reader to a
+    different model's line than the one it named.
+
+    Both halves are asserted: the sample branches must clear (they return before
+    the chart call and are the only place that can), and the render function's
+    own early exits must clear too (real entries whose `equity_curve`s are all
+    empty reach it and yield no series).
+    """
+    teardown = _extract(_HOME_JS, "clearHomeLeaderboardChart")
+    assert "homeRankChart.destroy()" in teardown, "the Chart.js instance must be released"
+    assert "removeChild" in teardown or "wrap.remove()" in teardown, (
+        "the wrapper element must go too -- a destroyed chart still leaves its box"
+    )
+
+    render = _extract(_HOME_JS, "renderHomeLeaderboardChart")
+    head = render[: render.index("const panel")]
+    assert head.count("clearHomeLeaderboardChart()") == 2, (
+        "both early exits (no series, no Chart.js) must tear an existing chart down"
+    )
+
+    entries = _extract(_HOME_JS, "renderEntries")
+    assert "if (sample) clearHomeLeaderboardChart();" in entries, (
+        "the three sample paths return before the chart call, so this is the only "
+        "place that can take the chart down with the standings"
+    )
+
+
+def test_the_chart_axis_reads_dates_and_not_raw_stamps():
+    """`times` are raw hourly `equity_curve` stamps -- `2026-04-15T14:00`.
+
+    Chart.js renders an unrecognised string label verbatim and auto-rotates to
+    fit, so with no callback this axis printed six ISO timestamps at ~45
+    degrees, colliding with each other and running past the canvas edge, across
+    a plot 132-280px tall. The formatter is borrowed from js/leaderboard.js
+    rather than reimplemented: both surfaces plot the same field, and a second
+    formatter is a second chance to render it two ways.
+    """
+    assert "window.formatShortDate = formatShortDate;" in _LEADERBOARD_JS
+    assert (
+        "window.formatChartTooltipLabel = formatChartTooltipLabel;" in _LEADERBOARD_JS
+    )
+    stamp = _extract(_HOME_JS, "homeFormatChartStamp")
+    assert "window.formatChartTooltipLabel" in stamp and "window.formatShortDate" in stamp
+    assert "return raw" in stamp, "a missing export must degrade to the stamp, not blank"
+
+    body = _extract(_HOME_JS, "renderHomeLeaderboardChart")
+    assert "homeFormatChartStamp(this.getLabelForValue(value), false)" in body, (
+        "the x ticks must be formatted, not printed raw"
+    )
+    assert re.search(r"maxRotation:\s*0", body) and re.search(r"minRotation:\s*0", body), (
+        "auto-rotation is what made the raw labels collide; flat ticks are the fix"
+    )
+
+
+def test_the_tooltip_reads_one_series_not_all_nine():
+    """An index-mode tooltip over nine series is taller than the plot it sits in.
+
+    Measured at 1440x900 before the fix: nine rows, 178px, inside a 234px
+    canvas. The Leaderboard tab keeps 'index' only because it also ships a
+    `tooltip.filter` bound to an explicit `hoveredDatasetIndex`; this panel has
+    no such hover gate, so it uses 'nearest'.
+
+    The `filter` is still required on top. 'nearest' returns EVERY item at the
+    minimum distance, and at the leftmost tick that is all nine -- `values[0]`
+    is `(base-base)/base` for every series, so the curves genuinely coincide
+    there and the nine-row tooltip came back at the one x a reader starts from.
+    """
+    body = _extract(_HOME_JS, "renderHomeLeaderboardChart")
+    assert "mode: 'nearest'" in body, "'index' lists every series in one tooltip"
+    assert "filter: (item, index) => index === 0" in body, (
+        "every series shares its first value, so 'nearest' ties nine ways at x=0"
+    )
+
+
+def test_the_tooltip_signs_zero_the_way_the_rank_row_does():
+    """The two sit side by side showing the same number, and the first point of
+    every series is exactly zero -- so the sign rule is not a detail.
+
+    `homeFormatReturnPct` is `> 0`, which renders `0.00%`. A `>= 0` test in the
+    tooltip rendered `+0.00%` for the identical value. The precision guard above
+    compares decimals and is structurally blind to this.
+    """
+    assert "pct > 0 ? '+' : ''" in _extract(_HOME_JS, "homeFormatReturnPct"), (
+        "the rank list's sign rule changed -- re-check the tooltip's"
+    )
+    body = _extract(_HOME_JS, "renderHomeLeaderboardChart")
+    assert "c.parsed.y > 0 ? '+' : ''" in body, (
+        "zero must not read as a gain in one place and flat in the other"
+    )
+
+
+def test_the_canvas_label_names_the_baselines_it_draws():
+    """The two reference curves are the reason the chart exists, and the only
+    thing marking them is that their lines are dashed -- which is not
+    information a screen reader receives. A label reading "for each AI model"
+    told that reader the image contains exactly what the baselines were added to
+    correct.
+    """
+    body = _extract(_HOME_JS, "renderHomeLeaderboardChart")
+    label = re.search(r"aria-label',\s*\n?\s*'([^']+)'", body)
+    assert label, "the canvas must carry an aria-label"
+    text = label.group(1).lower()
+    assert "baseline" in text or "buy-and-hold" in text, (
+        f"the label names only the models: {label.group(1)!r}"
+    )
+
+
+def test_the_sample_rows_carry_real_entry_ids():
+    """`getSeriesStyle` resolves a model's colour through
+    `getModelColor(entry.entry_id || label)`, which mints a palette slot per
+    unseen key -- and `modelColorMap` is module-level state in js/leaderboard.js
+    that the Leaderboard tab shares.
+
+    Id-less mock rows therefore entered that map under their display labels
+    while the real entries enter under their ids: one model, two slots, twelve
+    keys chasing a ten-colour palette, and a mock row handed the colour already
+    assigned to a different real model's curve. The shift outlived this panel --
+    the Leaderboard tab's own colours came to depend on whether the home module
+    had failed earlier in the session.
+    """
+    roster = {
+        s["id"]
+        for s in json.loads(
+            (_CONFIG / "leaderboard.json").read_text(encoding="utf-8")
+        )["strategies"]
+    }
+    mock = _const_block(_HOME_JS, "HOME_MOCK_LEADERBOARD")
+    ids = re.findall(r"entry_id:\s*'([^']+)'", mock)
+    assert len(ids) == mock.count("rank:"), "every sample row needs an entry_id"
+    unknown = sorted(set(ids) - roster)
+    assert not unknown, (
+        f"sample rows carry ids that are not on the board: {unknown} -- "
+        "a plausible-looking id mints its own palette slot exactly like no id at all"
+    )
+
+
+def test_the_charts_baseline_ids_are_on_the_board():
+    """`HOME_CHART_BASELINE_IDS` hardcodes two primary keys from
+    dashboard/config/leaderboard.json.
+
+    Ids rather than labels is the right call -- labels are renameable copy --
+    but ids are editable in that same file, and nothing else connected the two.
+    Rename either and screen 0 draws seven model curves with nothing to judge
+    them against, no console warning, and a green suite: every fixture in this
+    module hand-writes the ids it expects, so those cases assert the constant
+    against itself. This is the one case that reads the roster.
+    """
+    roster = {
+        s["id"]
+        for s in json.loads(
+            (_CONFIG / "leaderboard.json").read_text(encoding="utf-8")
+        )["strategies"]
+    }
+    ids = re.findall(
+        r"'([^']+)'", _const_block(_HOME_JS, "HOME_CHART_BASELINE_IDS")
+    )
+    assert ids, "the baseline id list was renamed or emptied"
+    missing = sorted(set(ids) - roster)
+    assert not missing, (
+        f"the chart's reference curves are not on the board: {missing} -- "
+        "screen 0 would draw the models against nothing"
     )
 
 

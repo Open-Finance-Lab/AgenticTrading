@@ -1614,3 +1614,10 @@ window.buildEquityCurvesFromEntries = buildEquityCurvesFromEntries;
 // Screen 0's rank rows read their swatch from here, so a row's colour and its
 // curve's colour cannot disagree -- the swatch is the chart's only key.
 window.getSeriesStyle = getSeriesStyle;
+// Both axis formatters, for the same reason the two above are exported: screen
+// 0 plots the SAME hourly `equity_curve` timestamps this tab does, and without
+// these it printed them raw -- "2026-04-15T00:00", rotated 45 degrees and
+// colliding across a chart 187px tall. A tick label is not copy either surface
+// gets to invent; it is a rendering of the other's data.
+window.formatShortDate = formatShortDate;
+window.formatChartTooltipLabel = formatChartTooltipLabel;

@@ -1506,17 +1506,61 @@ function homeChartSeries(entries, build) {
     return { times, series };
 }
 
+/** One of js/leaderboard.js's two axis formatters, applied to a raw hourly
+ *  stamp -- `formatChartTooltipLabel` (date + hour) when `withHour`, otherwise
+ *  `formatShortDate` (date only, for a tick).
+ *
+ *  Borrowed rather than reimplemented: both surfaces plot the same
+ *  `equity_curve` timestamps, so a second formatter here would be a second
+ *  chance to render the same field two ways.
+ *
+ *  Falls back to the raw stamp with no console warning, unlike the missing
+ *  `buildEquityCurvesFromEntries` case above. That one degrades to NO CHART,
+ *  which this design deliberately makes indistinguishable from the honest
+ *  no-curves state, so it needs a signal; this one degrades to an ugly label
+ *  that is on screen and self-reporting. */
+function homeFormatChartStamp(stamp, withHour) {
+    const raw = stamp == null ? '' : String(stamp);
+    const format = withHour ? window.formatChartTooltipLabel : window.formatShortDate;
+    if (typeof format !== 'function') return raw;
+    return format(raw) || raw;
+}
+
 let homeRankChart = null;
+
+/** Tear the chart down: destroy the Chart.js instance and remove its wrapper.
+ *
+ *  EVERY no-chart path has to call this, not just the first one. This module
+ *  re-renders in place -- `onHomePageShow` calls `refreshHomeModules()` on each
+ *  return to Home, and an IntersectionObserver calls it again -- so "no chart
+ *  this time" is a state the panel arrives at with a chart ALREADY DRAWN. Left
+ *  standing, the previous window's nine real curves sit above five invented
+ *  sample rows whose swatches key the reader to entirely different lines.
+ *  Returning early was correct on first load and wrong on every load after. */
+function clearHomeLeaderboardChart() {
+    if (homeRankChart) {
+        homeRankChart.destroy();
+        homeRankChart = null;
+    }
+    const wrap = document.getElementById('homeModuleRankChartWrap');
+    if (wrap && wrap.parentNode) wrap.parentNode.removeChild(wrap);
+}
 
 /** Draw screen 0's equity chart, or nothing at all.
  *
- *  Returns null -- and creates no element -- when there are no series or when
- *  Chart.js has not landed yet. Both cases leave the panel laid out exactly as
- *  it is today, list and all, which is the point: a blank reserved box reads as
- *  a chart that failed. */
+ *  Returns null -- and leaves no element behind -- when there are no series or
+ *  when Chart.js has not landed yet. Both cases leave the panel laid out
+ *  exactly as it is today, list and all, which is the point: a blank reserved
+ *  box reads as a chart that failed. */
 function renderHomeLeaderboardChart(series, times) {
-    if (!series.length) return null;
-    if (typeof window.Chart !== 'function') return null;
+    if (!series.length) {
+        clearHomeLeaderboardChart();
+        return null;
+    }
+    if (typeof window.Chart !== 'function') {
+        clearHomeLeaderboardChart();
+        return null;
+    }
     const panel = document.getElementById('homeModuleRanking');
     const anchor = panel && panel.querySelector('.hm-rank-table-head');
     if (!panel || !anchor) return null;
@@ -1529,7 +1573,19 @@ function renderHomeLeaderboardChart(series, times) {
         const canvas = document.createElement('canvas');
         canvas.id = 'homeModuleRankChart';
         canvas.setAttribute('role', 'img');
-        canvas.setAttribute('aria-label', 'Return for each AI model over the competition window');
+        // Names the baselines, because they are the reason the chart exists.
+        // `homeChartEntries` adds Buy & Hold and the DJIA precisely so a
+        // +7.49% has something to be judged against, and the only thing
+        // separating them from the models is that their lines are dashed --
+        // which is not information a screen reader receives. A label reading
+        // "for each AI model" told that reader the image contains exactly what
+        // the baselines were added to correct. The window is not asserted
+        // either: `_normalize_period` answers 200 for any period, so the
+        // payload behind this canvas is not always the competition board.
+        canvas.setAttribute(
+            'aria-label',
+            'Return for each AI model, with buy-and-hold and index baselines drawn as dashed lines',
+        );
         wrap.appendChild(canvas);
         panel.insertBefore(wrap, anchor);
     }
@@ -1555,7 +1611,16 @@ function renderHomeLeaderboardChart(series, times) {
             responsive: true,
             maintainAspectRatio: false,
             animation: false,
-            interaction: { mode: 'index', intersect: false },
+            // NEAREST, not 'index'. This chart carries nine series, and an
+            // index-mode tooltip lists every one of them: measured at 1440x900
+            // that is a 178px tooltip inside a 234px canvas, and at 1280x720 it
+            // is taller than the plot area it sits in, so hovering to read a
+            // value hides the thing being read. The Leaderboard tab keeps
+            // 'index' only because it also ships a `tooltip.filter` bound to an
+            // explicit `hoveredDatasetIndex` (js/leaderboard.js) -- a hover-gate
+            // this panel has no room and no need for. One curve under the
+            // cursor is the whole question here.
+            interaction: { mode: 'nearest', intersect: false },
             plugins: {
                 // The rank list beneath is the key -- each row carries the
                 // curve's colour swatch. A legend here would be the same five
@@ -1563,20 +1628,58 @@ function renderHomeLeaderboardChart(series, times) {
                 legend: { display: false },
                 tooltip: {
                     enabled: true,
+                    // ONE ROW, INCLUDING AT A TIE. 'nearest' returns every item
+                    // at the minimum distance, and at the leftmost tick that is
+                    // all nine: `values[0]` is `(base-base)/base` for every
+                    // series, so the curves genuinely coincide there. The
+                    // result was the same tooltip 'index' mode produced --
+                    // nine rows, taller than the plot area -- restored at the
+                    // one x the reader is most likely to start from. Dropping
+                    // the tied duplicates loses nothing: they all read 0.00%.
+                    filter: (item, index) => index === 0,
                     callbacks: {
+                        // The same hourly stamp the axis carries, rendered as
+                        // date + hour rather than `2026-04-30T16:00`.
+                        title: (items) =>
+                            (items.length ? homeFormatChartStamp(items[0].label, true) : ''),
                         // Without this the tooltip prints the raw fraction
                         // (0.0749). Two decimals, not the axis's one: this
                         // readout sits beside the rank row for the same model,
                         // and that row renders `homeFormatReturnPct` -- which
                         // is toFixed(2), so `+7.49%`. Pinned by
                         // `test_the_chart_readout_matches_the_rank_lists_own_precision`.
+                        //
+                        // `> 0`, not `>= 0`, for the same reason: the FIRST
+                        // point of every series is exactly zero (`values[0]` is
+                        // `(base-base)/base`), so at the leftmost tick a `>=`
+                        // test printed `+0.00%` beside a rank row rendering
+                        // `0.00%` for the identical number. The precision test
+                        // compares decimals and cannot see a sign.
                         label: (c) =>
-                            `${c.dataset.label}: ${c.parsed.y >= 0 ? '+' : ''}${(c.parsed.y * 100).toFixed(2)}%`,
+                            `${c.dataset.label}: ${c.parsed.y > 0 ? '+' : ''}${(c.parsed.y * 100).toFixed(2)}%`,
                     },
                 },
             },
             scales: {
-                x: { ticks: { ...axis, maxTicksLimit: 6 }, grid: { display: false } },
+                x: {
+                    ticks: {
+                        ...axis,
+                        maxTicksLimit: 6,
+                        // Flat, and formatted. `times` are raw hourly stamps
+                        // off `equity_curve`, and Chart.js renders an unknown
+                        // string label verbatim -- so this axis printed
+                        // "2026-04-15T00:00" six times, auto-rotated ~45 deg,
+                        // labels colliding and running past the canvas edge,
+                        // across a chart that is 132-280px tall. Same formatter
+                        // the Leaderboard tab uses on the same field.
+                        maxRotation: 0,
+                        minRotation: 0,
+                        callback(value) {
+                            return homeFormatChartStamp(this.getLabelForValue(value), false);
+                        },
+                    },
+                    grid: { display: false },
+                },
                 y: {
                     // Percent, not dollars -- see "Units" in the plan's Global
                     // Constraints. ONE decimal here, unlike the tooltip above:
@@ -1597,12 +1700,25 @@ async function loadHomeLeaderboardModule() {
     if (!list) return;
 
     // Home module shows LLM model performance only (no baselines / indices).
+    //
+    // `entry_id` CARRIES THE COLOUR, and these are the real ids from
+    // dashboard/config/leaderboard.json rather than plausible-looking strings.
+    // `getSeriesStyle` resolves a model's colour through
+    // `getModelColor(entry.entry_id || label)`, which mints a palette slot per
+    // unseen key -- so id-less mock rows entered the SHARED `modelColorMap` as
+    // "DeepSeek V4 Pro" while the real entries enter it as "deepseek_v4_pro".
+    // One model then held two slots, twelve keys chased a ten-colour palette,
+    // and the mock's "Qwen3.7 Plus" was handed the colour already assigned to
+    // the real DeepSeek curve. That map is module-level state in
+    // js/leaderboard.js, so the damage outlived this panel: the Leaderboard
+    // tab's own curve colours came to depend on whether the home module had
+    // happened to fail earlier in the session.
     const HOME_MOCK_LEADERBOARD = [
-        { rank: 1, model: 'DeepSeek V4 Pro', is_model: true, cumulative_return: 0.0749, sharpe_ratio: 5.01, portfolio_value: 107490 },
-        { rank: 2, model: 'Claude Sonnet 4.6', is_model: true, cumulative_return: 0.0312, sharpe_ratio: 1.18, portfolio_value: 103120 },
-        { rank: 3, model: 'GPT-5.5', is_model: true, cumulative_return: 0.0281, sharpe_ratio: 0.94, portfolio_value: 102810 },
-        { rank: 4, model: 'Qwen3.7 Plus', is_model: true, cumulative_return: 0.0249, sharpe_ratio: 0.72, portfolio_value: 102490 },
-        { rank: 5, model: 'Gemini 3.1 Pro', is_model: true, cumulative_return: 0.0156, sharpe_ratio: 0.41, portfolio_value: 101560 },
+        { rank: 1, entry_id: 'deepseek_v4_pro', model: 'DeepSeek V4 Pro', is_model: true, cumulative_return: 0.0749, sharpe_ratio: 5.01, portfolio_value: 107490 },
+        { rank: 2, entry_id: 'claude_sonnet_4_6', model: 'Claude Sonnet 4.6', is_model: true, cumulative_return: 0.0312, sharpe_ratio: 1.18, portfolio_value: 103120 },
+        { rank: 3, entry_id: 'gpt_5_5', model: 'GPT-5.5', is_model: true, cumulative_return: 0.0281, sharpe_ratio: 0.94, portfolio_value: 102810 },
+        { rank: 4, entry_id: 'qwen3_7_plus', model: 'Qwen3.7 Plus', is_model: true, cumulative_return: 0.0249, sharpe_ratio: 0.72, portfolio_value: 102490 },
+        { rank: 5, entry_id: 'gemini_3_1_pro_preview', model: 'Gemini 3.1 Pro', is_model: true, cumulative_return: 0.0156, sharpe_ratio: 0.41, portfolio_value: 101560 },
     ];
 
     function isHomeModelEntry(entry) {
@@ -1671,6 +1787,14 @@ async function loadHomeLeaderboardModule() {
 
     function renderEntries(entries, { sample = null } = {}) {
         markSample(sample);
+        // THE ONLY PLACE THAT CAN TAKE THE CHART DOWN WITH THE STANDINGS. All
+        // three sample paths return before `renderHomeLeaderboardChart` is ever
+        // reached, so on a re-render -- which is every return to Home -- a real
+        // nine-curve chart stayed on screen above five invented rows, with the
+        // rows' swatches pointing at whichever line had drawn in that colour.
+        // Not folded into `markSample`: that runs on the success path too, and
+        // tearing the wrapper out before rebuilding it flashes the layout.
+        if (sample) clearHomeLeaderboardChart();
         if (!entries.length) {
             list.innerHTML = '<li class="home-module-rank-empty">No AI model has finished this backtest window yet.</li>';
             return;
