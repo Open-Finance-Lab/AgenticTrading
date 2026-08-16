@@ -112,7 +112,7 @@ Spec §3a. Nothing else in Phase A fits until this lands: measured, the panel ha
 **Interfaces:**
 - Produces: a `.home-landing-board .home-module` with no fixed height cap above 1200px, so Tasks 3 and 4 have vertical budget to spend.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `dashboard/backend/tests/test_frontend_chart_first_home.py`:
 
@@ -176,7 +176,7 @@ def test_board_panel_is_not_capped_at_a_fixed_height():
     )
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 pytest dashboard/backend/tests/test_frontend_chart_first_home.py::test_board_panel_is_not_capped_at_a_fixed_height -v
@@ -184,7 +184,7 @@ pytest dashboard/backend/tests/test_frontend_chart_first_home.py::test_board_pan
 
 Expected: FAIL — `assert "height: 100%" in block`, because the block still reads `height: min(520px, ...)`.
 
-- [ ] **Step 3: Lift the cap**
+- [x] **Step 3: Lift the cap**
 
 In `dashboard/frontend/styles.css`, replace the block at 5310-5316:
 
@@ -207,7 +207,7 @@ html[data-nav-page="home"] #homeView .home-landing-board .home-module {
 }
 ```
 
-- [ ] **Step 4: Run the test and watch it pass**
+- [x] **Step 4: Run the test and watch it pass**
 
 ```bash
 pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v
@@ -215,7 +215,7 @@ pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v
 
 Expected: PASS.
 
-- [ ] **Step 5: Bump the `styles.css` cache buster (once per branch)**
+- [x] **Step 5: Bump the `styles.css` cache buster (once per branch)**
 
 In `dashboard/frontend/app.html`, change `styles.css?v=115` to `styles.css?v=116`.
 In `dashboard/backend/tests/test_frontend_fast_boot.py:194`, change the assertion to `assert "styles.css?v=116" in APP_HTML`.
@@ -224,7 +224,7 @@ In `dashboard/backend/tests/test_frontend_fast_boot.py:194`, change the assertio
 
 Later Phase A tasks also edit `styles.css` — **do not bump again.** The invariant is that the shipped `?v=` is ahead of what `main` serves, and one bump per branch satisfies it. A second bump makes every open PR's exact-match assertion conflict for no gain.
 
-- [ ] **Step 6: Run the fast-boot suite**
+- [x] **Step 6: Run the fast-boot suite**
 
 ```bash
 pytest dashboard/backend/tests/test_frontend_fast_boot.py -v
@@ -232,7 +232,7 @@ pytest dashboard/backend/tests/test_frontend_fast_boot.py -v
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/frontend/styles.css dashboard/frontend/app.html \
@@ -262,7 +262,7 @@ Spec §3b. Pure functions, no DOM — this is the logic worth testing, and node-
   - `homeChartSeries(entries, build): {times: string[], series: Array<{label, values, color, dash, isBaseline}>}` — **`series.length === 0` means draw nothing.** Task 3 keys the canvas's existence on it. Returning `times` alongside is what stops the call site building the curve set twice.
   - **`values` are fractions, not dollars** (`0.0749` = +7.49%), each divided by *its own* entry's `initial_equity`. See "Units" in Global Constraints for why a shared dollar axis is wrong here. This is the one place the normalisation happens — Task 3 renders what it is given.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Append to `dashboard/backend/tests/test_frontend_chart_first_home.py`:
 
@@ -560,7 +560,7 @@ def test_home_chart_matches_the_leaderboards_percent_formula():
         )
 ```
 
-- [ ] **Step 2: Run them and watch them fail**
+- [x] **Step 2: Run them and watch them fail**
 
 ```bash
 pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v -k "chart or curve or builder"
@@ -568,7 +568,7 @@ pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v -k "chart or
 
 Expected: FAIL — `ValueError: substring not found` from `_extract`, since none of these functions exist yet.
 
-- [ ] **Step 3: Export the curve builder**
+- [x] **Step 3: Export the curve builder**
 
 In `dashboard/frontend/js/leaderboard.js`, beside the existing exports at 1599-1600:
 
@@ -584,7 +584,7 @@ window.selectLeaderboardTeam = selectLeaderboardTeam;
 window.buildEquityCurvesFromEntries = buildEquityCurvesFromEntries;
 ```
 
-- [ ] **Step 4: Add the pure functions**
+- [x] **Step 4: Add the pure functions**
 
 In `dashboard/frontend/home-page.js`, immediately **above** `async function loadHomeLeaderboardModule()`. Top-level, closure-free, and side-effect-free — these are the two properties that let them run under node:
 
@@ -674,7 +674,7 @@ function homeChartSeries(entries, build) {
 }
 ```
 
-- [ ] **Step 5: Run the tests and watch them pass**
+- [x] **Step 5: Run the tests and watch them pass**
 
 ```bash
 pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v
@@ -682,7 +682,7 @@ pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v
 
 Expected: PASS (or SKIP on the node cases if `node` is absent — install node locally; CI has it).
 
-- [ ] **Step 6: Mutation-test the gate**
+- [x] **Step 6: Mutation-test the gate**
 
 The spec requires this: PR #352's round wrote 15 source-shape guards and 2 passed against a broken implementation.
 
@@ -694,12 +694,12 @@ pytest dashboard/backend/tests/test_frontend_chart_first_home.py::test_real_entr
 
 Expected: FAIL. Restore the filter and re-run — PASS. Repeat for `test_chart_draws_the_baselines_the_rank_list_filters_out` by swapping `homeChartEntries` for `homeModelEntries`-style filtering.
 
-- [ ] **Step 7: Bump the two cache busters (once per branch)**
+- [x] **Step 7: Bump the two cache busters (once per branch)**
 
 In `dashboard/frontend/app.html`: `home-page.js?v=47` → `home-page.js?v=48`, `js/leaderboard.js?v=28` → `js/leaderboard.js?v=29`.
 In `dashboard/backend/tests/test_frontend_fast_boot.py:195-196`, update both exact assertions.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add dashboard/frontend/home-page.js dashboard/frontend/js/leaderboard.js \
@@ -724,7 +724,7 @@ Spec §3, §3c. The canvas is created only when Task 2's gate returns a non-empt
 - Consumes: `homeChartSeries(entries, build)` from Task 2; `window.Chart` (Chart.js 4.4.0, `app.html:20`, `defer` + SRI).
 - Produces: `#homeModuleRankChartWrap` / `#homeModuleRankChart`, inserted before `.hm-rank-table-head`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `dashboard/backend/tests/test_frontend_chart_first_home.py`:
 
@@ -771,7 +771,7 @@ def test_chart_height_is_the_app_clamp_and_not_the_landing_one():
     assert "100dvh" not in blocks[0], "that is /'s formula, measured against the fold"
 ```
 
-- [ ] **Step 2: Run it and watch it fail**
+- [x] **Step 2: Run it and watch it fail**
 
 ```bash
 pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v -k "chart_element or axis_ticks or chart_height"
@@ -779,7 +779,7 @@ pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v -k "chart_el
 
 Expected: FAIL — `renderHomeLeaderboardChart` does not exist; `.hm-rank-chart` has no CSS block.
 
-- [ ] **Step 3: Add the CSS**
+- [x] **Step 3: Add the CSS**
 
 In `dashboard/frontend/styles.css`, immediately after the `.hm-rank-table-head` rules (≈6214):
 
@@ -802,7 +802,7 @@ In `dashboard/frontend/styles.css`, immediately after the `.hm-rank-table-head` 
 }
 ```
 
-- [ ] **Step 4: Add the render function**
+- [x] **Step 4: Add the render function**
 
 In `dashboard/frontend/home-page.js`, below `homeChartSeries`:
 
@@ -890,7 +890,7 @@ function renderHomeLeaderboardChart(series, times) {
 }
 ```
 
-- [ ] **Step 5: Wire the call site**
+- [x] **Step 5: Wire the call site**
 
 In `loadHomeLeaderboardModule`, replace the final `renderEntries(models);` (the real-data path only — **not** the two sample paths, which must stay chartless):
 
@@ -906,7 +906,7 @@ In `loadHomeLeaderboardModule`, replace the final `renderEntries(models);` (the 
         renderHomeLeaderboardChart(chart.series, chart.times);
 ```
 
-- [ ] **Step 6: Run the suite and watch it pass**
+- [x] **Step 6: Run the suite and watch it pass**
 
 ```bash
 pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v
@@ -914,7 +914,7 @@ pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v
 
 Expected: PASS.
 
-- [ ] **Step 7: Look at it**
+- [x] **Step 7: Look at it**
 
 ```bash
 cp dashboard/storage/data/backtest.db /tmp/claude-1000/scratch-backtest.db
@@ -927,7 +927,7 @@ Open `http://127.0.0.1:8077/app` at 1440×900. Expected: a chart above the stand
 
 **Never point `DATABASE_PATH` at the committed `dashboard/storage/data/backtest.db`** — a bare backend import runs lazy `ALTER`s against it, and it is the prod seed database.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add dashboard/frontend/home-page.js dashboard/frontend/styles.css \
@@ -950,7 +950,7 @@ Spec §1. Compact rows, a colour swatch per row, **ending value and Sharpe stay*
 **Interfaces:**
 - Consumes: `window.getSeriesStyle(label, entry).color` — the same call `homeChartSeries` uses, so a row's swatch and its curve cannot disagree.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_the_model_palette_has_a_distinct_colour_for_every_board_model():
@@ -986,7 +986,7 @@ def test_rank_rows_keep_ending_value_and_sharpe():
     assert "hm-rank-sharpe" in body
 ```
 
-- [ ] **Step 2: Run and watch fail**
+- [x] **Step 2: Run and watch fail**
 
 ```bash
 pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v -k "palette or swatch or ending_value"
@@ -994,7 +994,7 @@ pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v -k "palette 
 
 Expected: FAIL — palette has 5 colours; `renderEntries` has no `getSeriesStyle` and no `hm-rank-swatch`.
 
-- [ ] **Step 3: Widen the palette**
+- [x] **Step 3: Widen the palette**
 
 In `dashboard/frontend/js/leaderboard.js`, replace the `MODEL_COLOR_PALETTE` block:
 
@@ -1018,7 +1018,7 @@ Add the export beside the others at the file's end:
 window.getSeriesStyle = getSeriesStyle;
 ```
 
-- [ ] **Step 4: Add the swatch to `renderEntries`**
+- [x] **Step 4: Add the swatch to `renderEntries`**
 
 In `home-page.js`, inside `renderEntries`'s `map`, add above the `return`:
 
@@ -1036,7 +1036,7 @@ and as the first child of the `<li>`:
 
 `homeEscape` on the colour is not decoration: it lands in an inline `style` attribute, and the value comes from a payload field.
 
-- [ ] **Step 5: Compact the rows**
+- [x] **Step 5: Compact the rows**
 
 In `dashboard/frontend/styles.css`, beside the existing `.home-module-rank-list` rules:
 
@@ -1057,7 +1057,7 @@ In `dashboard/frontend/styles.css`, beside the existing `.home-module-rank-list`
 }
 ```
 
-- [ ] **Step 6: Run and watch pass**
+- [x] **Step 6: Run and watch pass**
 
 ```bash
 pytest dashboard/backend/tests/test_frontend_chart_first_home.py dashboard/backend/tests/test_frontend_leaderboard_hover.py -v
@@ -1065,7 +1065,7 @@ pytest dashboard/backend/tests/test_frontend_chart_first_home.py dashboard/backe
 
 Expected: PASS. The hover suite is included because it exercises `js/leaderboard.js`, which this task edits.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/frontend/js/leaderboard.js dashboard/frontend/home-page.js \
@@ -1083,7 +1083,7 @@ Spec §4. Copy-only. Verified unpinned: a grep for the sentence across the whole
 - Modify: `dashboard/frontend/app.html:458-462`
 - Test: `dashboard/backend/tests/test_frontend_chart_first_home.py` (extend)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_the_screen_zero_lede_is_a_fact_then_a_call_to_action():
@@ -1107,7 +1107,7 @@ def test_the_screen_zero_lede_is_a_fact_then_a_call_to_action():
     assert "AI models only" in html
 ```
 
-- [ ] **Step 2: Run and watch fail**
+- [x] **Step 2: Run and watch fail**
 
 ```bash
 pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v -k lede
@@ -1115,7 +1115,7 @@ pytest dashboard/backend/tests/test_frontend_chart_first_home.py -v -k lede
 
 Expected: FAIL on the first assertion.
 
-- [ ] **Step 3: Replace the lede**
+- [x] **Step 3: Replace the lede**
 
 In `dashboard/frontend/app.html`, replace this exact block — the comment and the `<p>` immediately after the `<h1>` (it sat at 458-462 when this plan was written and at 463-467 after PR #344; **match the text, never the line numbers**, and do not let the range creep up into the `<h1>`, which no test pins):
 
@@ -1143,7 +1143,7 @@ with:
                             <p class="home-landing-lede">See how the AI models did. Then test your own idea on the same days.</p>
 ```
 
-- [ ] **Step 4: Run the copy suites**
+- [x] **Step 4: Run the copy suites**
 
 ```bash
 pytest dashboard/backend/tests/test_app_copy_register.py \
@@ -1152,7 +1152,7 @@ pytest dashboard/backend/tests/test_app_copy_register.py \
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/frontend/app.html dashboard/backend/tests/test_frontend_chart_first_home.py
@@ -1177,7 +1177,7 @@ Spec §5, Hero row. The simulated-money sentence moves to small print under the 
 - Modify: `dashboard/landing/src/components/home/Hero.tsx:105-115`
 - Test: `dashboard/backend/tests/test_landing_chart_first.py` (create)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `dashboard/backend/tests/test_landing_chart_first.py`:
 
@@ -1235,7 +1235,7 @@ def test_the_simulated_money_sentence_survives_verbatim_as_small_print():
     assert _NO_REAL_MONEY in _collapse(_HERO)
 ```
 
-- [ ] **Step 2: Run and watch fail**
+- [x] **Step 2: Run and watch fail**
 
 ```bash
 pytest dashboard/backend/tests/test_landing_chart_first.py -v
@@ -1243,7 +1243,7 @@ pytest dashboard/backend/tests/test_landing_chart_first.py -v
 
 Expected: FAIL — the second clause is still present.
 
-- [ ] **Step 3: Trim the copy**
+- [x] **Step 3: Trim the copy**
 
 In `dashboard/landing/src/components/home/Hero.tsx`, replace the two `<p>` blocks (105-115):
 
@@ -1270,7 +1270,7 @@ and move the simulated-money paragraph below the CTA `motion.div`, **unchanged**
           </p>
 ```
 
-- [ ] **Step 4: Run the landing suites**
+- [x] **Step 4: Run the landing suites**
 
 ```bash
 pytest dashboard/backend/tests/test_landing_chart_first.py \
@@ -1279,7 +1279,7 @@ pytest dashboard/backend/tests/test_landing_chart_first.py \
 
 Expected: `test_landing_chart_first.py` PASS. `test_landing_copy_register.py` also PASS — it reads the *bundle*, which is unchanged until Task 10. That green is not evidence; Task 10 is.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/landing/src/components/home/Hero.tsx \
@@ -1303,7 +1303,7 @@ Spec § Shape. Three mechanical facts, none of which is "remove a class":
 - Modify: `dashboard/landing/src/components/home/Hero.tsx:93, 94, 139`
 - Test: `dashboard/backend/tests/test_landing_chart_first.py` (extend)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_the_board_column_is_two_thirds_and_uncapped():
@@ -1337,7 +1337,7 @@ def test_the_chart_column_escapes_the_container_on_its_left_edge_only():
     assert "lg:ms-[calc((100%-100vw)/2)]" in _HERO
 ```
 
-- [ ] **Step 2: Run and watch fail**
+- [x] **Step 2: Run and watch fail**
 
 ```bash
 pytest dashboard/backend/tests/test_landing_chart_first.py -v -k "two_thirds or ordered or escapes"
@@ -1345,7 +1345,7 @@ pytest dashboard/backend/tests/test_landing_chart_first.py -v -k "two_thirds or 
 
 Expected: FAIL on all three.
 
-- [ ] **Step 3: Restructure the hero row**
+- [x] **Step 3: Restructure the hero row**
 
 In `Hero.tsx`, the copy column (`:94`):
 
@@ -1366,7 +1366,7 @@ and the board column (`:139`), losing `max-w-2xl`:
 
 `lg:ps-6` restores the 24px the container's `px-6` was providing on that edge, so the chart is flush to the viewport without its axis labels touching it.
 
-- [ ] **Step 4: Run and watch pass**
+- [x] **Step 4: Run and watch pass**
 
 ```bash
 pytest dashboard/backend/tests/test_landing_chart_first.py -v
@@ -1374,7 +1374,7 @@ pytest dashboard/backend/tests/test_landing_chart_first.py -v
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add dashboard/landing/src/components/home/Hero.tsx \
@@ -1394,7 +1394,7 @@ Spec §1, §2. **Demotion, not deletion.** `BoardPreview` ships no Recharts `<Le
 - Modify: `dashboard/landing/src/components/home/BoardPreview.tsx:96-160`
 - Test: `dashboard/backend/tests/test_landing_chart_first.py` (extend)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```python
 def test_the_landing_chart_uses_its_own_measured_clamp():
@@ -1441,7 +1441,7 @@ def test_the_standings_table_becomes_a_one_row_chip_strip():
     assert "item.swatch" in board
 ```
 
-- [ ] **Step 2: Run and watch fail**
+- [x] **Step 2: Run and watch fail**
 
 ```bash
 pytest dashboard/backend/tests/test_landing_chart_first.py -v -k "clamp or axis or chip_strip"
@@ -1449,7 +1449,7 @@ pytest dashboard/backend/tests/test_landing_chart_first.py -v -k "clamp or axis 
 
 Expected: FAIL on all three.
 
-- [ ] **Step 3: Resize the chart, enlarge the axes, promote the title**
+- [x] **Step 3: Resize the chart, enlarge the axes, promote the title**
 
 In `BoardPreview.tsx`, replace the chart wrapper (`:96`):
 
@@ -1472,7 +1472,7 @@ Promote the panel title (`:83`) per spec §2 — on a card that is now two-third
 
 ⚠ **Do not remove the `Illustrative example` chip at `:88`.** It ships at three render sites today (this file, `ChatSimulation.tsx:149`, `Race.tsx:77`) against a `≥2` guard in `test_landing_copy_register.py`. This task keeps BoardPreview's, so the count stays 3 — but the margin is a single site, so nothing else in this branch may drop one either.
 
-- [ ] **Step 4: Replace the table with the chip strip**
+- [x] **Step 4: Replace the table with the chip strip**
 
 Replace the whole `<div className="px-5 pb-5 pt-3">` block (`:122-159`):
 
@@ -1514,7 +1514,7 @@ Replace the whole `<div className="px-5 pb-5 pt-3">` block (`:122-159`):
       </div>
 ```
 
-- [ ] **Step 5: Shorten the caption to one line**
+- [x] **Step 5: Shorten the caption to one line**
 
 The caption at `:91-94` is two lines at the old card width and feeds the `227px` in the clamp's constant. Replace it:
 
@@ -1526,7 +1526,7 @@ The caption at `:91-94` is two lines at the old card width and feeds the `227px`
 
 Note `text-xs` → `text-sm` per spec §2. If this ever grows back to two lines, the `390` constant is invalid — see the test's docstring.
 
-- [ ] **Step 6: Run and watch pass**
+- [x] **Step 6: Run and watch pass**
 
 ```bash
 pytest dashboard/backend/tests/test_landing_chart_first.py -v
@@ -1534,7 +1534,7 @@ pytest dashboard/backend/tests/test_landing_chart_first.py -v
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/landing/src/components/home/BoardPreview.tsx \
@@ -1557,7 +1557,7 @@ Roughly 45% less body copy is the *direction*, not an acceptance gate: no test a
 - Modify: `dashboard/landing/src/components/home/Talk.tsx:2,18-31` (drop the three-step `<ol>` and the now-unused icon import)
 - Test: `dashboard/backend/tests/test_landing_chart_first.py` (extend)
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 def test_talk_drops_the_three_step_list_but_keeps_its_pinned_strings():
@@ -1587,7 +1587,7 @@ def test_whycare_headings_are_untouched():
     assert not re.search(r'"0[1-9]"', whycare), "quoted step numbers are banned here"
 ```
 
-- [ ] **Step 2: Run and watch fail**
+- [x] **Step 2: Run and watch fail**
 
 ```bash
 pytest dashboard/backend/tests/test_landing_chart_first.py -v -k "talk or whycare"
@@ -1595,7 +1595,7 @@ pytest dashboard/backend/tests/test_landing_chart_first.py -v -k "talk or whycar
 
 Expected: FAIL on `assert "<ol" not in talk`.
 
-- [ ] **Step 3: Trim `Talk.tsx`**
+- [x] **Step 3: Trim `Talk.tsx`**
 
 Delete the `<ol>` at `:18-31` entirely — every `<li>` with it. Do **not** touch the surrounding `<section>`, the `<Button>`, `<ChatWindow />` or `<DiscordMock />`.
 
@@ -1607,7 +1607,7 @@ import { MessageSquare, Bot, Hash } from "lucide-react";
 
 Those three icons were used *only* by the `<li>` children. Nothing else in the file renders a lucide icon, so the line goes rather than shrinking — an unused import is a `noUnusedLocals` build failure in Task 10's `vite build`, not a lint nit you can leave.
 
-- [ ] **Step 4: Trim `WhyCare.tsx`**
+- [x] **Step 4: Trim `WhyCare.tsx`**
 
 The intro paragraph at `:69-73` becomes one sentence:
 
@@ -1647,7 +1647,7 @@ const ACTS = [
 
 ⚠ Do **not** write a quoted `"01"`–`"09"` anywhere in `WhyCare.tsx` while editing: `test_band_runs_no_second_step_sequence` greps for one, and the file's header comment says so for exactly this reason.
 
-- [ ] **Step 5: Run the full landing guard set**
+- [x] **Step 5: Run the full landing guard set**
 
 ```bash
 pytest dashboard/backend/tests/test_landing_chart_first.py \
@@ -1657,7 +1657,7 @@ pytest dashboard/backend/tests/test_landing_chart_first.py \
 
 Expected: PASS.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/landing/src/components/home/ dashboard/backend/tests/test_landing_chart_first.py
@@ -1674,23 +1674,23 @@ git commit -m "ux(landing): trim WhyCare and Talk body copy"
 - Modify: `dashboard/frontend/index.html`
 - Modify: `dashboard/frontend/assets/*`
 
-- [ ] **Step 1: Build**
+- [x] **Step 1: Build**
 
 ```bash
 cd dashboard/landing && npm install && npm run build
 ```
 
-- [ ] **Step 2: Copy the new assets in**
+- [x] **Step 2: Copy the new assets in**
 
 ```bash
 cp dashboard/landing/dist/public/assets/* dashboard/frontend/assets/
 ```
 
-- [ ] **Step 3: Delete the superseded bundles and repoint the two refs**
+- [x] **Step 3: Delete the superseded bundles and repoint the two refs**
 
 Remove the previous `index-*.js` and `index-*.css` from `dashboard/frontend/assets/`, then update the two `src=`/`href=` references in `dashboard/frontend/index.html` to the new hashed filenames. **Keep all four auth markers.**
 
-- [ ] **Step 4: Verify the patch did not drop vite output**
+- [x] **Step 4: Verify the patch did not drop vite output**
 
 ```bash
 diff dashboard/landing/dist/public/index.html dashboard/frontend/index.html
@@ -1698,7 +1698,7 @@ diff dashboard/landing/dist/public/index.html dashboard/frontend/index.html
 
 Expected: **every differing line is `>`** (lines the hand-patch adds). Any `<` line means vite output was dropped — fix before committing.
 
-- [ ] **Step 5: Run the bundle-reading guards, which now read the new text**
+- [x] **Step 5: Run the bundle-reading guards, which now read the new text**
 
 ```bash
 pytest dashboard/backend/tests/test_landing_copy_register.py \
@@ -1708,7 +1708,7 @@ pytest dashboard/backend/tests/test_landing_copy_register.py \
 
 Expected: PASS. This is the first run of these that is evidence rather than a stale green.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add dashboard/frontend/index.html dashboard/frontend/assets/
@@ -1730,7 +1730,7 @@ Spec §3d. §2's type-scale table reads like a shared contract and is not one: `
 **Files:**
 - Test: `dashboard/backend/tests/test_landing_chart_first.py` (extend)
 
-- [ ] **Step 1: Write the test**
+- [x] **Step 1: Write the test**
 
 ```python
 def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
@@ -1774,7 +1774,7 @@ def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
     assert "(v * 100).toFixed(1)}%" in home_js
 ```
 
-- [ ] **Step 2: Run it**
+- [x] **Step 2: Run it**
 
 ```bash
 pytest dashboard/backend/tests/test_landing_chart_first.py::test_the_two_surfaces_agree_on_the_numbers_that_must_agree -v
@@ -1782,13 +1782,13 @@ pytest dashboard/backend/tests/test_landing_chart_first.py::test_the_two_surface
 
 Expected: PASS if Tasks 3, 4 and 8 all landed. **If it fails, that is the point** — one of the four edits was missed.
 
-- [ ] **Step 3: Mutation-test it**
+- [x] **Step 3: Mutation-test it**
 
 Revert `fontSize={14}` to `fontSize={11}` in `BoardPreview.tsx`, run the test (expect FAIL), restore. Then do the same to the Chart.js `size: 14`. A guard that passes against both breakages is decoration.
 
 Then mutate the unit: swap screen 0's y-axis callback back to the dollar formatter (``callback: (v) => `$${Math.round(v).toLocaleString('en-US')}` ``) and run the test — expect FAIL. Restore. This is the mutation most likely to happen for a *plausible* reason, so it is the one that most needs to be red.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add dashboard/backend/tests/test_landing_chart_first.py
@@ -1806,7 +1806,7 @@ The spec's acceptance criteria are measurements. **The clipping bug PR #357 ship
 **Files:**
 - Create: `dashboard/scripts/verify_chart_first_layout.py`
 
-- [ ] **Step 1: Start the backend on a scratch DB with the LLM keys blanked**
+- [x] **Step 1: Start the backend on a scratch DB with the LLM keys blanked**
 
 ```bash
 cp dashboard/storage/data/backtest.db /tmp/claude-1000/scratch-backtest.db
@@ -1817,7 +1817,7 @@ ANTHROPIC_API_KEY= OPENAI_API_KEY= DEEPSEEK_API_KEY= COMMONSTACK_API_KEY= \
 
 python-dotenv loads with `override=False`, so an **empty** env var set in the process wins over `dashboard/.env` — which is what makes a paid LLM call impossible during the pass. Blank them, don't unset them. The scratch copy exists because a bare backend import runs lazy `ALTER`s against whatever `DATABASE_PATH` points at, and the committed seed DB is the prod database.
 
-- [ ] **Step 2: Write the script**
+- [x] **Step 2: Write the script**
 
 Create `dashboard/scripts/verify_chart_first_layout.py`:
 
@@ -2072,7 +2072,7 @@ if __name__ == "__main__":
 
 Two selector notes for whoever runs this: the `/` card selector falls back through three candidates because the shipped bundle's class names are minified — if all three miss, add a `data-testid="board-preview"` to `BoardPreview.tsx`'s outer card rather than guessing at a fourth. And the `/app` chart is read via `Chart.getChart(canvas)` (Chart.js 4's registry) rather than a `window.homeRankChart` global, so Task 3 does not have to leak its module-level handle just to be measurable.
 
-- [ ] **Step 3: Run it against Phase A only, before Phase B lands**
+- [x] **Step 3: Run it against Phase A only, before Phase B lands**
 
 ```bash
 ~/.venvs/htmlpdf/bin/python dashboard/scripts/verify_chart_first_layout.py
@@ -2082,17 +2082,17 @@ That venv already carries Playwright + Chromium — **do not `pip install playwr
 
 Expected: every `/app` row PASS; `/` rows still reflect the old layout.
 
-- [ ] **Step 4: Run it again after Task 10**
+- [x] **Step 4: Run it again after Task 10**
 
 Expected: all PASS.
 
-- [ ] **Step 5: Force the three `/app` fallback states and confirm none draws a chart**
+- [x] **Step 5: Force the three `/app` fallback states and confirm none draws a chart**
 
 - `unreachable` — block `/api/v1/leaderboard` in devtools. Expect: sample list, `unreachable` note, **no chart**.
 - `empty` — respond `{"entries": []}`. Expect: sample list, `empty` note, **no chart**.
 - **The third state** — respond with real entries whose `equity_curve` is `[]`. Expect: **real list, no sample note, and no chart**. A pass that only exercises the two `sample` reasons cannot distinguish this case from a working one.
 
-- [ ] **Step 6: Confirm the seed DB is untouched**
+- [x] **Step 6: Confirm the seed DB is untouched**
 
 ```bash
 git status --porcelain dashboard/storage/data/
@@ -2101,7 +2101,7 @@ ls -la dashboard/storage/data/backtest.db*
 
 Expected: no output from `git status`; `backtest.db` mtime unchanged and the `-wal` sidecar 0 bytes. **Never `git add -A` in this repo** — a bare backend import runs lazy `ALTER`s against the committed prod seed database, and the ALTERs hide in the untracked `-wal` sidecar.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add dashboard/scripts/verify_chart_first_layout.py
@@ -2183,3 +2183,20 @@ Found while executing Task 12, by seeding a scratch database from the committed 
 **A claim I made and then had refuted, recorded so it is not re-raised.** Reading the `or` in `run.get("initial_equity") or config.get("initial_capital", …)` (`service.py:1205`), I argued a stored `0.0` collapses `stored_initial` to the config capital, forces `scale = 1.0`, and leaves a series that opens at the synthetic `$10,000` and jumps to `$100,000`. The mechanism is real and I reproduced the rendering — but from an **unreachable** state. Both leaderboard writers set `initial_equity = float(equity_curve[0]["equity"])` (`baselines.py:91-96`) and store *that same curve* (`service.py:797/820`, `:1118/1142`), so the column is identical to the curve's first point by construction — visible in the seed data, where the Gemini row carries the float artifact `100000.00000000003` in both. `initial_equity` is also `NOT NULL`, so the NULL variant cannot exist either. It is a latent falsy-value smell worth tightening some day, **not** a live defect and not this plan's job. My fixture created a database state the write path cannot produce, which is the failure mode a hand-edited fixture invites.
 
 **Consequent edits made on this branch:** the `homeChartSeries` comment (`home-page.js`) and `test_mixed_initial_equity_does_not_break_the_chart`'s docstring both stated the refuted #365 rationale; both now state the measured one and mark the per-series division as defence-in-depth on a pure function rather than a live fix. The test itself is unchanged and still earns its place.
+
+### 2026-08-16 — executed; three plan defects found by measurement
+
+All 12 tasks landed. Backend suite **3083 passed, 84 skipped**; the measurement pass is green at all 8 viewports on both surfaces plus all 3 fallback states. What the plan got wrong, all of it caught by measuring rather than by review:
+
+1. **The `390` chart reserve is a desktop-only number.** The plan derived it from ~227px of non-chart card height and asserted non-negative fold slack "at every tested viewport", 390×844 included. Measured there, the card ran **77px past the fold**: stacked at phone width the title, the `Illustrative example` chip and the caption all wrap, and the non-chart height is **335px** against **132px** of section padding. Now two reserves on an arbitrary property (`480` below `lg`, `390` at `lg`+), because the formula's commas defeat Tailwind's arbitrary-*value* parser but an arbitrary *property* takes a breakpoint prefix. Both compile into the shipped CSS; verified.
+
+2. **Two instrumentation bugs made a correct layout look broken.** The drafted script measured the Recharts container but compared it to the clamp, which sits on the wrapper — a permanent 16px deficit. Worse, it measured *during* the hero's framer-motion entrance: `getBoundingClientRect` reports the transformed box, so every reading came back at exactly **0.95×** (494 against a 520px clamp, 313.5 against 330). A uniform 5% error reads as a subtle CSS discrepancy, not an instrumentation fault. Note a "has the height stopped changing" wait does **not** catch it — during the 0.3s delay the scale is constant at 0.95, so two polls agree on a stationary wrong number. The wait keys on the transform reaching identity.
+
+3. **A children-count wait is satisfied by static markup.** `app.html` ships `<li class="home-module-rank-empty">Loading the standings…</li>`, so waiting for the rank list to have children returned before any JS ran and produced a clean sweep of `/app` failures. The wait is now "the placeholder cleared".
+
+**Deviations from the plan, all deliberate:**
+- Task 12 Step 5's three fallback states are **scripted** (`--fallbacks`) rather than clicked through devtools, and their fixtures are the live payload mutated rather than hand-written. The third state — real entries with empty `equity_curve` — is the one a manual pass tends to skip, and it now runs every time.
+- The `/`-source guards **strip comments before scanning**. Mutation-tested: a class deleted but still named in a comment satisfies an `in` guard otherwise, which is how PR #357's claim scans went green against the wrong file.
+- Task 2 Step 5's cross-file export test was relocated into Task 3, where the consuming half exists; as drafted it could never pass in its own commit.
+
+**Follow-ups for merge:** `README.md`'s `snapshot.png` is stale again (file an issue, do not regenerate here). `service.py:1205`'s `run.get("initial_equity") or …` is a latent falsy-value smell — presently unreachable, see the amendment above; not this branch's job.
