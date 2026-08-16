@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import { MessageSquare, Bot, Hash } from "lucide-react";
 import { DiscordMock } from "./DiscordMock";
 import { ChatWindow } from "./ChatSimulation";
 import { PRIMARY_LANDING_CTA } from "@/lib/cta";
@@ -15,20 +14,12 @@ export function Talk() {
             <p className="text-foreground/80 mb-8 text-lg">
               Write how you want to trade. The agent follows it, hour by hour.
             </p>
-            <ol className="space-y-3 mb-8 text-sm text-foreground/80">
-              <li className="flex items-start gap-3">
-                <MessageSquare className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-                <span><span className="text-foreground font-medium">1.</span> Write your trading instruction in plain language</span>
-              </li>
-              <li className="flex items-start gap-3">
-                <Bot className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-                <span><span className="text-foreground font-medium">2.</span> Pick an AI model and how much simulated cash it gets</span>
-              </li>
-              <li className="flex items-start gap-3">
-                <Hash className="w-4 h-4 text-primary mt-0.5 shrink-0" />
-                <span><span className="text-foreground font-medium">3.</span> Prefer chat? The same agent answers on Discord</span>
-              </li>
-            </ol>
+            {/* The three-step list is gone: it restated WhyCare's three acts
+                one screen later, and its Discord step duplicated the Discord
+                section below, which shows the thing rather than describing it.
+                The lucide import went with it — those three icons had no other
+                use in this file, and an unused import is a noUnusedLocals build
+                failure, not a lint nit. */}
             <Button
               size="lg"
               type="button"

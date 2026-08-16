@@ -146,3 +146,45 @@ def test_the_standings_table_becomes_a_one_row_chip_strip():
     assert "SAMPLE_STANDINGS" in board
     assert "dataKey=" in board
     assert "item.swatch" in board
+
+
+def test_talk_drops_the_three_step_list_but_keeps_its_pinned_strings():
+    """The <ol> restates WhyCare's three acts one screen later. Everything the
+    existing suite pins about this section survives -- listed here so the trim
+    does not discover them by reddening CI.
+
+    Comment-stripped, like the scans above: these are claims about what the
+    component RENDERS, and a comment explaining the deleted list would otherwise
+    keep `<ol` "present" forever.
+    """
+    talk = _strip_comments((_HOME / "Talk.tsx").read_text(encoding="utf-8"))
+    assert "<ol" not in talk
+    assert 'id="talk"' in talk
+    assert "Describe your idea" in talk
+    assert "Discord" in talk
+    assert "<DiscordMock />" in talk
+    assert talk.count("01 — Talk") == 1
+
+
+def test_whycare_headings_are_untouched():
+    """Headings and the step-number ban, which are checked against DIFFERENT
+    texts on purpose.
+
+    The headings are a render claim, so they read the stripped source. The
+    quoted-step-number ban is not: `test_band_runs_no_second_step_sequence` greps
+    the raw file, and the file's own header comment tells editors the ban covers
+    the whole file precisely so nobody writes the number in a comment and then
+    copies it into JSX. Stripping here would quietly hold this copy of the rule
+    to a weaker standard than the guard it backs up.
+    """
+    raw = (_HOME / "WhyCare.tsx").read_text(encoding="utf-8")
+    whycare = _collapse(_strip_comments(raw))
+    for heading in (
+        "Describe it in plain English",
+        "Prove it on real market data",
+        "See how it ranks",
+        "Pick the AI model",
+        "For developers: bring your own agent",
+    ):
+        assert heading in whycare
+    assert not re.search(r'"0[1-9]"', raw), "quoted step numbers are banned here"
