@@ -49,7 +49,7 @@ Every task's requirements implicitly include this section. Values are copied ver
 - Screen 0 (`/app`) must contain `#homeModuleRanking`, `#homeModuleRankList`, `#homeScrollHint`.
 - `#landing-stats` appears exactly once and keeps a `scroll-mt-*` greater than `--landing-chrome-height` (120px, `landing/src/index.css:114`).
 
-**Cache busters (`/app`):** `test_frontend_fast_boot.py::test_cache_busters_bumped` is the **single owner** and matches **exactly**. Do not add a second cache-buster guard in a feature suite. Bump each asset **once per branch**, in the first task that touches it, and update the exact assertion in the same commit. Current floor: `app.js?v=114`, `styles.css?v=114`, `js/leaderboard.js?v=28`, `home-page.js?v=47`.
+**Cache busters (`/app`):** `test_frontend_fast_boot.py::test_cache_busters_bumped` is the **single owner** and matches **exactly**. Do not add a second cache-buster guard in a feature suite. Bump each asset **once per branch**, in the first task that touches it, and update the exact assertion in the same commit. Current floor, **re-read off `main` at `30c74e0`** (PR #344 advanced two of them after this plan was drafted): `app.js?v=115`, `styles.css?v=115`, `js/leaderboard.js?v=28`, `home-page.js?v=47`, `js/credits.js?v=2`. **Re-read this list before Task 1** — `command grep -n '?v=' dashboard/backend/tests/test_frontend_fast_boot.py`. The guard compares `app.html` against the test file, *not* against `main`, so a bump to a version `main` already serves is green **and** a no-op: browsers keep the cached asset and the whole branch ships invisibly. That failure is silent in CI and only visible as "my CSS change didn't appear in prod".
 
 **Heights are per-surface and must never share an assertion.** `/` and `/app` have different clamps by design (spec §2). A single shared height assertion is a bug, not a simplification.
 
@@ -204,8 +204,10 @@ Expected: PASS.
 
 - [ ] **Step 5: Bump the `styles.css` cache buster (once per branch)**
 
-In `dashboard/frontend/app.html`, change `styles.css?v=114` to `styles.css?v=115`.
-In `dashboard/backend/tests/test_frontend_fast_boot.py:194`, change the assertion to `assert "styles.css?v=115" in APP_HTML`.
+In `dashboard/frontend/app.html`, change `styles.css?v=115` to `styles.css?v=116`.
+In `dashboard/backend/tests/test_frontend_fast_boot.py:194`, change the assertion to `assert "styles.css?v=116" in APP_HTML`.
+
+⚠ **116 is correct only if `main` still serves 115.** Confirm with the grep in Global Constraints before editing; if another merge has advanced it, go one above whatever ships — never reuse a live version. Edit **only** the `styles.css` assertion line; `js/credits.js?v=2` sits below it and is not yours to touch.
 
 Later Phase A tasks also edit `styles.css` — **do not bump again.** The invariant is that the shipped `?v=` is ahead of what `main` serves, and one bump per branch satisfies it. A second bump makes every open PR's exact-match assertion conflict for no gain.
 
@@ -982,7 +984,17 @@ Expected: FAIL on the first assertion.
 
 - [ ] **Step 3: Replace the lede**
 
-In `dashboard/frontend/app.html`, replace lines 458-462 (the comment and the `<p>`):
+In `dashboard/frontend/app.html`, replace this exact block — the comment and the `<p>` immediately after the `<h1>` (it sat at 458-462 when this plan was written and at 463-467 after PR #344; **match the text, never the line numbers**, and do not let the range creep up into the `<h1>`, which no test pins):
+
+```html
+                            <!-- The one-per-surface gloss on "agent". Deliberately says
+                                 "in a test of its own": no user agent is on any board and
+                                 no entry path exists, so anything that reads as "yours is
+                                 on this list" is a promise the product cannot keep. -->
+                            <p class="home-landing-lede">Your own agent &mdash; an AI trading assistant that follows your written instruction &mdash; is scored on the same numbers, in a test of its own.</p>
+```
+
+with:
 
 ```html
                             <!-- Fact, then call to action. The "is my agent on
