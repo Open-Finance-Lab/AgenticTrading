@@ -39,7 +39,9 @@ class FakeLLMStrategy:
     """
 
     def __init__(self, *, used_llm, llm_calls, decision_steps=None,
-                 llm_decisions=None, report_decisions=True, model_id="test-model"):
+                 llm_decisions=None, report_decisions=True, model_id="test-model",
+                 strategy_prompt=None):
+        self.strategy_prompt = strategy_prompt
         self.used_llm = used_llm
         self.llm_calls = llm_calls
         # An older strategy shape may not report llm_decisions at all; omit the
@@ -235,11 +237,57 @@ def test_deploy_records_effective_llm_run_metadata(guard_env, monkeypatch):
         "integration": "openrouter",
         "temperature": 0,
         "reasoning_effort": "none",
+        # None, not absent: a Model Track entry carries no instruction, and the
+        # stored row has to say so positively or a later Open Track curve is
+        # indistinguishable from one written before the field existed.
+        "strategy_prompt": None,
         "llm_max_output_tokens": 1234,
         "initial_capital": 10000.0,
         "start_date": "2026-04-16",
         "end_date": "2026-04-30",
     }
+
+
+def test_deploy_records_the_instruction_that_produced_the_curve(
+    guard_env, monkeypatch
+):
+    """An Open Track curve must carry its instruction, not just its model.
+
+    `leaderboard.json` is editable and `_find_cached_run` does not key on this
+    field (issue #365's omission, one field over), so the config is not a record
+    of what actually ran — the stored row is the only place the pairing survives.
+    """
+    config = {
+        "session_id": "lb-instruction-test",
+        "start_date": "2026-04-15",
+        "end_date": "2026-05-15",
+        "initial_capital": 10000,
+        "strategies": [
+            {
+                "id": "open_alice",
+                "name": "Alice",
+                "strategy": "llm_agent",
+                "integration": "openrouter",
+                "model_id": "configured-model-id",
+                # Deliberately DIFFERENT from what the strategy actually ran with,
+                # standing in for a leaderboard.json edited after the deploy.
+                "strategy_prompt": "Edited after the fact.",
+            },
+        ],
+    }
+    monkeypatch.setattr(canon_service, "load_leaderboard_config", lambda: config)
+    _use(
+        monkeypatch,
+        FakeLLMStrategy(
+            used_llm=True, llm_calls=5, strategy_prompt="Buy the dip, sell the rip."
+        ),
+    )
+
+    result = canon_service.deploy_model_run("open_alice", force_refresh=True)
+
+    metadata = guard_env.get_run(result["run_id"])["metadata"]
+    # The strategy instance, not the config dict: the run records what executed.
+    assert metadata["strategy_prompt"] == "Buy the dip, sell the rip."
 
 
 def test_deploy_records_null_for_provider_default_parameters(guard_env, monkeypatch):
@@ -325,6 +373,7 @@ def test_ensure_leaderboard_runs_records_llm_metadata(tmp_path, monkeypatch):
         "integration": "openrouter",
         "temperature": 0,
         "reasoning_effort": "none",
+        "strategy_prompt": None,
         "llm_max_output_tokens": 1234,
         "initial_capital": 10000.0,
         "start_date": "2026-04-15",

@@ -1012,6 +1012,21 @@ def _llm_run_metadata(
         "reasoning_effort": getattr(
             strategy_impl, "reasoning_effort", entry.get("reasoning_effort")
         ),
+        # The Open Track's competing variable, and the only effective-config knob
+        # that rewrites the model's entire strategy body. Recorded verbatim (it is
+        # capped at MAX_STRATEGY_PROMPT_CHARS) so a published curve can be tied
+        # back to the instruction that produced it — leaderboard.json is editable,
+        # so the config is not a record of what ran.
+        #
+        # NOTE: this makes the run *auditable*, not *invalidating*.
+        # `_find_cached_run` (:615) still keys only on
+        # (mode, start_date, end_date, llm_model), so editing an entry's
+        # instruction and redeploying returns the cached row rather than
+        # recomputing. Same omission as `initial_equity`, tracked in issue #365 —
+        # fixing the key belongs with that, not here.
+        "strategy_prompt": getattr(
+            strategy_impl, "strategy_prompt", entry.get("strategy_prompt")
+        ),
         "llm_max_output_tokens": llm_harness.DEFAULT_MAX_OUTPUT_TOKENS,
         "initial_capital": initial_capital,
         "start_date": start_date,
