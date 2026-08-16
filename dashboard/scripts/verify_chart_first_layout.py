@@ -27,7 +27,20 @@ BASE = "http://localhost:8077"
 # 1366x768 and 1280x720 are the two that falsified the first draft's heights.
 # A list that only samples 900px-tall screens cannot see the bug this pass exists
 # to catch. 390x844 is the stacked (below-lg) case.
+#
+# 1024x900 and 1152x864 cover the rest of Tailwind's `lg` band. / stops stacking
+# at 1024 but the hero's two columns are at their narrowest there, and a sweep
+# that jumped 390 -> 1280 measured neither end of that band: the chip strip --
+# the chart's only legend -- was clipping one to two of its five entries across
+# the whole range, invisibly, because the only guard on it ran at 1440.
+#
+# 1201x760 and 1240x700 sit just above /app's 1200px pager threshold, the band
+# where screen 0 has the least height and still clips rather than scrolls.
 VIEWPORTS = [
+    (1024, 900),
+    (1152, 864),
+    (1201, 760),
+    (1240, 700),
     (1280, 720),
     (1280, 800),
     (1366, 768),
@@ -36,6 +49,9 @@ VIEWPORTS = [
     (1600, 900),
     (1920, 1080),
     (390, 844),
+    # The second phone size: the chip strip wraps to four rows here and five at
+    # 390, so the stacked reserve has to clear the taller of the two.
+    (414, 896),
 ]
 
 LG = 1024  # Tailwind's lg: breakpoint, where / stops stacking
@@ -105,14 +121,31 @@ def measure_landing(page, width: int, height: int) -> None:
         const chartBox = rc && rc.parentElement;
         const column = card && card.closest('div[class*="basis-2/3"], div[class*="lg:basis-2/3"]');
         const container = column && column.closest('.container');
-        const chips = card && card.querySelector('.flex-nowrap');
+        // A testid, not `.flex-nowrap`. The class was the thing under test, so
+        // the selector went stale the moment the strip was fixed -- and a
+        // querySelector that finds nothing makes this check SKIP, which prints
+        // as a clean run.
+        const chips = card && card.querySelector('[data-testid="board-chip-strip"]');
         const r = (el) => el ? el.getBoundingClientRect() : null;
+        const stripBox = chips ? chips.getBoundingClientRect() : null;
         return {
             card: r(card),
             chart: r(chartBox),
             column: r(column),
             container: r(container),
-            chips: chips ? {scrollWidth: chips.scrollWidth, clientWidth: chips.clientWidth} : null,
+            // Per-chip containment, not scrollWidth. Once the strip wraps it
+            // can never overflow horizontally, so the old scrollWidth test
+            // would pass forever regardless of what is visible; what matters is
+            // that all five entries are inside the box.
+            chips: chips ? {
+                total: chips.children.length,
+                inside: Array.from(chips.children).filter(c => {
+                    const b = c.getBoundingClientRect();
+                    return b.width > 0 && b.height > 0
+                        && b.left >= stripBox.left - 0.5 && b.right <= stripBox.right + 0.5
+                        && b.top >= stripBox.top - 0.5 && b.bottom <= stripBox.bottom + 0.5;
+                }).length,
+            } : null,
             innerHeight: window.innerHeight,
             // getComputedStyle, never the `hidden` attribute: PR #357's clipping
             // bug was invisible to attribute probes.
@@ -141,15 +174,16 @@ def measure_landing(page, width: int, height: int) -> None:
     )
 
     # The chart's own clamp. The reserve is breakpoint-dependent -- 390px beside
-    # the copy, 480px stacked -- because the card's non-chart height is ~227px
-    # at lg+ and 335px at phone width, where the title, chip and caption wrap.
-    reserve = 390.0 if width >= LG else 480.0
+    # the copy, 590px stacked -- because the card's non-chart height is 218-241px
+    # at lg+ and 443px at phone width, where the title, chip and caption wrap and
+    # the chip strip runs to five rows.
+    reserve = 390.0 if width >= LG else 590.0
     # Reported as a FAILURE when the container is absent, never skipped: a
     # missing chart is the single worst outcome this pass exists to catch, and a
     # silent skip would render it as a clean run.
     check(m["chart"] is not None, "/ chart container found", str(bool(m["chart"])))
     if m["chart"]:
-        expected = clamp(300.0, height - reserve, 520.0)
+        expected = clamp(260.0, height - reserve, 520.0)
         actual = m["chart"]["height"]
         check(
             abs(actual - expected) <= 2.0,
@@ -172,13 +206,17 @@ def measure_landing(page, width: int, height: int) -> None:
             f" container={m['container']['width']:.0f}",
         )
 
-    # Five chips, one row. Checked at 1440 specifically -- the width the strip
-    # was designed against.
-    if width == 1440 and m["chips"]:
+    # EVERY viewport, not just 1440. This ran at one width -- the one the strip
+    # was designed against -- so it could not see that the strip was dropping
+    # one to four of its five chips across the whole lg band and every phone.
+    # The strip is the chart's only legend; a missing chip is a drawn curve
+    # nothing on the page names.
+    check(m["chips"] is not None, "/ chip strip found", str(bool(m["chips"])))
+    if m["chips"]:
         check(
-            m["chips"]["scrollWidth"] <= m["chips"]["clientWidth"] + 1,
-            "/ chip strip fits on one row",
-            f"scrollWidth={m['chips']['scrollWidth']} clientWidth={m['chips']['clientWidth']}",
+            m["chips"]["inside"] == m["chips"]["total"] and m["chips"]["total"] == 5,
+            "/ every chip is visible inside the strip",
+            f"{m['chips']['inside']}/{m['chips']['total']} inside",
         )
 
 
@@ -205,24 +243,54 @@ def measure_app(page, width: int, height: int) -> None:
     m = page.evaluate(
         """() => {
         const screen = document.querySelector('#homeScreenLanding');
+        // THE HERO, NOT THE SCREEN. `.home-landing-hero` is the element that
+        // carries `overflow: hidden` above 1200px, and it is `height: 100%` of
+        // the screen -- so it absorbs its own overflow and #homeScreenLanding's
+        // scrollHeight NEVER exceeds its clientHeight no matter how far the
+        // panel overruns. Probing the screen reported a clean 0 while the panel
+        // header and footer button were off-screen; that is how the clip
+        // shipped through a measurement pass.
+        const hero = document.querySelector('.home-landing-hero');
+        const panel = document.querySelector('#homeModuleRanking');
         const wrap = document.querySelector('.hm-rank-chart');
         const canvas = document.querySelector('#homeModuleRankChart');
         const list = document.querySelector('#homeModuleRankList');
         const rows = list ? Array.from(list.children) : [];
         const listBox = list ? list.getBoundingClientRect() : null;
+        const heroBox = hero ? hero.getBoundingClientRect() : null;
+        const panelBox = panel ? panel.getBoundingClientRect() : null;
         const chart = (canvas && window.Chart && window.Chart.getChart)
             ? window.Chart.getChart(canvas) : null;
         return {
             screen: screen
                 ? {scrollHeight: screen.scrollHeight, clientHeight: screen.clientHeight}
                 : null,
+            hero: hero
+                ? {scrollHeight: hero.scrollHeight, clientHeight: hero.clientHeight,
+                   overflowY: getComputedStyle(hero).overflowY}
+                : null,
+            // Signed, and reported both ways: a panel cut at the TOP is the
+            // half a bottom-edge check misses, and this one was cut at both.
+            panelAboveHero: (heroBox && panelBox) ? heroBox.top - panelBox.top : null,
+            panelBelowHero: (heroBox && panelBox) ? panelBox.bottom - heroBox.bottom : null,
             chartHeight: wrap ? wrap.getBoundingClientRect().height : null,
             chartDisplay: wrap ? getComputedStyle(wrap).display : null,
             rowCount: rows.length,
+            // Rows fully inside the list's own visible box. NOT a clip check --
+            // the list is `overflow-y: auto`, so rows below its fold are
+            // scrolled, not lost, and when the panel was overrunning the hero
+            // this counted 7/7 for a list that was itself off-screen. It is a
+            // FLOOR: a panel that squeezes the standings to one row has
+            // defeated the screen even with nothing clipped.
             rowsInside: listBox
                 ? rows.filter(r => r.getBoundingClientRect().bottom
                     <= listBox.bottom + 0.5).length
                 : 0,
+            // The rows that are not visible have to be reachable.
+            listScrolls: list
+                ? (list.scrollHeight <= list.clientHeight + 1
+                   || ['auto', 'scroll'].includes(getComputedStyle(list).overflowY))
+                : null,
             rowBadges: rows.map(r => (r.textContent || '').includes('Baseline')),
             // The swatch must resolve to a real colour, and to the SAME colour
             // as its curve. A transparent swatch is the documented degraded
@@ -248,12 +316,31 @@ def measure_app(page, width: int, height: int) -> None:
 
     # The pager clips with overflow:hidden and NO scrollbar, so this is the only
     # way to see it. A height assertion on the panel alone cannot.
-    if width >= PAGER_MIN and m["screen"]:
-        overflow = m["screen"]["scrollHeight"] - m["screen"]["clientHeight"]
+    if width >= PAGER_MIN and m["hero"]:
+        overflow = m["hero"]["scrollHeight"] - m["hero"]["clientHeight"]
         check(
             overflow <= 1,
             "/app screen 0 does not clip",
-            f"scrollHeight-clientHeight={overflow}",
+            f"hero scrollHeight-clientHeight={overflow}"
+            f" (screen reports {m['screen']['scrollHeight'] - m['screen']['clientHeight']}"
+            " -- the screen cannot see this)",
+        )
+        # The containment check, kept separate. An ancestor's scrollHeight is a
+        # summary; these two name WHICH edge, and the top edge is the one a
+        # bottom-only check waves through.
+        check(
+            m["panelAboveHero"] is not None and m["panelAboveHero"] <= 0.5,
+            "/app the panel's top edge is inside the hero",
+            f"cut by {m['panelAboveHero']:.1f}px"
+            if m["panelAboveHero"] and m["panelAboveHero"] > 0.5
+            else "inside",
+        )
+        check(
+            m["panelBelowHero"] is not None and m["panelBelowHero"] <= 0.5,
+            "/app the panel's bottom edge is inside the hero",
+            f"cut by {m['panelBelowHero']:.1f}px"
+            if m["panelBelowHero"] and m["panelBelowHero"] > 0.5
+            else "inside",
         )
 
     check(
@@ -262,12 +349,27 @@ def measure_app(page, width: int, height: int) -> None:
         str(m["chartHeight"] is not None),
     )
     if m["chartHeight"] is not None:
-        expected = clamp(140.0, height * 0.26, 280.0)
+        # A RANGE, not equality. The chart is `flex: 0 1 auto` with a 132px
+        # floor, so under a deficit -- 509px of panel against 637px of content
+        # at 1240x700 -- it legitimately renders shorter than its clamp; that
+        # is what stops the standings collapsing to one row. Equality here
+        # would redden on the correct layout and, worse, was only satisfiable
+        # before because the panel was overrunning the hero. What the clamp
+        # still fixes is the CEILING.
+        ceiling = clamp(140.0, height * 0.26, 280.0)
         check(
-            abs(m["chartHeight"] - expected) <= 2.0,
-            "/app chart height matches its clamp",
-            f"actual={m['chartHeight']:.1f} expected={expected:.1f}",
+            132.0 - 0.5 <= m["chartHeight"] <= ceiling + 2.0,
+            "/app chart height is within its clamp and above its floor",
+            f"actual={m['chartHeight']:.1f} floor=132.0 ceiling={ceiling:.1f}",
         )
+        # One anchor where there IS surplus, so a clamp quietly replaced by a
+        # smaller formula cannot hide behind the range above.
+        if (width, height) == (1920, 1080):
+            check(
+                abs(m["chartHeight"] - ceiling) <= 2.0,
+                "/app chart takes its full clamp where the panel has room",
+                f"actual={m['chartHeight']:.1f} expected={ceiling:.1f}",
+            )
         check(
             m["chartDisplay"] != "none",
             "/app chart is displayed",
@@ -279,10 +381,22 @@ def measure_app(page, width: int, height: int) -> None:
         "/app renders all 7 models",
         f"rowCount={m['rowCount']}",
     )
+    # A FLOOR, not equality. Seven rows plus the chart plus 253px of panel
+    # chrome need 637px, and the hero row is 509px at 1240x700 -- so at short
+    # viewports some rows are below the list's fold by design, which is what its
+    # `overflow-y: auto` is for. Equality here only ever passed because the
+    # panel was overrunning the hero: every row really was inside the LIST, and
+    # the list was outside the SCREEN. What matters is that the standings are
+    # not squeezed to nothing and that the remainder is reachable.
     check(
-        m["rowsInside"] == m["rowCount"],
-        "/app every row is inside the list's visible box",
+        m["rowsInside"] >= min(3, m["rowCount"]),
+        "/app at least three standings rows are visible",
         f"{m['rowsInside']}/{m['rowCount']} visible",
+    )
+    check(
+        bool(m["listScrolls"]),
+        "/app rows below the list's fold are scrollable, not lost",
+        f"listScrolls={m['listScrolls']}",
     )
     # The list stays models-only, which is what keeps app.html's pinned
     # "AI models only - ranked by return" literally true.
@@ -463,6 +577,71 @@ def measure_fallbacks(browser) -> None:
                 f"rows={m['rows']} expected={len(real_models)}",
             )
         page.close()
+
+    measure_stale_chart(browser, len(real_models))
+
+
+def measure_stale_chart(browser, model_count: int) -> None:
+    """The state a fresh page per case CANNOT reach: a failure AFTER a success.
+
+    Every case above opens a new page, so the panel has never drawn a chart when
+    the fallback runs -- which means they confirm "no chart is created" and say
+    nothing about "an existing chart is removed". Those are different code paths
+    and only the second one is exercised in production: `onHomePageShow` calls
+    `refreshHomeModules()` on every return to Home, and an IntersectionObserver
+    calls it again, so the first failed refresh of a session always lands on a
+    panel with nine real curves already on it.
+
+    Left standing, those curves sat above five INVENTED sample rows, and because
+    the mock roster is a different set of models each row's swatch keyed a
+    different model's line than the one it named.
+    """
+    print("\n=== stale chart (success, then a failed refresh) ===")
+    page = browser.new_page(viewport={"width": 1440, "height": 900})
+    page.goto(f"{BASE}/app", wait_until="load")
+    _wait_for_module(page)
+    page.wait_for_timeout(800)
+    before = page.evaluate(
+        """() => {
+        const c = document.querySelector('#homeModuleRankChart');
+        const chart = (c && window.Chart && window.Chart.getChart)
+            ? window.Chart.getChart(c) : null;
+        return {hasChart: !!document.getElementById('homeModuleRankChartWrap'),
+                datasets: chart ? chart.data.datasets.length : 0};
+    }"""
+    )
+    # A precondition, asserted: if the chart never drew, everything below passes
+    # for the wrong reason.
+    check(
+        before["hasChart"] and before["datasets"] > 0,
+        "/app [stale] a real chart is on screen before the failed refresh",
+        f"hasChart={before['hasChart']} datasets={before['datasets']}",
+    )
+
+    page.route("**/api/v1/leaderboard*", lambda route: route.abort())
+    page.evaluate("() => window.refreshHomeModules && window.refreshHomeModules()")
+    page.wait_for_timeout(2500)
+    after = page.evaluate(
+        """() => {
+        const note = document.getElementById('homeModuleRankSample');
+        const list = document.querySelector('#homeModuleRankList');
+        return {hasChart: !!document.getElementById('homeModuleRankChartWrap'),
+                hasCanvas: !!document.querySelector('#homeModuleRankChart'),
+                noteVisible: !!note && !note.hidden,
+                rows: list ? list.children.length : -1};
+    }"""
+    )
+    check(
+        not after["hasChart"] and not after["hasCanvas"],
+        "/app [stale] the previous chart is torn down, not left standing",
+        str(after),
+    )
+    check(
+        after["noteVisible"] and after["rows"] != model_count,
+        "/app [stale] the standings fall back and say so",
+        f"noteVisible={after['noteVisible']} rows={after['rows']}",
+    )
+    page.close()
 
 
 def main() -> int:
