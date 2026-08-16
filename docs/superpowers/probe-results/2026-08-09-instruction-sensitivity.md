@@ -186,8 +186,15 @@ python dashboard/scripts/probe_instruction_sensitivity.py \
 The run header now prints the capital and its source, and the resolution guard refuses to spend
 if the base is too coarse — so a repeat of this mistake fails closed instead of billing.
 
-- **Measured cost:** ~$0.47/run × 4 = **~$1.86**. Phase 0 total would reach ~$4.10, inside the
-  plan's $4.97 sanction.
+- **Cost, and it is higher than the $10k leg:** the published $100k run cost **$0.756** against a
+  $10k probe average of **$0.465** — 1.63×, despite *fewer* calls (161 vs 180–203), because more
+  affordable positions make both the snapshot and the response longer. Budget **~$0.70–0.80/run**.
+  - 4 runs (2 seeded + control ×2) ≈ **$2.80–3.20** → Phase 0 total **$5.04–5.44**, which
+    **exceeds the plan's $4.97 sanction** and needs a fresh decision.
+  - 3 runs (1 seeded + control ×2) ≈ **$2.10–2.40** → total **$4.34–4.64**, inside the sanction.
+    Still measures the noise floor and one instruction-vs-control margin; loses only the
+    instruction-vs-instruction comparison.
+- **The published +7.49% run is a free anchor** — already computed at $100k, no new spend.
 - **Keep both controls.** Running the control twice is the only thing that revealed the noise
   floor, and at $100k it is the only way to separate model nondeterminism from share granularity.
 - **Consider also running one leg with no `strategy_prompt`** (i.e. stock `SAFE_TRADING_PROMPT`)
