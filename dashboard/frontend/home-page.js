@@ -1668,9 +1668,18 @@ async function loadHomeLeaderboardModule() {
             const retClass = ret >= 0 ? 'positive' : 'negative';
             const sharpe = Number(entry.sharpe_ratio || 0);
             const value = homeFormatPortfolioValue(entry.portfolio_value);
+            // Same source as the curve's own colour, so a row's swatch and its
+            // line cannot disagree -- a swatch pointing at the wrong line is
+            // worse than no swatch. Transparent rather than a stand-in colour
+            // when the export is missing: an invented colour would key the
+            // reader to a line that is not there.
+            const style = (typeof window.getSeriesStyle === 'function')
+                ? window.getSeriesStyle(label, entry)
+                : { color: 'transparent' };
             return `<li>
                 <span class="home-module-rank${rankClass}">${homeEscape(rank || '—')}</span>
                 <span class="hm-rank-entry">
+                    <span class="hm-rank-swatch" style="background:${homeEscape(style.color || 'transparent')}" aria-hidden="true"></span>
                     <span class="home-module-rank-name">${homeEscape(label)}</span>
                 </span>
                 <span class="hm-rank-value tabular-nums">${homeEscape(value)}</span>

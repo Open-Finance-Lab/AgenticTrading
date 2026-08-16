@@ -6268,6 +6268,26 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     align-items: center;
     gap: 6px;
     font-size: 12.5px;
+    /* Tighter than the 8px list gap: the chart above took the height these rows
+       used to spread into, and seven of them still have to fit without the
+       pager clipping (it is overflow:hidden with no scrollbar). */
+    padding-block: 3px;
+    line-height: 1.35;
+}
+/* The identity link between a row and its curve; the list is the chart's
+   legend, which is why the chart ships none of its own.
+
+   Lives inside `.hm-rank-entry` (a flex cell) rather than as a direct child of
+   the `<li>`, which is a five-column grid whose template mirrors
+   `.hm-rank-table-head`. A sixth grid child shifts every cell one column right
+   and silently unaligns the table from its own head -- `flex: 0 0 auto` below
+   only means anything because the parent is the flex cell. Spacing comes from
+   that parent's `gap: 4px`, so no margin here. */
+.hm-rank-swatch {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    flex: 0 0 auto;
 }
 .home-module-rank {
     width: 22px;

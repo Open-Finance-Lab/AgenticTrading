@@ -72,8 +72,14 @@ const teamColorMap = {};
 
 // Provided LLM models get their own warm, distinct palette (solid lines) so
 // they read as a separate category from rule-based strategy baselines.
+// Ten, not five: `getModelColor` assigns `PALETTE[n % len]` in first-seen
+// order, and the board carries seven models -- at five, models 6 and 7 were
+// handed models 1 and 2's colours. That was cosmetic while the colour was
+// decoration and is not, now that screen 0's rank-row swatch is the chart's
+// only key to which curve is which.
 const MODEL_COLOR_PALETTE = [
   '#FBBF24', '#FB923C', '#F472B6', '#A78BFA', '#34D399',
+  '#22D3EE', '#F87171', '#A3E635', '#E879F9', '#60A5FA',
 ];
 const modelColorMap = {};
 
@@ -1605,3 +1611,6 @@ window.selectLeaderboardTeam = selectLeaderboardTeam;
 // invisible. The export is pinned from both sides by
 // test_frontend_chart_first_home.py.
 window.buildEquityCurvesFromEntries = buildEquityCurvesFromEntries;
+// Screen 0's rank rows read their swatch from here, so a row's colour and its
+// curve's colour cannot disagree -- the swatch is the chart's only key.
+window.getSeriesStyle = getSeriesStyle;

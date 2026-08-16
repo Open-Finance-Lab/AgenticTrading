@@ -446,3 +446,125 @@ def test_chart_height_is_the_app_clamp_and_not_the_landing_one():
     assert blocks, ".hm-rank-chart was renamed or deleted"
     assert "clamp(140px, 26vh, 280px)" in blocks[0]
     assert "100dvh" not in blocks[0], "that is /'s formula, measured against the fold"
+
+
+def test_the_model_palette_has_a_distinct_colour_for_every_board_model():
+    """`getModelColor` assigns `MODEL_COLOR_PALETTE[n % len]` in first-seen
+    order. The board carries seven models and the palette had five, so models 6
+    and 7 got models 1 and 2's colours -- two pairs of identically coloured
+    curves. Harmless while the swatch was decoration; not harmless now that the
+    swatch is the chart's only key.
+    """
+    block = _const_block(_LEADERBOARD_JS, "MODEL_COLOR_PALETTE")
+    colours = re.findall(r"#[0-9A-Fa-f]{6}", block)
+    assert len(colours) >= 7, "seven models are on the board"
+    assert len(set(c.lower() for c in colours)) == len(colours), "duplicate colours"
+
+
+def test_the_model_palette_does_not_collide_with_the_baseline_styles():
+    """The chart draws models and baselines in one plot area, so their colours
+    share a namespace even though the palettes do not.
+
+    `LEADERBOARD_STYLES` fixes the two reference curves' colours by label, and
+    `getModelColor` hands out `MODEL_COLOR_PALETTE` entries by arrival order --
+    nothing consults the other. A model handed DJIA's grey reads as a second
+    index line, and the dash pattern is the only thing left distinguishing
+    them at 187px tall.
+    """
+    models = {
+        c.lower()
+        for c in re.findall(
+            r"#[0-9A-Fa-f]{6}", _const_block(_LEADERBOARD_JS, "MODEL_COLOR_PALETTE")
+        )
+    }
+    baselines = {
+        c.lower()
+        for c in re.findall(
+            r"#[0-9A-Fa-f]{6}", _const_block(_LEADERBOARD_JS, "LEADERBOARD_STYLES")
+        )
+    }
+    assert not (models & baselines), (
+        f"model palette collides with a baseline colour: {sorted(models & baselines)}"
+    )
+
+
+def test_rank_rows_carry_the_swatch_from_the_same_source_as_the_curve():
+    """A row whose swatch disagrees with its curve is worse than no swatch: it
+    points the reader at the wrong line. Both sides therefore read
+    `getSeriesStyle`, rather than the list picking its own colour.
+    """
+    body = _extract(_HOME_JS, "renderEntries")
+    assert "getSeriesStyle" in body
+    assert "hm-rank-swatch" in body
+
+
+def test_the_swatch_sits_inside_the_name_cell_not_in_the_row_grid():
+    """`.home-module-rank-list li` is a five-column GRID whose template mirrors
+    `.hm-rank-table-head` column for column. A swatch added as a direct child of
+    the `<li>` therefore takes column 1 and shifts every real cell one right --
+    the rank badge into the name's `1.2fr`, the name into a 72px slot -- and
+    spills Sharpe into an implicit sixth column that the header does not have.
+    Nothing throws; the table just stops lining up with its own head.
+
+    `.hm-rank-entry` is already `display:flex; align-items:center; gap:4px` with
+    the name ellipsising inside it, so the swatch belongs there: one flex child,
+    no grid change, no header change, and it keys the model NAME rather than the
+    rank number.
+    """
+    body = _extract(_HOME_JS, "renderEntries")
+    entry_cell = body[body.index('class="hm-rank-entry"') :]
+    swatch = body.index("hm-rank-swatch")
+    assert swatch > body.index('class="hm-rank-entry"'), (
+        "the swatch must be inside .hm-rank-entry, not a sixth grid child of the <li>"
+    )
+    assert entry_cell.index("hm-rank-swatch") < entry_cell.index(
+        "home-module-rank-name"
+    ), "the swatch reads as a key only if it precedes the name it keys"
+
+    row = css_blocks(".home-module-rank-list li")
+    assert row, "the rank row rule was renamed or deleted"
+    assert row[0].count("px") >= 1 and "grid-template-columns" in row[0], (
+        "this guard assumes the row is still a fixed-column grid"
+    )
+    head = css_blocks(".hm-rank-table-head")
+    assert head, "the table head rule was renamed or deleted"
+
+    def _columns(block: str) -> str:
+        return re.search(r"grid-template-columns:([^;]+);", block).group(1).strip()
+
+    assert _columns(row[0]) == _columns(head[0]), (
+        "the row and its header must declare the same columns -- if you add one "
+        "to either, add it to both"
+    )
+
+
+def test_the_swatch_colour_is_escaped_before_it_reaches_a_style_attribute():
+    """The colour lands in an inline `style` attribute built by string
+    concatenation, and it comes from a payload field: `getSeriesStyle` falls
+    through to `getTeamColor(entry?.entry_id || label)` for anything it does not
+    recognise, and both of those are server-supplied. Unescaped, a crafted
+    label closes the attribute.
+    """
+    body = _extract(_HOME_JS, "renderEntries")
+    assert re.search(r"style=\"background:\$\{homeEscape\(", body), (
+        "the swatch colour must go through homeEscape on its way into style="
+    )
+
+
+def test_rank_rows_keep_ending_value_and_sharpe():
+    """/ demotes its table to a legend strip because it has Race.tsx to hold the
+    detail. /app has no such page, and these are real numbers a signed-in user
+    came for.
+    """
+    body = _extract(_HOME_JS, "renderEntries")
+    assert "hm-rank-value" in body
+    assert "hm-rank-sharpe" in body
+
+
+def test_the_series_style_helper_is_an_explicit_cross_file_export():
+    """The same seam as the curve builder: home-page.js reads this off `window`
+    and falls back to a transparent swatch when it is missing, so a rename
+    degrades to colourless rows rather than an error. Pinned from both sides.
+    """
+    assert "window.getSeriesStyle = getSeriesStyle;" in _LEADERBOARD_JS
+    assert "window.getSeriesStyle" in _HOME_JS
