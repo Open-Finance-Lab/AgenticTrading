@@ -1598,3 +1598,10 @@ function displayLeaderboardError(message) {
 
 window.loadLeaderboardData = loadLeaderboardData;
 window.selectLeaderboardTeam = selectLeaderboardTeam;
+// Consumed by home-page.js for screen 0's chart. Explicit rather than relying
+// on the implicit global these classic scripts share: on rename the implicit
+// form degrades to "no chart", which this design deliberately makes
+// indistinguishable from the honest no-curves state -- so the break would be
+// invisible. The export is pinned from both sides by
+// test_frontend_chart_first_home.py.
+window.buildEquityCurvesFromEntries = buildEquityCurvesFromEntries;

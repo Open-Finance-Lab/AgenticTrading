@@ -1407,6 +1407,90 @@ function updateHomeAgentModule() {
     });
 }
 
+/** Entry ids the screen-0 chart draws as passive reference curves.
+ *
+ *  Ids, not display labels. `LEADERBOARD_STYLES` in js/leaderboard.js keys on
+ *  the label ("Buy & Hold", "DJIA"), but the label is copy and can be renamed
+ *  in dashboard/config/leaderboard.json without anything failing; `id` is that
+ *  file's primary key and reaches the client as `entry.entry_id`.
+ *
+ *  Two, not five. This chart is 187-280px tall and already carries seven model
+ *  curves; the question it exists to answer -- is +21.0% good? -- needs one
+ *  strategy baseline and one index, not the whole baseline roster. */
+const HOME_CHART_BASELINE_IDS = ['buy_hold_djia', 'djia_index'];
+
+/** Entries the CHART draws: every model, plus the two reference baselines.
+ *
+ *  A second, wider selection than `homeModelEntries()`, which the rank list
+ *  keeps. That one filters on `is_model || team_badge === 'Model'`, so the
+ *  panel's only data source today has no baselines in it -- build the chart
+ *  from it unchanged and you draw seven curves with nothing to judge them
+ *  against.
+ *
+ *  The LIST stays models-only on purpose: app.html ships the pinned line
+ *  "AI models only - ranked by return", which describes the RANKING. Baselines
+ *  on the chart leave it literally true; ranking them into the list would make
+ *  it false and force a copy change on a line the rest of this design leans on
+ *  being stable. */
+function homeChartEntries(entries) {
+    const all = entries || [];
+    const models = all.filter((e) => e && (e.is_model || e.team_badge === 'Model'));
+    const baselines = all.filter(
+        (e) => e && !e.is_model && HOME_CHART_BASELINE_IDS.indexOf(e.entry_id) !== -1
+    );
+    return models.concat(baselines);
+}
+
+/** The chart's `{times, series}`, with an empty `series` when there is nothing
+ *  honest to draw.
+ *
+ *  THE GATE IS "CURVES PRESENT", NOT "SAMPLE IS NULL". `renderEntries` runs
+ *  with `sample: null` whenever `models.length > 0`, regardless of whether any
+ *  entry carries an `equity_curve`, and `buildEquityCurvesFromEntries` silently
+ *  drops curveless entries (`if (!points.length) return;`). Real entries with
+ *  no curves therefore yield zero series: an empty chart with axes, under a
+ *  real standings list, carrying no sample note -- because the data genuinely
+ *  is real. Absent and broken would render identically, which is this repo's
+ *  fail-closed-is-not-fail-visible failure in miniature.
+ *
+ *  `build` is injected rather than read off `window` so this function is a pure
+ *  function of its arguments and can be exercised under node. */
+function homeChartSeries(entries, build) {
+    if (typeof build !== 'function') return { times: [], series: [] };
+    const selected = homeChartEntries(entries);
+    if (!selected.length) return { times: [], series: [] };
+    const built = build(selected) || {};
+    const times = built.times || [];
+    const curves = built.curves || {};
+    const styles = built.trajectories || {};
+    const initials = built.initials || {};
+    if (!times.length) return { times: [], series: [] };
+    const series = Object.keys(curves)
+        .map((label) => {
+            const style = styles[label] || {};
+            const raw = curves[label] || [];
+            // Fractions, not dollars. Each entry carries its OWN
+            // `initial_equity` and they do not currently agree across the
+            // board (issue #365), so a shared dollar axis would draw a $10k
+            // baseline against $100k models as a flat line on the floor.
+            // Dividing by each series' own base makes the comparison the
+            // chart exists to make. Same formula and same fallback order as
+            // `transformLeaderboardChartData`'s 'cumulative' branch in
+            // js/leaderboard.js -- pinned as an equivalence, not by eye, in
+            // `test_home_chart_matches_the_leaderboards_percent_formula`.
+            const base = Number(initials[label]) || raw.find((v) => v != null) || 10000;
+            return {
+                label,
+                values: raw.map((v) => (v == null ? null : (v - base) / base)),
+                color: style.color || '#94a3b8',
+                dash: style.dash || [],
+                isBaseline: (style.kind || 'model') !== 'model',
+            };
+        })
+        .filter((s) => s.values.some((v) => v != null));
+    return { times, series };
+}
+
 async function loadHomeLeaderboardModule() {
     const list = document.getElementById('homeModuleRankList');
     if (!list) return;

@@ -55,3 +55,315 @@ def test_board_panel_is_not_capped_at_a_fixed_height():
     assert "520px" not in block, (
         "the 520px cap leaves ~0px for the chart at 1440x900 and is negative at 1366x768"
     )
+
+
+_requires_node = pytest.mark.skipif(
+    shutil.which("node") is None, reason="node is not installed"
+)
+
+
+def _extract(source: str, name: str) -> str:
+    """`function <name>(...) { ... }`, brace-matched, from `source`.
+
+    Extracted rather than restated so a rename or deletion fails these tests
+    instead of leaving them green against a copy that no longer ships.
+    """
+    marker = f"function {name}("
+    start = source.index(marker)
+    index = source.index("{", source.index(")", start))
+    depth = 0
+    while True:
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1]
+        index += 1
+
+
+def _const_block(source: str, name: str) -> str:
+    """`const <name> = {...};` or `= [...];`, bracket-matched.
+
+    A line-based reader returns the first line of a multi-line literal, which is
+    syntactically incomplete: node then fails with a SyntaxError that reads like
+    the code under test is broken. MODEL_COLOR_PALETTE and LEADERBOARD_STYLES
+    are both multi-line.
+    """
+    start = source.index(f"const {name}")
+    opener = min(
+        i for i in (source.find("{", start), source.find("[", start)) if i != -1
+    )
+    closer = {"{": "}", "[": "]"}[source[opener]]
+    depth, index = 0, opener
+    while True:
+        if source[index] == source[opener]:
+            depth += 1
+        elif source[index] == closer:
+            depth -= 1
+            if depth == 0:
+                return source[start : index + 1] + ";"
+        index += 1
+
+
+def _harness() -> str:
+    """Everything the extracted functions close over, in dependency order.
+
+    Lifted from the shipped files rather than stubbed: a stub of
+    `LEADERBOARD_STYLES` would quietly test the stub's dash patterns instead of
+    the ones that ship, which is exactly the assertion these tests exist to make.
+    """
+    return "\n".join(
+        [
+            _const_block(_LEADERBOARD_JS, "LEADERBOARD_STYLES"),
+            _const_block(_LEADERBOARD_JS, "MODEL_COLOR_PALETTE"),
+            _const_block(_LEADERBOARD_JS, "TEAM_COLOR_PALETTE"),
+            "const modelColorMap = {}; const teamColorMap = {};",
+            _extract(_LEADERBOARD_JS, "isModelEntry"),
+            _extract(_LEADERBOARD_JS, "getModelColor"),
+            _extract(_LEADERBOARD_JS, "getTeamColor"),
+            _extract(_LEADERBOARD_JS, "getSeriesStyle"),
+            _extract(_LEADERBOARD_JS, "chartTimeKey"),
+            # The real builder, so the gate is exercised against the actual
+            # "silently drops curveless entries" behaviour rather than a stub
+            # that would drop them the way the test author assumed.
+            _extract(_LEADERBOARD_JS, "buildEquityCurvesFromEntries"),
+            # The leaderboard tab's percent formula, so screen 0's copy of it
+            # can be checked for equivalence rather than eyeballed. Pure and
+            # closure-free (curveValues, viewType, initialValue).
+            _extract(_LEADERBOARD_JS, "transformLeaderboardChartData"),
+            _const_block(_HOME_JS, "HOME_CHART_BASELINE_IDS"),
+            _extract(_HOME_JS, "homeChartEntries"),
+            _extract(_HOME_JS, "homeChartSeries"),
+        ]
+    )
+
+
+def _run_node(expr: str):
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not available")
+    script = f"{_harness()}\nconsole.log(JSON.stringify({expr}));"
+    out = subprocess.run(
+        [node, "-e", script], capture_output=True, text=True, check=True
+    )
+    return json.loads(out.stdout)
+
+
+def _entry(entry_id, model, *, is_model, curve, initial_equity=10000):
+    """`initial_equity` is a parameter, not a constant, on purpose.
+
+    A fixture where every row shares one capital base cannot fail on mixed
+    capital, and mixed capital is a live condition on this board: the config
+    says 10000, the published curves were computed at 100000, and
+    `_find_cached_run` does not key on it (issue #365). The default keeps the
+    existing cases unchanged; the mixed case below passes 100000 explicitly.
+    """
+    points = [
+        {"timestamp": f"2026-04-{15 + i:02d}T14:00:00+00:00", "equity": v}
+        for i, v in enumerate(curve)
+    ]
+    return {
+        "entry_id": entry_id,
+        "model": model,
+        "team_name": model,
+        "is_model": is_model,
+        "team_badge": "Model" if is_model else "Baseline Strategy",
+        "equity_curve": points,
+        "initial_equity": initial_equity,
+    }
+
+
+@_requires_node
+def test_chart_draws_the_baselines_the_rank_list_filters_out():
+    """`isHomeModelEntry` is `is_model || team_badge === 'Model'`, so the rank
+    list's source has no baselines in it at all. A chart built from that source
+    draws seven model curves with nothing to judge them against, which fails the
+    one question the chart exists to answer: is +21.0% good?
+    """
+    entries = [
+        _entry("deepseek_v4_pro", "DeepSeek V4 Pro", is_model=True, curve=[10000, 12100]),
+        _entry("buy_hold_djia", "Buy & Hold", is_model=False, curve=[10000, 10550]),
+        _entry("djia_index", "DJIA", is_model=False, curve=[10000, 10280]),
+        _entry("mean_variance_djia", "Mean-Variance", is_model=False, curve=[10000, 10100]),
+    ]
+    labels = _run_node(
+        f"homeChartSeries({json.dumps(entries)}, buildEquityCurvesFromEntries)"
+        ".series.map(s => s.label)"
+    )
+    assert "DeepSeek V4 Pro" in labels
+    assert "Buy & Hold" in labels, "the chart must carry a strategy baseline"
+    assert "DJIA" in labels, "the chart must carry an index baseline"
+    assert "Mean-Variance" not in labels, (
+        "two reference curves, not five -- the panel's chart is 187-280px tall"
+    )
+
+
+@_requires_node
+def test_baselines_are_dashed_and_models_are_not():
+    entries = [
+        _entry("deepseek_v4_pro", "DeepSeek V4 Pro", is_model=True, curve=[10000, 12100]),
+        _entry("buy_hold_djia", "Buy & Hold", is_model=False, curve=[10000, 10550]),
+    ]
+    series = _run_node(
+        f"homeChartSeries({json.dumps(entries)}, buildEquityCurvesFromEntries).series"
+    )
+    by_label = {s["label"]: s for s in series}
+    assert by_label["Buy & Hold"]["dash"], "baselines read as reference curves, not entrants"
+    assert by_label["Buy & Hold"]["isBaseline"] is True
+    assert not by_label["DeepSeek V4 Pro"]["dash"]
+    assert by_label["DeepSeek V4 Pro"]["isBaseline"] is False
+
+
+@_requires_node
+def test_real_entries_with_no_curves_yield_no_series():
+    """The third fallback state, and the reason the gate is NOT keyed on
+    `sample`. `renderEntries` runs with `sample: null` whenever
+    `models.length > 0`, regardless of whether any entry carries an
+    `equity_curve`, and the builder silently drops curveless entries
+    (`if (!points.length) return;`). Real entries + no curves therefore produce
+    an empty chart with axes, under a real standings list, carrying no sample
+    note -- absent and broken rendering identically.
+    """
+    entries = [
+        {
+            "entry_id": "deepseek_v4_pro",
+            "model": "DeepSeek V4 Pro",
+            "is_model": True,
+            "team_badge": "Model",
+            "equity_curve": [],
+        }
+    ]
+    series = _run_node(
+        f"homeChartSeries({json.dumps(entries)}, buildEquityCurvesFromEntries).series"
+    )
+    assert series == [], "no curves must mean no chart, not an empty chart"
+
+
+@_requires_node
+def test_a_series_with_no_usable_points_is_dropped_rather_than_drawn_flat():
+    """The one case the `.filter()` tail alone catches.
+
+    An entry whose `equity_curve` is non-empty but whose timestamps are all
+    unusable survives into `perEntry` -- `chartTimeKey` returns '' for them so
+    nothing lands in `byTime`, but the `if (!points.length) return;` skip never
+    fires. `curves[label]` is then a row of nulls the length of some OTHER
+    entry's time axis, which Chart.js draws as a labelled dataset with no line.
+    Task 4 makes the rank-row swatch this chart's only key, so that is a swatch
+    pointing at nothing.
+
+    Written after mutation-testing Step 6: removing the `.filter()` tail left
+    every other case in this file green, so nothing else pinned it. The sibling
+    `if (!times.length)` early return is fully subsumed by that filter -- it is
+    a cheap exit, not the guard.
+    """
+    good = _entry(
+        "deepseek_v4_pro", "DeepSeek V4 Pro", is_model=True, curve=[10000, 12100]
+    )
+    blank = _entry("buy_hold_djia", "Buy & Hold", is_model=False, curve=[10000, 10550])
+    for point in blank["equity_curve"]:
+        point["timestamp"] = ""
+
+    labels = _run_node(
+        f"homeChartSeries({json.dumps([good, blank])}, buildEquityCurvesFromEntries)"
+        ".series.map(s => s.label)"
+    )
+    assert labels == ["DeepSeek V4 Pro"], (
+        "a series with no usable points must be dropped, not drawn as an empty line"
+    )
+
+
+@_requires_node
+def test_a_missing_builder_yields_no_series_rather_than_throwing():
+    """`buildEquityCurvesFromEntries` lives in another file and reaches this one
+    as a global. If it is ever renamed, the panel must degrade to today's
+    layout, not throw inside the leaderboard load and leave the list on
+    "Loading the standings...". The source guard below is what makes the rename
+    loud; this is the runtime floor under it.
+    """
+    entries = [
+        _entry("deepseek_v4_pro", "DeepSeek V4 Pro", is_model=True, curve=[10000, 12100])
+    ]
+    assert _run_node(f"homeChartSeries({json.dumps(entries)}, undefined).series") == []
+
+
+@_requires_node
+def test_mixed_initial_equity_does_not_break_the_chart():
+    """The board's rows do NOT share a capital base, so the chart cannot
+    assume one.
+
+    `dashboard/config/leaderboard.json` says `initial_capital: 10000` while
+    every published curve was computed at $100,000, and `_find_cached_run`
+    (`service.py:615`) does not key on `initial_equity` -- so one
+    `?refresh=true` recomputes the five `auto_compute` baselines at $10k and
+    leaves the seven model entries at $100k (issue #365, open). Plotted in
+    dollars that renders as a 10x scale break: models near 100000, the
+    reference baselines flat on the floor at 10000.
+
+    This is the case the old fixture could not express, because it hardcoded
+    one `initial_equity` for every row.
+    """
+    entries = [
+        _entry(
+            "deepseek_v4_pro", "DeepSeek V4 Pro", is_model=True,
+            curve=[100000, 107490], initial_equity=100000,
+        ),
+        _entry(
+            "buy_hold_djia", "Buy & Hold", is_model=False,
+            curve=[10000, 10550], initial_equity=10000,
+        ),
+    ]
+    series = _run_node(
+        f"homeChartSeries({json.dumps(entries)}, buildEquityCurvesFromEntries).series"
+    )
+    by_label = {s["label"]: s["values"] for s in series}
+    assert set(by_label) == {"DeepSeek V4 Pro", "Buy & Hold"}
+
+    # Fractions, so the two are on one axis despite a 10x difference in base.
+    # Raw dollars would put these finals 96,940 apart.
+    assert by_label["DeepSeek V4 Pro"][-1] == pytest.approx(0.0749, abs=1e-4)
+    assert by_label["Buy & Hold"][-1] == pytest.approx(0.0550, abs=1e-4)
+    assert all(
+        abs(v) < 1 for values in by_label.values() for v in values if v is not None
+    ), "a value outside +/-100% means the series is still in dollars"
+
+
+@_requires_node
+def test_home_chart_matches_the_leaderboards_percent_formula():
+    """Screen 0 and the Leaderboard tab must compute percent identically.
+
+    They are two files with no shared module, so the formula is duplicated by
+    force. Pinning it as a STRING in either file would pass while the other
+    drifted; this runs both against the same input and compares outputs, which
+    is the only version of this assertion that can fail for the right reason.
+    """
+    entries = [
+        _entry(
+            "deepseek_v4_pro", "DeepSeek V4 Pro", is_model=True,
+            curve=[100000, 103000, 107490], initial_equity=100000,
+        ),
+        _entry(
+            "buy_hold_djia", "Buy & Hold", is_model=False,
+            curve=[10000, 9800, 10550], initial_equity=10000,
+        ),
+    ]
+    pairs = _run_node(
+        "(() => {"
+        f"  const entries = {json.dumps(entries)};"
+        "   const built = buildEquityCurvesFromEntries(entries);"
+        "   return homeChartSeries(entries, buildEquityCurvesFromEntries).series.map("
+        "     (s) => ({"
+        "       label: s.label,"
+        "       home: s.values,"
+        "       leaderboard: transformLeaderboardChartData("
+        "         built.curves[s.label], 'cumulative', built.initials[s.label]"
+        "       ),"
+        "     })"
+        "   );"
+        "})()"
+    )
+    assert pairs, "no series produced -- the fixture or the harness is wrong"
+    for pair in pairs:
+        assert pair["home"] == pair["leaderboard"], (
+            f"{pair['label']}: screen 0 and the leaderboard tab disagree on percent"
+        )
