@@ -202,3 +202,55 @@ def test_whycare_headings_are_untouched():
     ):
         assert heading in whycare
     assert not re.search(r'"0[1-9]"', raw), "quoted step numbers are banned here"
+
+
+def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
+    """There is no shared code and no shared token between / and /app, so after
+    this change there are two chart implementations with two axis-tick
+    declarations and two legend treatments. That duplication is forced by the
+    stacks and accepted; leaving it UNGUARDED is not. Pin the values that must
+    match so the pair drifts loudly or not at all.
+
+    Heights are deliberately absent: the surfaces have different vertical
+    envelopes and therefore different clamps (spec §2). A shared height
+    assertion here would be the bug it looks like a guard against. Units are
+    the same kind of case and are asserted per-surface below, not shared.
+    """
+    home_js = (
+        Path(__file__).resolve().parents[2] / "frontend" / "home-page.js"
+    ).read_text(encoding="utf-8")
+
+    # Axis ticks: 14px on both.
+    assert "fontSize={14}" in _BOARD
+    assert re.search(r"font:\s*\{\s*size:\s*14\s*\}", home_js)
+
+    # The key's type scale: text-base on /, and /app's rows inherit the panel's
+    # base size rather than the old 11px table register.
+    assert "text-base" in _BOARD
+    assert "hm-rank-swatch" in home_js
+
+    # Neither surface draws a built-in legend: the standings/chips are the key.
+    assert "<Legend" not in _BOARD
+    assert re.search(r"legend:\s*\{\s*display:\s*false\s*\}", home_js)
+
+    # UNITS: /app is percent. Asserted here rather than in the /app suite
+    # because the pressure to break it comes from THIS comparison -- someone
+    # noticing the two charts disagree and "aligning" screen 0 back to a dollar
+    # axis, which / uses.
+    #
+    # Why that is a regression and not a tidy-up: / plots fabricated curves that
+    # all share a base of 1000, so `$1210` is unambiguous and reads as
+    # SAMPLE_STANDINGS' +21.0%. Screen 0 plots LIVE entries, and every dollar
+    # level there is a x0.1 rescale of a $100,000 backtest onto the config's
+    # $10,000 display base (leaderboard service.py), so a `$10,749` tick names an
+    # account that never existed while the percent is what actually ran. The rank
+    # list beside it already renders percent, and it is the chart's only key.
+    #
+    # NOT the reason, though an earlier draft of this plan said so: issue #365
+    # does NOT make a dollar axis draw a 10x break here. get_leaderboard
+    # normalises every entry to one display base before serving -- measured
+    # against a hand-built mixed-capital database -- so on this payload dollars
+    # and percent are an affine transform. Do not re-derive the scale argument
+    # and then "discover" it is false; the label argument above is the one that
+    # holds.
+    assert "(v * 100).toFixed(1)}%" in home_js
