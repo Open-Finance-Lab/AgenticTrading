@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from dashboard.backend.tests._frontend_source import STYLES, css_blocks
+from dashboard.backend.tests._frontend_source import css_blocks
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _CONFIG = Path(__file__).resolve().parents[2] / "config"
