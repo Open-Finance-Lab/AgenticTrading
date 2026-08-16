@@ -5308,11 +5308,20 @@ html[data-nav-page="home"] #homeView .home-landing-board {
     display: flex;
 }
 /* The pager clips rather than scrolls (.home-pager-screen is overflow:hidden),
-   so the panel is sized against the viewport, not left to its content. */
+   so the panel is sized against the viewport, not left to its content.
+   It takes the whole hero row: measured at 1440x900 the panel's fixed chrome
+   (head 44 + meta 49 + table head 26 + Season-0 note 62 + footer button 36 +
+   padding 36 = 253) leaves 267px of a 520px cap, and seven rows need 202 -- so
+   under the old cap a chart had ~0px, and a negative budget at 1366x768.
+   Above 1200px the hero is a flex ROW, so the cap was never load-bearing for
+   the copy column; it was a card proportion chosen when this panel held only a
+   table. Verified: panel 653-722px and 7/7 rows visible with zero clip across
+   1280x720 -> 1920x1080. Re-measure rather than re-reason if the chrome above
+   changes -- every height in this design is a browser measurement. */
 html[data-nav-page="home"] #homeView .home-landing-board .home-module {
-    height: min(520px, calc(100dvh - var(--app-chrome-height) - 160px));
-    min-height: min(400px, calc(100dvh - var(--app-chrome-height) - 160px));
-    max-height: min(520px, calc(100dvh - var(--app-chrome-height) - 140px));
+    height: 100%;
+    min-height: 0;
+    max-height: none;
 }
 
 /* Below 1200px the hero stacks to a column (see the unscoped rule further down).
