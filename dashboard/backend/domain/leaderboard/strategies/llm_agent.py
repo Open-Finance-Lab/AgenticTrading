@@ -39,6 +39,14 @@ from .base import BaselineStrategy
 from ._common import build_price_cache, market_timestamps, subset_bars, timestamps_in_contest
 
 
+# Parity with api/routers/backtests.py::MAX_STRATEGY_PROMPT_CHARS, which caps the
+# same field on /backtest/run for the same reason (the text rides every LLM call).
+# Duplicated rather than imported because domain/ must not import api/
+# (test_architecture_boundaries); test_llm_agent_instruction.py asserts the two
+# constants stay equal so the copies cannot drift apart silently.
+MAX_STRATEGY_PROMPT_CHARS = 4000
+
+
 class LLMAgentStrategy(BaselineStrategy):
     key = "llm_agent"
 
@@ -82,7 +90,46 @@ class LLMAgentStrategy(BaselineStrategy):
         # C1: the Open Track's competing variable. Absent on the seven published
         # Model Track entries, which must keep producing their existing curves —
         # so blank collapses to None rather than "".
-        self.strategy_prompt = (self.config.get("strategy_prompt") or "").strip() or None
+        strategy_prompt = self.config.get("strategy_prompt")
+        if strategy_prompt is not None and not isinstance(strategy_prompt, str):
+            # Typed error, not the AttributeError `.strip()` would raise: this
+            # constructor runs on every public, unauthenticated
+            # GET /api/v1/leaderboard via _symbols_for_config/_config_needs_alpaca,
+            # so an uncaught one 500s the whole board — which surfaces to users as
+            # a CORS failure rather than an error anyone can read.
+            raise ValueError(
+                "strategy_prompt must be a string; got "
+                f"{type(strategy_prompt).__name__}"
+            )
+        self.strategy_prompt = (strategy_prompt or "").strip() or None
+        if (
+            self.strategy_prompt is not None
+            and len(self.strategy_prompt) > MAX_STRATEGY_PROMPT_CHARS
+        ):
+            raise ValueError(
+                f"strategy_prompt is {len(self.strategy_prompt)} characters, over the "
+                f"{MAX_STRATEGY_PROMPT_CHARS} limit. It is injected into every LLM call "
+                "of the run, and an over-long body pushes responses past "
+                "LLM_MAX_OUTPUT_TOKENS — which truncates decisions and fails H6 while "
+                "billing in full."
+            )
+        # create_prompt ignores `mode` entirely once a custom prompt is set
+        # (validator.py:772), so an entry configured buy_and_hold + instruction
+        # would be published under a mode it never actually ran. safe_trading is
+        # the default and replacing *its* body is the whole point of the feature,
+        # so only an explicit, different mode is a conflict. Same treatment as the
+        # temperature/reasoning_effort pair above: fail here, not once per step.
+        configured_mode = self.config.get("mode")
+        if (
+            self.strategy_prompt is not None
+            and configured_mode is not None
+            and configured_mode != "safe_trading"
+        ):
+            raise ValueError(
+                f"mode={configured_mode!r} cannot be combined with strategy_prompt: a "
+                "custom instruction REPLACES the mode's prompt body, so the entry would "
+                "publish a curve labelled with a mode that never ran."
+            )
         # Populated during run() for reporting / cost tracking.
         self.llm_calls = 0
         self.llm_decisions = 0  # steps the model actually drove (H6 guard numerator)
@@ -122,7 +169,7 @@ class LLMAgentStrategy(BaselineStrategy):
         data,
         price_cache,
         initial_capital,
-        model_id=None,
+        model_id,
     ):
         """One decision per timestamp, executed against a fresh PortfolioManager.
 
@@ -139,7 +186,11 @@ class LLMAgentStrategy(BaselineStrategy):
             initial_capital=initial_capital,
             t_plus_one_enabled=profile.t_plus_one_enabled,
         )
-        model_id = model_id or self.model_id or default_model_name(self.integration)
+        # Resolution lives in run() alone. Re-applying the
+        # `or self.model_id or default_model_name(...)` chain here meant two
+        # copies of it: change one and the header can advertise one model while
+        # the calls use another, with the stored run metadata agreeing with the
+        # header rather than with what was billed.
         total = len(timestamps)
 
         for i, ts in enumerate(timestamps):

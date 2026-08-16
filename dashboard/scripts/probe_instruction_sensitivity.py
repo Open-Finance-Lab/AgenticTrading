@@ -8,16 +8,35 @@ instructions through the leaderboard harness and prints the spread.
     python dashboard/scripts/probe_instruction_sensitivity.py --list-instructions
 
     # ~$0.43: the cheap half, and decisive on its own if it passes
-    python dashboard/scripts/probe_instruction_sensitivity.py --models nemotron
+    python dashboard/scripts/probe_instruction_sensitivity.py \
+        --models nemotron --initial-capital 100000
 
     # ~$4.54: only needed if nemotron comes back flat (the contingency branch)
-    python dashboard/scripts/probe_instruction_sensitivity.py --models deepseek
+    python dashboard/scripts/probe_instruction_sensitivity.py \
+        --models deepseek --initial-capital 100000
 
-Cost is measured, not assumed: the seven published contest runs recorded
-$0.0715 (nemotron) and $0.756 (deepseek) per 160-step run over this exact
-window, so six instructions cost ~$0.43 and ~$4.54 respectively. Running both
-is the plan's ~$4.97 — but the gate table only needs deepseek when nemotron
-fails, so `--models` defaults to nemotron alone.
+`--initial-capital 100000` is not optional in practice. leaderboard.json currently
+carries `initial_capital: 10000`, which the resolution guard below refuses (one
+median DJIA share is 2.49% of equity, above the 1% ceiling) — so without the flag
+these commands exit EXIT_CONFIG before spending anything. $100k is also the base
+every published board curve was computed at, which is what makes a probe return
+comparable with one. The flag stays explicit rather than defaulting to 100000
+because the config value is the thing under suspicion; see the capital-mismatch
+section of the write-up.
+
+Cost is read off the seven published contest runs, which recorded $0.0715
+(nemotron) and $0.756 (deepseek) per 160-step run over this exact window, so
+six instructions cost ~$0.43 and ~$4.54 respectively. Running both is the
+plan's ~$4.97 — but the gate table only needs deepseek when nemotron fails, so
+`--models` defaults to nemotron alone.
+
+Treat those as an UPPER bound, not a forecast. They extrapolate from a
+default-prompt board run, and this script exercises the custom-prompt path,
+which bills differently: the 2026-08-16 deepseek leg came in at $0.4556/run
+against a $0.70-0.80 prediction, after an earlier prediction erred the other
+way. Deliberately not lowered — an estimate that under-shoots is the one that
+overspends. Read per-run cost off a measured run; see
+docs/superpowers/probe-results/2026-08-09-instruction-sensitivity.md.
 
 GATE: if the spread across these instructions is under ~1pp, the instruction
 axis does not exist and Phase 2 must not be built. See the gate table in
@@ -37,7 +56,6 @@ import argparse
 import json
 import os
 import statistics
-import sys
 import tempfile
 from pathlib import Path
 
@@ -45,9 +63,15 @@ from dotenv import load_dotenv
 
 DASHBOARD_DIR = Path(__file__).resolve().parent.parent
 
-from _bootstrap import ensure_repo_root  # noqa: E402
+# Bootstrap for direct-file execution (``python dashboard/scripts/probe_...py``).
+# When imported as ``dashboard.scripts.probe_instruction_sensitivity`` — which the
+# gate-logic tests do, so the verdict that decides whether Phase 2 gets built is
+# not left untested — the repo root is already importable and __package__ is
+# truthy, so this is skipped. Same pattern as backfill_runs_to_postgres.py:125.
+if not __package__:
+    from _bootstrap import ensure_repo_root
 
-ensure_repo_root()
+    ensure_repo_root()
 
 # Load secrets from dashboard/.env then repo root .env, exactly as the deploy
 # script does. Without a key every run falls back to rule-based (see above).
@@ -58,9 +82,17 @@ load_dotenv(DASHBOARD_DIR.parent / ".env")
 # the backend runs lazy CREATE TABLE/ALTER against DATABASE_PATH. Point that at a
 # throwaway file *before* the backend imports so the committed prod seed database
 # at dashboard/storage/data/backtest.db cannot be mutated by running this.
-os.environ.setdefault(
-    "DATABASE_PATH",
-    str(Path(tempfile.gettempdir()) / "probe_instruction_sensitivity.db"),
+#
+# FORCE, not setdefault. The load_dotenv calls above have already run, and
+# .env.example ships `DATABASE_PATH=dashboard/storage/data/backtest.db`
+# *uncommented* (line 204) — so on any checkout whose .env was copied from it, a
+# setdefault sees the key already present, does nothing, and aims the lazy
+# migrations straight at the committed seed DB (issue #244, plus an untracked
+# -wal sidecar that hides the ALTERs). An ambient DATABASE_PATH in the operator's
+# shell does the same. This script never needs the real value for anything.
+# Same reasoning, same fix as backfill_runs_to_postgres.py:117.
+os.environ["DATABASE_PATH"] = str(
+    Path(tempfile.gettempdir()) / "probe_instruction_sensitivity.db"
 )
 
 from dashboard.backend.domain.leaderboard.baselines import (  # noqa: E402
@@ -73,6 +105,10 @@ from dashboard.backend.domain.leaderboard.service import (  # noqa: E402
 from dashboard.backend.domain.leaderboard.strategies import get_strategy  # noqa: E402
 from dashboard.backend.domain.leaderboard.strategies._common import (  # noqa: E402
     reference_start_date,
+)
+from dashboard.backend.domain.leaderboard.strategies._common import (  # noqa: E402
+    parse_config_date,
+    timestamp_date,
 )
 from dashboard.backend.infrastructure.llm import token_cost  # noqa: E402
 from dashboard.backend.infrastructure.llm.providers import (  # noqa: E402
@@ -178,36 +214,85 @@ EXIT_INCONCLUSIVE = 3
 MAX_SHARE_FRACTION_PCT = 1.0
 
 
-def _check_capital_resolution(bars: dict, initial_capital: float) -> str | None:
-    """Return a problem description when one share is too large a slice of equity."""
-    opens: list[float] = []
-    for df in bars.values():
-        if df is None or len(df) == 0:
-            continue
-        col = "close" if "close" in getattr(df, "columns", []) else None
+def _bar_date(ts):
+    """Calendar date of a bar timestamp, tolerating a tz-naive frame.
+
+    ``timestamp_date`` calls ``.astimezone``, which pandas *raises* on for a
+    tz-naive Timestamp rather than assuming a zone. Live Alpaca bars are UTC-aware
+    so the production path never hits it, but the caller's blanket ``except``
+    would read that raise as "no price available" and refuse to spend against a
+    perfectly good frame — a guard that fails closed on its own helper.
+    """
+    try:
+        return timestamp_date(ts)
+    except (TypeError, ValueError):
+        return parse_config_date(str(ts)[:10])
+
+
+def _window_open_price(df, window_open) -> float | None:
+    """Close of the first bar on or after the contest window opens.
+
+    Deliberately not ``iloc[0]``: bars are fetched from ``reference_start_date``,
+    a calendar month before the window, so row 0 is a price the probe never
+    trades at. Judging the capital base off it measures the resolution of a
+    window that was never run.
+    """
+    if df is None or len(df) == 0 or "close" not in getattr(df, "columns", []):
+        return None
+    closes = df["close"]
+    for pos, ts in enumerate(df.index):
         try:
-            opens.append(float(df[col].iloc[0] if col else df.iloc[0, 0]))
+            if _bar_date(ts) < window_open:
+                continue
+            price = float(closes.iloc[pos])
         except Exception:
             continue
-    if not opens or initial_capital <= 0:
-        return None
+        if price > 0:
+            return price
+    return None
 
-    opens.sort()
-    median = opens[len(opens) // 2]
+
+def _check_capital_resolution(
+    bars: dict, initial_capital: float, start_date: str
+) -> str | None:
+    """Return a problem description when one share is too large a slice of equity."""
+    if initial_capital <= 0:
+        return f"initial capital must be positive; got ${initial_capital:,.2f}"
+
+    window_open = parse_config_date(start_date)
+    prices = [
+        price
+        for price in (_window_open_price(df, window_open) for df in bars.values())
+        if price is not None
+    ]
+    if not prices:
+        # Fail VISIBLE, not open. Returning None here made "the base is fine" and
+        # "no price could be read at all" produce the identical silent log, and
+        # the very next thing main() does is spend money. A partial Alpaca
+        # outage, or a frame without a lowercase `close`, lands here.
+        return (
+            f"could not read an opening price for any of the {len(bars)} fetched symbols "
+            f"on or after {start_date}, so the capital base was never checked. Refusing "
+            f"to spend against an instrument of unknown resolution."
+        )
+
+    # statistics.median, not opens[len//2] — the latter is the upper-middle value
+    # for an even count, and it skews the guard toward refusing.
+    median = statistics.median(prices)
     frac = median / initial_capital * 100
-    per_name = initial_capital / len(opens)
-    unbuyable = sum(1 for p in opens if p > per_name)
+    per_name = initial_capital / len(prices)
+    unbuyable = sum(1 for p in prices if p > per_name)
 
     print(
-        f"  resolution   : one median share (${median:,.2f}) = {frac:.2f}% of "
-        f"${initial_capital:,.0f}; {unbuyable}/{len(opens)} names unbuyable at equal weight"
+        f"  resolution   : median share at {start_date} (${median:,.2f}) = {frac:.2f}% of "
+        f"${initial_capital:,.0f}; {unbuyable}/{len(prices)} names unbuyable at equal weight"
     )
     if frac <= MAX_SHARE_FRACTION_PCT:
         return None
     return (
         f"capital base too coarse to measure an instruction effect. One median share "
         f"(${median:,.2f}) is {frac:.2f}% of ${initial_capital:,.0f} — above the "
-        f"{MAX_SHARE_FRACTION_PCT}% ceiling — and {unbuyable}/{len(opens)} symbols cannot "
+        f"{MAX_SHARE_FRACTION_PCT}% ceiling — and {unbuyable}/{len(prices)} symbols cannot "
         f"be bought at all at equal weight. Run-to-run differences of a single share would "
         f"swamp the effect under test."
     )
@@ -248,7 +333,14 @@ def _run_one(
     if not curve:
         raise RuntimeError("no equity curve produced — check the window and bars")
 
-    first = curve[0]["equity"]
+    # NOT curve[0]: _run_decision_loop calls execute_actions *before* the first
+    # update_equity, so curve[0] is already post-trade and differs per
+    # instruction — an instruction that deploys capital immediately gets a
+    # smaller denominator than one that holds cash, and the probe would report
+    # that difference as instruction signal. `initial_capital` is also the board's
+    # own definition (calc_metrics, baselines.py:93), so probe returns and
+    # published returns are the same quantity and can be quoted side by side.
+    first_step_equity = curve[0]["equity"]
     last = curve[-1]["equity"]
     steps = int(getattr(strategy, "decision_steps", 0) or 0)
     decisions = int(getattr(strategy, "llm_decisions", 0) or 0)
@@ -257,7 +349,8 @@ def _run_one(
     output_tokens = int(getattr(strategy, "output_tokens", 0) or 0)
 
     return {
-        "return_pct": (last / first - 1.0) * 100.0,
+        "return_pct": (last - initial_capital) / initial_capital * 100.0,
+        "first_step_equity": first_step_equity,
         "coverage": coverage,
         "used_llm": bool(getattr(strategy, "used_llm", False)),
         "llm_calls": int(getattr(strategy, "llm_calls", 0) or 0),
@@ -348,6 +441,15 @@ def main() -> int:
         if missing:
             print(f"FATAL: unknown instruction slug(s) {sorted(missing)}")
             return EXIT_CONFIG
+        # `missing` is empty when `wanted` is empty, so a value like "," slips
+        # past the check above, runs nothing, and used to surface as a max()
+        # traceback out of _report rather than the EXIT_CONFIG everything else
+        # here returns.
+        if not instructions:
+            print(
+                f"FATAL: --instructions {args.instructions!r} selected no instructions."
+            )
+            return EXIT_CONFIG
 
     problems = _preflight_keys(model_slugs, args.integration)
     if problems:
@@ -405,7 +507,7 @@ def main() -> int:
         return EXIT_CONFIG
     print(f"  got {len(bars)} symbols")
 
-    resolution_problem = _check_capital_resolution(bars, initial_capital)
+    resolution_problem = _check_capital_resolution(bars, initial_capital, start_date)
     if resolution_problem and not args.allow_coarse_capital:
         print(f"\nFATAL: {resolution_problem}")
         print("\nRe-run with --initial-capital matching the published runs, or pass")
@@ -413,36 +515,14 @@ def main() -> int:
         return EXIT_CONFIG
 
     results: dict[str, dict[str, dict]] = {}
+    failures: list[str] = []
     spent = 0.0
-    for model_slug in model_slugs:
-        model_cfg = dict(PROBE_MODELS[model_slug])
-        if args.integration:
-            model_cfg["integration"] = args.integration
-        results[model_slug] = {}
-        for slug, instruction in instructions:
-            print(f"\n=== {model_slug} / {slug} ===")
-            row = _run_one(
-                instruction=instruction,
-                model_cfg=model_cfg,
-                bars=bars,
-                start_date=start_date,
-                end_date=end_date,
-                initial_capital=initial_capital,
-            )
-            results[model_slug][slug] = row
-            spent += row["cost_usd"]
-            print(
-                f"  return {row['return_pct']:+.2f}%  coverage {row['coverage']:.1%}  "
-                f"trades {row['num_trades']}  cost ${row['cost_usd']:.4f}  "
-                f"(running ${spent:.2f})"
-            )
-            if not row["valid"]:
-                print(
-                    "  ⚠ INVALID: the model did not drive this run "
-                    f"(used_llm={row['used_llm']}, coverage below "
-                    f"{MIN_LLM_DECISION_COVERAGE:.0%}). It is not evidence."
-                )
 
+    # Defined BEFORE the run loop so it can be called after every completed run.
+    # Persisting only after the loop protected against a _report bug but not
+    # against _run_one raising — a gateway timeout on run 6 of 6 discarded the
+    # five runs already paid for, which is the same money lost by a different
+    # door. It must also never raise for the same reason.
     def _write(exit_code: int | None) -> None:
         if not args.out:
             return
@@ -452,18 +532,60 @@ def main() -> int:
             "models": {m: PROBE_MODELS[m] for m in model_slugs},
             "integration_override": args.integration,
             "results": results,
+            "failures": failures,
             "total_cost_usd": spent,
             "exit_code": exit_code,
         }
-        Path(args.out).write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        try:
+            out_path = Path(args.out)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            out_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001 — a bad --out must not cost a leg
+            print(f"\nWARNING: could not write {args.out}: {type(exc).__name__}: {exc}")
+            print("Dumping the payload to stdout so the paid-for runs survive:\n")
+            print(json.dumps(payload, indent=2))
 
-    # Persist BEFORE reporting, then again to record the exit code. _report only
-    # formats numbers already in hand, so a bug in it must never be able to
-    # discard runs that cost real money — which is exactly what it did to the
-    # first DeepSeek smoke run (an empty-`seeded` ValueError threw away a
-    # completed $0.03 run; at $0.76/run that is not a survivable ordering).
-    _write(None)
-    exit_code = _report(results, spent)
+    for model_slug in model_slugs:
+        model_cfg = dict(PROBE_MODELS[model_slug])
+        if args.integration:
+            model_cfg["integration"] = args.integration
+        results[model_slug] = {}
+        for slug, instruction in instructions:
+            print(f"\n=== {model_slug} / {slug} ===")
+            try:
+                row = _run_one(
+                    instruction=instruction,
+                    model_cfg=model_cfg,
+                    bars=bars,
+                    start_date=start_date,
+                    end_date=end_date,
+                    initial_capital=initial_capital,
+                )
+            except KeyboardInterrupt:
+                print("\nInterrupted — persisting the runs already paid for.")
+                _write(None)
+                return EXIT_INCONCLUSIVE
+            except Exception as exc:  # noqa: BLE001 — one bad run must not void the leg
+                print(f"  ⚠ RUN FAILED: {type(exc).__name__}: {exc}")
+                failures.append(f"{model_slug}/{slug}: {type(exc).__name__}: {exc}")
+                _write(None)
+                continue
+            results[model_slug][slug] = row
+            spent += row["cost_usd"]
+            print(
+                f"  return {row['return_pct']:+.2f}%  coverage {row['coverage']:.1%}  "
+                f"trades {row['num_trades']}  cost ${row['cost_usd']:.4f}  "
+                f"(running ${spent:.2f})"
+            )
+            _write(None)
+            if not row["valid"]:
+                print(
+                    "  ⚠ INVALID: the model did not drive this run "
+                    f"(used_llm={row['used_llm']}, coverage below "
+                    f"{MIN_LLM_DECISION_COVERAGE:.0%}). It is not evidence."
+                )
+
+    exit_code = _report(results, spent, failures)
     _write(exit_code)
     if args.out:
         print(f"\nWrote {args.out}")
@@ -471,7 +593,9 @@ def main() -> int:
     return exit_code
 
 
-def _report(results: dict[str, dict[str, dict]], spent: float) -> int:
+def _report(
+    results: dict[str, dict[str, dict]], spent: float, failures: list[str]
+) -> int:
     print("\n" + "=" * 64)
     print("SPREAD")
     print("=" * 64)
@@ -482,15 +606,23 @@ def _report(results: dict[str, dict[str, dict]], spent: float) -> int:
     # a control — i.e. whether a gate is even answerable here. A single-instruction
     # shard cannot answer it, and must not print a verdict that says it did.
     any_comparable = False
+    # Whether any passing model had too few seeded instructions to say anything
+    # about instruction-vs-instruction — the question Phase 2 actually rests on.
+    axis_untested = False
 
     for model_slug, rows in results.items():
+        if not rows:
+            # Zero completed runs for this model. max() on the empty dict below
+            # would raise and take the whole report down with it.
+            print(f"\n{model_slug}: no completed runs — nothing to compare.")
+            continue
         invalid = [s for s, r in rows.items() if not r["valid"]]
         any_invalid = any_invalid or bool(invalid)
 
         rets = {s: r["return_pct"] for s, r in rows.items()}
         spread = max(rets.values()) - min(rets.values())
         stdev = statistics.pstdev(list(rets.values()))
-        print(f"\n{model_slug}: spread {spread:.2f}pp, stdev {stdev:.2f}pp")
+        print(f"\n{model_slug}: spread {spread:.2f}pp (all runs), stdev {stdev:.2f}pp")
         for slug, ret in sorted(rets.items(), key=lambda kv: -kv[1]):
             marker = "  (control)" if slug.startswith("control_") else ""
             flag = "" if rows[slug]["valid"] else "  ⚠ INVALID"
@@ -512,7 +644,28 @@ def _report(results: dict[str, dict[str, dict]], spent: float) -> int:
             print("  a control is only meaningful *positioned against* seeded returns.")
             print("  Merge with the seeded runs before reading any gate off this.")
             continue
-        any_comparable = any_comparable or bool(controls)
+        if not controls:
+            continue
+        any_comparable = True
+
+        # Measured over the SEEDED runs alone. The all-runs `spread` above
+        # includes the control, so using it collapsed the gate's two conditions
+        # into one: five identical seeded instructions plus one far-off control
+        # produced a 3.5pp "spread", cleared the >=1pp test, and printed
+        # "separates instructions" for a dead axis — exactly what the control
+        # exists to catch.
+        seeded_spread = max(seeded) - min(seeded) if len(seeded) > 1 else None
+        if seeded_spread is None:
+            print(
+                f"  seeded spread: n/a — only {len(seeded)} seeded instruction ran, so "
+                "instruction-vs-instruction is UNTESTED"
+            )
+        else:
+            print(
+                f"  seeded spread: {seeded_spread:.2f}pp across {len(seeded)} instructions"
+            )
+
+        margins: dict[str, float] = {}
         for cslug, cret in controls.items():
             # Margin, not a bare boundary test. `cret < min(seeded)` is true when
             # the control beats the best seeded run by 0.01pp — noise wearing the
@@ -521,21 +674,45 @@ def _report(results: dict[str, dict[str, dict]], spent: float) -> int:
             # `payload.period !== 'live'` banner check in leaderboard.js: a
             # boundary that inverts its own meaning at small margins.
             margin = max(min(seeded) - cret, cret - max(seeded))
-            outlier = margin >= CONTROL_MARGIN_PP
+            margins[cslug] = margin
             rank = sorted(rets.values(), reverse=True).index(cret) + 1
             verdict = (
                 "OUTLIER (good)"
-                if outlier
+                if margin >= CONTROL_MARGIN_PP
                 else f"NOT SEPARATED (margin {margin:+.2f}pp < {CONTROL_MARGIN_PP}pp)"
             )
             print(
                 f"  control {cslug}: {cret:+.2f}% — rank {rank}/{len(rets)}, {verdict}"
             )
-            if spread >= 1.0 and outlier:
-                any_pass = True
+
+        # ALL controls, not any. One nonsense instruction landing mid-pack IS the
+        # dead-axis result, and a second control landing clear does not cancel it.
+        all_separated = all(m >= CONTROL_MARGIN_PP for m in margins.values())
+        # Distance from the seeded band to the *nearest* control — the actual
+        # "an instruction moved the return by this much" quantity.
+        signal = min(margins.values())
+        axis_ok = seeded_spread is None or seeded_spread >= 1.0
+
+        if all_separated and signal >= 1.0 and axis_ok:
+            any_pass = True
+            axis_untested = axis_untested or seeded_spread is None
+        elif all_separated and signal >= 1.0 and not axis_ok:
+            print(
+                f"  ⚠ controls separate ({signal:.2f}pp), but the seeded instructions do "
+                f"not separate from each other ({seeded_spread:.2f}pp < 1pp): the model "
+                "responds to HAVING an instruction, not to its content. A Phase 2 board "
+                "built on this ranks noise."
+            )
 
     print("\n" + "=" * 64)
     print(f"Total spend this run: ${spent:.2f}")
+    if failures:
+        print(f"GATE: INCONCLUSIVE — {len(failures)} run(s) failed outright:")
+        for failure in failures:
+            print(f"  - {failure}")
+        print("The instruction set is incomplete, so no verdict is available from it.")
+        print("=" * 64)
+        return EXIT_INCONCLUSIVE
     if any_invalid:
         print("GATE: INCONCLUSIVE — at least one run was not driven by the model.")
         print("Fix credentials/billing and re-run. Do NOT read this as a FAIL:")
@@ -543,8 +720,14 @@ def _report(results: dict[str, dict[str, dict]], spent: float) -> int:
         print("=" * 64)
         return EXIT_INCONCLUSIVE
     if any_pass:
-        print("GATE: PASS — a model separates instructions by >=1pp AND its")
-        print("control lands outside the seeded range.")
+        print("GATE: PASS — for at least one model, EVERY control lands >=1pp outside")
+        print("the seeded range, and the seeded instructions do not collapse together.")
+        if axis_untested:
+            print("")
+            print("NOTE: only one seeded instruction ran, so this licenses exactly")
+            print("'an instruction moves the return' — NOT 'instructions can be ranked")
+            print("against each other', which is what Phase 2 actually needs. Run two")
+            print("plausible instructions against each other before building on it.")
         print("=" * 64)
         return EXIT_PASS
     if not any_comparable:

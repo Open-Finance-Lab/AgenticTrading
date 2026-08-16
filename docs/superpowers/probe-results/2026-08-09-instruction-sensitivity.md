@@ -32,6 +32,19 @@ noise floor is measured rather than assumed.
 
 All three cleared H6 (`MIN_LLM_DECISION_COVERAGE = 0.95`), so every curve here is publishable.
 
+> **The returns above were computed with the probe's pre-review denominator** —
+> `curve[-1]/curve[0] − 1`, where `curve[0]` is equity *after* the first step's trades — and
+> the review of this PR replaced it with the board's own definition,
+> `(final − initial_capital) / initial_capital`. The old denominator differs per instruction
+> (an instruction that deploys capital immediately gets a smaller base than one that holds
+> cash), so a slice of the measured spread was apparatus rather than signal. The raw curves
+> were not persisted to the repo, so these three figures **cannot be re-derived without
+> re-running the leg**. At $100k the first-step drift is a fraction of a percent against a
+> 3.61pp signal and a 0.20pp noise floor, so the 18× verdict is not in question — but treat
+> the exact decimals as definition-dependent, and quote future runs off the corrected metric.
+> This is the same class of error as the capital mismatch below, caught before it mattered
+> rather than after.
+
 The pass holds on the strict reading, not just the naive one. The plan warns that a spread can
 come from *having* an instruction rather than from its content; here the two controls — same
 nonsense instruction, same seed, same temperature — land 0.20pp apart, and the seeded run sits
@@ -185,6 +198,34 @@ Verified against the real window: **blocks at $10,000** (2.49%, 6/30 unbuyable),
 $100,000** (0.25%, 0/30), and returns `EXIT_CONFIG` without crashing on empty bars or zero
 capital. The guard would have refused both legs before a cent was spent.
 
+### Further defects, found reviewing this PR and fixed in it
+
+The capital guard above was the first pass. A review of the script found nine more, in three
+families — all fixed in this branch:
+
+**It could still have dirtied the prod seed database.** The `DATABASE_PATH` redirect used
+`os.environ.setdefault` *after* `load_dotenv`, and `.env.example` ships
+`DATABASE_PATH=dashboard/storage/data/backtest.db` **uncommented** (line 204). On any checkout
+whose `.env` came from that template the setdefault was a no-op and the backend's lazy
+`CREATE TABLE`/`ALTER` ran against the committed prod DB — issue #244's exact trap. Reproduced by
+checksum (the file genuinely changed), then fixed by forcing the assignment, matching
+`backfill_runs_to_postgres.py:117`.
+
+**It could lose runs it had already paid for.** `_write` ran only after the whole loop, so an
+exception in any single run discarded every completed one; and `_write` itself raised on a
+missing parent directory. Both now: persist after every completed run, `mkdir(parents=True)`, and
+a `_write` that dumps to stdout rather than throwing. A failed run is recorded and the leg
+continues, with the verdict forced to INCONCLUSIVE.
+
+**The gate could pass on a dead axis.** The `≥1pp` test used the spread across *all* runs, which
+includes the control — so five identical seeded instructions plus one far-off control cleared it
+and printed "separates instructions", the precise outcome the control exists to detect. Spread is
+now measured over seeded runs alone; **every** control must clear the margin (was: any); and when
+only one seeded instruction ran, PASS prints an explicit note that instruction-vs-instruction is
+untested. Also fixed: the resolution guard failed *open and silently* when no price could be read,
+`opens[len//2]` was the upper-middle rather than the median, and the sampled price came from
+`reference_start_date` — a month before the window whose resolution was being judged.
+
 Still open, and the more general form: a probe that quotes a stored run should **assert the
 stored run's parameters match its own** (`initial_equity`, data feed, window) rather than trusting
 that the config which produced them is the config it reads. Same shape as the feed-drift trap
@@ -208,6 +249,14 @@ exact comparison the board exists to make — with `equal_weight_djia` and `buy_
 Display is unaffected — `service.py:1205` reads each row's stored `initial_equity` — so this stays
 invisible until someone refreshes. Dormant, not live: the daily cron is paused as of PR #352 and
 `LEADERBOARD_DAILY_AUTO_DEPLOY` is off.
+
+**`strategy_prompt` lands in the same hole, and this PR is what puts it there.** The key does not
+include it either, so editing an Open Track entry's instruction and redeploying returns the cached
+row — publishing the *old* instruction's curve under the *new* instruction's name. Nothing sets
+the key in `leaderboard.json` yet, so it is latent rather than live, and widening the cache key is
+#365's fix rather than a second one. What this PR does do is close the *auditability* half:
+`_llm_run_metadata` now records the instruction the strategy actually ran with, so a substituted
+curve is at least detectable after the fact instead of leaving no trace at all.
 
 ## Gate application
 

@@ -9,7 +9,15 @@ behaviour for the seven published Model Track entries.
 
 import pytest
 
-from dashboard.backend.domain.leaderboard.strategies.llm_agent import LLMAgentStrategy
+from dashboard.backend.domain.leaderboard.strategies import llm_agent
+from dashboard.backend.infrastructure.market_data.profiles import ALPACA, get_market_profile
+
+# Imported as a module because `_drive_one_step` monkeypatches PortfolioManager on
+# it; the alias keeps the cases reading as plain constructor calls. One import form
+# only — importing the module *and* `from`-importing the class trips
+# CodeQL py/import-and-import-from.
+LLMAgentStrategy = llm_agent.LLMAgentStrategy
+MAX_STRATEGY_PROMPT_CHARS = llm_agent.MAX_STRATEGY_PROMPT_CHARS
 
 BASE_CONFIG = {
     "strategy": "llm_agent",
@@ -34,7 +42,9 @@ class FakeManager:
     output_tokens = 0
 
     def __init__(self, **kwargs):
-        self.init_kwargs = kwargs
+        # On the class, not the instance: _run_decision_loop constructs the
+        # manager itself, so a test can only see these through the fake.
+        FakeManager.init_kwargs_seen = kwargs
 
     def get_portfolio_state(self, market_data, price_cache, ts):
         return {}
@@ -55,10 +65,9 @@ class FakeManager:
 
 def _drive_one_step(monkeypatch, config):
     """Run a single decision step and return the kwargs the manager saw."""
-    import dashboard.backend.domain.leaderboard.strategies.llm_agent as mod
-
     FakeManager.seen = {}
-    monkeypatch.setattr(mod, "PortfolioManager", FakeManager)
+    FakeManager.init_kwargs_seen = {}
+    monkeypatch.setattr(llm_agent, "PortfolioManager", FakeManager)
 
     strategy = LLMAgentStrategy(config)
     strategy._run_decision_loop(
@@ -68,6 +77,7 @@ def _drive_one_step(monkeypatch, config):
         data={},
         price_cache={},
         initial_capital=10_000.0,
+        model_id=config.get("model_id"),
     )
     return FakeManager.seen
 
@@ -123,6 +133,86 @@ def test_extraction_preserved_the_other_decision_kwargs(monkeypatch):
     assert seen.get("temperature") == 0
 
 
+@pytest.mark.parametrize("bad", [250, 12.5, ["a"], {"a": 1}, True])
+def test_non_string_instruction_raises_a_typed_error(bad):
+    """`get_strategy()` runs on every public GET /api/v1/leaderboard.
+
+    `_symbols_for_config` and `_config_needs_alpaca` construct every entry to
+    decide the symbol set, so an AttributeError out of `.strip()` here 500s the
+    whole board anonymously — and per the prod notes a bare 500 reaches the
+    browser as a CORS error, which is unreadable as a diagnosis.
+    """
+    with pytest.raises(ValueError, match="strategy_prompt must be a string"):
+        LLMAgentStrategy({**BASE_CONFIG, "strategy_prompt": bad})
+
+
+def test_overlong_instruction_is_refused():
+    """The text rides every LLM call in the run, not one request.
+
+    The probe write-up's finding #2 is the live case: an instruction that makes
+    the model emit one action per DJIA symbol overran LLM_MAX_OUTPUT_TOKENS,
+    truncated 18 steps into rule-based fallback, failed H6 at 89.4% coverage —
+    and was the most expensive run in the leg, because truncated calls bill full.
+    """
+    with pytest.raises(ValueError, match="over the 4000 limit"):
+        LLMAgentStrategy(
+            {**BASE_CONFIG, "strategy_prompt": "x" * (MAX_STRATEGY_PROMPT_CHARS + 1)}
+        )
+
+
+def test_instruction_cap_matches_the_api_surface():
+    """The two constants are copies — domain/ may not import api/.
+
+    Without this, raising the cap on /backtest/run would silently leave the
+    leaderboard path on the old number (or vice versa).
+    """
+    from dashboard.backend.api.routers.backtests import (
+        MAX_STRATEGY_PROMPT_CHARS as API_CAP,
+    )
+
+    assert MAX_STRATEGY_PROMPT_CHARS == API_CAP
+
+
+def test_explicit_non_default_mode_conflicts_with_an_instruction():
+    """`create_prompt` ignores `mode` once a custom prompt is set.
+
+    A buy_and_hold entry carrying an instruction would publish a curve labelled
+    with a mode whose prompt body was never sent.
+    """
+    with pytest.raises(ValueError, match="cannot be combined with strategy_prompt"):
+        LLMAgentStrategy(
+            {**BASE_CONFIG, "mode": "buy_and_hold", "strategy_prompt": "Buy the dip."}
+        )
+
+
+def test_explicit_safe_trading_mode_is_not_a_conflict():
+    """Replacing the safe_trading body is the point of the feature, not a bug.
+
+    Guards the conflict check against over-firing: every Model Track entry names
+    safe_trading explicitly, so rejecting that pair would refuse the only
+    combination Phase 2 will ever ship.
+    """
+    strategy = LLMAgentStrategy(
+        {**BASE_CONFIG, "mode": "safe_trading", "strategy_prompt": "Buy the dip."}
+    )
+    assert strategy.strategy_prompt == "Buy the dip."
+
+
+def test_extraction_preserved_the_manager_construction(monkeypatch):
+    """The extraction moved the PortfolioManager() call too, not just the loop.
+
+    `t_plus_one_enabled` comes from the ALPACA market profile: drop it and every
+    published curve silently re-runs under settlement semantics its market does
+    not have, while all the kwarg assertions above still pass. Asserted against
+    the profile rather than a literal so a profile change moves both together.
+    """
+    _drive_one_step(monkeypatch, dict(BASE_CONFIG))
+
+    expected = get_market_profile(ALPACA).t_plus_one_enabled
+    assert FakeManager.init_kwargs_seen.get("initial_capital") == 10_000.0
+    assert FakeManager.init_kwargs_seen.get("t_plus_one_enabled") == expected
+
+
 def test_published_entries_send_no_instruction(monkeypatch):
     """A Model Track entry must reach the call with strategy_prompt=None.
 
@@ -131,4 +221,9 @@ def test_published_entries_send_no_instruction(monkeypatch):
     branch that produced the published curves.
     """
     seen = _drive_one_step(monkeypatch, dict(BASE_CONFIG))
-    assert seen.get("strategy_prompt") is None
+    # Membership first. `seen.get("strategy_prompt") is None` is equally true when
+    # the keyword was never passed at all, so on its own it passes with
+    # `strategy_prompt=self.strategy_prompt` deleted from llm_agent.py — i.e. it
+    # could not fail for the reason this docstring gives.
+    assert "strategy_prompt" in seen
+    assert seen["strategy_prompt"] is None
