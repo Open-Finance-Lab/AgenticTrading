@@ -103,15 +103,13 @@ export function Hero() {
           {/* The one-per-surface gloss on "agent". The headline uses the word
               before anything else on the page defines it, and the board beside
               it is the only other thing above the fold — so the definition has
-              to land here or not at all. */}
+              to land here or not at all. One line, not two: at 1/3 column width
+              the second clause wrapped to three lines and made the copy column
+              taller than the card, which pushes the card's bottom edge below the
+              fold (the hero row is `items-center`). */}
           <p className="max-w-xl mx-auto lg:mx-0 mb-5 text-base text-foreground/85 leading-relaxed">
             Write your trading idea in plain English. An agent is an AI trading assistant that
-            follows your written instruction — it trades the idea hour by hour, measured against
-            buy-and-hold and the index.
-          </p>
-          <p className="max-w-xl mx-auto lg:mx-0 mb-8 text-sm text-foreground/75">
-            Every test here uses simulated money. Real money is involved only if you explicitly
-            connect a brokerage account and turn on live trading.
+            follows your written instruction.
           </p>
           <motion.div
             className="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-4"
@@ -128,6 +126,14 @@ export function Hero() {
               {PRIMARY_LANDING_CTA.label}
             </Button>
           </motion.div>
+          {/* Verbatim, and pinned twice — by the verbatim-presence guard and by
+              the _CLAIM_DISCLAIMERS allowlist, whose staleness check fails if
+              the wording drifts. Below the CTA is small print, not a demotion:
+              it answers the question the button raises. */}
+          <p className="max-w-xl mx-auto lg:mx-0 mt-5 text-sm text-foreground/75">
+            Every test here uses simulated money. Real money is involved only if you explicitly
+            connect a brokerage account and turn on live trading.
+          </p>
         </div>
 
         {/* The board, not a product screenshot. It used to sit four screens down
