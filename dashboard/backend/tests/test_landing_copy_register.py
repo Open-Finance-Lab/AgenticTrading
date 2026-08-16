@@ -23,10 +23,7 @@ _INDEX_HTML = _FRONTEND / "index.html"
 _LOCAL_REF = re.compile(r'(?:src|href)="(/(?:assets|images)/[^"?#]+)')
 _BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
 
-_NO_REAL_MONEY_SENTENCE = (
-    "Every test here uses simulated money. Real money is involved only if you "
-    "explicitly connect a brokerage account and turn on live trading."
-)
+_NO_REAL_MONEY_SENTENCE = "No real money. Simulated money only."
 
 
 def _index_html() -> str:
@@ -229,13 +226,16 @@ _LANDING_HOME = _RACE_TSX.parent
 # leaving a file unguarded is not.
 _CLAIM_DISCLAIMERS = (
     # Hero's standing safety line, pinned verbatim by this suite (above) and by
-    # test_frontend_shelves. It is not an over-claim: the brokered path is real
-    # (api/routers/robinhood_live.py, mounted at api/router.py; ROBINHOOD_EXECUTE
-    # defaults false), and this sentence is the one place that states the
-    # condition accurately. Banning the phrase it needs would delete the
-    # disclaimer in order to satisfy the guard against the claim.
-    "Every test here uses simulated money. Real money is involved only if you "
-    "explicitly connect a brokerage account and turn on live trading.",
+    # test_landing_chart_first. It denies the claim outright rather than stating
+    # the brokered path's condition -- accurate for what the landing sells, which
+    # is simulated end to end (`execution/paper_backend.py` is still a stub). The
+    # opt-in brokered path does exist (api/routers/robinhood_live.py, mounted at
+    # api/router.py; ROBINHOOD_EXECUTE defaults false), and the /app surface still
+    # carries the longer conditional sentence that states its condition -- see
+    # test_frontend_shelves, which pins it there. Banning the phrase this line
+    # needs would delete the disclaimer in order to satisfy the guard against the
+    # claim.
+    "No real money. Simulated money only.",
     # Hero's gloss on what a Lab paper-trading run is. Accurate as written: the
     # prices are real, the money is not, and the sentence says exactly that.
     '<span className="text-primary font-semibold">paper trading</span> '

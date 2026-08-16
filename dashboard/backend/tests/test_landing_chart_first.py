@@ -40,10 +40,8 @@ def _strip_comments(source: str) -> str:
 _HERO = _strip_comments((_HOME / "Hero.tsx").read_text(encoding="utf-8"))
 _BOARD = _strip_comments((_HOME / "BoardPreview.tsx").read_text(encoding="utf-8"))
 
-_NO_REAL_MONEY = (
-    "Every test here uses simulated money. Real money is involved only if you "
-    "explicitly connect a brokerage account and turn on live trading."
-)
+_BOARD_CHALLENGE = "Can you beat the strategies and baselines on the left?"
+_NO_REAL_MONEY = "No real money. Simulated money only."
 
 
 def _collapse(source: str) -> str:
@@ -59,18 +57,28 @@ def test_the_hero_lede_is_one_line_and_still_glosses_agent():
     already inside the product. So this trims to one line; it does not drop.
     """
     hero = _collapse(_HERO)
-    assert "An agent is an AI trading assistant that follows your written instruction" in hero
+    assert "Agents here are AI trading assistants that follow your written instruction" in hero
     assert "it trades the idea hour by hour, measured against buy-and-hold and the index" not in hero, (
         "the second clause is what makes this two lines at 1/3 column width"
     )
 
 
-def test_the_simulated_money_sentence_survives_verbatim_as_small_print():
-    """Pinned twice -- by test_no_real_money_sentence_is_present_verbatim and by
-    the _CLAIM_DISCLAIMERS allowlist, whose staleness check fails if the wording
-    drifts. Moving it between components is fine; rewording it is not.
+def test_the_board_challenge_and_its_small_print_both_ship():
+    """The challenge points at the board; the line under it is what stops that
+    from reading as an invitation to risk anything, so the two travel together.
+
+    The second line is pinned three times -- here, by
+    test_no_real_money_sentence_is_present_verbatim (which reads the shipped
+    bundle, not this source), and by the _CLAIM_DISCLAIMERS allowlist, whose
+    staleness check fails if the wording drifts. It is on that allowlist because
+    it contains the exact phrase the brokered-claim scan bans, in order to deny
+    it: reword it without updating the allowlist and the ban re-arms on the
+    disclaimer itself. Moving either line between components is fine; rewording
+    is not.
     """
-    assert _NO_REAL_MONEY in _collapse(_HERO)
+    hero = _collapse(_HERO)
+    assert _BOARD_CHALLENGE in hero
+    assert _NO_REAL_MONEY in hero
 
 
 def test_the_board_column_is_two_thirds_and_uncapped():

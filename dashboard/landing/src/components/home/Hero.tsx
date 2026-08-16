@@ -115,16 +115,16 @@ export function Hero() {
               <HeadlineWords words={HEADLINE_LINE_2} startDelay={line2Delay} />
             </span>
           </h1>
-          {/* The one-per-surface gloss on "agent". The headline uses the word
-              before anything else on the page defines it, and the board beside
-              it is the only other thing above the fold — so the definition has
-              to land here or not at all. One line, not two: at 1/3 column width
-              the second clause wrapped to three lines and made the copy column
-              taller than the card, which pushes the card's bottom edge below the
-              fold (the hero row is `items-center`). */}
+          {/* The one-per-surface gloss on "agent", then the invitation. The
+              headline uses the word before anything else on the page defines it,
+              and the board beside it is the only other thing above the fold — so
+              the definition has to land here or not at all. Two short sentences
+              and no more: at 1/3 column width a third clause wraps and makes the
+              copy column taller than the card, which pushes the card's bottom
+              edge below the fold (the hero row is `items-center`). */}
           <p className="max-w-xl mx-auto lg:mx-0 mb-5 text-base text-foreground/85 leading-relaxed">
-            Write your trading idea in plain English. An agent is an AI trading assistant that
-            follows your written instruction.
+            Agents here are AI trading assistants that follow your written instruction. You may
+            write your trading strategy in plain English.
           </p>
           <motion.div
             className="flex flex-col sm:flex-row items-center justify-center lg:justify-start gap-4"
@@ -141,13 +141,19 @@ export function Hero() {
               {PRIMARY_LANDING_CTA.label}
             </Button>
           </motion.div>
-          {/* Verbatim, and pinned twice — by the verbatim-presence guard and by
-              the _CLAIM_DISCLAIMERS allowlist, whose staleness check fails if
-              the wording drifts. Below the CTA is small print, not a demotion:
-              it answers the question the button raises. */}
+          {/* The challenge the board raises, and the one line of small print
+              that keeps it from reading as an invitation to risk anything. The
+              second line is pinned verbatim by the _CLAIM_DISCLAIMERS allowlist,
+              whose staleness check fails if the wording drifts: it names the
+              exact phrase the brokered-claim scan bans, in order to deny it, so
+              a reword that leaves the allowlist behind re-arms the ban on the
+              disclaimer itself. Below the CTA on purpose — it answers the
+              question the button raises rather than competing with it. */}
           <p className="max-w-xl mx-auto lg:mx-0 mt-5 text-sm text-foreground/75">
-            Every test here uses simulated money. Real money is involved only if you explicitly
-            connect a brokerage account and turn on live trading.
+            Can you beat the strategies and baselines on the left?
+          </p>
+          <p className="max-w-xl mx-auto lg:mx-0 mt-1.5 text-xs text-foreground/60">
+            No real money. Simulated money only.
           </p>
         </div>
 
