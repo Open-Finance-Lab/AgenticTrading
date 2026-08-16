@@ -289,19 +289,27 @@ def test_a_missing_builder_yields_no_series_rather_than_throwing():
 
 @_requires_node
 def test_mixed_initial_equity_does_not_break_the_chart():
-    """The board's rows do NOT share a capital base, so the chart cannot
-    assume one.
+    """`homeChartSeries` normalises per series, so a payload whose rows carry
+    different capital bases still plots on one axis.
 
-    `dashboard/config/leaderboard.json` says `initial_capital: 10000` while
-    every published curve was computed at $100,000, and `_find_cached_run`
-    (`service.py:615`) does not key on `initial_equity` -- so one
-    `?refresh=true` recomputes the five `auto_compute` baselines at $10k and
-    leaves the seven model entries at $100k (issue #365, open). Plotted in
-    dollars that renders as a 10x scale break: models near 100000, the
-    reference baselines flat on the floor at 10000.
+    DEFENCE IN DEPTH, NOT A LIVE BUG -- and the distinction is the point of this
+    docstring. `/api/v1/leaderboard` does not currently emit the payload built
+    below: `get_leaderboard` rescales every entry by its own stored
+    `initial_equity` (`service.py:1204-1211`) and then reports the same
+    `display_capital` as every entry's `initial_equity` (`:1240`), so the bases
+    agree on the wire and a dollar axis would draw no scale break. That was
+    measured against a hand-built mixed-capital database, not assumed.
 
-    This is the case the old fixture could not express, because it hardcoded
-    one `initial_equity` for every row.
+    An earlier draft of this docstring claimed the opposite -- that issue #365
+    makes a 10x break reachable today. It does not. #365 is real but its damage
+    is to the RETURNS: a baseline recomputed at $10k trades in a much coarser
+    share quantum (one DJIA share is ~2.5% of equity, several names unbuyable),
+    so its curve genuinely differs from the $100k curves it is ranked against.
+    No y-axis repairs that, and this test does not claim to.
+
+    What this pins is that `homeChartSeries` is correct as a PURE FUNCTION of
+    its input, and never silently acquires a dependency on the backend
+    happening to pre-normalise for it.
     """
     entries = [
         _entry(

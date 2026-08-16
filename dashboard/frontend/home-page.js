@@ -1469,12 +1469,27 @@ function homeChartSeries(entries, build) {
         .map((label) => {
             const style = styles[label] || {};
             const raw = curves[label] || [];
-            // Fractions, not dollars. Each entry carries its OWN
-            // `initial_equity` and they do not currently agree across the
-            // board (issue #365), so a shared dollar axis would draw a $10k
-            // baseline against $100k models as a flat line on the floor.
-            // Dividing by each series' own base makes the comparison the
-            // chart exists to make. Same formula and same fallback order as
+            // Fractions, not dollars -- because of what the labels MEAN, not
+            // for scale safety. The rank list beside this chart is its key and
+            // already renders percent (`homeFormatReturnPct`); and every dollar
+            // level here is a x0.1 rescale of a $100,000 backtest, since all 12
+            // published runs stored `initial_equity = 100000` while
+            // leaderboard.json declares `initial_capital: 10000`
+            // (service.py `scale = display_capital / stored_initial`). So a
+            // "$10,749" tick names an account that never existed, while
+            // `cumulative_return` comes off the stored run untouched by that
+            // rescale -- +7.49% is exactly what ran.
+            //
+            // Dividing per series rather than by one shared constant is
+            // DEFENCE IN DEPTH on this function, not a live fix for issue #365:
+            // get_leaderboard reports the same `display_capital` as every
+            // entry's `initial_equity`, so the bases agree today and a dollar
+            // axis would NOT draw a scale break. Do not re-derive that claim --
+            // it was measured and is false. #365's real damage is to the
+            // returns (a $10k re-run trades in a coarser share quantum), which
+            // no choice of y-axis can repair.
+            //
+            // Same formula and same fallback order as
             // `transformLeaderboardChartData`'s 'cumulative' branch in
             // js/leaderboard.js -- pinned as an equivalence, not by eye, in
             // `test_home_chart_matches_the_leaderboards_percent_formula`.
