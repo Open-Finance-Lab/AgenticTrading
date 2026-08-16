@@ -80,7 +80,7 @@ export function BoardPreview() {
     <div className="bg-card border border-card-border rounded-xl shadow-2xl overflow-hidden flex flex-col">
       <div className="px-5 pt-5 pb-4 border-b border-border">
         <div className="flex items-start justify-between gap-3 mb-2">
-          <h2 className="text-lg font-bold flex items-center gap-2 min-w-0">
+          <h2 className="text-xl font-bold flex items-center gap-2 min-w-0">
             <LineChartIcon className="w-5 h-5 text-primary shrink-0" aria-hidden="true" />
             Where the AI models stand
           </h2>
@@ -88,20 +88,36 @@ export function BoardPreview() {
             Illustrative example
           </span>
         </div>
-        <p className="text-xs text-foreground/65 leading-relaxed">
-          Each line is one AI model&apos;s account value over the past week. The dashed lines are
-          buy-and-hold and the index.
+        {/* One line at this card width, and that is load-bearing: the chart's
+            clamp subtracts this bar's height. Two lines here invalidates the
+            390 constant below and the card goes half-visible without anything
+            failing. Naming no window is also deliberate — the sample curves do
+            not come from the range the old wording claimed. */}
+        <p className="text-sm text-foreground/65 leading-relaxed">
+          Each line is one AI model&apos;s account value. Dashed lines are buy-and-hold and the index.
         </p>
       </div>
 
-      <div className="h-[210px] md:h-[240px] w-full px-3 pt-4">
+      {/* An inline style, not an arbitrary Tailwind value: the formula's commas
+          and parentheses get mangled by the arbitrary-value parser, and this
+          constant is load-bearing enough to want readable in source.
+
+          390 = the card's own non-chart height (~227px: caption bar, chip
+          strip, detail line, padding) + 120px --landing-chrome-height + ~43px
+          fold margin. RE-DERIVE IT if the caption or chip strip changes height.
+          A shared clamp with /app was measured and rejected: it puts this card
+          25-46px below the fold at four ordinary laptop heights. */}
+      <div
+        className="w-full px-3 pt-4"
+        style={{ height: "clamp(300px, calc(100dvh - 390px), 520px)" }}
+      >
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={SAMPLE_CURVES} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
-            <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={11} tickLine={false} axisLine={false} />
+            <XAxis dataKey="day" stroke="hsl(var(--muted-foreground))" fontSize={14} tickLine={false} axisLine={false} />
             <YAxis
               stroke="hsl(var(--muted-foreground))"
-              fontSize={11}
+              fontSize={14}
               tickLine={false}
               axisLine={false}
               domain={[960, 1240]}
@@ -121,40 +137,40 @@ export function BoardPreview() {
       </div>
 
       <div className="px-5 pb-5 pt-3">
-        <div className="grid grid-cols-12 text-[11px] font-mono text-muted-foreground pb-2 px-2">
-          <div className="col-span-2">Rank</div>
-          <div className="col-span-7">AI model</div>
-          <div className="col-span-3 text-right">Return</div>
-        </div>
-        <div className="space-y-1.5">
+        {/* DEMOTION, NOT DELETION. The chart ships no Recharts legend — at this
+            card's width a five-item one wraps to two rows and pushes the plot
+            area down — so this strip is the only thing linking a curve's colour
+            to a model's name. Delete it and five unnamed lines are left. The
+            full standings, with ranks, live in Race.tsx, which is the detail
+            home.
+
+            Kept in THIS FILE deliberately: test_landing_copy_register.py scopes
+            its corpus to files containing the standings constant and requires a
+            Recharts data key in it, and the only ones are on the line elements
+            above. Splitting this strip into its own component reddens that
+            guard though nothing was deleted. */}
+        <div className="flex flex-nowrap items-center gap-x-4 gap-y-2 overflow-hidden text-base">
           {SAMPLE_STANDINGS.map((item) => (
-            <div
-              key={item.rank}
-              className={`grid grid-cols-12 items-center px-2 py-2 border rounded-lg text-sm ${
-                item.highlight ? "bg-primary/10 border-primary/40" : "bg-background border-border"
-              }`}
-            >
-              <div className="col-span-2 flex items-center gap-2 font-mono font-bold text-muted-foreground">
-                <span
-                  className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
-                  style={{ backgroundColor: item.swatch }}
-                  aria-hidden="true"
-                />
-                #{item.rank}
-              </div>
-              <div className="col-span-7 font-medium truncate pr-2 text-foreground">
-                {item.name}
-              </div>
-              <div
-                className={`col-span-3 text-right font-mono font-bold ${
+            <span key={item.rank} className="flex items-center gap-2 whitespace-nowrap">
+              <span
+                className="inline-block w-2.5 h-2.5 rounded-full shrink-0"
+                style={{ backgroundColor: item.swatch }}
+                aria-hidden="true"
+              />
+              <span className="font-medium text-foreground">{item.name}</span>
+              <span
+                className={`font-mono font-bold ${
                   item.ret.startsWith("-") ? "text-destructive" : "text-positive"
                 }`}
               >
                 {item.ret}
-              </div>
-            </div>
+              </span>
+            </span>
           ))}
         </div>
+        <p className="mt-3 text-sm text-foreground/65">
+          Account value over the competition window.
+        </p>
       </div>
     </div>
   );

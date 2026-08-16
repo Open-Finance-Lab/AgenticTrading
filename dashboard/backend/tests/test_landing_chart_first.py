@@ -102,3 +102,47 @@ def test_the_chart_column_escapes_the_container_on_its_left_edge_only():
     gutter is 0px at 1280 and below.
     """
     assert "lg:ms-[calc((100%-100vw)/2)]" in _HERO
+
+
+def test_the_landing_chart_uses_its_own_measured_clamp():
+    """`clamp(320px, 56vh, 520px)` -- the first draft's number, shared with /app
+    -- puts the card 25-46px BELOW the fold at 1440x768, 1366x768, 1280x800 and
+    1280x720. All four are ordinary laptop heights. The replacement is the
+    largest formula with non-negative fold slack at every tested viewport.
+
+    The 390 is derived, not taste: the card's own non-chart height (~227px:
+    caption bar, chip strip, detail line, padding) + 120px
+    --landing-chrome-height + ~43px fold margin. RE-DERIVE IT if the caption or
+    chip strip changes height -- the failure mode is a silently half-visible
+    card, not a broken build.
+    """
+    assert "clamp(300px,calc(100dvh-390px),520px)" in _BOARD.replace(" ", "")
+    assert "56vh" not in _BOARD, "the first draft's clamp fails at four viewports"
+    assert "h-[210px]" not in _BOARD and "md:h-[240px]" not in _BOARD
+
+
+def test_landing_chart_axis_ticks_are_14px():
+    assert _BOARD.count("fontSize={14}") == 2, "both XAxis and YAxis"
+    assert "fontSize={11}" not in _BOARD
+
+
+def test_the_panel_title_is_text_xl():
+    """Spec §2. The card is now two-thirds of the hero; a text-lg title reads as
+    a widget label on it."""
+    assert 'className="text-xl font-bold flex items-center gap-2 min-w-0"' in _BOARD
+
+
+def test_the_standings_table_becomes_a_one_row_chip_strip():
+    """Demotion, not deletion: the chart ships no <Legend> (a five-item legend
+    wraps to two rows at this width), so the table is the ONLY thing linking a
+    curve colour to a model name. The chips preserve that swatch-to-curve link
+    at a fraction of the height. The full table already lives in Race.tsx.
+    """
+    board = _BOARD
+    assert "grid-cols-12" not in board, "the 5-row table is what the chart needs the height of"
+    assert "flex-nowrap" in board, "five chips, one row"
+    assert "text-base" in board, "text-sm rows were one of the three reported problems"
+    # The identity link and the guard corpus both depend on these staying here.
+    assert "SAMPLE_STANDINGS" in board
+    assert "dataKey=" in board
+    assert "item.swatch" in board
