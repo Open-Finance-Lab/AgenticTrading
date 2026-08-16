@@ -561,6 +561,27 @@ def test_rank_rows_keep_ending_value_and_sharpe():
     assert "hm-rank-sharpe" in body
 
 
+def test_the_screen_zero_lede_is_a_fact_then_a_call_to_action():
+    """The old sentence did two jobs at once -- glossing "agent" AND pre-empting
+    "is my agent on this list?" -- which is why it read as neither marketing nor
+    a CTA. The no-entry fact is already stated on the board itself
+    ("AI models only - ranked by return"), so the lede is freed to be one plain
+    thing. The gloss drops on this surface: the reader is signed in and inside
+    the app, where the word is glossed throughout.
+    """
+    from dashboard.backend.tests._frontend_source import APP_HTML
+
+    html = re.sub(r"<!--.*?-->", "", APP_HTML, flags=re.DOTALL)
+    assert (
+        "See how the AI models did. Then test your own idea on the same days."
+        in html
+    )
+    assert "in a test of its own" not in html
+    # The fact it used to carry must still be on screen, on the board making the
+    # claim -- otherwise this is a deletion, not a split.
+    assert "AI models only" in html
+
+
 def test_the_series_style_helper_is_an_explicit_cross_file_export():
     """The same seam as the curve builder: home-page.js reads this off `window`
     and falls back to a transparent swatch when it is missing, so a rename
