@@ -61,12 +61,48 @@ def measure_landing(page, width: int, height: int) -> None:
     # the first two viewports and then timed out at the third -- a wait that fails
     # on a coin-flip cannot tell a broken layout from a poll landing badly.
     page.goto(f"{BASE}/", wait_until="load")
+    # WAIT OUT THE ENTRANCE ANIMATION, and key on the TRANSFORM, not on height.
+    #
+    # The hero card mounts under framer-motion with `initial={{scale: 0.95}}`,
+    # delay 0.3s, duration 0.7s. getBoundingClientRect() reports the TRANSFORMED
+    # box, so every measurement taken mid-animation is scaled: 494.0 against a
+    # 520px clamp, 313.5 against 330, 431.3 against 454 -- all of them exactly
+    # 0.95x, a uniform 5% error that reads as a subtle CSS discrepancy rather
+    # than an instrumentation bug.
+    #
+    # A "has the height stopped changing" check does NOT catch it: during the
+    # 0.3s delay the scale sits constant at 0.95, so two consecutive polls agree
+    # and the wait exits on a stationary WRONG value. Only the transform reaching
+    # identity actually means the animation finished.
+    try:
+        page.wait_for_function(
+            """() => {
+                const rc = document.querySelector('.recharts-responsive-container');
+                if (!rc) return false;
+                if (rc.getBoundingClientRect().height <= 0) return false;
+                for (let el = rc; el && el !== document.body; el = el.parentElement) {
+                    const t = getComputedStyle(el).transform;
+                    if (t && t !== 'none' && t !== 'matrix(1, 0, 0, 1, 0, 0)') return false;
+                }
+                return true;
+            }""",
+            timeout=15000,
+        )
+    except PlaywrightTimeoutError:
+        print("  [warn] landing entrance animation never settled; measuring as-is")
     m = page.evaluate(
         """() => {
         const card = document.querySelector('[data-testid="board-preview"]')
             || document.querySelector('#hero .rounded-xl, header .rounded-xl')
             || document.querySelector('main .rounded-xl');
-        const chartBox = card && card.querySelector('.recharts-responsive-container');
+        // THE WRAPPER, NOT THE RECHARTS CONTAINER. The clamp is an inline
+        // style on the wrapper; the container inside it is shorter by the
+        // wrapper's `pt-4` (16px). Measuring the child and comparing it to the
+        // clamp bakes that padding into the expected value invisibly, so the
+        // guard reads 16px low forever and would redden on a padding change
+        // that left the clamp perfectly honoured.
+        const rc = card && card.querySelector('.recharts-responsive-container');
+        const chartBox = rc && rc.parentElement;
         const column = card && card.closest('div[class*="basis-2/3"], div[class*="lg:basis-2/3"]');
         const container = column && column.closest('.container');
         const chips = card && card.querySelector('.flex-nowrap');
@@ -104,13 +140,16 @@ def measure_landing(page, width: int, height: int) -> None:
         f"bottom={bottom:.1f} innerHeight={m['innerHeight']}",
     )
 
-    # The chart's own clamp: clamp(300px, calc(100dvh - 390px), 520px).
+    # The chart's own clamp. The reserve is breakpoint-dependent -- 390px beside
+    # the copy, 480px stacked -- because the card's non-chart height is ~227px
+    # at lg+ and 335px at phone width, where the title, chip and caption wrap.
+    reserve = 390.0 if width >= LG else 480.0
     # Reported as a FAILURE when the container is absent, never skipped: a
     # missing chart is the single worst outcome this pass exists to catch, and a
     # silent skip would render it as a clean run.
     check(m["chart"] is not None, "/ chart container found", str(bool(m["chart"])))
     if m["chart"]:
-        expected = clamp(300.0, height - 390.0, 520.0)
+        expected = clamp(300.0, height - reserve, 520.0)
         actual = m["chart"]["height"]
         check(
             abs(actual - expected) <= 2.0,

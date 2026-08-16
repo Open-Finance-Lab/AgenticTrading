@@ -110,13 +110,27 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
     1280x720. All four are ordinary laptop heights. The replacement is the
     largest formula with non-negative fold slack at every tested viewport.
 
-    The 390 is derived, not taste: the card's own non-chart height (~227px:
-    caption bar, chip strip, detail line, padding) + 120px
-    --landing-chrome-height + ~43px fold margin. RE-DERIVE IT if the caption or
-    chip strip changes height -- the failure mode is a silently half-visible
-    card, not a broken build.
+    Both reserves are derived, not taste, and there are TWO because the card's
+    non-chart height is not one number: ~227px beside the copy at >=lg, but
+    335px stacked at 390px wide, where the title, the "Illustrative example"
+    chip and the caption all wrap.
+
+        lg+     390 = ~227 non-chart + 120 chrome + ~43 fold margin
+        below   480 = 335 non-chart + 132 section padding + ~13 margin
+
+    Measured, not derived: the single desktop constant put the card 77px past
+    the fold at 390x844. RE-DERIVE BOTH if the caption, title or chip strip
+    changes height -- the failure mode is a silently half-visible card, not a
+    broken build.
+
+    The var() indirection is load-bearing and not a tidy-up: the formula's
+    commas defeat Tailwind's arbitrary-VALUE parser, so the breakpoint-dependent
+    number rides an arbitrary PROPERTY instead, which does take a prefix.
     """
-    assert "clamp(300px,calc(100dvh-390px),520px)" in _BOARD.replace(" ", "")
+    board = _BOARD.replace(" ", "")
+    assert "clamp(300px,calc(100dvh-var(--board-chart-reserve)),520px)" in board
+    assert "[--board-chart-reserve:480px]" in board, "the stacked-phone reserve"
+    assert "lg:[--board-chart-reserve:390px]" in board, "the side-by-side reserve"
     assert "56vh" not in _BOARD, "the first draft's clamp fails at four viewports"
     assert "h-[210px]" not in _BOARD and "md:h-[240px]" not in _BOARD
 

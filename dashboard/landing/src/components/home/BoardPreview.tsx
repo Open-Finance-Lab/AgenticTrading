@@ -98,18 +98,32 @@ export function BoardPreview() {
         </p>
       </div>
 
-      {/* An inline style, not an arbitrary Tailwind value: the formula's commas
-          and parentheses get mangled by the arbitrary-value parser, and this
-          constant is load-bearing enough to want readable in source.
+      {/* The formula stays an inline style — its commas and parentheses get
+          mangled by Tailwind's arbitrary-VALUE parser — while the one number
+          that has to change per breakpoint rides an arbitrary PROPERTY, which
+          does take a responsive prefix.
 
-          390 = the card's own non-chart height (~227px: caption bar, chip
-          strip, detail line, padding) + 120px --landing-chrome-height + ~43px
-          fold margin. RE-DERIVE IT if the caption or chip strip changes height.
-          A shared clamp with /app was measured and rejected: it puts this card
-          25-46px below the fold at four ordinary laptop heights. */}
+          TWO RESERVES, BOTH MEASURED, because the card's non-chart height is
+          not one number. Beside the copy at >=lg it is ~227px; stacked at 390px
+          wide it is 335px, because the title, the "Illustrative example" chip
+          and the caption all wrap. One constant cannot serve both, and the
+          desktop one applied to a phone put the card 77px past the fold.
+
+            lg+     390 = ~227 non-chart + 120 chrome + ~43 fold margin
+            below   480 = 335 non-chart + 132 section padding + ~13 margin
+
+          RE-DERIVE BOTH if the caption, the title or the chip strip changes
+          height. The failure mode is a silently half-visible card, not a broken
+          build. A shared clamp with /app was measured and rejected outright: it
+          puts this card 25-46px below the fold at four ordinary laptop heights.
+
+          Below ~667px tall the 300px floor wins and the card overflows again;
+          that is inherent to having a floor, and untested territory here. */}
       <div
-        className="w-full px-3 pt-4"
-        style={{ height: "clamp(300px, calc(100dvh - 390px), 520px)" }}
+        className="w-full px-3 pt-4 [--board-chart-reserve:480px] lg:[--board-chart-reserve:390px]"
+        style={{
+          height: "clamp(300px, calc(100dvh - var(--board-chart-reserve)), 520px)",
+        }}
       >
         <ResponsiveContainer width="100%" height="100%">
           <LineChart data={SAMPLE_CURVES} margin={{ top: 4, right: 10, left: 0, bottom: 0 }}>
