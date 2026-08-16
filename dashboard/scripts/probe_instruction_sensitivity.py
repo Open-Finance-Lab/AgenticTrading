@@ -167,6 +167,52 @@ EXIT_CONFIG = 2
 EXIT_INCONCLUSIVE = 3
 
 
+# A probe is only as good as its resolution. Share counts are integers, so the
+# capital base decides how finely a portfolio can express an allocation — and
+# therefore how small an instruction-driven difference the probe can even see.
+# The 2026-08 legs were run at $10k against board curves computed at $100k: one
+# median DJIA share was 2.49% of equity, 6 of 30 names were unbuyable, and every
+# position collapsed to a 0-or-1-share decision. The instrument was ~4x coarser
+# than the ~0.6pp effect, and both legs had to be thrown away. This check costs
+# nothing and runs before the first billable call.
+MAX_SHARE_FRACTION_PCT = 1.0
+
+
+def _check_capital_resolution(bars: dict, initial_capital: float) -> str | None:
+    """Return a problem description when one share is too large a slice of equity."""
+    opens: list[float] = []
+    for df in bars.values():
+        if df is None or len(df) == 0:
+            continue
+        col = "close" if "close" in getattr(df, "columns", []) else None
+        try:
+            opens.append(float(df[col].iloc[0] if col else df.iloc[0, 0]))
+        except Exception:
+            continue
+    if not opens or initial_capital <= 0:
+        return None
+
+    opens.sort()
+    median = opens[len(opens) // 2]
+    frac = median / initial_capital * 100
+    per_name = initial_capital / len(opens)
+    unbuyable = sum(1 for p in opens if p > per_name)
+
+    print(
+        f"  resolution   : one median share (${median:,.2f}) = {frac:.2f}% of "
+        f"${initial_capital:,.0f}; {unbuyable}/{len(opens)} names unbuyable at equal weight"
+    )
+    if frac <= MAX_SHARE_FRACTION_PCT:
+        return None
+    return (
+        f"capital base too coarse to measure an instruction effect. One median share "
+        f"(${median:,.2f}) is {frac:.2f}% of ${initial_capital:,.0f} — above the "
+        f"{MAX_SHARE_FRACTION_PCT}% ceiling — and {unbuyable}/{len(opens)} symbols cannot "
+        f"be bought at all at equal weight. Run-to-run differences of a single share would "
+        f"swamp the effect under test."
+    )
+
+
 def _preflight_keys(model_slugs: list[str], integration_override: str | None) -> list[str]:
     """Return a list of human-readable problems; empty means good to spend."""
     problems = []
@@ -260,6 +306,20 @@ def main() -> int:
         "--out", default=None, help="Write the full result set to this JSON path"
     )
     parser.add_argument(
+        "--initial-capital",
+        type=float,
+        default=None,
+        help="Override the capital base (default: leaderboard.json's initial_capital). "
+        "Set this to match the capital the published runs were computed at — see the "
+        "resolution guard below; the config value has drifted from the board before.",
+    )
+    parser.add_argument(
+        "--allow-coarse-capital",
+        action="store_true",
+        help="Run even when one share is a large fraction of equity. Only use this "
+        "when you are deliberately measuring the coarse regime.",
+    )
+    parser.add_argument(
         "--list-instructions",
         action="store_true",
         help="Print the instruction set and exit without spending anything",
@@ -302,13 +362,28 @@ def main() -> int:
     cfg = load_leaderboard_config()
     start_date = args.start or cfg["start_date"]
     end_date = args.end or cfg["end_date"]
-    initial_capital = float(cfg["initial_capital"])
+    # The config value has drifted from the capital the board was computed at
+    # before (leaderboard.json went 100000 → 1000 → 10000 in 2026-07, after the
+    # published runs were written), so make the effective value explicit in the
+    # header rather than letting it be an invisible default.
+    initial_capital = (
+        float(args.initial_capital)
+        if args.initial_capital is not None
+        else float(cfg["initial_capital"])
+    )
+    if initial_capital <= 0:
+        print(f"FATAL: --initial-capital must be positive; got {initial_capital!r}")
+        return EXIT_CONFIG
 
     est = sum(COST_PER_RUN_USD.get(m, 0.0) for m in model_slugs) * len(instructions)
     print("=" * 64)
     print("INSTRUCTION-SENSITIVITY PROBE")
     print("=" * 64)
     print(f"  window       : {start_date} → {end_date}")
+    print(
+        f"  capital      : ${initial_capital:,.0f}"
+        + (" (--initial-capital)" if args.initial_capital is not None else " (from config)")
+    )
     print(f"  models       : {', '.join(model_slugs)}")
     print(f"  instructions : {len(instructions)} ({len(model_slugs) * len(instructions)} runs)")
     print(f"  est. cost    : ~${est:.2f} (at recorded contest-run prices)")
@@ -329,6 +404,13 @@ def main() -> int:
         print(f"FATAL: no market data for {bars_start} → {end_date}")
         return EXIT_CONFIG
     print(f"  got {len(bars)} symbols")
+
+    resolution_problem = _check_capital_resolution(bars, initial_capital)
+    if resolution_problem and not args.allow_coarse_capital:
+        print(f"\nFATAL: {resolution_problem}")
+        print("\nRe-run with --initial-capital matching the published runs, or pass")
+        print("--allow-coarse-capital if the coarse regime is what you mean to measure.")
+        return EXIT_CONFIG
 
     results: dict[str, dict[str, dict]] = {}
     spent = 0.0
