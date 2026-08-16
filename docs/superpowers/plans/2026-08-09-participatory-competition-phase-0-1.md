@@ -18,10 +18,10 @@
 >
 > | # | Task | Status | Evidence checked 2026-08-15 |
 > |---|---|---|---|
-> | 1 | `LLMAgentStrategy` forwards `strategy_prompt` | **TODO — valid as written** | No `strategy_prompt` or `_run_decision_loop` in `llm_agent.py`; the loop is still inlined in `run()` |
-> | 2 | Instruction-sensitivity probe script | **TODO — valid** | `dashboard/scripts/probe_instruction_sensitivity.py` absent |
-> | 3 | Run the probe, record the gate | **TODO — blocked on spend approval** | `docs/superpowers/probe-results/` does not exist |
-> | 4 | Six Open Track seed entries | **TODO — valid** | `leaderboard.json` still holds exactly 12 entries (5 baselines + 7 Model); no `label: "Open Track"`, `authored_by` or `strategy_prompt` anywhere |
+> | 1 | `LLMAgentStrategy` forwards `strategy_prompt` | **DONE — on a branch, NOT on `main`** | Built 2026-08-16. `self.strategy_prompt` at `llm_agent.py:85`, loop extracted to `_run_decision_loop`. Lives on `worktree-phase0-instruction-gate`, **PR #366 open** — anything depending on it must wait for that merge |
+> | 2 | Instruction-sensitivity probe script | **DONE — same branch/PR** | `dashboard/scripts/probe_instruction_sensitivity.py`, 567 lines. Gained `--initial-capital` and a capital-resolution guard that refuses to spend when one median share exceeds 1% of equity |
+> | 3 | Run the probe, record the gate | ✅ **DONE — GATE PASSES** | Ran 2026-08-16 at `initial_capital=100000`. `aggressive_momentum` **+3.83%** vs `control_nonsense` **+0.33% / +0.13%** → signal **3.61pp** over a **0.20pp** noise floor, **18.1×**; all cleared H6. **DeepSeek V4 Pro is the pinned model.** Write-up: `docs/superpowers/probe-results/2026-08-09-instruction-sensitivity.md`. Spend $3.61 of the $4.97 sanction |
+> | 4 | Six Open Track seed entries | **TODO — unblocked by the gate; read the caveat below** | `leaderboard.json` still holds exactly 12 entries (5 baselines + 7 Model); no `label: "Open Track"`, `authored_by` or `strategy_prompt` anywhere. Also **depends on Task 1, which is not on `main`** (PR #366) |
 > | 5 | `landing/src/lib/leaderboard.ts` | **BLOCKED — premise withdrawn** | Needed only if the landing page fetches live data. #357 chose labelled sample data instead. Do not build until that decision is reopened |
 > | 6 | `landing/src/lib/analytics.ts` | **TODO — still valid** | No `track()` import anywhere in `landing/src/`; `<Analytics />` is mount-only. Independent of the board-data decision |
 > | 7 | `Race` renders the live board | **SUPERSEDED — and partly reversed** | See the task's own status note. Its guard test would now *delete* a guard #357 added deliberately |
@@ -35,6 +35,20 @@
 > `og:image` (9), and the two renames (10). That is a materially smaller PR than
 > the one this plan describes, and it no longer touches the landing page's data
 > path at all.
+>
+> **The gate caveat (2026-08-16).** Phase 0 passed, but it measured
+> instruction-vs-**control**, not instruction-vs-instruction: `contrarian_reversion`
+> was cut to stay inside the spend sanction, so the leg shows that a real
+> instruction separates from nonsense — not that two *plausible* instructions
+> separate from each other. Task 4 seeds six Open Track entries that are all
+> plausible, and Phase 2 ranks user entries against each other. **That ranking is
+> the untested case.** Two further facts from the leg bear on it directly:
+> `temperature=0` still leaves **0.20pp** of run-to-run variance, so margins
+> inside ~0.2pp are not real and a re-run is not guaranteed to reproduce a rank;
+> and Nemotron is **unmeasured, not failed** — its leg ran at the wrong capital
+> base and was never redone, so nothing here licenses a claim about small models.
+> About $1.40 of the sanction remains, enough for `contrarian_reversion` plus a
+> no-`strategy_prompt` anchor.
 >
 > **Line numbers throughout this document are as of 2026-08-09** unless a task's
 > status note gives a newer one. Re-verify before editing.

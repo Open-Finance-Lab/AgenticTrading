@@ -53,6 +53,14 @@ Every task's requirements implicitly include this section. Values are copied ver
 
 **Heights are per-surface and must never share an assertion.** `/` and `/app` have different clamps by design (spec §2). A single shared height assertion is a bug, not a simplification.
 
+**Units: the `/app` chart plots percent return, never dollars.** *(Amendment 2026-08-16 — see "Amendments" at the end of this file.)* Screen 0's rank list already renders `+7.5%` (`homeFormatReturnBadge`, `home-page.js:1206`), and Task 4 makes that list **the chart's key**. A dollar y-axis beside a percent key labels the curve in units the key does not use, in the one panel where the two are meant to read as a single object.
+
+It is also a correctness requirement, not a preference. The board's entries carry a **per-row** `initial_equity`, and they do not currently agree: `dashboard/config/leaderboard.json` says `initial_capital: 10000` while all 12 published curves were computed at `$100,000`. `_find_cached_run` (`service.py:615`) does not key on `initial_equity`, and the 5 baselines are `auto_compute`-true while the 7 model entries are not — so **one `?refresh=true` recomputes the baselines at $10k and leaves the models at $100k** (issue #365, open). Plotted in dollars, the hero chart then draws seven model curves near $100,000 and its two reference baselines flat along the bottom at $10,000. Normalised per series by `initial_equity`, the same payload renders correctly.
+
+Note what this means for the current design: `isHomeModelEntry` filtering baselines out of the chart's source is the only thing hiding #365 on this surface today. Task 2 removes that filter deliberately — which is right, and which is exactly why the normalisation has to land with it.
+
+**`/` may keep its dollar axis.** `SAMPLE_CURVES` is fabricated and every series shares a base of 1000, so `$1210` is unambiguous and reads as the `+21.0%` in `SAMPLE_STANDINGS`. The surfaces diverge here for the same reason they diverge on heights: one is illustrative with a shared base, the other is live with a per-row one. Task 11 records the divergence so nobody "fixes" it by putting `/app` back into dollars.
+
 **Build:** a source edit under `dashboard/landing/src` that is never rebuilt leaves the bundle-reading guards green against stale text. Phase B is not done until Task 10 runs.
 
 ---
@@ -247,6 +255,7 @@ Spec §3b. Pure functions, no DOM — this is the logic worth testing, and node-
   - `HOME_CHART_BASELINE_IDS: string[]`
   - `homeChartEntries(entries): Entry[]`
   - `homeChartSeries(entries, build): {times: string[], series: Array<{label, values, color, dash, isBaseline}>}` — **`series.length === 0` means draw nothing.** Task 3 keys the canvas's existence on it. Returning `times` alongside is what stops the call site building the curve set twice.
+  - **`values` are fractions, not dollars** (`0.0749` = +7.49%), each divided by *its own* entry's `initial_equity`. See "Units" in Global Constraints for why a shared dollar axis is wrong here. This is the one place the normalisation happens — Task 3 renders what it is given.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -324,6 +333,10 @@ def _harness() -> str:
             # "silently drops curveless entries" behaviour rather than a stub
             # that would drop them the way the test author assumed.
             _extract(_LEADERBOARD_JS, "buildEquityCurvesFromEntries"),
+            # The leaderboard tab's percent formula, so screen 0's copy of it
+            # can be checked for equivalence rather than eyeballed. Pure and
+            # closure-free (curveValues, viewType, initialValue).
+            _extract(_LEADERBOARD_JS, "transformLeaderboardChartData"),
             _const_block(_HOME_JS, "HOME_CHART_BASELINE_IDS"),
             _extract(_HOME_JS, "homeChartEntries"),
             _extract(_HOME_JS, "homeChartSeries"),
@@ -342,7 +355,15 @@ def _run_node(expr: str):
     return json.loads(out.stdout)
 
 
-def _entry(entry_id, model, *, is_model, curve):
+def _entry(entry_id, model, *, is_model, curve, initial_equity=10000):
+    """`initial_equity` is a parameter, not a constant, on purpose.
+
+    A fixture where every row shares one capital base cannot fail on mixed
+    capital, and mixed capital is a live condition on this board: the config
+    says 10000, the published curves were computed at 100000, and
+    `_find_cached_run` does not key on it (issue #365). The default keeps the
+    existing cases unchanged; the mixed case below passes 100000 explicitly.
+    """
     points = [
         {"timestamp": f"2026-04-{15 + i:02d}T14:00:00+00:00", "equity": v}
         for i, v in enumerate(curve)
@@ -354,7 +375,7 @@ def _entry(entry_id, model, *, is_model, curve):
         "is_model": is_model,
         "team_badge": "Model" if is_model else "Baseline Strategy",
         "equity_curve": points,
-        "initial_equity": 10000,
+        "initial_equity": initial_equity,
     }
 
 
@@ -450,6 +471,88 @@ def test_the_curve_builder_is_an_explicit_cross_file_export():
         in _LEADERBOARD_JS
     )
     assert "window.buildEquityCurvesFromEntries" in _HOME_JS
+
+
+@_requires_node
+def test_mixed_initial_equity_does_not_break_the_chart():
+    """The board's rows do NOT share a capital base, so the chart cannot
+    assume one.
+
+    `dashboard/config/leaderboard.json` says `initial_capital: 10000` while
+    every published curve was computed at $100,000, and `_find_cached_run`
+    (`service.py:615`) does not key on `initial_equity` -- so one
+    `?refresh=true` recomputes the five `auto_compute` baselines at $10k and
+    leaves the seven model entries at $100k (issue #365, open). Plotted in
+    dollars that renders as a 10x scale break: models near 100000, the
+    reference baselines flat on the floor at 10000.
+
+    This is the case the old fixture could not express, because it hardcoded
+    one `initial_equity` for every row.
+    """
+    entries = [
+        _entry(
+            "deepseek_v4_pro", "DeepSeek V4 Pro", is_model=True,
+            curve=[100000, 107490], initial_equity=100000,
+        ),
+        _entry(
+            "buy_hold_djia", "Buy & Hold", is_model=False,
+            curve=[10000, 10550], initial_equity=10000,
+        ),
+    ]
+    series = _run_node(
+        f"homeChartSeries({json.dumps(entries)}, buildEquityCurvesFromEntries).series"
+    )
+    by_label = {s["label"]: s["values"] for s in series}
+    assert set(by_label) == {"DeepSeek V4 Pro", "Buy & Hold"}
+
+    # Fractions, so the two are on one axis despite a 10x difference in base.
+    # Raw dollars would put these finals 96,940 apart.
+    assert by_label["DeepSeek V4 Pro"][-1] == pytest.approx(0.0749, abs=1e-4)
+    assert by_label["Buy & Hold"][-1] == pytest.approx(0.0550, abs=1e-4)
+    assert all(
+        abs(v) < 1 for values in by_label.values() for v in values if v is not None
+    ), "a value outside +/-100% means the series is still in dollars"
+
+
+@_requires_node
+def test_home_chart_matches_the_leaderboards_percent_formula():
+    """Screen 0 and the Leaderboard tab must compute percent identically.
+
+    They are two files with no shared module, so the formula is duplicated by
+    force. Pinning it as a STRING in either file would pass while the other
+    drifted; this runs both against the same input and compares outputs, which
+    is the only version of this assertion that can fail for the right reason.
+    """
+    entries = [
+        _entry(
+            "deepseek_v4_pro", "DeepSeek V4 Pro", is_model=True,
+            curve=[100000, 103000, 107490], initial_equity=100000,
+        ),
+        _entry(
+            "buy_hold_djia", "Buy & Hold", is_model=False,
+            curve=[10000, 9800, 10550], initial_equity=10000,
+        ),
+    ]
+    pairs = _run_node(
+        "(() => {"
+        f"  const entries = {json.dumps(entries)};"
+        "   const built = buildEquityCurvesFromEntries(entries);"
+        "   return homeChartSeries(entries, buildEquityCurvesFromEntries).series.map("
+        "     (s) => ({"
+        "       label: s.label,"
+        "       home: s.values,"
+        "       leaderboard: transformLeaderboardChartData("
+        "         built.curves[s.label], 'cumulative', built.initials[s.label]"
+        "       ),"
+        "     })"
+        "   );"
+        "})()"
+    )
+    assert pairs, "no series produced -- the fixture or the harness is wrong"
+    for pair in pairs:
+        assert pair["home"] == pair["leaderboard"], (
+            f"{pair['label']}: screen 0 and the leaderboard tab disagree on percent"
+        )
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -537,13 +640,25 @@ function homeChartSeries(entries, build) {
     const times = built.times || [];
     const curves = built.curves || {};
     const styles = built.trajectories || {};
+    const initials = built.initials || {};
     if (!times.length) return { times: [], series: [] };
     const series = Object.keys(curves)
         .map((label) => {
             const style = styles[label] || {};
+            const raw = curves[label] || [];
+            // Fractions, not dollars. Each entry carries its OWN
+            // `initial_equity` and they do not currently agree across the
+            // board (issue #365), so a shared dollar axis would draw a $10k
+            // baseline against $100k models as a flat line on the floor.
+            // Dividing by each series' own base makes the comparison the
+            // chart exists to make. Same formula and same fallback order as
+            // `transformLeaderboardChartData`'s 'cumulative' branch in
+            // js/leaderboard.js -- pinned as an equivalence, not by eye, in
+            // `test_home_chart_matches_the_leaderboards_percent_formula`.
+            const base = Number(initials[label]) || raw.find((v) => v != null) || 10000;
             return {
                 label,
-                values: curves[label] || [],
+                values: raw.map((v) => (v == null ? null : (v - base) / base)),
                 color: style.color || '#94a3b8',
                 dash: style.dash || [],
                 isBaseline: (style.kind || 'model') !== 'model',
@@ -742,12 +857,25 @@ function renderHomeLeaderboardChart(series, times) {
                 // curve's colour swatch. A legend here would be the same five
                 // names twice, in a panel that has no height to spare.
                 legend: { display: false },
-                tooltip: { enabled: true },
+                tooltip: {
+                    enabled: true,
+                    callbacks: {
+                        // Without this the tooltip prints the raw fraction
+                        // (0.0749). The series are percent now; the readout
+                        // has to be too, and in the key's own precision.
+                        label: (c) =>
+                            `${c.dataset.label}: ${c.parsed.y >= 0 ? '+' : ''}${(c.parsed.y * 100).toFixed(1)}%`,
+                    },
+                },
             },
             scales: {
                 x: { ticks: { ...axis, maxTicksLimit: 6 }, grid: { display: false } },
                 y: {
-                    ticks: { ...axis, callback: (v) => `$${Math.round(v).toLocaleString('en-US')}` },
+                    // Percent, not dollars -- see "Units" in Global
+                    // Constraints. One decimal to match the rank list beside
+                    // it (`homeFormatReturnBadge` uses toFixed(1)); at zero
+                    // decimals a narrow domain renders duplicate tick labels.
+                    ticks: { ...axis, callback: (v) => `${(v * 100).toFixed(1)}%` },
                     grid: { color: 'rgba(148, 163, 184, 0.12)' },
                 },
             },
@@ -1609,7 +1737,8 @@ def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
 
     Heights are deliberately absent: the surfaces have different vertical
     envelopes and therefore different clamps (spec §2). A shared height
-    assertion here would be the bug it looks like a guard against.
+    assertion here would be the bug it looks like a guard against. Units are
+    the same kind of case and are asserted per-surface below, not shared.
     """
     home_js = (
         Path(__file__).resolve().parents[2] / "frontend" / "home-page.js"
@@ -1627,6 +1756,17 @@ def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
     # Neither surface draws a built-in legend: the standings/chips are the key.
     assert "<Legend" not in _BOARD
     assert re.search(r"legend:\s*\{\s*display:\s*false\s*\}", home_js)
+
+    # UNITS: /app is percent. Asserted here rather than in the /app suite
+    # because the pressure to break it comes from THIS comparison -- someone
+    # noticing the two charts disagree and "aligning" screen 0 back to the
+    # dollar axis / uses. That is a regression, not a tidy-up: / plots
+    # fabricated curves that all share a base of 1000, so $1210 is unambiguous
+    # and reads as SAMPLE_STANDINGS' +21.0%. Screen 0 plots live entries whose
+    # `initial_equity` genuinely differs row to row (issue #365), so a shared
+    # dollar axis there draws a $10k baseline against $100k models. The
+    # divergence is load-bearing, exactly like the per-surface heights above.
+    assert "(v * 100).toFixed(1)}%" in home_js
 ```
 
 - [ ] **Step 2: Run it**
@@ -1640,6 +1780,8 @@ Expected: PASS if Tasks 3, 4 and 8 all landed. **If it fails, that is the point*
 - [ ] **Step 3: Mutation-test it**
 
 Revert `fontSize={14}` to `fontSize={11}` in `BoardPreview.tsx`, run the test (expect FAIL), restore. Then do the same to the Chart.js `size: 14`. A guard that passes against both breakages is decoration.
+
+Then mutate the unit: swap screen 0's y-axis callback back to the dollar formatter (``callback: (v) => `$${Math.round(v).toLocaleString('en-US')}` ``) and run the test — expect FAIL. Restore. This is the mutation most likely to happen for a *plausible* reason, so it is the one that most needs to be red.
 
 - [ ] **Step 4: Commit**
 
@@ -1983,3 +2125,42 @@ And one measurement gap:
 - The season engine (issue #354) and the two open design questions (#355).
 - Refreshing `README.md`'s `snapshot.png`, which this change makes stale for the second time this month. File as a follow-up issue at merge — a review finding left in a merged PR's comments is already dead when written.
 - The `SAMPLE_CURVES` axis-vs-window mismatch (spec, "Accepted knowingly"). Pre-existing. If Task 8's caption rewrite makes it convenient, align the wording with the window the returns actually come from; do not chase it otherwise.
+- **Fixing issue #365 itself.** The chart must survive mixed `initial_equity`; reconciling the config with the published curves is a backend change on the leaderboard service and does not belong in a frontend plan.
+
+---
+
+## Amendments
+
+### 2026-08-16 — the screen 0 chart plots percent, not dollars
+
+Found while briefing this plan against `main` at `04850df`. Two edits as drafted disagreed with each other and with the data:
+
+- `homeChartSeries` returned `values: curves[label]` — **raw equity dollars** — and discarded `built.initials`, the per-entry `initial_equity` that `buildEquityCurvesFromEntries` already computes and returns.
+- Task 3's y-axis then formatted those dollars: ``callback: (v) => `$${Math.round(v).toLocaleString('en-US')}` ``.
+
+Two problems, one of them a correctness bug:
+
+1. **The chart and its own key were in different units.** Screen 0's rank list renders `+7.5%` (`homeFormatReturnBadge`, `home-page.js:1206`), and Task 4's whole idea is that the list *is* the chart's key. A dollar axis labels the curves in units the key does not use.
+2. **The rows do not share a capital base.** Config says `initial_capital: 10000`; all 12 published curves were computed at `$100,000`; `_find_cached_run` does not key on `initial_equity`; the 5 baselines are `auto_compute`-true and the 7 models are not. One `?refresh=true` therefore yields a payload mixing $10k baselines with $100k models (issue #365), which a dollar axis draws as a 10× scale break with the reference lines flat on the floor.
+
+The second is not hypothetical-in-principle — it is reachable today by hand. It is *dormant* only because the daily cron is paused (PR #352) and `LEADERBOARD_DAILY_AUTO_DEPLOY` is off. **Do not force-refresh the board while building this**, which is otherwise a natural thing to do to see the new chart with fresh data.
+
+Worth naming plainly: `isHomeModelEntry` filtering baselines out of the chart's source is currently the only thing hiding #365 on this surface. Task 2 removes that filter deliberately and correctly — the chart cannot answer "is +21% good?" without a reference line — which is precisely why the normalisation has to land in the same task.
+
+**Changes made:**
+
+| Where | Change |
+|---|---|
+| Global Constraints | New **Units** constraint: `/app` percent, `/` may keep dollars, with the reasoning |
+| Task 2, `_entry` | `initial_equity` becomes a parameter (default `10000`) — a fixture with one shared base cannot fail on mixed capital |
+| Task 2, harness | Extract `transformLeaderboardChartData` from `js/leaderboard.js` |
+| Task 2, tests | `test_mixed_initial_equity_does_not_break_the_chart`, `test_home_chart_matches_the_leaderboards_percent_formula` |
+| Task 2, `homeChartSeries` | Normalise per series by its own `initial_equity` |
+| Task 2, Interfaces | `values` documented as fractions |
+| Task 3, chart options | Percent y-axis at `toFixed(1)`; tooltip callback (the default prints the raw fraction) |
+| Task 11 | Pin `/app`'s percent formatter; unit divergence documented as load-bearing; mutation step added |
+| Out of scope | Fixing #365 itself |
+
+**Not changed, deliberately:** `/`'s dollar axis. `SAMPLE_CURVES` is fabricated and every series shares a base of 1000, so `$1210` is unambiguous and equals `SAMPLE_STANDINGS`' `+21.0%`. Aligning it to percent is defensible but is churn in guarded copy for no correctness gain, and Task 8 already touches that component.
+
+**Not re-verified:** the measured height budgets. Those were measured in-browser, which is the right method; re-deriving them by arithmetic is the mistake that falsified both earlier drafts.
