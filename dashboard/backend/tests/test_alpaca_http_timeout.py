@@ -96,7 +96,11 @@ def test_applying_twice_does_not_double_wrap():
 
 
 class _NoSessionClient:
-    """Mirrors the existing test_alpaca_bars.py _FakeClient: no _session at all."""
+    """A client with no ``_session`` at all -- what a future alpaca-py release
+    renaming that private attribute would look like from here. This is the only
+    place that case is covered: test_alpaca_bars.py's ``_FakeClient`` used to
+    exercise it incidentally, but it was given a ``_session`` so the fail-open
+    warning would stop firing on every green run."""
 
 
 def test_missing_session_warns_and_does_not_raise(capsys):
