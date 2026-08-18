@@ -33,6 +33,10 @@ from dashboard.backend.domain.backtesting.engine import HourlyBacktester
 
 BASELINE_QUEUE_MAX = int(os.getenv("BASELINE_QUEUE_MAX", "500"))
 QUEUE_DEPTH_WARN = 25
+# A per-item warning cannot report a total contract break (repo rule): this is
+# what makes a wholesale failure (e.g. an upstream signature change breaking
+# every job) loud instead of just a stream of per-job warnings nobody reads.
+_ESCALATION_THRESHOLD = 3
 
 _STOP = object()
 
@@ -59,6 +63,13 @@ _worker_lock = threading.Lock()
 # (start, end, mode) -> {"buy_and_hold": id, "djia": id}. Single-consumer, so
 # unlocked access is safe; grows one tiny entry per distinct config.
 _completed: Dict[Tuple[str, str, str], Dict[str, str]] = {}
+# Both counters are written only by the single drain thread (same
+# single-consumer reasoning as _completed above), so they need no lock either.
+# _consecutive_failures resets to 0 on any success and drives the escalation
+# print below; _total_failures never resets — it's the plain integer a caller
+# like stress_serve.py reads for a shutdown summary.
+_consecutive_failures = 0
+_total_failures = 0
 
 
 def submit(job: BaselineJob) -> bool:
@@ -88,16 +99,25 @@ def _ensure_worker() -> None:
 
 
 def _drain_forever(q: "queue.Queue") -> None:
+    global _consecutive_failures, _total_failures
     while True:
         job = q.get()
         try:
             if job is _STOP:
                 return
             _run_job(job)
+            _consecutive_failures = 0
         # SystemExit guard mirrors the old in-finalize catch: a daemon thread
         # swallows SystemExit silently, which would kill the worker forever.
         except (Exception, SystemExit) as exc:
             print(f"⚠️ Baseline generation failed (run saved): {exc}")
+            _consecutive_failures += 1
+            _total_failures += 1
+            if _consecutive_failures == _ESCALATION_THRESHOLD:
+                print(
+                    f"🔥 Baseline worker: {_consecutive_failures} consecutive "
+                    f"failures — last error: {exc}"
+                )
         finally:
             q.task_done()
 
@@ -144,10 +164,12 @@ def wait_idle(timeout: float = 30.0) -> bool:
 
 def _reset_for_tests(maxsize: Optional[int] = None) -> None:
     """Fresh queue + dedup cache; wakes a worker blocked on the old queue."""
-    global _queue, _worker_thread
+    global _queue, _worker_thread, _consecutive_failures, _total_failures
     with _worker_lock:
         old_q = _queue
         _completed.clear()
+        _consecutive_failures = 0
+        _total_failures = 0
         _queue = queue.Queue(
             maxsize=maxsize if maxsize is not None else BASELINE_QUEUE_MAX)
         if _worker_thread is not None and _worker_thread.is_alive():

@@ -9,6 +9,7 @@ Usage:
     python dashboard/scripts/loadtest/drive_agents.py 100 --artifacts /tmp/atl_loadtest_xxx
 """
 import argparse
+import datetime
 import json
 import os
 import statistics
@@ -27,6 +28,12 @@ parser.add_argument("--artifacts", required=True,
 parser.add_argument("--base", default="http://127.0.0.1:8402")
 parser.add_argument("--allow-remote", action="store_true",
                     help="required to target anything but localhost")
+parser.add_argument("--windows", choices=("shared", "distinct"), default="shared",
+                    help="shared (default): every agent backtests the same "
+                         "date range, so baseline generation dedups to one "
+                         "queued job. distinct: each agent's start date is "
+                         "offset by its index (same span), forcing N "
+                         "serialized baseline jobs instead of one.")
 args = parser.parse_args()
 
 host = urllib.parse.urlparse(args.base).hostname or ""
@@ -45,6 +52,24 @@ deadline_losses = []  # steps auto-held because our decision arrived too late
 server_holds = []     # server-reported timeout_holds per completed run (T3+)
 run_walls = []        # end-to-end seconds per completed run
 failures = []
+
+# "shared" reproduces the original hardcoded window byte-for-byte, for every
+# agent, so existing measurements stay comparable. "distinct" offsets each
+# agent's start date by its index (same 2-day span -> 3 trading-day window),
+# giving each its own baseline config -- the difference between one queued
+# baseline backtest for the whole run and N serialized ones.
+_WINDOW_START = datetime.date(2026, 6, 1)
+_WINDOW_END = datetime.date(2026, 6, 3)
+_WINDOW_SPAN = _WINDOW_END - _WINDOW_START
+
+
+def date_window(idx):
+    if args.windows == "distinct":
+        start = _WINDOW_START + datetime.timedelta(days=idx)
+        end = start + _WINDOW_SPAN
+    else:
+        start, end = _WINDOW_START, _WINDOW_END
+    return start.isoformat(), end.isoformat()
 
 
 def req(method, path, key, body=None):
@@ -73,11 +98,12 @@ def record(kind, ms, status):
         samples.append((kind, ms, status))
 
 
-def drive(agent):
+def drive(agent, idx):
     key = agent["api_key"]
+    start_date, end_date = date_window(idx)
     t_run = time.perf_counter()
     status, body, ms = req("POST", "/api/v1/runs", key, {
-        "config": {"start_date": "2026-06-01", "end_date": "2026-06-03"},
+        "config": {"start_date": start_date, "end_date": end_date},
     })
     record("create_run", ms, status)
     if status != 200:
@@ -160,9 +186,11 @@ def dist(label, vals):
 
 
 rss0, thr0 = server_stats()
-print(f"\n===== {M} concurrent agents =====  (server before: {rss0} MB RSS, {thr0} threads)")
+print(f"\n===== {M} concurrent agents ===== (windows={args.windows})  "
+      f"(server before: {rss0} MB RSS, {thr0} threads)")
 t0 = time.perf_counter()
-threads = [threading.Thread(target=drive, args=(a,)) for a in AGENTS[:M]]
+threads = [threading.Thread(target=drive, args=(a, i))
+           for i, a in enumerate(AGENTS[:M])]
 for t in threads:
     t.start()
 for t in threads:
