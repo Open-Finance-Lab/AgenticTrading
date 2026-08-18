@@ -88,6 +88,8 @@ os.environ.pop("MAX_ACTIVE_DASHBOARD_BACKTESTS", None)
 os.environ.pop("AGENT_AUTH_CACHE_TTL_SECONDS", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_PER_SESSION", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_GLOBAL", None)
+os.environ.pop("ALPACA_HTTP_TIMEOUT_SECONDS", None)
+os.environ.pop("ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS", None)
 # Read once at import into users.DEFAULT_MAX_CONCURRENT_BACKTESTS, which every
 # entitlement default and every per-account cap test resolves through.
 os.environ.pop("DEFAULT_MAX_CONCURRENT_BACKTESTS", None)
