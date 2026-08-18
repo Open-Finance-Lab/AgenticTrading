@@ -32,9 +32,13 @@ from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
 
 # Read once at import (tests monkeypatch the module constant). Entry count, not
-# bytes: a month-long dataset is ~50 MB, so 4 entries caps the worst case at
-# ~200 MB against the 512 MB free tier. Byte-aware accounting is a 1000-tier
-# refinement; the per-build size print below keeps a pathological mix visible.
+# bytes: measured ~1.7 MB for a month-long dataset (was cited as ~50 MB), but
+# that is a floor — the size print below counts only the all_data frames (not
+# timestamps or price_cache) and was taken on synthetic harness bars, not real
+# Alpaca DJIA-30 data. It no longer supports the old ~200 MB worst-case claim
+# against the 512 MB free tier; there is no settled byte budget, so the
+# 4-entry cap rests on entry count alone. Byte-aware accounting is a
+# 1000-tier refinement; the size print below keeps a pathological mix visible.
 MARKET_DATA_CACHE_MAX_ENTRIES = int(os.getenv("MARKET_DATA_CACHE_MAX_ENTRIES", "4"))
 NEGATIVE_TTL_SECONDS = 30.0
 
