@@ -24,10 +24,14 @@ Terminal 2:
 - `--windows shared|distinct` (default `shared`) on `drive_agents.py`.
   `shared` gives every agent the same date range, so background baseline
   generation dedups to a single queued job for the whole run. `distinct`
-  offsets each agent's start date by its index (same span), so every agent
-  gets its own baseline config — N serialized baseline backtests instead of
-  one. Use `distinct` to see baseline-worker cost scale with agent count
-  instead of being hidden by dedup.
+  offsets each agent's start date by its index in **whole weeks** (same
+  span, same trading-day count for every agent), so every agent gets its own
+  baseline config — N serialized baseline backtests instead of one. Use
+  `distinct` to see baseline-worker cost scale with agent count instead of
+  being hidden by dedup. (A per-day offset instead of per-week was tried
+  first and silently starved windows that crossed a weekend down to 1-2
+  trading days instead of 3 — see the comment above `date_window()` in
+  `drive_agents.py`.)
 - `N_AGENTS` (env var, default `100`) on `stress_serve.py` — how many
   protocol agents to pre-seed.
 

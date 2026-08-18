@@ -205,3 +205,33 @@ def test_foreign_session_without_status_is_skipped_not_raised(monkeypatch, clock
     assert ebs.sweep_terminal_sessions() == 1  # bt_done only
     assert "bt_foreign" in ebs._sessions
     assert "bt_done" not in ebs._sessions
+
+
+# ===========================================================================
+# LEGACY_SESSION_RETENTION_SECONDS env-var parsing
+# ===========================================================================
+#
+# Read once at import via a bare ``int(os.getenv(...))``-shaped call -- a
+# typo'd operator value must not raise at import, matching
+# ``_max_active_dashboard_backtests`` in ``api/routers/backtests.py``.
+
+def test_bad_retention_value_falls_back_instead_of_raising(monkeypatch, capsys):
+    monkeypatch.setenv("LEGACY_SESSION_RETENTION_SECONDS", "5m")
+    assert (
+        ebs._legacy_session_retention_seconds()
+        == ebs._DEFAULT_LEGACY_SESSION_RETENTION_SECONDS
+    )
+    assert "LEGACY_SESSION_RETENTION_SECONDS" in capsys.readouterr().out
+
+
+def test_unset_retention_value_uses_the_default(monkeypatch):
+    monkeypatch.delenv("LEGACY_SESSION_RETENTION_SECONDS", raising=False)
+    assert (
+        ebs._legacy_session_retention_seconds()
+        == ebs._DEFAULT_LEGACY_SESSION_RETENTION_SECONDS
+    )
+
+
+def test_valid_retention_value_is_parsed(monkeypatch):
+    monkeypatch.setenv("LEGACY_SESSION_RETENTION_SECONDS", "600")
+    assert ebs._legacy_session_retention_seconds() == 600

@@ -64,9 +64,23 @@ def fake_alpaca(monkeypatch):
         def __init__(self, df):
             self.df = df
 
+    class _FakeSession:
+        """Just enough of ``requests.Session`` for ``_apply_default_timeout``
+        to find a wrappable ``.request`` -- these tests call
+        ``get_stock_bars`` directly, never through ``_session.request``, so
+        it's never actually invoked. Without this, every ``AlpacaDataLoader``
+        constructed in this file hits the no-``_session`` warning path and
+        prints "timeout was NOT applied" on every passing test; that
+        production warning is exercised deliberately (with no ``_session``
+        at all) by ``test_alpaca_http_timeout.py``."""
+
+        def request(self, *args, **kwargs):
+            raise NotImplementedError("not exercised by these tests")
+
     class _FakeClient:
         def __init__(self, api_key, secret_key):
             state["ctor"].append((api_key, secret_key))
+            self._session = _FakeSession()
 
         def get_stock_bars(self, request):
             state["requests"].append(request)

@@ -318,3 +318,42 @@ def test_timeout_holds_counter_still_increments_exactly_as_before(
     assert s.status == "completed"
     assert s.timeout_holds == s.total_steps
     assert s.get_status()["timeout_holds"] == s.total_steps
+
+
+# ---------------------------------------------------------------------------
+# agent_name is caller-supplied on the legacy surface (StartBacktestRequest
+# has no character restriction beyond length) and that surface authenticates
+# nothing -- an embedded \n/\r must not forge extra log lines into the
+# deadline-hold notice.
+# ---------------------------------------------------------------------------
+
+
+def test_agent_name_newline_cannot_forge_a_log_line(monkeypatch, tmp_path, capsys):
+    test_db = db_module.BacktestDatabase(db_path=tmp_path / "hold_visibility_inj.db")
+    monkeypatch.setattr(db_module, "db", test_db)
+    monkeypatch.setattr(ebs, "db", test_db)
+    monkeypatch.setattr(ebs, "AlpacaDataLoader", _Loader)
+    monkeypatch.setattr(bw.HourlyBacktester, "run_buyhold_baseline",
+                        lambda self: (None, None))
+    monkeypatch.setattr(bw.HourlyBacktester, "run_djia_baseline",
+                        lambda self: (None, None))
+    malicious_name = "agent-x\n⚠️ FAKE: forged line\r\nmore"
+    s = ebs.ExternalBacktestSession(
+        backtest_id="bt_inject", session_id="sess_inj", agent_name=malicious_name,
+        model_name="m", start_date="2026-04-15", end_date="2026-04-17",
+    )
+    s.load_market_data()
+    assert s.total_steps > 4
+    capsys.readouterr()
+    _expire_next_n_steps(monkeypatch, s, n=1)
+
+    s.get_current_step()
+
+    out = capsys.readouterr().out
+    assert out.count("decision deadline") == 1
+    # A raw \n/\r from the name would start a new line that looks like its
+    # own log entry -- confirm the injected newline/CR never survive into
+    # the captured output, only the collapsed-to-spaces single-line form.
+    assert "\n⚠️ FAKE" not in out
+    assert "\r" not in out
+    assert "agent-x ⚠️ FAKE: forged line  more" in out
