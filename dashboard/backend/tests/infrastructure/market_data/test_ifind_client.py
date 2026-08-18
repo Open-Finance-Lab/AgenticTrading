@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import threading
 
 import pytest
 import requests
@@ -15,6 +16,8 @@ from dashboard.backend.infrastructure.market_data.profiles import (
 START = date(2026, 4, 1)
 END = date(2026, 4, 23)
 TOKEN = "private-ifind-token"
+REFRESH_TOKEN = "private-ifind-refresh-token"
+SHORT_TOKEN = "short-lived-ifind-token"
 
 
 class FakeResponse:
@@ -209,6 +212,57 @@ def test_uses_environment_defaults_without_exposing_token(monkeypatch):
     assert kwargs["headers"]["access_token"] == TOKEN
 
 
+def test_exchanges_refresh_token_before_first_data_request():
+    session = FakeSession(
+        [
+            FakeResponse(
+                payload={
+                    "errorcode": 0,
+                    "data": {"access_token": SHORT_TOKEN},
+                }
+            ),
+            FakeResponse(payload={"errorcode": 0, "tables": []}),
+        ]
+    )
+
+    result = make_client(
+        session,
+        token="",
+        refresh_token=REFRESH_TOKEN,
+    ).fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert result == {"errorcode": 0, "tables": []}
+    assert len(session.calls) == 2
+    refresh_url, refresh_kwargs = session.calls[0]
+    assert refresh_url == "https://ifind.test/api/v1/get_access_token"
+    assert refresh_kwargs["headers"] == {
+        "Content-Type": "application/json",
+        "refresh_token": REFRESH_TOKEN,
+    }
+    data_url, data_kwargs = session.calls[1]
+    assert data_url.endswith("/api/v1/high_frequency")
+    assert data_kwargs["headers"]["access_token"] == SHORT_TOKEN
+
+
+def test_refresh_token_takes_precedence_over_static_token():
+    session = FakeSession(
+        [
+            FakeResponse(
+                payload={"errorcode": 0, "data": {"access_token": SHORT_TOKEN}}
+            ),
+            FakeResponse(payload={"errorcode": 0, "tables": []}),
+        ]
+    )
+
+    make_client(
+        session,
+        token=TOKEN,
+        refresh_token=REFRESH_TOKEN,
+    ).fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert session.calls[1][1]["headers"]["access_token"] == SHORT_TOKEN
+
+
 def test_uses_official_base_url_when_no_override_is_configured(monkeypatch):
     from dashboard.backend.infrastructure.market_data.ifind_client import (
         IFindHttpClient,
@@ -232,12 +286,141 @@ def test_missing_token_fails_before_http_call(monkeypatch):
     )
 
     session = FakeSession([FakeResponse()])
+    monkeypatch.delenv("IFIND_REFRESH_TOKEN", raising=False)
     monkeypatch.delenv("IFIND_ACCESS_TOKEN", raising=False)
 
     with pytest.raises(IFindConfigurationError, match="IFIND_ACCESS_TOKEN"):
         IFindHttpClient(session=session)
 
     assert session.calls == []
+
+
+def test_refreshes_once_after_authentication_failure():
+    session = FakeSession(
+        [
+            FakeResponse(
+                payload={"errorcode": 0, "data": {"access_token": "first-token"}}
+            ),
+            FakeResponse(status_code=401),
+            FakeResponse(
+                payload={"errorcode": 0, "data": {"access_token": "second-token"}}
+            ),
+            FakeResponse(payload={"errorcode": 0, "tables": []}),
+        ]
+    )
+
+    result = make_client(
+        session,
+        token="",
+        refresh_token=REFRESH_TOKEN,
+    ).fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert result == {"errorcode": 0, "tables": []}
+    assert len(session.calls) == 4
+    assert session.calls[1][1]["headers"]["access_token"] == "first-token"
+    assert session.calls[3][1]["headers"]["access_token"] == "second-token"
+
+
+def test_refresh_cache_expires_after_six_days():
+    now = [0.0]
+    session = FakeSession(
+        [
+            FakeResponse(
+                payload={"errorcode": 0, "data": {"access_token": "token-1"}}
+            ),
+            FakeResponse(payload={"errorcode": 0, "tables": []}),
+            FakeResponse(payload={"errorcode": 0, "tables": []}),
+            FakeResponse(
+                payload={"errorcode": 0, "data": {"access_token": "token-2"}}
+            ),
+            FakeResponse(payload={"errorcode": 0, "tables": []}),
+        ]
+    )
+    client = make_client(
+        session,
+        token="",
+        refresh_token=REFRESH_TOKEN,
+        clock=lambda: now[0],
+    )
+
+    client.fetch_hourly_bars(["600519.SH"], START, END)
+    now[0] = 6 * 24 * 60 * 60 - 1
+    client.fetch_hourly_bars(["600519.SH"], START, END)
+    now[0] = 6 * 24 * 60 * 60
+    client.fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert [url.endswith("/api/v1/get_access_token") for url, _ in session.calls] == [
+        True,
+        False,
+        False,
+        True,
+        False,
+    ]
+
+
+def test_concurrent_first_requests_exchange_refresh_token_once():
+    class ConcurrentSession:
+        def __init__(self):
+            self.calls = []
+            self.exchange_calls = 0
+            self._lock = threading.Lock()
+
+        def post(self, url, **kwargs):
+            with self._lock:
+                self.calls.append((url, kwargs))
+                if url.endswith("/api/v1/get_access_token"):
+                    self.exchange_calls += 1
+            if url.endswith("/api/v1/get_access_token"):
+                return FakeResponse(
+                    payload={"errorcode": 0, "data": {"access_token": SHORT_TOKEN}}
+                )
+            return FakeResponse(payload={"errorcode": 0, "tables": []})
+
+    session = ConcurrentSession()
+    client = make_client(
+        session,
+        token="",
+        refresh_token=REFRESH_TOKEN,
+    )
+    errors = []
+
+    def fetch():
+        try:
+            client.fetch_hourly_bars(["600519.SH"], START, END)
+        except BaseException as exc:  # pragma: no cover - assertion below reports it
+            errors.append(exc)
+
+    threads = [threading.Thread(target=fetch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert session.exchange_calls == 1
+
+
+def test_refresh_failure_is_sanitized():
+    session = FakeSession(
+        [
+            FakeResponse(
+                payload={"errorcode": -1, "errmsg": REFRESH_TOKEN}
+            )
+        ]
+    )
+
+    from dashboard.backend.infrastructure.market_data.ifind_client import (
+        IFindTokenRefreshError,
+    )
+
+    with pytest.raises(IFindTokenRefreshError) as exc_info:
+        make_client(
+            session,
+            token="",
+            refresh_token=REFRESH_TOKEN,
+        ).fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert REFRESH_TOKEN not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(

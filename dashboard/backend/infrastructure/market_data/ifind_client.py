@@ -7,6 +7,7 @@ from datetime import date, timedelta
 import logging
 import math
 import os
+import threading
 import time
 from typing import Any
 
@@ -19,7 +20,9 @@ DEFAULT_BASE_URL = "https://quantapi.51ifind.com"
 HIGH_FREQUENCY_ENDPOINT = "/api/v1/high_frequency"
 HISTORY_QUOTATION_ENDPOINT = "/api/v1/cmd_history_quotation"
 BASIC_DATA_ENDPOINT = "/api/v1/basic_data_service"
+ACCESS_TOKEN_ENDPOINT = "/api/v1/get_access_token"
 DEFAULT_TIMEOUT = (3.0, 20.0)
+ACCESS_TOKEN_MAX_AGE_SECONDS = 6 * 24 * 60 * 60
 _RETRY_DELAYS = (0.5, 1.0)
 # Honour a server-supplied Retry-After, but never park a backtest thread on an
 # arbitrarily large one — past this we fail fast and let the caller retry.
@@ -32,6 +35,10 @@ class IFindClientError(RuntimeError):
 
 class IFindConfigurationError(IFindClientError):
     """Raised when required local client configuration is missing."""
+
+
+class IFindTokenRefreshError(IFindClientError):
+    """Raised when iFinD refuses or fails to exchange a refresh token."""
 
 
 class IFindRequestError(IFindClientError):
@@ -92,16 +99,26 @@ class IFindHttpClient:
         *,
         session: Any | None = None,
         token: str | None = None,
+        refresh_token: str | None = None,
         base_url: str | None = None,
         timeout: tuple[float, float] = DEFAULT_TIMEOUT,
         sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        resolved_refresh_token = (
+            refresh_token
+            if refresh_token is not None
+            else os.getenv("IFIND_REFRESH_TOKEN", "")
+        )
         resolved_token = token if token is not None else os.getenv(
             "IFIND_ACCESS_TOKEN", ""
         )
-        if not resolved_token.strip():
+        self._refresh_token = resolved_refresh_token.strip()
+        self._static_token = resolved_token.strip()
+        if not self._refresh_token and not self._static_token:
             raise IFindConfigurationError(
-                "iFinD credentials are not configured; set IFIND_ACCESS_TOKEN"
+                "iFinD credentials are not configured; "
+                "set IFIND_REFRESH_TOKEN or IFIND_ACCESS_TOKEN"
             )
 
         configured_url = base_url
@@ -110,10 +127,13 @@ class IFindHttpClient:
         configured_url = configured_url.strip() or DEFAULT_BASE_URL
 
         self._session = session if session is not None else requests.Session()
-        self._token = resolved_token.strip()
+        self._token = self._static_token
         self._base_url = configured_url.rstrip("/")
         self._timeout = timeout
         self._sleep = sleep
+        self._clock = clock
+        self._token_issued_at: float | None = None
+        self._token_lock = threading.Lock()
 
     def fetch_hourly_bars(
         self,
@@ -213,13 +233,10 @@ class IFindHttpClient:
         payload: Mapping[str, object],
     ) -> Mapping[str, object]:
         url = f"{self._base_url}{endpoint}"
-        headers = {
-            "Content-Type": "application/json",
-            "access_token": self._token,
-            "ifindlang": "cn",
-        }
+        refreshed_after_auth_failure = False
 
         for attempt in range(len(_RETRY_DELAYS) + 1):
+            headers = self._data_headers()
             try:
                 response = self._session.post(
                     url,
@@ -255,6 +272,15 @@ class IFindHttpClient:
 
             status_code = int(response.status_code)
             if not 200 <= status_code < 300:
+                if (
+                    status_code in {401, 403}
+                    and self._refresh_token
+                    and not refreshed_after_auth_failure
+                ):
+                    self._invalidate_access_token()
+                    self._get_access_token(force_refresh=True)
+                    refreshed_after_auth_failure = True
+                    continue
                 retryable = status_code == 429 or 500 <= status_code < 600
                 if retryable and attempt < len(_RETRY_DELAYS):
                     # A throttled server knows better than our fixed backoff
@@ -331,6 +357,78 @@ class IFindHttpClient:
             return decoded
 
         raise AssertionError("iFinD retry loop ended without a result")
+
+    def _data_headers(self) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "access_token": self._get_access_token(),
+            "ifindlang": "cn",
+        }
+
+    def _get_access_token(self, *, force_refresh: bool = False) -> str:
+        if not self._refresh_token:
+            return self._static_token
+
+        now = self._clock()
+        with self._token_lock:
+            if (
+                not force_refresh
+                and self._token
+                and self._token_issued_at is not None
+                and now - self._token_issued_at < ACCESS_TOKEN_MAX_AGE_SECONDS
+            ):
+                return self._token
+
+            access_token = self._exchange_refresh_token()
+            self._token = access_token
+            self._token_issued_at = self._clock()
+            return access_token
+
+    def _invalidate_access_token(self) -> None:
+        if self._refresh_token:
+            with self._token_lock:
+                self._token = ""
+                self._token_issued_at = None
+
+    def _exchange_refresh_token(self) -> str:
+        try:
+            response = self._session.post(
+                f"{self._base_url}{ACCESS_TOKEN_ENDPOINT}",
+                headers={
+                    "Content-Type": "application/json",
+                    "refresh_token": self._refresh_token,
+                },
+                timeout=self._timeout,
+            )
+        except requests.RequestException:
+            raise IFindTokenRefreshError(
+                "iFinD access token refresh failed during transport"
+            ) from None
+
+        status_code = int(response.status_code)
+        if not 200 <= status_code < 300:
+            raise IFindTokenRefreshError(
+                f"iFinD access token refresh failed with HTTP {status_code}"
+            ) from None
+
+        try:
+            decoded = response.json()
+        except ValueError:
+            raise IFindTokenRefreshError(
+                "iFinD access token refresh returned invalid JSON"
+            ) from None
+        if not isinstance(decoded, Mapping):
+            raise IFindTokenRefreshError(
+                "iFinD access token refresh returned an invalid response"
+            ) from None
+        raw_errorcode = decoded.get("errorcode")
+        data = decoded.get("data")
+        access_token = data.get("access_token") if isinstance(data, Mapping) else None
+        if raw_errorcode != 0 or not isinstance(access_token, str) or not access_token.strip():
+            raise IFindTokenRefreshError(
+                "iFinD access token refresh returned no usable access token"
+            ) from None
+        return access_token.strip()
 
     @staticmethod
     def _validate_request(
