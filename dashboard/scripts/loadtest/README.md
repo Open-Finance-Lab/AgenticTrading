@@ -41,9 +41,22 @@ dequeues it, and `drive_agents.py`'s reported wall time never waits on
 baselines. `distinct`'s extra cost is real (N serialized `HourlyBacktester`
 builds instead of one deduped build) but structurally invisible to that
 timer. The signal that `distinct` is doing more work is the server-side
-baseline-job count (1 unique config under `shared` vs. N under `distinct`,
-visible in `stress_serve.py`'s stdout), not the wall time `drive_agents.py`
-prints.
+count of baselines the worker actually **executed** (1 unique config under
+`shared` vs. N under `distinct`), not the wall time `drive_agents.py` prints.
+
+Count executions, and count them with this exact grep:
+
+    grep -c "Running Buy & Hold baseline" <the stress_serve.py log>
+
+⚠ **Do not read that off the queue-depth line, which is the loud number and
+says the opposite.** Dedup lives at the *consumer* — `_run_job` keys
+`_completed` on `(start_date, end_date, mode)` and skips the work
+(`baseline_worker.py`) — while `submit()` enqueues unconditionally. So under
+`shared` the queue genuinely does grow to ~N and stdout fills with
+`⚠️ Baseline queue depth N — worker backlog` warnings (a 100-agent run
+printed 24 of them, peaking at 37) while exactly **one** baseline executed.
+Those are cheap cache-hit jobs draining, not a capacity problem — but read
+as "the server-side baseline-job count" they look exactly like broken dedup.
 
 ## ⚠ Figures produced before 2026-08-18 are a floor, not a measurement
 
@@ -70,7 +83,48 @@ bug (0.522 CPU-s, 311 MB RSS) is **not** in the understated category — it
 was measured with baselines actually running. Do not average it with the
 earlier rungs; they are not measuring the same thing.
 
+## Emulating a hosting tier
+
+The dev box has 12 cores; every tier this project can afford has one or a
+fraction of one. Running unconstrained measures hardware nobody deploys on,
+so confine the **server** and pin the driver to other cores:
+
+    # Render Standard (1.0 CPU)
+    N_AGENTS=100 taskset -c 0 python dashboard/scripts/loadtest/stress_serve.py
+
+    # Render Free (0.1 CPU)
+    systemd-run --user --scope -p CPUQuota=10% \
+        env N_AGENTS=100 python dashboard/scripts/loadtest/stress_serve.py
+
+    # driver, in both cases
+    taskset -c 2-11 python dashboard/scripts/loadtest/drive_agents.py 100 --artifacts /tmp/atl_loadtest_XXXX
+
+Verify the quota actually binds before trusting a run (a busy-loop probe
+should burn ~0.1 CPU-s per wall-second). Results: spec §5.
+
+This is *not* a substitute for running against Render, but it is the closest
+thing available, because **the harness cannot be pointed at a deployed
+instance**: every hermetic property above is an in-process monkeypatch inside
+`stress_serve.py` (the market-data provider swap, the `DATABASE_PATH`
+redirect, the seeded agents and their keys). `--allow-remote` only relaxes a
+hostname guard — it supplies none of them. Against a real deployment the
+driver would find no agents, and the runs it created would hit real Alpaca
+and write to real stores.
+
+⚠ **Do not extrapolate one tier's numbers to another by dividing CPU-seconds
+by the tier's CPU budget.** That method was used to size this stack and was
+wrong in *both* directions — 2× pessimistic on Standard, 35% optimistic on
+Free. A cgroup quota does not slow work down smoothly; it freezes the process
+for ~90 ms of every 100 ms, including mid-transaction, so throttled CPU does
+less useful work per CPU-second than dedicated CPU. Measure each tier.
+
 ## Acceptance target (100 agents, 21-step runs, local dev hardware)
 
 0 timeout_holds, 0 failures, create p95 < 1 s, decision p95 < 1 s,
 total wall < 60 s, server RSS growth < 100 MB.
+
+⚠ **`timeout_holds` is not self-sufficient evidence.** Until 2026-08-18 the
+driver reported an unreadable count as `0`, so this criterion could not fail;
+it now reports `unknown`. Always cross-check it against the independent
+count in the server log — `grep -c "decision deadline"` — and when the two
+disagree, believe the log. A Free-tier run printed `0` against 7 in the log.
