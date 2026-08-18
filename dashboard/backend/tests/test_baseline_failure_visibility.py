@@ -80,6 +80,32 @@ def test_success_resets_consecutive_counter_but_not_total(capsys, monkeypatch):
     assert bw._total_failures == 2 * bw._ESCALATION_THRESHOLD
 
 
+def test_failures_past_threshold_do_not_reprint_escalation(capsys, monkeypatch):
+    """Escalation must fire on the threshold CROSSING only, not stay armed.
+
+    A `>=` comparison at the crossing check would reprint the escalation line
+    on every failure once _consecutive_failures reaches the threshold -- the
+    exact log-flood the brief warns a per-item warning must not become. Drive
+    two more failures past the threshold and count occurrences in stdout
+    (not just presence) to catch that regression.
+    """
+    def _boom(job):
+        raise RuntimeError(f"boom for {job.run_id}")
+
+    monkeypatch.setattr(bw, "_run_job", _boom)
+
+    overrun = bw._ESCALATION_THRESHOLD + 2
+    for i in range(overrun):
+        assert bw.submit(_job(f"bad{i}"))
+    assert bw.wait_idle(10)
+
+    out = capsys.readouterr().out
+    assert out.count("Baseline generation failed") == overrun
+    assert out.count("consecutive failures") == 1   # still exactly once, past the threshold
+    assert bw._consecutive_failures == overrun
+    assert bw._total_failures == overrun
+
+
 def test_fewer_than_threshold_failures_do_not_escalate(capsys, monkeypatch):
     def _boom(job):
         raise RuntimeError(f"boom for {job.run_id}")

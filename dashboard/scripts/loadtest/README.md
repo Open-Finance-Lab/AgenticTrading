@@ -31,6 +31,16 @@ Terminal 2:
 - `N_AGENTS` (env var, default `100`) on `stress_serve.py` — how many
   protocol agents to pre-seed.
 
+Baseline generation is asynchronous: finalize enqueues the job and returns
+immediately, so the run is already `completed` before the worker even
+dequeues it, and `drive_agents.py`'s reported wall time never waits on
+baselines. `distinct`'s extra cost is real (N serialized `HourlyBacktester`
+builds instead of one deduped build) but structurally invisible to that
+timer. The signal that `distinct` is doing more work is the server-side
+baseline-job count (1 unique config under `shared` vs. N under `distinct`,
+visible in `stress_serve.py`'s stdout), not the wall time `drive_agents.py`
+prints.
+
 ## ⚠ Figures produced before 2026-08-18 are a floor, not a measurement
 
 Until 2026-08-18, `stress_serve.py` patched `create_market_data_provider`
