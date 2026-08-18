@@ -427,11 +427,37 @@ class ExternalBacktestSession:
         self._advance_step(executable=[], decision_source="timeout_hold")
         return True
 
+    def _emit_deadline_hold_notice(self, first_index: int, count: int) -> None:
+        """Print once per poll when this call just auto-held one or more steps.
+
+        Every caller drives ``_maybe_apply_timeout`` (looped or single-call)
+        under ``self._step_lock`` and must capture ``first_index``
+        (``self.step_index``) *before* doing so — ``_advance_step`` increments
+        ``step_index`` inside the loop, so a value read afterward would name a
+        step that was never held. Never take ``self._step_lock`` here: every
+        caller already holds it, and ``threading.Lock`` is non-reentrant, so
+        re-acquiring it deadlocks. A published equity curve containing these
+        steps is not the agent's curve; this is the one place that says so.
+        """
+        last_index = first_index + count - 1
+        print(
+            f"⚠️ decision deadline: auto-held {count} step(s) for {self.backtest_id}\n"
+            f"   (agent={self.agent_name}, steps={first_index}..{last_index}, "
+            f"total_holds={self.timeout_holds})\n"
+            f"   — these steps are NOT the agent's decisions"
+        )
+
     def get_current_step(self) -> Dict[str, Any]:
         with self._step_lock:
+            start_index = self.step_index
+            holds_before = self.timeout_holds
             while self._maybe_apply_timeout():
                 if self.status == "completed":
                     break
+            if self.timeout_holds > holds_before:
+                self._emit_deadline_hold_notice(
+                    start_index, self.timeout_holds - holds_before
+                )
 
             if self.status == "loading":
                 return {"status": "loading", "message": "Loading market data..."}
@@ -709,7 +735,13 @@ class ExternalBacktestSession:
 
     def get_status(self) -> Dict[str, Any]:
         with self._step_lock:
+            start_index = self.step_index
+            holds_before = self.timeout_holds
             self._maybe_apply_timeout()
+            if self.timeout_holds > holds_before:
+                self._emit_deadline_hold_notice(
+                    start_index, self.timeout_holds - holds_before
+                )
             base = {
                 "backtest_id": self.backtest_id,
                 "status": self.status,
@@ -736,9 +768,15 @@ class ExternalBacktestSession:
         driving an abandoned run forward. No-op unless the current step is past
         its deadline. Returns the resulting status."""
         with self._step_lock:
+            start_index = self.step_index
+            holds_before = self.timeout_holds
             while self._maybe_apply_timeout():
                 if self.status == "completed":
                     break
+            if self.timeout_holds > holds_before:
+                self._emit_deadline_hold_notice(
+                    start_index, self.timeout_holds - holds_before
+                )
             return self.status
 
     def get_decisions(self) -> List[Dict[str, Any]]:
