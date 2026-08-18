@@ -44,10 +44,50 @@ SUPPORTED_ALPACA_FEEDS = ("iex", "sip", "delayed_sip", "otc")
 # ``opts``, so a stalled socket blocks ``requests`` forever and permanently
 # leaks a threadpool thread -- this binds at concurrency >= 1, not just under
 # burst load. Read once at import, like MAX_ACTIVE_RUNS_PER_AGENT.
-ALPACA_HTTP_TIMEOUT_SECONDS = float(os.getenv("ALPACA_HTTP_TIMEOUT_SECONDS", "60"))
-ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS = float(
-    os.getenv("ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS", "10")
-)
+#
+# Parsed defensively, same shape as ``_max_active_dashboard_backtests`` in
+# ``api/routers/backtests.py``: a typo'd operator value must not take the
+# whole app down at import (this module is on the boot path), so a bad value
+# falls back to the default with a log line instead of raising. No range
+# check on the fallen-back-to value -- a negative timeout is already rejected
+# loudly by urllib3 on the first request, so silently clamping it here would
+# hide the operator's mistake instead of surfacing it.
+_DEFAULT_ALPACA_HTTP_TIMEOUT_SECONDS = 60.0
+_DEFAULT_ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS = 10.0
+
+
+def _alpaca_http_timeout_seconds() -> float:
+    raw = os.getenv("ALPACA_HTTP_TIMEOUT_SECONDS")
+    if raw is None or not str(raw).strip():
+        return _DEFAULT_ALPACA_HTTP_TIMEOUT_SECONDS
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        print(
+            "ALPACA_HTTP_TIMEOUT_SECONDS is not a number "
+            f"({raw!r}); using {_DEFAULT_ALPACA_HTTP_TIMEOUT_SECONDS}",
+            flush=True,
+        )
+        return _DEFAULT_ALPACA_HTTP_TIMEOUT_SECONDS
+
+
+def _alpaca_http_connect_timeout_seconds() -> float:
+    raw = os.getenv("ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS")
+    if raw is None or not str(raw).strip():
+        return _DEFAULT_ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        print(
+            "ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS is not a number "
+            f"({raw!r}); using {_DEFAULT_ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS}",
+            flush=True,
+        )
+        return _DEFAULT_ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS
+
+
+ALPACA_HTTP_TIMEOUT_SECONDS = _alpaca_http_timeout_seconds()
+ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS = _alpaca_http_connect_timeout_seconds()
 
 # Stamped on each returned frame so a rare IEX fallback is visible to callers
 # (return type stays Dict[str, DataFrame] for the MarketDataProvider contract).

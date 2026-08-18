@@ -105,9 +105,31 @@ MAX_LEGACY_ACTIVE_GLOBAL = int(os.getenv("MAX_LEGACY_ACTIVE_GLOBAL", "50"))
 # populates. A terminal session left in _sessions is otherwise permanent,
 # each one still pinning a loaded bar window. sweep_terminal_sessions()
 # below rides the existing reaper pass to drop them after this many seconds.
-LEGACY_SESSION_RETENTION_SECONDS = int(
-    os.getenv("LEGACY_SESSION_RETENTION_SECONDS", "300")
-)
+#
+# Parsed defensively, same shape as ``_max_active_dashboard_backtests`` in
+# ``api/routers/backtests.py``: a typo'd operator value must not raise at
+# import, so a bad value falls back to the default with a log line. No range
+# check -- unlike a concurrency cap, there is no "0 is a legitimate setting,
+# negative is a typo" distinction to enforce here.
+_DEFAULT_LEGACY_SESSION_RETENTION_SECONDS = 300
+
+
+def _legacy_session_retention_seconds() -> int:
+    raw = os.getenv("LEGACY_SESSION_RETENTION_SECONDS")
+    if raw is None or not str(raw).strip():
+        return _DEFAULT_LEGACY_SESSION_RETENTION_SECONDS
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        print(
+            "LEGACY_SESSION_RETENTION_SECONDS is not an integer "
+            f"({raw!r}); using {_DEFAULT_LEGACY_SESSION_RETENTION_SECONDS}",
+            flush=True,
+        )
+        return _DEFAULT_LEGACY_SESSION_RETENTION_SECONDS
+
+
+LEGACY_SESSION_RETENTION_SECONDS = _legacy_session_retention_seconds()
 
 
 class BacktestCapacityError(Exception):
@@ -454,9 +476,14 @@ class ExternalBacktestSession:
         steps is not the agent's curve; this is the one place that says so.
         """
         last_index = first_index + count - 1
+        # agent_name is caller-supplied on the legacy surface (StartBacktestRequest,
+        # no character restriction beyond length) and that surface authenticates
+        # nothing -- an embedded \n/\r would forge additional log lines. Strip them
+        # at the interpolation site rather than trusting the value.
+        safe_agent_name = self.agent_name.replace("\r", " ").replace("\n", " ")
         print(
             f"⚠️ decision deadline: auto-held {count} step(s) for {self.backtest_id}\n"
-            f"   (agent={self.agent_name}, steps={first_index}..{last_index}, "
+            f"   (agent={safe_agent_name}, steps={first_index}..{last_index}, "
             f"total_holds={self.timeout_holds})\n"
             f"   — these steps are NOT the agent's decisions"
         )
@@ -1091,8 +1118,17 @@ def get_session(backtest_id: str) -> Optional[ExternalBacktestSession]:
 
 def evict_session(backtest_id: str) -> bool:
     """Drop a finished session from memory (frees its market-data buffers).
-    Read paths for a completed run fall back to the persisted result run, so
-    evicting a terminal session is safe. Returns True if one was removed."""
+
+    Protocol-surface reads (``/api/v1/runs/{run_id}/...``) are DB-backed via
+    ``run_store``, so eviction there is transparent. The legacy
+    ``/api/v1/backtest/*`` surface is not: its ``{backtest_id}``-keyed reads
+    (``status``, ``decisions``, ``steps/current``) go through
+    ``_require_backtest`` -> ``get_session``, which has no DB fallback and
+    404s once the session is gone. Only that surface's ``runs/{run_id}/*``
+    result/trades/decisions endpoints (DB-backed via
+    ``db.get_run_with_session``) stay readable after eviction. Returns True
+    if one was removed.
+    """
     with _lock:
         return _sessions.pop(backtest_id, None) is not None
 
@@ -1118,8 +1154,10 @@ def sweep_terminal_sessions() -> int:
     (never evicting on that same pass) rather than expecting a terminal
     transition to stamp it -- a finalize/cancel path that forgets to stamp
     would otherwise leak silently instead of just running one sweep late.
-    Read paths for a completed run persist to the DB (see ``evict_session``'s
-    docstring), so dropping the in-memory session here is safe.
+    Once a legacy session is dropped here, its ``{backtest_id}``-keyed reads
+    (status/decisions/steps-current) start 404ing -- the run's result stays
+    readable via the DB-backed ``GET /api/v1/backtest/runs/{run_id}/result``
+    (and ``/trades``, ``/decisions``); see ``evict_session``'s docstring.
 
     Called by the registered reaper sweep in app.py; not a new thread.
     Pops directly rather than calling ``evict_session`` because that also

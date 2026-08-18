@@ -32,8 +32,9 @@ parser.add_argument("--windows", choices=("shared", "distinct"), default="shared
                     help="shared (default): every agent backtests the same "
                          "date range, so baseline generation dedups to one "
                          "queued job. distinct: each agent's start date is "
-                         "offset by its index (same span), forcing N "
-                         "serialized baseline jobs instead of one.")
+                         "offset by its index in whole weeks (same span, "
+                         "same trading-day count for every agent), forcing "
+                         "N serialized baseline jobs instead of one.")
 args = parser.parse_args()
 
 host = urllib.parse.urlparse(args.base).hostname or ""
@@ -55,9 +56,15 @@ failures = []
 
 # "shared" reproduces the original hardcoded window byte-for-byte, for every
 # agent, so existing measurements stay comparable. "distinct" offsets each
-# agent's start date by its index (same 2-day span -> 3 trading-day window),
-# giving each its own baseline config -- the difference between one queued
-# baseline backtest for the whole run and N serialized ones.
+# agent's start date by whole weeks (same 2-day span -> 3 trading-day window
+# for every agent), giving each its own baseline config -- the difference
+# between one queued baseline backtest for the whole run and N serialized
+# ones. Offsetting by idx days instead of idx weeks looked equivalent but
+# isn't: 2026-06-01 is a Monday, so a plain idx-day walk drifts across the
+# weekend and starves the windows that land on Thu/Fri/Sat/Sun down to 1-2
+# trading days instead of 3, silently cutting ~a third of the protocol work
+# across a 100-agent run. Weekly offsets keep every window on the same
+# Mon-Wed alignment as index 0.
 _WINDOW_START = datetime.date(2026, 6, 1)
 _WINDOW_END = datetime.date(2026, 6, 3)
 _WINDOW_SPAN = _WINDOW_END - _WINDOW_START
@@ -65,7 +72,7 @@ _WINDOW_SPAN = _WINDOW_END - _WINDOW_START
 
 def date_window(idx):
     if args.windows == "distinct":
-        start = _WINDOW_START + datetime.timedelta(days=idx)
+        start = _WINDOW_START + datetime.timedelta(weeks=idx)
         end = start + _WINDOW_SPAN
     else:
         start, end = _WINDOW_START, _WINDOW_END

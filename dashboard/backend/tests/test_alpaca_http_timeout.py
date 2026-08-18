@@ -13,6 +13,10 @@ tolerate it without raising.
 from dashboard.backend.infrastructure.market_data.alpaca_bars import (
     ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS,
     ALPACA_HTTP_TIMEOUT_SECONDS,
+    _DEFAULT_ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS,
+    _DEFAULT_ALPACA_HTTP_TIMEOUT_SECONDS,
+    _alpaca_http_connect_timeout_seconds,
+    _alpaca_http_timeout_seconds,
     _apply_default_timeout,
 )
 
@@ -92,7 +96,11 @@ def test_applying_twice_does_not_double_wrap():
 
 
 class _NoSessionClient:
-    """Mirrors the existing test_alpaca_bars.py _FakeClient: no _session at all."""
+    """A client with no ``_session`` at all -- what a future alpaca-py release
+    renaming that private attribute would look like from here. This is the only
+    place that case is covered: test_alpaca_bars.py's ``_FakeClient`` used to
+    exercise it incidentally, but it was given a ``_session`` so the fail-open
+    warning would stop firing on every green run."""
 
 
 def test_missing_session_warns_and_does_not_raise(capsys):
@@ -102,3 +110,42 @@ def test_missing_session_warns_and_does_not_raise(capsys):
 
     captured = capsys.readouterr()
     assert "_session" in captured.out
+
+
+# ===========================================================================
+# Env-var parsing for the two timeout values
+# ===========================================================================
+#
+# Both are read once at import via a bare ``float(os.getenv(...))``-shaped
+# call -- a typo'd operator value must not raise at import (this module is on
+# the boot path), matching ``_max_active_dashboard_backtests`` in
+# ``api/routers/backtests.py``.
+
+def test_bad_timeout_value_falls_back_instead_of_raising(monkeypatch, capsys):
+    monkeypatch.setenv("ALPACA_HTTP_TIMEOUT_SECONDS", "sixty")
+    assert _alpaca_http_timeout_seconds() == _DEFAULT_ALPACA_HTTP_TIMEOUT_SECONDS
+    assert "ALPACA_HTTP_TIMEOUT_SECONDS" in capsys.readouterr().out
+
+
+def test_bad_connect_timeout_value_falls_back_instead_of_raising(monkeypatch, capsys):
+    monkeypatch.setenv("ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS", "immediately")
+    assert (
+        _alpaca_http_connect_timeout_seconds()
+        == _DEFAULT_ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS
+    )
+    assert "ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS" in capsys.readouterr().out
+
+
+def test_unset_timeout_values_use_the_default(monkeypatch):
+    monkeypatch.delenv("ALPACA_HTTP_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS", raising=False)
+    assert _alpaca_http_timeout_seconds() == _DEFAULT_ALPACA_HTTP_TIMEOUT_SECONDS
+    assert (
+        _alpaca_http_connect_timeout_seconds()
+        == _DEFAULT_ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS
+    )
+
+
+def test_valid_timeout_values_are_parsed(monkeypatch):
+    monkeypatch.setenv("ALPACA_HTTP_TIMEOUT_SECONDS", "45.5")
+    assert _alpaca_http_timeout_seconds() == 45.5
