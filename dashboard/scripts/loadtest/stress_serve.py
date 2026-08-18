@@ -55,9 +55,15 @@ class FakeAlpacaLoader:
 
 import dashboard.backend.domain.backtesting.external_run_service as ebs  # noqa: E402
 import dashboard.backend.domain.backtesting.engine as engine_mod  # noqa: E402
+import dashboard.backend.domain.backtesting.baseline_worker as baseline_worker  # noqa: E402
 
 ebs.AlpacaDataLoader = FakeAlpacaLoader
-engine_mod.create_market_data_provider = lambda ds=None: FakeAlpacaLoader()
+# HourlyBacktester.__init__ always calls create_market_data_provider(data_source,
+# universe) positionally with BOTH args (engine.py), even though both are
+# defaulted in the real signature. A one-arg lambda here raised TypeError on
+# every call — silently, because baseline generation swallows job failures
+# (baseline_worker.py) and nothing else in the harness ever hits this path.
+engine_mod.create_market_data_provider = lambda *a, **k: FakeAlpacaLoader()
 
 from dashboard.backend.domain.agents.repository import agent_store  # noqa: E402
 
@@ -81,4 +87,14 @@ print(f"seeded {N} agents; serving on 127.0.0.1:8402", flush=True)
 
 import uvicorn  # noqa: E402
 
-uvicorn.run("dashboard.backend.app:app", host="127.0.0.1", port=8402, log_level="warning")
+try:
+    uvicorn.run("dashboard.backend.app:app", host="127.0.0.1", port=8402, log_level="warning")
+finally:
+    # Read the counter, don't scrape stdout — a harness break must be as loud
+    # as the production one baseline_worker now raises on its own.
+    failed = baseline_worker._total_failures
+    if failed:
+        print(f"⚠️  SHUTDOWN SUMMARY: {failed} baseline job(s) failed during this run "
+              f"— see warnings above", flush=True)
+    else:
+        print("SHUTDOWN SUMMARY: 0 baseline job failures", flush=True)
