@@ -223,6 +223,18 @@ async def startup_event():
         print(f"⚠️ v2 sweep registration error: {e}")
 
     try:
+        # Same reaper pass also TTL-evicts terminal legacy /api/v1/backtest/*
+        # sessions, which have no registry of their own to be walked by.
+        from dashboard.backend.domain.backtesting.external_run_service import (
+            sweep_terminal_sessions,
+        )
+        from dashboard.backend.domain.runs.service import register_reaper_sweep
+        register_reaper_sweep(sweep_terminal_sessions)
+        print("🧹 legacy session sweep registered with the reaper")
+    except Exception as e:
+        print(f"⚠️ legacy session sweep registration error: {e}")
+
+    try:
         from dashboard.backend.domain.runs.service import start_reaper
         start_reaper()
         print("🧹 Run reaper started")
