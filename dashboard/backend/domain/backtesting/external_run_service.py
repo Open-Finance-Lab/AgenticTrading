@@ -99,6 +99,16 @@ _lock = threading.Lock()
 MAX_LEGACY_ACTIVE_PER_SESSION = int(os.getenv("MAX_LEGACY_ACTIVE_PER_SESSION", "5"))
 MAX_LEGACY_ACTIVE_GLOBAL = int(os.getenv("MAX_LEGACY_ACTIVE_GLOBAL", "50"))
 
+# Neither of the caps above bounds a session once it goes terminal --
+# _count_active_locked skips anything in TERMINAL_STATUSES, and reap_runs
+# only walks _runs (the protocol registry), which this legacy surface never
+# populates. A terminal session left in _sessions is otherwise permanent,
+# each one still pinning a loaded bar window. sweep_terminal_sessions()
+# below rides the existing reaper pass to drop them after this many seconds.
+LEGACY_SESSION_RETENTION_SECONDS = int(
+    os.getenv("LEGACY_SESSION_RETENTION_SECONDS", "300")
+)
+
 
 class BacktestCapacityError(Exception):
     """Legacy start refused: a session or the server is at capacity.
@@ -236,6 +246,10 @@ class ExternalBacktestSession:
         self.price_cache: Dict[str, Dict[Any, float]] = {}
 
         self.step_opened_at: Optional[datetime] = None
+        # Stamped by sweep_terminal_sessions() the first time it sees this
+        # session in a terminal status; None until then. Explicit default so
+        # the attribute is discoverable rather than a bare getattr() away.
+        self.terminal_seen_at: Optional[datetime] = None
         self.last_decision_source: Optional[str] = None
         self.decision_log: List[Dict[str, Any]] = []
         self.last_executed: List[Dict[str, Any]] = []
@@ -1081,6 +1095,57 @@ def evict_session(backtest_id: str) -> bool:
     evicting a terminal session is safe. Returns True if one was removed."""
     with _lock:
         return _sessions.pop(backtest_id, None) is not None
+
+
+def sweep_terminal_sessions() -> int:
+    """TTL eviction for terminal sessions left in ``_sessions``.
+
+    ``_sessions`` is written by ``start_backtest`` for both the legacy
+    ``/api/v1/backtest/*`` surface and the protocol surface (via
+    ``run_service.create_run``). The protocol side is separately reaped by
+    ``reap_runs`` walking ``_runs`` and calling ``evict_session`` once a run
+    goes terminal, but the legacy surface has no such registry, and neither
+    of the ``MAX_LEGACY_ACTIVE_*`` caps sees a terminal session either (they
+    filter on ``TERMINAL_STATUSES``). Left alone, a terminal legacy session
+    sits in memory forever, still pinning a loaded bar window. This sweep is
+    the backstop for both: it walks the whole dict rather than filtering to
+    legacy-only, which is correct because reap_runs already evicts terminal
+    protocol sessions before invoking registered sweeps like this one -- it
+    only ever sees a protocol session here if that eviction failed, where the
+    TTL is a second line of defense, not the primary path.
+
+    Stamps ``terminal_seen_at`` the first time a session is seen terminal
+    (never evicting on that same pass) rather than expecting a terminal
+    transition to stamp it -- a finalize/cancel path that forgets to stamp
+    would otherwise leak silently instead of just running one sweep late.
+    Read paths for a completed run persist to the DB (see ``evict_session``'s
+    docstring), so dropping the in-memory session here is safe.
+
+    Called by the registered reaper sweep in app.py; not a new thread.
+    Pops directly rather than calling ``evict_session`` because that also
+    acquires ``_lock``, which is not reentrant -- calling it from in here
+    would deadlock the reaper thread. Returns the number of sessions
+    evicted this pass; idempotent.
+    """
+    now = _utcnow()
+    dropped = 0
+    with _lock:
+        for backtest_id, s in list(_sessions.items()):
+            # Defensive: _sessions is shared with the protocol surface, and a
+            # foreign/fake object injected there (e.g. in tests) may not
+            # carry .status at all. Treat that as "not terminal" and skip --
+            # never let a missing attribute here raise through the reaper.
+            status = getattr(s, "status", None)
+            if status not in TERMINAL_STATUSES:
+                continue
+            if s.terminal_seen_at is None:
+                s.terminal_seen_at = now
+                continue
+            age = (now - s.terminal_seen_at).total_seconds()
+            if age >= LEGACY_SESSION_RETENTION_SECONDS:
+                _sessions.pop(backtest_id, None)
+                dropped += 1
+    return dropped
 
 
 def get_current_step(backtest_id: str) -> Optional[Dict[str, Any]]:
