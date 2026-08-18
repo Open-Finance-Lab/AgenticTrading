@@ -71,7 +71,16 @@ def test_applying_twice_does_not_double_wrap():
     # no-op rather than wrapping the wrapper.
     assert getattr(client._session.request, "_atl_default_timeout_applied", False) is True
 
+    # Capture the bound callable *after* the first apply, before any call is
+    # made. len(session.calls) and the recorded timeout are both
+    # depth-invariant -- stacked *args/**kwargs wrappers still bottom out in
+    # exactly one call to the fake, so neither can distinguish one wrapper
+    # from three. Identity of session.request is the assertion that actually
+    # fails if the early-return guard is removed.
+    wrapped = client._session.request
     _apply_default_timeout(client)
+    assert client._session.request is wrapped
+
     client._session.request("GET", "https://data.alpaca.markets/v2/stocks/bars")
 
     assert len(session.calls) == 1

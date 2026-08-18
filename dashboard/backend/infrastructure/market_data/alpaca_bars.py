@@ -221,8 +221,10 @@ def _apply_default_timeout(client: Any) -> None:
     original_request = getattr(session, "request", None)
     if session is None or original_request is None:
         print(
-            "WARNING: Alpaca client has no usable _session.request; "
-            "ALPACA_HTTP_TIMEOUT_SECONDS default timeout was NOT applied"
+            "WARNING: Alpaca client has no usable _session.request "
+            "(likely an alpaca-py version change) -- "
+            "ALPACA_HTTP_TIMEOUT_SECONDS default timeout was NOT applied; "
+            "Alpaca HTTP requests are unbounded until this is fixed"
         )
         return
 
