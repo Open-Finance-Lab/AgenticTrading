@@ -39,6 +39,16 @@ DEFAULT_ALPACA_FEED = "sip"
 # Canonical feed names, matching ``alpaca.data.enums.DataFeed`` ``.value``.
 SUPPORTED_ALPACA_FEEDS = ("iex", "sip", "delayed_sip", "otc")
 
+# alpaca-py 0.43.2 issues every HTTP request via
+# ``self._session.request(method, url, **opts)`` with no ``timeout`` in
+# ``opts``, so a stalled socket blocks ``requests`` forever and permanently
+# leaks a threadpool thread -- this binds at concurrency >= 1, not just under
+# burst load. Read once at import, like MAX_ACTIVE_RUNS_PER_AGENT.
+ALPACA_HTTP_TIMEOUT_SECONDS = float(os.getenv("ALPACA_HTTP_TIMEOUT_SECONDS", "60"))
+ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS = float(
+    os.getenv("ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS", "10")
+)
+
 # Stamped on each returned frame so a rare IEX fallback is visible to callers
 # (return type stays Dict[str, DataFrame] for the MarketDataProvider contract).
 FRAME_ATTR_FEED = "alpaca_feed"
@@ -197,6 +207,38 @@ def feed_provenance(bars: Dict[str, pd.DataFrame]) -> Optional[Dict[str, Any]]:
     return None
 
 
+def _apply_default_timeout(client: Any) -> None:
+    """Wrap ``client._session.request`` so every call gets a default timeout.
+
+    alpaca-py builds ``requests.Session.request`` with no ``timeout`` kwarg,
+    so a stalled socket hangs forever and permanently leaks a threadpool
+    thread. If a future alpaca-py release renames or drops ``_session``, fail
+    open (warn, don't raise) rather than silently restoring the unbounded
+    behavior this exists to prevent -- but make that loud, since a quiet
+    warning nobody reads is exactly how the original bug went unnoticed.
+    """
+    session = getattr(client, "_session", None)
+    original_request = getattr(session, "request", None)
+    if session is None or original_request is None:
+        print(
+            "WARNING: Alpaca client has no usable _session.request; "
+            "ALPACA_HTTP_TIMEOUT_SECONDS default timeout was NOT applied"
+        )
+        return
+
+    if getattr(original_request, "_atl_default_timeout_applied", False):
+        return
+
+    def _request_with_default_timeout(*args, **kwargs):
+        kwargs.setdefault(
+            "timeout", (ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS, ALPACA_HTTP_TIMEOUT_SECONDS)
+        )
+        return original_request(*args, **kwargs)
+
+    _request_with_default_timeout._atl_default_timeout_applied = True
+    session.request = _request_with_default_timeout
+
+
 class AlpacaDataLoader:
     """Fetches historical hourly bars from Alpaca API."""
 
@@ -218,6 +260,7 @@ class AlpacaDataLoader:
             from alpaca.data.timeframe import TimeFrame
 
             self.client = StockHistoricalDataClient(self.api_key, self.secret_key)
+            _apply_default_timeout(self.client)
             self.StockBarsRequest = StockBarsRequest
             self.TimeFrame = TimeFrame
             self.DataFeed = DataFeed
