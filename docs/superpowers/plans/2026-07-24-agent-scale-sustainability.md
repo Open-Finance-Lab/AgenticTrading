@@ -1,6 +1,19 @@
 # Agent-Scale Sustainability Implementation Plan
 
-> **✅ STATUS 2026-07-24 — IMPLEMENTATION COMPLETE.** All four tiers merged to `origin/main` and auto-deployed to prod: **T1** #208 (`e333f69`), **T2** #209 (`a178c01`), **T3** #211 (`17bf012`), **T4** #212 (`9eef9cc`). Shipped unattended via `afk-loop-runner.sh`, 0 deferrals. **Still pending:** Task 12 acceptance — the 100-agent load run + prod smoke were **not** executed (they sit past the "four tiers merged" milestone that stopped the loop). Run them before claiming the 100-agent goal met.
+> **✅ STATUS 2026-07-24 — IMPLEMENTATION COMPLETE.** All four tiers merged to `origin/main` and
+> auto-deployed to prod: **T1** #208 (`e333f69`), **T2** #209 (`a178c01`), **T3** #211
+> (`17bf012`), **T4** #212 (`9eef9cc`). Shipped unattended via `afk-loop-runner.sh`, 0 deferrals.
+> **Update 2026-08-18** (`docs/superpowers/plans/2026-08-18-burst-capacity-safety.md`): Task 12
+> acceptance ran, partially. **Executed and met** — 100 agents, 35.6 s wall, 100/100 completed, 0
+> failures, `timeout_holds` 0 in every rung. **Still pending** — `create p95`, `decision p95` and
+> RSS growth were never captured (peak RSS was recorded instead, a different quantity); carried
+> into `docs/superpowers/plans/2026-08-18-burst-capacity-safety.md`'s T5. **Still pending** — the
+> Step 3 post-deploy prod smoke was not run at all. Caveat: two different executions sit behind
+> these numbers, and only one is a floor. The **ladder sweep** (1→100 agents) — where
+> `timeout_holds` 0 in every rung comes from — ran with the **T4** harness bug present, so its CPU
+> figures (0.406–0.440 CPU-s) and its RSS are floors. The wall-time and completion numbers above
+> come from a separate **fresh 100-agent run**, taken after an ad-hoc local repair of that bug;
+> its CPU (0.522 CPU-s) and RSS (311 MB) are **not** floors.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -612,9 +625,13 @@ from dashboard.backend.domain.backtesting.features import TechnicalIndicators
 from dashboard.backend.infrastructure.market_data.alpaca_bars import AlpacaDataLoader
 
 # Read once at import (tests monkeypatch the module constant). Entry count, not
-# bytes: a month-long dataset is ~50 MB, so 4 entries caps the worst case at
-# ~200 MB against the 512 MB free tier. Byte-aware accounting is a 1000-tier
-# refinement; the per-build size print below keeps a pathological mix visible.
+# bytes: measured ~1.7 MB for a month-long dataset (was cited as ~50 MB), but
+# that is a floor — the size print below counts only the all_data frames (not
+# timestamps or price_cache) and was taken on synthetic harness bars, not real
+# Alpaca DJIA-30 data. It no longer supports the old ~200 MB worst-case claim
+# against the 512 MB free tier; there is no settled byte budget, so the
+# 4-entry cap rests on entry count alone. Byte-aware accounting is a
+# 1000-tier refinement; the size print below keeps a pathological mix visible.
 MARKET_DATA_CACHE_MAX_ENTRIES = int(os.getenv("MARKET_DATA_CACHE_MAX_ENTRIES", "4"))
 NEGATIVE_TTL_SECONDS = 30.0
 
