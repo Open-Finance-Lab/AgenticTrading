@@ -361,12 +361,50 @@ and was swallowed as a warning. The harness is the instrument T5 depends on.
 
 ## T5 — Validation against a real Render instance
 
+> ## ✅ EXECUTED 2026-08-18 — but **not against Render**, and the answers moved
+>
+> The capacity question is **answered**; the steps below are kept for the record and
+> annotated with what actually happened. Results live in **spec §5**.
+>
+> **Why not Render.** The harness cannot be pointed at a deployed instance. Every
+> hermetic property is an in-process monkeypatch inside `stress_serve.py`, not client
+> configuration: `:66` swaps `create_market_data_provider` for `FakeAlpacaLoader`;
+> `:17-20` redirects `DATABASE_PATH` and pops the Postgres URLs; `:70-79` seeds the
+> agents and writes the keys `drive_agents.py:45` requires. `--allow-remote`
+> (`drive_agents.py:41-42`) only relaxes a hostname guard — it supplies none of that.
+> Aimed at Render the run would register 100 junk agents in the prod content DB, hit
+> **real Alpaca** (the create payload carries only dates, so the server default feed
+> applies; the sole synthetic provider, `vnpy_simulation`, is absent from the image
+> because `Dockerfile:9` installs `requirements.txt` only), and write into the real
+> run-history store — while loading **prod**, the only Render service there is. That
+> measures a different system than §5 describes.
+>
+> **What was run instead.** The same harness, unmodified, with the *server* confined to
+> each tier's CPU budget on the dev box (`taskset -c 0` ≈ Standard 1.0 CPU;
+> `systemd-run --user --scope -p CPUQuota=10%` ≈ Free 0.1 CPU) and the driver pinned to
+> other cores. That reproduces the one variable that matters while keeping every
+> hermetic property intact. Ladders at N = 12/16/20/25/50/100.
+>
+> **The premise also changed.** T5 was scoped to a 100-agent *burst*. The operator's
+> actual plan is ~12 hosted agents **sustained**, growing with users — see spec §1.
+> §5 now answers that question.
+>
+> **Three things this found that the plan did not anticipate:**
+> 1. `timeout_holds == 0` — a Step 3 acceptance criterion — was **structurally
+>    unfalsifiable**. Fixed in `drive_agents.py` before any verdict was recorded.
+> 2. Free fails by **SQLite write-lock timeouts**, not by the predicted deadline breach,
+>    and it fails between 16 and 25 concurrent runs rather than at 100.
+> 3. Per-run CPU is a property *of the tier*, not of the code (0.31 CPU-s dedicated vs
+>    0.57 throttled), which is why Step 3's "~52 s prediction" was wrong.
+
 **Not a code change. Do not start it until T1–T4 have merged.**
 
 Every number in the spec comes from a 12-core dev box plus arithmetic. Nothing in this
 workstream has ever run on Render.
 
-- [ ] **Step 1:** Deploy `main` (with T1–T4) to a Render **Standard** instance.
+- [~] **Step 1:** ~~Deploy `main` (with T1–T4) to a Render **Standard** instance.~~
+      **Not done — and should not be.** Superseded by CPU-limited emulation; see the
+      EXECUTED block above. The only Render service is prod.
 - [ ] **Step 2:** Run the fixed harness at **25 agents** first, `--windows shared`.
       Record wall time, failures, `timeout_holds`, **create p95, decision p95, RSS at
       start and at end** (growth, not just peak — see Step 3).
@@ -378,6 +416,12 @@ workstream has ever run on Render.
       environment where they mean anything and the first run whose baselines actually
       execute, so this is what finally closes Task 12 Step 2. Task 12's own rule applies:
       if a criterion misses, diagnose — do not relax it.
+      **→ Run under CPU-limited emulation instead (spec §5). Standard: 100/100, zero
+      failures, zero locks, RSS +89 MB. Two corrections to this step's own text: the
+      `timeout_holds == 0` criterion could not fail as written and had to be fixed first,
+      and the "~52 s prediction" it measures against was itself wrong (per-run CPU is a
+      property of the tier). Task 12's rule was followed — the `create p95` miss was
+      diagnosed as burst-start queueing, not relaxed.**
 - [ ] **Step 4:** Run **100 agents `--windows distinct`** once, purely to measure the
       baseline-worker serialization from F5. Expected to be materially slower; that is
       the datum, not a failure.

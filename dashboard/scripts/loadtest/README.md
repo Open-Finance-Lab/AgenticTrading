@@ -123,8 +123,27 @@ less useful work per CPU-second than dedicated CPU. Measure each tier.
 0 timeout_holds, 0 failures, create p95 < 1 s, decision p95 < 1 s,
 total wall < 60 s, server RSS growth < 100 MB.
 
-⚠ **`timeout_holds` is not self-sufficient evidence.** Until 2026-08-18 the
-driver reported an unreadable count as `0`, so this criterion could not fail;
-it now reports `unknown`. Always cross-check it against the independent
-count in the server log — `grep -c "decision deadline"` — and when the two
-disagree, believe the log. A Free-tier run printed `0` against 7 in the log.
+⚠ **Auto-holds have three instruments and none of them is complete.** Rank
+them in this order and take the largest:
+
+1. **Client-observed deadline losses** — `drive_agents.py` counts a loss only
+   when the server answers a decision with **409 + "deadline"/"finalized"**,
+   i.e. the server itself reporting that it auto-held the step under the
+   agent. Authoritative and cannot be fabricated. Trust this one first.
+2. **The server log** — `grep -c "decision deadline"`. A **lower bound**: it
+   misses the path where `get_status` applies the hold *before* the
+   instrumented loop in `get_current_step` runs, so the loop sees no delta
+   and logs nothing. Measured: a 25-agent Standard run logged **0** while the
+   client observed **1**. Issue #375 is a second, separate blind spot (the
+   fourth deadline branch in `submit_decisions`, silent on the legacy and v2
+   surfaces).
+3. **The `timeout_holds` counter** — weakest. Until 2026-08-18 an unreadable
+   count printed as `0`, so this criterion could not fail; it now prints
+   `unknown`. At load it is unknown for essentially every run (a 100-agent
+   Standard run: `unknown [100/100 runs unreadable]`), because the live
+   session it reads from has usually been swept by the time the run is
+   polled.
+
+A run is only clean when **all three** are zero. Earlier guidance in this
+repo said "when they disagree, believe the log" — that is wrong, and was
+corrected once the client-observed count was seen to exceed it.

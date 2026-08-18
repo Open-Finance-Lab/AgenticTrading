@@ -15,6 +15,13 @@ The predecessor made 100 concurrent protocol agents *survivable*. This spec cove
 residue that the acceptance run surfaced: four verified defects, and the hosting decision
 for a **100-agent burst** (a demo/launch moment, not sustained load).
 
+⚠ **The burst framing was wrong about the product, and §5 has been re-scoped.** The
+operator's actual plan is to **keep roughly a dozen agents hosted continuously and grow
+that number as users arrive** — sustained load, not a launch moment. That is a different
+question from the one this spec originally asked, and it has a different answer: §5 now
+carries a measured Free-tier ceiling for *sustained concurrency* rather than an
+arithmetic burst estimate. Read §5, not this paragraph, for the hosting decision.
+
 **Explicitly out of scope, by decision:** per-run CPU optimization. It was measured
 (§4) and is real, but the burst target does not need it. Recorded here so a later
 reader does not re-derive it.
@@ -42,7 +49,7 @@ smoke) is likewise still outstanding — nothing in this workstream has run on R
 | Measurement | Result |
 |---|---|
 | 100 agents, fresh process | **35.6 s wall, 100/100 completed, 0 failures**, worst request 5.6 s |
-| `timeout_holds` | **0 in every rung** (1 → 100 agents) — the #208–#212 deadline fix is validated |
+| `timeout_holds` | **0 in every rung** (1 → 100 agents) — ⚠ **not evidence**, see below |
 | Peak RSS | 311 MB on the fresh 100-agent run (never above 360 MB in any configuration) |
 | CPU per run (ladder, over HTTP) | 0.440 / 0.406 / 0.412 / 0.432 / 0.420 CPU-s at 1 / 10 / 25 / 50 / 100 agents — **linear** across a 100× concurrency range |
 | CPU per run, working figure | **0.522 CPU-s** — the *only* run whose baselines actually executed (the ladder rungs ran with baselines silently disabled by F4, so 0.406–0.440 is a floor). 0.522 is the value used for every tier calculation below |
@@ -55,6 +62,37 @@ baselines, `baseline_worker.py:105-129`). The **ladder rungs** are the floors: t
 (0.406–0.440) *and* their RSS were measured with baselines silently failing. Do not
 extend the F4 discount to 0.522/311 MB, and do not treat the ladder's numbers as
 comparable to them.
+
+⚠ **The `timeout_holds` row was never evidence, and this was found the hard way.** Until
+2026-08-18 the driver folded three distinct *unknowns* into the same `0` that means "no
+holds" — a non-200 on the final GET, a swept live session (`engine_status` is `None` once
+it is gone), and an absent field. That read has been there since the harness's first
+commit (`11a102b`), so **every rung above, and the predecessor's whole ladder, reported a
+number that could not fail.** It reads zero hardest under the load that produces holds: a
+Free-tier run printed `0` while the server log carried **7**. Fixed in
+`drive_agents.py` (unknown now prints as `unknown`, never `0`).
+
+This does not mean the #208–#212 deadline fix is broken — on an unsaturated 12-core box
+those zeros were most likely true. It means these runs could not tell a working fix from
+an unreadable counter, so they never validated it.
+
+**Auto-holds have three instruments, and none of them is complete.** Rank them and take
+the largest:
+
+1. **Client-observed deadline losses** (`drive_agents.py:152-155`) — counted only when
+   the server answers a decision with **409 + "deadline"/"finalized"**, i.e. the server
+   itself reporting the auto-hold. Authoritative; trust first.
+2. **T2's `decision deadline` log lines** — a **lower bound**. It misses the path where
+   `get_status` applies the hold *before* the instrumented loop in `get_current_step`
+   runs, leaving that loop no delta to report. Measured in §5: a 25-agent Standard run
+   logged **0** while the client observed **1**. Issue #375 is a separate second blind
+   spot (the fourth deadline branch in `submit_decisions`).
+3. **The `timeout_holds` counter** — weakest, and at load it is `unknown` for essentially
+   every run.
+
+⚠ An earlier draft of this section said "when they disagree, believe the log." That was
+written before the Standard 25-agent run showed the log *under*-counting, and is wrong.
+The log is a floor, not a truth.
 
 RSS nonetheless stays unsettled, for different reasons: 311 MB is **one run**, on a
 12-core dev box, against `FakeAlpacaLoader`/`synth_bars` synthetic frames rather than real
@@ -217,40 +255,170 @@ sites from drifting — do not fold it into any connection-pooling change.
 **Why it is deferred:** 1.51× moves free tier from ~7.6 to ~11.5 sustained agents.
 It does not reach 100 by any path. For the burst target it is unnecessary (§5).
 
-## 5. Hosting decision
+⚠ **Both of those agent counts are wrong** — they are `0.522 ÷ 0.1` arithmetic, the
+method §5 falsified. **Measured**, Free clears **20** concurrent active runs before the
+first failure, not 7.6. The deferral still holds, but not for the reason given: the
+optimization was sized as the thing that would lift Free from "under the operator's
+target" to "just over it", and Free was already over it. What actually bounds Free is
+SQLite write-lock contention under CPU throttling (§5), which shaving 33% off per-run
+CPU does not address — the lock is held across a *freeze*, not across compute. Do not
+revive this optimization as a way to raise Free's agent ceiling.
 
-Per-run cost is **0.522 CPU-s** over HTTP (§2). For a **burst** of 100 agents running
-once — 52.2 CPU-s of request work in total:
+## 5. Hosting decision — MEASURED 2026-08-18
 
-| Tier | CPU | Burst wall time | Worst request (extrapolated) | Verdict |
-|---|---|---|---|---|
-| Free | 0.1 | ~520 s | **~82 s** | **Breaches the 60 s deadline** → silent auto-holds |
-| Standard | 1.0 | ~52 s | ~8 s | **Adequate, but with no headroom** |
+> **This section was arithmetic and it was wrong in both directions.** It predicted
+> Standard at ~52 s (measured 26–49 s), Free at ~520 s (measured 702 s), and — more
+> importantly — the **wrong failure mode at the wrong load**. Replaced with measurement.
+> The method it used, `CPU-seconds ÷ CPU budget`, must not be reused; see *Why the
+> arithmetic failed*.
 
-Both columns are arithmetic, and the derivation is stated so it can be checked:
-wall = 52.2 ÷ CPU; worst request = 5.6 s × (predicted wall ÷ 35.6 s measured wall).
+### What is being sized
 
-The deadline, not throughput, is the failure boundary: a step served later than
-`EXTERNAL_AGENT_DECISION_TIMEOUT_SECONDS` (60) is auto-held and attributed to the agent
-anyway (F2). Free tier is expected to breach it under a 100-agent burst; Standard is not.
-That is what makes deferring §4 safe — **but the margin is thinner than the table alone
-suggests, and T5 exists to settle it**:
+**N is the number of concurrently *active runs*, not registered agents.** A dozen hosted
+agents that each step hourly are a negligible load; a dozen agents all backtesting at the
+same moment is the worst case, and that is what N means below.
 
-- **The 52 s figure consumes the whole CPU.** 52.2 CPU-s of request work on 1.0 CPU in
-  ~52 s is ~100% utilisation with nothing left for the baseline worker, the 60 s reaper,
-  DB writes, or any concurrent dashboard traffic. It is a lower bound on wall time, not a
-  budget.
-- **The baseline worker's CPU is in none of these numbers** (F4). Even the shared-window
-  demo of §7 still queues one full `HourlyBacktester` run.
-- **Scaling a *tail* latency linearly is not sound**, and the ~82 s / ~8 s column should
-  be read as an order-of-magnitude estimate, not a measurement. It assumes the
-  tail-to-total ratio (5.6 ⁄ 35.6 ≈ 16%) survives the move from a 12-core box to
-  cgroup-throttled fractional CPU, where FIFO queueing against a near-single-threaded
-  resource can grow the tail *super*-linearly. If anything it **understates** the Free
-  tier's worst case; the Free verdict is directionally safe regardless, which is the only
-  load-bearing use of the number here.
+The operator's target is **~12 sustained, growing with users** (§1) — not the 100-agent
+burst this spec was originally scoped to.
 
-Sustained 100 agents is a different question and is not answered here.
+### Method
+
+The hermetic harness (`dashboard/scripts/loadtest/`), unmodified, on merged `main`
+(`e8473fe`), `--windows shared`, with the **server** confined to each tier's CPU budget
+and the driver pinned to other cores:
+
+- **Standard** ≈ `taskset -c 0` (1.0 CPU)
+- **Free** ≈ `systemd-run --user --scope -p CPUQuota=10%` (0.1 CPU); quota enforcement
+  verified first with a busy-loop probe (0.52 CPU-s over 5 s wall = 10.4%)
+
+Server CPU read directly from `/proc/<pid>/stat` (process-wide, all threads). Not Render
+itself — the harness cannot be pointed at a deployed instance; see the plan's T5 block.
+
+### Free tier (0.1 CPU) — the ceiling is 20
+
+| N | wall | server CPU | CPU/run | util of quota | completed | failures | `database is locked` | holds (log / client) |
+|---|---|---|---|---|---|---|---|---|
+| 12 | 68.9 s | 6.9 | 0.575 | 100% | **12/12** | **0** | 0 | 0 / 0 |
+| 16 | 89.1 s | 8.9 | 0.556 | 100% | **16/16** | **0** | 0 | 0 / 0 |
+| 20 | 141.0 s | 11.2 | 0.560 | 79% | **20/20** | **0** | 0 | 0 / 0 |
+| 25 | 141.3 s | 14.0 | 0.560 | 99% | 22/25 | **3** | **6** | 0 / 0 |
+| 50 | 313.6 s | 28.3 | 0.566 | 90% | 36/50 | **14** | **26** | 2 / 1 |
+| 100 | 702.4 s | ~70 † | ~0.70 † | ~100% † | 81/100 | **19** | **34** | 7 / 7 |
+
+† The N=100 row's CPU is **inferred** from wall × quota; that run predates the direct
+`/proc` instrumentation. Every other row is measured.
+
+**Clean through 20 concurrent; first failures at 25.** But "clean" is not "comfortable":
+the server runs **at or near its full 0.1 CPU quota across the whole range**, so there is
+no headroom for dashboard traffic, the leaderboard refresh, or the baseline worker.
+Latency is already seconds — `decision` p95 2.0 s at N=12, 3.7 s at N=20.
+
+The two rungs below 100% are the informative ones. N=50 (90%) and N=20 (79%) are *not*
+spare capacity: both lost wall-clock to blocking rather than compute — N=50 to lock waits
+(26 of them), N=20 to one long stall (below). CPU going idle on this stack is a symptom,
+not headroom.
+
+RSS stayed 276–303 MB across the whole range, so the 512 MB ceiling is **not** the
+constraint at any point. This failure is purely CPU.
+
+### Standard tier (1.0 CPU)
+
+| N | wall | server CPU | CPU/run | util | completed | failures | locks | create p95 | decision p95 |
+|---|---|---|---|---|---|---|---|---|---|
+| 12 | 77.5 s | 3.7 | 0.308 | 4.8% | **12/12** | **0** | 0 | 529 ms | 120 ms |
+| 25 | 73.9 s | 6.8 | 0.272 | 9.2% | **25/25** | **0** | 0 | 259 ms | 269 ms |
+| 100 | 48.8 s | 31.0 | 0.310 | 63.5% | **100/100** | **0** | 0 | 1494 ms | 1014 ms |
+
+**Zero failures and zero lock errors at every rung, including 100.** At N=100 the server
+used 63.5% of one CPU, so even the burst case leaves headroom. An earlier, less
+instrumented run of the same configuration finished in 26.6 s with `create` p95 1157 ms
+and `decision` p95 884 ms; the difference is contention for core 0 with other work on the
+dev box, which makes this emulation a **floor** for Standard rather than a ceiling.
+
+Wall time here is dominated by an outlier stall, not by CPU — see *The ~68 s stall*.
+
+### Why the arithmetic failed
+
+**Per-run CPU is a property of the tier, not of the code.** Measured directly:
+
+| | CPU-s per run |
+|---|---|
+| 1.0 CPU, dedicated (`taskset`) | **0.31** |
+| 0.1 CPU, throttled (`CPUQuota`) | **0.57** (≈1.9×) |
+| 12-core dev box (the figure §2 used) | 0.522 |
+
+A cgroup quota does not slow a process down smoothly — it **freezes** it for ~90 ms of
+every 100 ms period, including mid-transaction and mid-critical-section. Throttled CPU
+therefore does less useful work per CPU-second than dedicated CPU. Dividing one
+per-run constant by each tier's budget assumes exactly the opposite, so it overestimated
+the fast tier (0.522 vs the true 0.31) and underestimated the throttled one (0.522 vs the
+true 0.57). The 12-core figure happened to sit between them, which is why the result
+looked plausible.
+
+Use each tier's own measured per-run cost, or measure the tier.
+
+### The failure mode is not the one that was predicted
+
+§5 predicted Free would fail by **breaching the 60 s decision deadline → silent
+auto-holds**. It does not. It fails by **SQLite write-lock timeouts**, at a quarter of
+the predicted load, with *zero* auto-holds at the threshold:
+
+```
+sqlite3.OperationalError: database is locked
+  → database.py:645 insert_run          (via external_run_service _finalize → _advance_step → submit_decisions)
+  → domain/runs/repository.py:433 finalize_step   (via runs/service.py:971 submit_decision)
+```
+
+Both sit on the agent's decision path (`api/routers/runs.py:157`) and both carry a ~5 s
+busy timeout (`repository.py:79` explicitly; `database.py:119` via Python's default). A
+writer frozen by the quota still holds the lock, so every other writer exhausts its
+timeout and the agent gets a bare **500**.
+
+**This is throttling contention, not concurrency contention** — 100 concurrent writers on
+a full CPU produce **zero** lock errors, while 25 on a tenth of a CPU produce six.
+
+⚠ **On prod the two sites diverge, and the hotter one cannot be relieved.** `insert_run`
+moves to Postgres when `AGENT_RUNS_DATABASE_URL` is set. `finalize_step` writes
+`protocol_steps`, which has **no Postgres twin** (`domain/runs/` has no `*_postgres.py`)
+and always lives on local SQLite — and it runs once per *step*, ~21× more often than
+`insert_run` runs per *run*. Configuration cannot move the hot site.
+
+### The ~68 s stall — reproduced, unexplained
+
+Three runs across both tiers showed a single request stalling for a fixed ~68–70 s while
+the server was **idle**:
+
+| run | stalled endpoint | duration | server util |
+|---|---|---|---|
+| Standard N=12 | `steps/next` | 68.6 s | 4.8% |
+| Standard N=25 | `decision` | 69.6 s | 9.2% |
+| Free N=50 | `steps/next` | 68.2 s | 9.0% |
+
+At Standard N=12, eleven of twelve runs finished in ~2.9 s and one took 77.4 s, with only
+3.7 CPU-s consumed in total — so this is a **wait, not work**, and the near-identical
+duration across unrelated configurations argues against a scheduling artifact.
+`get_current_step` does not long-poll (`external_run_service.py:491`), so a 68 s response
+is a genuine server-side stall. It exceeds the 60 s decision deadline, and at Standard
+N=25 it produced a real client-observed auto-hold.
+
+**Not diagnosed.** Recorded here so it is not rediscovered as a "flake"; it deserves its
+own investigation.
+
+### Verdict
+
+**Standard, standing — not a per-event flip.** The operator's plan is sustained hosting,
+so the relevant comparison is headroom, not survival:
+
+- Free clears a dozen concurrent runs, but **at or near its full CPU quota throughout**,
+  with second-scale latencies and a hard wall at 25 where agents start receiving 500s.
+  Nothing is left for the dashboard the agents are hosted behind.
+- Standard clears 100 concurrent at 63.5% utilisation with no failures and no lock
+  errors — roughly **5× the target load, with headroom to grow into**.
+
+The upgrade trigger is not "a dozen agents"; it is **any expectation of more than ~20
+concurrent active runs**, or of Free's CPU being shared with anything else.
+
+Sustained 100 agents remains a different question and is still not answered here.
 
 **Horizontal scaling stays closed.** Run state is module-level (`_sessions`,
 `external_run_service.py:67`; `_runs`, `runs/service.py:49`) and the heartbeat path
@@ -380,10 +548,19 @@ aggregate-failure counter in `baseline_worker` that escalates to one unmissable 
 
 ### T5 — Validation against a real Render instance
 
+✅ **Executed 2026-08-18, under CPU-limited emulation rather than on Render** (the
+harness cannot target a deployed instance — see the plan's T5 block). §5 carries the
+results and has been rewritten around them. It did disagree with §5, and §5 was wrong,
+exactly as the rule below required.
+
 Nothing in this workstream has ever run on Render. Everything in §2 and §5 is a
 12-core dev box plus arithmetic. Deploy to Standard, run the fixed harness at 100
 agents, and assert: zero failures, `timeout_holds == 0`, RSS below the instance
 ceiling. **If T5 disagrees with §5, §5 is wrong**, not T5.
+
+⚠ Two of the assertions in that sentence were themselves defective: `timeout_holds == 0`
+could not fail as written (§2), and "RSS below the instance ceiling" was never the
+binding constraint on either tier (§5).
 
 T5 also carries the three predecessor criteria §2 could not close, because this is the
 first environment on which they mean anything: **create p95 < 1000 ms, decision p95 <
