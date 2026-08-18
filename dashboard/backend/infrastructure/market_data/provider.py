@@ -84,11 +84,13 @@ def ensure_market_data_source_available(data_source: str) -> None:
         raise MarketDataDependencyError(
             "vn.py is not installed; run pip install -r requirements-vnpy.txt"
         )
-    if data_source == IFIND_ASHARE and not os.getenv(
-        "IFIND_ACCESS_TOKEN", ""
-    ).strip():
+    if data_source == IFIND_ASHARE and not any(
+        os.getenv(name, "").strip()
+        for name in ("IFIND_REFRESH_TOKEN", "IFIND_ACCESS_TOKEN")
+    ):
         raise MarketDataCredentialsError(
-            "iFinD credentials are not configured; set IFIND_ACCESS_TOKEN"
+            "iFinD credentials are not configured; "
+            "set IFIND_REFRESH_TOKEN or IFIND_ACCESS_TOKEN"
         )
 
 

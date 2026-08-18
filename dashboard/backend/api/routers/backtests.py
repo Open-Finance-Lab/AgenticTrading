@@ -1170,13 +1170,19 @@ def _redact_credentials(text: object, extra_secret: Optional[str] = None) -> str
     summary needs a length bound.
     """
     message = str(text)
-    token = os.getenv("IFIND_ACCESS_TOKEN", "").strip()
-    if token:
-        message = message.replace(token, "[REDACTED]")
+    for environment_variable in ("IFIND_REFRESH_TOKEN", "IFIND_ACCESS_TOKEN"):
+        token = os.getenv(environment_variable, "").strip()
+        if token:
+            message = message.replace(token, "[REDACTED]")
     if extra_secret:
         message = message.replace(extra_secret, "[REDACTED]")
     message = re.sub(
         r"(?i)(access[_-]?token\s*[=:]\s*)[^\s,;]+",
+        r"\1[REDACTED]",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(refresh[_-]?token\s*[=:]\s*)[^\s,;]+",
         r"\1[REDACTED]",
         message,
     )

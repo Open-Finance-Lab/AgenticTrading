@@ -125,6 +125,7 @@ def test_missing_ifind_token_is_rejected_without_leaking_secrets(monkeypatch):
     from dashboard.backend.infrastructure.market_data import provider
 
     monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.delenv("IFIND_REFRESH_TOKEN", raising=False)
     monkeypatch.delenv("IFIND_ACCESS_TOKEN", raising=False)
     monkeypatch.setenv("UNRELATED_SECRET", "must-not-leak")
 
@@ -132,8 +133,19 @@ def test_missing_ifind_token_is_rejected_without_leaking_secrets(monkeypatch):
         provider.ensure_market_data_source_available(provider.IFIND_ASHARE)
 
     message = str(exc_info.value)
+    assert "IFIND_REFRESH_TOKEN" in message
     assert "IFIND_ACCESS_TOKEN" in message
     assert "must-not-leak" not in message
+
+
+def test_refresh_token_is_sufficient_for_ifind_availability(monkeypatch):
+    from dashboard.backend.infrastructure.market_data import provider
+
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_REFRESH_TOKEN", "refresh-token-canary")
+    monkeypatch.delenv("IFIND_ACCESS_TOKEN", raising=False)
+
+    provider.ensure_market_data_source_available(provider.IFIND_ASHARE)
 
 
 def test_invalid_ifind_universe_is_rejected_before_credentials(monkeypatch):
