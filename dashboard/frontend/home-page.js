@@ -716,7 +716,25 @@ function homeFormatMoney(value, digits = 0) {
     })}`;
 }
 
+/** The signed percent this module renders everywhere: rank rows, chart tooltip.
+ *
+ *  DELEGATES to the board frame's own formatter. The endpoint pill beside each
+ *  curve is drawn by `createEndpointLabelPlugin`, which prints
+ *  `boardSignedPercent` -- so the pill and the rank row directly beneath it
+ *  were two independent expressions rendering one number, which is how the
+ *  sign rule (`> 0`, not `>= 0`) or the precision drifts apart unnoticed.
+ *  `homeBoardFramePlugins` takes the default pill formatter for exactly this
+ *  reason; delegating here is the other half of that.
+ *
+ *  The local arithmetic survives only as the fallback for leaderboard.js not
+ *  having landed -- the same absence `homeBoardFramePlugins` warns about, where
+ *  there is no pill on screen to match anyway. The `'—'` for a non-finite
+ *  input is this module's own: `boardSignedPercent` returns `''`, which would
+ *  render a rank cell as blank rather than as visibly missing. */
 function homeFormatReturnPct(value) {
+    if (typeof window.boardSignedPercent === 'function') {
+        return window.boardSignedPercent(value) || '—';
+    }
     const n = Number(value);
     if (!Number.isFinite(n)) return '—';
     const pct = n * 100;
@@ -1671,20 +1689,21 @@ function renderHomeLeaderboardChart(series, times) {
                         title: (items) =>
                             (items.length ? homeFormatChartStamp(items[0].label, true) : ''),
                         // Without this the tooltip prints the raw fraction
-                        // (0.0749). Two decimals, not the axis's one: this
-                        // readout sits beside the rank row for the same model,
-                        // and that row renders `homeFormatReturnPct` -- which
-                        // is toFixed(2), so `+7.49%`. Pinned by
+                        // (0.0749). It renders through `homeFormatReturnPct`
+                        // rather than re-deriving the percent, because this
+                        // readout sits beside the rank row for the same model
+                        // and that row renders the same function. Two decimals,
+                        // not the axis's one, follows from that. Pinned by
                         // `test_the_chart_readout_matches_the_rank_lists_own_precision`.
                         //
-                        // `> 0`, not `>= 0`, for the same reason: the FIRST
-                        // point of every series is exactly zero (`values[0]` is
-                        // `(base-base)/base`), so at the leftmost tick a `>=`
-                        // test printed `+0.00%` beside a rank row rendering
-                        // `0.00%` for the identical number. The precision test
-                        // compares decimals and cannot see a sign.
-                        label: (c) =>
-                            `${c.dataset.label}: ${c.parsed.y > 0 ? '+' : ''}${(c.parsed.y * 100).toFixed(2)}%`,
+                        // The sign rule travels with it, and it is `> 0` rather
+                        // than `>= 0`: the FIRST point of every series is
+                        // exactly zero (`values[0]` is `(base-base)/base`), so
+                        // at the leftmost tick a `>=` test printed `+0.00%`
+                        // beside a rank row rendering `0.00%` for the identical
+                        // number. It was an inlined copy of that rule here that
+                        // made the divergence possible at all.
+                        label: (c) => `${c.dataset.label}: ${homeFormatReturnPct(c.parsed.y)}`,
                     },
                 },
             },

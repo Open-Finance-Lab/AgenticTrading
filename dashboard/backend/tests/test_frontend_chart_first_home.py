@@ -576,13 +576,18 @@ def test_the_tooltip_signs_zero_the_way_the_rank_row_does():
     `homeFormatReturnPct` is `> 0`, which renders `0.00%`. A `>= 0` test in the
     tooltip rendered `+0.00%` for the identical value. The precision guard above
     compares decimals and is structurally blind to this.
+
+    The two can no longer disagree by construction -- the tooltip calls the rank
+    row's formatter, which calls the board frame's `boardSignedPercent` -- so
+    what is asserted here is the sign rule at the ONE place that now renders it,
+    plus the local fallback that stands in when leaderboard.js has not landed.
     """
-    assert "pct > 0 ? '+' : ''" in _extract(_HOME_JS, "homeFormatReturnPct"), (
-        "the rank list's sign rule changed -- re-check the tooltip's"
+    assert "v > 0 ? '+' : ''" in _extract(_LEADERBOARD_JS, "boardSignedPercent"), (
+        "the shared formatter's sign rule changed -- it renders the pill, the "
+        "rank row and the tooltip at once now"
     )
-    body = _extract(_HOME_JS, "renderHomeLeaderboardChart")
-    assert "c.parsed.y > 0 ? '+' : ''" in body, (
-        "zero must not read as a gain in one place and flat in the other"
+    assert "pct > 0 ? '+' : ''" in _extract(_HOME_JS, "homeFormatReturnPct"), (
+        "the rank list's leaderboard.js-is-absent fallback must keep the rule too"
     )
 
 
@@ -679,13 +684,27 @@ def test_the_chart_readout_matches_the_rank_lists_own_precision():
     unrelated reason in its own comment: tick labels over a narrow domain
     collapse into duplicates at zero decimals and turn noisy at two. Different
     jobs, different precision; only the tooltip has a neighbour to match.
+
+    MATCHING IS NOW DELEGATION, not two expressions that agree. The tooltip
+    inlined its own `(y * 100).toFixed(2)`, which is a fourth copy of a rule
+    that also lives in `homeFormatReturnPct` and (twice) in leaderboard.js --
+    so this guard asserted that two literals were equal rather than that one
+    number had one source. It now asserts the call, and that the tooltip does
+    NOT re-derive; the precision itself is pinned where it is implemented.
     """
     assert "toFixed(2)" in _extract(_HOME_JS, "homeFormatReturnPct"), (
         "the rank list's formatter changed -- re-check the tooltip's precision"
     )
     body = _extract(_HOME_JS, "renderHomeLeaderboardChart")
-    assert "(c.parsed.y * 100).toFixed(2)" in body, (
-        "the tooltip must read in the same precision as the row beside it"
+    assert "homeFormatReturnPct(c.parsed.y)" in body, (
+        "the tooltip must render through the row's own formatter"
+    )
+    # Scoped to the tooltip's OWN expression, not to `toFixed` anywhere in the
+    # function: the axis tick callback legitimately carries `(v * 100)
+    # .toFixed(1)`, which is the one-decimal rule this docstring separates out.
+    assert "c.parsed.y * 100" not in body, (
+        "the tooltip re-derived the percent instead of delegating -- that is "
+        "exactly the drift this guard exists to prevent"
     )
 
 

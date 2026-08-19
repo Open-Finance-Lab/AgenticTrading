@@ -64,6 +64,8 @@ def _run_node(script: str):
     harness = "\n".join(
         [
             _board_constants(),
+            _extract_function("hexToRgb"),
+            _extract_function("boardXAxisHeight"),
             _extract_function("boardFrameLayout"),
             _extract_function("boardLabelBlockWidth"),
             _extract_function("boardPillTextColor"),
@@ -117,6 +119,14 @@ function makeChart(datasets, metas) {
   return {
     data: { datasets },
     getDatasetMeta(i) { return (metas && metas[i]) || { data: [] }; },
+    // Chart.js v4's own rule, not a convenience: `meta.hidden` wins only when
+    // it is an actual boolean, otherwise the dataset's flag. Stubbing this
+    // rather than a bare `!hidden` is what keeps the test honest about the
+    // contract boardVisibleEndpoints now delegates to.
+    isDatasetVisible(i) {
+      const meta = this.getDatasetMeta(i);
+      return typeof meta.hidden === 'boolean' ? !meta.hidden : !datasets[i].hidden;
+    },
   };
 }
 """,
@@ -145,13 +155,17 @@ def _run_plugin_node(script: str):
     harness = "\n".join(
         [
             _board_constants(),
+            _extract_function("hexToRgb"),
             _extract_function("hexToRgba"),
+            _extract_function("boardXAxisHeight"),
             _extract_function("shortName"),
             _extract_function("boardSeriesColor"),
             _extract_function("boardPillTextColor"),
             _extract_function("boardLabelBlockWidth"),
             _extract_function("boardFrameLayout"),
             _extract_function("boardVisibleEndpoints"),
+            _extract_function("boardLayoutLabels"),
+            _extract_function("boardWatchGutterFont"),
             _extract_function("boardSignedPercent"),
             _extract_function("boardDefaultValueText"),
             _extract_function("boardRoundRect"),
@@ -203,7 +217,7 @@ const frame = boardFrameLayout(makeChart(1200, 420), makeLabels(9), 0.4);
 console.log(JSON.stringify({ floor, gutter: frame.gutter, draw: frame.drawLabels }));
 """
     )
-    assert result["floor"] == pytest.approx(132.0)
+    assert result["floor"] == pytest.approx(144.0)
     assert result["gutter"] == pytest.approx(result["floor"] + 36.0), (
         "the wide-chart gutter must be floor + BOARD_GUTTER_SLACK, not 40% of the "
         "canvas -- a regression back to the raw fraction reintroduces the 440px "
@@ -219,12 +233,14 @@ def test_a_long_label_raises_the_gutter_above_the_fraction():
 
     Same width for both labels, so the only variable is the label. The SHORT
     label lands in the wide regime (`width * fraction` clears `floor + slack`,
-    so the ceiling binds at `floor + slack`, not at 40% of 400 -- re-read
-    against the new rule, this sub-case's expected value changed from the old
-    160.0 to 120.0). The LONG label's floor (186) alone exceeds `width *
-    fraction` (160), so it is unaffected by the slack change at all: this
-    sub-case still passes unchanged, because case 3 (floor > width * fraction)
-    was never reachable by the ceiling in the first place."""
+    so the ceiling binds at `floor + slack`, not at 40% of 400). The LONG
+    label's floor (198) alone exceeds `width * fraction` (160), so the ceiling
+    never intervenes: case 3 (floor > width * fraction) is the floor's own.
+
+    Both floors carry `BOARD_TICK_CLEARANCE` since 2026-08-19 -- the gutter is
+    not the empty canvas the band note used to claim -- and it is reserved for
+    every label so that only the descending ones have to spend it. That moved
+    the short floor 84 -> 96 and the long one 186 -> 198."""
     result = _run_node(
         """
 const short = boardFrameLayout(makeChart(400, 420), makeLabels(3, 'AI', '+1%'), 0.4);
@@ -233,13 +249,13 @@ const long = boardFrameLayout(
 console.log(JSON.stringify({ short: short.gutter, long: long.gutter }));
 """
     )
-    assert result["short"] == pytest.approx(120.0), (
-        "40% of 400 (160) is past floor(84) + slack(36) = 120, so the wide-regime "
-        "ceiling caps it at 120, not the raw 160"
+    assert result["short"] == pytest.approx(132.0), (
+        "40% of 400 (160) is past floor(96) + slack(36) = 132, so the wide-regime "
+        "ceiling caps it at 132, not the raw 160"
     )
-    assert result["long"] == pytest.approx(186.0), (
-        "unaffected by the slack change: the long label's floor alone (186) "
-        "already exceeds 40% of 400 (160), so this was always the floor case"
+    assert result["long"] == pytest.approx(198.0), (
+        "the long label's floor alone (198) already exceeds 40% of 400 (160), "
+        "so this is the floor case and the ceiling never applies"
     )
     assert result["long"] > result["short"], "the measured block must be able to push past 40%"
 
@@ -247,31 +263,34 @@ console.log(JSON.stringify({ short: short.gutter, long: long.gutter }));
 def test_the_ceiling_has_three_regimes():
     """The post-review formula (`fix-gutter-cap-brief.md`) is
     `max(floor, min(width * fraction, floor + BOARD_GUTTER_SLACK))`, read as
-    three regimes over the same 9-label set (floor == 132 throughout, only the
+    three regimes over the same 9-label set (floor == 144 throughout, only the
     canvas width changes):
 
     1. WIDE (`width * fraction >= floor + slack`, 1200px): the ceiling binds
-       at `floor + slack` = 168, well under the raw 40% (480).
-    2. TIGHT (`floor <= width * fraction < floor + slack`, 350px): 40% of 350
-       is 140, inside `[132, 168)` -- the fraction itself binds, same as the
-       pre-change rule, because the ceiling never has to intervene here.
+       at `floor + slack` = 180, well under the raw 40% (480).
+    2. TIGHT (`floor <= width * fraction < floor + slack`, 400px): 40% of 400
+       is 160, inside `[144, 180)` -- the fraction itself binds, because the
+       ceiling never has to intervene here. (This case was 350px until
+       `BOARD_TICK_CLEARANCE` raised the floor 132 -> 144: 40% of 350 is 140,
+       which is now BELOW the floor and therefore regime 3, not regime 2. The
+       width moved so the case still exercises the regime it names.)
     3. OVERFLOWING (`width * fraction < floor`, 300px): 40% of 300 is 120,
        under the floor -- `Math.max(floor, ...)` wins and the gutter is
-       exactly 132, the floor, not 120. This is the load-bearing outer
+       exactly 144, the floor, not 120. This is the load-bearing outer
        `Math.max` from the brief: dropping it would clip the label text,
        which is the one failure this whole frame exists to avoid."""
     result = _run_node(
         """
 console.log(JSON.stringify({
   wide: boardFrameLayout(makeChart(1200, 420), makeLabels(9), 0.4).gutter,
-  tight: boardFrameLayout(makeChart(350, 420), makeLabels(9), 0.4).gutter,
+  tight: boardFrameLayout(makeChart(400, 420), makeLabels(9), 0.4).gutter,
   overflowing: boardFrameLayout(makeChart(300, 420), makeLabels(9), 0.4).gutter,
 }));
 """
     )
-    assert result["wide"] == pytest.approx(168.0), "floor(132) + slack(36), not 40% of 1200 (480)"
-    assert result["tight"] == pytest.approx(140.0), "40% of 350 -- the fraction itself, uncapped"
-    assert result["overflowing"] == pytest.approx(132.0), (
+    assert result["wide"] == pytest.approx(180.0), "floor(144) + slack(36), not 40% of 1200 (480)"
+    assert result["tight"] == pytest.approx(160.0), "40% of 400 -- the fraction itself, uncapped"
+    assert result["overflowing"] == pytest.approx(144.0), (
         "exactly the floor, not 40% of 300 (120) -- the clipping guard"
     )
 
@@ -444,9 +463,39 @@ def test_the_arrow_is_drawn_past_the_plot_and_not_as_an_axis_tick():
     arrow = _extract_function("createAxisArrowPlugin")
     assert "chart.width" in arrow, "the arrow tip is on the canvas edge, not chartArea"
     assert "BOARD_ARROW_HEAD_LENGTH" in arrow and "BOARD_ARROW_HEAD_HALF" in arrow
-    assert "afterDraw(chart)" in arrow, (
-        "chrome above the data: afterDatasetsDraw would let a curve running along "
-        "the floor sit on top of the baseline"
+
+
+def test_the_axis_baseline_is_drawn_under_the_endpoint_labels():
+    """The baseline runs the FULL canvas width, straight through the reserved
+    gutter -- so whichever plugin draws last owns those pixels.
+
+    On `afterDraw` the arrow drew after every `afterDatasetsDraw` hook and
+    struck a line through any label the stack pushes below `chartArea.bottom`
+    (measured on a 1440x268 tab, 12 low-clustered curves: chartArea.bottom
+    247.6, a label at y=241 whose pill spans 233.5-248.5). Two things have to
+    hold for the fix, and only together: the hook is `afterDatasetsDraw`, and
+    the arrow is registered BEFORE the label plugin at every call site, since
+    Chart.js runs a hook in array order.
+
+    Moving the hook does not cost the property the old comment protected --
+    datasets are already drawn by `afterDatasetsDraw`, so a curve running along
+    the floor still sits under the baseline."""
+    arrow = _extract_function("createAxisArrowPlugin")
+    assert "afterDatasetsDraw(chart)" in arrow, (
+        "afterDraw put the baseline on top of every descended endpoint label"
+    )
+    assert "afterDraw(chart)" not in arrow
+
+    # The tab's `plugins: [...]` array, not the function definitions above it.
+    registered = _SRC[_SRC.index("plugins: ["):]
+    assert registered.index("createAxisArrowPlugin") < registered.index(
+        "createEndpointLabelPlugin"
+    ), "leaderboard.js lists the label plugin first -- the baseline paints over it"
+
+    # Screen 0 aliases both factories off `window` before returning them.
+    assert "return [arrow(), labels()];" in _HOME_SRC, (
+        "home-page.js reordered or renamed its frame array -- the arrow must "
+        "still be listed before the labels"
     )
 
 
@@ -852,6 +901,7 @@ const chart = {
     if (i !== 0) return { hidden: true, data: [] };
     return { hidden: false, data: [{ x: 10, y: 50 }, { x: 20, y: 40 }, { x: 30, y: 60 }] };
   },
+  isDatasetVisible(i) { return !this.getDatasetMeta(i).hidden; },
   chartArea: { left: 0, top: 0, right: 540, bottom: 386 },
 };
 
@@ -870,7 +920,7 @@ const drawBlockWidth = (valueCall.x - BOARD_PILL_PAD_X + pillWidth) - labelX;
 
 const measuredBlock =
   boardLabelBlockWidth(chart, [{ name: nameCall.text, value: valueCall.text }]) -
-  BOARD_GUTTER_TEXT_INSET - BOARD_GUTTER_TRAILING_PAD;
+  BOARD_GUTTER_TEXT_INSET - BOARD_TICK_CLEARANCE - BOARD_GUTTER_TRAILING_PAD;
 
 console.log(JSON.stringify({
   nameText: nameCall.text, valueText: valueCall.text, drawBlockWidth, measuredBlock,
@@ -920,6 +970,7 @@ const chart = {
     const y = [50, 90, NaN][i]; // Bravo (index 2, last) is the malformed point
     return { hidden: false, data: [{ x: 10, y: 10 }, { x: 20, y: 20 }, { x: 30, y }] };
   },
+  isDatasetVisible(i) { return !this.getDatasetMeta(i).hidden; },
   chartArea: { left: 0, top: 0, right: 540, bottom: 386 },
 };
 
@@ -932,10 +983,246 @@ const texts = chart.ctx.fillTextCalls.map((c) => c.text);
 console.log(JSON.stringify({ drawLabels: chart.$boardFrame.drawLabels, texts }));
 """
     )
-    assert out["drawLabels"] is True, "the gutter is still reserved -- 3 valid label texts"
+    assert out["drawLabels"] is True, (
+        "the gutter is still reserved -- beforeLayout drops the NaN series too "
+        "now (boardLayoutLabels), leaving 2 real labels rather than 3"
+    )
     assert "Alpha" in out["texts"], "the good series before the NaN one must still draw"
     assert "Charlie" in out["texts"], "the good series after the NaN one must still draw"
     assert not any("Bravo" in t for t in out["texts"]), (
         "the NaN series itself must not draw a label at a garbage position"
     )
     assert len(out["texts"]) == 4, "exactly 2 surviving labels x (name, value)"
+
+
+# ---------------------------------------------------------------------------
+# Post-review fixes, 2026-08-19. Each case below is a defect the review found
+# in the frame as first written; they are grouped here rather than filed beside
+# their neighbours so the reasoning stays with the change that motivated it.
+# ---------------------------------------------------------------------------
+
+def test_the_minimum_pitch_is_at_least_one_pill_tall():
+    """`BOARD_LABEL_GAP_MIN` was 13 against a 15px pill, so at any pitch in
+    `[13, 15)` the guard passed and consecutive FILLED colour pills overlapped
+    by up to 2px.
+
+    That is not a legibility judgement anyone can tune -- the guard was reading
+    "is 11px text still separable?" when the binding constraint is geometric:
+    two opaque rounded rects at a pitch under their own height intersect, at
+    any font size. Screen 0 reaches it for real (9 series into `clamp(140px,
+    26vh, 280px)` is a 152-168px canvas at a 585-645px viewport), which is the
+    case below. Deriving the constant is what stops the two being edited apart
+    again."""
+    result = _run_node(
+        """
+console.log(JSON.stringify({
+  gapMin: BOARD_LABEL_GAP_MIN,
+  pill: BOARD_PILL_HEIGHT,
+  // Screen 0 at a 600px-tall viewport: 9 curves, 26vh -> a 156px canvas.
+  screenZero: boardFrameLayout(makeChart(420, 156), makeLabels(9), 0.4),
+}));
+"""
+    )
+    assert result["gapMin"] >= result["pill"], (
+        "a pitch shorter than the pill itself makes adjacent pills overlap; the "
+        "frame must degrade to arrow-only instead"
+    )
+    assert result["screenZero"]["drawLabels"] is False, (
+        "9 labels into a 156px canvas is a ~13px pitch -- pills would overlap, "
+        "so the frame gives the gutter back"
+    )
+    assert result["screenZero"]["gutter"] == 18, "arrow-only reserves BOARD_ARROW_PAD"
+
+
+def test_the_axis_allowance_yields_to_the_rendered_scale_height():
+    """`BOARD_XAXIS_ALLOWANCE` is the FIRST-FRAME estimate, not a permanent
+    stand-in. 34 was a guess and the tab's axis renders at 20.4px, so it spent
+    14px of stacking room that exists -- and that height is what both the gap
+    divisor and the fits-the-canvas guard are computed from, so the frame gave
+    up on labels earlier than its own geometry required.
+
+    Chart.js leaves the previous layout's scale on the chart, so from the second
+    update onwards the real number is readable. Reading it also means a change
+    to the tick font moves this by itself rather than leaving a literal wrong --
+    the `BoardPreview.tsx` `width={56}` failure, in the other direction."""
+    result = _run_node(
+        """
+const bare = { width: 900, height: 268, ctx: makeChart(0, 0).ctx };
+const laidOut = { ...bare, scales: { x: { height: 20.4 } } };
+const junk = { ...bare, scales: { x: { height: NaN } } };
+console.log(JSON.stringify({
+  fallback: boardXAxisHeight(bare),
+  rendered: boardXAxisHeight(laidOut),
+  junk: boardXAxisHeight(junk),
+  gapBefore: boardFrameLayout(bare, makeLabels(12), 0.4).gap,
+  gapAfter: boardFrameLayout(laidOut, makeLabels(12), 0.4).gap,
+}));
+"""
+    )
+    assert result["fallback"] == 34, "no scale yet -- the first-frame estimate stands in"
+    assert result["rendered"] == pytest.approx(20.4), "the rendered axis height wins"
+    assert result["junk"] == 34, "a non-finite scale height falls back rather than poisoning the gap"
+    assert result["gapAfter"] > result["gapBefore"], (
+        "reading the real axis height must give the stack back the room the "
+        "34px estimate was over-reserving"
+    )
+
+
+def test_a_numeric_layout_padding_survives_the_gutter_write():
+    """`layout: { padding: 12 }` is legal Chart.js shorthand for uniform
+    padding. `typeof 12 === 'object'` is false, so the hook replaced it with
+    `{}` and set only `.right` -- the chart silently lost its top, left and
+    bottom padding and rendered flush to those edges.
+
+    Neither caller in this repo passes a number, which is exactly why this
+    needs a test: `createEndpointLabelPlugin` is exported on `window` so other
+    surfaces can adopt the frame, and this is the shape one of them will use."""
+    out = _run_plugin_node(
+        """
+function chartWith(padding) {
+  return {
+    width: 900, height: 420, options: { layout: { padding } }, ctx: makeCtx(),
+    $boardFrame: null,
+    data: { datasets: [{ label: 'A', hidden: false, data: [0, 0.1], borderColor: '#F97316' }] },
+    getDatasetMeta() { return { hidden: false, data: [{ x: 10, y: 50 }, { x: 20, y: 40 }] }; },
+    isDatasetVisible() { return true; },
+    chartArea: { left: 0, top: 0, right: 540, bottom: 386 },
+  };
+}
+const plugin = createEndpointLabelPlugin();
+const numeric = chartWith(12);
+plugin.beforeLayout(numeric);
+const object = chartWith({ top: 8 });
+plugin.beforeLayout(object);
+console.log(JSON.stringify({
+  numeric: numeric.options.layout.padding,
+  object: object.options.layout.padding,
+}));
+"""
+    )
+    assert out["numeric"]["top"] == 12, "the numeric shorthand's other three sides were dropped"
+    assert out["numeric"]["left"] == 12
+    assert out["numeric"]["bottom"] == 12
+    assert out["numeric"]["right"] > 12, "the gutter still has to be written"
+    assert out["object"]["top"] == 8, "an object padding is still mutated in place"
+
+
+def test_a_label_hanging_into_the_axis_strip_clears_the_last_tick():
+    """The gutter is not the empty canvas the band note used to claim. Chart.js
+    centres the LAST x tick on `chartArea.right` and reserves its right-half
+    overhang inside our own `layout.padding.right` -- ~18px here, ~21px on
+    screen 0's larger ticks -- so a label that hangs below `chartArea.bottom`
+    lands in the tick strip at overlapping x. Scales draw before
+    `afterDatasetsDraw`, so the label wins those pixels rather than being
+    occluded; a colour dot on the tail of a tick label is still a collision.
+
+    Only the descending labels spend the clearance, and it is reserved for all
+    of them, so paying it here can never push a block out of the gutter."""
+    out = _run_plugin_node(
+        """
+function chartAt(anchorY) {
+  return {
+    width: 900, height: 200, options: {}, ctx: makeCtx(), $boardFrame: null,
+    data: { datasets: [{ label: 'A', hidden: false, data: [0, 0.1], borderColor: '#F97316' }] },
+    getDatasetMeta() { return { hidden: false, data: [{ x: 10, y: 20 }, { x: 530, y: anchorY }] }; },
+    isDatasetVisible() { return true; },
+    chartArea: { left: 0, top: 0, right: 540, bottom: 150 },
+  };
+}
+const plugin = createEndpointLabelPlugin();
+function nameX(anchorY) {
+  const chart = chartAt(anchorY);
+  plugin.beforeLayout(chart);
+  chart.ctx = makeCtx();
+  plugin.afterDatasetsDraw(chart);
+  return chart.ctx.fillTextCalls[0].x;
+}
+console.log(JSON.stringify({
+  inside: nameX(60),      // well above chartArea.bottom
+  descending: nameX(190), // pill spans 182.5-197.5, past bottom (150)
+  clearance: BOARD_TICK_CLEARANCE,
+}));
+"""
+    )
+    assert out["descending"] - out["inside"] == out["clearance"], (
+        "a label hanging into the x-axis strip must be indented past the last "
+        "tick's overhang; one inside the plot must not move"
+    )
+
+
+def test_a_non_finite_anchor_x_drops_its_label_too():
+    """`anchorY` was finite-checked and `anchorX` was not, though the draw hook
+    uses `anchorX` for the endpoint dot, the dotted stub and the leader line.
+
+    The canvas spec silently DISCARDS an `arc`/`moveTo`/`lineTo` containing
+    `NaN` -- no throw, no warning -- so a point with a finite y and a NaN x drew
+    a name and a value pill with no dot and no stub beside them. An
+    inconsistent row, and one no existing test could see: they all stub
+    `anchorY` alone."""
+    out = _run_plugin_node(
+        """
+const chart = {
+  width: 900, height: 420, options: {}, ctx: makeCtx(), $boardFrame: null,
+  data: { datasets: [
+    { label: 'Alpha', hidden: false, data: [0, 0.05], borderColor: '#F97316' },
+    { label: 'Bravo', hidden: false, data: [0, 0.02], borderColor: '#38BDF8' },
+  ] },
+  getDatasetMeta(i) {
+    // Bravo's last point has a finite y and a NaN x.
+    return { hidden: false, data: [{ x: 10, y: 10 }, { x: [530, NaN][i], y: [50, 90][i] }] };
+  },
+  isDatasetVisible() { return true; },
+  chartArea: { left: 0, top: 0, right: 540, bottom: 386 },
+};
+const plugin = createEndpointLabelPlugin();
+plugin.beforeLayout(chart);
+chart.ctx = makeCtx();
+plugin.afterDatasetsDraw(chart);
+console.log(JSON.stringify({ texts: chart.ctx.fillTextCalls.map((c) => c.text) }));
+"""
+    )
+    assert "Alpha" in out["texts"], "the well-formed series must still draw"
+    assert "Bravo" not in out["texts"], (
+        "a NaN anchorX draws a name and a pill with no dot and no stub -- drop "
+        "the row instead of rendering half of it"
+    )
+
+
+def test_the_draw_hook_reuses_the_set_beforelayout_measured():
+    """`formatValue` per series plus 2N `measureText` is the whole cost of a
+    layout, and the draw hook used to rebuild all of it.
+
+    That put the entire measurement on the mousemove path: `applyHoverTarget`
+    calls `chart.update('none')` on every change of hovered curve, and a bare
+    `chart.render()` on the frames between re-ran the draw hook's own copy --
+    ~24 `measureText` calls and N format passes per hover frame, all producing
+    values that cannot have changed. Reuse is safe precisely because nothing
+    changes a label's text without an update, and an update re-runs
+    `beforeLayout`.
+
+    Asserted by mutating the data BETWEEN the two hooks: the drawn text must be
+    what `beforeLayout` measured, not what a re-derivation would produce."""
+    out = _run_plugin_node(
+        """
+const chart = {
+  width: 900, height: 420, options: {}, ctx: makeCtx(), $boardFrame: null,
+  data: { datasets: [{ label: 'Alpha', hidden: false, data: [0, 0.05], borderColor: '#F97316' }] },
+  getDatasetMeta() { return { hidden: false, data: [{ x: 10, y: 10 }, { x: 530, y: 50 }] }; },
+  isDatasetVisible() { return true; },
+  chartArea: { left: 0, top: 0, right: 540, bottom: 386 },
+};
+const plugin = createEndpointLabelPlugin();
+plugin.beforeLayout(chart);
+chart.data.datasets[0].data[1] = 0.99; // no update() -- the draw hook must not see this
+chart.ctx = makeCtx();
+plugin.afterDatasetsDraw(chart);
+console.log(JSON.stringify({
+  stashed: chart.$boardFrame.labels.map((l) => l.value),
+  drawn: chart.ctx.fillTextCalls.map((c) => c.text),
+}));
+"""
+    )
+    assert out["stashed"] == ["+5.00%"], "beforeLayout stashes the measured texts"
+    assert out["drawn"] == ["Alpha", "+5.00%"], (
+        "the draw hook re-derived the value instead of reusing the measured set"
+    )
