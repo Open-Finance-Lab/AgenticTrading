@@ -3,7 +3,10 @@
 Each agent: POST /api/v1/runs (3 trading days ~= 21 hourly steps), then loop
 GET steps/next -> POST decision until completed. Records per-endpoint latency,
 end-to-end run wall time, errors, steps lost to the decision deadline, and the
-server-reported timeout_holds counter (present once T3 ships; 0 before).
+server-reported timeout_holds counter. That counter prints as ``unknown``
+when it cannot be read, never as 0 — and it is not self-sufficient evidence
+either way: cross-check it against the ``decision deadline`` lines the server
+logs, which count holds independently. When the two disagree, believe the log.
 
 Usage:
     python dashboard/scripts/loadtest/drive_agents.py 100 --artifacts /tmp/atl_loadtest_xxx
@@ -161,9 +164,17 @@ def drive(agent, idx):
         if res.get("run_status") == "completed":
             break
     status, view, _ = req("GET", f"/api/v1/runs/{run_id}", key)
-    holds = 0
+    # Stays None when the count could not be read *at all*: a non-200, a run
+    # whose live session has already been swept (`engine_status` is None once
+    # it is gone — runs/service.py), or a payload without the field. Folding
+    # any of those into 0 made this metric report "no holds" exactly when the
+    # server is most loaded, i.e. when holds actually happen: a Free-tier run
+    # printed 0 here while the server log carried 7. Unknown is not zero.
+    holds = None
     if status == 200:
-        holds = (view.get("engine_status") or {}).get("timeout_holds") or 0
+        raw = (view.get("engine_status") or {}).get("timeout_holds")
+        if raw is not None:
+            holds = int(raw)
     with lock:
         run_walls.append(time.perf_counter() - t_run)
         deadline_losses.append(lost)
@@ -218,8 +229,13 @@ print("end-to-end run wall time (s):")
 dist("full_run", run_walls)
 total_lost = sum(deadline_losses)
 runs_hit = sum(1 for x in deadline_losses if x)
+known_holds = [h for h in server_holds if h is not None]
+unreadable = len(server_holds) - len(known_holds)
+holds_txt = str(sum(known_holds)) if known_holds else "unknown"
+if unreadable:
+    holds_txt += f" [{unreadable}/{len(server_holds)} runs unreadable]"
 print(f"completed runs: {len(run_walls)}/{M}  |  client-observed deadline losses: "
-      f"{total_lost} (across {runs_hit} runs)  |  server timeout_holds: {sum(server_holds)}")
+      f"{total_lost} (across {runs_hit} runs)  |  server timeout_holds: {holds_txt}")
 if failures:
     print(f"FAILURES: {len(failures)}")
     for f in failures[:8]:
