@@ -107,6 +107,21 @@ reads as room for the board to grow into. Revisit only after seeing it rendered.
 too little for `⬤ DeepSeek V4 Pro +7.49%`, and the labels clip. The gutter is
 therefore `max(40% of chart width, GUTTER_MIN_PX)`.
 
+> **As implemented (PR #382).** The 40% shipped as a *ceiling* on the measured
+> floor rather than as the gutter's width: rendered, a fixed 40% reserved 640px
+> on a 1600px canvas to hold ~200px of labels, leaving ~440px of the plot as an
+> empty column. `boardFrameLayout` computes
+> `max(floor, min(width * 0.4, floor + BOARD_GUTTER_SLACK))`.
+>
+> **Where the fraction actually binds**, since "the gutter takes 40%" now
+> overstates it: only while `width * 0.4 < floor + slack`, i.e. below
+> `2.5 * floor + 90` px of canvas — about 613px at today's ~209px measured
+> floor. Every desktop width this dashboard renders at is above that, so on a
+> 1440 or 1600px tab the slack binds and the fraction is inert; it does its job
+> on the home panel and on mobile, which is where an unbounded rail would eat
+> the plot. `BOARD_GUTTER_MAX_FRACTION` (0.5) is the one width-relative guard
+> that fires at any size: past it the frame draws no labels at all.
+
 `GUTTER_MIN_PX` is **derived at implementation time, not guessed**: render the
 longest label the roster can produce — `shortName()` truncates at 18 characters,
 so the worst case is 18 chars plus the dot, the gap and a `-12.34%` pill — in the
@@ -148,7 +163,21 @@ The x-axis line extends through the gutter and terminates in a right-pointing
 arrowhead. Drawn in a plugin (Chart.js can draw anywhere on the canvas, not only
 inside `chartArea`) / as an SVG overlay (Recharts).
 
-No tick labels appear in the gutter.
+No tick labels are *placed* in the gutter — but the strip below the plot is not
+empty at the labels' x, and the implementation must not assume it is.
+
+> **Correction (PR #382).** Chart.js centres the **last** x tick on
+> `chartArea.right` and reserves its right-half overhang inside the same
+> `layout.padding.right` this design uses for the gutter: roughly 18px at the
+> Leaderboard tab's 12px ticks, ~21px at screen 0's 14px ones. That matters
+> because endpoint labels legitimately hang *below* `chartArea.bottom` into the
+> axis strip — the stagger is routinely taller than the plot — so a descending
+> label and the final tick occupy overlapping pixels. Scales draw before
+> `afterDatasetsDraw`, so the label always wins them rather than being
+> occluded; `BOARD_TICK_CLEARANCE` indents descending labels past the overhang
+> so the collision does not arise. The gutter is *reserved* space, not *empty
+> canvas*, and the axis arrow's own baseline crosses it too (§4.4) — which is
+> why that plugin draws under the labels rather than after them.
 
 **Accepted imprecision, stated:** on the Competition board the arrow implies
 advancement that a closed window does not do — that window ran
