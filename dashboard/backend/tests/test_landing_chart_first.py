@@ -138,27 +138,38 @@ def test_the_chart_column_escapes_the_container_on_its_left_edge_only():
 
 
 def test_the_landing_chart_uses_its_own_measured_clamp():
-    """`clamp(320px, 56vh, 520px)` -- the first draft's number, shared with /app
-    -- puts the card 25-46px BELOW the fold at 1440x768, 1366x768, 1280x800 and
-    1280x720. All four are ordinary laptop heights. The replacement is the
-    largest formula with non-negative fold slack at every tested viewport.
+    """Both reserves are derived, not taste, and there are TWO because the card's
+    non-chart height is not one number: one thing beside the copy at >=lg, and
+    another stacked at phone widths where the title, the window chip and the
+    caption all wrap and the chip strip runs to eight rows.
 
-    Both reserves are derived, not taste, and there are TWO because the card's
-    non-chart height is not one number: 218-241px beside the copy at >=lg, but
-    443px stacked at 390px wide, where the title, the "Illustrative example"
-    chip and the caption all wrap and the chip strip runs to five rows.
+    RE-DERIVED when the board went live -- the strip went from five hardcoded
+    entries to nine from the payload and the "Illustrative example" chip became
+    a longer window label -- and BOTH NUMBERS MOVED. Measured against the BUILT
+    card with the board READY, at the NARROWEST width of each band:
 
-        lg+     390 = ~218-241 non-chart + 120 chrome + ~14-43 fold margin
-        below   590 = 443 non-chart + 132 section padding + ~9 margin
+        lg+     460 = ceil10(136 cardTop + 313.75 non-chart @1024x768) + 10
+        below   730 = ceil10(132 cardTop + 583.25 non-chart @360x800)  + 10
 
-    Measured, not derived: the single desktop constant put the card 77px past
-    the fold at 390x844. RE-DERIVE BOTH if the caption, title or chip strip
-    changes height -- the failure mode is a silently half-visible card, not a
-    broken build. That is not hypothetical: unclipping the chip strip took it
-    from 24px to 152px at 390px wide, the stacked reserve from 480 to 590, and
-    then the FLOOR from 300 to 260 -- because at 844px tall the card had 269px
-    left for a chart whose floor was 300, so the floor, not the reserve, was
-    what put it 95px past the fold on the second pass.
+    The trailing +10 is measured too: rounding alone left 0.25px of fold slack
+    at 1024, a margin that survives exactly one browser.
+
+    THE OLD lg VALUE WAS MEASURED AT THE WRONG WIDTH, which is why it is pinned
+    here with the band spelled out. `lg:` binds from 1024, but 390 was derived
+    at 1440 where non-chart is 249.75; from 1024 to 1279 the strip takes a fifth
+    row and the card hung 55.75px BELOW THE FOLD across that entire band while
+    every viewport it had been checked at (1280+) passed with 4.25px to spare.
+    Re-derive at 1024 and 360, never at 1440 and 390.
+
+    The 260px FLOOR is what binds on a phone, not either reserve: at 390x844 the
+    card needs 920.5px against 844, so the strip's tail is below the fold at any
+    reserve. That is deliberate -- see the component comment. The floor is
+    pinned here so a future "fix" that shrinks it to chase the fold has to argue
+    with this docstring first: the chart already ends above the fold there, and
+    lowering the floor trades the chart for its own fallback key.
+
+    RE-DERIVE BOTH AGAIN if the caption, title or chip strip changes height. The
+    failure mode is a silently half-visible card, not a broken build.
 
     The var() indirection is load-bearing and not a tidy-up: the formula's
     commas defeat Tailwind's arbitrary-VALUE parser, so the breakpoint-dependent
@@ -166,10 +177,45 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
     """
     board = _BOARD.replace(" ", "")
     assert "clamp(260px,calc(100dvh-var(--board-chart-reserve)),520px)" in board
-    assert "[--board-chart-reserve:590px]" in board, "the stacked-phone reserve"
-    assert "lg:[--board-chart-reserve:390px]" in board, "the side-by-side reserve"
+    assert "[--board-chart-reserve:730px]" in board, "the stacked-phone reserve"
+    assert "lg:[--board-chart-reserve:460px]" in board, "the side-by-side reserve"
     assert "56vh" not in _BOARD, "the first draft's clamp fails at four viewports"
     assert "h-[210px]" not in _BOARD and "md:h-[240px]" not in _BOARD
+
+
+def test_the_window_chip_cannot_out_size_the_header_row():
+    """The chip states the window the chart draws, and at 390px it used to run
+    38.8px past the card's right edge -- which is `overflow-hidden`, so the end
+    date was cut off -- while squeezing the <h2> beside it to width ZERO that
+    still rendered 112px tall.
+
+    Both symptoms came from one class: `shrink-0` on a chip whose text went from
+    19 characters ("Illustrative example") to 44 ("Competition window ·
+    2026-04-15 → 2026-05-15") when the board went live. Nothing failed: no
+    scrollbar, no ellipsis, no console error -- the same silent clipping the chip
+    strip below shipped once already.
+
+    Pinned as the two classes that fix it because the measurement that caught it
+    only exists in a browser, and nothing in CI opens one. `max-w-full` is what
+    lets the chip wrap instead of overflowing; `flex-wrap` is what lets it take
+    its own row instead of collapsing the title to reach it.
+    """
+    row = re.search(r'<div className="([^"]*)">\s*<h2', _BOARD)
+    assert row, "could not find the header row that wraps the <h2>"
+    assert "flex-wrap" in row.group(1), (
+        f"the title/chip row must wrap, or the chip collapses the title to "
+        f"width 0; found {row.group(1)!r}"
+    )
+
+    chip = re.search(r'<span className="([^"]*)">\s*\{data\?\.windowLabel', _BOARD)
+    assert chip, "could not find the window chip — did the label move?"
+    assert "shrink-0" not in chip.group(1), (
+        f"shrink-0 on the window chip is what pushed it 38.8px past the card's "
+        f"edge; found {chip.group(1)!r}"
+    )
+    assert "max-w-full" in chip.group(1), (
+        f"the window chip must be capped at the row width; found {chip.group(1)!r}"
+    )
 
 
 def test_landing_chart_axis_ticks_are_14px():

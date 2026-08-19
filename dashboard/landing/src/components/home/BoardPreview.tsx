@@ -121,7 +121,21 @@ export function BoardPreview() {
   return (
     <div className="bg-card border border-card-border rounded-xl shadow-2xl overflow-hidden flex flex-col">
       <div className="px-5 pt-5 pb-4 border-b border-border">
-        <div className="flex items-start justify-between gap-3 mb-2">
+        {/* WRAPS, and the chip may not out-size the row. Both halves are one
+            fix for one measured defect, and it is the window label above that
+            caused it: "Illustrative example" was 19 characters, "Competition
+            window · 2026-04-15 → 2026-05-15" is 44, and the chip carried
+            `shrink-0`. At 390px the chip's max-content width is 332.8px inside
+            a 285px row, so it ran 38.8px past the card's right edge — and the
+            card is `overflow-hidden`, so the window's end date was simply cut
+            off. The same non-shrinking chip squeezed the <h2> beside it to
+            width ZERO, which still rendered 112px tall (four lines of nothing)
+            and put 112px of pure damage into the reserve measured below.
+            Both were invisible to every guard: no scrollbar, no ellipsis,
+            nothing failing — the clipping failure this card has now shipped
+            twice. Measured after: title 285px wide and 56px tall, chip 285px
+            and wrapped to two lines, nothing past the card edge. */}
+        <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-2 mb-2">
           <h2 className="text-xl font-bold flex items-center gap-2 min-w-0">
             <LineChartIcon className="w-5 h-5 text-primary shrink-0" aria-hidden="true" />
             Where the AI models stand
@@ -132,7 +146,7 @@ export function BoardPreview() {
               chip is now a provenance statement rather than a disclaimer, and it
               is what keeps the forward arrow below from reading as a claim that
               this window is still running. */}
-          <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded shrink-0">
+          <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded max-w-full">
             {data?.windowLabel ? `Competition window · ${data.windowLabel}` : "Competition window"}
           </span>
         </div>
@@ -156,15 +170,45 @@ export function BoardPreview() {
           strip runs to several rows. One constant cannot serve both, and the
           desktop one applied to a phone put the card 77px past the fold.
 
-          RE-DERIVED for live data: the strip went from five entries to nine and
-          the "Illustrative example" chip became a longer window label, so both
-          numbers below were re-measured in a browser at 1920/1440/1280/390 --
-          see the plan's Task 11. RE-DERIVE BOTH AGAIN if the caption, the title
-          or the chip strip changes height. The failure mode is a silently
-          half-visible card, not a broken build. */}
+          RE-DERIVED in a browser for live data, and BOTH NUMBERS MOVED. The
+          rule is `reserve = ceil10(cardTop + nonChart) + 10`, measured at the
+          NARROWEST width of the band with the board READY (the loading state
+          is one shimmer div and measures nothing):
+
+            lg+   460 = ceil10(136 + 313.75 @1024x768) + 10 -> 10.25px slack
+            below 730 = ceil10(132 + 583.25 @360x800)  + 10 -> floor-bound
+
+          The trailing +10 is not padding-by-taste: rounding alone left 0.25px
+          of fold slack at 1024, which is a number that survives one browser and
+          no other.
+
+          MEASURE THE lg RESERVE AT 1024, NOT AT 1440. This is what the old 390
+          got wrong and what nothing caught: `lg:` binds from 1024 up, but 390
+          was derived at 1440 where nonChart is 249.75. Between 1024 and 1279
+          the chip strip takes five rows instead of four and nonChart is
+          309.75, so the card hung 55.75px BELOW THE FOLD across that whole
+          band -- every 1280-wide-and-under laptop -- while the 1280+ viewports
+          the number was checked against passed with 4.25px to spare.
+
+          THE 260px FLOOR, NOT THE RESERVE, IS WHAT BINDS ON A PHONE, and no
+          value here can change that: at 390x844 the card needs 920.5px
+          (132 + 528.5 + the 260 floor) against 844 of viewport, so the last
+          ~77px -- the tail of the chip strip -- sits below the fold at every
+          reserve. Dropping the floor to ~183 is the only thing that would pull
+          it up, and that trades the chart the hero exists to show for its own
+          fallback key: the chart itself already ends at y=586, well above the
+          fold. Left as measured deliberately. The reserve still earns its
+          value on every stacked viewport tall enough for the floor to clear
+          (>=990dvh: 390x1000 fits with 49.5px to spare); below that the
+          floor decides and the reserve is inert.
+
+          RE-DERIVE BOTH AGAIN if the caption, the title or the chip strip
+          changes height, and re-derive at the NARROWEST width of each band.
+          The failure mode is a silently half-visible card, not a broken
+          build. */}
       <div
         ref={chartRef}
-        className="w-full px-3 pt-4 [--board-chart-reserve:590px] lg:[--board-chart-reserve:390px]"
+        className="w-full px-3 pt-4 [--board-chart-reserve:730px] lg:[--board-chart-reserve:460px]"
         style={{
           height: "clamp(260px, calc(100dvh - var(--board-chart-reserve)), 520px)",
         }}
