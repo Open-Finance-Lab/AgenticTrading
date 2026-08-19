@@ -204,3 +204,98 @@ console.log(JSON.stringify({
     assert result["amber"] == "#0b1220"
     assert result["slate"] == "#0b1220"
     assert result["deep"] == "#f8fafc"
+
+
+def test_the_frame_is_built_by_factories_not_a_singleton():
+    """Screen 0 draws the same frame over datasets that carry none of this tab's
+    private fields (`_raw`, `_entry`, `_style`) and has no hover gate. A shared
+    singleton would have to close over this module's `hoveredDatasetIndex` and
+    `currentChartView`, so the only way to share it is to parameterise it."""
+    assert "function createEndpointLabelPlugin(options)" in _SRC
+    assert "function createAxisArrowPlugin(" in _SRC
+    assert "const endpointLabelPlugin = {" not in _SRC, (
+        "the singleton is replaced by a factory call, not kept beside it"
+    )
+
+
+def test_the_gutter_is_reserved_in_beforelayout_and_never_in_the_domain():
+    """`layout.padding`, not scale domain. `resolveHoverTarget` rejects
+    `x > chartArea.right` outright, so padding leaves the hover gate's whole
+    premise true; a domain padded with future slots would move empty territory
+    inside the plot and make the gutter hoverable.
+
+    beforeLayout because the width is a FRACTION of the rendered width, which is
+    not known at config time -- and beforeLayout is the last hook that can still
+    move chartArea."""
+    factory = _extract_function("createEndpointLabelPlugin")
+    assert "beforeLayout(chart)" in factory
+    assert "padding.right = frame.gutter" in factory
+    assert "data.labels" not in factory, (
+        "reserving space by appending empty category labels is the design that "
+        "was dropped -- it puts the gutter INSIDE chartArea"
+    )
+
+
+def test_the_tab_lets_the_plugin_own_the_right_padding():
+    """A literal `right: 120` left in the config is dead but not inert: it is
+    what renders on the first frame before beforeLayout runs, and it is what a
+    reader will believe."""
+    layout = re.search(r"layout:\s*\{\s*padding:\s*\{[^}]*\}", _SRC)
+    assert layout, "the tab's layout.padding block moved or was deleted"
+    assert "right:" not in layout.group(0), (
+        "the gutter is the frame's to compute; leaving a literal here renders it "
+        "for one frame and misinforms every reader after that"
+    )
+    assert "top: 8" in layout.group(0), "the top padding is unrelated and stays"
+
+
+def test_the_tab_pill_follows_the_axis_unit():
+    """Spec §4.5: no surface invents a unit its axis does not show. This tab
+    defaults to `$` (`currentChartView = 'absolute'`) and the endpoint label
+    printed `+7.49%` in that view -- a percent beside a dollar axis."""
+    call = _SRC[_SRC.index("createEndpointLabelPlugin({") :][:800]
+    assert "currentChartView === 'absolute'" in call
+    assert "formatLeaderboardNumber" in call, "the money branch reuses the axis formatter"
+    assert "cumulative_return" in call, (
+        "the percent branch keeps preferring the entry's stored return over the "
+        "last plotted point"
+    )
+
+
+def test_the_hover_fade_stays_this_tabs_business():
+    """`hoveredDatasetIndex` is this module's pointer-gate state. Screen 0 has no
+    hover gate at all, so it must reach the factory as an injected predicate
+    rather than a closed-over global."""
+    factory = _extract_function("createEndpointLabelPlugin")
+    assert "hoveredDatasetIndex" not in factory, (
+        "the factory must not close over this tab's hover state"
+    )
+    assert "isFaded" in factory
+    # 1000, not the 800 used above: `isFaded` is the last option in the call,
+    # after the longer `formatValue` body, so it needs the wider window to
+    # stay inside the same call site rather than spilling into whatever
+    # follows it.
+    call = _SRC[_SRC.index("createEndpointLabelPlugin({") :][:1000]
+    assert "hoveredDatasetIndex" in call, "the tab injects it at the call site"
+
+
+def test_each_curve_ends_in_a_dot_and_a_dotted_stub():
+    """The handwritten note's `•⋯` mark: the curve carries on, and the stub
+    asserts no value for where it goes."""
+    factory = _extract_function("createEndpointLabelPlugin")
+    assert "BOARD_DOT_RADIUS" in factory
+    assert "BOARD_STUB_LENGTH" in factory
+    assert factory.count("setLineDash([1, 3])") == 2, "the stub and the leader line"
+
+
+def test_the_arrow_is_drawn_past_the_plot_and_not_as_an_axis_tick():
+    """Chart.js can draw anywhere on the canvas, not only inside chartArea, so
+    the forward affordance costs no scale configuration at all -- which is the
+    whole reason the future-tick design was dropped."""
+    arrow = _extract_function("createAxisArrowPlugin")
+    assert "chart.width" in arrow, "the arrow tip is on the canvas edge, not chartArea"
+    assert "BOARD_ARROW_HEAD_LENGTH" in arrow and "BOARD_ARROW_HEAD_HALF" in arrow
+    assert "afterDraw(chart)" in arrow, (
+        "chrome above the data: afterDatasetsDraw would let a curve running along "
+        "the floor sit on top of the baseline"
+    )

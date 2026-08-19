@@ -1395,82 +1395,234 @@ const hoverMarkerPlugin = {
   },
 };
 
-// Right-endpoint labels: name + latest return for each visible curve, with
-// vertical collision avoidance and subtle leader lines to displaced labels.
-const endpointLabelPlugin = {
-  id: 'endpointLabels',
-  afterDatasetsDraw(chart) {
-    const { ctx, chartArea } = chart;
-    const labels = [];
-
-    chart.data.datasets.forEach((ds, i) => {
-      const meta = chart.getDatasetMeta(i);
-      if (meta.hidden || ds.hidden || !ds._raw || !meta.data || !meta.data.length) return;
-      let lastIdx = -1;
-      for (let k = ds._raw.length - 1; k >= 0; k -= 1) {
-        if (ds._raw[k] != null) { lastIdx = k; break; }
-      }
-      if (lastIdx < 0 || !meta.data[lastIdx]) return;
-
-      const ret = (ds._entry && ds._entry.cumulative_return != null)
-        ? Number(ds._entry.cumulative_return)
-        : (ds._raw[lastIdx] - ds._initial) / (ds._initial || 1);
-
-      labels.push({
-        i,
-        anchorX: meta.data[lastIdx].x,
-        anchorY: meta.data[lastIdx].y,
-        y: meta.data[lastIdx].y,
-        color: (ds._style && ds._style.color) || '#e5e7eb',
-        text: `${shortName(ds.label)}  ${(ret * 100).toFixed(2)}%`,
-      });
-    });
-    if (!labels.length) return;
-
-    // Stagger overlapping labels downward, keeping >= GAP px spacing. Each
-    // label keeps its original endpoint y (anchorY) so we can tell later
-    // whether collision-avoidance actually moved it.
-    const GAP = 20;
-    // Only draw a leader line once a label has been displaced enough that the
-    // connection is genuinely ambiguous; otherwise it just leaves a tiny stub.
-    const LEADER_MIN_DISPLACEMENT = 7;
-    labels.sort((a, b) => a.y - b.y);
-    for (let k = 1; k < labels.length; k += 1) {
-      if (labels[k].y - labels[k - 1].y < GAP) labels[k].y = labels[k - 1].y + GAP;
+/** The endpoint of each visible curve, and the two strings that label it.
+ *
+ *  Reads `ds.data` -- the PLOTTED values, already in whatever unit this chart's
+ *  axis shows -- rather than any surface's private raw-curve field, which is
+ *  what lets one factory serve two dataset shapes.
+ *
+ *  Called from `beforeLayout` as well as from the draw hook. In the layout pass
+ *  `meta.data[i].x/y` are last frame's positions or undefined, which is fine:
+ *  that pass only needs the label TEXT, to measure it. */
+function boardVisibleEndpoints(chart, formatValue) {
+  const out = [];
+  chart.data.datasets.forEach((ds, i) => {
+    const meta = chart.getDatasetMeta(i);
+    if (meta.hidden || ds.hidden || !ds.data || !ds.data.length) return;
+    let lastIdx = -1;
+    for (let k = ds.data.length - 1; k >= 0; k -= 1) {
+      if (ds.data[k] != null) { lastIdx = k; break; }
     }
-    // If the stack overflows the plot bottom, shift the whole stack up.
-    const overflow = labels[labels.length - 1].y - chartArea.bottom;
-    if (overflow > 0) labels.forEach((lab) => { lab.y -= overflow; });
+    if (lastIdx < 0) return;
+    const point = meta.data && meta.data[lastIdx];
+    out.push({
+      i,
+      lastIdx,
+      anchorX: point ? point.x : null,
+      anchorY: point ? point.y : null,
+      color: boardSeriesColor(ds),
+      name: shortName(ds.label),
+      value: formatValue(ds, lastIdx),
+    });
+  });
+  return out;
+}
 
-    // Labels live entirely inside the reserved right gutter so the plotted
-    // line paths (which end at chartArea.right) never leave stubs under them.
-    const gutterStart = chartArea.right + 6;
-    const labelX = chartArea.right + 12;
-    ctx.save();
-    ctx.font = '600 11px Inter, system-ui, sans-serif';
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'left';
-    labels.forEach((lab) => {
-      const faded = hoveredDatasetIndex != null && lab.i !== hoveredDatasetIndex;
-      const displaced = Math.abs(lab.y - lab.anchorY) > LEADER_MIN_DISPLACEMENT;
-      if (displaced) {
-        // Subtle dotted leader, drawn only within the gutter (never over the
-        // data line endpoint), connecting the displaced label to its curve.
-        ctx.setLineDash([1, 3]);
-        ctx.strokeStyle = hexToRgba(lab.color, faded ? 0.12 : 0.35);
-        ctx.lineWidth = 1;
+/** Percent, two decimals, signed. The default for every surface whose axis is
+ *  percent -- which is both of them except this tab in its money view. */
+function boardDefaultValueText(ds, lastIdx) {
+  const v = Number(ds.data[lastIdx]);
+  if (!Number.isFinite(v)) return '';
+  return `${v > 0 ? '+' : ''}${(v * 100).toFixed(2)}%`;
+}
+
+/** Path a rounded rect. Caller fills. `ctx.roundRect` is not in every browser
+ *  this dashboard is opened in, and a missing method here would throw inside a
+ *  draw hook -- which takes the whole chart down, not just the pill. */
+function boardRoundRect(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, h / 2, w / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+/** Right-endpoint labels: a colour-matched dot, the owner's name, and a value
+ *  pill, laid out in the reserved gutter with vertical collision avoidance and
+ *  dotted leaders to displaced labels.
+ *
+ *  A FACTORY. Screen 0 (home-page.js) draws this same frame over datasets that
+ *  carry none of this tab's private fields and has no hover gate, so the two
+ *  things that differ -- the value's unit and whether a series is faded -- are
+ *  injected. The defaults reproduce this tab in its percent view.
+ *
+ *  The stagger, `BOARD_LEADER_MIN_DISPLACEMENT` and the `gutterStart`/`labelX`
+ *  split are carried over unchanged from the plugin this replaces: labels drawn
+ *  over the line endpoints left visible stubs, and a leader shorter than the
+ *  displacement threshold is just a tick that connects nothing. */
+function createEndpointLabelPlugin(options) {
+  const opts = options || {};
+  const formatValue =
+    typeof opts.formatValue === 'function' ? opts.formatValue : boardDefaultValueText;
+  const isFaded = typeof opts.isFaded === 'function' ? opts.isFaded : () => false;
+  const fraction = Number.isFinite(opts.gutterFraction)
+    ? opts.gutterFraction
+    : BOARD_GUTTER_FRACTION;
+
+  return {
+    id: 'endpointLabels',
+    // The gutter is a fraction of the RENDERED width, which is not known at
+    // config time; beforeLayout is the last hook that can still move chartArea,
+    // and `chart.width`/`chart.height` are already current there.
+    beforeLayout(chart) {
+      const labels = boardVisibleEndpoints(chart, formatValue);
+      const frame = boardFrameLayout(chart, labels, fraction);
+      chart.$boardFrame = frame;
+      const layout = chart.options.layout || (chart.options.layout = {});
+      const padding =
+        layout.padding && typeof layout.padding === 'object'
+          ? layout.padding
+          : (layout.padding = {});
+      padding.right = frame.gutter;
+    },
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea } = chart;
+      const frame = chart.$boardFrame;
+      if (!frame || !frame.drawLabels || !chartArea) return;
+      const labels = boardVisibleEndpoints(chart, formatValue).filter(
+        (lab) => lab.anchorY != null,
+      );
+      if (!labels.length) return;
+
+      // Stagger overlapping labels downward, keeping >= gap px spacing. Each
+      // keeps its original endpoint y (anchorY) so we can tell later whether
+      // collision-avoidance actually moved it.
+      labels.forEach((lab) => { lab.y = lab.anchorY; });
+      labels.sort((a, b) => a.y - b.y);
+      for (let k = 1; k < labels.length; k += 1) {
+        if (labels[k].y - labels[k - 1].y < frame.gap) {
+          labels[k].y = labels[k - 1].y + frame.gap;
+        }
+      }
+      // Shift the whole stack back inside the plot. Both clamps, not just the
+      // bottom one: pushing an overflowing stack up can drive its head above
+      // chartArea.top. It cannot exceed both bounds at once -- boardFrameLayout
+      // only returns drawLabels when the stack fits in the plot height.
+      const overflow = labels[labels.length - 1].y - chartArea.bottom;
+      if (overflow > 0) labels.forEach((lab) => { lab.y -= overflow; });
+      const underflow = chartArea.top - labels[0].y;
+      if (underflow > 0) labels.forEach((lab) => { lab.y += underflow; });
+
+      // Labels live entirely inside the reserved gutter so the plotted line
+      // paths (which end at chartArea.right) never leave stubs under them.
+      const gutterStart = chartArea.right + 6;
+      const labelX = chartArea.right + BOARD_GUTTER_TEXT_INSET;
+      ctx.save();
+      ctx.font = BOARD_GUTTER_FONT;
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      labels.forEach((lab) => {
+        const faded = isFaded(lab.i);
+        const alpha = faded ? 0.3 : 1;
+
+        // The note's `•⋯`: a filled endpoint dot and a short dotted stub. It
+        // says the curve continues; it asserts no value for where it goes.
+        ctx.fillStyle = hexToRgba(lab.color, alpha);
         ctx.beginPath();
-        ctx.moveTo(gutterStart, lab.anchorY);
-        ctx.lineTo(labelX - 3, lab.y);
+        ctx.arc(lab.anchorX, lab.anchorY, BOARD_DOT_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.setLineDash([1, 3]);
+        ctx.strokeStyle = hexToRgba(lab.color, faded ? 0.2 : 0.6);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(lab.anchorX + BOARD_DOT_RADIUS + 1, lab.anchorY);
+        ctx.lineTo(lab.anchorX + BOARD_DOT_RADIUS + 1 + BOARD_STUB_LENGTH, lab.anchorY);
         ctx.stroke();
         ctx.setLineDash([]);
-      }
-      ctx.fillStyle = hexToRgba(lab.color, faded ? 0.3 : 1);
-      ctx.fillText(lab.text, labelX, lab.y);
-    });
-    ctx.restore();
-  },
-};
+
+        if (Math.abs(lab.y - lab.anchorY) > BOARD_LEADER_MIN_DISPLACEMENT) {
+          ctx.setLineDash([1, 3]);
+          ctx.strokeStyle = hexToRgba(lab.color, faded ? 0.12 : 0.35);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(gutterStart, lab.anchorY);
+          ctx.lineTo(labelX - 3, lab.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        let x = labelX;
+        ctx.fillStyle = hexToRgba(lab.color, alpha);
+        ctx.beginPath();
+        ctx.arc(x + BOARD_DOT_RADIUS, lab.y, BOARD_DOT_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+        x += BOARD_DOT_RADIUS * 2 + 4;
+
+        ctx.fillStyle = hexToRgba(lab.color, alpha);
+        ctx.fillText(lab.name, x, lab.y);
+        x += ctx.measureText(lab.name).width + 6;
+
+        const pillWidth = ctx.measureText(lab.value).width + BOARD_PILL_PAD_X * 2;
+        ctx.fillStyle = hexToRgba(lab.color, faded ? 0.25 : 1);
+        boardRoundRect(ctx, x, lab.y - BOARD_PILL_HEIGHT / 2, pillWidth, BOARD_PILL_HEIGHT, 4);
+        ctx.fill();
+        const ink = boardPillTextColor(lab.color);
+        ctx.fillStyle = faded ? hexToRgba(ink, 0.5) : ink;
+        ctx.fillText(lab.value, x + BOARD_PILL_PAD_X, lab.y);
+      });
+      ctx.restore();
+    },
+  };
+}
+
+/** The x-axis line, running the full width and terminating in a right-pointing
+ *  arrowhead out in the gutter.
+ *
+ *  The forward affordance, and the whole of it: the future-date-tick design was
+ *  dropped precisely because Chart.js can draw anywhere on the canvas, so this
+ *  costs no scale configuration and cannot touch the hover gate.
+ *
+ *  ACCEPTED IMPRECISION, STATED. On the Competition board the arrow implies an
+ *  advancement a closed window does not perform -- that window ran 2026-04-15 →
+ *  2026-05-15 and is finished. The mitigation is that the window label sits
+ *  directly above the chart on every surface that draws this. It is a soft
+ *  visual affordance rather than a data claim, and it was accepted knowingly. */
+function createAxisArrowPlugin() {
+  return {
+    id: 'boardAxisArrow',
+    // afterDraw, not afterDatasetsDraw: this is chrome, and a curve running
+    // along the floor would otherwise sit on top of the baseline.
+    afterDraw(chart) {
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      const y = Math.round(chartArea.bottom) + 0.5;
+      const tipX = chart.width - 4;
+      if (tipX <= chartArea.left + BOARD_ARROW_HEAD_LENGTH) return;
+      ctx.save();
+      ctx.strokeStyle = BOARD_AXIS_COLOR;
+      ctx.fillStyle = BOARD_AXIS_COLOR;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(chartArea.left, y);
+      ctx.lineTo(tipX - BOARD_ARROW_HEAD_LENGTH, y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(tipX, y);
+      ctx.lineTo(tipX - BOARD_ARROW_HEAD_LENGTH, y - BOARD_ARROW_HEAD_HALF);
+      ctx.lineTo(tipX - BOARD_ARROW_HEAD_LENGTH, y + BOARD_ARROW_HEAD_HALF);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    },
+  };
+}
 
 function buildCustomLegend(chart) {
   const container = document.getElementById('equityCurvesLegend');
@@ -1570,11 +1722,37 @@ async function renderEquityCurvesChart() {
   equityCurvesChartInstance = new Chart(ctx, {
     type: 'line',
     data: { labels: axisLabels, datasets },
-    plugins: [selectedGlowPlugin, hoverMarkerPlugin, endpointLabelPlugin],
+    plugins: [
+      selectedGlowPlugin,
+      hoverMarkerPlugin,
+      createAxisArrowPlugin(),
+      createEndpointLabelPlugin({
+        // Spec §4.5: the pill renders THIS chart's axis unit. This tab defaults
+        // to money, and the label printed `+7.49%` beside a `$` axis.
+        formatValue(ds, idx) {
+          if (currentChartView === 'absolute') {
+            return `$${formatLeaderboardNumber(ds.data[idx])}`;
+          }
+          // The entry's stored return in preference to the last plotted point:
+          // the point is the curve's own arithmetic, the field is what the run
+          // recorded, and the rank column beside it renders the field.
+          const ret =
+            ds._entry && ds._entry.cumulative_return != null
+              ? Number(ds._entry.cumulative_return)
+              : Number(ds.data[idx]);
+          if (!Number.isFinite(ret)) return '';
+          return `${ret > 0 ? '+' : ''}${(ret * 100).toFixed(2)}%`;
+        },
+        isFaded: (i) => hoveredDatasetIndex != null && i !== hoveredDatasetIndex,
+      }),
+    ],
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      layout: { padding: { right: 120, top: 8 } },
+      // `right` is the frame's, computed per layout from the rendered width.
+      // A literal here is not merely dead: it is what renders on the first
+      // frame, and what every later reader believes.
+      layout: { padding: { top: 8 } },
       // Chart.js does no interaction resolution of its own: hover, the marker
       // and the tooltip are all driven from handleCanvasPointerMove, which is
       // the only path that sees the endpoint-label gutter. Leaving the built-in
