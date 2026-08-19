@@ -1226,3 +1226,63 @@ console.log(JSON.stringify({
     assert out["drawn"] == ["Alpha", "+5.00%"], (
         "the draw hook re-derived the value instead of reusing the measured set"
     )
+
+
+def test_both_colour_readers_share_one_hex_parse():
+    """`boardPillTextColor` carried a verbatim copy of `hexToRgba`'s four-line
+    parse, and neither handled the 3-digit `#rgb` form: `#fff` read as
+    r=255 g=15 b=0, which is a light-ink verdict on a near-white pill in one and
+    an orange-red stroke in the other.
+
+    Latent -- every palette entry in this file is 6-digit -- but the defect is
+    the duplication, not the arithmetic: a fix to one copy would not have
+    reached the other. Asserted through both consumers, not through `hexToRgb`
+    alone, since sharing the parse is the actual property."""
+    result = _run_node(
+        """
+console.log(JSON.stringify({
+  short: hexToRgb('#fff'),
+  long: hexToRgb('#ffffff'),
+  inkShort: boardPillTextColor('#fff'),
+  inkLong: boardPillTextColor('#ffffff'),
+  inkDark: boardPillTextColor('#000'),
+  empty: hexToRgb(''),
+  junk: hexToRgb('nonsense'),
+}));
+"""
+    )
+    assert result["short"] == result["long"], "`#fff` must read as white, not r=255 g=15 b=0"
+    assert result["inkShort"] == result["inkLong"] == "#0b1220", "dark ink on a white pill"
+    assert result["inkDark"] == "#f8fafc", "light ink on a black pill"
+    assert result["empty"] == {"r": 0, "g": 0, "b": 0}, "no colour at all reads as black"
+    # Not an exact triple: `parseInt` stops at the first bad digit, so a junk
+    # string yields whatever prefix happened to be hex. The property that
+    # matters is that no channel is NaN -- a NaN would poison the luminance
+    # comparison into always choosing light ink. Unchanged from `hexToRgba`.
+    assert all(isinstance(v, int) for v in result["junk"].values()), (
+        "an unparseable colour must degrade to numbers, never NaN"
+    )
+
+
+def test_visibility_is_asked_of_chart_js_not_re_implemented():
+    """`resolveHoverTarget` calls `chart.isDatasetVisible(i)`; the label rail
+    hand-rolled `meta.hidden || ds.hidden` for the identical question.
+
+    Two predicates for one chart is how the hover gate and the rail end up
+    disagreeing about which curves are on screen -- a pill drawn for a series
+    that is not there. Chart.js also resolves the pair properly (`meta.hidden`
+    wins only when it is an actual boolean) where `||` reads an explicit
+    `meta.hidden === false` as "fall through to `ds.hidden`". Behavioural
+    coverage lives in the hidden/empty/all-null cases above; this pins the
+    delegation itself, which those cannot see."""
+    body = _extract_function("boardVisibleEndpoints")
+    # STRIPPED, because the negative assertion below is otherwise satisfied by
+    # the comment that explains the fix -- which is how a guard in this repo
+    # has passed on prose before.
+    code = "\n".join(
+        ln for ln in body.splitlines() if not ln.strip().startswith(("//", "*", "/*"))
+    )
+    assert "chart.isDatasetVisible(i)" in code, (
+        "ask Chart.js, so the rail and the hover gate cannot diverge"
+    )
+    assert "meta.hidden ||" not in code, "the hand-rolled predicate is back"
