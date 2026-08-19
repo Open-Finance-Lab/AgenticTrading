@@ -7,6 +7,17 @@
  *  fails if a single number drifts. Change a value here and change it there in
  *  the same commit.
  *
+ *  THE CONSTANT GUARD CANNOT SEE ALGORITHM DRIFT. It diffs `BOARD_*` source
+ *  text only, not function bodies -- so it stayed green through a full commit
+ *  where `stackLabels` here used a different (and, per `js/leaderboard.js`'s
+ *  own docstring, previously-buggy) overflow/underflow strategy than the
+ *  shipped `boardStackLabels` it is supposed to mirror. Only a behavioural
+ *  test with the right shape caught it (see
+ *  `test_an_outlier_anchor_does_not_reintroduce_the_whole_stack_shift_bug`).
+ *  Matching constants is necessary, not sufficient, for the two copies to
+ *  actually agree -- when porting a function here, read the shipped body, not
+ *  just its constants.
+ *
  *  TWO TEST TIERS, AND THE SECOND SKIPS IN CI. The constant mirror in that test
  *  file is a source scan and runs everywhere. The behavioural tests transpile
  *  this file with the esbuild inside dashboard/landing/node_modules and run it
@@ -135,16 +146,46 @@ export function frameLayout(input: {
   return { gutter: room, drawLabels: true, gap };
 }
 
-/** Stagger coincident endpoints downward, then push the stack back inside.
+/** Stagger coincident endpoints downward, then walk the stack back inside
+ *  `[top, bottom]` without re-opening the gaps the first pass just closed.
  *
  *  Each label keeps its endpoint y as `anchorY` so `displaced` can say whether
  *  collision-avoidance actually moved it -- a leader line shorter than
  *  BOARD_LEADER_MIN_DISPLACEMENT connects nothing and just leaves a stub.
  *
- *  BOTH CLAMPS. Pushing an overflowing stack up can drive its head above the
- *  plot top, and a label drawn above the chart is not a smaller bug than one
- *  drawn below it. They cannot both bind at once: `frameLayout` only reports
- *  drawLabels when the stack fits in the plot height. */
+ *  THREE PASSES, NOT A SHIFT OF THE WHOLE STACK. This function used to correct
+ *  an overflowing tail by shifting every label up by the overflow amount, then
+ *  correct the underflow that shift could produce at the head by shifting
+ *  every label back down by the underflow amount. For any stack whose SPREAD
+ *  (not its count) exceeds the band, those two shifts cancel exactly -- the
+ *  second undoes the first -- and the tail lands back outside `bottom` by the
+ *  same amount it started. `js/leaderboard.js`'s `boardStackLabels` hit this
+ *  for real: a rendered check found the last label 5-10px past the canvas
+ *  bottom, sliced through the middle. The fix there, mirrored here, is to walk
+ *  a BOUND instead of shifting a BLOCK: clamp only the last label to `bottom`,
+ *  walk backward opening exactly the gaps that clamp compressed (never more),
+ *  then clamp the first label to `top` and walk forward once more to restore
+ *  any gap the backward pass over-closed while pulling the head up. That final
+ *  forward pass is not redundant with the first: the backward pass is the one
+ *  that can leave a label too close to the neighbour above it, and re-running
+ *  the forward direction is what repairs that without re-compressing anything
+ *  -- nothing here is ever squeezed below `gap` to buy room, only walked.
+ *
+ *  BOTH CLAMPS bind independently, and can bind on the same stack --
+ *  `test_an_outlier_anchor_does_not_reintroduce_the_whole_stack_shift_bug` is
+ *  exactly that case. `frameLayout`'s stack-fits-the-canvas guard keeps a
+ *  caller from handing this a stack that cannot fit at ANY arrangement; it
+ *  says nothing about whether the stack is well spread going in, which is
+ *  what the walk above corrects for.
+ *
+ *  NO "DID IT FIT" RETURN. `boardStackLabels` also returns whether the last
+ *  label ended at or before `bottom`, but its own comment says that value is
+ *  "reported rather than asserted" -- a belt-and-suspenders cross-check
+ *  against `boardFrameLayout`'s own stack-fits-the-canvas guard, not
+ *  something a caller needs to branch on today. This mirror's `Placed[]`
+ *  signature is pinned by the Task 8-9 contract, and the same fact is
+ *  trivially recoverable without widening it: `placed[placed.length - 1].y <=
+ *  opts.bottom`. */
 export function stackLabels(
   anchors: Anchor[],
   opts: { gap: number; top: number; bottom: number },
@@ -152,16 +193,18 @@ export function stackLabels(
   const placed: Placed[] = anchors
     .map((a) => ({ ...a, y: a.anchorY, displaced: false }))
     .sort((a, b) => a.y - b.y);
-  for (let i = 1; i < placed.length; i += 1) {
-    if (placed[i].y - placed[i - 1].y < opts.gap) {
-      placed[i].y = placed[i - 1].y + opts.gap;
-    }
+  const last = placed.length - 1;
+  if (last < 0) return placed;
+  for (let k = 1; k <= last; k += 1) {
+    if (placed[k].y - placed[k - 1].y < opts.gap) placed[k].y = placed[k - 1].y + opts.gap;
   }
-  if (placed.length) {
-    const overflow = placed[placed.length - 1].y - opts.bottom;
-    if (overflow > 0) placed.forEach((p) => { p.y -= overflow; });
-    const underflow = opts.top - placed[0].y;
-    if (underflow > 0) placed.forEach((p) => { p.y += underflow; });
+  if (placed[last].y > opts.bottom) placed[last].y = opts.bottom;
+  for (let k = last - 1; k >= 0; k -= 1) {
+    if (placed[k].y > placed[k + 1].y - opts.gap) placed[k].y = placed[k + 1].y - opts.gap;
+  }
+  if (placed[0].y < opts.top) placed[0].y = opts.top;
+  for (let k = 1; k <= last; k += 1) {
+    if (placed[k].y - placed[k - 1].y < opts.gap) placed[k].y = placed[k - 1].y + opts.gap;
   }
   placed.forEach((p) => {
     p.displaced = Math.abs(p.y - p.anchorY) > BOARD_LEADER_MIN_DISPLACEMENT;

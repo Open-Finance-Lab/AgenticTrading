@@ -136,6 +136,45 @@ console.log(JSON.stringify({gutter: frame.gutter, draw: frame.drawLabels, gap: f
     assert result["gap"] == pytest.approx(16.0)
 
 
+def test_an_outlier_anchor_does_not_reintroduce_the_whole_stack_shift_bug():
+    """Pins the exact defect PR A's `boardStackLabels` docstring records fixing
+    in js/leaderboard.js: two whole-stack shifts (correct the tail's overflow by
+    shifting everything up, then correct the head's resulting underflow by
+    shifting everything back down) cancel each other exactly and the tail ends
+    up back outside the band -- a rendered check once found the last label 5-
+    10px past the canvas bottom, sliced through the middle.
+
+    Four anchors -- three clustered near 0, one far out at 200 -- with a band
+    that can hold them (3 gaps of 20 = 60px of stacking room against a 100px
+    band) reproduce it: the forward pass opens the cluster to 0, 20, 40, 200,
+    which overflows bottom=100 by 100px. A whole-stack shift up by 100 then
+    drives the head to -100, well past top=0, so the compensating shift back
+    down by 100 undoes the first correction exactly, leaving the last label at
+    200 -- 100px outside the band the layout could legitimately have fit.
+
+    The three-pass shipped algorithm instead clamps only the last label to
+    `bottom`, then walks backward opening exactly the gaps that clamp
+    compressed, then walks forward once more to restore any gap the backward
+    pass closed too far -- so it never moves labels that were already fine."""
+    result = _run_ts(
+        """
+const anchors = [
+  {key: 'a', anchorX: 500, anchorY: 0},
+  {key: 'b', anchorX: 500, anchorY: 5},
+  {key: 'c', anchorX: 500, anchorY: 10},
+  {key: 'd', anchorX: 500, anchorY: 200},
+];
+const placed = module.exports.stackLabels(anchors, {gap: 20, top: 0, bottom: 100});
+console.log(JSON.stringify(placed.map((p) => ({key: p.key, y: p.y, displaced: p.displaced}))));
+"""
+    )
+    ys = [row["y"] for row in result]
+    assert ys == sorted(ys)
+    assert all(b - a >= 20 - 1e-9 for a, b in zip(ys, ys[1:])), "every pair still clears the gap"
+    assert min(ys) >= 0, "the head must not be pushed above the plot top"
+    assert max(ys) <= 100, "the tail must land inside the band, not 100px past it"
+
+
 def test_the_stagger_separates_coincident_endpoints():
     """The real board spans -0.43% to +7.49%, so nine endpoints land within a
     few pixels of each other. Without the stagger they are one smear."""
