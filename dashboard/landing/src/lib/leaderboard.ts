@@ -115,19 +115,53 @@ export function buildBoardData(payload: {
   });
   const times = Array.from(timeSet).sort();
 
+  // Colour is assigned once per SELECTED entry, in order -- never skipped by a
+  // missing curve, because every selected entry reaches `standings` below
+  // regardless of whether it has drawable values. That keeps this positional
+  // MODEL_COLOR_PALETTE[n] indexing equivalent to /app's lazy per-entry_id
+  // `getModelColor`, which mints a slot the first time an entry's style is
+  // resolved: here every selected entry resolves exactly one style, in the
+  // same order /app would resolve them in. Deriving the colour from a running
+  // index that skipped curve-less entries shifted every later model's colour
+  // by one slot -- the same failure mode home-page.js:1748 documents for a
+  // stale key entering the SHARED modelColorMap: one model ends up wearing
+  // another's colour, on whichever page built its map in a different order.
   let modelIndex = 0;
+  const styleByEntryId = new Map<string, { color: string; dash?: string }>();
+  perEntry.forEach(({ entry }) => {
+    const isModel = !!(entry.is_model || entry.team_badge === 'Model');
+    styleByEntryId.set(
+      entry.entry_id,
+      isModel
+        ? { color: MODEL_COLOR_PALETTE[modelIndex++ % MODEL_COLOR_PALETTE.length], dash: undefined }
+        : BASELINE_STYLES[entry.entry_id] || { color: '#94A3B8', dash: '10 6' },
+    );
+  });
+
   const series: BoardSeries[] = [];
   const standings: BoardStanding[] = [];
   perEntry.forEach(({ entry, byTime }) => {
     const isModel = !!(entry.is_model || entry.team_badge === 'Model');
-    const style = isModel
-      ? { color: MODEL_COLOR_PALETTE[modelIndex++ % MODEL_COLOR_PALETTE.length], dash: undefined }
-      : BASELINE_STYLES[entry.entry_id] || { color: '#94A3B8', dash: '10 6' };
+    const style = styleByEntryId.get(entry.entry_id)!;
+    const name = entry.model || entry.team_name;
+
+    // Rank and return come from `cumulative_return`, independent of whether
+    // this entry has a drawable curve -- mirrors /app's rank list
+    // (`homeModelEntries`), which shows a model's rank regardless of chart
+    // data. A curve-less entry must not vanish from the standings just
+    // because it has nothing to plot.
+    standings.push({
+      key: entry.entry_id,
+      name,
+      // Two decimals, matching /app's rank rows and this card's own tooltip.
+      ret: formatPercent(Number(entry.cumulative_return), 2),
+      color: style.color,
+    });
+
     const raw = times.map((t) => (t in byTime ? byTime[t] : null));
     const base = Number(entry.initial_equity) || raw.find((v) => v != null) || 10000;
     const values = raw.map((v) => (v == null ? null : (v - base) / base));
     if (!values.some((v) => v != null)) return;
-    const name = entry.model || entry.team_name;
     series.push({
       key: entry.entry_id,
       name,
@@ -135,13 +169,6 @@ export function buildBoardData(payload: {
       dash: style.dash,
       isBaseline: !isModel,
       values,
-    });
-    standings.push({
-      key: entry.entry_id,
-      name,
-      // Two decimals, matching /app's rank rows and this card's own tooltip.
-      ret: formatPercent(Number(entry.cumulative_return), 2),
-      color: style.color,
     });
   });
 
