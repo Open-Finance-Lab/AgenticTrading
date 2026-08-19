@@ -98,6 +98,38 @@ function makeLabels(n, name, value) {
     return json.loads(proc.stdout)
 
 
+def _run_endpoints_node(script: str):
+    """Same node-subprocess shape as ``_run_node``, built for
+    ``boardVisibleEndpoints`` instead: a fake ``chart.data.datasets`` +
+    ``chart.getDatasetMeta(i)`` pair rather than the width/height canvas stub
+    the layout tests above use, since this function never touches a canvas.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not available")
+    harness = "\n".join(
+        [
+            _extract_function("shortName"),
+            _extract_function("boardSeriesColor"),
+            _extract_function("boardVisibleEndpoints"),
+            """
+function makeChart(datasets, metas) {
+  return {
+    data: { datasets },
+    getDatasetMeta(i) { return (metas && metas[i]) || { data: [] }; },
+  };
+}
+""",
+            script,
+        ]
+    )
+    proc = subprocess.run(
+        [node, "-e", harness], capture_output=True, text=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
 def test_the_gutter_is_two_fifths_of_a_wide_chart():
     """Spec §4.1: plot 60%, gutter 40%, as a FRACTION of measured width so the
     ratio survives every breakpoint rather than holding at one design size."""
@@ -299,3 +331,114 @@ def test_the_arrow_is_drawn_past_the_plot_and_not_as_an_axis_tick():
         "chrome above the data: afterDatasetsDraw would let a curve running along "
         "the floor sit on top of the baseline"
     )
+
+
+def test_a_hidden_dataset_contributes_no_endpoint():
+    """`hiddenSeries` toggling (the tab's legend) sets `ds.hidden` on the
+    dataset the tab builds -- a hidden curve must not get a label in the
+    gutter either."""
+    result = _run_endpoints_node(
+        """
+const chart = makeChart(
+  [{ label: 'A', data: [1, 2, 3], hidden: true }],
+  [{ data: [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }] }],
+);
+const out = boardVisibleEndpoints(chart, (ds, idx) => String(ds.data[idx]));
+console.log(JSON.stringify(out));
+"""
+    )
+    assert result == []
+
+
+def test_an_empty_dataset_contributes_no_endpoint():
+    """Series use different hour grids (spanGaps' own justification); a curve
+    that has no data at all yet must be dropped, not throw on an empty
+    backward scan."""
+    result = _run_endpoints_node(
+        """
+const chart = makeChart(
+  [{ label: 'A', data: [] }],
+  [{ data: [] }],
+);
+const out = boardVisibleEndpoints(chart, (ds, idx) => String(ds.data[idx]));
+console.log(JSON.stringify(out));
+"""
+    )
+    assert result == []
+
+
+def test_an_all_null_dataset_contributes_no_endpoint():
+    """A curve that is entirely gaps (no real value has arrived yet) must
+    terminate the backward scan at lastIdx = -1 and drop out, not anchor on a
+    null point or throw."""
+    result = _run_endpoints_node(
+        """
+const chart = makeChart(
+  [{ label: 'A', data: [null, null, null] }],
+  [{ data: [{ x: 0, y: 0 }, { x: 1, y: 1 }, { x: 2, y: 2 }] }],
+);
+const out = boardVisibleEndpoints(chart, (ds, idx) => String(ds.data[idx]));
+console.log(JSON.stringify(out));
+"""
+    )
+    assert result == []
+
+
+def test_trailing_nulls_anchor_on_the_last_real_point():
+    """Series use different hour grids (e.g. SPY :30 vs an LLM's :00), so a
+    curve that stopped early still trails nulls out to the end of the shared
+    axis. The endpoint must anchor on the last REAL value -- both the index
+    and the x/y read off it -- not the last array slot."""
+    result = _run_endpoints_node(
+        """
+const chart = makeChart(
+  [{ label: 'A', data: [100, 110, 105, null, null] }],
+  [{ data: [
+    { x: 0, y: 50 }, { x: 1, y: 40 }, { x: 2, y: 45 }, { x: 3, y: 0 }, { x: 4, y: 0 },
+  ] }],
+);
+const out = boardVisibleEndpoints(chart, (ds, idx) => String(ds.data[idx]));
+console.log(JSON.stringify(out));
+"""
+    )
+    assert len(result) == 1
+    entry = result[0]
+    assert entry["lastIdx"] == 2, "must land on the last non-null slot, index 2"
+    assert entry["anchorX"] == 2 and entry["anchorY"] == 45, (
+        "anchor must read meta.data[2], not the trailing null slots at 3/4"
+    )
+    assert entry["value"] == "105", "formatValue must be called with lastIdx, not data.length - 1"
+
+
+def test_the_happy_path_returns_one_entry_per_visible_dataset():
+    """A normal multi-dataset chart: each visible curve gets one endpoint,
+    carrying the index, name, color and formatted value a caller (the layout
+    pass, the draw hook) actually reads -- and in dataset order."""
+    result = _run_endpoints_node(
+        """
+const chart = makeChart(
+  [
+    { label: 'DeepSeek V4 Pro', data: [1, 2, 3], _style: { color: '#ff0000' } },
+    { label: 'SPY', data: [4, 5], borderColor: '#00ff00' },
+  ],
+  [
+    { data: [{ x: 0, y: 9 }, { x: 1, y: 8 }, { x: 2, y: 7 }] },
+    { data: [{ x: 0, y: 6 }, { x: 1, y: 5 }] },
+  ],
+);
+const out = boardVisibleEndpoints(chart, (ds, idx) => 'V' + ds.data[idx]);
+console.log(JSON.stringify(out));
+"""
+    )
+    assert len(result) == 2
+    first, second = result
+    assert first["i"] == 0
+    assert first["lastIdx"] == 2
+    assert first["name"] == "DeepSeek V4 Pro"
+    assert first["value"] == "V3"
+    assert first["color"] == "#ff0000"
+    assert second["i"] == 1
+    assert second["lastIdx"] == 1
+    assert second["name"] == "SPY"
+    assert second["value"] == "V5"
+    assert second["color"] == "#00ff00", "no _style on this dataset -- falls back to borderColor"
