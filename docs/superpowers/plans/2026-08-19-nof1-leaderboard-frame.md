@@ -18,11 +18,11 @@ Every task's requirements implicitly include this section.
 
 - **Three PRs, delivered in order A → B → C.** A and C are independent of everything; B depends on A for the visual rule only. Do not combine them.
 - **Gutter split is 3:2.** The plot area takes **60%** of measured chart width, the reserved gutter **40%** (`BOARD_GUTTER_FRACTION = 0.4`). Deliberately more generous than nof1's ~18%; revisit only after seeing it rendered.
-- **`layout.padding`, never the scale domain.** The gutter must stay *outside* `chartArea`. `resolveHoverTarget` (`js/leaderboard.js:1098`) rejects any `x > chartArea.right` outright; extending the category domain would move empty territory inside the plot and silently make the gutter hoverable.
+- **`layout.padding`, never the scale domain.** The gutter must stay *outside* `chartArea`. `resolveHoverTarget` (`js/leaderboard.js:1361`) rejects any `x > chartArea.right` outright; extending the category domain would move empty territory inside the plot and silently make the gutter hoverable.
 - **No future date ticks.** Explicitly dropped by the user. The forward affordance is an arrowhead only. No tick labels appear in the gutter.
 - **No "Now" marker.** The user's "move the Now point leftwards" is satisfied *by* the gutter — the last data point moves left because the plot narrows. Do not add a literal `Now` label: the Competition window closed `2026-05-15` and labelling its end "Now" is a false claim.
 - **Every pill renders its own chart's y-axis unit.** Landing `%`, screen 0 `%`, Leaderboard tab follows `currentChartView` (`$` default, `%` toggle). No surface invents a unit its axis does not show.
-- **Season length is 10 trading days** = two calendar weeks of US cash sessions, Mon–Fri. Already declared client-side at `dashboard/frontend/js/leaderboard.js:282`.
+- **Season length is 10 trading days** = two calendar weeks of US cash sessions, Mon–Fri. Already declared client-side at `dashboard/frontend/js/leaderboard.js:508` (`SEASON_TRADING_DAYS`).
 - **`season.last_advanced_date` stays `null` and `season.trading_days_elapsed` stays `0`.** No season has advanced. `seasonHasAdvanced()` reads exactly those two fields, and it is the anchor under every preview disclaimer on the Live tab.
 - **Never `git add -A` in this repo.** A bare backend import runs lazy `ALTER`s against the committed prod seed DB (`dashboard/storage/data/backtest.db`). Stage named paths only. Check `git status --short` before every commit and never stage `dashboard/storage/data/*`.
 - **The shipped `dashboard/frontend/index.html` is hand-patched** (issue #225). It is *not* `vite build` output: the Vite template is 25 lines, the shipped file 418. Copying `dist/public/index.html` over it silently kills every landing CTA with no console error. Follow `dashboard/landing/README.md`.
@@ -348,17 +348,30 @@ const BOARD_GUTTER_FONT = '600 11px Inter, system-ui, sans-serif';
 // canvas left to the right of the widest one so the arrowhead has room.
 const BOARD_GUTTER_TEXT_INSET = 12;
 const BOARD_GUTTER_TRAILING_PAD = 16;
-// Comfortable vertical spacing between stacked labels, and the floor below
-// which 11px text stops being separable.
-const BOARD_LABEL_GAP_MAX = 20;
-const BOARD_LABEL_GAP_MIN = 13;
-// Only draw a leader line once collision-avoidance has displaced a label far
-// enough that the connection is genuinely ambiguous; below this it is a stub.
-const BOARD_LEADER_MIN_DISPLACEMENT = 7;
+// Clear canvas kept between the plot's last tick label and the label block, so
+// the gutter never reads as part of the axis.
+const BOARD_TICK_CLEARANCE = 12;
+// How far past the measured floor the gutter may grow. BOARD_GUTTER_FRACTION is
+// the ceiling, the measured floor the minimum, and this is the slack between
+// them -- a wide card should not donate plot width it has no labels to fill.
+const BOARD_GUTTER_SLACK = 36;
+// Gaps inside one label block: dot-to-name, then name-to-value pill.
+const BOARD_DOT_GAP = 4;
+const BOARD_NAME_GAP = 6;
 const BOARD_PILL_PAD_X = 5;
 const BOARD_PILL_HEIGHT = 15;
 const BOARD_DOT_RADIUS = 3;
 const BOARD_STUB_LENGTH = 7;
+// Comfortable vertical spacing between stacked labels, and the floor below
+// which 11px text stops being separable.
+const BOARD_LABEL_GAP_MAX = 20;
+// Ordering is load-bearing: BOARD_LABEL_GAP_MIN reads BOARD_PILL_HEIGHT, and a
+// `const` read before its declaration is a TDZ ReferenceError at module load,
+// not a lint warning. Keep the pill constants above the gap constants.
+const BOARD_LABEL_GAP_MIN = BOARD_PILL_HEIGHT + 1;
+// Only draw a leader line once collision-avoidance has displaced a label far
+// enough that the connection is genuinely ambiguous; below this it is a stub.
+const BOARD_LEADER_MIN_DISPLACEMENT = 7;
 // Reserved right padding when the frame declines to draw labels: enough for the
 // arrowhead and nothing else.
 const BOARD_ARROW_PAD = 18;
@@ -1238,7 +1251,7 @@ def _run_ts(script: str):
     return json.loads(proc.stdout)
 
 
-def test_the_gutter_is_two_fifths_of_a_wide_card():
+def test_a_wide_card_reserves_the_measured_floor_plus_slack_not_two_fifths_of_the_width():
     result = _run_ts(
         """
 const labels = Array.from({length: 9}, (_, i) => ({name: 'Model ' + i, value: '+1.00%'}));
@@ -1246,7 +1259,7 @@ const frame = module.exports.frameLayout({width: 900, height: 420, labels});
 console.log(JSON.stringify({gutter: frame.gutter, draw: frame.drawLabels}));
 """
     )
-    assert result["gutter"] == pytest.approx(360.0)
+    assert result["gutter"] == pytest.approx(180.0)
     assert result["draw"] is True
 
 
@@ -1323,13 +1336,23 @@ export const BOARD_GUTTER_MAX_FRACTION = 0.5;
 export const BOARD_GUTTER_FONT = '600 11px Inter, system-ui, sans-serif';
 export const BOARD_GUTTER_TEXT_INSET = 12;
 export const BOARD_GUTTER_TRAILING_PAD = 16;
-export const BOARD_LABEL_GAP_MAX = 20;
-export const BOARD_LABEL_GAP_MIN = 13;
-export const BOARD_LEADER_MIN_DISPLACEMENT = 7;
+export const BOARD_TICK_CLEARANCE = 12;
+export const BOARD_GUTTER_SLACK = 36;
+export const BOARD_DOT_GAP = 4;
+export const BOARD_NAME_GAP = 6;
 export const BOARD_PILL_PAD_X = 5;
 export const BOARD_PILL_HEIGHT = 15;
 export const BOARD_DOT_RADIUS = 3;
 export const BOARD_STUB_LENGTH = 7;
+export const BOARD_LABEL_GAP_MAX = 20;
+// An EXPRESSION, not a literal: a 15px pill needs at least 16px of pitch not to
+// overlap its neighbour, so the minimum is derived from the pill height rather
+// than restated beside it. Decoupling the two is how they drift apart.
+// Ordering is load-bearing: BOARD_LABEL_GAP_MIN reads BOARD_PILL_HEIGHT, and a
+// `const` read before its declaration is a TDZ ReferenceError at module load,
+// not a lint warning. Keep the pill constants above the gap constants.
+export const BOARD_LABEL_GAP_MIN = BOARD_PILL_HEIGHT + 1;
+export const BOARD_LEADER_MIN_DISPLACEMENT = 7;
 export const BOARD_ARROW_PAD = 18;
 export const BOARD_ARROW_HEAD_LENGTH = 8;
 export const BOARD_ARROW_HEAD_HALF = 4;
@@ -1368,14 +1391,16 @@ export function labelBlockWidth(labels: LabelText[]): number {
   for (const label of labels) {
     const block =
       BOARD_DOT_RADIUS * 2 +
-      4 +
+      BOARD_DOT_GAP +
       measureTextWidth(label.name, BOARD_GUTTER_FONT) +
-      6 +
+      BOARD_NAME_GAP +
       measureTextWidth(label.value, BOARD_GUTTER_FONT) +
       BOARD_PILL_PAD_X * 2;
     if (block > widest) widest = block;
   }
-  return BOARD_GUTTER_TEXT_INSET + widest + BOARD_GUTTER_TRAILING_PAD;
+  return (
+    BOARD_GUTTER_TEXT_INSET + widest + BOARD_TICK_CLEARANCE + BOARD_GUTTER_TRAILING_PAD
+  );
 }
 
 /** How much right margin to reserve, whether to draw labels, and how far apart.
@@ -1397,9 +1422,15 @@ export function frameLayout(input: {
   if (!labels.length || width <= 0 || height <= 0) return none;
   const gap = Math.min(BOARD_LABEL_GAP_MAX, (height - BOARD_XAXIS_ALLOWANCE) / labels.length);
   if (gap < BOARD_LABEL_GAP_MIN) return none;
+  // The stack must also fit the canvas, not just the gap threshold.
+  if ((labels.length - 1) * gap + BOARD_PILL_HEIGHT > height) return none;
   const floor = labelBlockWidth(labels);
   if (floor > width * BOARD_GUTTER_MAX_FRACTION) return none;
-  return { gutter: Math.max(width * fraction, floor), drawLabels: true, gap };
+  // Cap the gutter at the measured floor plus a little slack rather than letting
+  // it run to the full fraction: a wide card should not donate plot width it has
+  // no labels to fill. `fraction` is the ceiling, `floor` the minimum.
+  const room = Math.max(floor, Math.min(width * fraction, floor + BOARD_GUTTER_SLACK));
+  return { gutter: room, drawLabels: true, gap };
 }
 
 /** Stagger coincident endpoints downward, then push the stack back inside.
@@ -2271,7 +2302,7 @@ The largest single change in the plan. `BoardPreview.tsx` loses both sample cons
 
 **Interfaces:**
 - Consumes: `useLeaderboard()` (Task 7), `frameLayout`/`measureTextWidth` (Task 5), `formatPercent` (Task 6), `EndpointRail` (Task 8).
-- Produces, for Task 10: nothing exported. `SAMPLE_CURVES`, `SAMPLE_STANDINGS` and `LINE_COLORS` are **deleted**; `Race.tsx` is the only importer of any of them, and Task 10 moves it. Passing `gap={frame.gap}` to `<Customized>` is what feeds `EndpointRail`'s `gap` prop from Task 8 — the rail never computes it.
+- Produces, for Task 10: nothing exported. `SAMPLE_CURVES`, `SAMPLE_STANDINGS` and `LINE_COLORS` are **deleted**; `Race.tsx` is the only importer of any of them, and **Task 9 rewrites that one import line itself** (ruled during execution) so that no intermediate commit on the branch is left failing `tsc`. Task 9 changes nothing else in `Race.tsx`; Task 10 still rewires its body to the hook. Passing `gap={frame.gap}` to `<Customized>` is what feeds `EndpointRail`'s `gap` prop from Task 8 — the rail never computes it.
 
 - [ ] **Step 1: Update the failing guards**
 
@@ -2591,6 +2622,14 @@ export function BoardPreview() {
                 tickLine={false}
                 axisLine={false}
                 minTickGap={48}
+                // `timeKey` slices to 16 chars, so the raw value here is
+                // "2026-04-15T14:00". Without a formatter Recharts prints that
+                // verbatim, while /app renders the byte-identical key as
+                // "Apr 15" via formatShortDate (js/leaderboard.js:1096, used as
+                // an axis tick callback at :2132). `formatAxisDate` mirrors it.
+                // Omitting this was a defect in an earlier draft of this plan,
+                // found in review of Task 9 and fixed before the bundle build.
+                tickFormatter={formatAxisDate}
               />
               <YAxis
                 stroke="hsl(var(--muted-foreground))"
@@ -2709,7 +2748,7 @@ git commit -m "feat(landing): hero card draws the live competition board"
 
 ### Task 10: The Race standings, and the copy guards that anchored on samples
 
-`Race.tsx` renders the full standings table from `SAMPLE_STANDINGS`, which Task 9 deleted. It moves to the same hook. A hero with real numbers above a table of invented ones, on the same page, is worse than either alone.
+`Race.tsx` renders the full standings table from rows Task 9 left inline when it deleted `SAMPLE_STANDINGS` from `BoardPreview.tsx` (Task 9 rewrote the import so the branch stayed typecheck-clean; it did no other work here). The table moves to the same hook. A hero with real numbers above a table of invented ones, on the same page, is worse than either alone.
 
 Three guards in `test_landing_copy_register.py` derive their corpus or their count from the sample constants and go red here. All three are **re-anchored, not relaxed** — each was catching something real, and what it was catching still needs catching.
 

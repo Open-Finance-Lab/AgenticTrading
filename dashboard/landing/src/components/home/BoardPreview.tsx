@@ -199,8 +199,11 @@ export function BoardPreview() {
           fallback key: the chart itself already ends at y=586, well above the
           fold. Left as measured deliberately. The reserve still earns its
           value on every stacked viewport tall enough for the floor to clear
-          (>=990dvh: 390x1000 fits with 49.5px to spare); below that the
-          floor decides and the reserve is inert.
+          (390x1000 fits); below that the floor decides and the
+          reserve is inert. Deliberately no slack figure here: three
+          independent measurements of that viewport gave 37.5, 49.5 and 69.5px,
+          so the direction is solid and the number is not. Re-measure rather
+          than trusting a figure written down once.
 
           RE-DERIVE BOTH AGAIN if the caption, the title or the chip strip
           changes height, and re-derive at the NARROWEST width of each band.
