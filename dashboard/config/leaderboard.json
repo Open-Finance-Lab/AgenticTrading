@@ -6,6 +6,10 @@
   "end_date": "2026-05-15",
   "reference_start_date": "2026-03-15",
   "description": "One-month contest window; stock baselines use prior-month data only as reference (no in-window look-ahead)",
+  "season": {
+    "length_trading_days": 10,
+    "season_zero_start": "2026-08-12"
+  },
   "strategies": [
     {
       "id": "spy_index",

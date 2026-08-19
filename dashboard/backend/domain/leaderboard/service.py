@@ -47,7 +47,7 @@ downsample_daily = _baselines.downsample_daily
 fetch_hourly_bars = _baselines.fetch_hourly_bars
 
 LEADERBOARD_MODE = "leaderboard"
-VALID_PERIODS = ("contest", "daily")
+VALID_PERIODS = ("contest", "daily", "live")
 _SKIP_CACHE_PATH = DATA_DIR / "leaderboard_skip_cache.json"
 _DAILY_REFRESH_STATE_PATH = DATA_DIR / "leaderboard_daily_refresh.json"
 _daily_refresh_lock = threading.Lock()
@@ -473,6 +473,76 @@ def verify_daily_refresh_secret(provided: Optional[str]) -> None:
         raise PermissionError("Invalid daily leaderboard refresh secret")
 
 
+# Season 0 is the shakedown season by convention: numbered, so the board has a
+# real identity to show and so Season 1 means "the first one that counted", but
+# explicitly the one whose results nobody should read as a standing. Mirrors
+# PREVIEW_SEASON_NUMBER in dashboard/frontend/js/leaderboard.js.
+PREVIEW_SEASON_NUMBER = 0
+DEFAULT_SEASON_TRADING_DAYS = 10
+
+
+def season_window(start_date: str, trading_days: int) -> Tuple[str, str]:
+    """The (start, end) dates of a season ``trading_days`` sessions long.
+
+    Ten sessions is two calendar weeks of US cash trading, Monday through
+    Friday. Not a new number: ``js/leaderboard.js`` already declares
+    ``const SEASON_TRADING_DAYS = 10;`` with exactly that comment.
+
+    Weekdays only -- market holidays are NOT modelled. That is correct for
+    Season 0, whose window (2026-08-12 → 2026-08-25) contains none, and it is
+    knowingly insufficient for the advance engine, which will need a real
+    calendar. It is stated here rather than left for that engine to discover:
+    the failure would be a season that ends one session short with nothing
+    reporting it.
+    """
+    start = date.fromisoformat(start_date)
+    cursor = start
+    counted = 0
+    last = start
+    while counted < max(int(trading_days), 1):
+        if cursor.weekday() < 5:
+            counted += 1
+            last = cursor
+        cursor += timedelta(days=1)
+    return start.isoformat(), last.isoformat()
+
+
+def build_season_payload(config: Dict[str, Any]) -> Dict[str, Any]:
+    """The season block the Live Trading tab renders.
+
+    NOTHING HERE MAY CLAIM AN ADVANCE. ``last_advanced_date`` stays None and
+    ``trading_days_elapsed`` stays 0 because no season has advanced -- there is
+    no advance engine. ``seasonHasAdvanced()`` on the client tests exactly those
+    two fields, deliberately rather than the period string, precisely so that
+    teaching the server the word "live" cannot clear the preview banner. A date
+    here flips the badge to "Running" and prints "Next advance: nightly after
+    the 16:00 ET close" under a board nothing updates.
+
+    Every key the client reads is present. A missing one is not a crash there --
+    the render path uses optional chaining throughout -- it is a silently blank
+    season strip, which is worse.
+    """
+    season_cfg = config.get("season") or {}
+    trading_days = int(season_cfg.get("length_trading_days") or DEFAULT_SEASON_TRADING_DAYS)
+    start, end = season_window(
+        season_cfg.get("season_zero_start") or config["start_date"], trading_days
+    )
+    return {
+        "number": PREVIEW_SEASON_NUMBER,
+        "status": "preview",
+        "start_date": start,
+        "end_date": end,
+        "last_advanced_date": None,
+        "trading_days_elapsed": 0,
+        "trading_days_total": trading_days,
+        "entries_open": False,
+        "entry_closes_at": None,
+        "entry_count": 0,
+        "next_advance_at": None,
+        "gaps": [],
+    }
+
+
 def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, Any]:
     """Return the effective leaderboard config for ``contest`` or ``daily``.
 
@@ -501,6 +571,20 @@ def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, A
             "period": "daily",
             "board_title": "Daily Leaderboard",
             "phase_label": "Daily",
+            "standings_label": "Ranking",
+        }
+    if period_key == "live":
+        # The contest session and the contest window, deliberately. This board
+        # is a Season 0 PREVIEW: real Competition curves under season chrome,
+        # with a banner saying nothing here has advanced. Inventing a window
+        # would make `_find_cached_run` miss on all twelve entries and start
+        # recomputing baselines -- and with LEADERBOARD_DAILY_AUTO_DEPLOY armed,
+        # LLM deploys -- from a public, unauthenticated GET.
+        return {
+            **base,
+            "period": "live",
+            "board_title": "Live Trading Leaderboard",
+            "phase_label": "Season 0",
             "standings_label": "Ranking",
         }
     return {
@@ -1312,4 +1396,6 @@ def get_leaderboard(
     }
     if daily_status is not None:
         payload["daily_status"] = daily_status
+    if config.get("period") == "live":
+        payload["season"] = build_season_payload(config)
     return payload
