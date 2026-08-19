@@ -10,7 +10,7 @@ import math
 import os
 import threading
 import time
-from typing import Any, NoReturn
+from typing import Any
 
 import requests
 
@@ -449,8 +449,10 @@ class IFindHttpClient:
                 self._clock(),
             )
 
-    def _fail_refresh(self, reason: str, *, detail: str = "") -> NoReturn:
-        """Log and raise one refresh failure, with enough detail to tell them apart.
+    def _refresh_error(
+        self, reason: str, *, detail: str = ""
+    ) -> IFindTokenRefreshError:
+        """Log one refresh failure and build it, with enough detail to tell them apart.
 
         Every branch below produced a bare exception and no log line, so "the
         refresh token was revoked", "iFinD renamed data.access_token" and "the
@@ -458,12 +460,17 @@ class IFindHttpClient:
         upstream ``errmsg`` is still never echoed -- it is attacker-influenced
         and has carried the credential itself -- but the numeric errorcode and
         HTTP status are safe and are the whole diagnosis.
+
+        Returned rather than raised so each `raise` stays visible at its own
+        call site: a helper that raises makes every caller look like it can
+        fall off the end, which is both harder to read and a static-analysis
+        false positive waiting to happen.
         """
         message = f"iFinD access token refresh {reason}"
         if detail:
             message = f"{message}; {detail}"
         logger.warning(message)
-        raise IFindTokenRefreshError(message) from None
+        return IFindTokenRefreshError(message)
 
     def _post_token_exchange(self) -> Any:
         """POST the refresh token, retrying only the faults worth retrying.
@@ -488,28 +495,30 @@ class IFindHttpClient:
                 if attempt < _TOKEN_EXCHANGE_ATTEMPTS - 1:
                     self._sleep(_RETRY_DELAYS[attempt])
                     continue
-                self._fail_refresh("failed during transport")
+                break
             except requests.RequestException:
-                self._fail_refresh("failed during transport")
-        self._fail_refresh("failed during transport")
+                break
+        raise self._refresh_error("failed during transport") from None
 
     def _exchange_refresh_token(self) -> str:
         response = self._post_token_exchange()
 
         status_code = int(response.status_code)
         if not 200 <= status_code < 300:
-            self._fail_refresh(f"failed with HTTP {status_code}")
+            raise self._refresh_error(
+                f"failed with HTTP {status_code}"
+            ) from None
 
         try:
             decoded = response.json()
         except ValueError:
-            self._fail_refresh(
+            raise self._refresh_error(
                 "returned invalid JSON", detail=f"status={status_code}"
-            )
+            ) from None
         if not isinstance(decoded, Mapping):
-            self._fail_refresh(
+            raise self._refresh_error(
                 "returned an invalid response", detail=f"status={status_code}"
-            )
+            ) from None
 
         raw_errorcode = decoded.get("errorcode")
         errorcode = (
@@ -530,10 +539,10 @@ class IFindHttpClient:
             or not isinstance(access_token, str)
             or not access_token.strip()
         ):
-            self._fail_refresh(
+            raise self._refresh_error(
                 "returned no usable access token",
                 detail=f"errorcode={errorcode_label}",
-            )
+            ) from None
         return access_token.strip()
 
     @staticmethod
