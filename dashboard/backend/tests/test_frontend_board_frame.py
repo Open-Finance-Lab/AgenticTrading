@@ -130,6 +130,61 @@ function makeChart(datasets, metas) {
     return json.loads(proc.stdout)
 
 
+def _run_plugin_node(script: str):
+    """Runs `createEndpointLabelPlugin`'s own hooks end to end -- `beforeLayout`
+    reserves the gutter via `boardFrameLayout`, then `afterDatasetsDraw` walks
+    it -- through a recording ctx stub, rather than re-deriving what the draw
+    hook does by hand. Pulls in every helper the draw hook calls by name
+    (`boardRoundRect`, `boardStackLabels`, `boardSignedPercent`, ...) so a
+    rename or a signature change reddens this instead of a hand-copied
+    stand-in quietly drifting from the shipping code.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not available")
+    harness = "\n".join(
+        [
+            _board_constants(),
+            _extract_function("hexToRgba"),
+            _extract_function("shortName"),
+            _extract_function("boardSeriesColor"),
+            _extract_function("boardPillTextColor"),
+            _extract_function("boardLabelBlockWidth"),
+            _extract_function("boardFrameLayout"),
+            _extract_function("boardVisibleEndpoints"),
+            _extract_function("boardSignedPercent"),
+            _extract_function("boardDefaultValueText"),
+            _extract_function("boardRoundRect"),
+            _extract_function("boardStackLabels"),
+            _extract_function("createEndpointLabelPlugin"),
+            """
+// A ctx stub that also RECORDS every fillText call -- (text, x, y) -- since
+// that is the only place the draw hook's accumulated x-offset becomes
+// observable from outside. Same 6px/char rule as the layout tests' stub.
+function makeCtx() {
+  const fillTextCalls = [];
+  return {
+    fillTextCalls,
+    save() {}, restore() {}, beginPath() {}, closePath() {},
+    arc() {}, fill() {}, stroke() {}, moveTo() {}, lineTo() {},
+    quadraticCurveTo() {}, setLineDash() {},
+    font: '', textBaseline: '', textAlign: '',
+    fillStyle: '', strokeStyle: '', lineWidth: 0,
+    measureText(text) { return { width: String(text).length * 6 }; },
+    fillText(text, x, y) { fillTextCalls.push({ text, x, y }); },
+  };
+}
+""",
+            script,
+        ]
+    )
+    proc = subprocess.run(
+        [node, "-e", harness], capture_output=True, text=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
 def test_the_gutter_is_two_fifths_of_a_wide_chart():
     """Spec §4.1: plot 60%, gutter 40%, as a FRACTION of measured width so the
     ratio survives every breakpoint rather than holding at one design size."""
@@ -611,3 +666,214 @@ console.log(JSON.stringify(frame));
     )
     assert out["drawLabels"] is False
     assert out["gutter"] == 18, "arrow-only reserves BOARD_ARROW_PAD, not a gutter"
+
+
+# ---------------------------------------------------------------------------
+# boardStackLabels, five more edge cases the forward/backward/forward passes
+# were hand-traced against but never run: a single label (both loops that
+# assume >= 2 elements skip entirely), two labels, unsorted input, and the two
+# band-size extremes. All five are traced correct in the review that asked for
+# them; a failure here is a real defect in boardStackLabels, not in the test.
+# ---------------------------------------------------------------------------
+
+def test_a_single_label_is_left_alone_when_it_already_fits():
+    """`last = labels.length - 1` is 0 here, so every `for (k = 1; k <= last; …)`
+    loop -- both stagger passes -- never executes, and the only code that can
+    still run is the two clamp checks. A label already inside the band must
+    come out exactly where it went in."""
+    out = _stack([100], 20, 200)
+    assert out["fits"] is True
+    assert out["top"] == pytest.approx(92.5)
+    assert out["bottom"] == pytest.approx(107.5)
+
+
+def test_a_single_label_still_clamps_to_the_top_edge():
+    """The clamp checks are reachable even with nothing to stagger against --
+    an anchor above the band must still land on the band's top edge, not sail
+    past it."""
+    out = _stack([5], 20, 200)
+    assert out["fits"] is True
+    assert out["top"] == pytest.approx(0.0)
+
+
+def test_two_labels_open_up_to_the_gap_and_no_further():
+    """The simplest real collision: two endpoints 5px apart must separate to
+    exactly `gap`, not more (nothing here should trigger the reverse or
+    third-pass rework two labels are too few to need)."""
+    out = _stack([100, 105], 20, 300)
+    assert out["fits"] is True
+    assert out["minGap"] == pytest.approx(20.0)
+
+
+def test_unsorted_input_is_sorted_before_it_is_staggered():
+    """The function's first line is `labels.sort((a, b) => a.y - b.y)`. Feed it
+    labels tagged with a stable index but out of y order, and read the index
+    order back afterward: it must come back y-ascending, not in call order.
+
+    `_stack`'s fits/minGap summary (used everywhere else in this file) cannot
+    tell this apart from a bug: the forward stagger pass enforces `gap` between
+    consecutive ARRAY entries regardless of whether the array is y-sorted, so a
+    missing sort would still report a healthy minGap -- just with labels
+    stacked in the wrong order, which only the `i` order below exposes."""
+    out = _run_stack_node(
+        """
+const labels = [{ i: 0, y: 100 }, { i: 1, y: 80 }, { i: 2, y: 90 }];
+const fits = boardStackLabels(labels, 20, 0, 300);
+console.log(JSON.stringify({ fits, order: labels.map((l) => l.i) }));
+"""
+    )
+    assert out["fits"] is True
+    assert out["order"] == [1, 2, 0], (
+        "labels must come back y-ascending (80, 90, 100 -> i 1, 2, 0), not call "
+        "order -- the function's own sort is what guarantees this"
+    )
+
+
+def test_a_band_exactly_one_pill_tall_still_fits_flush_to_the_edge():
+    """`bottom - top == BOARD_PILL_HEIGHT` exactly -- the boundary a `>` instead
+    of `>=` off-by-one would miss. One label, anchored above the band, must
+    still clamp to the top edge and be reported as fitting rather than
+    refused."""
+    out = _stack([0], 20, 30)  # canvas_height = 2 * BOARD_PILL_HEIGHT
+    assert out["fits"] is True
+    assert out["top"] == pytest.approx(0.0)
+
+
+def test_a_band_smaller_than_one_pill_is_refused_rather_than_clipped():
+    """Shrink the canvas below one pill's own height and the half-pill insets
+    `_stack` uses (matching the real caller) cross over: `top > bottom`. The
+    contract this pins is the same as the multi-label case above -- refuse the
+    layout rather than hand back a position squeezed into a band that cannot
+    hold it -- but reached here through the single-label path, which has no
+    stagger pass to catch it and must rely on the clamp checks alone."""
+    out = _stack([5], 20, 10)  # canvas_height < BOARD_PILL_HEIGHT
+    assert out["fits"] is False
+
+
+# ---------------------------------------------------------------------------
+# The measured floor (`boardLabelBlockWidth`) and the draw hook inside
+# `createEndpointLabelPlugin` each total the "dot name pill" block from
+# scratch, ~1400 lines apart, sharing only `BOARD_DOT_GAP`/`BOARD_NAME_GAP` by
+# promise. They agree today -- the point of this guard is to keep it that way
+# numerically, by running the REAL draw hook and reading back where it put the
+# pixels, rather than trusting that a future edit to either copy remembers the
+# other.
+# ---------------------------------------------------------------------------
+
+def test_the_draw_hooks_block_matches_the_measured_floor():
+    """The measured block is the FLOOR under the gutter -- what stops the
+    frame from clipping at narrow widths. The Leaderboard tab has 280-536px of
+    slack under it, so an under-measure would stay invisible there
+    indefinitely; the home panel binds to within 16-52px (measured in a
+    browser), so the same drift clips text on the very next redeploy with
+    every source-shape guard in this file still green.
+
+    Runs `createEndpointLabelPlugin()` for real against one label, then
+    recomputes the block width two ways: once from `boardLabelBlockWidth` (the
+    floor `beforeLayout` reserved room for), and once from where
+    `afterDatasetsDraw` actually put the second `fillText` call (the value
+    pill) plus the pill's own width. If the two literals drift apart, this
+    numeric comparison fails; the source-shape checks elsewhere in this file
+    (`BOARD_DOT_GAP` / `BOARD_NAME_GAP` appearing in both places) cannot."""
+    out = _run_plugin_node(
+        """
+const NAME = 'DeepSeek V4 Pro';
+const chart = {
+  width: 900, height: 420,
+  options: {},
+  ctx: makeCtx(),
+  $boardFrame: null,
+  data: { datasets: [
+    { label: NAME, hidden: false, data: [0, 0.1, -0.1234], borderColor: '#F97316' },
+  ] },
+  getDatasetMeta(i) {
+    if (i !== 0) return { hidden: true, data: [] };
+    return { hidden: false, data: [{ x: 10, y: 50 }, { x: 20, y: 40 }, { x: 30, y: 60 }] };
+  },
+  chartArea: { left: 0, top: 0, right: 540, bottom: 386 },
+};
+
+const plugin = createEndpointLabelPlugin();
+plugin.beforeLayout(chart);
+if (!chart.$boardFrame.drawLabels) throw new Error('frame declined to draw labels');
+chart.ctx = makeCtx();
+plugin.afterDatasetsDraw(chart);
+
+const calls = chart.ctx.fillTextCalls;
+if (calls.length !== 2) throw new Error('expected exactly 2 fillText calls, got ' + calls.length);
+const [nameCall, valueCall] = calls;
+const labelX = chart.chartArea.right + BOARD_GUTTER_TEXT_INSET;
+const pillWidth = valueCall.text.length * 6 + BOARD_PILL_PAD_X * 2;
+const drawBlockWidth = (valueCall.x - BOARD_PILL_PAD_X + pillWidth) - labelX;
+
+const measuredBlock =
+  boardLabelBlockWidth(chart, [{ name: nameCall.text, value: valueCall.text }]) -
+  BOARD_GUTTER_TEXT_INSET - BOARD_GUTTER_TRAILING_PAD;
+
+console.log(JSON.stringify({
+  nameText: nameCall.text, valueText: valueCall.text, drawBlockWidth, measuredBlock,
+}));
+"""
+    )
+    assert out["nameText"] == "DeepSeek V4 Pro"
+    assert out["valueText"] == "-12.34%"
+    assert out["drawBlockWidth"] == pytest.approx(out["measuredBlock"]), (
+        "the draw hook painted a different width than boardLabelBlockWidth "
+        "measured -- the floor no longer matches what actually renders"
+    )
+
+
+def test_one_nan_endpoint_does_not_blank_the_whole_rail():
+    """`anchorY` comes from `meta.data[lastIdx].y` (leaderboard.js), which can
+    be `NaN` for a malformed point -- and `NaN != null` is `false`, so the old
+    `!= null` filter let it through where `Number.isFinite` rejects it.
+
+    A `NaN` anchor left in the array does not merely draw one garbage label:
+    `Array.prototype.sort` treats a `NaN` comparator result as "equal" (V8
+    verified directly -- a `NaN`-valued entry keeps its ORIGINAL array
+    position rather than sorting by value), so a `NaN` that starts out last
+    stays last. From there every `boardStackLabels` comparison against it is
+    `false` (`NaN > x` and `NaN <= x` both are), including the final
+    `labels[last].y <= bottom` the function reports its verdict with -- so
+    `fits` comes back `false` and `afterDatasetsDraw`'s `if (!boardStackLabels
+    (...)) return;` bails before drawing ANYTHING. One bad series, with the old
+    filter, silently deleted every other curve's label -- confirmed below: the
+    unfixed filter on this exact fixture draws zero labels, not merely one.
+
+    Three datasets, the NaN one last (the ordering that reaches the failing
+    branch): the other two must still get their dot, name and value pill."""
+    out = _run_plugin_node(
+        """
+const chart = {
+  width: 900, height: 420,
+  options: {},
+  ctx: makeCtx(),
+  $boardFrame: null,
+  data: { datasets: [
+    { label: 'Alpha', hidden: false, data: [0, 0.05, 0.10], borderColor: '#F97316' },
+    { label: 'Charlie', hidden: false, data: [0, -0.01, 0.07], borderColor: '#4ADE80' },
+    { label: 'Bravo', hidden: false, data: [0, 0.02, -0.03], borderColor: '#38BDF8' },
+  ] },
+  getDatasetMeta(i) {
+    const y = [50, 90, NaN][i]; // Bravo (index 2, last) is the malformed point
+    return { hidden: false, data: [{ x: 10, y: 10 }, { x: 20, y: 20 }, { x: 30, y }] };
+  },
+  chartArea: { left: 0, top: 0, right: 540, bottom: 386 },
+};
+
+const plugin = createEndpointLabelPlugin();
+plugin.beforeLayout(chart);
+chart.ctx = makeCtx();
+plugin.afterDatasetsDraw(chart);
+
+const texts = chart.ctx.fillTextCalls.map((c) => c.text);
+console.log(JSON.stringify({ drawLabels: chart.$boardFrame.drawLabels, texts }));
+"""
+    )
+    assert out["drawLabels"] is True, "the gutter is still reserved -- 3 valid label texts"
+    assert "Alpha" in out["texts"], "the good series before the NaN one must still draw"
+    assert "Charlie" in out["texts"], "the good series after the NaN one must still draw"
+    assert not any("Bravo" in t for t in out["texts"]), (
+        "the NaN series itself must not draw a label at a garbage position"
+    )
+    assert len(out["texts"]) == 4, "exactly 2 surviving labels x (name, value)"
