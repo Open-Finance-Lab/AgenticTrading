@@ -505,3 +505,109 @@ def test_the_shared_fraction_is_the_default_and_any_override_says_why():
     assert "BOARD_GUTTER_FRACTION" not in _HOME_SRC, (
         "the fraction is the frame's; screen 0 either takes it or passes an option"
     )
+
+
+# ---------------------------------------------------------------------------
+# The label stack's vertical layout. Behavioural, not source-shape: the defect
+# these pin rendered clipped labels on BOTH surfaces at 1280/1440/1920 while
+# every source-shape guard in this module stayed green.
+# ---------------------------------------------------------------------------
+
+def _run_stack_node(script: str):
+    """``boardStackLabels`` under node. It is pure in (labels, gap, top, bottom)
+    and touches no canvas, so it needs only the BOARD_* constants -- not the
+    width/height chart stub the layout tests use."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is not available")
+    harness = "\n".join(
+        [_board_constants(), _extract_function("boardStackLabels"), script]
+    )
+    proc = subprocess.run(
+        [node, "-e", harness], capture_output=True, text=True, timeout=30
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def _stack(anchors, gap, canvas_height):
+    """Lay `anchors` out in the band the plugin uses: the CANVAS, inset by half
+    a pill at each edge, which is what makes a pill's own edges land on canvas."""
+    script = """
+const half = BOARD_PILL_HEIGHT / 2;
+const labels = %s.map((y, i) => ({ i, y }));
+const fits = boardStackLabels(labels, %r, half, %r - half);
+const ys = labels.map((l) => l.y);
+console.log(JSON.stringify({
+  fits,
+  top: +(ys[0] - half).toFixed(2),
+  bottom: +(ys[ys.length - 1] + half).toFixed(2),
+  minGap: +Math.min(...ys.slice(1).map((y, i) => y - ys[i])).toFixed(2),
+}));
+""" % (json.dumps(anchors), gap, canvas_height)
+    return _run_stack_node(script)
+
+
+# Endpoint y positions RECORDED from the live render at 1440px, not invented:
+# a fixture built from the plugin's own arithmetic would drift with the code and
+# stay green through exactly the kind of regression these exist to catch.
+_HOME_1440 = ([36.82, 81.13, 121.29, 124.1, 125.51, 138.83, 161.39, 162.81, 167.03], 19.67, 211)
+_TAB_1440 = (
+    [45.95, 82.5, 104.17, 108.27, 164.75, 166.1, 168.71, 170.68, 189.42, 221.15, 223.14, 229.08],
+    19.5,
+    268,
+)
+
+
+@pytest.mark.parametrize(
+    "anchors,gap,height,surface",
+    [_HOME_1440 + ("screen 0",), _TAB_1440 + ("Leaderboard tab",)],
+)
+def test_no_label_is_laid_out_past_either_canvas_edge(anchors, gap, height, surface):
+    """THE REGRESSION. Both surfaces' endpoints cluster low, so the staggered
+    stack is taller than the PLOT -- 202.5px against 168.8px on screen 0, 255.3px
+    against 237.4px on the tab. The version this replaces clamped to `chartArea`
+    with two whole-stack shifts that cancelled exactly, and drew the last label
+    10.4px past the canvas bottom on screen 0 and 5px past it on the tab.
+
+    The bound is the CANVAS: a gutter label sits right of the plot, where the
+    x-axis tick strip is empty, so hanging below `chartArea.bottom` is fine and
+    only the canvas edge clips."""
+    out = _stack(anchors, gap, height)
+    assert out["fits"] is True, f"{surface}: the stack should fit this canvas"
+    assert out["top"] >= 0, f"{surface}: top label {out['top']}px above the canvas"
+    assert out["bottom"] <= height, (
+        f"{surface}: bottom label ends at {out['bottom']} on a {height}px canvas"
+    )
+    assert out["minGap"] >= gap - 0.01, (
+        f"{surface}: gap compressed to {out['minGap']} -- nothing may be squeezed "
+        "to buy the room; the frame drops labels instead"
+    )
+
+
+def test_a_band_too_small_for_the_stack_is_refused_rather_than_clipped():
+    """The degradation, at the helper. Nine pills at a 19.67px pitch need
+    8*19.67 + 15 = 172.4px; offered 120, the stack cannot fit, and the contract
+    is to SAY SO so the plugin draws nothing -- not to return a stack whose tail
+    hangs off the canvas. An earlier draft of this guard asserted the overhang
+    was 'only as large as the real shortfall', which would have certified that
+    clipping the top edge is acceptable once the bottom edge was fixed."""
+    out = _stack([20, 24, 28, 33, 39, 44, 50, 56, 61], 19.67, 120)
+    assert out["fits"] is False, "a stack that cannot fit must report it"
+
+
+def test_a_panel_too_short_for_its_labels_reserves_the_arrow_and_nothing_else():
+    """The degradation, at the layout hook -- and the reachable one. Screen 0's
+    chart is 132px tall at any viewport <= 700px high (measured), where nine
+    labels want a 10.9px pitch against a 13px legibility floor. The frame gives
+    the gutter back rather than stacking unreadable text, which is what a
+    rendered check at 390px and at 1440x600 showed it doing."""
+    out = _run_node(
+        """
+const chart = makeChart(550, 132);
+const frame = boardFrameLayout(chart, makeLabels(9), 0.4);
+console.log(JSON.stringify(frame));
+"""
+    )
+    assert out["drawLabels"] is False
+    assert out["gutter"] == 18, "arrow-only reserves BOARD_ARROW_PAD, not a gutter"

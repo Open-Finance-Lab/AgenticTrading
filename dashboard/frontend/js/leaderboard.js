@@ -227,6 +227,15 @@ function boardFrameLayout(chart, labels, fraction) {
   const usableHeight = chart.height - BOARD_XAXIS_ALLOWANCE;
   const gap = Math.min(BOARD_LABEL_GAP_MAX, usableHeight / labels.length);
   if (gap < BOARD_LABEL_GAP_MIN) return none;
+  // ...and the stack that pitch produces must FIT THE CANVAS. The line above
+  // sizes a gap; this is the extent of n pills at it -- (n-1) gaps plus one
+  // pill's height -- against the band boardStackLabels is given. Checking it
+  // here is what makes this hook's verdict and the draw hook's identical rather
+  // than merely usually-equal, so the gutter is never reserved and left empty.
+  // With today's constants it cannot fire; it is here so that raising
+  // BOARD_LABEL_GAP_MAX or shrinking BOARD_XAXIS_ALLOWANCE degrades to
+  // arrow-only instead of silently reintroducing a clipped label.
+  if ((labels.length - 1) * gap + BOARD_PILL_HEIGHT > chart.height) return none;
   const floor = boardLabelBlockWidth(chart, labels);
   if (floor > chart.width * BOARD_GUTTER_MAX_FRACTION) return none;
   return { gutter: Math.max(chart.width * fraction, floor), drawLabels: true, gap };
@@ -1454,6 +1463,55 @@ function boardRoundRect(ctx, x, y, w, h, r) {
   ctx.closePath();
 }
 
+/** Lay the endpoint labels out vertically: sorted by endpoint, never closer
+ *  together than `gap`, and never outside the band `[top, bottom]`. Mutates
+ *  `lab.y`; returns whether the stack fits, so a caller that cannot honour the
+ *  band draws nothing rather than something clipped.
+ *
+ *  Pure in (labels, gap, top, bottom) for the same reason `boardFrameLayout`
+ *  is: node without a canvas is the only kind of chart test this repo has, and
+ *  the defect this replaces was invisible to every source-shape guard that
+ *  already existed.
+ *
+ *  THE BAND IS THE CANVAS, NOT THE PLOT -- that distinction IS the bug this
+ *  fixes. These labels live in the gutter, to the right of `chartArea.right`,
+ *  so the x-axis tick strip below the plot is empty at their x and they may
+ *  legitimately hang past `chartArea.bottom`. The version this replaces clamped
+ *  them to `chartArea` instead, and since the forward pass enforces a MINIMUM
+ *  gap the staggered stack is routinely taller than the plot: 255.3px against a
+ *  237.4px plot on the Leaderboard tab at 1440, 202.5px against 168.8px on
+ *  screen 0. Two whole-stack shifts then cancelled each other exactly -- lift
+ *  the tail inside, put it straight back -- and a rendered check found the last
+ *  label drawn 5px past the canvas bottom on the tab and 10.4px past it on
+ *  screen 0, sliced through the middle.
+ *
+ *  THREE PASSES. Down to open the gaps, up to pull the tail inside `bottom`,
+ *  down again to push the head inside `top`. The third is not redundant with
+ *  the first: the second pass is what can drive the head out, and re-running
+ *  the first is what puts it back without compressing anything. Walking a bound
+ *  rather than shifting the whole stack is what keeps every gap at or above
+ *  `gap` -- nothing is squeezed to buy the room. */
+function boardStackLabels(labels, gap, top, bottom) {
+  if (!labels || !labels.length) return false;
+  labels.sort((a, b) => a.y - b.y);
+  const last = labels.length - 1;
+  for (let k = 1; k <= last; k += 1) {
+    if (labels[k].y - labels[k - 1].y < gap) labels[k].y = labels[k - 1].y + gap;
+  }
+  if (labels[last].y > bottom) labels[last].y = bottom;
+  for (let k = last - 1; k >= 0; k -= 1) {
+    if (labels[k].y > labels[k + 1].y - gap) labels[k].y = labels[k + 1].y - gap;
+  }
+  if (labels[0].y < top) labels[0].y = top;
+  for (let k = 1; k <= last; k += 1) {
+    if (labels[k].y - labels[k - 1].y < gap) labels[k].y = labels[k - 1].y + gap;
+  }
+  // False only when the band cannot hold n pills at this pitch, which
+  // boardFrameLayout now excludes before reserving the gutter. Reported rather
+  // than asserted so the two hooks cannot drift into disagreeing again.
+  return labels[last].y <= bottom;
+}
+
 /** Right-endpoint labels: a colour-matched dot, the owner's name, and a value
  *  pill, laid out in the reserved gutter with vertical collision avoidance and
  *  dotted leaders to displaced labels.
@@ -1501,24 +1559,19 @@ function createEndpointLabelPlugin(options) {
       );
       if (!labels.length) return;
 
-      // Stagger overlapping labels downward, keeping >= gap px spacing. Each
-      // keeps its original endpoint y (anchorY) so we can tell later whether
-      // collision-avoidance actually moved it.
+      // Stagger overlapping labels, keeping >= gap px spacing and staying on
+      // canvas. Each keeps its original endpoint y (anchorY) so we can tell
+      // later whether collision-avoidance actually moved it.
+      //
+      // The band is the CANVAS, not chartArea: a gutter label sits to the right
+      // of the plot, where the x-axis tick strip is empty, so hanging below
+      // chartArea.bottom costs nothing and clamping to it clipped the stack.
+      // See boardStackLabels. A false return means the band cannot hold the
+      // stack -- draw nothing rather than something cut off, which is the same
+      // degradation boardFrameLayout takes at the narrow and short extremes.
       labels.forEach((lab) => { lab.y = lab.anchorY; });
-      labels.sort((a, b) => a.y - b.y);
-      for (let k = 1; k < labels.length; k += 1) {
-        if (labels[k].y - labels[k - 1].y < frame.gap) {
-          labels[k].y = labels[k - 1].y + frame.gap;
-        }
-      }
-      // Shift the whole stack back inside the plot. Both clamps, not just the
-      // bottom one: pushing an overflowing stack up can drive its head above
-      // chartArea.top. It cannot exceed both bounds at once -- boardFrameLayout
-      // only returns drawLabels when the stack fits in the plot height.
-      const overflow = labels[labels.length - 1].y - chartArea.bottom;
-      if (overflow > 0) labels.forEach((lab) => { lab.y -= overflow; });
-      const underflow = chartArea.top - labels[0].y;
-      if (underflow > 0) labels.forEach((lab) => { lab.y += underflow; });
+      const half = BOARD_PILL_HEIGHT / 2;
+      if (!boardStackLabels(labels, frame.gap, half, chart.height - half)) return;
 
       // Labels live entirely inside the reserved gutter so the plotted line
       // paths (which end at chartArea.right) never leave stubs under them.
