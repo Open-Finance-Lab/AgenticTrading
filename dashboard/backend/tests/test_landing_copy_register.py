@@ -14,6 +14,7 @@ naive line-comment stripping corrupts minified JS (``//`` also appears inside
 string literals like URLs).
 """
 
+import json
 import re
 from pathlib import Path
 
@@ -440,3 +441,113 @@ def test_race_source_and_shipped_bundle_agree():
         "Race.tsx names the board but the shipped bundle does not — "
         "rebuild per dashboard/landing/README.md"
     )
+
+
+# ---------------------------------------------------------------------------
+# §02's illustrative run report vs. the live board four screens up.
+#
+# CONTROLLER RULING, minimal form. Test.tsx/storyline.ts predate the live-board
+# change; what that change did was make them FALSIFIABLE -- before it, nothing
+# on this page could be checked against anything. The page is what ships, and as
+# it stood it stated two different results for the SAME named model over the
+# SAME stated window and the SAME base: the hero said Claude Sonnet 4.6 returned
+# +0.11% over 2026-04-15 → 2026-05-15 from $10,000, and §02 said +14.2% over
+# "Apr 15 – May 15, 2026" from $10,000, on a dollar axis the hero itself refuses
+# because a dollar level names an account that never existed.
+#
+# The fix is narrow and deliberately reversible: §02 keeps its numbers, its
+# dollar axis, its layout and its "Illustrative" chip, and stops naming a real
+# roster model and the real contest window. That removes the comparison a
+# visitor can make; it does not pass judgement on the section.
+#
+# Derived from dashboard/config/leaderboard.json rather than hardcoded, so an
+# eighth LLM entry -- the documented way the roster grew to seven -- extends the
+# ban without anyone remembering to.
+# ---------------------------------------------------------------------------
+
+_LANDING_HOME = (
+    Path(__file__).resolve().parents[2] / "landing" / "src" / "components" / "home"
+)
+_LEADERBOARD_CONFIG = Path(__file__).resolve().parents[2] / "config" / "leaderboard.json"
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _story_sources() -> dict[str, str]:
+    """The three files that render the Talk → Test storyline."""
+    return {
+        name: (_LANDING_HOME / name).read_text(encoding="utf-8")
+        for name in ("storyline.ts", "Test.tsx", "DiscordMock.tsx")
+    }
+
+
+def _leaderboard_config() -> dict:
+    return json.loads(_LEADERBOARD_CONFIG.read_text(encoding="utf-8"))
+
+
+def test_the_illustrative_run_report_names_no_real_roster_model():
+    """A fabricated +14.2% under a real model's name, four screens below that
+    model's real return on the live board, is a claim a visitor can falsify by
+    scrolling. Baseline names (DJIA, Buy & Hold, S&P 500) are NOT banned -- the
+    storyline legitimately names its benchmarks, and they are not the entries
+    whose results are being contradicted."""
+    roster = sorted(
+        {
+            (s.get("model") or s.get("name") or "").strip()
+            for s in _leaderboard_config().get("strategies", [])
+            if s.get("strategy") == "llm_agent"
+        }
+        - {""}
+    )
+    assert len(roster) >= 5, (
+        f"derived from the live roster and it came back nearly empty ({roster!r}) "
+        f"— this guard would be vacuous"
+    )
+    for name, source in _story_sources().items():
+        for model in roster:
+            assert model not in source, (
+                f"{name} names the roster model {model!r}; the live board four "
+                f"screens up publishes that model's real return, so a fabricated "
+                f"one here is falsifiable by scrolling"
+            )
+
+
+def test_the_illustrative_run_report_does_not_restate_the_contest_window():
+    """The other half of the comparison. Same model AND same window is what makes
+    the two numbers commensurable; breaking either breaks the comparison, and the
+    window is the cheaper one to break.
+
+    The CHART's own window counts, not only the stated one: Test.tsx builds its
+    x-axis day labels from a hardcoded `Date.UTC(...)` pair, so leaving that on
+    the contest window while restating the window elsewhere would put "Apr 15 …
+    May 15" back under the figure -- and would also make the settings card and
+    the chart beneath it name different months, which is a fresh contradiction
+    rather than a fix."""
+    config = _leaderboard_config()
+    start, end = config["start_date"], config["end_date"]
+    y0, m0, d0 = (int(p) for p in start.split("-"))
+    y1, m1, d1 = (int(p) for p in end.split("-"))
+    human_forms = {
+        f"{_MONTHS[m0 - 1]} {d0} {dash} {_MONTHS[m1 - 1]} {d1}, {y1}"
+        for dash in ("–", "—", "-", "to")
+    }
+    for name, source in _story_sources().items():
+        assert "STORY" in source or "storyline" in source, f"{name} read empty?"
+        assert start not in source, f"{name} restates the contest start date {start}"
+        assert end not in source, f"{name} restates the contest end date {end}"
+        for form in human_forms:
+            assert form not in source, f"{name} restates the contest window as {form!r}"
+        assert not re.search(
+            rf"Date\.UTC\(\s*{y0}\s*,\s*{m0 - 1}\s*,\s*{d0}\s*\)", source
+        ), f"{name} draws its chart over the contest window's start date"
+        assert not re.search(
+            rf"Date\.UTC\(\s*{y1}\s*,\s*{m1 - 1}\s*,\s*{d1}\s*\)", source
+        ), f"{name} draws its chart over the contest window's end date"
+
+
+def test_the_illustrative_run_report_still_labels_itself_illustrative():
+    """The counterweight. Nothing above says §02 must be deleted or defanged --
+    it keeps its numbers and its dollar axis. What it must keep is the label that
+    says they are not a result, so a later edit cannot close this by quietly
+    dropping the chip instead of the impersonation."""
+    assert "Illustrative" in _story_sources()["Test.tsx"]

@@ -39,12 +39,20 @@ function noise(seed: number) {
 }
 
 /**
- * Hourly equity for Apr 15–May 15, 2026 (weekdays only).
- * Paths drift toward the published end levels; agent outperforms baselines.
+ * Hourly equity for the illustrative window in STORY_SPECS.timePeriod
+ * (weekdays only). Paths drift toward the published end levels; agent
+ * outperforms baselines.
+ *
+ * KEEP THESE DATES AND STORY_SPECS.timePeriod IN STEP -- the x-axis day labels
+ * come from here while the settings card above states the window, so a drift
+ * between them puts two different months inside one figure. They must also stay
+ * OFF the contest window in dashboard/config/leaderboard.json: see the note on
+ * STORY_SPECS for why a real window here is a falsifiable claim now that the
+ * live board is four screens up.
  */
 function buildHourlyEquity(): EquityPoint[] {
-  const start = new Date(Date.UTC(2026, 3, 15));
-  const end = new Date(Date.UTC(2026, 4, 15));
+  const start = new Date(Date.UTC(2025, 8, 3));
+  const end = new Date(Date.UTC(2025, 9, 3));
   const tradingDays: Date[] = [];
   for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
     const wd = d.getUTCDay();
