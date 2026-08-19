@@ -146,6 +146,13 @@ const BOARD_LABEL_GAP_MIN = 13;
 // Only draw a leader line once collision-avoidance has displaced a label far
 // enough that the connection is genuinely ambiguous; below this it is a stub.
 const BOARD_LEADER_MIN_DISPLACEMENT = 7;
+// The two gaps inside the "dot name pill" block: after the leading dot, and
+// after the name. `boardLabelBlockWidth` (the measure) and the draw hook
+// inside `createEndpointLabelPlugin` (~1400 lines apart) each total this block
+// from scratch -- named constants are what keeps the two arithmetic copies
+// from drifting the way two bare literals silently could.
+const BOARD_DOT_GAP = 4;
+const BOARD_NAME_GAP = 6;
 const BOARD_PILL_PAD_X = 5;
 const BOARD_PILL_HEIGHT = 15;
 const BOARD_DOT_RADIUS = 3;
@@ -197,9 +204,9 @@ function boardLabelBlockWidth(chart, labels) {
   labels.forEach((lab) => {
     const block =
       BOARD_DOT_RADIUS * 2 +
-      4 +
+      BOARD_DOT_GAP +
       ctx.measureText(lab.name).width +
-      6 +
+      BOARD_NAME_GAP +
       ctx.measureText(lab.value).width +
       BOARD_PILL_PAD_X * 2;
     if (block > widest) widest = block;
@@ -1437,12 +1444,20 @@ function boardVisibleEndpoints(chart, formatValue) {
   return out;
 }
 
+/** Percent, two decimals, signed -- `+7.49%` / `-3.20%` / `''` for non-finite.
+ *  Shared so the sign and precision cannot drift between this tab's money-view
+ *  percent branch (Spec §4.5) and `boardDefaultValueText` below, the default
+ *  every other pill on this frame takes. */
+function boardSignedPercent(fraction) {
+  const v = Number(fraction);
+  if (!Number.isFinite(v)) return '';
+  return `${v > 0 ? '+' : ''}${(v * 100).toFixed(2)}%`;
+}
+
 /** Percent, two decimals, signed. The default for every surface whose axis is
  *  percent -- which is both of them except this tab in its money view. */
 function boardDefaultValueText(ds, lastIdx) {
-  const v = Number(ds.data[lastIdx]);
-  if (!Number.isFinite(v)) return '';
-  return `${v > 0 ? '+' : ''}${(v * 100).toFixed(2)}%`;
+  return boardSignedPercent(ds.data[lastIdx]);
 }
 
 /** Path a rounded rect. Caller fills. `ctx.roundRect` is not in every browser
@@ -1554,8 +1569,13 @@ function createEndpointLabelPlugin(options) {
       const { ctx, chartArea } = chart;
       const frame = chart.$boardFrame;
       if (!frame || !frame.drawLabels || !chartArea) return;
+      // Number.isFinite, not `!= null`: a NaN anchorY (a malformed point) would
+      // pass a null check, then poison every comparison inside boardStackLabels,
+      // which returns false and drops the WHOLE stack rather than the one bad
+      // series -- a single corrupt endpoint should not blank every other curve's
+      // label.
       const labels = boardVisibleEndpoints(chart, formatValue).filter(
-        (lab) => lab.anchorY != null,
+        (lab) => Number.isFinite(lab.anchorY),
       );
       if (!labels.length) return;
 
@@ -1616,11 +1636,11 @@ function createEndpointLabelPlugin(options) {
         ctx.beginPath();
         ctx.arc(x + BOARD_DOT_RADIUS, lab.y, BOARD_DOT_RADIUS, 0, Math.PI * 2);
         ctx.fill();
-        x += BOARD_DOT_RADIUS * 2 + 4;
+        x += BOARD_DOT_RADIUS * 2 + BOARD_DOT_GAP;
 
         ctx.fillStyle = hexToRgba(lab.color, alpha);
         ctx.fillText(lab.name, x, lab.y);
-        x += ctx.measureText(lab.name).width + 6;
+        x += ctx.measureText(lab.name).width + BOARD_NAME_GAP;
 
         const pillWidth = ctx.measureText(lab.value).width + BOARD_PILL_PAD_X * 2;
         ctx.fillStyle = hexToRgba(lab.color, faded ? 0.25 : 1);
@@ -1793,8 +1813,7 @@ async function renderEquityCurvesChart() {
             ds._entry && ds._entry.cumulative_return != null
               ? Number(ds._entry.cumulative_return)
               : Number(ds.data[idx]);
-          if (!Number.isFinite(ret)) return '';
-          return `${ret > 0 ? '+' : ''}${(ret * 100).toFixed(2)}%`;
+          return boardSignedPercent(ret);
         },
         isFaded: (i) => hoveredDatasetIndex != null && i !== hoveredDatasetIndex,
       }),

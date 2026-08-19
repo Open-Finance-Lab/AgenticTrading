@@ -1566,6 +1566,10 @@ function homeBoardFramePlugins() {
         console.warn('[home] board frame factories missing — drawing an unframed chart');
         return [];
     }
+    // Taking the default pill formatter is only correct because `s.values`
+    // (the dataset below) are fractional returns -- the default multiplies by
+    // 100 to print a percent. A dollar-equity series here would need its own
+    // override, or the pill prints something like `+1030000.00%`.
     return [arrow(), labels()];
 }
 
