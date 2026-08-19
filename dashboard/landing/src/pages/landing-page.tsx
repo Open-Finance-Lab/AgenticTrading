@@ -6,6 +6,7 @@ import { Talk } from "../components/home/Talk";
 import { Test } from "../components/home/Test";
 import { Race } from "../components/home/Race";
 import { FooterCTA } from "../components/home/FooterCTA";
+import { LeaderboardProvider } from "@/lib/useLeaderboard";
 
 export default function LandingPage() {
   return (
@@ -14,13 +15,15 @@ export default function LandingPage() {
         <Navbar />
         <MarketTicker />
       </div>
-      <main>
-        <Hero />
-        <WhyCare />
-        <Talk />
-        <Test />
-        <Race />
-      </main>
+      <LeaderboardProvider>
+        <main>
+          <Hero />
+          <WhyCare />
+          <Talk />
+          <Test />
+          <Race />
+        </main>
+      </LeaderboardProvider>
       <FooterCTA />
     </div>
   );

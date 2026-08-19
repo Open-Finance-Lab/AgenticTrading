@@ -18,6 +18,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -333,3 +334,187 @@ console.log(JSON.stringify({seriesColor, standingsColor}));
     )
     for key, color in result["seriesColor"].items():
         assert result["standingsColor"][key] == color, f"{key} disagrees between series and standings"
+
+
+# ---------------------------------------------------------------------------
+# Task 7 -- one fetch, shared by the hero and the Race standings.
+# ---------------------------------------------------------------------------
+
+_HOOK_TS = None
+
+
+def _hook() -> str:
+    global _HOOK_TS
+    if _HOOK_TS is None:
+        _HOOK_TS = (_LIB / "useLeaderboard.tsx").read_text(encoding="utf-8")
+    return _HOOK_TS
+
+
+def test_the_board_is_fetched_once_for_the_whole_page():
+    """The hero and the Race standings are four screens apart and render the same
+    board. Two fetches double the load on a backend that cold-starts in 30-60s
+    and, worse, can disagree -- real numbers in the hero above different ones in
+    the table is worse than either alone."""
+    assert "createContext" in _hook()
+    assert "LeaderboardProvider" in _hook()
+    page = (_ROOT / "landing" / "src" / "pages" / "landing-page.tsx").read_text(
+        encoding="utf-8"
+    )
+    assert "<LeaderboardProvider>" in page
+    hero_at = page.index("<Hero />")
+    race_at = page.index("<Race />")
+    provider_at = page.index("<LeaderboardProvider>")
+    assert provider_at < hero_at < race_at, "both consumers must sit inside it"
+
+
+def test_the_three_states_are_distinguishable_in_the_type():
+    """Loading, ready and failed are three states, not two plus a fallback. A
+    silent fallback to sample curves would make "the backend is down" and "the
+    backend is fine" render near-identically -- the exact failure shape
+    CLAUDE.md's fail-closed-is-not-fail-visible section is about."""
+    src = _hook()
+    for status in ('"loading"', '"ready"', '"error"'):
+        assert status in src, f"{status} is not one of the states"
+    assert "SAMPLE_" not in src, "no fallback to invented curves, ever"
+
+
+def test_a_failed_fetch_carries_a_message_rather_than_a_bare_flag():
+    """The failed card names the failure. "Something went wrong" with no cause is
+    the dead end this landing's auth modal already had to be corrected for."""
+    assert re.search(r"message:\s*", _hook())
+
+
+def test_the_fetch_is_cancelled_on_unmount():
+    assert "AbortController" in _hook()
+    assert ".abort()" in _hook()
+
+
+def test_the_unmount_cleanup_itself_calls_abort_not_just_the_timeout_handler():
+    """`.abort()` also appears inside the 45s timeout handler
+    (`setTimeout(() => controller.abort(), 45_000)`), so a mutant that deletes
+    ONLY the effect's own cleanup call -- leaving a fetch for an unmounted
+    provider to keep running until the timeout, or forever if it resolves
+    first -- leaves both substring checks above green (see the mutation check
+    in the task report: this exact mutant passed `test_the_fetch_is_cancelled_
+    on_unmount` unchanged). This targets `.abort()` specifically inside the
+    effect's `return () => {...}` cleanup body."""
+    match = re.search(r"return \(\) => \{(.*?)\};", _hook(), re.S)
+    assert match, "no cleanup function found in the effect"
+    assert ".abort()" in match.group(1), "the cleanup function itself must call .abort()"
+
+
+# ---------------------------------------------------------------------------
+# Behavioural coverage for useLeaderboard.tsx.
+#
+# The provider itself (createContext/useState/useEffect, the actual mount ->
+# fetch -> unmount -> abort lifecycle, and React 18 StrictMode's dev-only
+# double-invoke) needs a real React render to mean anything -- a mounted
+# fiber, a committed effect, an unmount. That needs a DOM (jsdom) or a fake
+# host config (react-test-renderer / @testing-library/react), and NONE of
+# those are present in dashboard/landing/node_modules (checked: no jsdom, no
+# react-test-renderer, no @testing-library/*). Installing a new devDependency
+# was out of scope for this task, so the provider's own lifecycle is covered
+# only by the source-shape tests above plus the structural nesting check in
+# test_the_board_is_fetched_once_for_the_whole_page (one <LeaderboardProvider>
+# wrapping both <Hero /> and <Race /> is what makes "one fetch" true: one
+# component instance, one effect, one fetchLeaderboard call per real mount).
+# That is an honest gap, not a papered-over one.
+#
+# What CAN run under plain node is the one piece of genuinely tricky,
+# DOM-independent logic in the file: classifyFetchFailure, which decides
+# whether a caught rejection becomes the "gave up waiting" message or the
+# request's own error message. It is exported from useLeaderboard.tsx for
+# exactly this reason. Bundled and run the same way _run_ts runs
+# leaderboard.ts, with --jsx=automatic added since this file is .tsx.
+# ---------------------------------------------------------------------------
+
+_ESBUILD_HOOK = _ESBUILD
+
+
+def _run_tsx(script: str):
+    """Transpile useLeaderboard.tsx to CJS and run `script` against it under
+    node. Same mechanism as _run_ts above (esbuild -> node), generalised with
+    --jsx=automatic because this module (unlike leaderboard.ts) contains JSX.
+
+    Bundling React itself in makes the output ~130KB, past Linux's per-argument
+    MAX_ARG_STRLEN (128KiB) -- `node -e <bundle+script>` (the _run_ts approach)
+    hits `OSError: [Errno 7] Argument list too long` on this file specifically.
+    Writing the combined source to a temp file and running `node <file>`
+    instead sidesteps the argv limit without changing the technique."""
+    node = shutil.which("node")
+    if not node or not _ESBUILD_HOOK.is_file():
+        pytest.skip("node and dashboard/landing/node_modules are required")
+    bundled = subprocess.run(
+        [str(_ESBUILD_HOOK), str(_LIB / "useLeaderboard.tsx"), "--bundle", "--format=cjs",
+         "--platform=node", "--jsx=automatic", "--log-level=error"],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert bundled.returncode == 0, bundled.stderr
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".js", delete=False, encoding="utf-8"
+    ) as tmp:
+        tmp.write(bundled.stdout + "\n" + script)
+        tmp_path = tmp.name
+    try:
+        proc = subprocess.run(
+            [node, tmp_path], capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        Path(tmp_path).unlink(missing_ok=True)
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+def test_an_aborted_request_that_rejects_with_an_abort_error_reports_a_timeout():
+    """The routine case: the 45s ceiling fires, `controller.abort()` rejects the
+    underlying fetch with a real AbortError, and the card should say the board
+    timed out -- not surface a raw "AbortError" message a visitor can't act
+    on."""
+    result = _run_tsx(
+        """
+const err = Object.assign(new Error('aborted'), {name: 'AbortError'});
+const state = module.exports.classifyFetchFailure(err, true);
+console.log(JSON.stringify(state));
+"""
+    )
+    assert result == {"status": "error", "message": "Timed out waiting for the board."}
+
+
+def test_an_aborted_request_that_rejects_with_a_real_error_keeps_that_message():
+    """If the timeout fires but the rejection is some OTHER real error (not an
+    AbortError -- e.g. a network failure that happened to lose the race with
+    the timeout), the card must show that error's own message, not blame it on
+    the timeout it didn't actually hit. This is the branch a naive
+    `if (aborted) show timeout` would get wrong."""
+    result = _run_tsx(
+        """
+const state = module.exports.classifyFetchFailure(new Error('HTTP 503'), true);
+console.log(JSON.stringify(state));
+"""
+    )
+    assert result == {"status": "error", "message": "HTTP 503"}
+
+
+def test_a_non_aborted_request_reports_its_own_error_message():
+    """The ordinary failure path: no timeout involved, the request just failed.
+    The message must be the real error, not the generic timeout copy."""
+    result = _run_tsx(
+        """
+const state = module.exports.classifyFetchFailure(new Error('HTTP 500'), false);
+console.log(JSON.stringify(state));
+"""
+    )
+    assert result == {"status": "error", "message": "HTTP 500"}
+
+
+def test_a_non_error_rejection_falls_back_to_unknown_error_when_not_aborted():
+    """`fetchLeaderboard` can only ever reject with an Error today, but the
+    catch handler is typed `unknown` and must not throw trying to read
+    `.message` off something that isn't one."""
+    result = _run_tsx(
+        """
+const state = module.exports.classifyFetchFailure('not an Error instance', false);
+console.log(JSON.stringify(state));
+"""
+    )
+    assert result == {"status": "error", "message": "Unknown error"}
