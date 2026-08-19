@@ -130,15 +130,27 @@ function hexToRgba(hex, alpha) {
 // with null future slots would put empty territory INSIDE the plot, and the
 // gutter would silently become hoverable.
 const BOARD_GUTTER_FRACTION = 0.4;
-// The 40% is a target with a measured floor under it; this is the ceiling that
-// stops the floor from eating the plot on a narrow card. Past it the frame
-// gives the space back and draws no labels at all -- see boardFrameLayout.
+// The 40% is a CEILING on the measured floor, not the width the rail always
+// takes -- see boardFrameLayout. Past BOARD_GUTTER_MAX_FRACTION (below) the
+// frame gives up on the ceiling entirely and gives the space back, drawing no
+// labels at all.
 const BOARD_GUTTER_MAX_FRACTION = 0.5;
 const BOARD_GUTTER_FONT = '600 11px Inter, system-ui, sans-serif';
 // Where the label block starts relative to chartArea.right, and the clear
 // canvas left to the right of the widest one so the arrowhead has room.
 const BOARD_GUTTER_TEXT_INSET = 12;
 const BOARD_GUTTER_TRAILING_PAD = 16;
+// Breathing room ABOVE the measured floor, once the floor is smaller than the
+// fraction would reserve. A 1600px Leaderboard tab at BOARD_GUTTER_FRACTION
+// reserved 640px for a ~200px label block -- 440px of dead plot -- while the
+// home panel's browser-checked floor (Task 4, 2026-08-19) came out within
+// 0-36.2px of its own fraction-driven gutter at every desktop width measured
+// (1280: 0px over the floor: it already bound; 1440: 9px; 1920: 36.2px). 36
+// sits just under that observed ceiling, so every one of those three widths
+// still lands within a fraction of a px of what a browser already confirmed
+// looked right, while the tab's floor+slack (~240px) still gives back most of
+// the 440px it used to waste. See boardFrameLayout.
+const BOARD_GUTTER_SLACK = 36;
 // Comfortable vertical spacing between stacked labels, and the floor below
 // which 11px text stops being separable.
 const BOARD_LABEL_GAP_MAX = 20;
@@ -245,7 +257,18 @@ function boardFrameLayout(chart, labels, fraction) {
   if ((labels.length - 1) * gap + BOARD_PILL_HEIGHT > chart.height) return none;
   const floor = boardLabelBlockWidth(chart, labels);
   if (floor > chart.width * BOARD_GUTTER_MAX_FRACTION) return none;
-  return { gutter: Math.max(chart.width * fraction, floor), drawLabels: true, gap };
+  // `fraction` is a CEILING on the floor, not the gutter's width. A wide board
+  // (the 1600px Leaderboard tab) has `width * fraction` far above what the
+  // labels measure, and reserving that much left ~440px of the plot rendering
+  // as an empty column; a narrow one (the ~400px home panel) has the floor
+  // already at or past the fraction, where it was binding correctly all
+  // along. `Math.max(floor, ...)` is therefore LOAD-BEARING, not defensive:
+  // `floor` is the hard lower bound clipped label text would otherwise
+  // require, and it must survive the min() clamp below untouched. The
+  // genuinely-impossible case -- floor itself past BOARD_GUTTER_MAX_FRACTION
+  // -- is the `return none` above; this line never has to refuse on its own.
+  const room = Math.max(floor, Math.min(chart.width * fraction, floor + BOARD_GUTTER_SLACK));
+  return { gutter: room, drawLabels: true, gap };
 }
 
 function getTeamColor(stableId) {

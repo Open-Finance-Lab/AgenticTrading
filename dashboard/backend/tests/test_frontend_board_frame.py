@@ -185,23 +185,46 @@ function makeCtx() {
     return json.loads(proc.stdout)
 
 
-def test_the_gutter_is_two_fifths_of_a_wide_chart():
-    """Spec §4.1: plot 60%, gutter 40%, as a FRACTION of measured width so the
-    ratio survives every breakpoint rather than holding at one design size."""
+def test_the_two_fifths_split_is_a_ceiling_not_the_gutter_width():
+    """Post-review change (2026-08-19, fix-gutter-cap): a 1600px Leaderboard tab
+    at the raw 40% reserved 640px for a ~200px label block -- 440px of the plot
+    rendering as an empty column. The design owner's fix keeps 40% as the
+    UPPER BOUND the rail may take, not the width it always takes: past the
+    measured floor, the gutter only grows `BOARD_GUTTER_SLACK` further, then
+    stops, and the plot gets the rest back.
+
+    This is the WIDE regime: `width * fraction` (1200 * 0.4 = 480) is far past
+    `floor + BOARD_GUTTER_SLACK`, so the ceiling binds and the gutter is
+    `floor + slack`, not 480."""
     result = _run_node(
         """
+const floor = boardLabelBlockWidth(makeChart(1200, 420), makeLabels(9));
 const frame = boardFrameLayout(makeChart(1200, 420), makeLabels(9), 0.4);
-console.log(JSON.stringify({ gutter: frame.gutter, draw: frame.drawLabels }));
+console.log(JSON.stringify({ floor, gutter: frame.gutter, draw: frame.drawLabels }));
 """
     )
-    assert result["gutter"] == pytest.approx(480.0)
+    assert result["floor"] == pytest.approx(132.0)
+    assert result["gutter"] == pytest.approx(result["floor"] + 36.0), (
+        "the wide-chart gutter must be floor + BOARD_GUTTER_SLACK, not 40% of the "
+        "canvas -- a regression back to the raw fraction reintroduces the 440px "
+        "dead column this change exists to remove"
+    )
     assert result["draw"] is True
 
 
 def test_a_long_label_raises_the_gutter_above_the_fraction():
-    """The 40% is a target, not a ceiling: at middling widths it clips, so the
-    measured label block is a floor under it. Same width for both, so the only
-    variable is the label."""
+    """The measured floor is a hard lower bound on the gutter no matter how the
+    fraction/slack ceiling above it is computed: a label block too big to fit
+    under `width * fraction` still gets the room it measures, never less.
+
+    Same width for both labels, so the only variable is the label. The SHORT
+    label lands in the wide regime (`width * fraction` clears `floor + slack`,
+    so the ceiling binds at `floor + slack`, not at 40% of 400 -- re-read
+    against the new rule, this sub-case's expected value changed from the old
+    160.0 to 120.0). The LONG label's floor (186) alone exceeds `width *
+    fraction` (160), so it is unaffected by the slack change at all: this
+    sub-case still passes unchanged, because case 3 (floor > width * fraction)
+    was never reachable by the ceiling in the first place."""
     result = _run_node(
         """
 const short = boardFrameLayout(makeChart(400, 420), makeLabels(3, 'AI', '+1%'), 0.4);
@@ -210,8 +233,47 @@ const long = boardFrameLayout(
 console.log(JSON.stringify({ short: short.gutter, long: long.gutter }));
 """
     )
-    assert result["short"] == pytest.approx(160.0), "40% of 400 clears the short label"
-    assert result["long"] > 160.0, "the measured block must be able to push past 40%"
+    assert result["short"] == pytest.approx(120.0), (
+        "40% of 400 (160) is past floor(84) + slack(36) = 120, so the wide-regime "
+        "ceiling caps it at 120, not the raw 160"
+    )
+    assert result["long"] == pytest.approx(186.0), (
+        "unaffected by the slack change: the long label's floor alone (186) "
+        "already exceeds 40% of 400 (160), so this was always the floor case"
+    )
+    assert result["long"] > result["short"], "the measured block must be able to push past 40%"
+
+
+def test_the_ceiling_has_three_regimes():
+    """The post-review formula (`fix-gutter-cap-brief.md`) is
+    `max(floor, min(width * fraction, floor + BOARD_GUTTER_SLACK))`, read as
+    three regimes over the same 9-label set (floor == 132 throughout, only the
+    canvas width changes):
+
+    1. WIDE (`width * fraction >= floor + slack`, 1200px): the ceiling binds
+       at `floor + slack` = 168, well under the raw 40% (480).
+    2. TIGHT (`floor <= width * fraction < floor + slack`, 350px): 40% of 350
+       is 140, inside `[132, 168)` -- the fraction itself binds, same as the
+       pre-change rule, because the ceiling never has to intervene here.
+    3. OVERFLOWING (`width * fraction < floor`, 300px): 40% of 300 is 120,
+       under the floor -- `Math.max(floor, ...)` wins and the gutter is
+       exactly 132, the floor, not 120. This is the load-bearing outer
+       `Math.max` from the brief: dropping it would clip the label text,
+       which is the one failure this whole frame exists to avoid."""
+    result = _run_node(
+        """
+console.log(JSON.stringify({
+  wide: boardFrameLayout(makeChart(1200, 420), makeLabels(9), 0.4).gutter,
+  tight: boardFrameLayout(makeChart(350, 420), makeLabels(9), 0.4).gutter,
+  overflowing: boardFrameLayout(makeChart(300, 420), makeLabels(9), 0.4).gutter,
+}));
+"""
+    )
+    assert result["wide"] == pytest.approx(168.0), "floor(132) + slack(36), not 40% of 1200 (480)"
+    assert result["tight"] == pytest.approx(140.0), "40% of 350 -- the fraction itself, uncapped"
+    assert result["overflowing"] == pytest.approx(132.0), (
+        "exactly the floor, not 40% of 300 (120) -- the clipping guard"
+    )
 
 
 def test_a_chart_too_narrow_for_its_labels_drops_them_rather_than_clipping():
