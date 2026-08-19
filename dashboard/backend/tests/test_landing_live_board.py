@@ -530,3 +530,45 @@ console.log(JSON.stringify(state));
 """
     )
     assert result == {"status": "error", "message": "Unknown error"}
+
+
+_RAIL = None
+
+
+def _rail() -> str:
+    global _RAIL
+    if _RAIL is None:
+        _RAIL = (
+            _ROOT / "landing" / "src" / "components" / "home" / "EndpointRail.tsx"
+        ).read_text(encoding="utf-8")
+    return _RAIL
+
+
+def test_the_rail_degrades_to_nothing_when_recharts_internals_change():
+    """`Customized` is cloned with the chart's props and state, which is internal
+    shape rather than contract. When it is not what the rail expects, the rail
+    renders nothing and the chip strip below keeps keying every curve -- a real
+    fallback, not a silent one."""
+    src = _rail()
+    assert "Array.isArray(formattedGraphicalItems)" in src
+    assert "return null" in src
+
+
+def test_the_rail_draws_the_frame_and_not_a_second_geometry():
+    """Every number comes from boardFrame.ts, which is pinned against
+    js/leaderboard.js. A literal here would be a third copy nothing guards."""
+    src = _rail()
+    assert "from \"@/lib/boardFrame\"" in src or "from '@/lib/boardFrame'" in src
+    assert "stackLabels(" in src
+    assert "BOARD_DOT_RADIUS" in src and "BOARD_STUB_LENGTH" in src
+    assert "BOARD_ARROW_HEAD_LENGTH" in src
+    assert "BOARD_LABEL_GAP_MAX" in src, "even the fallback gap is the frame's"
+
+
+def test_the_rail_never_sorts_by_declaration_order():
+    """`formattedGraphicalItems` arrives in <Line> declaration order, not visual
+    order. `stackLabels` sorts by y itself; anything that assumed the incoming
+    order was meaningful would stagger the wrong labels."""
+    src = _rail()
+    assert "formattedGraphicalItems" in src
+    assert ".sort(" not in src, "sorting is stackLabels' job and it does it by y"
