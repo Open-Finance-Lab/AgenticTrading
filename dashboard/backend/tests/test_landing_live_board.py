@@ -405,6 +405,73 @@ def test_the_hero_x_axis_is_wired_to_the_date_formatter():
 
 
 # ---------------------------------------------------------------------------
+# The tooltip HEADER is a second formatter, and the axis fix did not reach it.
+# ---------------------------------------------------------------------------
+
+
+def test_format_tooltip_date_prints_the_hour_the_dashboard_prints():
+    """`/app` renders `Apr 15, 2:00 PM` for this key
+    (`formatChartTooltipLabel`, js/leaderboard.js:1103). The axis deliberately
+    drops the hour -- an hourly series would otherwise repeat `Apr 15` seven
+    times -- so the tooltip needs its OWN formatter rather than reusing
+    `formatAxisDate`, which is exactly why the raw key survived the axis fix."""
+    result = _run_ts(
+        "console.log(JSON.stringify(module.exports.formatTooltipDate('2026-04-15T14:00')));"
+    )
+    assert result == "Apr 15, 2:00 PM"
+
+
+def test_format_tooltip_date_keeps_the_date_only_branch_dateless():
+    """`formatChartTooltipLabel` branches on the `T`: a date-only key has no
+    hour to print, and appending `12:00 AM` to one would invent a time the
+    payload never carried."""
+    result = _run_ts(
+        "console.log(JSON.stringify(module.exports.formatTooltipDate('2026-04-15')));"
+    )
+    assert result == "Apr 15"
+
+
+def test_format_tooltip_date_on_the_empty_key_returns_the_empty_string():
+    result = _run_ts(
+        "console.log(JSON.stringify(module.exports.formatTooltipDate('')));"
+    )
+    assert result == ""
+
+
+def test_format_tooltip_date_passes_through_an_unparseable_key_unchanged():
+    """Same `if (Number.isNaN(d.getTime())) return raw;` branch the axis
+    formatter mirrors -- the input comes back UNCHANGED, not as the string
+    "Invalid Date"."""
+    result = _run_ts(
+        "console.log(JSON.stringify(module.exports.formatTooltipDate('not-a-date')));"
+    )
+    assert result == "not-a-date"
+
+
+def test_the_hero_tooltip_header_is_wired_to_the_tooltip_formatter():
+    """Source guard, scoped to `<Tooltip>` the way the case above is scoped to
+    `<XAxis>` -- and that scoping is why the axis guard could not see this.
+
+    In recharts 2.15.4 the tooltip header is `tooltipTicks[activeIndex].value`
+    (generateCategoricalChart.js:232) -- the raw category value -- rendered
+    verbatim by DefaultTooltipContent unless a `labelFormatter` is supplied.
+    `XAxis.tickFormatter` never reaches it. The category here is the `t`
+    column, i.e. `timeKey()` output, so with no `labelFormatter` the hero
+    printed `2026-04-15T14:00` directly above an axis correctly reading
+    `Apr 15`.
+
+    Binding-scoped rather than a bare `"formatTooltipDate" in _BOARD`, which
+    the import line alone satisfies (`noUnusedLocals` is off, so an unused
+    import typechecks clean)."""
+    tooltip = re.search(r"<Tooltip\b.*?/>", _BOARD_PREVIEW_TSX, re.S)
+    assert tooltip, "no <Tooltip> found in BoardPreview.tsx"
+    assert "labelFormatter={formatTooltipDate}" in tooltip.group(0), (
+        "the tooltip header must format its label, or the hero prints the raw "
+        "ISO key '2026-04-15T14:00' where /app prints 'Apr 15, 2:00 PM'"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Task 7 -- one fetch, shared by the hero and the Race standings.
 # ---------------------------------------------------------------------------
 

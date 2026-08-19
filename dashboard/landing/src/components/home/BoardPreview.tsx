@@ -11,7 +11,12 @@ import {
   Customized,
 } from "recharts";
 import { useLeaderboard } from "@/lib/useLeaderboard";
-import { formatAxisDate, formatPercent, type BoardSeries } from "@/lib/leaderboard";
+import {
+  formatAxisDate,
+  formatPercent,
+  formatTooltipDate,
+  type BoardSeries,
+} from "@/lib/leaderboard";
 import { frameLayout, measureTextWidth } from "@/lib/boardFrame";
 import { EndpointRail } from "./EndpointRail";
 
@@ -254,8 +259,15 @@ export function BoardPreview() {
                 width={yAxisWidth}
                 tickFormatter={axisTick}
               />
+              {/* `labelFormatter` is the tooltip HEADER and it is a separate
+                  wire from the axis: recharts renders the raw category value
+                  -- the `t` column, i.e. `timeKey()` output -- unless this
+                  prop is given, and `XAxis.tickFormatter` never reaches it. So
+                  the axis fix left the hero printing `2026-04-15T14:00` above
+                  an axis correctly reading `Apr 15`. Same string /app shows. */}
               <Tooltip
                 contentStyle={{ backgroundColor: "hsl(var(--card))", borderColor: "hsl(var(--border))", borderRadius: "8px" }}
+                labelFormatter={formatTooltipDate}
                 formatter={(value: number | string) =>
                   formatPercent(Number(value), 2)
                 }

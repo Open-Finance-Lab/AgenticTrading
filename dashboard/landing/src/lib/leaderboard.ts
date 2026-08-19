@@ -104,6 +104,34 @@ export function formatAxisDate(isoDay: string): string {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 }
 
+/** `2026-04-15T14:00` -> `Apr 15, 2:00 PM`. Mirrors `formatChartTooltipLabel`
+ *  in dashboard/frontend/js/leaderboard.js:1103 exactly, including the
+ *  branch on the `T` and the invalid-date passthrough.
+ *
+ *  A SECOND formatter, not a reuse of `formatAxisDate`, and the split is the
+ *  same one /app makes: the axis drops the hour because an hourly series would
+ *  otherwise repeat `Apr 15` seven times in a row, while the tooltip names ONE
+ *  point and has to say which hour it is. That is also why the axis fix did not
+ *  reach here: recharts renders the raw category value as the tooltip header
+ *  (`tooltipTicks[activeIndex].value`) and `XAxis.tickFormatter` never touches
+ *  it, so until this was bound as `labelFormatter` the hero printed the machine
+ *  key `2026-04-15T14:00` directly above an axis correctly reading `Apr 15`. */
+export function formatTooltipDate(isoStamp: string): string {
+  if (!isoStamp) return '';
+  const raw = String(isoStamp);
+  const d = new Date(raw.includes('T') ? raw : `${raw}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return raw;
+  if (raw.includes('T')) {
+    return d.toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+  }
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
 /** Fractions, not dollars, and not for scale safety -- because of what the
  *  labels MEAN. Every dollar level in this payload is a x0.1 rescale of a
  *  $100,000 backtest onto the config's $10,000 display base (leaderboard
