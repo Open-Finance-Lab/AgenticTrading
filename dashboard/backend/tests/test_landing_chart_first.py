@@ -39,6 +39,10 @@ def _strip_comments(source: str) -> str:
 
 _HERO = _strip_comments((_HOME / "Hero.tsx").read_text(encoding="utf-8"))
 _BOARD = _strip_comments((_HOME / "BoardPreview.tsx").read_text(encoding="utf-8"))
+# The SECOND board card. There are two of them and they took the same window
+# chip in the same commit, so a layout guard scoped to one of them is scoped to
+# half the change -- see test_the_race_window_chip_cannot_out_size_its_header_row.
+_RACE = _strip_comments((_HOME / "Race.tsx").read_text(encoding="utf-8"))
 
 _BOARD_CHALLENGE = "Can you beat the strategies and baselines on the left?"
 _NO_REAL_MONEY = "No real money. Simulated money only."
@@ -215,6 +219,51 @@ def test_the_window_chip_cannot_out_size_the_header_row():
     )
     assert "max-w-full" in chip.group(1), (
         f"the window chip must be capped at the row width; found {chip.group(1)!r}"
+    )
+
+
+def test_the_race_window_chip_cannot_out_size_its_header_row():
+    """The same 44-character chip, in the OTHER board card, which never got the
+    fix the hero card got.
+
+    "Illustrative example" (19 chars) became "Competition window ·
+    2026-04-15 → 2026-05-15" (44) in BOTH cards in the same commit. Only
+    BoardPreview.tsx was repaired, and the case above is scoped to `_BOARD`, so
+    nothing could see the other half. Measured in headless Chromium, base vs
+    HEAD in the same browser: at 390x844 Race's `<h3>Competition Standings</h3>`
+    goes 109px -> 0px wide while still rendering 56px tall, so its text
+    overflows under the chip's own `bg-muted` and the heading reads "Standings"
+    with "Competition" painted over; the chip's right edge lands 58.2px past the
+    card's inner right of 327; and at 360x800 `documentElement.scrollWidth`
+    becomes 385 against an `innerWidth` of 360 -- 25px of horizontal page scroll
+    on a 360px phone, on the highest-traffic anonymous surface in the product.
+
+    Deliberately a SEPARATE case per component rather than one merged scan: an
+    edit aimed at one card cannot then delete the other card's pin. Both cards
+    are guarded; neither guard is the other's.
+
+    The two classes are required UNPREFIXED. `lg:flex-wrap` and `lg:max-w-full`
+    satisfy a bare substring check and bind only from 1024px -- which restores
+    the measured defect across the entire sub-1024 band the measurements above
+    were taken in, with the guard green.
+    """
+    row = re.search(r'<div className="([^"]*)">\s*<h3', _RACE)
+    assert row, "could not find the Race header row that wraps the <h3>"
+    assert re.search(r"(?:^|\s)flex-wrap(?:\s|$)", row.group(1)), (
+        f"the title/chip row must wrap at every width, or the chip collapses "
+        f"the title to width 0; found {row.group(1)!r}"
+    )
+
+    chip = re.search(r'<span className="([^"]*)">\s*\{board\.status', _RACE)
+    assert chip, "could not find Race's window chip — did the label move?"
+    assert "shrink-0" not in chip.group(1), (
+        f"shrink-0 on the window chip is what pushed it 58.2px past the card's "
+        f"edge and put 25px of horizontal scroll on a 360px phone; found "
+        f"{chip.group(1)!r}"
+    )
+    assert re.search(r"(?:^|\s)max-w-full(?:\s|$)", chip.group(1)), (
+        f"the window chip must be capped at the row width at every width; "
+        f"found {chip.group(1)!r}"
     )
 
 

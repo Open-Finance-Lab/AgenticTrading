@@ -79,7 +79,21 @@ export function Race() {
           </div>
 
           <div className="bg-card border border-card-border rounded-xl shadow-xl p-6">
-            <div className="flex items-center justify-between mb-2 border-b border-border pb-4 gap-3">
+            {/* WRAPS, and the chip may not out-size the row — the same one fix
+                BoardPreview.tsx carries, for the same measured defect, because
+                this card took the same chip in the same commit and did not get
+                repaired with it. "Illustrative example" was 19 characters,
+                "Competition window · 2026-04-15 → 2026-05-15" is 44, and the
+                chip carried `shrink-0`. Measured at 390x844: the <h3> went
+                109px -> 0px WIDE while still rendering 56px tall, so its text
+                overflowed under the chip's own `bg-muted` and the heading read
+                "Standings" with "Competition" painted over it; the chip ran
+                58.2px past the card's inner right edge; and at 360x800 the
+                document gained 25px of horizontal scroll. Nothing failed — no
+                scrollbar warning, no ellipsis, no console error. Do not put
+                `shrink-0` back, and do not put either class behind a `lg:`
+                prefix: the measurements above are all BELOW 1024. */}
+            <div className="flex flex-wrap items-center justify-between mb-2 border-b border-border pb-4 gap-3">
               <h3 className="text-xl font-bold flex items-center gap-2 min-w-0">
                 <Medal className="w-5 h-5 text-primary shrink-0" aria-hidden="true" />
                 Competition Standings
@@ -87,7 +101,7 @@ export function Race() {
               {/* Literal, not a shared constant — see the note in
                   BoardPreview.tsx: the guard counts occurrences in the minified
                   bundle. */}
-              <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded shrink-0">
+              <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded max-w-full">
                 {board.status === "ready" && board.data.windowLabel
                   ? `Competition window · ${board.data.windowLabel}`
                   : "Competition window"}
