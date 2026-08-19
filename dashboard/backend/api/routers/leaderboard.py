@@ -32,15 +32,24 @@ def api_get_leaderboard(
     refresh: bool = Query(default=False),
     period: str = Query(
         default="contest",
-        description="Leaderboard period: 'contest' (fixed preseason window) or 'daily' (last completed weekday).",
+        description=(
+            "Leaderboard period: 'contest' (fixed preseason window), "
+            "'daily' (last completed weekday), or 'live' (Season 0 preview — "
+            "the contest curves under season chrome; no season has advanced)."
+        ),
     ),
 ):
     """
-    Official competition / daily leaderboard for the requested period.
+    Official competition / daily / live leaderboard for the requested period.
 
     Baselines are computed from Alpaca hourly backtest data and cached in SQLite.
     Pass ?refresh=true to recompute (e.g. after config change).
     Pass ?period=daily for the rolling one-day board (weekends show Friday).
+    Pass ?period=live for the Live Trading Leaderboard: the contest window and
+    curves, plus a ``season`` block describing Season 0. No advance engine
+    exists yet, so the response always carries a preview season (no
+    last_advanced_date, zero trading_days_elapsed) — see
+    ``domain/leaderboard/service.py::build_season_payload``.
     """
     # Public, unauthenticated endpoint: no exception text reaches the caller.
     # A raw exception string can embed internal infrastructure details — the

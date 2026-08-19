@@ -47,7 +47,7 @@ downsample_daily = _baselines.downsample_daily
 fetch_hourly_bars = _baselines.fetch_hourly_bars
 
 LEADERBOARD_MODE = "leaderboard"
-VALID_PERIODS = ("contest", "daily")
+VALID_PERIODS = ("contest", "daily", "live")
 _SKIP_CACHE_PATH = DATA_DIR / "leaderboard_skip_cache.json"
 _DAILY_REFRESH_STATE_PATH = DATA_DIR / "leaderboard_daily_refresh.json"
 _daily_refresh_lock = threading.Lock()
@@ -473,11 +473,200 @@ def verify_daily_refresh_secret(provided: Optional[str]) -> None:
         raise PermissionError("Invalid daily leaderboard refresh secret")
 
 
+# Season 0 is the shakedown season by convention: numbered, so the board has a
+# real identity to show and so Season 1 means "the first one that counted", but
+# explicitly the one whose results nobody should read as a standing. Mirrors
+# PREVIEW_SEASON_NUMBER in dashboard/frontend/js/leaderboard.js.
+PREVIEW_SEASON_NUMBER = 0
+DEFAULT_SEASON_TRADING_DAYS = 10
+# One calendar year of weekday sessions. An upper bound rather than a sanity
+# check: `season_window` walks the calendar one day at a time and runs inside a
+# public, unauthenticated GET, so the config number is the loop bound. See
+# `_season_trading_days`.
+MAX_SEASON_TRADING_DAYS = 260
+
+# Preview-season windows already reported as elapsed — see `_preview_season_dates`.
+# Warned once per (start, end) rather than per request, because the request is a
+# public GET and the condition, once true, is true forever.
+_warned_elapsed_seasons: set[Tuple[str, str]] = set()
+
+
+def _season_trading_days(season_cfg: Dict[str, Any]) -> int:
+    """The configured season length, clamped to a length a season can have.
+
+    Parsed and clamped **once**, here, so the ``trading_days_total`` the payload
+    reports is the number the window was actually built from. Reporting the raw
+    config value instead was not cosmetic: the client computes
+    ``elapsed / total``, so a negative length rendered a **100%-full** progress
+    bar directly underneath the banner whose entire job is denying that anything
+    advanced.
+
+    The parse is guarded for the same reason the clamp is. A bare ``int()`` on a
+    config string raises ``ValueError`` out of a public, unauthenticated GET, and
+    a large value spins the ``season_window`` calendar walk on every request.
+    """
+    raw = season_cfg.get("length_trading_days")
+    if raw is None or raw == "":
+        return DEFAULT_SEASON_TRADING_DAYS
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        print(
+            "[leaderboard] season.length_trading_days is not an integer "
+            f"({raw!r}); using {DEFAULT_SEASON_TRADING_DAYS}"
+        )
+        return DEFAULT_SEASON_TRADING_DAYS
+    clamped = max(1, min(value, MAX_SEASON_TRADING_DAYS))
+    if clamped != value:
+        print(
+            f"[leaderboard] season.length_trading_days={value} is outside "
+            f"1..{MAX_SEASON_TRADING_DAYS}; using {clamped}"
+        )
+    return clamped
+
+
+def season_window(start_date: str, trading_days: int) -> Tuple[str, str]:
+    """The (start, end) dates of a season ``trading_days`` sessions long.
+
+    Ten sessions is two calendar weeks of US cash trading, Monday through
+    Friday. Not a new number: ``js/leaderboard.js`` already declares
+    ``const SEASON_TRADING_DAYS = 10;`` with exactly that comment.
+
+    Weekdays only -- market holidays are NOT modelled. That is correct for
+    Season 0, whose window (2026-08-12 → 2026-08-25) contains none, and it is
+    knowingly insufficient for the advance engine, which will need a real
+    calendar. It is stated here rather than left for that engine to discover:
+    the failure would be a season that ends one session short with nothing
+    reporting it.
+
+    A **weekend ``start_date`` rolls forward** to the following Monday instead of
+    being echoed back. The returned start is the season's first *session*, and
+    the client prints it as the window's first day; a Saturday there is a date on
+    which, by this function's own weekday rule, nothing traded.
+
+    ``trading_days`` is clamped to ``1..MAX_SEASON_TRADING_DAYS`` **in here**, not
+    only in the caller: this is a module-level function reached from a public GET
+    and the argument is the bound on a day-at-a-time calendar walk.
+    """
+    cursor = date.fromisoformat(start_date)
+    while cursor.weekday() >= 5:
+        cursor += timedelta(days=1)
+    start = cursor
+    target = max(1, min(int(trading_days), MAX_SEASON_TRADING_DAYS))
+    counted = 0
+    last = start
+    while counted < target:
+        if cursor.weekday() < 5:
+            counted += 1
+            last = cursor
+        cursor += timedelta(days=1)
+    return start.isoformat(), last.isoformat()
+
+
+def _preview_season_dates(
+    season_cfg: Dict[str, Any],
+    trading_days: int,
+    as_of: Optional[Union[date, datetime]] = None,
+) -> Tuple[Optional[str], Optional[str]]:
+    """The preview season's window, or ``(None, None)`` when it cannot be stated.
+
+    Two ways it cannot be, and both used to answer with a confident wrong window:
+
+    - **No ``season_zero_start``.** This fell back to ``config["start_date"]`` --
+      the *contest* window -- and published 2026-04-15 → 2026-04-28 as a season.
+      "Nobody configured a season" and "the season is the April contest window"
+      came back byte-identical, both ``status: preview``, HTTP 200. That is the
+      exact shape of CLAUDE.md's fail-closed-is-not-fail-visible section.
+    - **The configured window has already elapsed.** *Nothing advances Season 0* --
+      there is no engine -- so a fixed fortnight becomes a fixed **past** fortnight
+      the day after it ends, and the strip renders "Aug 12 – Aug 25 · Day 0 of 10"
+      for as long as the preview ships. No operator error is required, only time,
+      which is why it is handled here rather than left to a config bump.
+
+    ``(None, None)`` lands on copy the client already carries for this exact
+    state: "Dates set when the first season opens", and a subtitle with the date
+    clause dropped. A season that has not opened has no window -- that is the
+    true thing to say, and the only one that does not rot.
+
+    The elapsed case prints once per window. Silently swapping a stale window for
+    no window is still a silent swap; the operator signal is a log line because
+    the caller is an anonymous GET (same convention as `_warn_on_feed_drift`).
+    """
+    raw = season_cfg.get("season_zero_start")
+    raw_start = raw.strip() if isinstance(raw, str) else ""
+    if not raw_start:
+        return None, None
+    try:
+        start, end = season_window(raw_start, trading_days)
+    except ValueError:
+        print(
+            "[leaderboard] season.season_zero_start is not an ISO date "
+            f"({raw!r}); the preview season reports no window"
+        )
+        return None, None
+    if date.fromisoformat(end) < _coerce_as_of_eastern(as_of).date():
+        key = (start, end)
+        if key not in _warned_elapsed_seasons:
+            _warned_elapsed_seasons.add(key)
+            print(
+                f"[leaderboard] preview season window {start} → {end} has fully "
+                "elapsed and no advance engine exists; the season block now "
+                "reports no dates. Move season.season_zero_start forward in "
+                "dashboard/config/leaderboard.json, or ship the advance engine."
+            )
+        return None, None
+    return start, end
+
+
+def build_season_payload(
+    config: Dict[str, Any],
+    as_of: Optional[Union[date, datetime]] = None,
+) -> Dict[str, Any]:
+    """The season block the Live Trading tab renders.
+
+    NOTHING HERE MAY CLAIM AN ADVANCE. ``last_advanced_date`` stays None and
+    ``trading_days_elapsed`` stays 0 because no season has advanced -- there is
+    no advance engine. ``seasonHasAdvanced()`` on the client tests exactly those
+    two fields, deliberately rather than the period string, precisely so that
+    teaching the server the word "live" cannot clear the preview banner. A date
+    here flips the badge to "Running" and prints "Next advance: nightly after
+    the 16:00 ET close" under a board nothing updates.
+
+    Every key the client reads is present. A missing one is not a crash there --
+    the render path uses optional chaining throughout -- it is a silently blank
+    season strip, which is worse.
+
+    ``start_date``/``end_date`` are the two that may legitimately be ``None``;
+    see `_preview_season_dates` for the two states that produce it. Present-but-
+    null, never absent.
+    """
+    season_cfg = config.get("season") or {}
+    trading_days = _season_trading_days(season_cfg)
+    start, end = _preview_season_dates(season_cfg, trading_days, as_of)
+    return {
+        "number": PREVIEW_SEASON_NUMBER,
+        "status": "preview",
+        "start_date": start,
+        "end_date": end,
+        "last_advanced_date": None,
+        "trading_days_elapsed": 0,
+        "trading_days_total": trading_days,
+        "entries_open": False,
+        "entry_closes_at": None,
+        "entry_count": 0,
+        "next_advance_at": None,
+        "gaps": [],
+    }
+
+
 def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, Any]:
-    """Return the effective leaderboard config for ``contest`` or ``daily``.
+    """Return the effective leaderboard config for ``contest``, ``daily``, or ``live``.
 
     Daily reuses the same strategy roster as the contest board, but caches under
     a separate session and a rolling 1-day (last completed weekday) window.
+    Live reuses the contest session and window verbatim — it is a Season 0
+    preview of the Competition board under season chrome, not a distinct
+    computed window — so every entry still hits the same cache.
     """
     base = load_leaderboard_config()
     period_key = _normalize_period(period)
@@ -501,6 +690,36 @@ def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, A
             "period": "daily",
             "board_title": "Daily Leaderboard",
             "phase_label": "Daily",
+            "standings_label": "Ranking",
+        }
+    if period_key == "live":
+        # The contest session and the contest window, deliberately. This board
+        # is a Season 0 PREVIEW: real Competition curves under season chrome,
+        # with a banner saying nothing here has advanced. Inventing a window
+        # would make `_find_cached_run` miss on all twelve entries and start
+        # recomputing baselines -- and with LEADERBOARD_DAILY_AUTO_DEPLOY armed,
+        # LLM deploys -- from a public, unauthenticated GET.
+        return {
+            **base,
+            # Overridden, not inherited. The contest description ("One-month
+            # contest window; stock baselines use prior-month data only as
+            # reference…") describes the *rules of the Competition board*, and
+            # inheriting it shipped those rules to `window.description` on a tab
+            # that does not run under them -- to every non-browser consumer of
+            # this payload, since /app never renders the field and so never
+            # showed the mismatch.
+            "description": (
+                f"Season {PREVIEW_SEASON_NUMBER} preview. The curves are the "
+                "Competition board's fixed window, shown under season chrome so "
+                "the layout can be reviewed: no season has advanced, and no "
+                "ranking on this board counts. There is no advance engine yet."
+            ),
+            "period": "live",
+            "board_title": "Live Trading Leaderboard",
+            # Derived, never spelled out: a literal "Season 0" here is a second
+            # owner of the season number, and the first thing the advance engine
+            # does is bump PREVIEW_SEASON_NUMBER.
+            "phase_label": f"Season {PREVIEW_SEASON_NUMBER}",
             "standings_label": "Ranking",
         }
     return {
@@ -1312,4 +1531,6 @@ def get_leaderboard(
     }
     if daily_status is not None:
         payload["daily_status"] = daily_status
+    if config.get("period") == "live":
+        payload["season"] = build_season_payload(config)
     return payload

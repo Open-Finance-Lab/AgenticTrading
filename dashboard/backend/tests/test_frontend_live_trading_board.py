@@ -16,16 +16,18 @@ re-check inside the timeout callback, a refresh that is in progress keeps the
 30s poll re-fetching and re-rendering a hidden Chart.js canvas for the whole
 (possibly multi-hour) model deploy.
 
-**The preview banner.** The season engine is not deployed, and the server
-coerces an unknown ``period`` back to 'contest' rather than 4xx-ing it, so
-asking for the live board returns HTTP 200 carrying the Competition board.
-Every other element on the tab -- chart, table, curve picker, rankings --
-renders identically either way, because those shapes are shared between the two
-boards. The banner is the *only* thing on screen that distinguishes "no season
-has ever run" from "these are the live standings", and it can only do that by
-comparing what was requested against what came back. See the
+**The preview banner.** The season engine is not deployed. The server now
+answers ``?period=live`` with ``period: 'live'`` and a real ``season`` block --
+it no longer coerces the period back to 'contest' -- but that block is
+hardcoded to the not-yet-advanced state, so the hazard is unchanged: every
+other element on the tab (chart, table, curve picker, rankings) renders
+identically whether or not a season ran, because those shapes are shared
+between the two boards. The banner is the *only* thing on screen that
+distinguishes "no season has ever run" from "these are the live standings", and
+it can only do that by testing a field an advance had to write. See the
 fail-closed-is-not-fail-visible section of CLAUDE.md, and the FinSearch news
-adapter it was written about.
+adapter it was written about. The server half of this contract is pinned in
+tests/test_leaderboard_season.py.
 
 **Season 0.** The current season is numbered zero, which is falsy. Every
 ``season.number ? ... : '-'`` in this file's subject matter renders the live
@@ -86,11 +88,11 @@ def test_no_daily_status_machinery_survives():
     """``daily_status`` was the Daily board's notice/poll contract.
 
     The server attaches it only for ``period == 'daily'`` (service.py), a period
-    this UI can no longer request -- it asks for 'live', which `_normalize_period`
-    coerces to 'contest'. So every branch keyed on that field became unreachable
-    the moment the tab was renamed, and the season payload contract this PR ships
-    defines `season.*` with no `daily_status` at all, so it stays unreachable
-    after the engine lands.
+    this UI can no longer request -- it asks for 'live', which is now its own
+    period and carries a `season` block instead. So every branch keyed on that
+    field became unreachable the moment the tab was renamed, and the season
+    payload contract defines `season.*` with no `daily_status` at all, so it
+    stays unreachable after the engine lands.
 
     Carried-over code that can never run is worse than absent code once tests
     guard it: three cases in this file used to exercise the notice and the poll,
@@ -445,15 +447,82 @@ def test_preview_season_is_zero():
 
 
 def test_every_rendered_season_number_goes_through_the_resolver():
-    """Two places print the number: the strip badge and the Phase stat."""
-    for fn in ("renderSeasonStrip", "updateLeaderboardHeader"):
+    """Four places print the number: strip badge, Phase stat, banner, subtitle."""
+    for fn in (
+        "renderSeasonStrip",
+        "updateLeaderboardHeader",
+        "renderLivePreviewBanner",
+        "formatLiveBoardSubtitle",
+    ):
         body = _fn_body(fn)
         if "Season $" not in body and "Season ${" not in body:
             continue
-        assert "displayedSeasonNumber(" in body, (
+        assert "displayedSeasonNumber(" in body or "displayedSeasonLabel(" in body, (
             f"{fn} formats a season number without the resolver, so it can "
             "reintroduce the season-0-is-falsy bug independently"
         )
+
+
+def test_the_season_number_has_exactly_one_owner_on_screen():
+    """The payload's `season.number` decides; this file's constant only fills in.
+
+    The banner and the subtitle used to interpolate PREVIEW_SEASON_NUMBER
+    directly while the badge read the payload, which meant the number had two
+    owners that could disagree. The disagreement is not hypothetical: the first
+    act of the advance engine is bumping the *server's* PREVIEW_SEASON_NUMBER,
+    at which point the badge reads "Season 1" and the banner underneath it reads
+    "Season 0 has not been run".
+
+    Guarding the resolver alone cannot catch this -- the offending lines never
+    called it -- so the guard is on where the constant may appear at all.
+    """
+    remainder = _SOURCE.replace(_fn_body("displayedSeasonNumber"), "")
+    remainder = re.sub(r"const PREVIEW_SEASON_NUMBER\s*=\s*\d+\s*;", "", remainder)
+    assert "PREVIEW_SEASON_NUMBER" not in remainder, (
+        "PREVIEW_SEASON_NUMBER is read outside displayedSeasonNumber(); it is a "
+        "fallback for a missing payload, not a second source of the season "
+        "number. Render it through displayedSeasonLabel()/displayedSeasonNumber()."
+    )
+
+
+def test_the_season_label_never_prints_a_null_number():
+    """`displayedSeasonNumber` returns null for "no season at all"."""
+    body = _fn_body("displayedSeasonLabel")
+    assert "=== null" in body or "== null" in body, (
+        "displayedSeasonLabel must handle the null the resolver can return, or "
+        "the banner renders the words 'Season null'"
+    )
+
+
+def test_the_season_constants_are_the_same_number_in_all_three_places():
+    """10 and 0 are declared in Python, in JS, and in leaderboard.json.
+
+    Nothing but a comment tied them together, and the comment is in the file a
+    reader is already looking at -- so the drift it warns about is invisible
+    from either of the other two. Season length in particular is the divisor
+    behind the progress bar on one side and the window builder on the other.
+    """
+    import json
+
+    from dashboard.backend.domain.leaderboard import service
+
+    config = json.loads(
+        (Path(__file__).resolve().parents[2] / "config" / "leaderboard.json")
+        .read_text(encoding="utf-8")
+    )
+    js_days = re.search(r"const SEASON_TRADING_DAYS\s*=\s*(\d+)", _SOURCE)
+    js_preview = re.search(r"const PREVIEW_SEASON_NUMBER\s*=\s*(\d+)", _SOURCE)
+    assert js_days and js_preview, "the JS season constants moved -- re-point this guard"
+
+    assert int(js_days.group(1)) == service.DEFAULT_SEASON_TRADING_DAYS, (
+        "js/leaderboard.js and service.py disagree on the length of a season"
+    )
+    assert config["season"]["length_trading_days"] == service.DEFAULT_SEASON_TRADING_DAYS, (
+        "leaderboard.json and service.py disagree on the length of a season"
+    )
+    assert int(js_preview.group(1)) == service.PREVIEW_SEASON_NUMBER, (
+        "js/leaderboard.js and service.py disagree on which season is the preview"
+    )
 
 
 # ── Gap markers: a missed night must not read like a flat market ─────────────

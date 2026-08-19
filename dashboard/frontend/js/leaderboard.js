@@ -527,6 +527,13 @@ function isLiveBoard() {
  * banner, flip the badge to "Running" and promise a nightly advance while no
  * season had ever run. What the banner claims is that nothing here advanced, so
  * that is what it tests: a date the engine can only write after a real advance.
+ *
+ * That commit has since landed: `VALID_PERIODS` is now
+ * `("contest", "daily", "live")` and the server sends a real `season` block. It
+ * changed nothing here, which was the point — the block hardcodes the
+ * not-yet-advanced state, so this still returns false and the banner still
+ * shows. Do not now "simplify" this to a period check on the grounds that the
+ * period is finally real; it is real and still says nothing about an advance.
  */
 function seasonHasAdvanced(payload) {
   const season = (payload || {}).season;
@@ -537,11 +544,15 @@ function seasonHasAdvanced(payload) {
 
 /** True when the Live Trading tab is rendering something that is not a season.
  *
- * The server coerces an unknown ``period`` back to 'contest' instead of 4xx-ing,
- * so the wrong board arrives as a perfectly successful HTTP 200. Without this,
- * "the season engine is not deployed" and "here are the live standings" render
- * byte-identically — the exact failure shape CLAUDE.md's
- * fail-closed-is-not-fail-visible section is about.
+ * The server now answers `?period=live` with `period: 'live'` and a season
+ * block, so the old reason — an unknown period silently coerced to 'contest',
+ * arriving as a perfectly successful HTTP 200 — no longer applies. The check
+ * outlives it, because the *shape* it guards did not change: the season block
+ * is hardcoded to the not-yet-advanced state and every other element on the tab
+ * (chart, table, curve picker, rankings) renders identically whether or not a
+ * season ran. Without this, "the season engine is not deployed" and "here are
+ * the live standings" still render byte-identically — the exact failure shape
+ * CLAUDE.md's fail-closed-is-not-fail-visible section is about.
  */
 function isLivePreview(payload) {
   return isLiveBoard() && !seasonHasAdvanced(payload);
@@ -557,6 +568,23 @@ function displayedSeasonNumber(payload) {
   const n = Number((payload || {}).season?.number);
   if (Number.isFinite(n)) return n;
   return isLivePreview(payload) ? PREVIEW_SEASON_NUMBER : null;
+}
+
+/** "Season 0" / "Season 3" / "This season" — the number rendered as prose.
+ *
+ * Every sentence on this tab that names the season goes through here, so the
+ * server's `season.number` is the single owner of it. Interpolating
+ * PREVIEW_SEASON_NUMBER directly gave the number two: the badge read the
+ * payload while the banner beneath it read this file's constant, so the first
+ * act of the advance engine — bumping the server's PREVIEW_SEASON_NUMBER —
+ * would have printed "Season 1" above "Season 0 has not been run".
+ *
+ * `null` (no season at all) becomes "This season" rather than "Season null",
+ * and the sentences are written to read correctly either way.
+ */
+function displayedSeasonLabel(payload) {
+  const n = displayedSeasonNumber(payload);
+  return n === null ? 'This season' : `Season ${n}`;
 }
 
 /** A relative phrase, or null when the timestamp is absent or unparseable.
@@ -690,7 +718,7 @@ function formatLiveBoardSubtitle(payload) {
     // Stating the cadence here would promise a nightly advance that no deployed
     // job performs. The banner above carries the full explanation; this is the
     // one-line version that has to survive next to it.
-    return `${dates}Season ${PREVIEW_SEASON_NUMBER} preview — no advance has run`;
+    return `${dates}${displayedSeasonLabel(payload)} preview — no advance has run`;
   }
   // `window.start_date` is the board's display window, NOT a record that an
   // advance ran, and falling back to it printed the Competition window's first
@@ -725,7 +753,7 @@ function renderLivePreviewBanner(payload) {
   lead.textContent = 'Preview — the season engine is not deployed.';
   const body = document.createElement('span');
   const label = payload.window?.label || 'the Competition window';
-  body.textContent = ` Season ${PREVIEW_SEASON_NUMBER} has not been run. The curves below are the Competition board's fixed window (${label}), shown so this layout can be reviewed: nothing here is a live standing, and no ranking on this tab counts.`;
+  body.textContent = ` ${displayedSeasonLabel(payload)} has not been run. The curves below are the Competition board's fixed window (${label}), shown so this layout can be reviewed: nothing here is a live standing, and no ranking on this tab counts.`;
   host.append(lead, body);
 }
 
@@ -740,7 +768,14 @@ function renderSeasonStrip(payload) {
   host.hidden = false;
   host.classList.toggle('is-placeholder', !season);
 
-  const total = Number(season?.trading_days_total) || SEASON_TRADING_DAYS;
+  // Both clamped before either is divided by the other. The server clamps
+  // `trading_days_total` too, and that is the real fix — but this value reaches
+  // `(elapsed / total) * 100` as a CSS width, so a zero or negative one draws a
+  // full or backwards bar under the banner that says nothing has advanced.
+  const rawTotal = Number(season?.trading_days_total);
+  const total = Number.isFinite(rawTotal) && rawTotal >= 1
+    ? Math.floor(rawTotal)
+    : SEASON_TRADING_DAYS;
   const elapsed = Math.min(Math.max(Number(season?.trading_days_elapsed) || 0, 0), total);
 
   const badge = document.getElementById('seasonBadge');
@@ -1233,9 +1268,11 @@ function populateLeaderboardTable() {
 
   const filtered = getFilteredLeaderboardEntries();
   if (!filtered.length) {
-    // Keyed on the board asked for, not the one returned: in preview the
-    // response says 'contest', and the season tab explaining itself as the
-    // contest board is how an empty season stops being legible as one.
+    // Keyed on the board asked for, not the one returned. The server now
+    // echoes `period: 'live'` so the two agree today, but this tab is defined
+    // by what the user clicked: a coerced or fallback response explaining the
+    // season tab as the contest board is how an empty season stops being
+    // legible as one.
     const msg = isLiveBoard()
       ? 'No entries in this season yet. Baselines compute on first load; competition models advance via the nightly job.'
       : 'No leaderboard entries yet. Baselines compute on first load (requires market data).';
