@@ -212,9 +212,19 @@ export function stackLabels(
   return placed;
 }
 
-/** Dark or light pill ink, by the swatch's relative luminance. */
+/** Dark or light pill ink, by the swatch's relative luminance.
+ *
+ *  MUST EXPAND A 3-DIGIT HEX BEFORE READING CHANNELS OUT OF IT. Shipped
+ *  `hexToRgb`'s own docstring in js/leaderboard.js records this as a bug that
+ *  existed in both of ITS callers at once -- unexpanded, `#fff` reads as
+ *  r=255 g=15 b=0 (`slice(2,4)` on `'fff'` takes only the trailing `'f'`,
+ *  `slice(4,6)` is empty), which is a light-ink verdict on a near-white pill.
+ *  The docstring names the actual defect as "a fix applied to one copy would
+ *  not have reached the other" -- and this mirror shipped as a THIRD copy
+ *  with the same gap, for the same reason: one parse, repeated by hand. */
 export function pillTextColor(hex: string): string {
-  const h = String(hex || '').replace('#', '');
+  let h = String(hex || '').replace('#', '');
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
   const r = parseInt(h.slice(0, 2), 16) || 0;
   const g = parseInt(h.slice(2, 4), 16) || 0;
   const b = parseInt(h.slice(4, 6), 16) || 0;

@@ -205,3 +205,58 @@ console.log(JSON.stringify(placed.map((p) => p.y)));
     )
     assert min(result) >= 0
     assert max(result) <= 400
+
+
+def test_pill_text_color_expands_a_three_char_hex_before_computing_luminance():
+    """`hexToRgb`'s docstring in js/leaderboard.js records that this exact
+    3-digit expansion was missing from BOTH of its own callers at once, and
+    names the actual defect: 'a fix applied to one copy would not have reached
+    the other.' This mirror is now a third copy, and it shipped without the
+    expansion too -- so this test exercises the divergence in both directions,
+    not just one, since a test that only checks the dark-ink case would also
+    pass if the luminance comparison were simply inverted.
+
+    #fff unexpanded parses as r=255 g=15 b=0 (slice(2,4) on 'fff' takes only
+    the trailing 'f', slice(4,6) is empty -> 0), luminance 85.05, which is
+    BELOW the 150 threshold and picks light ink -- the wrong answer, and the
+    dangerous one: light text on a near-white pill. Expanded to 'ffffff' it is
+    255/255/255, luminance 255, correctly dark ink. #000 is the mirror check:
+    right answer either way per-channel (0 either way), so it only catches an
+    inverted comparison, not a missing expansion -- the two cases together
+    close both failure modes."""
+    result = _run_ts(
+        """
+console.log(JSON.stringify({
+  white: module.exports.pillTextColor('#fff'),
+  black: module.exports.pillTextColor('#000'),
+}));
+"""
+    )
+    assert result["white"] == "#0b1220", "white must read as light background -> dark ink"
+    assert result["black"] == "#f8fafc", "black must read as dark background -> light ink"
+
+
+def test_a_short_card_refuses_before_ever_measuring_a_label():
+    """The `gap < BOARD_LABEL_GAP_MIN` branch in `frameLayout`, reached before
+    a floor is ever measured -- and, until this test, never driven true by
+    anything in this suite. The shipped comment near BOARD_LABEL_GAP_MAX/MIN
+    cites the real case this guards against: 9 series into a 152-168px mobile
+    canvas (`clamp(140px, 26vh, 280px)` at a narrow viewport).
+
+    height=160 with 9 labels: gap = min(20, (160-34)/9) = 14.0, below
+    BOARD_LABEL_GAP_MIN (16), so frameLayout must refuse right there. Width is
+    set absurdly large (100000) so the width-based floor check -- the other
+    return-none path -- cannot be what actually fires; if this test passed
+    with a narrow width instead, it would prove nothing about this branch
+    specifically, since either guard alone produces the same {drawLabels:
+    false, gutter: BOARD_ARROW_PAD} shape."""
+    result = _run_ts(
+        """
+const labels = Array.from({length: 9}, (_, i) => ({name: 'M' + i, value: '+1%'}));
+const frame = module.exports.frameLayout({width: 100000, height: 160, labels});
+console.log(JSON.stringify({gutter: frame.gutter, draw: frame.drawLabels, gap: frame.gap}));
+"""
+    )
+    assert result["draw"] is False
+    assert result["gutter"] == pytest.approx(18.0)
+    assert result["gap"] == 0
