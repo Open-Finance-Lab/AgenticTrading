@@ -1224,6 +1224,17 @@ def test_subprocess_log_dump_is_redacted_but_not_truncated(monkeypatch):
     assert "[REDACTED]" in redacted
 
 
+def test_subprocess_log_redacts_ifind_refresh_token(monkeypatch):
+    monkeypatch.setenv("IFIND_REFRESH_TOKEN", "refresh-secret-token")
+
+    redacted = bt._redact_credentials(
+        "refresh_token=refresh-secret-token"
+    )
+
+    assert "refresh-secret-token" not in redacted
+    assert "[REDACTED]" in redacted
+
+
 def test_subprocess_log_redacts_user_financial_datasets_credential():
     credential = "user-financial-datasets-plaintext-canary"
 

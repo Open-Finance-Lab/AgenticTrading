@@ -128,6 +128,15 @@ os.environ.pop("LEADERBOARD_DAILY_REFRESH_SECRET", None)
 # with it exported would otherwise make the unconfigured-refusal tests fail,
 # and could accidentally promote the suite's throwaway accounts.
 os.environ.pop("ADMIN_BOOTSTRAP_SECRET", None)
+# The iFinD A-share credentials, for the same reason plus a sharper one: a
+# developer with IFIND_REFRESH_TOKEN exported (from `dashboard/.env`, which
+# reaches os.environ as soon as any sibling test imports `app`) makes every
+# static-token client in the suite open with an unexpected token exchange,
+# silently consuming the first queued response of each fake session. That
+# presents as ~27 unrelated assertion failures rather than as a config leak.
+os.environ.pop("IFIND_REFRESH_TOKEN", None)
+os.environ.pop("IFIND_ACCESS_TOKEN", None)
+os.environ.pop("IFIND_BASE_URL", None)
 
 
 @atexit.register
@@ -148,6 +157,22 @@ def pytest_configure(config):
         "daily_refresh_background: test drives the real Daily Leaderboard "
         "background scheduler; opts out of the autouse no-op guard.",
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_ifind_access_token_cache():
+    """Keep the process-wide iFinD token cache from leaking between tests.
+
+    The cache is deliberately module-level (one exchange per process, per the
+    design), which means without this every test that exchanges a token hands
+    it to the next one -- and a fake session that expected to be asked for a
+    token would silently never be called.
+    """
+    from dashboard.backend.infrastructure.market_data import ifind_client
+
+    ifind_client._ACCESS_TOKEN_CACHE.clear()
+    yield
+    ifind_client._ACCESS_TOKEN_CACHE.clear()
 
 
 @pytest.fixture(autouse=True)

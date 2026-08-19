@@ -424,6 +424,23 @@ def test_factory_creates_ifind_provider_without_making_http_request(monkeypatch)
     assert isinstance(created, IFindAshareProvider)
 
 
+def test_factory_accepts_refresh_token_without_making_http_request(monkeypatch):
+    from dashboard.backend.infrastructure.market_data.ifind_ashare import (
+        IFindAshareProvider,
+    )
+    from dashboard.backend.infrastructure.market_data.provider import (
+        create_market_data_provider,
+    )
+
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_REFRESH_TOKEN", "refresh-token")
+    monkeypatch.delenv("IFIND_ACCESS_TOKEN", raising=False)
+
+    created = create_market_data_provider(IFIND_ASHARE)
+
+    assert isinstance(created, IFindAshareProvider)
+
+
 def test_ifind_provider_import_is_lazy_and_has_no_network_or_fallback_imports():
     env = {
         **os.environ,

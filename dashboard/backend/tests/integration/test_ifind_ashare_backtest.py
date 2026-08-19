@@ -283,6 +283,57 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
     assert secret not in capsys.readouterr().out
 
 
+def test_ifind_refresh_token_is_inherited_by_subprocess_without_leaking(
+    monkeypatch, capsys
+):
+    secret = f"refresh-offline-{uuid.uuid4().hex}"
+    session_id = str(uuid.uuid4())
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_REFRESH_TOKEN", secret)
+    monkeypatch.delenv("IFIND_ACCESS_TOKEN", raising=False)
+    monkeypatch.setattr(backtests_router, "_BackgroundThread", _CapturingThread)
+    backtests_router._backtest_rate_limiter.reset()
+    backtests_router.backtest_status.update(
+        {
+            "running": False,
+            "error": None,
+            "runs_count": 0,
+            "started_at": None,
+            "progress_file": None,
+            "live_run_id": None,
+        }
+    )
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": START.isoformat(),
+            "end_date": END.isoformat(),
+            "data_source": IFIND_ASHARE,
+            "universe": A_SHARE_DEMO_6,
+            "timeframe": "60m",
+        },
+        headers={"X-Session-Id": session_id},
+    )
+    assert response.status_code == 200
+
+    captured = {}
+
+    def fake_subprocess_run(command, **kwargs):
+        captured["command"] = list(command)
+        captured["environment"] = kwargs["env"]
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_subprocess_run)
+    thread = _CapturingThread.last
+    assert thread is not None
+    thread.run_target()
+
+    assert captured["environment"]["IFIND_REFRESH_TOKEN"] == secret
+    assert secret not in " ".join(captured["command"])
+    assert secret not in capsys.readouterr().out
+
+
 @pytest.mark.parametrize(
     ("selected_universe", "symbols"),
     [

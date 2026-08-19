@@ -199,6 +199,7 @@ def test_disabled_ifind_returns_403_before_scheduling(monkeypatch):
 
 def test_missing_ifind_token_returns_503_before_scheduling(monkeypatch):
     monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.delenv("IFIND_REFRESH_TOKEN", raising=False)
     monkeypatch.delenv("IFIND_ACCESS_TOKEN", raising=False)
     spy = Spy()
     monkeypatch.setattr(backtests, "run_backtest_background", spy)
@@ -216,8 +217,32 @@ def test_missing_ifind_token_returns_503_before_scheduling(monkeypatch):
     )
 
     assert response.status_code == 503
+    assert "IFIND_REFRESH_TOKEN" in response.text
     assert "IFIND_ACCESS_TOKEN" in response.text
     assert spy.calls == []
+
+
+def test_refresh_token_allows_ifind_backtest_scheduling(monkeypatch):
+    monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
+    monkeypatch.setenv("IFIND_REFRESH_TOKEN", "refresh-token-canary")
+    monkeypatch.delenv("IFIND_ACCESS_TOKEN", raising=False)
+    spy = Spy()
+    monkeypatch.setattr(backtests, "run_backtest_background", spy)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-04-01",
+            "end_date": "2026-04-23",
+            "data_source": IFIND_ASHARE,
+            "universe": A_SHARE_DEMO_6,
+            "timeframe": "60m",
+        },
+        headers=session_headers(),
+    )
+
+    assert response.status_code == 200
+    assert spy.calls
 
 
 def test_ifind_rejects_wrong_universe_before_checking_credentials(monkeypatch):
