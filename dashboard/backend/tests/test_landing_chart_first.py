@@ -174,7 +174,30 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
 
 def test_landing_chart_axis_ticks_are_14px():
     assert _BOARD.count("fontSize={14}") == 2, "both XAxis and YAxis"
-    assert "fontSize={11}" not in _BOARD
+    assert "fontSize={11}" not in _BOARD, (
+        "11px belongs to the gutter labels, which live in EndpointRail.tsx"
+    )
+
+
+def test_the_y_axis_reserve_is_measured_rather_than_guessed():
+    """`width={56}` was measured against `$1030` at 11px; the tick font later
+    moved to 14px and four of five labels lost their leading `$` with nothing
+    failing. The axis is percent now, so the number would have to be re-measured
+    anyway -- measuring it at render removes the whole class."""
+    assert "width={56}" not in _BOARD
+    assert "domain={[960, 1240]}" not in _BOARD, "a hardcoded dollar domain"
+    # NOT a bare `"measureTextWidth" in _BOARD`. That string also appears in the
+    # file's import line, so replacing the whole computation with
+    # `const yAxisWidth = 60;` -- a guessed reserve, the exact regression this
+    # case is named for -- left the import behind and this case GREEN (verified
+    # by mutation; `noUnusedLocals` is off, so that mutant typechecks too).
+    # The measurement has to reach the axis, so pin the binding AND the fact
+    # that what is measured is the rendered tick text.
+    assert "width={yAxisWidth}" in _BOARD, "the YAxis must take the measured width"
+    assert "measureTextWidth(axisTick(" in _BOARD, (
+        "the reserve must be measured from the tick text this axis actually "
+        "renders, not guessed"
+    )
 
 
 def test_the_panel_title_is_text_xl():
@@ -184,35 +207,63 @@ def test_the_panel_title_is_text_xl():
 
 
 def test_the_standings_table_becomes_a_chip_strip_that_can_show_every_chip():
-    """Demotion, not deletion: the chart ships no <Legend> (a five-item legend
-    wraps to two rows at this width), so the table is the ONLY thing linking a
-    curve colour to a model name. The chips preserve that swatch-to-curve link
-    at a fraction of the height. The full table already lives in Race.tsx.
+    """Demotion, not deletion: the chart ships no <Legend>, so the chips are the
+    only thing linking a curve colour to a model name -- and they are now also
+    the fallback when the endpoint rail declines to draw (a narrow card, a
+    Recharts internal that moved). The full table lives in Race.tsx.
 
-    THE STRIP MUST WRAP. `flex-nowrap` with `overflow-hidden` cut entries off
-    the end wherever the strip was narrower than its content: measured
-    scrollWidth 910 against clientWidth 285 at 390 (one chip survives, keying
-    five drawn curves), 663 at 768, 895 at 1024 -- the whole lg band and every
-    phone, silently, because the only live-browser guard on it ran at 1440.
-    "One row" was the intent at the design width, not a constraint worth
-    dropping four of five model names for; and Race.tsx carries no swatches, so
-    a clipped chip has no fallback key anywhere on the page.
+    THE STRIP MUST WRAP, and the pressure just went up: it went from five
+    hardcoded entries to nine from the payload. `flex-nowrap` with
+    `overflow-hidden` cut entries off the end wherever the strip was narrower
+    than its content -- measured scrollWidth 910 against clientWidth 285 at 390
+    (one chip survives, keying five drawn curves), 663 at 768, 895 at 1024, so
+    the whole lg band and every phone, silently, because the only live-browser
+    guard on it ran at 1440.
     """
     board = _BOARD
     assert "grid-cols-12" not in board, "the 5-row table is what the chart needs the height of"
     assert "flex-wrap" in board and "flex-nowrap" not in board, (
         "a legend that cannot show its entries is not a legend"
     )
-    strip = board[board.index("SAMPLE_STANDINGS.map") - 400 : board.index("SAMPLE_STANDINGS.map")]
+    # Anchored on the JSX render site (`{standings.map`), NOT on the first
+    # `standings.map` in the file. The old card mapped its rows exactly once, so
+    # a bare `.index("SAMPLE_STANDINGS.map")` was the strip; the live card maps
+    # `standings` three times, and the two earlier call sites (the frameLayout
+    # labels and valueByKey) sit ~4.5KB above the strip. Anchoring on the first
+    # put this 400-char window over the ResizeObserver effect, where
+    # `overflow-hidden` can never appear -- verified by mutation: adding
+    # `overflow-hidden` to the chip strip's own className left this case GREEN.
+    strip = board[board.index("{standings.map") - 400 : board.index("{standings.map")]
     assert "overflow-hidden" not in strip, (
         "clipping the strip is the same failure by another route -- no scrollbar, "
         "no ellipsis, and nothing fails"
     )
     assert "text-base" in board, "text-sm rows were one of the three reported problems"
-    # The identity link and the guard corpus both depend on these staying here.
-    assert "SAMPLE_STANDINGS" in board
+    # The identity link. `swatch` is gone with the sample rows; the colour now
+    # comes off the same BoardSeries the curve is drawn from, which is stronger:
+    # a row and its curve cannot disagree because there is one value.
+    assert "item.color" in board
     assert "dataKey=" in board
-    assert "item.swatch" in board
+
+
+def test_the_hero_draws_the_board_the_signed_in_home_draws():
+    """The whole point of the change. No component may reintroduce a curve that
+    is not on the board, and the only way to be sure of that is for the data to
+    come from the API rather than from a literal."""
+    assert "useLeaderboard" in _BOARD
+    assert "SAMPLE_CURVES" not in _BOARD and "SAMPLE_STANDINGS" not in _BOARD
+
+
+def test_the_hero_reports_a_failed_load_instead_of_shimmering_forever():
+    """Three states, and they must be distinguishable. A permanent skeleton and
+    a silent fallback are the same defect: "the backend is down" and "the backend
+    is fine" would render near-identically."""
+    board = _collapse(_BOARD)
+    assert 'status === "error"' in board or "status === 'error'" in board
+    assert 'status === "loading"' in board or "status === 'loading'" in board
+    assert "state.message" in board or "board.message" in board, (
+        "the failed card must name the failure, not print a dead end"
+    )
 
 
 def test_talk_drops_the_three_step_list_but_keeps_its_pinned_strings():
@@ -286,24 +337,26 @@ def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
     assert "<Legend" not in _BOARD
     assert re.search(r"legend:\s*\{\s*display:\s*false\s*\}", home_js)
 
-    # UNITS: /app is percent. Asserted here rather than in the /app suite
-    # because the pressure to break it comes from THIS comparison -- someone
-    # noticing the two charts disagree and "aligning" screen 0 back to a dollar
-    # axis, which / uses.
+    # UNITS: percent on BOTH, and this is the assertion that inverted.
     #
-    # Why that is a regression and not a tidy-up: / plots fabricated curves that
-    # all share a base of 1000, so `$1210` is unambiguous and reads as
-    # SAMPLE_STANDINGS' +21.0%. Screen 0 plots LIVE entries, and every dollar
-    # level there is a x0.1 rescale of a $100,000 backtest onto the config's
-    # $10,000 display base (leaderboard service.py), so a `$10,749` tick names an
-    # account that never existed while the percent is what actually ran. The rank
-    # list beside it already renders percent, and it is the chart's only key.
+    # It used to pin an ASYMMETRY -- /app percent, / dollars -- and the
+    # justification was precise: / plotted fabricated curves that all shared a
+    # base of 1000, so `$1210` was unambiguous and read as SAMPLE_STANDINGS'
+    # +21.0%. That premise is gone. / now plots the same LIVE entries screen 0
+    # does, and every dollar level in that payload is a x0.1 rescale of a
+    # $100,000 backtest onto the config's $10,000 display base (leaderboard
+    # service.py), so a `$10,749` tick names an account that never existed while
+    # the percent is what actually ran.
     #
-    # NOT the reason, though an earlier draft of this plan said so: issue #365
-    # does NOT make a dollar axis draw a 10x break here. get_leaderboard
-    # normalises every entry to one display base before serving -- measured
-    # against a hand-built mixed-capital database -- so on this payload dollars
-    # and percent are an affine transform. Do not re-derive the scale argument
-    # and then "discover" it is false; the label argument above is the one that
-    # holds.
+    # NOT the reason, though an earlier draft of the chart-first plan said so:
+    # issue #365 does NOT make a dollar axis draw a 10x break here.
+    # get_leaderboard normalises every entry to one display base before serving
+    # -- measured against a hand-built mixed-capital database -- so on this
+    # payload dollars and percent are an affine transform. Do not re-derive the
+    # scale argument and then "discover" it is false; the label argument above
+    # is the one that holds.
     assert "(v * 100).toFixed(1)}%" in home_js
+    assert "toFixed(1)" in _BOARD, "the landing axis is percent to one decimal too"
+    assert not re.search(r"tickFormatter=\{\(v\) => `\$", _BOARD), (
+        "a dollar tick on this card names an account that never existed"
+    )

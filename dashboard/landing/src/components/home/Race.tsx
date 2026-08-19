@@ -2,12 +2,28 @@ import { Medal, CalendarClock, TrendingUp, ShieldCheck } from "lucide-react";
 import { Button } from "@/components/ui/button";
 // No storyline import here on purpose: the Talk → Test story agent belongs to a
 // backtest run report (Test.tsx), not to a board.
-//
-// The sample numbers and the chart moved to BoardPreview.tsx when the board was
-// promoted into the hero. This section keeps the full standings and the rules
-// that govern them — the chart is the hook, these are the terms.
-import { SAMPLE_STANDINGS } from "./BoardPreview";
 import { PRIMARY_LANDING_CTA } from "@/lib/cta";
+
+/** TEMPORARY, and the next task deletes it.
+ *
+ *  These rows used to be imported from BoardPreview.tsx, which drew the same
+ *  invented curves. That card now renders the live Competition board, so the
+ *  constant went with the fabricated data — and this file, left importing it,
+ *  would not have compiled. Inlining the rows here is the smallest change that
+ *  keeps every intermediate commit on this branch typecheck-clean; rewiring
+ *  this table to `useLeaderboard()` is the next task's job, not a change to
+ *  smuggle in beside a chart rewrite.
+ *
+ *  So the page is briefly in the state the plan calls the worst of both: real
+ *  numbers in the hero above invented ones here. That is a property of this
+ *  commit, not of the branch. */
+const SAMPLE_STANDINGS = [
+  { rank: 1, name: "DeepSeek V4 Pro", ret: "+21.0%", highlight: true },
+  { rank: 2, name: "Buy & Hold", ret: "+5.5%", highlight: false },
+  { rank: 3, name: "DJIA", ret: "+2.8%", highlight: false },
+  { rank: 4, name: "Claude Sonnet 4.6", ret: "+1.4%", highlight: false },
+  { rank: 5, name: "GPT-5.5", ret: "-1.5%", highlight: false },
+];
 
 /** Three facts, in the order a sceptic asks for them: what was held equal, what
  *  the other board is, and what disqualifies a result. Icons carry the shape so
