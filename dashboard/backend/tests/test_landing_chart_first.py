@@ -181,7 +181,27 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
     """
     board = _BOARD.replace(" ", "")
     assert "clamp(260px,calc(100dvh-var(--board-chart-reserve)),520px)" in board
-    assert "[--board-chart-reserve:730px]" in board, "the stacked-phone reserve"
+    # UNPREFIXED, and this is the severe one. As a bare substring check this
+    # assertion was satisfied by `md:[--board-chart-reserve:730px]`: below `md`
+    # the custom property is then undefined, `clamp(260px, calc(100dvh -
+    # var(--board-chart-reserve)), 520px)` is invalid at computed-value time, the
+    # `height` declaration is DROPPED, the container computes to `auto`, and
+    # <ResponsiveContainer height="100%"> resolves against zero. Measured in
+    # headless Chromium at 390x844: chart region 260px with the variable
+    # defined, 0px without -- the hero chart does not render at all on any
+    # phone, with this file at 19 passed and `npm run typecheck` clean.
+    #
+    # Read off _BOARD with its spaces INTACT rather than the collapsed `board`
+    # above, so the class can be anchored on the whitespace that separates
+    # Tailwind classes. A negative lookbehind for `<letter>:` was the first
+    # draft and has a hole: an arbitrary variant (`min-[390px]:`) ends `]:`,
+    # which no `[a-z]:` lookbehind rejects. Anchoring on the separator rejects
+    # every variant form, present and future, because a variant by definition
+    # occupies the characters between the separator and the class.
+    assert re.search(r'(?:^|\s)\[--board-chart-reserve:730px\](?=\s|"|$)', _BOARD), (
+        "the base reserve must be unprefixed, or the clamp is invalid below "
+        "that breakpoint and the chart region computes to 0"
+    )
     assert "lg:[--board-chart-reserve:460px]" in board, "the side-by-side reserve"
     assert "56vh" not in _BOARD, "the first draft's clamp fails at four viewports"
     assert "h-[210px]" not in _BOARD and "md:h-[240px]" not in _BOARD
@@ -203,12 +223,24 @@ def test_the_window_chip_cannot_out_size_the_header_row():
     only exists in a browser, and nothing in CI opens one. `max-w-full` is what
     lets the chip wrap instead of overflowing; `flex-wrap` is what lets it take
     its own row instead of collapsing the title to reach it.
+
+    BOTH ARE REQUIRED UNPREFIXED, and as bare substring checks neither was:
+    `lg:flex-wrap` and `lg:max-w-full` satisfy `in`, bind only from 1024px, and
+    therefore restore the measured defect across the entire sub-1024 band --
+    including the 390px the measurement above was taken at -- with this file at
+    19 passed and `npm run typecheck` clean.
+
+    The OTHER board card has its own case,
+    test_the_race_window_chip_cannot_out_size_its_header_row, deliberately
+    separate rather than merged into this one: an edit aimed at one card must
+    not be able to delete the other card's pin. If you add a third board card,
+    add a third case -- do not widen either of these to scan several files.
     """
     row = re.search(r'<div className="([^"]*)">\s*<h2', _BOARD)
     assert row, "could not find the header row that wraps the <h2>"
-    assert "flex-wrap" in row.group(1), (
-        f"the title/chip row must wrap, or the chip collapses the title to "
-        f"width 0; found {row.group(1)!r}"
+    assert re.search(r"(?:^|\s)flex-wrap(?:\s|$)", row.group(1)), (
+        f"the title/chip row must wrap at every width, or the chip collapses "
+        f"the title to width 0; found {row.group(1)!r}"
     )
 
     chip = re.search(r'<span className="([^"]*)">\s*\{data\?\.windowLabel', _BOARD)
@@ -217,8 +249,9 @@ def test_the_window_chip_cannot_out_size_the_header_row():
         f"shrink-0 on the window chip is what pushed it 38.8px past the card's "
         f"edge; found {chip.group(1)!r}"
     )
-    assert "max-w-full" in chip.group(1), (
-        f"the window chip must be capped at the row width; found {chip.group(1)!r}"
+    assert re.search(r"(?:^|\s)max-w-full(?:\s|$)", chip.group(1)), (
+        f"the window chip must be capped at the row width at every width; "
+        f"found {chip.group(1)!r}"
     )
 
 
@@ -344,8 +377,25 @@ def test_the_standings_table_becomes_a_chip_strip_that_can_show_every_chip():
 def test_the_hero_draws_the_board_the_signed_in_home_draws():
     """The whole point of the change. No component may reintroduce a curve that
     is not on the board, and the only way to be sure of that is for the data to
-    come from the API rather than from a literal."""
-    assert "useLeaderboard" in _BOARD
+    come from the API rather than from a literal.
+
+    THE PARENS ARE THE ASSERTION. A bare `"useLeaderboard" in _BOARD` holds
+    against the IMPORT line whether or not the hook is ever called, and
+    `noUnusedLocals` is off. Verified by mutation: keeping the import, adding a
+    module-level `function fabricatedBoard(): BoardState { ... }` of hardcoded
+    curves, returns and window label, and calling it instead left `npm run
+    typecheck` clean and the five landing suites at 113 passed -- with the hero
+    drawing an entirely invented board, which is precisely the state this change
+    exists to remove. The return-type annotation defeats TS literal narrowing,
+    so no branch below goes unreachable and nothing else notices either.
+
+    The companion assertion below is not a backstop: it bans the two retired
+    sample-data symbols by name and says nothing about where the data comes
+    from."""
+    assert "useLeaderboard()" in _BOARD, (
+        "the hero must CALL the hook, not merely import it — an unused import "
+        "type-checks clean and leaves the board free to be a literal"
+    )
     assert "SAMPLE_CURVES" not in _BOARD and "SAMPLE_STANDINGS" not in _BOARD
 
 
@@ -500,4 +550,29 @@ def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
     # makes both surfaces fail on the same edit.
     assert "(v * 100).toFixed(1)}%" in _BOARD, (
         "the landing axis renders the percent that actually ran, not a level"
+    )
+    # ...AND pin what the axis is BOUND to, because the body pin above closes
+    # only half of it. `axisTick` is also referenced by
+    # `measureTextWidth(axisTick(domain[0]), ...)`, so it can be left byte-
+    # identical -- keeping the body assertion AND the y-axis-reserve guard green
+    # -- while a SECOND named formatter is declared beside it and bound to the
+    # axis instead. Verified by mutation: adding
+    # `function dollarTick(v) { return `$${(10000 * (1 + v)).toFixed(1)}`; }`
+    # and binding it left this file at 19 passed with `npm run typecheck` clean,
+    # and the hero rendering the $10,749-style ticks the comment above calls the
+    # one hard "must never" of this change. The inline-arrow ban is likewise
+    # blind to it: a named binding carries no arrow.
+    #
+    # Scoped to the <YAxis> ELEMENT, not the file, for the same reason the
+    # y-axis-reserve guard is: a substring that may live in an import line, a
+    # helper or a dead function is not a claim about what the axis renders.
+    # A prop containing `>` (an inline arrow formatter) makes the element regex
+    # miss and fires the first assertion -- fail-closed, which is the direction
+    # this guard has to fail in.
+    yaxis = re.search(r"<YAxis\b[^>]*?/>", _BOARD, re.S)
+    assert yaxis, "could not find the <YAxis> element"
+    assert "tickFormatter={axisTick}" in yaxis.group(0), (
+        "the y-axis must bind the percent formatter itself, not a second "
+        "formatter that walks around the body pin above; found "
+        f"{yaxis.group(0)!r}"
     )

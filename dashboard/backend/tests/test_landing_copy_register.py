@@ -89,11 +89,37 @@ def test_the_board_cards_name_the_window_they_draw():
     """What replaced the disclaimer on the two board cards. They now draw real
     entries over a real window, and the window is the one detail that must not be
     left implicit -- the forward arrow under the chart otherwise reads as a claim
-    that this window is still running, when it closed on 2026-05-15."""
-    text = _shipped_text()
-    assert text.count("Competition window") >= 2, (
-        "both the hero card and the Race standings must state their provenance"
+    that this window is still running, when it closed on 2026-05-15.
+
+    SCOPED PER COMPONENT, because counting occurrences in the merged bundle
+    cannot attribute them. EACH card emits the literal TWICE -- once in the
+    interpolated branch, once in the fallback branch, and neither branch is
+    dead-code-eliminable -- so the bundle count is 4 and the old `>= 2` was met
+    by either card ALONE. Verified by mutation: dropping the words from Race's
+    chip, so the standings card renders the bare window label and no
+    provenance, left the whole register green at 43 passed. "Competition
+    Standings" would then publish real returns from a fixed historical window
+    with nothing on the card dating them.
+
+    The bundle assertion stays as this file's usual rebuild check -- source that
+    was edited but never built into ../frontend/ is the register's own thesis --
+    but it is no longer the claim. Comments are stripped on both files first:
+    BoardPreview.tsx's chip carries a five-line comment explaining what the
+    provenance chip replaced, and a guard that reads its own rationale as
+    coverage passes on the file that deleted the chip.
+    """
+    assert "Competition window" in _shipped_text(), (
+        "the chip is in neither component's built output — rebuild per "
+        "dashboard/landing/README.md"
     )
+    for name in ("BoardPreview.tsx", "Race.tsx"):
+        body = _BLOCK_COMMENT.sub(
+            "", (_LANDING_HOME / name).read_text(encoding="utf-8")
+        )
+        assert "Competition window" in body, (
+            f"{name} draws real entries over a fixed historical window and no "
+            f"longer states which one"
+        )
 
 
 def test_no_real_money_sentence_is_present_verbatim():
@@ -392,7 +418,10 @@ def test_no_landing_component_puts_a_user_agent_on_the_board():
     # anchor is now the hook both board components read, which is the strongest
     # version of this check yet -- a component drawing a curve it did NOT get
     # from the API is exactly the thing being banned.
-    board = {name: body for name, body in bodies.items() if "useLeaderboard" in body}
+    # Keyed on the CALL, not the import: a component that imports the hook and
+    # then renders a literal is the thing being banned, and it would otherwise
+    # stay in this set and keep the ban vacuous against itself.
+    board = {name: body for name, body in bodies.items() if "useLeaderboard()" in body}
     assert board, "no component reads the live board"
     corpus = "".join(board.values())
     assert "dataKey=" in corpus, "one of them must actually draw curves"
@@ -421,12 +450,34 @@ def test_race_standings_render_the_full_selection_baselines_included():
     baselines; what this guard pins is that Race.tsx does not narrow that list
     back down before rendering it -- e.g. a `standings.filter((s) => ...)`
     inserted ahead of the `.map` would compile cleanly and pass every other
-    guard in this file while silently dropping the baseline rows."""
-    source = _RACE_TSX.read_text(encoding="utf-8")
+    guard in this file while silently dropping the baseline rows.
+
+    THE BAN IS ON THE OPERATION, NOT ON A RECEIVER NAMED `standings`. Requiring
+    `standings` to be the immediate receiver pinned one spelling of the edit and
+    left at least three others: filtering the TERNARY instead --
+    `const standings = (board.status === "ready" ? board.data.standings :
+    []).filter(...)`, whose receiver is `)` -- rebinding first
+    (`standings0.filter(...)`), and `board.data.standings.slice(0, 7)`. The
+    ternary form was reproduced end to end: `npm run typecheck` clean and the
+    five landing suites at 116 passed, with the models-only table the controller
+    ruled against. That ruling matters because buy-and-hold beat six of the
+    seven models: a models-only table makes the page more flattering than the
+    truth, which is the exact failure every copy guard in this file exists to
+    prevent.
+
+    Race.tsx renders exactly one collection, so a blanket ban costs nothing
+    here. If this component ever needs a legitimate `.filter`/`.slice`, that is
+    a change to the adjudicated ruling -- argue with this docstring first, do
+    not widen the regex. Comments are stripped so the prose above (and Race.tsx's
+    own "do not add a filter here" note) cannot trip it."""
+    source = _BLOCK_COMMENT.sub("", _RACE_TSX.read_text(encoding="utf-8"))
     assert "standings.map(" in source, "Race.tsx no longer maps the full standings array"
-    assert not re.search(r"standings\s*\.\s*filter\(", source), (
-        "a filter ahead of the map would drop the baseline rows the controller "
-        "ruled must stay on the board"
+    narrowing = re.search(r"\.\s*(filter|slice)\(", source)
+    assert not narrowing, (
+        f"Race.tsx narrows a collection before rendering it "
+        f"({narrowing.group(0)!r} at offset {narrowing.start() if narrowing else -1}); "
+        f"the baseline rows the controller ruled must stay on the board are the "
+        f"only thing this component can narrow away"
     )
 
 

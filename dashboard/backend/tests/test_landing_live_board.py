@@ -86,6 +86,17 @@ def test_the_fetch_is_root_relative_and_names_no_origin():
     assert '"/api/v1/leaderboard' in _LIB_TS or "'/api/v1/leaderboard" in _LIB_TS
     assert "onrender.com" not in _LIB_TS
     assert "window.location.origin" not in _LIB_TS
+    # THE QUERY IS PART OF THE URL. Pinning only the path prefix left the period
+    # unguarded: `?period=daily` kept 98 tests green, and `daily` is the one
+    # period reaching `maybe_schedule_daily_leaderboard_refresh()` -- from `/`,
+    # the highest-traffic ANONYMOUS surface in the product. `?period=live`
+    # likewise puts the Season-0 preview board in the hero with none of the
+    # preview chrome that exists to say nothing has advanced.
+    assert "/api/v1/leaderboard?period=contest" in _LIB_TS, (
+        "the hero draws the Competition board; any other period either changes "
+        "what the card claims or reaches a refresh path an anonymous GET must "
+        "not touch"
+    )
 
 
 def test_the_fetch_is_bounded_by_an_abort_signal():
@@ -334,6 +345,92 @@ console.log(JSON.stringify({seriesColor, standingsColor}));
     )
     for key, color in result["seriesColor"].items():
         assert result["standingsColor"][key] == color, f"{key} disagrees between series and standings"
+
+
+# ---------------------------------------------------------------------------
+# The two things `buildBoardData` does to the standings that nothing else does:
+# it formats the return, and it restores rank order after selectBoardEntries
+# has destroyed it. Neither was pinned by anything.
+# ---------------------------------------------------------------------------
+
+
+def test_standings_returns_carry_two_decimals():
+    """Source pin, and the tier that actually runs in CI (the behavioural cases
+    need an `npm install` CI does not do).
+
+    `2` is the whole claim of "the hero shows the same numbers /app shows":
+    /app's rank rows and this card's own tooltip are both two decimals. Nothing
+    pinned it. Changing it to `0` left 98 tests green and rendered `+7%` and --
+    the one that matters -- `-0%` where /app renders `+7.49%` and `-0.43%`: a
+    real loss displayed as no movement, on the acquisition page.
+    `test_the_two_surfaces_agree_on_the_numbers_that_must_agree` is not this
+    guard: it pins the one-decimal AXIS formatter, a different call."""
+    assert "formatPercent(Number(entry.cumulative_return), 2)" in _LIB_TS, (
+        "standings returns are two decimals, matching /app's rank rows and this "
+        "card's tooltip"
+    )
+
+
+def test_a_small_loss_renders_as_a_loss_and_not_as_zero():
+    """The behavioural half of the case above, and the reason `0` is not a
+    cosmetic choice: at zero decimals a -0.43% return formats as `-0%`."""
+    result = _run_ts(
+        """
+console.log(JSON.stringify({
+  loss: module.exports.formatPercent(-0.0043, 2),
+  gain: module.exports.formatPercent(0.0749, 2),
+}));
+"""
+    )
+    assert result == {"loss": "-0.43%", "gain": "+7.49%"}
+
+
+# A fixture whose payload (ranked) order is deliberately DESTROYED by
+# selectBoardEntries: it regroups into models-then-baselines, so the two
+# baselines land at the end regardless of where they ranked. buy_hold_djia
+# (+3%) outranks two of the three models here, so a board that skipped the
+# re-sort would publish gpt_5_5 at -2% ABOVE buy_hold_djia at +3%.
+_INTERLEAVED_RANK_FIXTURE_JS = """
+const entries = [
+  {entry_id: 'claude_haiku_4_5', team_name: 'Claude Haiku 4.5', team_badge: 'Model', model: 'Claude Haiku 4.5', is_model: true, cumulative_return: 0.05, portfolio_value: 10500, initial_equity: 10000, equity_curve: []},
+  {entry_id: 'buy_hold_djia', team_name: 'Agentic Trading Lab', team_badge: 'Baseline Strategy', model: 'Buy & Hold', is_model: false, cumulative_return: 0.03, portfolio_value: 10300, initial_equity: 10000, equity_curve: []},
+  {entry_id: 'qwen3_7_plus', team_name: 'Qwen3.7 Plus', team_badge: 'Model', model: 'Qwen3.7 Plus', is_model: true, cumulative_return: 0.02, portfolio_value: 10200, initial_equity: 10000, equity_curve: []},
+  {entry_id: 'djia_index', team_name: 'Agentic Trading Lab', team_badge: 'Market Index', model: 'DJIA', is_model: false, cumulative_return: 0.01, portfolio_value: 10100, initial_equity: 10000, equity_curve: []},
+  {entry_id: 'gpt_5_5', team_name: 'GPT-5.5', team_badge: 'Model', model: 'GPT-5.5', is_model: true, cumulative_return: -0.02, portfolio_value: 9800, initial_equity: 10000, equity_curve: []},
+];
+const board = module.exports.buildBoardData({entries, window: {label: 'test window'}});
+"""
+
+
+def test_standings_are_re_ranked_by_return_after_the_model_baseline_regroup():
+    """`selectBoardEntries` returns models.concat(baselines) -- it DELIBERATELY
+    destroys rank order, because the model colour palette is assigned by
+    position. `standings.sort` is the only thing that puts rank back, and
+    Race.tsx renders `#{index + 1}` straight off the array index, so without it
+    the rank column is a lie about a board that mostly lost to buy-and-hold.
+
+    Nothing pinned the sort. Deleting it left 80 tests green while publishing
+    GPT-5.5 at -2% as rank 3, ahead of Buy & Hold at +3% at rank 4.
+
+    EQUALITY, not containment: a containment check passes on any order, which is
+    the entire failure being guarded against here."""
+    result = _run_ts(
+        _INTERLEAVED_RANK_FIXTURE_JS
+        + """
+console.log(JSON.stringify({
+  standingsKeys: board.standings.map((s) => s.key),
+  rets: board.standings.map((s) => s.ret),
+}));
+"""
+    )
+    assert result["standingsKeys"] == [
+        "claude_haiku_4_5",   # +5%
+        "buy_hold_djia",      # +3% -- a BASELINE, second, which is the point
+        "qwen3_7_plus",       # +2%
+        "djia_index",         # +1%
+        "gpt_5_5",            # -2%
+    ]
+    assert result["rets"] == ["+5.00%", "+3.00%", "+2.00%", "+1.00%", "-2.00%"]
 
 
 # ---------------------------------------------------------------------------
@@ -691,13 +788,29 @@ def test_the_rail_degrades_to_nothing_when_recharts_internals_change():
 
 def test_the_rail_draws_the_frame_and_not_a_second_geometry():
     """Every number comes from boardFrame.ts, which is pinned against
-    js/leaderboard.js. A literal here would be a third copy nothing guards."""
+    js/leaderboard.js. A literal here would be a third copy nothing guards.
+
+    THE CONSTANT ASSERTIONS READ THE BODY, NOT THE FILE. Against the whole
+    source every one of them is satisfied by the IMPORT BLOCK ALONE, with
+    nothing below it referring to any of them -- and `tsconfig.json` sets
+    `noUnusedLocals: false`, so an import nothing uses type-checks clean.
+    Verified by mutation: leaving the import byte-identical and replacing each
+    USE below with a divergent literal (radius 6, stub 14, arrow head 16, gap
+    40) put exactly the unguarded third copy this docstring forbids into the
+    rail, with `npm run typecheck` clean and this file at 43 passed.
+
+    The import line and `stackLabels(` stay scoped to the full source on
+    purpose: the import is a claim about where the numbers come from, and
+    `stackLabels` is only ever called, never imported-and-shadowed."""
     src = _rail()
     assert "from \"@/lib/boardFrame\"" in src or "from '@/lib/boardFrame'" in src
     assert "stackLabels(" in src
-    assert "BOARD_DOT_RADIUS" in src and "BOARD_STUB_LENGTH" in src
-    assert "BOARD_ARROW_HEAD_LENGTH" in src
-    assert "BOARD_LABEL_GAP_MAX" in src, "even the fallback gap is the frame's"
+    body = src.split("type RailProps", 1)
+    assert len(body) == 2, "could not split the import block from the rail body"
+    body = body[1]
+    assert "BOARD_DOT_RADIUS" in body and "BOARD_STUB_LENGTH" in body
+    assert "BOARD_ARROW_HEAD_LENGTH" in body
+    assert "BOARD_LABEL_GAP_MAX" in body, "even the fallback gap is the frame's"
 
 
 def test_the_rail_never_sorts_by_declaration_order():
