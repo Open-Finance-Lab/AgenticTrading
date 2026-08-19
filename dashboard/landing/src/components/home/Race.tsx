@@ -3,27 +3,10 @@ import { Button } from "@/components/ui/button";
 // No storyline import here on purpose: the Talk → Test story agent belongs to a
 // backtest run report (Test.tsx), not to a board.
 import { PRIMARY_LANDING_CTA } from "@/lib/cta";
-
-/** TEMPORARY, and the next task deletes it.
- *
- *  These rows used to be imported from BoardPreview.tsx, which drew the same
- *  invented curves. That card now renders the live Competition board, so the
- *  constant went with the fabricated data — and this file, left importing it,
- *  would not have compiled. Inlining the rows here is the smallest change that
- *  keeps every intermediate commit on this branch typecheck-clean; rewiring
- *  this table to `useLeaderboard()` is the next task's job, not a change to
- *  smuggle in beside a chart rewrite.
- *
- *  So the page is briefly in the state the plan calls the worst of both: real
- *  numbers in the hero above invented ones here. That is a property of this
- *  commit, not of the branch. */
-const SAMPLE_STANDINGS = [
-  { rank: 1, name: "DeepSeek V4 Pro", ret: "+21.0%", highlight: true },
-  { rank: 2, name: "Buy & Hold", ret: "+5.5%", highlight: false },
-  { rank: 3, name: "DJIA", ret: "+2.8%", highlight: false },
-  { rank: 4, name: "Claude Sonnet 4.6", ret: "+1.4%", highlight: false },
-  { rank: 5, name: "GPT-5.5", ret: "-1.5%", highlight: false },
-];
+// The sample rows are gone: this table and the hero card render the SAME live
+// Competition board, from one fetch. Real numbers in the hero above invented
+// ones here, on the same page, is worse than either alone.
+import { useLeaderboard } from "@/lib/useLeaderboard";
 
 /** Three facts, in the order a sceptic asks for them: what was held equal, what
  *  the other board is, and what disqualifies a result. Icons carry the shape so
@@ -45,6 +28,20 @@ const BOARD_RULES = [
 ] as const;
 
 export function Race() {
+  const board = useLeaderboard();
+  // The standings table is a board, not the home CHART rank list -- it INCLUDES
+  // buy_hold_djia and djia_index alongside the 7 models, deliberately different
+  // from /app's models-only rank row. Three reasons: (1) the dashboard's own
+  // Competition Leaderboard tab ranks all twelve entries including baselines --
+  // it is the home CHART rank list, not this table, that is models-only; (2)
+  // the chart on this page already draws both baselines as dashed curves, so a
+  // row-less curve would be a dangling reference with nothing to name it; (3)
+  // most of the models lost to buy-and-hold, and a models-only table would
+  // silently make the page more flattering than the truth -- the exact failure
+  // the copy guards in this file exist to prevent. `selectBoardEntries` already
+  // seeds `standings` with both baselines; do not add a filter here that drops
+  // them back out.
+  const standings = board.status === "ready" ? board.data.standings : [];
   return (
     <section id="race" className="py-24 bg-muted/20 border-y border-border scroll-mt-40">
       <div className="container mx-auto px-6">
@@ -87,10 +84,13 @@ export function Race() {
                 <Medal className="w-5 h-5 text-primary shrink-0" aria-hidden="true" />
                 Competition Standings
               </h3>
-              {/* Literal, not a shared constant — see the note in BoardPreview.tsx:
-                  the guard counts occurrences in the minified bundle. */}
+              {/* Literal, not a shared constant — see the note in
+                  BoardPreview.tsx: the guard counts occurrences in the minified
+                  bundle. */}
               <span className="text-xs font-mono text-muted-foreground bg-muted px-2 py-1 rounded shrink-0">
-                Illustrative example
+                {board.status === "ready" && board.data.windowLabel
+                  ? `Competition window · ${board.data.windowLabel}`
+                  : "Competition window"}
               </span>
             </div>
             <div className="space-y-2 mt-4">
@@ -99,32 +99,47 @@ export function Race() {
                 <div className="col-span-7">AI model</div>
                 <div className="col-span-3 text-right">Return</div>
               </div>
-              {SAMPLE_STANDINGS.map((item) => (
-                <div
-                  key={item.rank}
-                  className={`grid grid-cols-12 items-center p-3 border rounded-lg ${
-                    item.highlight
-                      ? "bg-primary/10 border-primary/40"
-                      : "bg-background border-border"
-                  }`}
-                >
-                  <div className="col-span-2 font-mono font-bold text-muted-foreground">#{item.rank}</div>
-                  <div className={`col-span-7 font-medium truncate pr-2 ${item.highlight ? "text-primary" : "text-foreground"}`}>
-                    {item.name}
-                  </div>
+              {board.status === "loading" ? (
+                <p className="px-2 py-6 text-sm text-muted-foreground">Loading the board…</p>
+              ) : board.status === "error" ? (
+                // Names the failure. Absent and broken must not render the same.
+                <p className="px-2 py-6 text-sm text-muted-foreground">
+                  The standings didn&apos;t load ({board.message}). Reload to try again.
+                </p>
+              ) : (
+                standings.map((item, index) => (
                   <div
-                    className={`col-span-3 text-right font-mono font-bold ${
-                      item.highlight
-                        ? "text-primary"
-                        : item.ret.startsWith("-")
-                          ? "text-destructive"
-                          : "text-positive"
+                    key={item.key}
+                    className={`grid grid-cols-12 items-center p-3 border rounded-lg ${
+                      index === 0
+                        ? "bg-primary/10 border-primary/40"
+                        : "bg-background border-border"
                     }`}
                   >
-                    {item.ret}
+                    <div className="col-span-2 font-mono font-bold text-muted-foreground">
+                      #{index + 1}
+                    </div>
+                    <div
+                      className={`col-span-7 font-medium truncate pr-2 ${
+                        index === 0 ? "text-primary" : "text-foreground"
+                      }`}
+                    >
+                      {item.name}
+                    </div>
+                    <div
+                      className={`col-span-3 text-right font-mono font-bold ${
+                        index === 0
+                          ? "text-primary"
+                          : item.ret.startsWith("-")
+                            ? "text-destructive"
+                            : "text-positive"
+                      }`}
+                    >
+                      {item.ret}
+                    </div>
                   </div>
-                </div>
-              ))}
+                ))
+              )}
             </div>
           </div>
         </div>

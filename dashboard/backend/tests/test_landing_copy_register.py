@@ -64,13 +64,35 @@ def test_token_cost_wording_is_gone():
     assert "Est. token cost" not in _shipped_text()
 
 
-def test_illustrative_example_label_appears_at_least_twice():
-    """Hero's metric row and Race's chart/standings block both need the label —
-    the sample curves elsewhere on the page are not backed by a live account and
-    must not read as a real result."""
+def test_the_disclaimer_survives_where_the_data_is_still_invented():
+    """The label was on three cards: the hero board, the Race standings, and the
+    chat mock. Two of the three now draw the LIVE Competition board, and the
+    label on real numbers is its own false claim -- so the count is 1, not 3,
+    and asserting >= 2 would force the disclaimer back onto real data.
+
+    The chat mock is still a mock, so it keeps it. Pinning that specifically,
+    rather than dropping the guard, is what stops the next edit from removing the
+    one place it is still true."""
     text = _shipped_text()
-    count = text.count("Illustrative example")
-    assert count >= 2, f"expected 'Illustrative example' at least twice, found {count}"
+    assert text.count("Illustrative example") == 1, (
+        "exactly one card is still illustrative — the chat simulation"
+    )
+    chat = (
+        Path(__file__).resolve().parents[2]
+        / "landing" / "src" / "components" / "home" / "ChatSimulation.tsx"
+    ).read_text(encoding="utf-8")
+    assert "Illustrative example" in chat
+
+
+def test_the_board_cards_name_the_window_they_draw():
+    """What replaced the disclaimer on the two board cards. They now draw real
+    entries over a real window, and the window is the one detail that must not be
+    left implicit -- the forward arrow under the chart otherwise reads as a claim
+    that this window is still running, when it closed on 2026-05-15."""
+    text = _shipped_text()
+    assert text.count("Competition window") >= 2, (
+        "both the hero card and the Race standings must state their provenance"
+    )
 
 
 def test_no_real_money_sentence_is_present_verbatim():
@@ -161,20 +183,28 @@ def test_settings_label_uses_the_ai_model_glossary_term():
 
 
 def test_race_sample_cards_have_no_live_pulse():
-    """Race's Standings/Leaderboard cards carry "Illustrative example" tags, yet a
-    pulsing green "Live" badge sat beside both — animating exactly the claim the
-    label disclaims. The badge's ping dot was the landing's only use of Tailwind's
+    """Race's Standings card carried "Illustrative example" yet a pulsing green
+    "Live" badge sat beside it — animating exactly the claim the label
+    disclaimed. The badge's ping dot was the landing's only use of Tailwind's
     ``animate-ping``, so its absence from the shipped text means the badge (not
-    merely its caption) is gone. The surrounding prose may still say "live" —
-    live *market prices* are a real product property; the badge on sample data
-    was the contradiction. The positive assertions pin that the cards themselves
-    still ship AND that the bundle text was actually read: "Standings" and
-    "Leaderboard" live only in the JS bundle, so a broken entry-bundle reference
-    cannot turn the negative check vacuous (shown by fault injection during
-    review)."""
+    merely its caption) is gone.
+
+    The card draws the live board now, which removes the contradiction but not
+    the ban: a green pulse beside a FIXED historical window would be a fresh
+    claim of its own, and a worse one for being on real numbers. The surrounding
+    prose may still say "live" — the Live Trading Leaderboard is a real board
+    with a real name, and live *market prices* are a real product property.
+
+    The positive assertions pin that the cards themselves still ship AND that the
+    bundle text was actually read: "Standings" and "Leaderboard" live only in the
+    JS bundle, so a broken entry-bundle reference cannot turn the negative check
+    vacuous (shown by fault injection during review)."""
     text = _shipped_text()
     assert "Standings" in text and "Leaderboard" in text
     assert "animate-ping" not in text
+    assert "animate-pulse" not in text or "Competition window" in text, (
+        "a pulse on this card must not outlive the window label that dates it"
+    )
 
 
 def test_auth_error_gives_a_next_step():
@@ -355,14 +385,48 @@ def test_no_landing_component_puts_a_user_agent_on_the_board():
         assert "yours" not in body, f"{name}: no user curve on a board no user agent is on"
 
     # Non-vacuity, scoped to whatever actually draws the board today. Membership
-    # is derived from the shared sample rows rather than hardcoded to Race.tsx:
-    # the chart moved to BoardPreview.tsx when the board was promoted into the
-    # hero, and a filename-pinned check would have passed on the file that no
-    # longer draws anything.
-    board = {name: body for name, body in bodies.items() if "SAMPLE_STANDINGS" in body}
-    assert board, "no component renders the board sample rows"
+    # is derived rather than hardcoded to a filename: the chart moved to
+    # BoardPreview.tsx when the board was promoted into the hero, and the sample
+    # rows it was previously keyed on were deleted when the board went live. The
+    # anchor is now the hook both board components read, which is the strongest
+    # version of this check yet -- a component drawing a curve it did NOT get
+    # from the API is exactly the thing being banned.
+    board = {name: body for name, body in bodies.items() if "useLeaderboard" in body}
+    assert board, "no component reads the live board"
     corpus = "".join(board.values())
-    assert "DeepSeek V4 Pro" in corpus and "dataKey=" in corpus
+    assert "dataKey=" in corpus, "one of them must actually draw curves"
+    assert "SAMPLE_STANDINGS" not in corpus and "SAMPLE_CURVES" not in corpus, (
+        "a board component that carries its own rows is drawing something the "
+        "API did not send"
+    )
+
+
+def test_race_standings_render_the_full_selection_baselines_included():
+    """ADJUDICATED BY THE CONTROLLER, pinned rather than left to drift back: the
+    Race standings table includes buy_hold_djia and djia_index alongside the 7
+    models, unlike /app's home CHART rank list, which is models-only. Three
+    reasons live in the Race.tsx comment beside `standings`: (1) the dashboard's
+    own Competition Leaderboard tab ranks all twelve entries including the
+    baselines -- it is the home CHART rank list that is models-only, and this
+    card is a board, not that list; (2) the chart on this page already draws
+    both baselines as dashed curves, so a row-less curve would be a dangling
+    reference; (3) most of the models lost to buy-and-hold, and a models-only
+    table would silently make the page more flattering than the truth -- the
+    exact failure the copy guards in this file exist to prevent.
+
+    `selectBoardEntries` (pinned separately in
+    test_select_board_entries_returns_nine_of_twelve_models_first_then_baselines,
+    test_landing_live_board.py) already seeds `board.data.standings` with both
+    baselines; what this guard pins is that Race.tsx does not narrow that list
+    back down before rendering it -- e.g. a `standings.filter((s) => ...)`
+    inserted ahead of the `.map` would compile cleanly and pass every other
+    guard in this file while silently dropping the baseline rows."""
+    source = _RACE_TSX.read_text(encoding="utf-8")
+    assert "standings.map(" in source, "Race.tsx no longer maps the full standings array"
+    assert not re.search(r"standings\s*\.\s*filter\(", source), (
+        "a filter ahead of the map would drop the baseline rows the controller "
+        "ruled must stay on the board"
+    )
 
 
 def test_race_source_and_shipped_bundle_agree():
