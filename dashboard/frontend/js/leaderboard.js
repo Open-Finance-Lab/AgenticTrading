@@ -1914,3 +1914,10 @@ window.getSeriesStyle = getSeriesStyle;
 // gets to invent; it is a rendering of the other's data.
 window.formatShortDate = formatShortDate;
 window.formatChartTooltipLabel = formatChartTooltipLabel;
+// The shared board frame, consumed by home-page.js for screen 0's chart.
+// Explicit for the same reason the four exports above are: the implicit global
+// degrades on rename to a chart with no frame, and a frame that silently stops
+// drawing is indistinguishable from a frame nobody asked for. Pinned from both
+// sides by test_frontend_board_frame.py.
+window.createEndpointLabelPlugin = createEndpointLabelPlugin;
+window.createAxisArrowPlugin = createAxisArrowPlugin;

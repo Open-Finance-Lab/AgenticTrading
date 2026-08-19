@@ -442,3 +442,50 @@ console.log(JSON.stringify(out));
     assert second["name"] == "SPY"
     assert second["value"] == "V5"
     assert second["color"] == "#00ff00", "no _style on this dataset -- falls back to borderColor"
+
+
+def test_the_frame_factories_are_explicit_cross_file_exports():
+    """Same contract as `buildEquityCurvesFromEntries`: explicit, not the
+    implicit global these classic scripts share. On rename the implicit form
+    degrades to a chart with no frame, and a frame that silently stops drawing
+    looks exactly like a frame nobody asked for."""
+    assert "window.createEndpointLabelPlugin = createEndpointLabelPlugin;" in _SRC
+    assert "window.createAxisArrowPlugin = createAxisArrowPlugin;" in _SRC
+    assert "window.createEndpointLabelPlugin" in _HOME_SRC
+    assert "window.createAxisArrowPlugin" in _HOME_SRC
+
+
+def test_screen_zero_installs_the_frame_on_its_chart():
+    """Not merely defined next to it. The plugins array is what makes it draw."""
+    assert "homeBoardFramePlugins()" in _HOME_SRC
+    chart_call = _HOME_SRC[_HOME_SRC.index("new window.Chart(") :][:400]
+    assert "plugins: homeBoardFramePlugins()" in chart_call
+
+
+def test_screen_zero_says_so_when_the_frame_is_missing():
+    """A missing export degrades to a frameless chart, which is a plausible
+    design rather than a break -- so it needs a signal, exactly like the missing
+    curve-builder case this module already warns about."""
+    fn = _HOME_SRC[_HOME_SRC.index("function homeBoardFramePlugins()") :][:700]
+    assert "console.warn" in fn
+    assert "return []" in fn
+
+
+def test_screen_zero_does_not_grow_a_pointer_gate():
+    """`Interaction.modes.nearest` delegates to getNearestItems, which returns []
+    unless `chart.isPointInArea(position)` -- so the widened gutter is already
+    inert for this panel's tooltip. A hand-rolled gate here would be dead code
+    imitating the Leaderboard tab, which needs one only because it sets
+    `events: []`."""
+    assert "pointermove" not in _HOME_SRC
+    assert "resolveHoverTarget" not in _HOME_SRC
+
+
+def test_screen_zero_keeps_its_percent_pill_by_taking_the_default():
+    """The factory's default formatter is percent to two decimals, which is what
+    the rank row beside each curve renders (`homeFormatReturnPct`). Passing a
+    formatter here would be a second chance to render the same number two ways
+    -- the reason this module borrows both axis formatters rather than writing
+    its own."""
+    fn = _HOME_SRC[_HOME_SRC.index("function homeBoardFramePlugins()") :][:700]
+    assert "formatValue" not in fn

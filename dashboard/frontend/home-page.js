@@ -1546,6 +1546,29 @@ function clearHomeLeaderboardChart() {
     if (wrap && wrap.parentNode) wrap.parentNode.removeChild(wrap);
 }
 
+/** The shared board frame's plugins, or none if js/leaderboard.js has not
+ *  landed yet.
+ *
+ *  Screen 0 takes every default: the pill formatter is percent to two decimals,
+ *  which is exactly what the rank row beside each curve renders
+ *  (`homeFormatReturnPct`), and there is no hover gate here to fade against.
+ *  Passing a formatter would be a second chance to render the same number two
+ *  ways -- the same reason this module borrows both axis formatters rather than
+ *  writing its own.
+ *
+ *  Warns on absence. A frameless chart is a plausible design rather than a
+ *  visible break, so unlike the axis formatters (which degrade to an ugly label
+ *  that is on screen and self-reporting) this one needs a signal. */
+function homeBoardFramePlugins() {
+    const labels = window.createEndpointLabelPlugin;
+    const arrow = window.createAxisArrowPlugin;
+    if (typeof labels !== 'function' || typeof arrow !== 'function') {
+        console.warn('[home] board frame factories missing — drawing an unframed chart');
+        return [];
+    }
+    return [arrow(), labels()];
+}
+
 /** Draw screen 0's equity chart, or nothing at all.
  *
  *  Returns null -- and leaves no element behind -- when there are no series or
@@ -1594,6 +1617,7 @@ function renderHomeLeaderboardChart(series, times) {
     const axis = { color: 'rgba(148, 163, 184, 0.85)', font: { size: 14 } };
     homeRankChart = new window.Chart(wrap.querySelector('canvas'), {
         type: 'line',
+        plugins: homeBoardFramePlugins(),
         data: {
             labels: times,
             datasets: series.map((s) => ({
