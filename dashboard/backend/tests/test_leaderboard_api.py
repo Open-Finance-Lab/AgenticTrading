@@ -771,3 +771,64 @@ def test_thread_start_failure_releases_the_in_progress_flag(monkeypatch):
     with pytest.raises(RuntimeError):
         lb_service.maybe_schedule_daily_leaderboard_refresh(force_refresh=True)
     assert lb_service._daily_refresh_running is False
+
+
+def test_live_leaderboard_api_serves_the_contest_curves_under_season_chrome(client, monkeypatch):
+    """The route, not the service function. `?period=live` was previously coerced
+    to 'contest' *inside* `_normalize_period`, so every service-level assertion
+    about the live board passed identically before and after the period existed.
+    Only a request through the router proves FastAPI accepts the value, that it
+    survives the `Query` declaration, and that `season` reaches the wire.
+    """
+    _seed_leaderboard_runs(lb_service.db)
+    monkeypatch.setattr(
+        lb_service,
+        "ensure_leaderboard_runs",
+        lambda force_refresh=False, period="contest", config=None: {
+            "session_id": "leaderboard-contest",
+            "start_date": "2026-04-15",
+            "end_date": "2026-05-15",
+            "period": "live",
+            "created": 0,
+            "refreshed_at": "2026-06-18T00:00:00+00:00",
+        },
+    )
+
+    resp = client.get("/api/v1/leaderboard?period=live")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["period"] == "live"
+    assert body["board_title"] == "Live Trading Leaderboard"
+    # Same window as the contest board, deliberately: a distinct window would
+    # miss `_find_cached_run` on every entry and start recomputing baselines --
+    # and, with LEADERBOARD_DAILY_AUTO_DEPLOY armed, billable LLM deploys -- from
+    # a public, unauthenticated GET.
+    assert body["window"]["start_date"] == "2026-04-15"
+    assert body["window"]["end_date"] == "2026-05-15"
+    assert body["total_entries"] == 2
+
+    # The board's own description, not the Competition board's rules.
+    assert "contest window" not in body["window"]["description"]
+    assert "preview" in body["window"]["description"].lower()
+
+    # And it still reads as a preview to `seasonHasAdvanced()`.
+    season = body["season"]
+    assert season["number"] == 0
+    assert season["last_advanced_date"] is None
+    assert season["trading_days_elapsed"] == 0
+
+
+def test_contest_leaderboard_api_carries_no_season(client, monkeypatch):
+    """One fixed historical window is not a season. Attaching one would render
+    the season strip on a board that has none."""
+    _seed_leaderboard_runs(lb_service.db)
+    monkeypatch.setattr(
+        lb_service,
+        "ensure_leaderboard_runs",
+        lambda force_refresh=False, period="contest", config=None: {
+            "session_id": "leaderboard-contest",
+            "created": 0,
+            "refreshed_at": "2026-06-18T00:00:00+00:00",
+        },
+    )
+    assert "season" not in client.get("/api/v1/leaderboard").json()

@@ -90,7 +90,7 @@ Pipeline is **backtest → SQLite → API → dashboard**. The backend is layere
 
 **H6 leaderboard integrity guard.** An LLM-backed entry can only publish if the model actually drove ≥95% of its steps (`MIN_LLM_DECISION_COVERAGE = 0.95`). The guard (`domain/leaderboard/service.py`) keys on `PortfolioManager.llm_decisions` — steps the model genuinely drove, incremented only at the *success exit* of the decision path — **not** `llm_calls` (a pure billing counter that also ticks on truncated/unparseable responses that then silently fall back to rule-based). This stops a rule-based fallback curve from being published under an LLM's name. See the memory note `leaderboard-h6-integrity-model` for the full rationale. All 7 LLM entries currently on the board (Claude Haiku 4.5, Sonnet 4.6, GPT-5.5, Gemini 3.1 Pro, Qwen3.7 Plus, DeepSeek V4 Pro, Nemotron 3 Nano 30B) cleared it; only DeepSeek beat the passive baselines.
 
-### Two leaderboards, and why `live` is frontend-only vocabulary
+### Two leaderboards, and what `live` does *not* mean
 
 Since PR #352 the dashboard serves **two** boards: the **Competition Leaderboard** (one fixed
 historical window, the acquisition hook) and the **Live Trading Leaderboard**, which is meant to
@@ -99,24 +99,63 @@ Neither board takes user entries — `get_leaderboard` builds every row from the
 `strategies` roster in `dashboard/config/leaderboard.json`, and `api/routers/leaderboard.py`
 exposes no submission route. Don't write copy that implies otherwise.
 
-**The season engine does not exist yet.** `VALID_PERIODS = ("contest", "daily")`
-(`domain/leaderboard/service.py:50`) — `live` and `season` are *frontend* vocabulary only
-(`normalizeBoardPeriod()`, `dashboard/frontend/js/leaderboard.js:636`). `_normalize_period`
-(`:91-93`) coerces any unrecognised period back to `contest` rather than 4xx-ing it, so
-`GET /api/v1/leaderboard?period=live` returns a perfectly successful **HTTP 200 carrying the
-Competition board**. The tab therefore renders in a deliberate **Season 0 preview**: real
-Competition curves under season chrome, plus a banner saying nothing here has advanced.
+**`live` is a real period; the season engine still does not exist.** As of PR #386
+`VALID_PERIODS = ("contest", "daily", "live")` (`domain/leaderboard/service.py:50`) and
+`GET /api/v1/leaderboard?period=live` answers with `period: "live"`, its own
+`window.description`, and a `season` block (`build_season_payload`, `:621`). `_normalize_period`
+(`:91-93`) still coerces genuinely unrecognised periods back to `contest` rather than 4xx-ing
+them. **Nothing advances anything** — the block is hardcoded to the not-yet-advanced state — so
+the tab renders a deliberate **Season 0 preview**: real Competition curves under season chrome,
+plus a banner saying nothing here has advanced. `season` remains vocabulary the *engine* has yet
+to earn.
+
+**The live board reuses the contest session and window byte-for-byte, and that is a spend
+control.** `resolve_leaderboard_config("live")` spreads the contest base so `_find_cached_run`
+hits cache on all twelve entries; inventing a window would miss on every one and start
+recomputing baselines — and, with `LEADERBOARD_DAILY_AUTO_DEPLOY` armed, billable LLM deploys —
+from a public unauthenticated GET. The independent second lock is
+`maybe_schedule_daily_leaderboard_refresh()` being gated on `period == "daily"`. Neither was
+written as a backstop for the other.
 
 ⚠ **The preview banner is anchored on evidence of an advance, not on the period — keep it that
 way.** `isLivePreview()` is `isLiveBoard() && !seasonHasAdvanced(payload)`, and
-`seasonHasAdvanced()` tests `season.last_advanced_date` / `trading_days_elapsed > 0`: fields only
-a real nightly advance can write. It was originally `payload.period !== 'live'`, which meant the
-season engine's most natural first commit — adding `"live"` to `VALID_PERIODS`, needing no season
-payload at all — would have silently cleared every banner while nothing had run. Do not
-"simplify" it back to a period check. Relatedly, **Season 0 is falsy**: every read of the number
-goes through `displayedSeasonNumber()` + `Number.isFinite`, because `season?.number ? … : '—'`
-renders the shakedown season as no season at all. Both are pinned by source-shape tests, which is
-the only kind that can catch either (a test passing period `"live"` or season `3` passes anyway).
+`seasonHasAdvanced()` (`js/leaderboard.js:312`) tests `season.last_advanced_date` /
+`trading_days_elapsed > 0`: fields only a real nightly advance can write. It was originally
+`payload.period !== 'live'`, which meant the season engine's most natural first commit — adding
+`"live"` to `VALID_PERIODS`, needing no season payload at all — would have silently cleared every
+banner while nothing had run. **That commit has now landed and changed nothing here, which was
+the point.** Do not now "simplify" it to a period check on the grounds that the period is finally
+real; it is real and still says nothing about an advance.
+
+⚠ **Season 0 is falsy, and the number has exactly one owner.** Every read goes through
+`displayedSeasonNumber()` + `Number.isFinite` (`:341`), because `season?.number ? … : '—'`
+renders the shakedown season as no season at all; every *rendered* mention goes through
+`displayedSeasonLabel()` (`:359`). `PREVIEW_SEASON_NUMBER` exists on both sides, but the JS copy
+is only the fallback inside `displayedSeasonNumber` — the payload's `season.number` decides.
+Interpolating the JS constant into copy gave the badge and the banner separate owners that
+disagreed the moment the server's constant moved. `phase_label` is `f"Season {…}"` for the same
+reason.
+
+⚠ **The preview season's window expires by itself, on purpose.** Nothing advances Season 0, so
+`season_zero_start` + `length_trading_days` describes a fortnight that becomes a *past* fortnight
+with no code noticing. `_preview_season_dates` (`:566`) therefore returns `(None, None)` once the
+window has elapsed — and also when `season_zero_start` is absent or unparseable — which lands on
+copy the client already ships ("Dates set when the first season opens") and prints a one-time
+operator log line. Do **not** restore the old `or config["start_date"]` fallback: it published
+the *contest* window (2026-04-15 → 2026-04-28) as a season, so "nobody configured a season" and
+"the season is the April contest window" came back byte-identical, `status: preview`, HTTP 200 —
+the exact shape the fail-closed-is-not-fail-visible section below is about.
+
+The season length is untrusted config on a public GET: `_season_trading_days` (`:494`) parses and
+clamps it **once** to `1..MAX_SEASON_TRADING_DAYS`, and the payload reports the clamped value.
+Clamping inside `season_window` while publishing the raw number let a negative length render a
+**100%-full** progress bar (`elapsed / total`, both negative) directly under the banner denying
+that anything advanced.
+
+All of the above is pinned by tests: `tests/test_leaderboard_season.py` (the server contract),
+`tests/test_leaderboard_api.py` (the route), and `tests/test_frontend_live_trading_board.py`
+(source-shape guards — the only kind that can catch the falsy-season and two-owners bugs, since a
+test passing period `"live"` or season `3` passes anyway).
 
 ### LLM safety boundary
 

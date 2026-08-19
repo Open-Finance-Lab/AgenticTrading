@@ -6,6 +6,7 @@ shape it reads and, more importantly, the one thing that must NOT be true yet.
 """
 
 import json
+from datetime import date
 
 import pytest
 
@@ -116,3 +117,147 @@ def test_only_the_live_board_carries_a_season():
     attaching one would make the season strip render on a board that has none."""
     assert "season" not in service.get_leaderboard(period="contest")
     assert "season" in service.get_leaderboard(period="live")
+
+
+# ── The window is a claim, and a claim that nothing maintains goes stale ─────
+
+
+def test_the_preview_window_disappears_once_it_has_elapsed():
+    """Nothing advances Season 0, so its fortnight becomes a *past* fortnight.
+
+    The config pins 2026-08-12 → 2026-08-25. On 2026-08-26 and every day after,
+    the unfixed code kept publishing that window with `trading_days_elapsed: 0`,
+    so the strip read "Aug 12 – Aug 25 · Day 0 of 10" indefinitely -- a board
+    advertising a schedule it had already missed. No operator error is needed to
+    reach this state, only time, which is why it cannot be left to a config bump.
+
+    `(None, None)` lands on copy the client already ships for exactly this:
+    "Dates set when the first season opens".
+    """
+    live = service.resolve_leaderboard_config("live")
+    inside = service.build_season_payload(live, as_of=date(2026, 8, 20))
+    assert inside["start_date"] == "2026-08-12"
+    assert inside["end_date"] == "2026-08-25"
+
+    after = service.build_season_payload(live, as_of=date(2026, 9, 30))
+    assert after["start_date"] is None
+    assert after["end_date"] is None
+    # Present-but-null, never absent: the client reads these keys unguarded-ish.
+    assert "start_date" in after and "end_date" in after
+    assert after["status"] == "preview"
+    assert after["trading_days_total"] == 10
+
+
+def test_the_last_day_of_the_window_still_counts_as_inside_it():
+    """A season that ends today has not elapsed. `<` not `<=`."""
+    live = service.resolve_leaderboard_config("live")
+    on_the_day = service.build_season_payload(live, as_of=date(2026, 8, 25))
+    assert on_the_day["end_date"] == "2026-08-25"
+
+
+def test_a_missing_season_start_reports_no_window_not_the_contest_one():
+    """This fell back to `config["start_date"]` -- the *contest* window -- and
+    published 2026-04-15 → 2026-04-28 as a season, `status: preview`, HTTP 200.
+
+    "Nobody configured a season" and "the season is the April contest window"
+    were byte-identical responses. That is the failure shape CLAUDE.md's
+    fail-closed-is-not-fail-visible section is about.
+    """
+    season = service.build_season_payload(
+        {"start_date": "2026-04-15", "season": {"length_trading_days": 10}}
+    )
+    assert season["start_date"] is None
+    assert season["end_date"] is None
+
+
+def test_an_unparseable_season_start_reports_no_window_rather_than_raising():
+    """`date.fromisoformat` raises ValueError, on a public unauthenticated GET."""
+    season = service.build_season_payload({"season": {"season_zero_start": "not-a-date"}})
+    assert season["start_date"] is None
+
+
+def test_a_weekend_start_rolls_forward_to_the_first_session():
+    """The returned start is the season's first *session*.
+
+    `season_window` counts weekdays, so a Saturday start was echoed back verbatim
+    as a first day on which, by this function's own rule, nothing traded -- and
+    the client prints it as the window's first day.
+    """
+    start, end = service.season_window("2026-08-15", 10)  # Saturday
+    assert start == "2026-08-17", "Sat 15 Aug rolls forward to Mon 17 Aug"
+    assert end == "2026-08-28"
+
+
+# ── The length is config, so it is untrusted input on a public GET ──────────
+
+
+def test_trading_days_total_is_the_number_the_window_was_built_from():
+    """The clamp used to live inside `season_window` while the payload reported
+    the raw config value, so the two consumers disagreed. The client computes
+    `elapsed / total` for a CSS width: a negative total rendered a **100%-full**
+    progress bar directly under the banner denying that anything had advanced.
+    """
+    season = service.build_season_payload(
+        {"season": {"length_trading_days": -5, "season_zero_start": "2026-08-12"}}
+    )
+    assert season["trading_days_total"] == 1, "clamped, and reported as clamped"
+    assert season["trading_days_total"] >= 1
+
+
+def test_a_junk_season_length_falls_back_instead_of_raising():
+    """A bare `int()` on a config string raised ValueError out of the GET."""
+    season = service.build_season_payload(
+        {"season": {"length_trading_days": "ten", "season_zero_start": "2026-08-12"}}
+    )
+    assert season["trading_days_total"] == service.DEFAULT_SEASON_TRADING_DAYS
+
+
+def test_the_season_length_bounds_the_calendar_walk():
+    """`season_window` steps one day at a time and runs inside a public GET, so
+    the config number is the loop bound. Bounded in the function itself, not only
+    in its caller."""
+    start, end = service.season_window("2026-08-12", 10 ** 9)
+    assert start == "2026-08-12"
+    span = date.fromisoformat(end) - date.fromisoformat(start)
+    assert span.days < 400, "a season length may not become an unbounded loop"
+
+
+# ── The live board describes itself ─────────────────────────────────────────
+
+
+def test_the_live_board_does_not_inherit_the_contest_rules_as_its_description():
+    """`window.description` is served to every non-browser consumer of this
+    payload; /app never renders it, so nothing on screen showed the mismatch.
+    Inherited, it shipped the Competition board's *rules* to a tab that does not
+    run under them."""
+    contest = service.resolve_leaderboard_config("contest")
+    live = service.resolve_leaderboard_config("live")
+    assert live["description"] != contest["description"]
+    assert "look-ahead" not in live["description"]
+    assert "preview" in live["description"].lower()
+
+
+def test_the_live_phase_label_is_derived_from_the_season_number():
+    """A literal "Season 0" here is a second owner of the season number, and
+    bumping PREVIEW_SEASON_NUMBER is the first act of the advance engine."""
+    live = service.resolve_leaderboard_config("live")
+    assert live["phase_label"] == f"Season {service.PREVIEW_SEASON_NUMBER}"
+
+
+def test_the_route_documents_the_third_period():
+    """The description is what /docs shows and what the next reader believes.
+
+    Asserted against the `Query` object FastAPI actually serves, not against the
+    router file as text: a whole-file substring search for "live" passes on the
+    word appearing anywhere -- a comment, an unrelated identifier, the import
+    block -- so it could not tell a documented period from an undocumented one.
+    """
+    import inspect
+
+    from dashboard.backend.api.routers import leaderboard as router
+
+    param = inspect.signature(router.api_get_leaderboard).parameters["period"]
+    described = param.default.description
+    assert "live" in described, "the period the route now accepts must be in its own description"
+    for known in ("contest", "daily"):
+        assert known in described, f"the {known} period lost its documentation"
