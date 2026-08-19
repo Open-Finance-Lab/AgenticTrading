@@ -360,11 +360,23 @@ def test_the_board_is_fetched_once_for_the_whole_page():
     page = (_ROOT / "landing" / "src" / "pages" / "landing-page.tsx").read_text(
         encoding="utf-8"
     )
-    assert "<LeaderboardProvider>" in page
+    # Real containment, not text order. `provider_at < hero_at < race_at` alone
+    # is satisfied by a mutant where </LeaderboardProvider> closes right after
+    # <Hero /> -- <Race /> then sits textually after the opening tag but
+    # OUTSIDE the provider's actual JSX children, which is well-formed JSX
+    # and typechecks clean (verified). Exactly one provider -- so a stray
+    # second one can't satisfy this by itself -- and both consumers must fall
+    # strictly between its one open tag and its one close tag.
+    assert page.count("<LeaderboardProvider>") == 1, "exactly one provider expected"
+    assert page.count("</LeaderboardProvider>") == 1, "exactly one closing tag expected"
+    provider_at = page.index("<LeaderboardProvider>")
+    provider_close_at = page.index("</LeaderboardProvider>")
+    assert provider_at < provider_close_at, "the provider must actually close"
     hero_at = page.index("<Hero />")
     race_at = page.index("<Race />")
-    provider_at = page.index("<LeaderboardProvider>")
-    assert provider_at < hero_at < race_at, "both consumers must sit inside it"
+    assert provider_at < hero_at < provider_close_at, "<Hero /> must sit inside the provider"
+    assert provider_at < race_at < provider_close_at, "<Race /> must sit inside the provider"
+    assert hero_at < race_at, "Hero renders above Race on the page"
 
 
 def test_the_three_states_are_distinguishable_in_the_type():
