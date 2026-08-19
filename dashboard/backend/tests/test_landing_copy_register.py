@@ -602,3 +602,40 @@ def test_the_illustrative_run_report_still_labels_itself_illustrative():
     says they are not a result, so a later edit cannot close this by quietly
     dropping the chip instead of the impersonation."""
     assert "Illustrative" in _story_sources()["Test.tsx"]
+
+
+def test_the_illustrative_placeholders_source_and_shipped_bundle_agree():
+    """The three cases above read ``landing/src``; prod reads the bundle.
+
+    So all three stay green against a bundle built before the placeholders
+    landed -- and that bundle still ships "Claude Sonnet 4.6" over the real
+    contest window, which is the whole defect they were written to close.
+    Measured: the full landing suite (156 cases) passed on the pre-rebuild
+    bundle, so nothing at all made the missing ``npm run build`` red.
+
+    Same shape as ``test_race_source_and_shipped_bundle_agree`` and for the same
+    reason -- anchor one string on BOTH sides. Both values are read out of
+    ``storyline.ts`` rather than hardcoded, so changing the placeholder to some
+    other non-roster model or window keeps this honest by itself; a *bare*
+    absence check could not, because the bundle legitimately carries every roster
+    model name for the live board four screens up.
+    """
+    source = _BLOCK_COMMENT.sub("", _story_sources()["storyline.ts"])
+    stated = {
+        field: re.search(rf'\b{field}:\s*"([^"]+)"', source)
+        for field in ("model", "timePeriod")
+    }
+    missing_in_source = sorted(f for f, m in stated.items() if not m)
+    assert not missing_in_source, (
+        f"storyline.ts no longer declares {missing_in_source} as a plain string "
+        "literal, so this guard can no longer see which placeholders ship — "
+        "re-point it at however STORY_SPECS now states the model and the window."
+    )
+
+    shipped = _shipped_text()
+    absent = sorted(m.group(1) for m in stated.values() if m.group(1) not in shipped)
+    assert not absent, (
+        f"storyline.ts states {absent} but the shipped bundle does not carry "
+        "them, so prod still renders the previous illustrative run report — "
+        "rebuild per dashboard/landing/README.md"
+    )
