@@ -337,6 +337,74 @@ console.log(JSON.stringify({seriesColor, standingsColor}));
 
 
 # ---------------------------------------------------------------------------
+# Hero x-axis date formatting -- the dashboard prints "Apr 15" for the same
+# `timeKey` output this module bins onto the shared axis; the hero must not
+# print the raw ISO key.
+# ---------------------------------------------------------------------------
+
+
+def test_format_axis_date_formats_an_hourly_key_as_a_short_date():
+    result = _run_ts(
+        "console.log(JSON.stringify(module.exports.formatAxisDate('2026-04-15T14:00')));"
+    )
+    assert result == "Apr 15"
+
+
+def test_format_axis_date_formats_a_date_only_key_as_a_short_date():
+    """timeKey falls back to a 10-char date-only key (`s.length >= 10`) when
+    the timestamp has no `T` at index 10 -- formatAxisDate must take that
+    branch too, not only the hourly one."""
+    result = _run_ts(
+        "console.log(JSON.stringify(module.exports.formatAxisDate('2026-04-15')));"
+    )
+    assert result == "Apr 15"
+
+
+def test_format_axis_date_on_the_empty_key_returns_the_empty_string():
+    """timeKey returns '' for a missing/unparseable timestamp -- Recharts must
+    get back '' for that tick, not 'Invalid Date' or the literal string
+    'undefined'."""
+    result = _run_ts(
+        "console.log(JSON.stringify(module.exports.formatAxisDate('')));"
+    )
+    assert result == ""
+
+
+def test_format_axis_date_passes_through_an_unparseable_key_unchanged():
+    """Mirrors formatShortDate's `if (Number.isNaN(d.getTime())) return
+    isoDay;` -- an input `new Date(...)` cannot parse comes back UNCHANGED,
+    not as the string "Invalid Date". A mutant that drops this branch (or
+    returns `String(d)` instead of `isoDay`) fails this assertion."""
+    result = _run_ts(
+        "console.log(JSON.stringify(module.exports.formatAxisDate('not-a-date')));"
+    )
+    assert result == "not-a-date"
+
+
+_BOARD_PREVIEW_TSX = (_ROOT / "landing" / "src" / "components" / "home" / "BoardPreview.tsx").read_text(
+    encoding="utf-8"
+)
+
+
+def test_the_hero_x_axis_is_wired_to_the_date_formatter():
+    """Source guard: the <XAxis> must actually use formatAxisDate as its
+    tickFormatter, not just have the function exist unused in the module.
+    Deleting `tickFormatter={formatAxisDate}` from BoardPreview.tsx while
+    leaving the export in leaderboard.ts turns this assertion red -- verified
+    by hand (see the task report) -- while every other test in this file
+    still passes, since none of them render BoardPreview.tsx."""
+    xaxis_match = re.search(r"<XAxis\b.*?/>", _BOARD_PREVIEW_TSX, re.S)
+    assert xaxis_match, "no <XAxis> found in BoardPreview.tsx"
+    assert "tickFormatter={formatAxisDate}" in xaxis_match.group(0), (
+        "the XAxis must format its ticks with formatAxisDate, or the hero "
+        "prints raw ISO keys like '2026-04-15T14:00' instead of 'Apr 15'"
+    )
+    assert "formatAxisDate" in re.search(
+        r"import\s*\{[^}]*\}\s*from\s*\"@/lib/leaderboard\";", _BOARD_PREVIEW_TSX
+    ).group(0), "formatAxisDate must be imported from the shared lib, not redefined inline"
+
+
+# ---------------------------------------------------------------------------
 # Task 7 -- one fetch, shared by the hero and the Race standings.
 # ---------------------------------------------------------------------------
 

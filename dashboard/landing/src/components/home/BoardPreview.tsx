@@ -11,7 +11,7 @@ import {
   Customized,
 } from "recharts";
 import { useLeaderboard } from "@/lib/useLeaderboard";
-import { formatPercent, type BoardSeries } from "@/lib/leaderboard";
+import { formatAxisDate, formatPercent, type BoardSeries } from "@/lib/leaderboard";
 import { frameLayout, measureTextWidth } from "@/lib/boardFrame";
 import { EndpointRail } from "./EndpointRail";
 
@@ -196,6 +196,7 @@ export function BoardPreview() {
                 tickLine={false}
                 axisLine={false}
                 minTickGap={48}
+                tickFormatter={formatAxisDate}
               />
               <YAxis
                 stroke="hsl(var(--muted-foreground))"

@@ -90,6 +90,20 @@ function timeKey(ts: string): string {
   return s;
 }
 
+/** `2026-04-15T14:00` -> `Apr 15`. Mirrors `formatShortDate` in
+ *  dashboard/frontend/js/leaderboard.js:1096 exactly, including the
+ *  empty-string case, the T-vs-date-only branch, and the invalid-date
+ *  passthrough (returns the input unchanged rather than "Invalid Date") --
+ *  the dashboard renders the byte-identical `timeKey` output as a date, so
+ *  the hero's x-axis must format it the same way rather than print the raw
+ *  ISO key. */
+export function formatAxisDate(isoDay: string): string {
+  if (!isoDay) return '';
+  const d = new Date(String(isoDay).includes('T') ? isoDay : `${isoDay}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return isoDay;
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+
 /** Fractions, not dollars, and not for scale safety -- because of what the
  *  labels MEAN. Every dollar level in this payload is a x0.1 rescale of a
  *  $100,000 backtest onto the config's $10,000 display base (leaderboard
