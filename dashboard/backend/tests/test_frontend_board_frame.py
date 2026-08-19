@@ -489,3 +489,19 @@ def test_screen_zero_keeps_its_percent_pill_by_taking_the_default():
     its own."""
     fn = _HOME_SRC[_HOME_SRC.index("function homeBoardFramePlugins()") :][:700]
     assert "formatValue" not in fn
+
+
+def test_the_shared_fraction_is_the_default_and_any_override_says_why():
+    """Both surfaces take 0.4 unless a rendered check found otherwise. If screen
+    0 overrides, the number must arrive as the factory's documented option --
+    not as a second constant, and not by moving the shared default, which would
+    silently narrow the plot on a full-width board to fix a panel."""
+    assert "const BOARD_GUTTER_FRACTION = 0.4;" in _SRC
+    fn = _HOME_SRC[_HOME_SRC.index("function homeBoardFramePlugins()") :][:900]
+    if "gutterFraction" in fn:
+        assert re.search(r"Measured at \S", fn), (
+            "an override must carry the measurement that justified it"
+        )
+    assert "BOARD_GUTTER_FRACTION" not in _HOME_SRC, (
+        "the fraction is the frame's; screen 0 either takes it or passes an option"
+    )
