@@ -4,7 +4,7 @@
 
 **Goal:** Let the ATL backend use one Render-managed iFinD refresh token to obtain short-lived access tokens for all A-share backtests, while preserving the existing static access-token fallback and keeping all credentials server-side.
 
-**Architecture:** Prefer IFIND_REFRESH_TOKEN over IFIND_ACCESS_TOKEN. Exchange the refresh token lazily on the first iFinD request, cache the access token in process memory for six days, and serialize refreshes with a lock. On one 401/403 response, invalidate the cached token, refresh once, and retry. Do not persist tokens, expose them to the frontend, log them, or start a background timer.
+**Architecture:** Prefer IFIND_REFRESH_TOKEN over IFIND_ACCESS_TOKEN. Exchange the refresh token lazily on the first iFinD request, cache the access token in module-level process memory for six days (a client is built per backtester, so an instance-scoped cache would exchange once per backtest), and serialize refreshes with a process-local lock. On one 401/403 response, replace the token that was rejected -- compare-and-swap under a single lock acquisition, so a rotation seen by N threads costs one exchange -- refresh once, and retry. Do not persist tokens, expose them to the frontend, log them, or start a background timer.
 
 **Tech Stack:** Python backend, requests-compatible sessions, pytest, existing ATL market-data and backtest routers, Render environment variables.
 
@@ -84,9 +84,9 @@
    - ACCESS_TOKEN_MAX_AGE_SECONDS = 6 * 24 * 60 * 60.
 4. Resolve refresh and static credentials from explicit arguments first, then environment variables, with refresh precedence.
 5. Implement a lock-protected _get_access_token() cache using the injected monotonic clock.
-6. Exchange with a POST request containing Content-Type: application/json and the refresh_token header. Validate HTTP status, JSON shape, errorcode == 0, a mapping data, and a non-empty string access_token.
+6. Exchange with a POST request containing Content-Type: application/json and the refresh_token header. Validate HTTP status, JSON shape, a mapping data, and a non-empty string access_token. Treat errorcode the way the data path does -- a failure only when the field is present and non-zero -- so a response that omits it but carries a valid token is accepted rather than reported as a credential problem.
 7. Build data-request headers from the current provider token on every attempt.
-8. Preserve existing connection, 429, and 5xx retry behavior. For a 401/403, invalidate the cached token, perform one refresh, and retry once; do not loop indefinitely.
+8. Preserve existing connection, 429, and 5xx retry behavior. For a 401/403, replace the rejected token, perform one refresh, and retry once; do not loop indefinitely. The retry must not spend a transport retry slot -- an expired token discovered on the last attempt still has to be re-sent, and falling out of the retry loop raises an error the engine does not catch.
 9. Sanitize all refresh failures and keep credentials out of exception text.
 10. Run the focused client tests.
 11. Commit:

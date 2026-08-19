@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import logging
 import threading
 
 import pytest
@@ -54,6 +55,11 @@ def make_client(session, **kwargs):
     options = {
         "session": session,
         "token": TOKEN,
+        # Pinned rather than left to default: unset, the client falls back to
+        # os.getenv("IFIND_REFRESH_TOKEN"), so a developer's exported prod
+        # credential would turn every static-token case below into a
+        # refresh-first client and eat the first queued response.
+        "refresh_token": "",
         "base_url": "https://ifind.test",
         "sleep": lambda _seconds: None,
     }
@@ -387,7 +393,7 @@ def test_concurrent_first_requests_exchange_refresh_token_once():
     def fetch():
         try:
             client.fetch_hourly_bars(["600519.SH"], START, END)
-        except BaseException as exc:  # pragma: no cover - assertion below reports it
+        except Exception as exc:  # pragma: no cover - assertion below reports it
             errors.append(exc)
 
     threads = [threading.Thread(target=fetch) for _ in range(2)]
@@ -675,3 +681,313 @@ def test_non_mapping_json_is_rejected():
         make_client(session).fetch_hourly_bars(["600519.SH"], START, END)
 
     assert len(session.calls) == 1
+
+
+def test_auth_refresh_on_the_final_attempt_still_re_sends():
+    """An expired token discovered after the transport retries is recoverable.
+
+    The refresh path re-sends the request, so it must not be the loop's last
+    iteration: falling out of the retry loop raises an error the backtest
+    engine does not catch.
+    """
+    session = FakeSession(
+        [
+            FakeResponse(
+                payload={"errorcode": 0, "data": {"access_token": "first-token"}}
+            ),
+            requests.ConnectionError("boom"),
+            requests.ConnectionError("boom"),
+            FakeResponse(status_code=401),
+            FakeResponse(
+                payload={"errorcode": 0, "data": {"access_token": "second-token"}}
+            ),
+            FakeResponse(payload={"errorcode": 0, "tables": []}),
+        ]
+    )
+
+    result = make_client(
+        session,
+        token="",
+        refresh_token=REFRESH_TOKEN,
+    ).fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert result == {"errorcode": 0, "tables": []}
+    assert session.calls[-1][1]["headers"]["access_token"] == "second-token"
+
+
+def test_persistent_auth_failure_raises_a_catchable_client_error():
+    """A 401 that survives the refresh must stay inside the client's hierarchy."""
+    from dashboard.backend.infrastructure.market_data.ifind_client import (
+        IFindClientError,
+    )
+
+    session = FakeSession(
+        [
+            FakeResponse(
+                payload={"errorcode": 0, "data": {"access_token": "first-token"}}
+            ),
+            requests.ConnectionError("boom"),
+            requests.ConnectionError("boom"),
+            FakeResponse(status_code=401),
+            FakeResponse(
+                payload={"errorcode": 0, "data": {"access_token": "second-token"}}
+            ),
+            FakeResponse(status_code=401),
+        ]
+    )
+
+    with pytest.raises(IFindClientError):
+        make_client(
+            session,
+            token="",
+            refresh_token=REFRESH_TOKEN,
+        ).fetch_hourly_bars(["600519.SH"], START, END)
+
+
+def test_refresh_accepts_a_response_that_omits_errorcode():
+    """Absent `errorcode` means success on the data path; the same must hold here."""
+    session = FakeSession(
+        [
+            FakeResponse(payload={"data": {"access_token": SHORT_TOKEN}}),
+            FakeResponse(payload={"errorcode": 0, "tables": []}),
+        ]
+    )
+
+    result = make_client(
+        session,
+        token="",
+        refresh_token=REFRESH_TOKEN,
+    ).fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert result == {"errorcode": 0, "tables": []}
+    assert session.calls[1][1]["headers"]["access_token"] == SHORT_TOKEN
+
+
+def test_refresh_still_rejects_a_non_zero_errorcode_carrying_a_token():
+    """Tolerating absence must not become tolerating an explicit failure."""
+    from dashboard.backend.infrastructure.market_data.ifind_client import (
+        IFindTokenRefreshError,
+    )
+
+    session = FakeSession(
+        [
+            FakeResponse(
+                payload={"errorcode": -1, "data": {"access_token": SHORT_TOKEN}}
+            )
+        ]
+    )
+
+    with pytest.raises(IFindTokenRefreshError):
+        make_client(
+            session,
+            token="",
+            refresh_token=REFRESH_TOKEN,
+        ).fetch_hourly_bars(["600519.SH"], START, END)
+
+
+def test_refresh_failure_logs_the_errorcode_without_the_secret(caplog):
+    """A revoked token and a renamed field must be distinguishable in the log."""
+    from dashboard.backend.infrastructure.market_data.ifind_client import (
+        IFindTokenRefreshError,
+    )
+
+    session = FakeSession(
+        [FakeResponse(payload={"errorcode": -1, "errmsg": REFRESH_TOKEN})]
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="dashboard.backend.infrastructure.market_data.ifind_client",
+    ):
+        with pytest.raises(IFindTokenRefreshError):
+            make_client(
+                session,
+                token="",
+                refresh_token=REFRESH_TOKEN,
+            ).fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert "errorcode=-1" in caplog.text
+    assert REFRESH_TOKEN not in caplog.text
+    assert TOKEN not in caplog.text
+
+
+def test_refresh_transport_failure_is_logged_without_the_secret(caplog):
+    """The three non-business refresh failures must not be silent either."""
+    from dashboard.backend.infrastructure.market_data.ifind_client import (
+        IFindTokenRefreshError,
+    )
+
+    session = FakeSession(
+        [
+            requests.ConnectionError(REFRESH_TOKEN),
+            requests.ConnectionError(REFRESH_TOKEN),
+            requests.ConnectionError(REFRESH_TOKEN),
+        ]
+    )
+
+    with caplog.at_level(
+        logging.WARNING,
+        logger="dashboard.backend.infrastructure.market_data.ifind_client",
+    ):
+        with pytest.raises(IFindTokenRefreshError):
+            make_client(
+                session,
+                token="",
+                refresh_token=REFRESH_TOKEN,
+            ).fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert "iFinD access token refresh" in caplog.text
+    assert REFRESH_TOKEN not in caplog.text
+
+
+def test_token_exchange_retries_a_transport_failure():
+    """A single connection reset on the exchange must not abort the backtest."""
+    session = FakeSession(
+        [
+            requests.ConnectionError("boom"),
+            FakeResponse(
+                payload={"errorcode": 0, "data": {"access_token": SHORT_TOKEN}}
+            ),
+            FakeResponse(payload={"errorcode": 0, "tables": []}),
+        ]
+    )
+
+    result = make_client(
+        session,
+        token="",
+        refresh_token=REFRESH_TOKEN,
+    ).fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert result == {"errorcode": 0, "tables": []}
+    assert session.calls[2][1]["headers"]["access_token"] == SHORT_TOKEN
+
+
+def test_concurrent_authentication_failures_exchange_once():
+    """One rotation must cost one exchange, not one per in-flight thread."""
+
+    class AuthFailureSession:
+        def __init__(self):
+            self._lock = threading.Lock()
+            self.exchange_calls = 0
+            self.data_calls = 0
+            # Both threads must be holding a 401 before either is allowed to
+            # refresh, or the race this test exists to pin never happens.
+            self._both_rejected = threading.Barrier(2, timeout=10)
+
+        def post(self, url, **kwargs):
+            if url.endswith("/api/v1/get_access_token"):
+                with self._lock:
+                    self.exchange_calls += 1
+                    issued = self.exchange_calls
+                return FakeResponse(
+                    payload={
+                        "errorcode": 0,
+                        "data": {"access_token": f"token-{issued}"},
+                    }
+                )
+            with self._lock:
+                self.data_calls += 1
+                seen = self.data_calls
+            if seen <= 2:
+                self._both_rejected.wait()
+                return FakeResponse(status_code=401)
+            return FakeResponse(payload={"errorcode": 0, "tables": []})
+
+    session = AuthFailureSession()
+    client = make_client(session, token="", refresh_token=REFRESH_TOKEN)
+    errors: list[Exception] = []
+
+    def fetch():
+        try:
+            client.fetch_hourly_bars(["600519.SH"], START, END)
+        except Exception as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=fetch) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert errors == []
+    # One exchange to open, one to replace the rotated token. A third means
+    # each thread refreshed independently -- and clobbered its sibling's token.
+    assert session.exchange_calls == 2
+
+
+class CountingSession:
+    """Classifies calls by endpoint so exchanges can be counted, not queued."""
+
+    def __init__(self):
+        self.exchange_calls = 0
+        self.data_tokens: list[str] = []
+
+    def post(self, url, **kwargs):
+        if url.endswith("/api/v1/get_access_token"):
+            self.exchange_calls += 1
+            return FakeResponse(
+                payload={
+                    "errorcode": 0,
+                    "data": {"access_token": f"token-{self.exchange_calls}"},
+                }
+            )
+        self.data_tokens.append(kwargs["headers"]["access_token"])
+        return FakeResponse(payload={"errorcode": 0, "tables": []})
+
+
+def test_separate_clients_in_one_process_share_one_access_token():
+    """The cache is per process, as designed -- not per client instance.
+
+    A client is built per provider, a provider per `create_market_data_provider`
+    call, and that runs in every `HourlyBacktester.__init__`. Scoped to the
+    instance, an in-process burst of backtests exchanges once per backtest,
+    which is the per-worker request the design set out to avoid.
+    """
+    session = CountingSession()
+
+    make_client(session, token="", refresh_token=REFRESH_TOKEN).fetch_hourly_bars(
+        ["600519.SH"], START, END
+    )
+    make_client(session, token="", refresh_token=REFRESH_TOKEN).fetch_hourly_bars(
+        ["600519.SH"], START, END
+    )
+
+    assert session.exchange_calls == 1
+    assert session.data_tokens == ["token-1", "token-1"]
+
+
+def test_clients_with_different_credentials_do_not_share_a_token():
+    """Sharing is keyed on the credential, so a second account gets its own token."""
+    session = CountingSession()
+
+    make_client(session, token="", refresh_token=REFRESH_TOKEN).fetch_hourly_bars(
+        ["600519.SH"], START, END
+    )
+    make_client(
+        session, token="", refresh_token="a-second-ifind-refresh-token"
+    ).fetch_hourly_bars(["600519.SH"], START, END)
+
+    assert session.exchange_calls == 2
+    assert session.data_tokens == ["token-1", "token-2"]
+
+
+def test_token_exchange_wraps_every_request_exception():
+    """Adding retries must not narrow what the exchange catches.
+
+    Only connection resets and timeouts are worth retrying, but every
+    ``requests`` failure still has to leave as an ``IFindClientError`` -- a raw
+    ``requests`` exception escapes the engine's handlers the same way an
+    ``AssertionError`` does.
+    """
+    from dashboard.backend.infrastructure.market_data.ifind_client import (
+        IFindTokenRefreshError,
+    )
+
+    session = FakeSession([requests.TooManyRedirects(REFRESH_TOKEN)])
+
+    with pytest.raises(IFindTokenRefreshError):
+        make_client(
+            session,
+            token="",
+            refresh_token=REFRESH_TOKEN,
+        ).fetch_hourly_bars(["600519.SH"], START, END)

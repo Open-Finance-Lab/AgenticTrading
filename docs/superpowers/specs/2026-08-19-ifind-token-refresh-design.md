@@ -60,7 +60,7 @@ Add a small token provider beside the existing iFinD HTTP client:
 
 ### Request retry
 
-If a data request returns HTTP 401 or 403 while a refresh token is configured, invalidate the cached access token, exchange the refresh token once, and retry the original request once. Unknown iFinD business error codes are not retried automatically; they remain sanitized provider errors instead of risking an infinite loop or duplicate data request.
+If a data request returns HTTP 401 or 403 while a refresh token is configured, replace the access token that was rejected (compare-and-swap under one lock acquisition, so concurrent callers hit by the same rotation share a single exchange instead of clobbering each other's tokens), exchange the refresh token once, and retry the original request once without consuming a transport retry slot. Unknown iFinD business error codes are not retried automatically; they remain sanitized provider errors instead of risking an infinite loop or duplicate data request.
 
 ### Existing provider boundary
 

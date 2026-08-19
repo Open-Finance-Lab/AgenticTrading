@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date, timedelta
+import hashlib
 import logging
 import math
 import os
 import threading
 import time
-from typing import Any
+from typing import Any, NoReturn
 
 import requests
 
@@ -24,6 +25,19 @@ ACCESS_TOKEN_ENDPOINT = "/api/v1/get_access_token"
 DEFAULT_TIMEOUT = (3.0, 20.0)
 ACCESS_TOKEN_MAX_AGE_SECONDS = 6 * 24 * 60 * 60
 _RETRY_DELAYS = (0.5, 1.0)
+# One iteration beyond the transport retries, reserved for the single
+# permitted re-send after an access-token refresh: an expired token is not a
+# transport fault and must not spend a retry slot. Every other `continue` in
+# the request loop is bounded by `attempt < len(_RETRY_DELAYS)` and the
+# refresh fires at most once per call, so the loop still always terminates.
+_MAX_REQUEST_ATTEMPTS = len(_RETRY_DELAYS) + 2
+# The exchange runs while `_ACCESS_TOKEN_CACHE_LOCK` is held, so its retry
+# budget is deliberately smaller than the data path's: holding the lock is what
+# makes one token rotation cost one exchange, and every extra attempt is time
+# every other thread spends blocked on it. One retry absorbs a dropped
+# connection without turning an iFinD outage into a multi-minute stall for
+# each waiting caller.
+_TOKEN_EXCHANGE_ATTEMPTS = 2
 # Honour a server-supplied Retry-After, but never park a backtest thread on an
 # arbitrarily large one — past this we fail fast and let the caller retry.
 MAX_RETRY_AFTER_SECONDS = 30.0
@@ -91,6 +105,21 @@ def _retry_after_seconds(response: object) -> float | None:
     return min(delay, MAX_RETRY_AFTER_SECONDS)
 
 
+# One access token per process, which is what the design specifies ("the first
+# iFinD data request in a process", "a process-local lock so concurrent
+# backtests perform one exchange rather than a request per worker thread").
+# Held per client instance instead, that guarantee did not hold: a client is
+# built per provider, a provider per `create_market_data_provider`, and that
+# runs in every `HourlyBacktester.__init__`, so an in-process burst exchanged
+# once per backtest. Keyed by base URL and a digest of the refresh token so
+# two differently-credentialled clients never share an entry, and so the
+# credential itself is never a key in a long-lived module-level mapping.
+# (Dashboard backtests run in their own subprocess and so still exchange once
+# each; sharing across processes would need a store and is out of scope.)
+_ACCESS_TOKEN_CACHE: dict[tuple[str, str], tuple[str, float]] = {}
+_ACCESS_TOKEN_CACHE_LOCK = threading.Lock()
+
+
 class IFindHttpClient:
     """Fetch official iFinD responses without interpreting table data."""
 
@@ -127,13 +156,10 @@ class IFindHttpClient:
         configured_url = configured_url.strip() or DEFAULT_BASE_URL
 
         self._session = session if session is not None else requests.Session()
-        self._token = self._static_token
         self._base_url = configured_url.rstrip("/")
         self._timeout = timeout
         self._sleep = sleep
         self._clock = clock
-        self._token_issued_at: float | None = None
-        self._token_lock = threading.Lock()
 
     def fetch_hourly_bars(
         self,
@@ -235,7 +261,7 @@ class IFindHttpClient:
         url = f"{self._base_url}{endpoint}"
         refreshed_after_auth_failure = False
 
-        for attempt in range(len(_RETRY_DELAYS) + 1):
+        for attempt in range(_MAX_REQUEST_ATTEMPTS):
             headers = self._data_headers()
             try:
                 response = self._session.post(
@@ -277,8 +303,9 @@ class IFindHttpClient:
                     and self._refresh_token
                     and not refreshed_after_auth_failure
                 ):
-                    self._invalidate_access_token()
-                    self._get_access_token(force_refresh=True)
+                    self._refresh_rejected_access_token(
+                        headers.get("access_token", "")
+                    )
                     refreshed_after_auth_failure = True
                     continue
                 retryable = status_code == 429 or 500 <= status_code < 600
@@ -356,7 +383,21 @@ class IFindHttpClient:
 
             return decoded
 
-        raise AssertionError("iFinD retry loop ended without a result")
+        # Unreachable while every `continue` above stays bounded, but raised
+        # inside the client's own hierarchy regardless: an AssertionError here
+        # slips past the engine's `except IFindClientError` handlers and reaches
+        # the user as an unhandled traceback rather than a sanitized
+        # market-data failure.
+        raise IFindTransportError(
+            self._failure_message(
+                endpoint,
+                symbols,
+                start,
+                end,
+                status_code=None,
+                error_type="attempts_exhausted",
+            )
+        )
 
     def _data_headers(self) -> dict[str, str]:
         return {
@@ -365,69 +406,134 @@ class IFindHttpClient:
             "ifindlang": "cn",
         }
 
-    def _get_access_token(self, *, force_refresh: bool = False) -> str:
+    def _cache_key(self) -> tuple[str, str]:
+        digest = hashlib.sha256(self._refresh_token.encode("utf-8")).hexdigest()
+        return (self._base_url, digest)
+
+    def _get_access_token(self) -> str:
         if not self._refresh_token:
             return self._static_token
 
+        key = self._cache_key()
         now = self._clock()
-        with self._token_lock:
-            if (
-                not force_refresh
-                and self._token
-                and self._token_issued_at is not None
-                and now - self._token_issued_at < ACCESS_TOKEN_MAX_AGE_SECONDS
-            ):
-                return self._token
-
+        with _ACCESS_TOKEN_CACHE_LOCK:
+            cached = _ACCESS_TOKEN_CACHE.get(key)
+            if cached is not None:
+                token, issued_at = cached
+                if token and now - issued_at < ACCESS_TOKEN_MAX_AGE_SECONDS:
+                    return token
             access_token = self._exchange_refresh_token()
-            self._token = access_token
-            self._token_issued_at = self._clock()
+            _ACCESS_TOKEN_CACHE[key] = (access_token, self._clock())
             return access_token
 
-    def _invalidate_access_token(self) -> None:
-        if self._refresh_token:
-            with self._token_lock:
-                self._token = ""
-                self._token_issued_at = None
+    def _refresh_rejected_access_token(self, rejected_token: str) -> None:
+        """Replace ``rejected_token`` unless a sibling caller already did.
+
+        Invalidating and then force-refreshing took the lock twice with a gap
+        between, so every thread holding a 401 from the same rotation forced its
+        own exchange -- and each invalidation discarded the token a sibling had
+        just fetched, cascading further exchanges against an endpoint meant to be
+        called about once a week. One acquisition, comparing against the token
+        that actually failed, makes a rotation cost exactly one exchange.
+        """
+        if not self._refresh_token:
+            return
+
+        key = self._cache_key()
+        with _ACCESS_TOKEN_CACHE_LOCK:
+            cached = _ACCESS_TOKEN_CACHE.get(key)
+            if cached is not None and cached[0] and cached[0] != rejected_token:
+                return
+            _ACCESS_TOKEN_CACHE[key] = (
+                self._exchange_refresh_token(),
+                self._clock(),
+            )
+
+    def _fail_refresh(self, reason: str, *, detail: str = "") -> NoReturn:
+        """Log and raise one refresh failure, with enough detail to tell them apart.
+
+        Every branch below produced a bare exception and no log line, so "the
+        refresh token was revoked", "iFinD renamed data.access_token" and "the
+        endpoint returned HTML" were indistinguishable in production. The
+        upstream ``errmsg`` is still never echoed -- it is attacker-influenced
+        and has carried the credential itself -- but the numeric errorcode and
+        HTTP status are safe and are the whole diagnosis.
+        """
+        message = f"iFinD access token refresh {reason}"
+        if detail:
+            message = f"{message}; {detail}"
+        logger.warning(message)
+        raise IFindTokenRefreshError(message) from None
+
+    def _post_token_exchange(self) -> Any:
+        """POST the refresh token, retrying only the faults worth retrying.
+
+        A connection reset gets a second chance; every other ``requests``
+        failure is wrapped immediately. The wrapping is the point -- a raw
+        ``requests`` exception escapes the engine's ``except IFindClientError``
+        handlers, and its message can carry the refresh token itself.
+        """
+        url = f"{self._base_url}{ACCESS_TOKEN_ENDPOINT}"
+        for attempt in range(_TOKEN_EXCHANGE_ATTEMPTS):
+            try:
+                return self._session.post(
+                    url,
+                    headers={
+                        "Content-Type": "application/json",
+                        "refresh_token": self._refresh_token,
+                    },
+                    timeout=self._timeout,
+                )
+            except (requests.ConnectionError, requests.Timeout):
+                if attempt < _TOKEN_EXCHANGE_ATTEMPTS - 1:
+                    self._sleep(_RETRY_DELAYS[attempt])
+                    continue
+                self._fail_refresh("failed during transport")
+            except requests.RequestException:
+                self._fail_refresh("failed during transport")
+        self._fail_refresh("failed during transport")
 
     def _exchange_refresh_token(self) -> str:
-        try:
-            response = self._session.post(
-                f"{self._base_url}{ACCESS_TOKEN_ENDPOINT}",
-                headers={
-                    "Content-Type": "application/json",
-                    "refresh_token": self._refresh_token,
-                },
-                timeout=self._timeout,
-            )
-        except requests.RequestException:
-            raise IFindTokenRefreshError(
-                "iFinD access token refresh failed during transport"
-            ) from None
+        response = self._post_token_exchange()
 
         status_code = int(response.status_code)
         if not 200 <= status_code < 300:
-            raise IFindTokenRefreshError(
-                f"iFinD access token refresh failed with HTTP {status_code}"
-            ) from None
+            self._fail_refresh(f"failed with HTTP {status_code}")
 
         try:
             decoded = response.json()
         except ValueError:
-            raise IFindTokenRefreshError(
-                "iFinD access token refresh returned invalid JSON"
-            ) from None
+            self._fail_refresh(
+                "returned invalid JSON", detail=f"status={status_code}"
+            )
         if not isinstance(decoded, Mapping):
-            raise IFindTokenRefreshError(
-                "iFinD access token refresh returned an invalid response"
-            ) from None
+            self._fail_refresh(
+                "returned an invalid response", detail=f"status={status_code}"
+            )
+
         raw_errorcode = decoded.get("errorcode")
+        errorcode = (
+            raw_errorcode
+            if isinstance(raw_errorcode, int) and not isinstance(raw_errorcode, bool)
+            else None
+        )
+        errorcode_label = str(errorcode) if errorcode is not None else "unavailable"
+        # Absence means success on the data path (see `_request_json`), so it has
+        # to mean success here too: rejecting a response that omits `errorcode`
+        # while carrying a valid token fails every A-share backtest and points
+        # the operator at a credential problem that does not exist.
+        reported_failure = "errorcode" in decoded and decoded["errorcode"] != 0
         data = decoded.get("data")
         access_token = data.get("access_token") if isinstance(data, Mapping) else None
-        if raw_errorcode != 0 or not isinstance(access_token, str) or not access_token.strip():
-            raise IFindTokenRefreshError(
-                "iFinD access token refresh returned no usable access token"
-            ) from None
+        if (
+            reported_failure
+            or not isinstance(access_token, str)
+            or not access_token.strip()
+        ):
+            self._fail_refresh(
+                "returned no usable access token",
+                detail=f"errorcode={errorcode_label}",
+            )
         return access_token.strip()
 
     @staticmethod
