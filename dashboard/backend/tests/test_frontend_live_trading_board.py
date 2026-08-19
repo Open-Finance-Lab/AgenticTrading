@@ -662,3 +662,42 @@ def test_manual_refresh_does_not_default_to_billable_deploys():
     assert re.search(r"default:\s*false", block.group(1)), (
         "deploy_models must default to false while no board can show the result"
     )
+
+
+def test_the_live_route_answers_with_a_season_and_still_reads_as_preview(monkeypatch):
+    """End to end, not source shape: the payload the route actually serves must
+    fail `seasonHasAdvanced()`'s test.
+
+    That function is `last_advanced_date || trading_days_elapsed > 0`, and it is
+    the anchor under every disclaimer on this tab. Adding "live" to VALID_PERIODS
+    was named in its docstring as the change most likely to break it silently --
+    a one-line commit that needs no season payload at all -- so this is the case
+    that closes that loop from the other side.
+    """
+    from dashboard.backend.domain.leaderboard import service
+
+    # `ensure_leaderboard_runs` fetches bars; this module is about the payload
+    # shape, not run production. Same stub tests/domain/leaderboard/
+    # test_service_move.py uses.
+    monkeypatch.setattr(
+        service,
+        "ensure_leaderboard_runs",
+        lambda force_refresh=False, period="contest", config=None: {
+            "session_id": "leaderboard-contest",
+            "created": 0,
+            "refreshed_at": "2026-08-19T00:00:00+00:00",
+        },
+    )
+    payload = service.get_leaderboard(period="live")
+    season = payload["season"]
+    assert payload["period"] == "live"
+    assert not season["last_advanced_date"]
+    assert not (season["trading_days_elapsed"] > 0)
+
+
+def test_the_route_documents_the_third_period():
+    """The description is what /docs shows and what the next reader believes."""
+    router = (
+        Path(__file__).resolve().parents[1] / "api" / "routers" / "leaderboard.py"
+    ).read_text(encoding="utf-8")
+    assert "'live'" in router or '"live"' in router

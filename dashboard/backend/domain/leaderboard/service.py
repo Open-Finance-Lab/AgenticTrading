@@ -544,10 +544,13 @@ def build_season_payload(config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def resolve_leaderboard_config(period: Optional[str] = "contest") -> Dict[str, Any]:
-    """Return the effective leaderboard config for ``contest`` or ``daily``.
+    """Return the effective leaderboard config for ``contest``, ``daily``, or ``live``.
 
     Daily reuses the same strategy roster as the contest board, but caches under
     a separate session and a rolling 1-day (last completed weekday) window.
+    Live reuses the contest session and window verbatim — it is a Season 0
+    preview of the Competition board under season chrome, not a distinct
+    computed window — so every entry still hits the same cache.
     """
     base = load_leaderboard_config()
     period_key = _normalize_period(period)
