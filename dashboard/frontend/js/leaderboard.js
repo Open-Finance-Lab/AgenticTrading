@@ -117,6 +117,121 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
+// ── The shared board frame (2026-08-19 spec §4) ──────────────────────────────
+//
+// One visual contract across three charts: curves stop short of the right edge,
+// the reserved gutter carries each curve's owner and value, and the x-axis runs
+// on through it to an arrowhead.
+//
+// The gutter is `layout.padding`, NOT extra scale domain, and that distinction
+// is load-bearing rather than stylistic. Everything in this tab's hover gate
+// reads `chartArea.right` as "the end of real data" -- `resolveHoverTarget`
+// rejects `x > area.right` outright. Padding leaves that true. A domain padded
+// with null future slots would put empty territory INSIDE the plot, and the
+// gutter would silently become hoverable.
+const BOARD_GUTTER_FRACTION = 0.4;
+// The 40% is a target with a measured floor under it; this is the ceiling that
+// stops the floor from eating the plot on a narrow card. Past it the frame
+// gives the space back and draws no labels at all -- see boardFrameLayout.
+const BOARD_GUTTER_MAX_FRACTION = 0.5;
+const BOARD_GUTTER_FONT = '600 11px Inter, system-ui, sans-serif';
+// Where the label block starts relative to chartArea.right, and the clear
+// canvas left to the right of the widest one so the arrowhead has room.
+const BOARD_GUTTER_TEXT_INSET = 12;
+const BOARD_GUTTER_TRAILING_PAD = 16;
+// Comfortable vertical spacing between stacked labels, and the floor below
+// which 11px text stops being separable.
+const BOARD_LABEL_GAP_MAX = 20;
+const BOARD_LABEL_GAP_MIN = 13;
+// Only draw a leader line once collision-avoidance has displaced a label far
+// enough that the connection is genuinely ambiguous; below this it is a stub.
+const BOARD_LEADER_MIN_DISPLACEMENT = 7;
+const BOARD_PILL_PAD_X = 5;
+const BOARD_PILL_HEIGHT = 15;
+const BOARD_DOT_RADIUS = 3;
+const BOARD_STUB_LENGTH = 7;
+// Reserved right padding when the frame declines to draw labels: enough for the
+// arrowhead and nothing else.
+const BOARD_ARROW_PAD = 18;
+const BOARD_ARROW_HEAD_LENGTH = 8;
+const BOARD_ARROW_HEAD_HALF = 4;
+// Conservative allowance for the x-axis, subtracted from canvas height to
+// estimate plot height. Needed in `beforeLayout`, where chartArea is exactly
+// what has not been computed yet -- and both the layout hook and the draw hook
+// must reach the same drawLabels verdict or the gutter is reserved and empty.
+const BOARD_XAXIS_ALLOWANCE = 34;
+const BOARD_AXIS_COLOR = 'rgba(148, 163, 184, 0.45)';
+
+/** The curve's own colour, from whichever field this surface carries it in.
+ *
+ *  This tab decorates datasets with `_style`; screen 0 sets a plain hex on
+ *  `borderColor`. Reading both is what lets one factory serve both without
+ *  either surface having to adopt the other's dataset shape. `borderColor` is
+ *  second because `styleDatasets` rewrites it to an rgba with a hover alpha,
+ *  and a faded swatch is not the series colour. */
+function boardSeriesColor(ds) {
+  return (ds && ds._style && ds._style.color) || (ds && ds.borderColor) || '#e5e7eb';
+}
+
+/** Dark or light pill ink, by the swatch's relative luminance. */
+function boardPillTextColor(hex) {
+  const h = String(hex || '').replace('#', '');
+  const r = parseInt(h.slice(0, 2), 16) || 0;
+  const g = parseInt(h.slice(2, 4), 16) || 0;
+  const b = parseInt(h.slice(4, 6), 16) || 0;
+  return 0.299 * r + 0.587 * g + 0.114 * b > 150 ? '#0b1220' : '#f8fafc';
+}
+
+/** Width of the widest `dot name pill` block, measured in the gutter's own font.
+ *
+ *  MEASURED, not a recorded constant. The spec allowed either; this is the one
+ *  that cannot go stale. `BoardPreview.tsx`'s `width={56}` is the cautionary
+ *  case in this repo: measured correctly against `$1030` at 11px, then the tick
+ *  font moved to 14px and four of five labels lost their leading `$` with
+ *  nothing failing. A measurement taken at layout time re-takes itself. */
+function boardLabelBlockWidth(chart, labels) {
+  const ctx = chart.ctx;
+  let widest = 0;
+  ctx.save();
+  ctx.font = BOARD_GUTTER_FONT;
+  labels.forEach((lab) => {
+    const block =
+      BOARD_DOT_RADIUS * 2 +
+      4 +
+      ctx.measureText(lab.name).width +
+      6 +
+      ctx.measureText(lab.value).width +
+      BOARD_PILL_PAD_X * 2;
+    if (block > widest) widest = block;
+  });
+  ctx.restore();
+  return BOARD_GUTTER_TEXT_INSET + widest + BOARD_GUTTER_TRAILING_PAD;
+}
+
+/** How much right padding to reserve, whether to draw labels, and how far apart.
+ *
+ *  Pure in (chart.width, chart.height, label texts, fraction) so it can be
+ *  exercised under node without a canvas -- which, in this repo, is the only
+ *  kind of chart test that exists.
+ *
+ *  TWO DEGRADATIONS, BOTH TO "ARROW ONLY". Too narrow for the widest label, or
+ *  too short to stack N of them, and the frame gives the space back rather than
+ *  clipping text or piling labels on each other. Clipping is the failure this
+ *  codebase keeps re-learning: the chip strip on / silently cut four of five
+ *  model names at 390px with no scrollbar, no ellipsis and nothing failing.
+ *  Both surfaces keep a complete key elsewhere (this tab's custom legend,
+ *  screen 0's rank list), so dropping the labels loses no information. */
+function boardFrameLayout(chart, labels, fraction) {
+  const none = { gutter: BOARD_ARROW_PAD, drawLabels: false, gap: 0 };
+  if (!labels || !labels.length) return none;
+  const usableHeight = chart.height - BOARD_XAXIS_ALLOWANCE;
+  const gap = Math.min(BOARD_LABEL_GAP_MAX, usableHeight / labels.length);
+  if (gap < BOARD_LABEL_GAP_MIN) return none;
+  const floor = boardLabelBlockWidth(chart, labels);
+  if (floor > chart.width * BOARD_GUTTER_MAX_FRACTION) return none;
+  return { gutter: Math.max(chart.width * fraction, floor), drawLabels: true, gap };
+}
+
 function getTeamColor(stableId) {
   const key = String(stableId);
   if (!teamColorMap[key]) {
