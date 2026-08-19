@@ -254,6 +254,40 @@ def test_the_hero_draws_the_board_the_signed_in_home_draws():
     assert "SAMPLE_CURVES" not in _BOARD and "SAMPLE_STANDINGS" not in _BOARD
 
 
+def test_the_hero_mounts_the_frame_it_reserves_room_for():
+    """The rail is only ever reached through this element, and nothing else on
+    the branch checks that anyone renders it.
+
+    `test_the_rail_*` cases in test_landing_live_board.py read EndpointRail.tsx's
+    OWN source, so they keep passing when the component becomes dead code.
+    Verified by mutation: deleting the `<Customized>` element, its two imports
+    and the reserved gutter -- the landing half of the frame removed wholesale --
+    left the eight-file focused suite at its usual 1 failed / 128 passed AND
+    typechecked clean, because an unmounted component still compiles.
+
+    The gutter and the three props are asserted separately rather than as one
+    blob: they fail independently in the browser. `right: frame.gutter` is the
+    reserved column the labels are drawn into -- lose it and the rail paints
+    over the plot area. `gap` is the one the rail cannot recover on its own: it
+    consumes the value and never calls frameLayout, so a dropped prop is silent
+    label collision, not an error. Three of the four (`gutter`, `drawLabels`,
+    `gap`) come off the ONE frameLayout call above, which is what keeps this
+    card from growing a second geometry; `valueByKey` is the endpoint values the
+    rail labels, and without it the rail has nothing to draw.
+    """
+    assert "component={EndpointRail}" in _BOARD, (
+        "the hero must actually mount the rail, not merely coexist with it"
+    )
+    assert "right: frame.gutter" in _BOARD, (
+        "the gutter is reserved by the one frameLayout call, not by a literal"
+    )
+    assert "valueByKey={valueByKey}" in _BOARD
+    assert "drawLabels={frame.drawLabels}" in _BOARD
+    assert "gap={frame.gap}" in _BOARD, (
+        "the rail never computes the gap -- this prop is where it comes from"
+    )
+
+
 def test_the_hero_reports_a_failed_load_instead_of_shimmering_forever():
     """Three states, and they must be distinguishable. A permanent skeleton and
     a silent fallback are the same defect: "the backend is down" and "the backend
@@ -359,4 +393,16 @@ def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
     assert "toFixed(1)" in _BOARD, "the landing axis is percent to one decimal too"
     assert not re.search(r"tickFormatter=\{\(v\) => `\$", _BOARD), (
         "a dollar tick on this card names an account that never existed"
+    )
+    # The line above only sees an INLINE arrow formatter, and this file does not
+    # use one -- it binds the named `axisTick`, so the most natural way to put
+    # dollars back is to edit that function, where the regex cannot reach.
+    # `toFixed(1)` on its own does not close it either: a dollar tick has one
+    # decimal too. Verified by mutation: rewriting `axisTick` to return
+    # `$${(10000 * (1 + v)).toFixed(1)}` -- the exact $10,749 display-base tick
+    # the comment above forbids -- left this whole file GREEN. So pin the landing
+    # formatter's BODY the same way home_js's is pinned two lines above, which
+    # makes both surfaces fail on the same edit.
+    assert "(v * 100).toFixed(1)}%" in _BOARD, (
+        "the landing axis renders the percent that actually ran, not a level"
     )
