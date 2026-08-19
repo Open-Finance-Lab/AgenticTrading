@@ -11,7 +11,11 @@ of the ways to get it wrong are not obvious from reading the code:
   therefore exercised below at Daily-board spacing.
 * Chart.js only fires `onHover` inside `chartArea`, and `chart.update()` replays
   the last in-plot event. Emphasis driven from `onHover` consequently sticks in
-  the 120px endpoint-label gutter *and* re-arms itself when cleared. The fix is
+  the endpoint-label gutter *and* re-arms itself when cleared. (That gutter is
+  measured per layout by `boardFrameLayout`, not a literal: 18px when the frame
+  draws no labels, up to the measured block plus slack otherwise. It read
+  "120px" here until 2026-08-19, which was the pre-frame `layout.padding.right`
+  and is wrong in both directions now.) The fix is
   to take Chart.js out of event handling entirely (`events: []`) and drive hover
   from a canvas pointer listener; the source guards below hold that in place,
   since restoring either default would silently bring the bug back.

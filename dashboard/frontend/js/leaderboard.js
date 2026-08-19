@@ -109,12 +109,238 @@ function shortName(label) {
   return label && label.length > 18 ? `${label.slice(0, 17)}…` : (label || '');
 }
 
+/** `#rgb` / `#rrggbb` -> `{ r, g, b }`, black on anything unparseable.
+ *
+ *  ONE parse, TWO callers. `hexToRgba` (curve strokes, leader lines) and
+ *  `boardPillTextColor` (pill ink) both need the channels, and carrying the
+ *  same four lines twice meant the 3-digit form was wrong in both at once:
+ *  `#fff` read as r=255 g=15 b=0, which is a light-ink verdict on a near-white
+ *  pill in one and an orange-red stroke in the other. Every palette entry in
+ *  this file is 6-digit, so neither ever fired -- but a fix applied to one copy
+ *  would not have reached the other, which is the actual defect. */
+function hexToRgb(hex) {
+  let h = String(hex || '').replace('#', '');
+  if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+  return {
+    r: parseInt(h.slice(0, 2), 16) || 0,
+    g: parseInt(h.slice(2, 4), 16) || 0,
+    b: parseInt(h.slice(4, 6), 16) || 0,
+  };
+}
+
 function hexToRgba(hex, alpha) {
-  const h = String(hex || '').replace('#', '');
-  const r = parseInt(h.slice(0, 2), 16) || 0;
-  const g = parseInt(h.slice(2, 4), 16) || 0;
-  const b = parseInt(h.slice(4, 6), 16) || 0;
+  const { r, g, b } = hexToRgb(hex);
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// ── The shared board frame (2026-08-19 spec §4) ──────────────────────────────
+//
+// One visual contract across three charts: curves stop short of the right edge,
+// the reserved gutter carries each curve's owner and value, and the x-axis runs
+// on through it to an arrowhead.
+//
+// The gutter is `layout.padding`, NOT extra scale domain, and that distinction
+// is load-bearing rather than stylistic. Everything in this tab's hover gate
+// reads `chartArea.right` as "the end of real data" -- `resolveHoverTarget`
+// rejects `x > area.right` outright. Padding leaves that true. A domain padded
+// with null future slots would put empty territory INSIDE the plot, and the
+// gutter would silently become hoverable.
+const BOARD_GUTTER_FRACTION = 0.4;
+// The 40% is a CEILING on the measured floor, not the width the rail always
+// takes -- see boardFrameLayout.
+//
+// WHERE IT ACTUALLY BINDS, since "caps how much of the board the rail may
+// take" overstates it: the gutter is `max(floor, min(width * 0.4, floor +
+// SLACK))`, so the fraction only wins while `width * 0.4 < floor + SLACK` --
+// i.e. below `2.5 * floor + 90` px of canvas, about 613px at today's ~209px
+// measured floor. Every desktop width this dashboard renders at is above that,
+// so on a 1440 or 1600px tab the gutter is floor + SLACK and the fraction is
+// inert; it binds on the narrow home panel and on mobile, which is exactly
+// where an unbounded rail would eat the plot. BOARD_GUTTER_MAX_FRACTION
+// (below) is the one width-relative guard that fires at any size: past it the
+// frame gives up entirely and gives the space back, drawing no labels at all.
+const BOARD_GUTTER_MAX_FRACTION = 0.5;
+const BOARD_GUTTER_FONT = '600 11px Inter, system-ui, sans-serif';
+// Where the label block starts relative to chartArea.right, and the clear
+// canvas left to the right of the widest one so the arrowhead has room.
+const BOARD_GUTTER_TEXT_INSET = 12;
+const BOARD_GUTTER_TRAILING_PAD = 16;
+// Extra indent for a label that hangs into the x-axis strip -- see the band
+// note on boardStackLabels for why the strip is not the empty canvas it looks
+// like. Chart.js centres the LAST x tick on chartArea.right, so roughly half
+// its width overhangs into our gutter: ~18px for this tab's 12px `May 15`,
+// ~21px for screen 0's 14px ticks. Only the 6px leading dot reaches that far
+// (the name starts at inset + 10), and labels draw after the scales so they
+// win the pixels -- but a colour dot sitting on the tail of a tick label is
+// still a collision, and it is the bottom-most labels, the ones the taller-
+// than-the-plot stack routinely produces, that hit it.
+//
+// A LITERAL IS DEFENSIBLE HERE, unlike BOARD_XAXIS_ALLOWANCE below. This one
+// is RESERVED unconditionally in boardLabelBlockWidth and spent only by the
+// labels that descend, so getting it wrong costs a few px of residual overlap
+// -- never clipped text, and never a wrong verdict. 12 clears both measured
+// overhangs from the inset with margin.
+const BOARD_TICK_CLEARANCE = 12;
+// Breathing room ABOVE the measured floor, once the floor is smaller than the
+// fraction would reserve. A 1600px Leaderboard tab at BOARD_GUTTER_FRACTION
+// reserved 640px for a ~200px label block -- 440px of dead plot -- while the
+// home panel's browser-checked floor (Task 4, 2026-08-19) came out within
+// 0-36.2px of its own fraction-driven gutter at every desktop width measured
+// (1280: 0px over the floor: it already bound; 1440: 9px; 1920: 36.2px). 36
+// sits just under that observed ceiling, so every one of those three widths
+// still lands within a fraction of a px of what a browser already confirmed
+// looked right, while the tab's floor+slack (~240px) still gives back most of
+// the 440px it used to waste. See boardFrameLayout.
+const BOARD_GUTTER_SLACK = 36;
+// The two gaps inside the "dot name pill" block: after the leading dot, and
+// after the name. `boardLabelBlockWidth` (the measure) and the draw hook
+// inside `createEndpointLabelPlugin` (~1400 lines apart) each total this block
+// from scratch -- named constants are what keeps the two arithmetic copies
+// from drifting the way two bare literals silently could.
+const BOARD_DOT_GAP = 4;
+const BOARD_NAME_GAP = 6;
+const BOARD_PILL_PAD_X = 5;
+const BOARD_PILL_HEIGHT = 15;
+const BOARD_DOT_RADIUS = 3;
+const BOARD_STUB_LENGTH = 7;
+// Comfortable vertical spacing between stacked labels, and the floor below
+// which the frame gives up and reserves the arrow alone.
+//
+// THE FLOOR IS GEOMETRIC, NOT TYPOGRAPHIC, and it is DERIVED for that reason.
+// It was 13 against a 15px pill, so at any pitch in [13, 15) the guard passed
+// -- it was reading "is 11px text still separable?" -- while consecutive
+// FILLED colour pills overlapped by up to 2px. That is not a legibility
+// judgement anyone can tune: two opaque rounded rects at a pitch below their
+// own height intersect, and no font size changes it. Screen 0 reached it for
+// real (9 series into `clamp(140px, 26vh, 280px)` is a 152-168px canvas at a
+// 585-645px viewport), as does this tab once the curated roster hits 14 at the
+// mobile height. Deriving it from BOARD_PILL_HEIGHT is what stops the two
+// numbers being edited apart again; the +1 is a hairline so pills never touch.
+const BOARD_LABEL_GAP_MAX = 20;
+const BOARD_LABEL_GAP_MIN = BOARD_PILL_HEIGHT + 1;
+// Only draw a leader line once collision-avoidance has displaced a label far
+// enough that the connection is genuinely ambiguous; below this it is a stub.
+const BOARD_LEADER_MIN_DISPLACEMENT = 7;
+// Reserved right padding when the frame declines to draw labels: enough for the
+// arrowhead and nothing else.
+const BOARD_ARROW_PAD = 18;
+const BOARD_ARROW_HEAD_LENGTH = 8;
+const BOARD_ARROW_HEAD_HALF = 4;
+// FIRST-FRAME allowance for the x-axis, subtracted from canvas height to
+// estimate plot height. Needed in `beforeLayout`, where chartArea is exactly
+// what has not been computed yet. See boardXAxisHeight: from the second update
+// onwards the real number is read off the scale, and this is only the estimate
+// that stands in before any layout has happened.
+const BOARD_XAXIS_ALLOWANCE = 34;
+const BOARD_AXIS_COLOR = 'rgba(148, 163, 184, 0.45)';
+
+/** The x-axis strip's real height, or a conservative stand-in before layout.
+ *
+ *  `beforeLayout` runs at the one moment chartArea does not exist yet, which
+ *  is why this began as a bare literal. But 34 was a guess and the tab's axis
+ *  renders at 20.4px, so it threw away 14px of stacking room on every frame --
+ *  and that is the height the gap divisor and the fits-the-canvas guard both
+ *  spend, so the frame gave up on labels earlier than its own geometry
+ *  required. Chart.js leaves the previous layout's scale on the chart, so from
+ *  the second update onwards the true value is right here; the constant is the
+ *  first frame's estimate and nothing more. Reading it also means a change to
+ *  the tick font moves this number by itself, rather than leaving a literal
+ *  quietly wrong the way `BoardPreview.tsx`'s `width={56}` was. */
+function boardXAxisHeight(chart) {
+  const h = chart && chart.scales && chart.scales.x && chart.scales.x.height;
+  return Number.isFinite(h) ? h : BOARD_XAXIS_ALLOWANCE;
+}
+
+/** The curve's own colour, from whichever field this surface carries it in.
+ *
+ *  This tab decorates datasets with `_style`; screen 0 sets a plain hex on
+ *  `borderColor`. Reading both is what lets one factory serve both without
+ *  either surface having to adopt the other's dataset shape. `borderColor` is
+ *  second because `styleDatasets` rewrites it to an rgba with a hover alpha,
+ *  and a faded swatch is not the series colour. */
+function boardSeriesColor(ds) {
+  return (ds && ds._style && ds._style.color) || (ds && ds.borderColor) || '#e5e7eb';
+}
+
+/** Dark or light pill ink, by the swatch's relative luminance. */
+function boardPillTextColor(hex) {
+  const { r, g, b } = hexToRgb(hex);
+  return 0.299 * r + 0.587 * g + 0.114 * b > 150 ? '#0b1220' : '#f8fafc';
+}
+
+/** Width of the widest `dot name pill` block, measured in the gutter's own font.
+ *
+ *  MEASURED, not a recorded constant. The spec allowed either; this is the one
+ *  that cannot go stale. `BoardPreview.tsx`'s `width={56}` is the cautionary
+ *  case in this repo: measured correctly against `$1030` at 11px, then the tick
+ *  font moved to 14px and four of five labels lost their leading `$` with
+ *  nothing failing. A measurement taken at layout time re-takes itself. */
+function boardLabelBlockWidth(chart, labels) {
+  const ctx = chart.ctx;
+  let widest = 0;
+  ctx.save();
+  ctx.font = BOARD_GUTTER_FONT;
+  labels.forEach((lab) => {
+    const block =
+      BOARD_DOT_RADIUS * 2 +
+      BOARD_DOT_GAP +
+      ctx.measureText(lab.name).width +
+      BOARD_NAME_GAP +
+      ctx.measureText(lab.value).width +
+      BOARD_PILL_PAD_X * 2;
+    if (block > widest) widest = block;
+  });
+  ctx.restore();
+  return (
+    BOARD_GUTTER_TEXT_INSET + widest + BOARD_TICK_CLEARANCE + BOARD_GUTTER_TRAILING_PAD
+  );
+}
+
+/** How much right padding to reserve, whether to draw labels, and how far apart.
+ *
+ *  Pure in (chart.width, chart.height, label texts, fraction) so it can be
+ *  exercised under node without a canvas -- which, in this repo, is the only
+ *  kind of chart test that exists.
+ *
+ *  TWO DEGRADATIONS, BOTH TO "ARROW ONLY". Too narrow for the widest label, or
+ *  too short to stack N of them, and the frame gives the space back rather than
+ *  clipping text or piling labels on each other. Clipping is the failure this
+ *  codebase keeps re-learning: the chip strip on / silently cut four of five
+ *  model names at 390px with no scrollbar, no ellipsis and nothing failing.
+ *  Both surfaces keep a complete key elsewhere (this tab's custom legend,
+ *  screen 0's rank list), so dropping the labels loses no information. */
+function boardFrameLayout(chart, labels, fraction) {
+  const none = { gutter: BOARD_ARROW_PAD, drawLabels: false, gap: 0 };
+  if (!labels || !labels.length) return none;
+  const usableHeight = chart.height - boardXAxisHeight(chart);
+  const gap = Math.min(BOARD_LABEL_GAP_MAX, usableHeight / labels.length);
+  if (gap < BOARD_LABEL_GAP_MIN) return none;
+  // ...and the stack that pitch produces must FIT THE CANVAS. The line above
+  // sizes a gap; this is the extent of n pills at it -- (n-1) gaps plus one
+  // pill's height -- against the band boardStackLabels is given. Checked here
+  // so the layout hook refuses on the same geometry the draw hook would, on a
+  // set that is a SUPERSET of what the draw hook will lay out (see
+  // boardLayoutLabels) -- which makes this verdict conservative rather than
+  // identical: the frame can reserve a gutter and draw fewer labels in it, but
+  // it can never reserve too little and clip one.
+  // With today's constants it cannot fire; it is here so that raising
+  // BOARD_LABEL_GAP_MAX or shrinking BOARD_XAXIS_ALLOWANCE degrades to
+  // arrow-only instead of silently reintroducing a clipped label.
+  if ((labels.length - 1) * gap + BOARD_PILL_HEIGHT > chart.height) return none;
+  const floor = boardLabelBlockWidth(chart, labels);
+  if (floor > chart.width * BOARD_GUTTER_MAX_FRACTION) return none;
+  // `fraction` is a CEILING on the floor, not the gutter's width. A wide board
+  // (the 1600px Leaderboard tab) has `width * fraction` far above what the
+  // labels measure, and reserving that much left ~440px of the plot rendering
+  // as an empty column; a narrow one (the ~400px home panel) has the floor
+  // already at or past the fraction, where it was binding correctly all
+  // along. `Math.max(floor, ...)` is therefore LOAD-BEARING, not defensive:
+  // `floor` is the hard lower bound clipped label text would otherwise
+  // require, and it must survive the min() clamp below untouched. The
+  // genuinely-impossible case -- floor itself past BOARD_GUTTER_MAX_FRACTION
+  // -- is the `return none` above; this line never has to refuse on its own.
+  const room = Math.max(floor, Math.min(chart.width * fraction, floor + BOARD_GUTTER_SLACK));
+  return { gutter: room, drawLabels: true, gap };
 }
 
 function getTeamColor(stableId) {
@@ -1195,9 +1421,12 @@ function clearChartHoverEmphasis() {
  *
  * Chart.js' own `onHover` cannot do this job. It only fires while the pointer
  * is inside `chartArea` (plus `_minPadding`, a couple of px of dataset
- * overflow), so the 120px endpoint-label gutter reserved by
- * `layout.padding.right` never reaches the proximity gate — emphasis would
- * stick on whichever curve was hovered last. Worse, `chart.update()` replays
+ * overflow), so the endpoint-label gutter reserved by `layout.padding.right`
+ * never reaches the proximity gate — emphasis would stick on whichever curve
+ * was hovered last. (That gutter is no longer a literal: it is measured per
+ * layout by `boardFrameLayout`, from 18px when the frame draws no labels up to
+ * the measured block plus slack, ~245px on this tab. Do not re-introduce a
+ * number here — the previous one said 120 and was wrong in both directions.) Worse, `chart.update()` replays
  * the last in-plot event, so clearing from `onHover` re-emphasized the curve
  * the clear had just dropped. Handling the DOM event directly sidesteps both.
  */
@@ -1280,82 +1509,396 @@ const hoverMarkerPlugin = {
   },
 };
 
-// Right-endpoint labels: name + latest return for each visible curve, with
-// vertical collision avoidance and subtle leader lines to displaced labels.
-const endpointLabelPlugin = {
-  id: 'endpointLabels',
-  afterDatasetsDraw(chart) {
-    const { ctx, chartArea } = chart;
-    const labels = [];
-
-    chart.data.datasets.forEach((ds, i) => {
-      const meta = chart.getDatasetMeta(i);
-      if (meta.hidden || ds.hidden || !ds._raw || !meta.data || !meta.data.length) return;
-      let lastIdx = -1;
-      for (let k = ds._raw.length - 1; k >= 0; k -= 1) {
-        if (ds._raw[k] != null) { lastIdx = k; break; }
-      }
-      if (lastIdx < 0 || !meta.data[lastIdx]) return;
-
-      const ret = (ds._entry && ds._entry.cumulative_return != null)
-        ? Number(ds._entry.cumulative_return)
-        : (ds._raw[lastIdx] - ds._initial) / (ds._initial || 1);
-
-      labels.push({
-        i,
-        anchorX: meta.data[lastIdx].x,
-        anchorY: meta.data[lastIdx].y,
-        y: meta.data[lastIdx].y,
-        color: (ds._style && ds._style.color) || '#e5e7eb',
-        text: `${shortName(ds.label)}  ${(ret * 100).toFixed(2)}%`,
-      });
-    });
-    if (!labels.length) return;
-
-    // Stagger overlapping labels downward, keeping >= GAP px spacing. Each
-    // label keeps its original endpoint y (anchorY) so we can tell later
-    // whether collision-avoidance actually moved it.
-    const GAP = 20;
-    // Only draw a leader line once a label has been displaced enough that the
-    // connection is genuinely ambiguous; otherwise it just leaves a tiny stub.
-    const LEADER_MIN_DISPLACEMENT = 7;
-    labels.sort((a, b) => a.y - b.y);
-    for (let k = 1; k < labels.length; k += 1) {
-      if (labels[k].y - labels[k - 1].y < GAP) labels[k].y = labels[k - 1].y + GAP;
+/** The endpoint of each visible curve, and the two strings that label it.
+ *
+ *  Reads `ds.data` -- the PLOTTED values, already in whatever unit this chart's
+ *  axis shows -- rather than any surface's private raw-curve field, which is
+ *  what lets one factory serve two dataset shapes.
+ *
+ *  Called from `beforeLayout` as well as from the draw hook. In the layout pass
+ *  `meta.data[i].x/y` are last frame's positions or undefined, which is fine:
+ *  that pass only needs the label TEXT, to measure it. */
+function boardVisibleEndpoints(chart, formatValue) {
+  const out = [];
+  chart.data.datasets.forEach((ds, i) => {
+    // `chart.isDatasetVisible(i)`, not a hand-rolled `meta.hidden || ds.hidden`:
+    // `resolveHoverTarget` in this same file already asks Chart.js the question
+    // this way, and two predicates for one chart is how the hover gate and the
+    // label rail end up disagreeing about which curves are on screen. Chart.js
+    // also resolves the pair properly -- meta.hidden wins only when it is an
+    // actual boolean -- where `||` reads an explicit `meta.hidden === false`
+    // as "fall through to ds.hidden".
+    if (!chart.isDatasetVisible(i) || !ds.data || !ds.data.length) return;
+    const meta = chart.getDatasetMeta(i);
+    let lastIdx = -1;
+    for (let k = ds.data.length - 1; k >= 0; k -= 1) {
+      if (ds.data[k] != null) { lastIdx = k; break; }
     }
-    // If the stack overflows the plot bottom, shift the whole stack up.
-    const overflow = labels[labels.length - 1].y - chartArea.bottom;
-    if (overflow > 0) labels.forEach((lab) => { lab.y -= overflow; });
+    if (lastIdx < 0) return;
+    const point = meta.data && meta.data[lastIdx];
+    out.push({
+      i,
+      lastIdx,
+      anchorX: point ? point.x : null,
+      anchorY: point ? point.y : null,
+      color: boardSeriesColor(ds),
+      name: shortName(ds.label),
+      value: formatValue(ds, lastIdx),
+    });
+  });
+  return out;
+}
 
-    // Labels live entirely inside the reserved right gutter so the plotted
-    // line paths (which end at chartArea.right) never leave stubs under them.
-    const gutterStart = chartArea.right + 6;
-    const labelX = chartArea.right + 12;
-    ctx.save();
-    ctx.font = '600 11px Inter, system-ui, sans-serif';
-    ctx.textBaseline = 'middle';
-    ctx.textAlign = 'left';
-    labels.forEach((lab) => {
-      const faded = hoveredDatasetIndex != null && lab.i !== hoveredDatasetIndex;
-      const displaced = Math.abs(lab.y - lab.anchorY) > LEADER_MIN_DISPLACEMENT;
-      if (displaced) {
-        // Subtle dotted leader, drawn only within the gutter (never over the
-        // data line endpoint), connecting the displaced label to its curve.
-        ctx.setLineDash([1, 3]);
-        ctx.strokeStyle = hexToRgba(lab.color, faded ? 0.12 : 0.35);
-        ctx.lineWidth = 1;
+/** The label set `beforeLayout` sizes the gutter from.
+ *
+ *  THE TWO HOOKS DO NOT SHARE A PREDICATE, and pretending otherwise was the
+ *  bug. `beforeLayout` runs before any point has a position, so it cannot
+ *  filter on `Number.isFinite(anchorY)` the way the draw hook does -- on the
+ *  very first layout that would reject every series and reserve no gutter at
+ *  all. It therefore counts every CANDIDATE, which keeps the reserve
+ *  conservative in both directions (a wider measured floor, a larger gap) and
+ *  means the draw set is always a subset: the frame can waste gutter, never
+ *  clip a label.
+ *
+ *  What it CAN do is stop wasting it after the first frame. Once any anchor is
+ *  positioned the unpositioned ones are genuinely absent rather than merely
+ *  not-yet-laid-out, so from the second update onwards the two hooks see the
+ *  same set and "gutter reserved and empty" stops being reachable at all. */
+function boardLayoutLabels(chart, formatValue) {
+  const all = boardVisibleEndpoints(chart, formatValue);
+  const positioned = all.filter((lab) => Number.isFinite(lab.anchorY));
+  return positioned.length ? positioned : all;
+}
+
+/** Re-lay-out once the gutter's webfont has actually landed.
+ *
+ *  `boardLabelBlockWidth` measures in `600 11px Inter`, and app.html loads
+ *  Inter with `display=swap`. A chart laid out before the face arrives sizes
+ *  its gutter against system-ui and then never re-measures: the next repaint
+ *  is a bare `chart.render()` (the hover path), which does not re-run
+ *  `beforeLayout`. The labels paint in Inter into a gutter measured for the
+ *  fallback, and where Inter is the wider face the value pill runs off the
+ *  canvas -- precisely the clipping a runtime measurement is supposed to be
+ *  immune to, which is the claim `boardLabelBlockWidth`'s docstring makes.
+ *
+ *  One shot per chart. A no-op wherever `document.fonts` does not exist (node,
+ *  older browsers), where nothing swapped under the measurement anyway. */
+function boardWatchGutterFont(chart) {
+  if (chart.$boardFontWatched) return;
+  chart.$boardFontWatched = true;
+  if (typeof document === 'undefined' || !document.fonts || !document.fonts.ready) return;
+  document.fonts.ready
+    .then(() => {
+      // This tab destroys and rebuilds its chart on every render; Chart.js
+      // nulls both of these on destroy.
+      if (chart.canvas && chart.ctx) chart.update('none');
+    })
+    .catch(() => {});
+}
+
+/** Percent, two decimals, signed -- `+7.49%` / `-3.20%` / `''` for non-finite.
+ *  Shared so the sign and precision cannot drift between this tab's money-view
+ *  percent branch (Spec §4.5) and `boardDefaultValueText` below, the default
+ *  every other pill on this frame takes. */
+function boardSignedPercent(fraction) {
+  const v = Number(fraction);
+  if (!Number.isFinite(v)) return '';
+  return `${v > 0 ? '+' : ''}${(v * 100).toFixed(2)}%`;
+}
+
+/** Percent, two decimals, signed. The default for every surface whose axis is
+ *  percent -- which is both of them except this tab in its money view. */
+function boardDefaultValueText(ds, lastIdx) {
+  return boardSignedPercent(ds.data[lastIdx]);
+}
+
+/** Path a rounded rect. Caller fills. `ctx.roundRect` is not in every browser
+ *  this dashboard is opened in, and a missing method here would throw inside a
+ *  draw hook -- which takes the whole chart down, not just the pill. */
+function boardRoundRect(ctx, x, y, w, h, r) {
+  const radius = Math.min(r, h / 2, w / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + radius, y);
+  ctx.lineTo(x + w - radius, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + radius);
+  ctx.lineTo(x + w, y + h - radius);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - radius, y + h);
+  ctx.lineTo(x + radius, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - radius);
+  ctx.lineTo(x, y + radius);
+  ctx.quadraticCurveTo(x, y, x + radius, y);
+  ctx.closePath();
+}
+
+/** Lay the endpoint labels out vertically: sorted by endpoint, never closer
+ *  together than `gap`, and never outside the band `[top, bottom]`. Mutates
+ *  `lab.y`; returns whether the stack fits, so a caller that cannot honour the
+ *  band draws nothing rather than something clipped.
+ *
+ *  Pure in (labels, gap, top, bottom) for the same reason `boardFrameLayout`
+ *  is: node without a canvas is the only kind of chart test this repo has, and
+ *  the defect this replaces was invisible to every source-shape guard that
+ *  already existed.
+ *
+ *  THE BAND IS THE CANVAS, NOT THE PLOT -- that distinction IS the bug this
+ *  fixes. These labels live in the gutter, to the right of `chartArea.right`,
+ *  so they may legitimately hang past `chartArea.bottom` into the x-axis strip.
+ *  That strip is NEARLY empty at their x, not actually empty: Chart.js centres
+ *  the last x tick on `chartArea.right` and reserves its right-half overhang
+ *  inside our own `layout.padding.right`, which reaches about 18px into the
+ *  gutter here and 21px on screen 0's larger ticks. Scales draw before
+ *  `afterDatasetsDraw`, so a label always wins those pixels rather than being
+ *  occluded by one; BOARD_TICK_CLEARANCE is what keeps it from landing on top
+ *  of a tick in the first place. The version this replaces clamped
+ *  them to `chartArea` instead, and since the forward pass enforces a MINIMUM
+ *  gap the staggered stack is routinely taller than the plot: 255.3px against a
+ *  237.4px plot on the Leaderboard tab at 1440, 202.5px against 168.8px on
+ *  screen 0. Two whole-stack shifts then cancelled each other exactly -- lift
+ *  the tail inside, put it straight back -- and a rendered check found the last
+ *  label drawn 5px past the canvas bottom on the tab and 10.4px past it on
+ *  screen 0, sliced through the middle.
+ *
+ *  THREE PASSES. Down to open the gaps, up to pull the tail inside `bottom`,
+ *  down again to push the head inside `top`. The third is not redundant with
+ *  the first: the second pass is what can drive the head out, and re-running
+ *  the first is what puts it back without compressing anything. Walking a bound
+ *  rather than shifting the whole stack is what keeps every gap at or above
+ *  `gap` -- nothing is squeezed to buy the room. */
+function boardStackLabels(labels, gap, top, bottom) {
+  if (!labels || !labels.length) return false;
+  labels.sort((a, b) => a.y - b.y);
+  const last = labels.length - 1;
+  for (let k = 1; k <= last; k += 1) {
+    if (labels[k].y - labels[k - 1].y < gap) labels[k].y = labels[k - 1].y + gap;
+  }
+  if (labels[last].y > bottom) labels[last].y = bottom;
+  for (let k = last - 1; k >= 0; k -= 1) {
+    if (labels[k].y > labels[k + 1].y - gap) labels[k].y = labels[k + 1].y - gap;
+  }
+  if (labels[0].y < top) labels[0].y = top;
+  for (let k = 1; k <= last; k += 1) {
+    if (labels[k].y - labels[k - 1].y < gap) labels[k].y = labels[k - 1].y + gap;
+  }
+  // False only when the band cannot hold n pills at this pitch, which
+  // boardFrameLayout now excludes before reserving the gutter. Reported rather
+  // than asserted so the two hooks cannot drift into disagreeing again.
+  return labels[last].y <= bottom;
+}
+
+/** Right-endpoint labels: a colour-matched dot, the owner's name, and a value
+ *  pill, laid out in the reserved gutter with vertical collision avoidance and
+ *  dotted leaders to displaced labels.
+ *
+ *  A FACTORY. Screen 0 (home-page.js) draws this same frame over datasets that
+ *  carry none of this tab's private fields and has no hover gate, so the two
+ *  things that differ -- the value's unit and whether a series is faded -- are
+ *  injected. The defaults reproduce this tab in its percent view.
+ *
+ *  The stagger, `BOARD_LEADER_MIN_DISPLACEMENT` and the `gutterStart`/`labelX`
+ *  split are carried over unchanged from the plugin this replaces: labels drawn
+ *  over the line endpoints left visible stubs, and a leader shorter than the
+ *  displacement threshold is just a tick that connects nothing. */
+function createEndpointLabelPlugin(options) {
+  const opts = options || {};
+  const formatValue =
+    typeof opts.formatValue === 'function' ? opts.formatValue : boardDefaultValueText;
+  const isFaded = typeof opts.isFaded === 'function' ? opts.isFaded : () => false;
+  const fraction = Number.isFinite(opts.gutterFraction)
+    ? opts.gutterFraction
+    : BOARD_GUTTER_FRACTION;
+
+  return {
+    id: 'endpointLabels',
+    // The gutter is a fraction of the RENDERED width, which is not known at
+    // config time; beforeLayout is the last hook that can still move chartArea,
+    // and `chart.width`/`chart.height` are already current there.
+    beforeLayout(chart) {
+      boardWatchGutterFont(chart);
+      const labels = boardLayoutLabels(chart, formatValue);
+      const frame = boardFrameLayout(chart, labels, fraction);
+      // The measured texts ride along so the draw hook does not rebuild them.
+      // `formatValue` per series plus 2N `measureText` is the whole cost of a
+      // layout, and `applyHoverTarget` calls `chart.update('none')` on every
+      // change of hovered curve -- so recomputing it in the draw hook ran the
+      // entire measurement again on the mousemove path, for values that cannot
+      // have changed without an update. Anchors are deliberately NOT carried:
+      // they are last frame's here, and the draw hook re-reads them.
+      frame.labels = labels;
+      chart.$boardFrame = frame;
+      const layout = chart.options.layout || (chart.options.layout = {});
+      // `padding` may legally be a NUMBER -- Chart.js shorthand for uniform
+      // padding. Replacing it with `{}` and setting only `.right` silently
+      // dropped the other three sides. Neither caller in this repo passes one,
+      // but this factory is exported on `window` precisely so other surfaces
+      // can adopt the frame, and losing top/left/bottom padding renders their
+      // curves flush to the canvas edges.
+      const current = layout.padding;
+      const padding =
+        current && typeof current === 'object'
+          ? current
+          : (layout.padding = Number.isFinite(current)
+            ? { top: current, right: current, bottom: current, left: current }
+            : {});
+      padding.right = frame.gutter;
+    },
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea } = chart;
+      const frame = chart.$boardFrame;
+      if (!frame || !frame.drawLabels || !chartArea || !frame.labels) return;
+      // Re-anchor the set `beforeLayout` measured, rather than rebuilding it:
+      // the names and values are already current (nothing changes them without
+      // an update, and an update re-runs beforeLayout), so only the positions
+      // have to be re-read.
+      //
+      // Number.isFinite on BOTH axes, not `!= null`: a NaN anchorY (a malformed
+      // point) would pass a null check, then poison every comparison inside
+      // boardStackLabels, which returns false and drops the WHOLE stack rather
+      // than the one bad series. anchorX is checked for a quieter reason -- the
+      // canvas spec silently discards an arc/moveTo/lineTo containing NaN, so a
+      // point with a finite y and a NaN x used to draw a name and a pill with
+      // no endpoint dot and no stub, an inconsistent row nothing would report.
+      const labels = [];
+      frame.labels.forEach((lab) => {
+        const meta = chart.getDatasetMeta(lab.i);
+        const point = meta && meta.data && meta.data[lab.lastIdx];
+        const anchorX = point ? point.x : null;
+        const anchorY = point ? point.y : null;
+        if (!Number.isFinite(anchorX) || !Number.isFinite(anchorY)) return;
+        labels.push({ ...lab, anchorX, anchorY, y: anchorY });
+      });
+      if (!labels.length) return;
+
+      // Stagger overlapping labels, keeping >= gap px spacing and staying on
+      // canvas. Each keeps its original endpoint y (anchorY) so we can tell
+      // later whether collision-avoidance actually moved it.
+      //
+      // The band is the CANVAS, not chartArea: a gutter label sits to the right
+      // of the plot, so hanging below chartArea.bottom into the axis strip is
+      // legitimate where clamping to it clipped the stack. The strip is not
+      // quite empty there -- the last x tick overhangs into the gutter -- which
+      // is what BOARD_TICK_CLEARANCE indents the descending labels past.
+      // See boardStackLabels. A false return means the band cannot hold the
+      // stack -- draw nothing rather than something cut off, which is the same
+      // degradation boardFrameLayout takes at the narrow and short extremes.
+      const half = BOARD_PILL_HEIGHT / 2;
+      if (!boardStackLabels(labels, frame.gap, half, chart.height - half)) return;
+
+      // Labels live entirely inside the reserved gutter so the plotted line
+      // paths (which end at chartArea.right) never leave stubs under them.
+      const gutterStart = chartArea.right + 6;
+      const labelX = chartArea.right + BOARD_GUTTER_TEXT_INSET;
+      ctx.save();
+      ctx.font = BOARD_GUTTER_FONT;
+      ctx.textBaseline = 'middle';
+      ctx.textAlign = 'left';
+      labels.forEach((lab) => {
+        const faded = isFaded(lab.i);
+        const alpha = faded ? 0.3 : 1;
+        // Past the last x tick's overhang, but only for the labels that
+        // actually hang into the axis strip -- see BOARD_TICK_CLEARANCE. The
+        // clearance is reserved unconditionally by boardLabelBlockWidth, so
+        // spending it here can never push a block out of the gutter.
+        const lx = labelX + (lab.y + half > chartArea.bottom ? BOARD_TICK_CLEARANCE : 0);
+
+        // The note's `•⋯`: a filled endpoint dot and a short dotted stub. It
+        // says the curve continues; it asserts no value for where it goes.
+        ctx.fillStyle = hexToRgba(lab.color, alpha);
         ctx.beginPath();
-        ctx.moveTo(gutterStart, lab.anchorY);
-        ctx.lineTo(labelX - 3, lab.y);
+        ctx.arc(lab.anchorX, lab.anchorY, BOARD_DOT_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.setLineDash([1, 3]);
+        ctx.strokeStyle = hexToRgba(lab.color, faded ? 0.2 : 0.6);
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(lab.anchorX + BOARD_DOT_RADIUS + 1, lab.anchorY);
+        ctx.lineTo(lab.anchorX + BOARD_DOT_RADIUS + 1 + BOARD_STUB_LENGTH, lab.anchorY);
         ctx.stroke();
         ctx.setLineDash([]);
-      }
-      ctx.fillStyle = hexToRgba(lab.color, faded ? 0.3 : 1);
-      ctx.fillText(lab.text, labelX, lab.y);
-    });
-    ctx.restore();
-  },
-};
+
+        if (Math.abs(lab.y - lab.anchorY) > BOARD_LEADER_MIN_DISPLACEMENT) {
+          ctx.setLineDash([1, 3]);
+          ctx.strokeStyle = hexToRgba(lab.color, faded ? 0.12 : 0.35);
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.moveTo(gutterStart, lab.anchorY);
+          ctx.lineTo(lx - 3, lab.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        let x = lx;
+        ctx.fillStyle = hexToRgba(lab.color, alpha);
+        ctx.beginPath();
+        ctx.arc(x + BOARD_DOT_RADIUS, lab.y, BOARD_DOT_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+        x += BOARD_DOT_RADIUS * 2 + BOARD_DOT_GAP;
+
+        ctx.fillStyle = hexToRgba(lab.color, alpha);
+        ctx.fillText(lab.name, x, lab.y);
+        x += ctx.measureText(lab.name).width + BOARD_NAME_GAP;
+
+        const pillWidth = ctx.measureText(lab.value).width + BOARD_PILL_PAD_X * 2;
+        ctx.fillStyle = hexToRgba(lab.color, faded ? 0.25 : 1);
+        boardRoundRect(ctx, x, lab.y - BOARD_PILL_HEIGHT / 2, pillWidth, BOARD_PILL_HEIGHT, 4);
+        ctx.fill();
+        const ink = boardPillTextColor(lab.color);
+        ctx.fillStyle = faded ? hexToRgba(ink, 0.5) : ink;
+        ctx.fillText(lab.value, x + BOARD_PILL_PAD_X, lab.y);
+      });
+      ctx.restore();
+    },
+  };
+}
+
+/** The x-axis line, running the full width and terminating in a right-pointing
+ *  arrowhead out in the gutter.
+ *
+ *  The forward affordance, and the whole of it: the future-date-tick design was
+ *  dropped precisely because Chart.js can draw anywhere on the canvas, so this
+ *  costs no scale configuration and cannot touch the hover gate.
+ *
+ *  ACCEPTED IMPRECISION, STATED. On the Competition board the arrow implies an
+ *  advancement a closed window does not perform -- that window ran 2026-04-15 →
+ *  2026-05-15 and is finished. The mitigation is that the window label sits
+ *  directly above the chart on every surface that draws this. It is a soft
+ *  visual affordance rather than a data claim, and it was accepted knowingly. */
+function createAxisArrowPlugin() {
+  return {
+    id: 'boardAxisArrow',
+    // afterDatasetsDraw, and registered BEFORE createEndpointLabelPlugin at
+    // both call sites. Chart.js has already drawn the datasets by this hook,
+    // so the original reason for afterDraw -- chrome above a curve running
+    // along the floor -- still holds exactly. What afterDraw could NOT do is
+    // let the labels sit above the chrome: this baseline runs the full canvas
+    // width, straight through the reserved gutter, so it painted a line
+    // through every label the stack pushes below chartArea.bottom. Measured on
+    // a 1440x268 tab with 12 low-clustered curves: chartArea.bottom 247.6, a
+    // label at y=241 whose pill spans 233.5-248.5, struck through at 247.6.
+    // Plugins run a hook in array order, so the labels now paint last.
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea } = chart;
+      if (!chartArea) return;
+      const y = Math.round(chartArea.bottom) + 0.5;
+      const tipX = chart.width - 4;
+      if (tipX <= chartArea.left + BOARD_ARROW_HEAD_LENGTH) return;
+      ctx.save();
+      ctx.strokeStyle = BOARD_AXIS_COLOR;
+      ctx.fillStyle = BOARD_AXIS_COLOR;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(chartArea.left, y);
+      ctx.lineTo(tipX - BOARD_ARROW_HEAD_LENGTH, y);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(tipX, y);
+      ctx.lineTo(tipX - BOARD_ARROW_HEAD_LENGTH, y - BOARD_ARROW_HEAD_HALF);
+      ctx.lineTo(tipX - BOARD_ARROW_HEAD_LENGTH, y + BOARD_ARROW_HEAD_HALF);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    },
+  };
+}
 
 function buildCustomLegend(chart) {
   const container = document.getElementById('equityCurvesLegend');
@@ -1455,11 +1998,36 @@ async function renderEquityCurvesChart() {
   equityCurvesChartInstance = new Chart(ctx, {
     type: 'line',
     data: { labels: axisLabels, datasets },
-    plugins: [selectedGlowPlugin, hoverMarkerPlugin, endpointLabelPlugin],
+    plugins: [
+      selectedGlowPlugin,
+      hoverMarkerPlugin,
+      createAxisArrowPlugin(),
+      createEndpointLabelPlugin({
+        // Spec §4.5: the pill renders THIS chart's axis unit. This tab defaults
+        // to money, and the label printed `+7.49%` beside a `$` axis.
+        formatValue(ds, idx) {
+          if (currentChartView === 'absolute') {
+            return `$${formatLeaderboardNumber(ds.data[idx])}`;
+          }
+          // The entry's stored return in preference to the last plotted point:
+          // the point is the curve's own arithmetic, the field is what the run
+          // recorded, and the rank column beside it renders the field.
+          const ret =
+            ds._entry && ds._entry.cumulative_return != null
+              ? Number(ds._entry.cumulative_return)
+              : Number(ds.data[idx]);
+          return boardSignedPercent(ret);
+        },
+        isFaded: (i) => hoveredDatasetIndex != null && i !== hoveredDatasetIndex,
+      }),
+    ],
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      layout: { padding: { right: 120, top: 8 } },
+      // `right` is the frame's, computed per layout from the rendered width.
+      // A literal here is not merely dead: it is what renders on the first
+      // frame, and what every later reader believes.
+      layout: { padding: { top: 8 } },
       // Chart.js does no interaction resolution of its own: hover, the marker
       // and the tooltip are all driven from handleCanvasPointerMove, which is
       // the only path that sees the endpoint-label gutter. Leaving the built-in
@@ -1621,3 +2189,14 @@ window.getSeriesStyle = getSeriesStyle;
 // gets to invent; it is a rendering of the other's data.
 window.formatShortDate = formatShortDate;
 window.formatChartTooltipLabel = formatChartTooltipLabel;
+// The shared board frame, consumed by home-page.js for screen 0's chart.
+// Explicit for the same reason the four exports above are: the implicit global
+// degrades on rename to a chart with no frame, and a frame that silently stops
+// drawing is indistinguishable from a frame nobody asked for. Pinned from both
+// sides by test_frontend_board_frame.py.
+// Exported for home-page.js's rank rows: the pill beside a curve and the row
+// beneath it render the same number, and two independent expressions producing
+// it is how they drift.
+window.boardSignedPercent = boardSignedPercent;
+window.createEndpointLabelPlugin = createEndpointLabelPlugin;
+window.createAxisArrowPlugin = createAxisArrowPlugin;
