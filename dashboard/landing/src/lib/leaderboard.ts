@@ -28,7 +28,17 @@ export type BoardSeries = {
   values: Array<number | null>;
 };
 
-export type BoardStanding = { key: string; name: string; ret: string; color: string };
+export type BoardStanding = {
+  key: string;
+  name: string;
+  ret: string;
+  color: string;
+  /** Carried so a consumer can tell "no model results came back" from "the
+   *  board is fine". `BoardSeries` answers the same question with
+   *  `isBaseline`; the two collections are not interchangeable -- a curve-less
+   *  model reaches `standings` and never reaches `series`. */
+  isModel: boolean;
+};
 
 export type BoardData = {
   times: string[];
@@ -198,6 +208,7 @@ export function buildBoardData(payload: {
       // Two decimals, matching /app's rank rows and this card's own tooltip.
       ret: formatPercent(Number(entry.cumulative_return), 2),
       color: style.color,
+      isModel,
     });
 
     const raw = times.map((t) => (t in byTime ? byTime[t] : null));
@@ -218,6 +229,46 @@ export function buildBoardData(payload: {
     (a, b) => parseFloat(b.ret) - parseFloat(a.ret),
   );
   return { times, series, standings, windowLabel: payload.window?.label || '' };
+}
+
+/** What a 200 actually delivered -- the question `status: "ready"` cannot
+ *  answer.
+ *
+ *  `get_leaderboard` skips any strategy with no cached run
+ *  (domain/leaderboard/service.py, `if not run: continue`) and still answers
+ *  200, so `entries: []` and "only the baselines resolved" are ordinary
+ *  SUCCESSFUL responses. Without this the hero drew its entire frame over an
+ *  empty payload -- a percent axis labelled -5.0%..5.0% off `percentDomain`'s
+ *  hardcoded fallback, a scale no run produced, under the axis arrow, the
+ *  title, the window chip and a caption naming the competition window -- and
+ *  Race drew its Rank/AI model/Return header over zero rows. "The upstream
+ *  returned nothing" and "everything is fine" rendered identically, which is
+ *  the failure class CLAUDE.md's fail-closed-is-not-fail-visible section is
+ *  about.
+ *
+ *  DO NOT answer this by substituting curves. An invented dataset under any
+ *  name is the bug this whole module exists to remove; the fix is to say the
+ *  board is empty. */
+export type BoardCoverage = 'empty' | 'baselines-only' | 'full';
+
+/** For the CHART, which draws `series`. */
+export function chartCoverage(series: BoardSeries[]): BoardCoverage {
+  if (!series.length) return 'empty';
+  if (series.every((s) => s.isBaseline)) return 'baselines-only';
+  return 'full';
+}
+
+/** For the TABLE, which lists `standings`.
+ *
+ *  A separate rule rather than a shared one, because the two collections
+ *  genuinely disagree: a model with `equity_curve: []` stands in `standings`
+ *  and never enters `series`, so a board that is `baselines-only` to the chart
+ *  can be `full` to the table. Collapsing them would make Race announce a
+ *  board with no models while listing models. */
+export function standingsCoverage(standings: BoardStanding[]): BoardCoverage {
+  if (!standings.length) return 'empty';
+  if (!standings.some((s) => s.isModel)) return 'baselines-only';
+  return 'full';
 }
 
 /** Root-relative, with no origin anywhere in it.

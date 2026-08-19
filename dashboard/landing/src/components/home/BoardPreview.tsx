@@ -12,6 +12,7 @@ import {
 } from "recharts";
 import { useLeaderboard } from "@/lib/useLeaderboard";
 import {
+  chartCoverage,
   formatAxisDate,
   formatPercent,
   formatTooltipDate,
@@ -97,6 +98,11 @@ export function BoardPreview() {
   const data = board.status === "ready" ? board.data : null;
   const series = data?.series ?? [];
   const standings = data?.standings ?? [];
+  // A 200 is not a board. `get_leaderboard` skips any strategy with no cached
+  // run and still answers 200, so an empty payload and a baselines-only one
+  // are ordinary SUCCESSFUL responses that `board.status` cannot tell apart
+  // from a full board -- see chartCoverage's own note.
+  const coverage = chartCoverage(series);
 
   const frame = useMemo(
     () =>
@@ -160,7 +166,11 @@ export function BoardPreview() {
             reserves below and the card goes half-visible without anything
             failing. */}
         <p className="text-sm text-foreground/65 leading-relaxed">
-          Each line is one AI model&apos;s return. Dashed lines are buy-and-hold and the index.
+          {coverage === "empty"
+            ? "No curves came back for this window."
+            : coverage === "baselines-only"
+              ? "No AI model results came back — the dashed lines are buy-and-hold and the index."
+              : "Each line is one AI model's return. Dashed lines are buy-and-hold and the index."}
         </p>
       </div>
 
@@ -235,6 +245,21 @@ export function BoardPreview() {
             <p className="text-xs font-mono text-muted-foreground">{board.message}</p>
             <p className="text-xs text-muted-foreground">
               The board itself is fine — reload to try again.
+            </p>
+          </div>
+        ) : coverage === "empty" ? (
+          // A 200 that carried nothing to draw. Without this branch the card
+          // rendered its whole frame over it -- a percent axis labelled
+          // -5.0%..5.0% off percentDomain's hardcoded fallback, a scale no run
+          // produced, under the axis arrow, the title, the window chip and a
+          // caption naming the competition window. Confident, silent, wrong.
+          // The fix is to SAY the board is empty; substituting curves is the
+          // bug this card exists to remove.
+          <div className="h-full w-full rounded-lg border border-border bg-muted/20 flex flex-col items-center justify-center gap-2 px-6 text-center">
+            <p className="text-sm text-foreground/80">The board came back empty.</p>
+            <p className="text-xs text-muted-foreground">
+              The request succeeded and carried no curves. Nothing here is a result — reload to
+              try again.
             </p>
           </div>
         ) : (
@@ -343,10 +368,15 @@ export function BoardPreview() {
         </div>
         {/* Names the axis directly above it, and only that. The axis is percent
             now — see the plan's §6 — so a caption about "account value" would
-            describe a chart that is not there. */}
-        <p className="mt-3 text-sm text-foreground/65">
-          Return over the competition window, hour by hour.
-        </p>
+            describe a chart that is not there. By the same rule it is withheld
+            when nothing was drawn: on an empty 200 there IS no axis, and a
+            caption dating one is the confident-frame-over-nothing claim the
+            empty branch above exists to remove. */}
+        {coverage === "empty" ? null : (
+          <p className="mt-3 text-sm text-foreground/65">
+            Return over the competition window, hour by hour.
+          </p>
+        )}
       </div>
     </div>
   );

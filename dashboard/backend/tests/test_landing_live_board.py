@@ -707,3 +707,153 @@ def test_the_rail_never_sorts_by_declaration_order():
     src = _rail()
     assert "formattedGraphicalItems" in src
     assert ".sort(" not in src, "sorting is stackLabels' job and it does it by y"
+
+
+# ---------------------------------------------------------------------------
+# A 200 is not a board. `get_leaderboard` skips any strategy with no cached run
+# (service.py:1434, `if not run: continue`) and still answers 200, so
+# `entries: []` and "only the baselines resolved" are ordinary SUCCESSFUL
+# responses -- not errors, and not distinguishable from a full board by
+# `status`. Coverage is the question `status: "ready"` cannot answer.
+# ---------------------------------------------------------------------------
+
+# Two baselines and no models: the reachable half. All seven LLM entries carry
+# `auto_compute: false` in dashboard/config/leaderboard.json while the baselines
+# auto-recompute, so editing the contest window misses `_find_cached_run` on all
+# twelve, rebuilds the two baselines and never rebuilds the seven models.
+_BASELINES_ONLY_FIXTURE_JS = """
+const entries = [
+  {entry_id: 'djia_index', team_name: 'Agentic Trading Lab', team_badge: 'Market Index', model: 'DJIA', is_model: false, cumulative_return: 0.0224, portfolio_value: 10224, initial_equity: 10000,
+   equity_curve: [{timestamp: '2026-04-15T14:00:00+00:00', equity: 10000}, {timestamp: '2026-04-15T15:00:00+00:00', equity: 10224}]},
+  {entry_id: 'buy_hold_djia', team_name: 'Agentic Trading Lab', team_badge: 'Baseline Strategy', model: 'Buy & Hold', is_model: false, cumulative_return: 0.0487, portfolio_value: 10487, initial_equity: 10000,
+   equity_curve: [{timestamp: '2026-04-15T14:00:00+00:00', equity: 10000}, {timestamp: '2026-04-15T15:00:00+00:00', equity: 10487}]},
+];
+const board = module.exports.buildBoardData({entries, window: {label: '2026-04-15 → 2026-05-15'}});
+"""
+
+_EMPTY_FIXTURE_JS = """
+const board = module.exports.buildBoardData({entries: [], window: {label: '2026-04-15 → 2026-05-15'}});
+"""
+
+
+def test_an_empty_two_hundred_is_reported_as_empty_by_both_coverage_rules():
+    """`entries: []` is a 200. Without this the hero draws its whole frame over
+    it -- a percent axis labelled -5.0%..5.0% off `percentDomain`'s hardcoded
+    fallback, a scale no run produced, under the axis arrow, the title, the
+    window chip and the caption "Return over the competition window, hour by
+    hour" -- and Race renders its Rank/AI model/Return header over zero rows.
+    Both are silent, confident, and wrong."""
+    result = _run_ts(
+        _EMPTY_FIXTURE_JS
+        + """
+console.log(JSON.stringify({
+  chart: module.exports.chartCoverage(board.series),
+  standings: module.exports.standingsCoverage(board.standings),
+}));
+"""
+    )
+    assert result == {"chart": "empty", "standings": "empty"}
+
+
+def test_a_baselines_only_two_hundred_is_reported_as_carrying_no_models():
+    """The more reachable half, and the one that looks more plausible: a card
+    captioned "Each line is one AI model's return" drawing two dashed baselines
+    and no models, above Race copy still reading "Seven leading AI models traded
+    the same days." Not an error -- a 200 whose model entries all missed cache."""
+    result = _run_ts(
+        _BASELINES_ONLY_FIXTURE_JS
+        + """
+console.log(JSON.stringify({
+  chart: module.exports.chartCoverage(board.series),
+  standings: module.exports.standingsCoverage(board.standings),
+  seriesKeys: board.series.map((s) => s.key),
+  standingsKeys: board.standings.map((s) => s.key),
+}));
+"""
+    )
+    assert result["chart"] == "baselines-only"
+    assert result["standings"] == "baselines-only"
+    # Non-vacuity: the payload really did carry two drawable reference curves,
+    # so "baselines-only" is distinguishing them from models rather than from
+    # nothing at all -- which is what separates this state from "empty".
+    assert sorted(result["seriesKeys"]) == ["buy_hold_djia", "djia_index"]
+    assert sorted(result["standingsKeys"]) == ["buy_hold_djia", "djia_index"]
+
+
+def test_a_full_board_is_reported_as_full_so_the_notice_is_not_permanent():
+    """The other direction, and the one a mutant `return "baselines-only"` would
+    fail: today's real roster must report `full`, or every visitor sees a notice
+    saying the board is incomplete while looking at a complete board."""
+    result = _run_ts(
+        _RAGGED_CURVE_FIXTURE_JS
+        + """
+console.log(JSON.stringify({
+  chart: module.exports.chartCoverage(board.series),
+  standings: module.exports.standingsCoverage(board.standings),
+}));
+"""
+    )
+    assert result == {"chart": "full", "standings": "full"}
+
+
+def test_a_model_with_no_drawable_curve_still_counts_as_a_model_in_the_standings():
+    """The two rules answer for different collections on purpose: the hero draws
+    `series` and Race lists `standings`, and a curve-less model reaches the
+    second but not the first. deepseek_v4_pro in the ragged fixture is exactly
+    that entry, and it must not make Race announce a board with no models."""
+    result = _run_ts(
+        _RAGGED_CURVE_FIXTURE_JS
+        + """
+const deepseek = board.standings.find((s) => s.key === 'deepseek_v4_pro');
+console.log(JSON.stringify({
+  isModel: deepseek.isModel,
+  inSeries: board.series.some((s) => s.key === 'deepseek_v4_pro'),
+  baselineIsNotAModel: board.standings.find((s) => s.key === 'buy_hold_djia').isModel,
+}));
+"""
+    )
+    assert result == {"isModel": True, "inSeries": False, "baselineIsNotAModel": False}
+
+
+_RACE_TSX_SRC = (_ROOT / "landing" / "src" / "components" / "home" / "Race.tsx").read_text(
+    encoding="utf-8"
+)
+
+
+def test_both_board_consumers_branch_on_coverage_and_not_only_on_status():
+    """The fourth render path, in both consumers.
+
+    `BoardState` is exactly `loading | ready | error` and before this both
+    components branched on exactly those three -- there was no length or
+    emptiness check anywhere in landing/src. This is the repo's own documented
+    fail-closed-is-not-fail-visible shape: "the upstream returned nothing" and
+    "everything is fine" rendered byte-identically, at HTTP 200, with a green
+    suite.
+
+    Pinned as the CALL (parens), not the imported name: `noUnusedLocals` is off,
+    so an import with no call site typechecks clean and would satisfy a bare
+    substring check while both components went back to drawing a confident
+    frame over nothing."""
+    assert "chartCoverage(" in _BOARD_PREVIEW_TSX, (
+        "the hero must ask what the 200 actually carried before drawing a frame"
+    )
+    assert "standingsCoverage(" in _RACE_TSX_SRC, (
+        "the standings table must ask the same question before rendering rows"
+    )
+    for name, src in (("BoardPreview.tsx", _BOARD_PREVIEW_TSX), ("Race.tsx", _RACE_TSX_SRC)):
+        assert '=== "empty"' in src, f"{name} must render the empty case differently"
+        assert '=== "baselines-only"' in src, (
+            f"{name} must say so when a 200 carried no model entries"
+        )
+
+
+def test_neither_consumer_invents_a_fallback_dataset_for_the_empty_case():
+    """The fix for an empty board is to SAY it is empty. Substituting curves --
+    under any name -- is the bug the whole change exists to remove, and a
+    name-scoped ban on the three retired SAMPLE_* symbols cannot express that,
+    so this one bans the shapes a new fallback would take."""
+    for name, src in (("BoardPreview.tsx", _BOARD_PREVIEW_TSX), ("Race.tsx", _RACE_TSX_SRC)):
+        assert "SAMPLE_" not in src, f"{name} carries a sample dataset again"
+        assert not re.search(r"(FALLBACK|DEMO|PLACEHOLDER)_(CURVES|STANDINGS|ENTRIES)", src), (
+            f"{name} carries a renamed fallback dataset"
+        )

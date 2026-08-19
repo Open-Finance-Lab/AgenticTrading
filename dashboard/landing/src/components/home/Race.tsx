@@ -7,6 +7,7 @@ import { PRIMARY_LANDING_CTA } from "@/lib/cta";
 // Competition board, from one fetch. Real numbers in the hero above invented
 // ones here, on the same page, is worse than either alone.
 import { useLeaderboard } from "@/lib/useLeaderboard";
+import { standingsCoverage } from "@/lib/leaderboard";
 
 /** Three facts, in the order a sceptic asks for them: what was held equal, what
  *  the other board is, and what disqualifies a result. Icons carry the shape so
@@ -42,6 +43,14 @@ export function Race() {
   // seeds `standings` with both baselines; do not add a filter here that drops
   // them back out.
   const standings = board.status === "ready" ? board.data.standings : [];
+  // A 200 is not a board: `get_leaderboard` skips any strategy with no
+  // cached run and still answers 200, so a payload with no entries -- or
+  // with the two baselines and none of the seven models -- is an ordinary
+  // SUCCESSFUL response that `board.status` cannot tell from a full board.
+  // Rendering the Rank/AI model/Return header over that is the
+  // fail-closed-is-not-fail-visible shape, on the page's most checkable
+  // claim. Do not answer it with invented rows.
+  const coverage = standingsCoverage(standings);
   return (
     <section id="race" className="py-24 bg-muted/20 border-y border-border scroll-mt-40">
       <div className="container mx-auto px-6">
@@ -120,39 +129,59 @@ export function Race() {
                 <p className="px-2 py-6 text-sm text-muted-foreground">
                   The standings didn&apos;t load ({board.message}). Reload to try again.
                 </p>
+              ) : coverage === "empty" ? (
+                <p className="px-2 py-6 text-sm text-muted-foreground">
+                  The standings came back empty. The request succeeded and carried no entries —
+                  nothing here is a result. Reload to try again.
+                </p>
               ) : (
-                standings.map((item, index) => (
-                  <div
-                    key={item.key}
-                    className={`grid grid-cols-12 items-center p-3 border rounded-lg ${
-                      index === 0
-                        ? "bg-primary/10 border-primary/40"
-                        : "bg-background border-border"
-                    }`}
-                  >
-                    <div className="col-span-2 font-mono font-bold text-muted-foreground">
-                      #{index + 1}
-                    </div>
+                <>
+                  {coverage === "baselines-only" ? (
+                    // The reachable half, and the one that looks plausible: all
+                    // seven LLM entries carry `auto_compute: false` while the
+                    // baselines auto-recompute, so a contest-window edit misses
+                    // cache on all twelve, rebuilds the two baselines and never
+                    // rebuilds the models. Without this line the table publishes
+                    // two baselines under an "AI model" header, below copy
+                    // reading "Seven leading AI models traded the same days."
+                    <p className="px-2 pb-3 text-sm text-muted-foreground">
+                      No AI model results came back this time — the rows below are the reference
+                      baselines only.
+                    </p>
+                  ) : null}
+                  {standings.map((item, index) => (
                     <div
-                      className={`col-span-7 font-medium truncate pr-2 ${
-                        index === 0 ? "text-primary" : "text-foreground"
-                      }`}
-                    >
-                      {item.name}
-                    </div>
-                    <div
-                      className={`col-span-3 text-right font-mono font-bold ${
+                      key={item.key}
+                      className={`grid grid-cols-12 items-center p-3 border rounded-lg ${
                         index === 0
-                          ? "text-primary"
-                          : item.ret.startsWith("-")
-                            ? "text-destructive"
-                            : "text-positive"
+                          ? "bg-primary/10 border-primary/40"
+                          : "bg-background border-border"
                       }`}
                     >
-                      {item.ret}
+                      <div className="col-span-2 font-mono font-bold text-muted-foreground">
+                        #{index + 1}
+                      </div>
+                      <div
+                        className={`col-span-7 font-medium truncate pr-2 ${
+                          index === 0 ? "text-primary" : "text-foreground"
+                        }`}
+                      >
+                        {item.name}
+                      </div>
+                      <div
+                        className={`col-span-3 text-right font-mono font-bold ${
+                          index === 0
+                            ? "text-primary"
+                            : item.ret.startsWith("-")
+                              ? "text-destructive"
+                              : "text-positive"
+                        }`}
+                      >
+                        {item.ret}
+                      </div>
                     </div>
-                  </div>
-                ))
+                  ))}
+                </>
               )}
             </div>
           </div>
