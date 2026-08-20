@@ -5383,18 +5383,40 @@ html[data-nav-page="home"] #homeView .home-landing-board {
        (rail - gap) / (1 + ratio) less a 24px inset, and the tightest viewport
        is NOT the narrowest: `gap: clamp(2.5rem, 5vw, 6.8rem)` keeps growing to
        108.8px while the rail is pinned at 1444, so the copy column shrinks
-       above ~1744 and bottoms out at 2176+. Measured slack there (available
-       minus what "AI models finished" needs, Inter loaded):
+       above ~1744 and bottoms out at 2176+ (both clamps sit at their maximum
+       there, so nothing wider is tighter).
+
+       TWO bounds stack here and they swap over, which an earlier table missed
+       by measuring only the first: the copy column (this ratio) and the
+       headline's OWN `max-width: 36rem` = 576px, further down this file. Below
+       ~1650px of viewport the column is narrower than 576 and the ratio binds;
+       above it the column clears 576, the h1 stops at its cap, and the ratio
+       stops mattering at all. Slack below is measured for the shipped accent
+       line, "each model ranks", against the h1's laid-out content width --
+       min(column, 576) -- and not against the column, Inter loaded, with W
+       marking a headline that actually wrapped (rendered height, not
+       arithmetic):
 
          ratio   1201   1600   1744   1920   2176
-         1.25    +40    +54    +17    +13    +7.7
-         1.30    +31    +41     +4    +0.6   -5.0   <- three-line headline
-         1.35    +22    +29    -7.9  -11.6  -17.1
+         1.25   +57.0  +68.9  +26.5  +26.5  +26.5
+         1.30   +48.0  +66.9  +26.5  +26.5  +20.5
+         1.35   +39.0  +54.9  +17.5  +13.5   +8.5
+         1.38   +34.0  +47.9  +10.5   +6.5   +1.5
+         1.40   +30.0  +42.9   +5.5   +2.5   -3.5W
 
-       1.30 and 1.35 both wrap, at the WIDEST screens rather than the narrowest
-       -- which is how an earlier 1.35 ceiling measured "safe" against a table
-       that stopped at 1920. Raising this is not free; re-measure at 2176 and
-       up. Pinned by test_the_board_ratio_leaves_the_headline_room.
+       The flat +26.5 across 1744-2176 is the cap binding, not a coincidence.
+       The ceiling is now ~1.38. It was 1.28 for the previous headline, "AI
+       models finished", which is 25.6px wider: that copy wrapped at 1.30 (2176)
+       and at 1.35 from 1744 up, and at the shipped 1.25 it cleared its cap by
+       +1.0px at every viewport from 1744 -- one pixel, at three of five widths
+       measured. A font update or one longer word would have wrapped it, and the
+       column-only table read that as +17/+13/+7.7 of headroom.
+
+       So this number is deliberately NOT raised to its new ceiling: the copy
+       got shorter, the constraint did not get looser, and the next headline
+       spends the margin again. Raising it is still not free; re-measure at 2176
+       and up, and against the cap. Pinned by
+       test_the_board_ratio_leaves_the_headline_room.
 
        Shrink is 0, written into the shorthand. The rule this replaced read
        `flex: 1 1 0` with a `flex-shrink: 0` three lines below overriding the `1`,
@@ -5475,9 +5497,13 @@ html[data-nav-page="home"] #homeView .home-landing-board .home-module {
     html[data-nav-page="home"] #homeView .home-landing-hero {
         height: auto;
         min-height: 100%;
-        /* Reserves the scroll hint's own strip: it is position:absolute at
-           bottom:18px and stands ~50px tall, so anything less than ~90px of
-           padding lets the panel slide under it. */
+        /* Reserves the scroll hint's own strip. The hint is position:absolute
+           at bottom:18px and measures 56px tall, so the band it occupies is
+           74px -- the "~50px" this comment used to quote was the estimate that
+           was wrong by 6px, and it outlived the literals it described. The
+           value is the shared token for that reason: the desktop reserve spends
+           the same one and the guard reads it, so there is nothing left here to
+           drift out of step. See `--home-hint-strip`. */
         padding-block: clamp(14px, 2vh, 28px) var(--home-hint-strip);
     }
     html[data-nav-page="home"] #homeView .home-landing-hero-inner {

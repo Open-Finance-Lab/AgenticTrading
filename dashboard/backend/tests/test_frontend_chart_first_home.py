@@ -832,24 +832,26 @@ def test_rank_rows_keep_ending_value_and_sharpe():
     assert "hm-rank-sharpe" in body
 
 
-def test_the_screen_zero_lede_is_a_fact_then_a_call_to_action():
-    """The old sentence did two jobs at once -- glossing "agent" AND pre-empting
-    "is my agent on this list?" -- which is why it read as neither marketing nor
-    a CTA. The no-entry fact is already stated on the board itself
-    ("AI models only - ranked by return"), so the lede is freed to be one plain
-    thing. The gloss drops on this surface: the reader is signed in and inside
-    the app, where the word is glossed throughout.
+def test_the_screen_zero_lede_is_a_direct_challenge():
+    """The lede stopped describing the board and became a challenge.
+
+    Two earlier ledes tried to describe: one glossed "agent" AND pre-empted "is
+    my agent on this list?", the next narrated what the board shows. The
+    headline states the offer and the board states the no-entry fact
+    ("AI models only - ranked by return"), so a describing lede was the third
+    element saying the same thing. This one only has to move the reader to the
+    CTA directly beneath it.
     """
     from dashboard.backend.tests._frontend_source import APP_HTML
 
     html = re.sub(r"<!--.*?-->", "", APP_HTML, flags=re.DOTALL)
-    assert (
-        "See how the AI models did. Then test your own idea on the same days."
-        in html
-    )
+    assert "Do you think you can beat them?" in html
+    # Both retired ledes, so a revert shows up here rather than as duplicated
+    # description on screen.
     assert "in a test of its own" not in html
-    # The fact it used to carry must still be on screen, on the board making the
-    # claim -- otherwise this is a deletion, not a split.
+    assert "See how the AI models did" not in html
+    # The fact the lede never carried must still be on screen, on the board
+    # making the claim -- otherwise this is a deletion, not a split.
     assert "AI models only" in html
 
 
@@ -877,8 +879,16 @@ _HINT_STRIP_FLOOR_PX = 74
 _RESERVE_MAX_GATE_PX = 768
 
 # Above this the headline's second line wraps -- at the WIDEST screens, because
-# the gap keeps growing while the rail is pinned. Measured slack at 2176px:
-# 1.25 -> +7.7px, 1.30 -> -5.0px, 1.35 -> -17.1px.
+# the gap keeps growing while the rail is pinned. TWO bounds stack: this ratio
+# (which sets the copy column) and the headline's own `max-width: 36rem` = 576px.
+# Below ~1650px of viewport the column is the narrower of the two and the ratio
+# binds; above it the column clears 576, the h1 stops at its cap, and the ratio
+# stops mattering. Measured against the h1's laid-out width -- min(column, 576)
+# -- at 2176px with the current headline: 1.25 -> +26.5px, 1.35 -> +8.5px,
+# 1.38 -> +1.5px, 1.40 -> wraps. The ceiling is ~1.38 and is deliberately NOT
+# taken here: the copy got shorter, the constraint did not get looser. The
+# previous headline ("AI models finished", 25.6px wider) put the ceiling at 1.28
+# and cleared its cap by +1.0px at 1744 and up.
 _MAX_BOARD_GROW = 1.25
 
 _HINT_SELECTOR_HINT = "scroll-hint"
@@ -1229,12 +1239,16 @@ def test_the_board_ratio_leaves_the_headline_room():
     The copy column is whatever the board leaves, and the binding width is the
     WIDEST screen, not the narrowest: `gap: clamp(2.5rem, 5vw, 6.8rem)` keeps
     growing to 108.8px while the rail is pinned at 1444, so the column shrinks
-    above ~1744 and bottoms out at 2176+. Measured slack there: 1.25 -> +7.7px,
-    1.30 -> -5.0px, 1.35 -> -17.1px.
+    above ~1744 and bottoms out at 2176+.
 
-    A ceiling of 1.35 therefore passed values that visibly wrap; it had been
-    measured against a table that stopped at 1920. Raising this means
-    re-measuring at 2176 and up, not editing the number.
+    A ceiling of 1.35 once passed values that visibly wrap, because it had been
+    measured against a table that stopped at 1920. The other way to get this
+    wrong is to measure the copy column and call it the headroom: the headline
+    also carries `max-width: 36rem`, and past ~1650px of viewport THAT is the
+    narrower bound, so the column-only reading overstates the margin by however
+    far the column clears 576px. See `_MAX_BOARD_GROW` for the current grid.
+    Raising this means re-measuring at 2176 and up, against the cap, not editing
+    the number.
     """
     block = _unique_block(
         'html[data-nav-page="home"] #homeView .home-landing-board', "flex"
@@ -1252,6 +1266,51 @@ def test_the_board_ratio_leaves_the_headline_room():
     assert grow <= _MAX_BOARD_GROW, (
         f"the board grows at {grow}, above the measured {_MAX_BOARD_GROW} "
         "ceiling; the hero headline wraps to a third line at 2176px and wider"
+    )
+
+
+def test_the_ratio_grid_measures_the_headline_that_ships():
+    """The measured grid beside the board's `flex` must name the CURRENT headline.
+
+    This is the one assertion in this file that reads a comment ON PURPOSE,
+    against `_strip_comments`' rule, because here the comment IS the artifact
+    under guard: the ceiling is a measurement of one specific string, and a copy
+    edit that leaves the grid behind produces a table that is precise,
+    authoritative, and about a headline nobody ships any more. Nothing else can
+    catch that -- the CSS still parses, the ratio still passes its bound, and the
+    stale numbers read exactly like fresh ones.
+
+    Pairs with `_MAX_BOARD_GROW`: that bounds the number, this bounds what the
+    number was measured against.
+    """
+    from dashboard.backend.tests._frontend_source import APP_HTML
+
+    accent = re.search(r"home-headline-line--2[^>]*>([^<]+)<", APP_HTML)
+    assert accent, "screen 0 has no `home-headline-line--2` span for the grid to measure"
+    headline = accent.group(1).strip()
+
+    grid = next(
+        (
+            block
+            for block in re.findall(r"/\*.*?\*/", STYLES, re.S)
+            if "test_the_board_ratio_leaves_the_headline_room" in block
+        ),
+        None,
+    )
+    assert grid, (
+        "the board's ratio comment no longer names its guard, so this test cannot "
+        "find the grid -- re-point it at whatever now carries the measurements"
+    )
+    # Collapse the comment's own line wrapping first: the grid is prose in a CSS
+    # block comment, so a re-flow can split the quoted headline across lines
+    # without changing a word. A guard that fails on re-indentation gets deleted
+    # by the next person who touches it.
+    flattened = " ".join(grid.split())
+    assert headline in flattened, (
+        f"screen 0 ships the headline {headline!r}, but the measured ratio grid "
+        "names a different string. The grid is what licenses _MAX_BOARD_GROW, so "
+        "re-measure it against the new copy (the comment carries the method) "
+        "rather than deleting the mismatch."
     )
 
 
