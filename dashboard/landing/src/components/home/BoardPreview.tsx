@@ -125,10 +125,28 @@ export function BoardPreview() {
   // from a full board -- see chartCoverage's own note.
   const coverage = chartCoverage(series);
 
-  const valueByKey = useMemo(
-    () => Object.fromEntries(standings.map((s) => [s.key, s.ret])),
-    [standings],
-  );
+  // NULL PROTOTYPE, not `Object.fromEntries`. Not a live bug today, and worth
+  // being exact about which: both readers index this by a key that is already
+  // known to be present -- `series[].key` below, and `String(item.dataKey)` in
+  // EndpointRail, which Recharts took from those same series -- so the subset
+  // note under this comment is what keeps every lookup an own property, and
+  // the prototype is never consulted.
+  //
+  // It is the CONSEQUENCE OF THAT NOTE BEING WRONG that this changes. On a
+  // plain object a miss does not read as a miss: `constructor`, `toString` and
+  // `valueOf` answer from Object.prototype with a function, and the rail's
+  // `?? ""` cannot catch it because a function is not nullish -- so a `series`
+  // entry that ever escapes `standings` stops being a blank pill and becomes a
+  // stringified function, measured into the gutter as a label. That converts a
+  // future invariant break from visible-and-obvious into rendered-and-wrong,
+  // for a roster whose entry_ids come from config rather than from code. A
+  // dictionary with no prototype has nothing to inherit, so the miss stays a
+  // miss, and it costs one line to buy both readers out of the question.
+  const valueByKey = useMemo(() => {
+    const byKey: Record<string, string> = Object.create(null);
+    for (const s of standings) byKey[s.key] = s.ret;
+    return byKey;
+  }, [standings]);
 
   // MEASURED OVER `series`, NOT `standings`, because the rail draws `series`.
   // The two are not the same set and never can be: `buildBoardData` pushes
