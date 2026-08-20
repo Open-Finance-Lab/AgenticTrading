@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from dashboard.backend.tests._frontend_source import css_blocks
+from dashboard.backend.tests._frontend_source import STYLES, css_blocks
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _CONFIG = Path(__file__).resolve().parents[2] / "config"
@@ -860,3 +860,291 @@ def test_the_series_style_helper_is_an_explicit_cross_file_export():
     """
     assert "window.getSeriesStyle = getSeriesStyle;" in _LEADERBOARD_JS
     assert "window.getSeriesStyle" in _HOME_JS
+
+
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+# The hint is `position: absolute; bottom: 18px` and stands ~50px tall, so the
+# strip it occupies is ~68px. The <=1200px branch reserves 96px and documents
+# why ("anything less than ~90px of padding lets the panel slide under it");
+# 90 is that stated floor, asserted rather than the exact 96 so tuning the
+# padding does not have to touch this file.
+_HINT_STRIP_FLOOR_PX = 90
+
+# Above this the headline's second line wraps. Measured under headless Chromium
+# with Inter loaded: 1.5 wraps at every width >=1201px, 1.4 wraps at 1920/2560,
+# 1.35 clears 1920 by ~2px. See the rule's own comment for the full table.
+_MAX_BOARD_GROW = 1.35
+
+
+def _exact_rule_blocks(prelude: str) -> list[str]:
+    """`css_blocks`, minus blocks where `prelude` is only a selector's TAIL.
+
+    `css_blocks` searches for the prelude followed by `{`, so a *scoped* rule --
+    `html[data-nav-page="home"] #homeView .home-scroll-hint {` -- also matches a
+    bare `.home-scroll-hint` and comes back as a block that begins mid-selector.
+    A guard asking "does the UNSCOPED rule still viewport-centre the hint" was
+    therefore satisfiable by the scoped override: by the very rule it exists to
+    be independent of. Keep only matches that start where a selector may start.
+    """
+    starts = [
+        match.start()
+        for match in re.finditer(re.escape(prelude) + r"\s*\{", STYLES)
+    ]
+    blocks = css_blocks(prelude)
+    assert len(starts) == len(blocks), "css_blocks stopped matching its own regex"
+    kept = []
+    for start, block in zip(starts, blocks):
+        before = STYLES[:start].rstrip()
+        if before == "" or before[-1] in "{}" or before.endswith("*/"):
+            kept.append(block)
+    return kept
+
+
+def _declarations(block: str, prop: str) -> list[str]:
+    """Every value `block` declares for `prop`, read from code and never prose.
+
+    Comments are stripped first because the rules guarded here carry long notes
+    that quote their own numbers ("caps itself at 1500px", "1444 rather than
+    1500") -- exactly the trap this file's `_strip_comments` docstring describes
+    for the JS side. Without the strip, moving a rail and leaving the note
+    behind keeps the guard green on the regression it exists to catch.
+    """
+    body = _CSS_COMMENT.sub("", block)
+    return [
+        match.group(1).strip()
+        for match in re.finditer(rf"(?m)^\s*{re.escape(prop)}:\s*([^;]+);", body)
+    ]
+
+
+def _shorthand_parts(value: str) -> list[str]:
+    """Split a shorthand on TOP-LEVEL whitespace only.
+
+    A plain `.split()` is wrong here and fails open in the worst way: the hero's
+    padding is `clamp(20px, 3vh, 40px) clamp(40px, 5vw, 80px) 96px`, and the
+    spaces inside those `clamp()` calls turn a three-value shorthand into seven
+    tokens. The bottom value then reads as `3vh,` -- not a px length, so a guard
+    that tolerates unparseable values concludes "no fixed reserve declared" over
+    a rule that declares one perfectly well.
+    """
+    parts: list[str] = []
+    depth = 0
+    current = ""
+    for char in value:
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+        if char.isspace() and depth == 0:
+            if current:
+                parts.append(current)
+                current = ""
+            continue
+        current += char
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _px(value: str) -> float:
+    match = re.fullmatch(r"(-?[\d.]+)px", value.strip())
+    assert match, f"expected a plain px length, got {value!r}"
+    return float(match.group(1))
+
+
+def _rail_geometry(prelude: str) -> tuple[float, float]:
+    """(rail width, horizontal inset) for the one rule that declares the rail.
+
+    Both numbers are read from the SAME block rather than from whichever rule
+    happens to come first. The previous helper returned the first block that
+    declared a `max-width`, which silently depended on authoring order: adding a
+    `max-width` to either selector's narrow-viewport override -- or authoring a
+    new override above the base rule -- would have made this compare a stacked
+    rail against a desktop one, and the failure would have read as a real
+    mismatch. Taking the padding from the same block matters for the same
+    reason: screen 1 re-declares its padding inside `@media (max-width: 820px)`.
+    """
+    capped = [
+        block for block in _exact_rule_blocks(prelude) if _declarations(block, "max-width")
+    ]
+    assert len(capped) == 1, (
+        f"{prelude} now declares max-width in {len(capped)} rules; this guard "
+        "cannot tell which one is the desktop rail -- disambiguate it here "
+        "rather than deleting the case"
+    )
+    block = capped[0]
+    assert "box-sizing: border-box" in _CSS_COMMENT.sub("", block), (
+        f"{prelude} is no longer border-box, so its max-width stopped including "
+        "its padding and the arithmetic below is wrong"
+    )
+    (width,) = _declarations(block, "max-width")
+    padding = _declarations(block, "padding")
+    if not padding:
+        return _px(width), 0.0
+    parts = _shorthand_parts(padding[0])
+    # padding: A | A B | A B C | A B C D -- the inline value is [1] whenever
+    # there is more than one part, and [0] when the shorthand has just one.
+    inline = parts[1] if len(parts) > 1 else parts[0]
+    return _px(width), _px(inline)
+
+
+def test_the_two_pager_screens_share_one_content_rail():
+    """The two screens put their CONTENT on the same x, not their border boxes.
+
+    `#homeView` is a scroll-snap pager: the screens are never on-screen
+    together, so a rail mismatch is invisible in any single view and shows up
+    only as the content sliding sideways on every snap -- precisely the kind of
+    defect nobody files.
+
+    The quantity is the content rail, and getting that wrong is not theoretical:
+    screen 1 caps itself at 1500px and then insets its content by 28px a side,
+    so equalising the two `max-width` declarations at 1500 lands the border
+    boxes on the same x while moving the content edges 28px APART. Measured at
+    1920 and 2560 that change made the jump 28px, against 2px for the 1440 rail
+    it replaced -- the old rail was very nearly right by accident, its 60px
+    under-size almost exactly screen 1's 56px of padding. A guard on the raw
+    `max-width` values calls that regression a fix.
+
+    Kept as arithmetic over two independently-read declarations rather than a
+    literal, so widening the app stays a change this case forces you to make
+    consistently instead of a third number to update.
+    """
+    hero_rail, hero_inset = _rail_geometry(
+        'html[data-nav-page="home"] #homeView .home-landing-hero-inner'
+    )
+    dash_rail, dash_inset = _rail_geometry(
+        'html[data-nav-page="home"] #homeView .home-dashboard-screen-inner'
+    )
+    hero_content = hero_rail - 2 * hero_inset
+    dash_content = dash_rail - 2 * dash_inset
+    assert hero_content == dash_content, (
+        f"screen 0 puts {hero_content}px of content on screen "
+        f"({hero_rail} rail less {hero_inset}px a side) but screen 1 puts "
+        f"{dash_content}px ({dash_rail} less {dash_inset}px a side), so the "
+        f"content shifts {abs(hero_content - dash_content) / 2}px sideways on "
+        "every pager snap -- move the rails together, or absorb the difference "
+        "in the other screen's padding"
+    )
+
+
+def test_the_hero_reserves_the_scroll_hints_strip():
+    """The hint gets its own strip; nothing is laid out under it.
+
+    The hint is `position: absolute; bottom: 18px` with `z-index: 3` and live
+    pointer-events, so anything sharing its band is not merely overlapped but
+    UN-CLICKABLE. Measured at 1600x620, 1440x650, 1366x640 and 1280x600 with a
+    hero that reserved nothing, `document.elementFromPoint` at the centre of the
+    "Join our Discord community" CTA returned `homeScrollHint`: the click
+    scrolled to the dashboard instead of opening Discord.
+
+    Reserving the strip vertically is also what keeps the hint off the board
+    card, which is why the fix is NOT to move the hint sideways. An override
+    that re-anchors it horizontally trades the board overlap for a copy-column
+    overlap and lands it on the CTAs -- and it has to hard-code half the rail
+    to do so, a second constant nothing keeps in step with the rail itself.
+    """
+    hero_blocks = _exact_rule_blocks(
+        'html[data-nav-page="home"] #homeView .home-landing-hero'
+    )
+    assert hero_blocks, "the hero rule was renamed or deleted"
+    reserves = []
+    for block in hero_blocks:
+        for prop in ("padding", "padding-block", "padding-bottom"):
+            for value in _declarations(block, prop):
+                parts = _shorthand_parts(value)
+                bottom = {
+                    "padding": {1: 0, 2: 0, 3: 2, 4: 2},
+                    "padding-block": {1: 0, 2: 1},
+                    "padding-bottom": {1: 0},
+                }[prop].get(len(parts))
+                if bottom is None:
+                    continue
+                try:
+                    reserves.append(_px(parts[bottom]))
+                except AssertionError:
+                    continue  # a clamp()/var() bottom is not a fixed reserve
+    assert reserves, (
+        "no hero rule declares a fixed bottom padding any more, so nothing "
+        "reserves the scroll hint's strip -- re-point this case at however the "
+        "reserve is now expressed, do not delete it"
+    )
+    assert min(reserves) >= _HINT_STRIP_FLOOR_PX, (
+        f"the hero reserves only {min(reserves)}px at its shallowest, under the "
+        f"~{_HINT_STRIP_FLOOR_PX}px the hint's own strip needs; the CTA row "
+        "slides under the hint and stops taking clicks"
+    )
+
+    base = _exact_rule_blocks(".home-scroll-hint")
+    assert base, "the unscoped scroll-hint rule was renamed or deleted"
+    assert any("left: 50%" in _CSS_COMMENT.sub("", block) for block in base), (
+        "the scroll hint no longer viewport-centres -- that is the anchor both "
+        "the stacked and the two-column layouts rely on now that the hero "
+        "reserves the hint's strip instead of moving it"
+    )
+    scoped = [
+        _CSS_COMMENT.sub("", block)
+        for block in _exact_rule_blocks(
+            'html[data-nav-page="home"] #homeView .home-scroll-hint'
+        )
+    ]
+    assert not any("left:" in block for block in scoped), (
+        "something re-anchors the scroll hint horizontally on the home pager. "
+        "That is the fix this case exists to prevent: it moves the hint off the "
+        "board card and onto the copy column's CTAs, and it needs half the rail "
+        f"as a hard-coded constant to do it (blocks: {scoped!r})"
+    )
+
+
+def _board_block() -> str:
+    """The desktop (>1200px) rule for the board column."""
+    blocks = _exact_rule_blocks(
+        'html[data-nav-page="home"] #homeView .home-landing-board'
+    )
+    assert blocks, "the board column rule was renamed or deleted"
+    return blocks[0]
+
+
+def test_the_board_ratio_leaves_the_headline_room():
+    """The board may not grow so fast that the headline gains a third line.
+
+    The copy column is whatever the board leaves: (rail - gap) / (1 + grow),
+    less a 24px inset. Measured under headless Chromium with Inter loaded,
+    `.home-headline-line--2` ("AI models finished") needs 396/424/454/478/533/
+    575px at 1201/1280/1366/1440/1600/1920. At `flex: 1.5` the column is under
+    that at EVERY width >=1201px and "See where the / AI models finished"
+    renders as three lines; 1.4 still wraps at 1920 and 2560.
+
+    Asserted as a ceiling rather than the exact value so the ratio stays
+    tunable, but it is a measured ceiling: raising it means re-running the
+    headline measurement, not editing this number.
+    """
+    (flex,) = _declarations(_board_block(), "flex")
+    grow = float(flex.split()[0])
+    assert grow <= _MAX_BOARD_GROW, (
+        f"the board grows at {grow}, above the measured {_MAX_BOARD_GROW} "
+        "ceiling; the hero headline wraps to a third line at desktop widths"
+    )
+
+
+def test_the_board_column_is_not_recapped_by_the_unscoped_rule():
+    """`max-width: none` here is load-bearing, not a leftover.
+
+    The unscoped `.home-landing-board` rule carries `max-width: 42rem`. This
+    scoped rule used to mask it with a cap of its own, so DELETING the cap here
+    -- the obvious tidy-up, since no cap ever binds above 1200px -- does not
+    uncap the column: it hands it to that 42rem and measured pins the board to
+    672px at 1600/1920/2560, silently undoing most of the widening.
+    """
+    (declared,) = _declarations(_board_block(), "max-width")
+    assert declared == "none", (
+        f"the board's desktop rule declares `max-width: {declared}` instead of "
+        "`none`; if that is narrower than the column wants it re-caps the board"
+    )
+    unscoped = [
+        block for block in _exact_rule_blocks(".home-landing-board")
+        if _declarations(block, "max-width")
+    ]
+    assert unscoped, (
+        "the unscoped .home-landing-board no longer declares a max-width, so "
+        "`max-width: none` above may now be removable -- verify and update both"
+    )
