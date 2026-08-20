@@ -5275,8 +5275,22 @@ html[data-nav-page="home"] #homeView #homeScreenLanding {
 html[data-nav-page="home"] #homeView .home-landing-hero {
     height: 100%;
     min-height: 0;
-    /* Match .home-page gutters — pager zeroes page padding, so hero must carry the rail. */
-    padding: clamp(20px, 3vh, 40px) clamp(40px, 5vw, 80px);
+    /* Match .home-page gutters — pager zeroes page padding, so hero must carry
+       the rail. The bottom is the scroll hint's own strip, RESERVED rather than
+       shared: the hint is position:absolute at bottom:18px, stands ~50px tall,
+       and carries `z-index: 3` with live pointer-events, so anything the hero
+       lays out down there is not merely overlapped but un-clickable. Measured
+       at 1600x620, 1440x650, 1366x640 and 1280x600 without this reserve,
+       `document.elementFromPoint` at the centre of the "Join our Discord
+       community" CTA returned `homeScrollHint` -- the click scrolled to the
+       dashboard instead of opening Discord. Reserving the strip is also what
+       keeps the hint off the board card (measured overlap 28x42px before this,
+       and it grows with the card), which is why no rule moves the hint
+       sideways: viewport-centring is correct once nothing is laid out beneath
+       it. The <=1200px branch below reserves the same 96px for the same reason
+       -- this is that rule's desktop half, not a second mechanism.
+       Pinned by test_the_hero_reserves_the_scroll_hints_strip. */
+    padding: clamp(20px, 3vh, 40px) clamp(40px, 5vw, 80px) 96px;
     display: flex;
     flex-direction: column;
     justify-content: center;
@@ -5294,14 +5308,21 @@ html[data-nav-page="home"] #homeView .home-landing-hero-inner {
        hero stacks and the cap is released. The board being widest on a small
        laptop and narrowest on a 4K monitor is the defect.
 
-       This number is NOT free: `#homeView` is a scroll-snap pager and
-       `.home-dashboard-screen-inner` (screen 1) caps its own rail at the same
-       value. Measured at 1920, 1720 here put this rail at x=93 against screen
-       1's x=203 -- a 110px sideways jump on every snap, where the pre-existing
-       mismatch was 29.5px. Matching lands both on x=202.5 exactly. Move this
-       only together with that one; pinned by
+       1444 rather than 1500, and the 56px is not slack: `#homeView` is a
+       scroll-snap pager, and the number that must match screen 1 is the
+       CONTENT rail, not the border box. `.home-dashboard-screen-inner` caps
+       itself at 1500px but then insets its content by `padding: 16px 28px`,
+       so its content rail is 1500 - 56 = 1444. This screen has no such
+       padding, so 1444 here puts both content edges on the same x.
+
+       Setting this to 1500 to "match" screen 1 is the trap, and it measures
+       WORSE than the 1440 it replaced: matching the border boxes lands both
+       at x=202.5 while the content edges sit 28px apart at 1920 and 2560,
+       against 2px before. 1440 was very nearly right by accident -- its 60px
+       under-size was almost exactly screen 1's 56px of padding. Move this
+       only together with screen 1's rail OR its padding; pinned by
        test_the_two_pager_screens_share_one_content_rail. */
-    max-width: 1500px;
+    max-width: 1444px;
     margin-inline: auto;
     justify-content: flex-start;
     align-items: center;
@@ -5332,16 +5353,35 @@ html[data-nav-page="home"] #homeView .home-landing-board {
        card that rail WAS 40% of the canvas; the fix is a bigger denominator,
        not a smaller rail.
 
-       1.5 rather than 1.25: measured plot area at 1280/1440/1600 was
-       270/319/385px at 1.25 against 302/363/444px at 1.5, while the copy
-       column only falls 490/551/611 -> 444/498/552, which still clears the
-       two-line headline at every one of those widths. At 1920+ the board is at
-       its own max-width, so the ratio stops mattering there. */
-    flex: 1.5 1 0;
+       1.25 is a CEILING the headline sets, not a taste call. Measured under
+       headless Chromium with Inter loaded, `.home-headline-line--2` ("AI models
+       finished") needs 396/424/454/478/533/575px at 1201/1280/1366/1440/1600/
+       1920, against a copy column of (rail - gap) / (1 + ratio) less a 24px
+       inset. At 1.5 that column is too narrow at EVERY width >=1201px and the
+       headline becomes three lines; 1.4 still wraps at 1920 and 2560; 1.35
+       clears 1920 by ~2px, which one font revision would eat. 1.25 leaves ~25px
+       at the tightest width and still takes the board from 690px to 767px at
+       1920 (+11%). Raising it is not free -- re-measure the headline first.
+       Pinned by test_the_board_ratio_leaves_the_headline_room.
+
+       Shrink is 0, written into the shorthand. It used to read `flex: 1.5 1 0`
+       with a `flex-shrink: 0` three lines below silently overriding the `1`,
+       so the source said the two columns were symmetric and the computed style
+       said otherwise.
+
+       `max-width: none` is load-bearing and must not be "tidied" away. The
+       unscoped `.home-landing-board` rule further down carries `max-width:
+       42rem`, which this rule's own cap used to mask. Simply DELETING the cap
+       here does not uncap the column -- it hands it to that 42rem, measured
+       pinning the board to 672px at 1600/1920/2560 and silently undoing most
+       of this fix. The cap is dropped rather than re-tuned because the rail's
+       1500px already bounds this column to ~780px, so any number written here
+       is either dead (the 42rem/56rem it replaces never applied above 1200px)
+       or a second constant to keep in step with the rail. */
+    flex: 1.25 0 0;
     width: 100%;
-    max-width: 56rem;
+    max-width: none;
     min-width: 0;
-    flex-shrink: 0;
     display: flex;
     align-self: stretch;
     min-height: 0;
@@ -5369,28 +5409,6 @@ html[data-nav-page="home"] #homeView .home-landing-board .home-module {
     height: 100%;
     min-height: 0;
     max-height: none;
-}
-
-/* The scroll hint is `left: 50%` on a containing block the full width of the
-   screen, so it centres on the VIEWPORT while the hero it labels is two
-   asymmetric columns. Already wrong before the board column was widened --
-   measured 28x42px of overlap with the board card at 1920 -- and widening the
-   board turned 28px into 165px, with the hint's own `z-index: 3` painting
-   "SEE YOUR DASHBOARD" across the card's bottom-left corner. Viewport-centre
-   is only the right anchor when the hero is ONE column, so below 1201px the
-   base rule still applies.
-
-   `calc(50% - 750px)` is the rail's left edge whenever the 1500px rail is
-   cap-limited, and the `max()` falls back to the hero's own padding at the
-   widths where it is viewport-limited instead -- the same two-branch geometry
-   the rail itself resolves, rather than a second constant that could drift
-   from it. `transform: none` undoes the base rule's `translateX(-50%)`, which
-   would otherwise pull it a half-width back over the card. */
-@media (min-width: 1201px) {
-    html[data-nav-page="home"] #homeView .home-scroll-hint {
-        left: max(clamp(40px, 5vw, 80px), calc(50% - 750px));
-        transform: none;
-    }
 }
 
 /* Below 1200px the hero stacks to a column (see the unscoped rule further down).
