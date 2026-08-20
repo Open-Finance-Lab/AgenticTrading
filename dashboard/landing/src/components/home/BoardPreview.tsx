@@ -242,10 +242,25 @@ export function BoardPreview() {
           MEASURE THE lg RESERVE AT 1024, NOT AT 1440. This is what the old 390
           got wrong and what nothing caught: `lg:` binds from 1024 up, but 390
           was derived at 1440 where nonChart is 249.75. Between 1024 and 1279
-          the chip strip takes five rows instead of four and nonChart is
-          309.75, so the card hung 55.75px BELOW THE FOLD across that whole
-          band -- every 1280-wide-and-under laptop -- while the 1280+ viewports
-          the number was checked against passed with 4.25px to spare.
+          the chip strip takes FOUR rows instead of three and nonChart is
+          313.75, so the card hung below the fold across that whole band --
+          every 1280-wide-and-under laptop -- while the 1280+ viewports the
+          number was checked against passed with room to spare.
+
+          Those two figures were "five instead of four" and 309.75 until
+          2026-08-20. Both were wrong, and the second contradicted this
+          comment's OWN derivation four lines above it, which has always read
+          313.75 and is the number that produced the shipped 460. Re-measured
+          against the live payload (nine chips, not the five this was first
+          written for): 1024x768 -> 4 rows, nonChart 313.75, cardTop 136;
+          1280x800 and 1440x900 -> 3 rows, nonChart 249.75. The row PITCH is
+          32px (24px row + 8px `gap-y-2`), so one extra row is 32 of the 64px
+          gap between the bands and the wrapping title/chip bar is the rest.
+          Nothing shipped moves: ceil10(136 + 313.75) + 10 and
+          ceil10(136 + 309.75) + 10 are both 460, which is exactly why a wrong
+          number could sit here this long -- the constant it justifies is
+          insensitive to it, so only reading the two numbers against each other
+          catches it.
 
           THE 260px FLOOR, NOT THE RESERVE, IS WHAT BINDS ON A PHONE, and no
           value here can change that: at 390x844 the card needs 920.5px
