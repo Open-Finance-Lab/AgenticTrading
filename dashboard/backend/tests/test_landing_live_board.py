@@ -365,7 +365,14 @@ def test_standings_returns_carry_two_decimals():
     real loss displayed as no movement, on the acquisition page.
     `test_the_two_surfaces_agree_on_the_numbers_that_must_agree` is not this
     guard: it pins the one-decimal AXIS formatter, a different call."""
-    assert "formatPercent(Number(entry.cumulative_return), 2)" in _LIB_TS, (
+    # PINNED ON THE DECIMALS, NOT ON THE COERCION. This was an exact-string
+    # match including `Number(...)`, so replacing that with `finiteNumber(...)`
+    # -- a fix to how an ABSENT return is read, which has nothing to do with the
+    # precision this case is about -- reddened it and read as a decimals
+    # regression. The `2` is the whole claim; the argument expression is not.
+    assert re.search(
+        r"formatPercent\(\s*\w+\(entry\.cumulative_return\)\s*,\s*2\s*\)", _LIB_TS
+    ), (
         "standings returns are two decimals, matching /app's rank rows and this "
         "card's tooltip"
     )
@@ -820,6 +827,366 @@ def test_the_rail_never_sorts_by_declaration_order():
     src = _rail()
     assert "formattedGraphicalItems" in src
     assert ".sort(" not in src, "sorting is stackLabels' job and it does it by y"
+
+
+# ---------------------------------------------------------------------------
+# THE THREE DRIFTS THE CONSTANT MIRROR COULD NOT SEE.
+#
+# boardFrame.ts's own docstring says it: the guard in test_landing_board_frame.py
+# diffs `BOARD_*` SOURCE TEXT, not function bodies, so it is green while the two
+# copies compute different things from the same numbers. Every case below pins a
+# USE against the shipped `js/leaderboard.js` rather than a declaration, and each
+# names the mutant it exists to fail on.
+# ---------------------------------------------------------------------------
+
+
+def test_the_rail_stacks_into_the_canvas_band_and_not_the_plot_band():
+    """`bottom` is the CANVAS inset by half a pill, never the plot's bottom edge.
+
+    The shipped hook calls `boardStackLabels(labels, frame.gap, half,
+    chart.height - half)` and its comment gives the reason: a gutter label sits
+    beside the plot, so hanging below `chartArea.bottom` into the x-axis strip is
+    legitimate, and clamping to it clipped the stack -- measured at 5px past the
+    canvas on the tab and 10.4px on screen 0, sliced through the middle.
+
+    The mirror shipped `top: offset.top, bottom: offset.top + offset.height`,
+    which is that clamp restored AND the half-pill inset dropped: the head's 15px
+    pill then centres on the band edge and its top 3.5px falls outside the SVG
+    viewBox. It also unhooks `frameLayout`'s stack-fits-the-canvas guard, which
+    is checked against the full `height` and so no longer bounds the band the
+    rail actually walks.
+
+    Both sides are asserted, because the failure is DISAGREEMENT: a change to
+    either copy alone should redden this."""
+    args = re.search(r"stackLabels\(rows,\s*\{(.*?)\}\)", _rail(), re.S)
+    assert args, "the rail no longer calls stackLabels with an options object"
+    band = args.group(1)
+    assert "top: HALF_PILL" in band, "the band's top must be inset by half a pill"
+    assert "bottom: height - HALF_PILL" in band, (
+        "the band's bottom is the CANVAS inset by half a pill, not the plot's bottom"
+    )
+    assert "offset." not in band, (
+        "offset.* is the PLOT area; using it here is the clipping bug the shipped "
+        "boardStackLabels docstring records fixing"
+    )
+    assert re.search(r"HALF_PILL\s*=\s*BOARD_PILL_HEIGHT\s*/\s*2", _rail()), (
+        "HALF_PILL must be derived from the frame's pill height, not typed again"
+    )
+    assert re.search(
+        r"boardStackLabels\(labels,\s*frame\.gap,\s*half,\s*chart\.height - half\)",
+        _LEADERBOARD_JS,
+    ), "the shipped hook's band changed; the mirror above now disagrees with it"
+
+
+def test_the_rail_spends_the_tick_clearance_the_gutter_reserves():
+    """`labelBlockWidth` adds BOARD_TICK_CLEARANCE to every gutter it reserves;
+    the rail has to spend it or the reserve is idle and the overlap it was bought
+    to prevent is still there.
+
+    The shipped hook computes `labelX + (lab.y + half > chartArea.bottom ?
+    BOARD_TICK_CLEARANCE : 0)` -- indenting only the labels that actually descend
+    into the axis strip, which is where recharts' last x tick overhangs into the
+    gutter (`textAnchor="middle"` on the plot's right edge, ~22px at fontSize
+    14). The mirror imported neither the constant nor the shift, so the lowest
+    labels painted over the axis date.
+
+    Pinned on the DRAWN coordinates, not just the constant's presence: importing
+    it and computing `lx` while still drawing at `labelX` is the same defect with
+    the substring check green."""
+    body = _rail().split("type RailProps", 1)[1]
+    assert "BOARD_TICK_CLEARANCE" in body, "the reserved clearance is never spent"
+    assert re.search(r"\?\s*BOARD_TICK_CLEARANCE\s*:\s*0", body), (
+        "the clearance is CONDITIONAL -- only labels below the axis line pay it"
+    )
+    for drawn in ("x={labelX", "cx={labelX", "x1={labelX", "x2={labelX"):
+        assert drawn not in body, (
+            f"{drawn!r} draws at the unshifted gutter x; every drawn coordinate "
+            f"must use the tick-clearance-adjusted `lx`"
+        )
+    assert re.search(
+        r"lab\.y \+ half > chartArea\.bottom \? BOARD_TICK_CLEARANCE : 0",
+        _LEADERBOARD_JS,
+    ), "the shipped hook's clearance shift changed; the mirror now disagrees"
+
+
+def test_the_rail_lays_out_the_label_block_with_the_frames_named_gaps():
+    """`BOARD_DOT_GAP` (4) and `BOARD_NAME_GAP` (6) were re-typed as bare literals
+    in the two places that lay out the block, while `labelBlockWidth` reserved the
+    gutter with the named constants -- so raising either widened the reserve and
+    not the drawn block, or lowered it and overran the reserve, with the constant
+    mirror green throughout because it only diffs declarations.
+
+    This is the "a literal here would be a third copy nothing guards" line in
+    EndpointRail.tsx's own docstring, which the file then did not honour for these
+    two."""
+    body = _rail().split("type RailProps", 1)[1]
+    pill = re.search(r"const pillX =(.*?);", body, re.S)
+    assert pill, "the pill's x is no longer computed in one expression"
+    expr = pill.group(1)
+    assert "BOARD_DOT_GAP" in expr and "BOARD_NAME_GAP" in expr, (
+        "the label block's two gaps come from the frame, not from literals"
+    )
+    assert not re.search(r"(?<![\w.])[46](?![\w.])", expr), (
+        "a bare 4 or 6 in the block layout is the third copy of BOARD_DOT_GAP / "
+        "BOARD_NAME_GAP that nothing guards"
+    )
+    assert body.count("BOARD_DOT_GAP") >= 2, (
+        "both the name's x and the pill's x are offset by the dot gap"
+    )
+
+
+def test_the_rail_does_not_rebuild_its_geometry_on_every_mousemove():
+    """`Customized` is cloned with the chart's mutable STATE, and `chartX`/
+    `chartY`/`activeTooltipIndex` are written into it by a throttled 60fps
+    mousemove handler -- so an unmemoised rail rebuilds every row, re-walks the
+    stack and re-runs 2N canvas `measureText` calls per pointer frame, for values
+    that cannot change on hover. The shipped Chart.js hook documents removing
+    exactly this.
+
+    The memos must sit ABOVE the internals-changed guard: hook order may not
+    depend on a prop, and a `useMemo` after an early `return null` is a
+    conditional hook call that React throws on."""
+    src = _rail()
+    assert "useMemo" in src, "the rail's geometry is recomputed on every render"
+    memo_at = src.index("useMemo")
+    guard = re.search(r"if \(!Array\.isArray\(formattedGraphicalItems\)", src)
+    assert guard, "the internals-changed guard is gone"
+    assert memo_at < guard.start(), (
+        "a useMemo below the early return is a conditional hook call; the memos "
+        "must run unconditionally and yield empty in the cases the guard rejects"
+    )
+
+
+# ---------------------------------------------------------------------------
+# The data layer: one bad point, and one bad comparator.
+# ---------------------------------------------------------------------------
+
+_BAD_EQUITY_FIXTURE_JS = """
+const entries = [
+  {entry_id: 'gpt_5_5', team_name: 'GPT-5.5', team_badge: 'Model', model: 'GPT-5.5', is_model: true, cumulative_return: 0.01, portfolio_value: 10100, initial_equity: 10000,
+   equity_curve: [{timestamp: '2026-04-15T14:00:00+00:00', equity: 10000},
+                  {timestamp: '2026-04-15T15:00:00+00:00', equity: null},
+                  {timestamp: '2026-04-15T16:00:00+00:00', equity: 10100}]},
+  {entry_id: 'buy_hold_djia', team_name: 'Agentic Trading Lab', team_badge: 'Baseline Strategy', model: 'Buy & Hold', is_model: false, cumulative_return: 0.02, portfolio_value: 10200, initial_equity: 10000,
+   equity_curve: [{timestamp: '2026-04-15T14:00:00+00:00', equity: 10000},
+                  {timestamp: '2026-04-15T15:00:00+00:00', equity: 10150},
+                  {timestamp: '2026-04-15T16:00:00+00:00', equity: 10200}]},
+];
+const board = module.exports.buildBoardData({entries, window: {label: 'test window'}});
+"""
+
+
+def test_a_non_numeric_equity_point_is_a_gap_and_not_a_hundred_percent_loss():
+    """`Number(pt.equity) || 0` read null/undefined/NaN/a string as a $0 account.
+
+    `base` is the $10,000 display capital, so that point became
+    `(0 - 10000) / 10000 = -100%` -- and the damage is not one bad marker.
+    `percentDomain` then spans about [-1.12, hi], and the real board's
+    -0.43%..+7.49% spread collapses into a sliver at the top of the axis with a
+    vertical spike to the floor. Every curve on the card goes flat because of one
+    point on one of them.
+
+    A missing point already has a representation here -- `null`, which Recharts
+    skips and `connectNulls` bridges. Reachable end to end: `get_leaderboard`
+    normalises a stored NULL to `0` server-side (`float(pt.get("equity") or 0)`),
+    and this client-side coercion turned every other malformed shape into the
+    same thing."""
+    result = _run_ts(
+        _BAD_EQUITY_FIXTURE_JS
+        + """
+const gpt = board.series.find((s) => s.key === 'gpt_5_5');
+console.log(JSON.stringify({values: gpt.values, times: board.times}));
+"""
+    )
+    assert result["values"][1] is None, (
+        "an unparseable equity is a GAP; zeroing it renders the account as -100%"
+    )
+    assert result["values"][0] == pytest.approx(0.0)
+    assert result["values"][2] == pytest.approx(0.01)
+    assert min(v for v in result["values"] if v is not None) > -0.5, (
+        "no curve may be dragged to the -100% floor by a single malformed point"
+    )
+
+
+_NEAR_TIE_FIXTURE_JS = """
+const entries = [
+  {entry_id: 'a_lower', team_name: 'A', team_badge: 'Model', model: 'A', is_model: true, cumulative_return: 0.070001, portfolio_value: 10700, initial_equity: 10000, equity_curve: []},
+  {entry_id: 'b_higher', team_name: 'B', team_badge: 'Model', model: 'B', is_model: true, cumulative_return: 0.070049, portfolio_value: 10700, initial_equity: 10000, equity_curve: []},
+];
+const board = module.exports.buildBoardData({entries, window: {label: 'test window'}});
+"""
+
+_NON_FINITE_RETURN_FIXTURE_JS = """
+const entries = [
+  {entry_id: 'broken', team_name: 'Broken', team_badge: 'Model', model: 'Broken', is_model: true, cumulative_return: null, portfolio_value: 0, initial_equity: 10000, equity_curve: []},
+  {entry_id: 'low', team_name: 'Low', team_badge: 'Model', model: 'Low', is_model: true, cumulative_return: -0.02, portfolio_value: 9800, initial_equity: 10000, equity_curve: []},
+  {entry_id: 'high', team_name: 'High', team_badge: 'Model', model: 'High', is_model: true, cumulative_return: 0.05, portfolio_value: 10500, initial_equity: 10000, equity_curve: []},
+  {entry_id: 'mid', team_name: 'Mid', team_badge: 'Model', model: 'Mid', is_model: true, cumulative_return: 0.01, portfolio_value: 10100, initial_equity: 10000, equity_curve: []},
+];
+const board = module.exports.buildBoardData({entries, window: {label: 'test window'}});
+"""
+
+
+def test_two_returns_inside_the_display_precision_still_rank_correctly():
+    """The standings were ordered by `parseFloat(b.ret) - parseFloat(a.ret)` --
+    re-reading the two-decimal DISPLAY string. Both entries here format to
+    "+7.00%", so that comparator returned 0 and left them in payload order while
+    Race printed them under distinct `#1`/`#2` ranks that did not reflect the
+    returns. The existing rank guard uses 5%/3%/2%/1%/-2%, which is far outside
+    the precision the formatter throws away, so it never saw this."""
+    result = _run_ts(
+        _NEAR_TIE_FIXTURE_JS
+        + """
+console.log(JSON.stringify({
+  keys: board.standings.map((s) => s.key),
+  rets: board.standings.map((s) => s.ret),
+}));
+"""
+    )
+    assert result["rets"] == ["+7.00%", "+7.00%"], (
+        "fixture no longer exercises the sub-display-precision case"
+    )
+    assert result["keys"] == ["b_higher", "a_lower"], (
+        "rank must come from the number, not from the string it was formatted to"
+    )
+
+
+def test_one_non_finite_return_does_not_scramble_every_other_rank():
+    """`formatPercent` returns the em-dash for a non-finite return and
+    `parseFloat('\u2014')` is NaN. A comparator that returns NaN leaves V8's sort
+    order IMPLEMENTATION-DEFINED for the whole array -- so one malformed entry
+    could reorder every rank and every chip on the page, not just misplace
+    itself.
+
+    Subtracting numerics is not enough either: sinking non-finite values to
+    -Infinity reintroduces NaN the moment two of them meet (-Infinity minus
+    -Infinity). The comparator has to be a total order."""
+    result = _run_ts(
+        _NON_FINITE_RETURN_FIXTURE_JS
+        + """
+console.log(JSON.stringify({
+  keys: board.standings.map((s) => s.key),
+  rets: board.standings.map((s) => s.ret),
+}));
+"""
+    )
+    assert result["keys"][:3] == ["high", "mid", "low"], (
+        "the finite returns must stay correctly ranked regardless of a bad entry"
+    )
+    assert result["keys"][3] == "broken", "a non-finite return ranks last"
+    assert result["rets"][3] == "\u2014"
+
+
+def test_board_headline_counts_report_the_field_and_who_beat_it():
+    """Race's opening sentence hardcoded "Seven leading AI models ... Only one
+    finished ahead of both" beside a table that is now live off the same payload.
+    These are the numbers that replace both literals."""
+    result = _run_ts(
+        _INTERLEAVED_RANK_FIXTURE_JS
+        + """
+console.log(JSON.stringify(module.exports.boardHeadlineCounts(board.standings)));
+"""
+    )
+    # claude_haiku +5%, qwen +2%, gpt -2% vs buy_hold +3% and djia +1%:
+    # only claude clears the BEST baseline, which is what "ahead of both" means.
+    assert result == {"models": 3, "baselines": 2, "ahead": 1}
+
+
+def test_board_headline_counts_claim_nothing_without_a_baseline_to_beat():
+    """"Ahead of both" is a claim about a comparison. With no baseline resolved
+    there is nothing to be ahead OF, and reporting `ahead` off a -Infinity
+    sentinel would make every model a winner."""
+    result = _run_ts(
+        """
+const entries = [
+  {entry_id: 'solo', team_name: 'Solo', team_badge: 'Model', model: 'Solo', is_model: true, cumulative_return: 0.05, portfolio_value: 10500, initial_equity: 10000, equity_curve: []},
+];
+const board = module.exports.buildBoardData({entries, window: {label: 'w'}});
+console.log(JSON.stringify(module.exports.boardHeadlineCounts(board.standings)));
+"""
+    )
+    assert result == {"models": 1, "baselines": 0, "ahead": 0}
+
+
+# ---------------------------------------------------------------------------
+# What a visitor is shown when the fetch fails.
+# ---------------------------------------------------------------------------
+
+
+def test_a_two_hundred_that_is_not_json_is_reported_as_unreadable():
+    """`await res.json()` ran on ANY 2xx. The Vercel `/api/:path*` rewrite
+    (dashboard/frontend/vercel.json) proxies to Render, and either end can answer
+    with an HTML error page -- so the public failure message on the hero card was
+    `Unexpected token '<', "<!DOCTYPE "... is not valid JSON`, rendered in
+    font-mono, and mid-sentence in Race ("The standings didn't load (...)").
+
+    Checked on the content type rather than by catching the parse error, so the
+    HTML body is never fed to the parser in the first place."""
+    result = _run_ts(
+        """
+globalThis.fetch = async () => ({
+  ok: true,
+  status: 200,
+  headers: {get: () => 'text/html; charset=utf-8'},
+  json: async () => { throw new SyntaxError('Unexpected token \\'<\\', "<!DOCTYPE "... is not valid JSON'); },
+});
+module.exports.fetchLeaderboard(undefined).then(
+  () => console.log(JSON.stringify({message: null})),
+  (err) => console.log(JSON.stringify({message: err.message})),
+);
+"""
+    )
+    assert result["message"] is not None, "an HTML 2xx must not resolve to a board"
+    assert "DOCTYPE" not in result["message"] and "JSON" not in result["message"], (
+        "the parser's own text is not a sentence to show a visitor"
+    )
+
+
+def test_a_dead_backend_is_reported_without_the_browsers_own_wording():
+    """A dead backend rejects `fetch` with `TypeError: Failed to fetch`, which the
+    card rendered verbatim. AbortError must still pass through untouched -- the
+    provider's 45s ceiling aborts this same signal, and `classifyFetchFailure`
+    reads exactly that to say "timed out" instead."""
+    result = _run_ts(
+        """
+const calls = [];
+globalThis.fetch = async () => { throw new TypeError('Failed to fetch'); };
+module.exports.fetchLeaderboard(undefined).catch((err) => calls.push(err.message));
+globalThis.fetch = async () => { throw Object.assign(new Error('aborted'), {name: 'AbortError'}); };
+module.exports.fetchLeaderboard(undefined).catch((err) => calls.push(err.name));
+setTimeout(() => console.log(JSON.stringify(calls)), 0);
+"""
+    )
+    assert "Failed to fetch" not in result[0], (
+        "the browser's transport wording is not visitor-facing copy"
+    )
+    assert result[1] == "AbortError", (
+        "AbortError must reach classifyFetchFailure unchanged or the timeout "
+        "branch can never fire"
+    )
+
+
+def test_an_unmount_is_not_reported_to_the_visitor_as_a_timeout():
+    """`controller.signal.aborted` has THREE causes, and `classifyFetchFailure`
+    knows two. The effect's own cleanup aborts as well, so an unmount landed in
+    the timeout branch. Today that setState hits an unmounted provider and is a
+    no-op -- but add `<StrictMode>` to main.tsx and React 18 double-invokes the
+    effect, aborting the first fetch on a component whose state survives, so the
+    first thing a visitor sees is "Timed out waiting for the board." before the
+    second fetch resolves over it.
+
+    Intent has to be tracked, not inferred from a flag that cannot tell the three
+    apart."""
+    src = _hook()
+    cleanup = re.search(r"return \(\) => \{(.*?)\};", src, re.S)
+    assert cleanup, "no cleanup function found in the effect"
+    assert re.search(r"\bcancelled\s*=\s*true", cleanup.group(1)), (
+        "the cleanup must record that it cancelled, so the catch can tell an "
+        "unmount from the 45s ceiling"
+    )
+    assert re.search(r"if \(!cancelled\) setState", src), (
+        "both settle paths must check the flag before reporting to the visitor"
+    )
 
 
 # ---------------------------------------------------------------------------

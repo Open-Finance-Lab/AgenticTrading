@@ -481,6 +481,83 @@ def test_race_standings_render_the_full_selection_baselines_included():
     )
 
 
+def test_the_race_headline_is_derived_from_the_board_it_sits_beside():
+    """The section opened with "Seven leading AI models traded the same days with
+    simulated money, ranked against buy-and-hold and the index. Only one finished
+    ahead of both." -- a count and an outcome, typed into the page, directly above
+    a table that is now live off the same payload.
+
+    Both halves were falsifiable by ordinary changes. An eighth `llm_agent` entry
+    in dashboard/config/leaderboard.json is the documented way the roster reached
+    seven, and `test_the_illustrative_run_report_names_no_real_roster_model` was
+    written to absorb exactly that automatically -- it would have left this
+    sentence saying "Seven" beside eight rows. A re-run that put a second model
+    ahead of buy-and-hold falsifies the second half with the counter-evidence
+    rendered beside it. On the page's most checkable claim, on the highest-traffic
+    anonymous surface, with no guard anywhere.
+
+    The number-word list is not banned -- the sentence still spells its counts --
+    so this pins the DERIVATION: the counts must come from the payload, and the
+    two retired literals must not come back.
+
+    COMMENTS ARE STRIPPED, like the standings guard above. Race.tsx's own note
+    quotes the retired sentence verbatim to say what was wrong with it, and a raw
+    substring scan reddens on that -- which reads as the ban working and invites
+    deleting the explanation that is the whole reason the ban exists. The bundle
+    half needs no stripping: esbuild drops comments, so a retired string surviving
+    there is genuinely rendered copy."""
+    source = _BLOCK_COMMENT.sub("", _RACE_TSX.read_text(encoding="utf-8"))
+    assert "boardHeadlineCounts" in source, (
+        "the headline's counts must come from the board, not from the source text"
+    )
+    assert "headlineSentence(standings)" in source, (
+        "the rendered sentence must be built from the standings actually shown"
+    )
+    for retired in ("Seven leading AI models", "Only one finished ahead of both"):
+        assert retired not in source, (
+            f"{retired!r} is a hardcoded claim about live data; derive it"
+        )
+        assert retired not in _shipped_text(), (
+            f"{retired!r} still ships in the bundle — rebuild per "
+            f"dashboard/landing/README.md"
+        )
+
+
+def test_the_standings_table_does_not_present_a_benchmark_as_an_ai_model():
+    """The table deliberately ranks buy_hold_djia and djia_index alongside the
+    models (pinned above), and most of the models lost to buy-and-hold -- so on
+    the live board the `#1` row IS a benchmark. It was rendered in the brand
+    accent (`bg-primary/10`, `text-primary`), under a column headed "AI model",
+    beneath a heading reading "What the AI models actually returned", with nothing
+    marking it as a reference curve. The chart distinguishes those two with a dash
+    pattern; the table had no equivalent, so three signals at once told a visitor
+    the passive index was the leading AI model.
+
+    The accent is NOT what this bans. That buy-and-hold came first is the honest,
+    unflattering fact this card exists to show, and moving the highlight to the
+    best model would be the flattery every guard in this file is against. What is
+    banned is the column header calling every row an AI model, with no per-row
+    tag to say otherwise.
+
+    `baselines-only` got a caption for this exact confusion when the PR landed;
+    the `full` branch, which is the one that actually ships, did not."""
+    source = _BLOCK_COMMENT.sub("", _RACE_TSX.read_text(encoding="utf-8"))
+    header = re.search(r'col-span-7">([^<]+)</div>', source)
+    assert header, "the standings header row's model column is gone"
+    assert header.group(1).strip().lower() != "ai model", (
+        "the column holds benchmarks too; heading it 'AI model' publishes "
+        "buy-and-hold as the leading model"
+    )
+    assert "item.isModel" in source, (
+        "nothing in a row distinguishes a benchmark from a model"
+    )
+    assert "Benchmark" in source, "the per-row benchmark tag is gone"
+    assert "Benchmark" in _shipped_text(), (
+        "the benchmark tag is in the source but not in the bundle — rebuild per "
+        "dashboard/landing/README.md"
+    )
+
+
 def test_race_source_and_shipped_bundle_agree():
     """The register's thesis applied to this section specifically: every other
     assertion here reads the bundle, so a Race.tsx edit that was never rebuilt
