@@ -5289,7 +5289,16 @@ html[data-nav-page="home"] #homeView .home-landing-hero {
    74px floor, the desktop reserve and the <=1200px reserve both spend it, and
    the guard reads it. They were two unlinked literals plus a "~50px" estimate
    that was wrong by 6px, so restyling `.home-scroll-hint-label` silently
-   invalidated all of them. */
+   invalidated all of them.
+
+   96 AND NOT THE 74px FLOOR: the extra 22px is clearance, so the hero's last
+   laid-out element stops short of the hint's box rather than finishing flush
+   against it. Only the floor is pinned (`_HINT_STRIP_FLOOR_PX`), and nothing
+   pins 96 -- which is the right way round, but is not a licence to trim this
+   to 74 on the strength of the guard still passing. The 96 predates the
+   re-measurement above: it was chosen against the "~90px" that the wrong
+   ~50px estimate produced, and it stands because it clears the real band, not
+   because anything re-derived it. Trimming it needs its own measurement. */
 :root { --home-hint-strip: 96px; }
 
 /* RESERVED ONLY WHERE THE HERO CAN AFFORD IT, and the gate is the point.
@@ -5403,6 +5412,15 @@ html[data-nav-page="home"] #homeView .home-landing-board {
          1.35   +39.0  +54.9  +17.5  +13.5   +8.5
          1.38   +34.0  +47.9  +10.5   +6.5   +1.5
          1.40   +30.0  +42.9   +5.5   +2.5   -3.5W
+
+       MEASURED-HEADLINE: "each model ranks"
+
+       That line is what the guard reads, and it is a marker rather than prose
+       on purpose: this comment names the RETIRED headline too, a few lines
+       down, so a check that merely looks for the shipped string SOMEWHERE in
+       the block is satisfied by the history -- revert screen 0 and it still
+       passes, over a grid measured for the other copy. One line, one quoted
+       string, nothing else quoted on it.
 
        The flat +26.5 across 1744-2176 is the cap binding, not a coincidence.
        The ceiling is now ~1.38. It was 1.28 for the previous headline, "AI

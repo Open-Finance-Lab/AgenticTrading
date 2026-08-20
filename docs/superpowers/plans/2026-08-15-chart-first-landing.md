@@ -1124,6 +1124,11 @@ def test_the_screen_zero_lede_is_a_fact_then_a_call_to_action():
     assert "AI models only" in html
 ```
 
+> **Superseded 2026-08-20 (PR #394).** This step executed as written; the lede and its
+> guard have both moved since. Left verbatim because the block is a record of what ran,
+> not a description of what ships — for the current copy, and why its second clause is
+> not optional, see the "Superseded" note in the spec.
+
 - [x] **Step 2: Run and watch fail**
 
 ```bash
@@ -1159,6 +1164,9 @@ with:
                                  throughout. -->
                             <p class="home-landing-lede">See how the AI models did. Then test your own idea on the same days.</p>
 ```
+
+> **Superseded 2026-08-20 (PR #394)** — same as the step above; this is the markup that
+> shipped at the time, not the markup that ships now.
 
 - [x] **Step 4: Run the copy suites**
 

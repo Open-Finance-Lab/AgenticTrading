@@ -832,26 +832,51 @@ def test_rank_rows_keep_ending_value_and_sharpe():
     assert "hm-rank-sharpe" in body
 
 
-def test_the_screen_zero_lede_is_a_direct_challenge():
-    """The lede stopped describing the board and became a challenge.
+def test_the_screen_zero_lede_challenges_and_then_names_the_mechanism():
+    """A challenge alone promises a place on a board that takes no entries.
 
     Two earlier ledes tried to describe: one glossed "agent" AND pre-empted "is
     my agent on this list?", the next narrated what the board shows. The
     headline states the offer and the board states the no-entry fact
     ("AI models only - ranked by return"), so a describing lede was the third
-    element saying the same thing. This one only has to move the reader to the
-    CTA directly beneath it.
+    element saying the same thing -- and dropping the description is what the
+    current copy is for.
+
+    But it cannot drop ALL the way to a bare challenge, and that is the
+    assertion below that is not a string pin. Neither leaderboard accepts
+    entries: `get_leaderboard` builds every row from the curated roster in
+    config/leaderboard.json and `api/routers/leaderboard.py` exposes no
+    submission route. So "Think you can beat them?" with nothing after it, sat
+    under a ranking headline and above "Create a free account", reads as an
+    invitation to join the ranking -- exactly the copy CLAUDE.md forbids. The
+    trailing clause is what converts it back into something true (run the same
+    window yourself), and it aims at the CTA while doing so.
+
+    Hence the shape check as well as the literal: a future edit that tightens
+    this to the punchier half sentence is the regression, and it would keep
+    every string assertion here green if only the challenge were pinned.
     """
     from dashboard.backend.tests._frontend_source import APP_HTML
 
     html = re.sub(r"<!--.*?-->", "", APP_HTML, flags=re.DOTALL)
-    assert "Do you think you can beat them?" in html
+    lede = re.search(r'<p class="home-landing-lede">([^<]+)</p>', html)
+    assert lede, "screen 0 no longer has a `home-landing-lede` paragraph"
+    text = lede.group(1).strip()
+
+    assert text == "Think you can beat them? Test your own idea on the same days."
+    challenge, _, mechanism = text.partition("?")
+    assert challenge and mechanism.strip(), (
+        f"the lede is a bare challenge ({text!r}). Neither board takes entries, "
+        "so a challenge with no mechanism after it promises a place on the "
+        "ranking. Keep the clause that says what the reader actually does."
+    )
+
     # Both retired ledes, so a revert shows up here rather than as duplicated
     # description on screen.
     assert "in a test of its own" not in html
     assert "See how the AI models did" not in html
-    # The fact the lede never carried must still be on screen, on the board
-    # making the claim -- otherwise this is a deletion, not a split.
+    # The fact only the FIRST of those two carried must still be on screen, on
+    # the board making the claim -- otherwise this is a deletion, not a split.
     assert "AI models only" in html
 
 
@@ -1282,6 +1307,17 @@ def test_the_ratio_grid_measures_the_headline_that_ships():
 
     Pairs with `_MAX_BOARD_GROW`: that bounds the number, this bounds what the
     number was measured against.
+
+    It reads a MARKER line rather than searching the block, and that is the
+    whole difficulty of the case. The comment legitimately names the RETIRED
+    headline as well -- the ceiling only means something stated against both --
+    so `assert headline in block` is satisfied by the history: revert screen 0
+    to "AI models finished" and the check still passes, because the grid quotes
+    that string while explaining why the ratio was not raised. A guard that
+    cannot fail on the exact edit it exists to catch is worse than none, since
+    it reports the grid as verified. One `MEASURED-HEADLINE:` line, holding the
+    only quoted string on it, is the smallest thing that cannot be satisfied by
+    prose about some other headline.
     """
     from dashboard.backend.tests._frontend_source import APP_HTML
 
@@ -1302,15 +1338,23 @@ def test_the_ratio_grid_measures_the_headline_that_ships():
         "find the grid -- re-point it at whatever now carries the measurements"
     )
     # Collapse the comment's own line wrapping first: the grid is prose in a CSS
-    # block comment, so a re-flow can split the quoted headline across lines
-    # without changing a word. A guard that fails on re-indentation gets deleted
-    # by the next person who touches it.
+    # block comment, so a re-flow can split the marker across lines without
+    # changing a word. A guard that fails on re-indentation gets deleted by the
+    # next person who touches it.
     flattened = " ".join(grid.split())
-    assert headline in flattened, (
-        f"screen 0 ships the headline {headline!r}, but the measured ratio grid "
-        "names a different string. The grid is what licenses _MAX_BOARD_GROW, so "
-        "re-measure it against the new copy (the comment carries the method) "
-        "rather than deleting the mismatch."
+    marker = re.search(r'MEASURED-HEADLINE:\s*"([^"]*)"', flattened)
+    assert marker, (
+        'the ratio grid no longer carries a `MEASURED-HEADLINE: "..."` line. It '
+        "is not decoration: the block also quotes the retired headline, so "
+        "without the marker this case passes on that instead and reports a "
+        "stale grid as measured. Re-add it naming whatever the grid measures."
+    )
+    measured = marker.group(1)
+    assert measured == headline, (
+        f"screen 0 ships the headline {headline!r}, but the ratio grid was "
+        f"measured against {measured!r}. The grid is what licenses "
+        "_MAX_BOARD_GROW, so re-measure it against the new copy (the comment "
+        "carries the method) rather than editing the marker to match."
     )
 
 
