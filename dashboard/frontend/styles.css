@@ -5276,25 +5276,50 @@ html[data-nav-page="home"] #homeView .home-landing-hero {
     height: 100%;
     min-height: 0;
     /* Match .home-page gutters — pager zeroes page padding, so hero must carry
-       the rail. The bottom is the scroll hint's own strip, RESERVED rather than
-       shared: the hint is position:absolute at bottom:18px, stands ~50px tall,
-       and carries `z-index: 3` with live pointer-events, so anything the hero
-       lays out down there is not merely overlapped but un-clickable. Measured
-       at 1600x620, 1440x650, 1366x640 and 1280x600 without this reserve,
-       `document.elementFromPoint` at the centre of the "Join our Discord
-       community" CTA returned `homeScrollHint` -- the click scrolled to the
-       dashboard instead of opening Discord. Reserving the strip is also what
-       keeps the hint off the board card (measured overlap 28x42px before this,
-       and it grows with the card), which is why no rule moves the hint
-       sideways: viewport-centring is correct once nothing is laid out beneath
-       it. The <=1200px branch below reserves the same 96px for the same reason
-       -- this is that rule's desktop half, not a second mechanism.
-       Pinned by test_the_hero_reserves_the_scroll_hints_strip. */
-    padding: clamp(20px, 3vh, 40px) clamp(40px, 5vw, 80px) 96px;
+       the rail. The bottom reserve is NOT here: it is height-conditional, in
+       the `min-height` block just below. See `--home-hint-strip`. */
+    padding: clamp(20px, 3vh, 40px) clamp(40px, 5vw, 80px);
     display: flex;
     flex-direction: column;
     justify-content: center;
     box-sizing: border-box;
+}
+/* The strip the scroll hint occupies, in ONE place because four numbers have
+   to agree: the hint's own `bottom: 18px` plus its measured 56px height set the
+   74px floor, the desktop reserve and the <=1200px reserve both spend it, and
+   the guard reads it. They were two unlinked literals plus a "~50px" estimate
+   that was wrong by 6px, so restyling `.home-scroll-hint-label` silently
+   invalidated all of them. */
+:root { --home-hint-strip: 96px; }
+
+/* RESERVED ONLY WHERE THE HERO CAN AFFORD IT, and the gate is the point.
+   The hint is `position: absolute` at `bottom: 18px` with `z-index: 3` and live
+   pointer-events, so anything laid out in its band is un-clickable rather than
+   merely overlapped -- but the board panel is `overflow: hidden` around a chart
+   with a hard `min-height: 132px`, so buying the strip out of the hero's height
+   is not free at short viewports. Measured with the panel populated (7 rows and
+   the chart wrapper), an UNCONDITIONAL 96px reserve overflowed the panel by
+   12/32/52/72px at viewport heights 680/660/640/620 and pushed the "See both
+   leaderboards" footer button outside its own clipping box -- silently, since
+   the panel is `overflow: hidden`, and `elementFromPoint` showed the button
+   unreachable at 1440x640, 1366x620 and 1600x620. It cost visible rows well
+   above that too: 7 -> 5 at 1280x720. A 1366x768 laptop, once browser chrome
+   and the app's 148px header come off, lands inside that band.
+
+   768px is where the reserve measured FREE: at >=768 the panel keeps all seven
+   rows and overflows by 0, identical to before the reserve existed; at 760 it
+   starts costing rows. Below the gate the hint overlaps the card as it did
+   before any of this -- cosmetic, and measured, the footer button and both hero
+   CTAs stay clickable there. Cosmetic overlap beats a clipped control.
+
+   Consequence worth knowing: where this applies the hero is no longer
+   symmetric, so `justify-content: center` centres content in a box whose bottom
+   inset is larger than its top. That is deliberate; the hint sits in the
+   difference. Pinned by test_the_hero_reserves_the_scroll_hints_strip. */
+@media (min-height: 768px) {
+    html[data-nav-page="home"] #homeView .home-landing-hero {
+        padding-bottom: var(--home-hint-strip);
+    }
 }
 html[data-nav-page="home"] #homeView .home-landing-hero-inner {
     /* Wider page-1 rail so a larger center gap does not crush the two columns.
@@ -5353,19 +5378,26 @@ html[data-nav-page="home"] #homeView .home-landing-board {
        card that rail WAS 40% of the canvas; the fix is a bigger denominator,
        not a smaller rail.
 
-       1.25 is a CEILING the headline sets, not a taste call. Measured under
-       headless Chromium with Inter loaded, `.home-headline-line--2` ("AI models
-       finished") needs 396/424/454/478/533/575px at 1201/1280/1366/1440/1600/
-       1920, against a copy column of (rail - gap) / (1 + ratio) less a 24px
-       inset. At 1.5 that column is too narrow at EVERY width >=1201px and the
-       headline becomes three lines; 1.4 still wraps at 1920 and 2560; 1.35
-       clears 1920 by ~2px, which one font revision would eat. 1.25 leaves ~25px
-       at the tightest width and still takes the board from 690px to 767px at
-       1920 (+11%). Raising it is not free -- re-measure the headline first.
-       Pinned by test_the_board_ratio_leaves_the_headline_room.
+       1.25 is a CEILING the headline sets, not a taste call, and it is the
+       ceiling for THIS rail -- re-measure if the rail moves. Copy width is
+       (rail - gap) / (1 + ratio) less a 24px inset, and the tightest viewport
+       is NOT the narrowest: `gap: clamp(2.5rem, 5vw, 6.8rem)` keeps growing to
+       108.8px while the rail is pinned at 1444, so the copy column shrinks
+       above ~1744 and bottoms out at 2176+. Measured slack there (available
+       minus what "AI models finished" needs, Inter loaded):
 
-       Shrink is 0, written into the shorthand. It used to read `flex: 1.5 1 0`
-       with a `flex-shrink: 0` three lines below silently overriding the `1`,
+         ratio   1201   1600   1744   1920   2176
+         1.25    +40    +54    +17    +13    +7.7
+         1.30    +31    +41     +4    +0.6   -5.0   <- three-line headline
+         1.35    +22    +29    -7.9  -11.6  -17.1
+
+       1.30 and 1.35 both wrap, at the WIDEST screens rather than the narrowest
+       -- which is how an earlier 1.35 ceiling measured "safe" against a table
+       that stopped at 1920. Raising this is not free; re-measure at 2176 and
+       up. Pinned by test_the_board_ratio_leaves_the_headline_room.
+
+       Shrink is 0, written into the shorthand. The rule this replaced read
+       `flex: 1 1 0` with a `flex-shrink: 0` three lines below overriding the `1`,
        so the source said the two columns were symmetric and the computed style
        said otherwise.
 
@@ -5375,9 +5407,10 @@ html[data-nav-page="home"] #homeView .home-landing-board {
        here does not uncap the column -- it hands it to that 42rem, measured
        pinning the board to 672px at 1600/1920/2560 and silently undoing most
        of this fix. The cap is dropped rather than re-tuned because the rail's
-       1500px already bounds this column to ~780px, so any number written here
-       is either dead (the 42rem/56rem it replaces never applied above 1200px)
-       or a second constant to keep in step with the rail. */
+       1444px already bounds this column to ~740px (measured peak 740.5 around
+       1744), so any number written here is either dead -- the 42rem it replaces
+       never applied above 1200px -- or a second constant to keep in step with
+       the rail. */
     flex: 1.25 0 0;
     width: 100%;
     max-width: none;
@@ -5404,7 +5437,17 @@ html[data-nav-page="home"] #homeView .home-landing-board {
    across 1280x720 -> 1920x1080", which was true only because the panel was
    overflowing the hero -- every row was inside the LIST, and the list was
    outside the SCREEN. Re-measure rather than re-reason if the chrome above
-   changes; every height in this design is a browser measurement. */
+   changes; every height in this design is a browser measurement.
+
+   That instruction has been acted on once: the scroll hint's reserve changes
+   the chrome by `--home-hint-strip`, but only at `min-height: 768px` and up.
+   The 1280x720 figures above are BELOW that gate and still measure exactly as
+   written (hero row 528px, unchanged from before the reserve existed). Above
+   it the row is shorter -- measured 697 -> 628 at 1440x900, 866 -> 803 at
+   1920x1080, 573 -> 500 at 1366x768 -- and the gate sits where that subtraction
+   measured free: seven rows still visible, panel overflow 0. An UNGATED
+   reserve is what made those numbers wrong, and it clipped the footer button
+   below ~690px of viewport; see the reserve's own comment. */
 html[data-nav-page="home"] #homeView .home-landing-board .home-module {
     height: 100%;
     min-height: 0;
@@ -5435,7 +5478,7 @@ html[data-nav-page="home"] #homeView .home-landing-board .home-module {
         /* Reserves the scroll hint's own strip: it is position:absolute at
            bottom:18px and stands ~50px tall, so anything less than ~90px of
            padding lets the panel slide under it. */
-        padding-block: clamp(14px, 2vh, 28px) 96px;
+        padding-block: clamp(14px, 2vh, 28px) var(--home-hint-strip);
     }
     html[data-nav-page="home"] #homeView .home-landing-hero-inner {
         min-height: 0;
