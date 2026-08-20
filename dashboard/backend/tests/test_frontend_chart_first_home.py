@@ -860,3 +860,94 @@ def test_the_series_style_helper_is_an_explicit_cross_file_export():
     """
     assert "window.getSeriesStyle = getSeriesStyle;" in _LEADERBOARD_JS
     assert "window.getSeriesStyle" in _HOME_JS
+
+
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+
+
+def _declared_max_width(prelude: str) -> str | None:
+    """The `max-width` this selector declares, read from code and not prose.
+
+    Comments are stripped first because the two rules guarded below now carry
+    long notes that quote their own numbers ("1720 here put the hero rail at
+    x=93", "caps its own rail at 1500") -- exactly the trap this file's
+    `_strip_comments` docstring describes for the JS side. Without the strip,
+    editing one rail to 1720 and leaving the note behind keeps the guard green
+    on the regression it exists to catch.
+
+    Returns the first block that declares one: `css_blocks` also returns the
+    narrow-viewport override of each selector, and only one of the two sets a
+    rail width.
+    """
+    for block in css_blocks(prelude):
+        match = re.search(r"\bmax-width:\s*([^;]+);", _CSS_COMMENT.sub("", block))
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def test_the_two_pager_screens_share_one_content_rail():
+    """Screen 0's rail and screen 1's rail are one number, declared twice.
+
+    `#homeView` is a scroll-snap pager: the two screens are never on-screen
+    together, so a rail mismatch is invisible in any single view and shows up
+    only as the content sliding sideways on every snap. That is precisely the
+    kind of defect nobody files. Measured at 1920 while the hero rail was
+    1720px against screen 1's 1500px: x=93 vs x=203, a 110px jump.
+
+    Kept as an equality between two independently-read declarations rather than
+    a literal, so widening the app later stays a one-line change that this case
+    forces you to make in both places -- pinning `1500px` here would just make
+    the guard the third thing to update.
+    """
+    hero = _declared_max_width(
+        'html[data-nav-page="home"] #homeView .home-landing-hero-inner'
+    )
+    dash = _declared_max_width(
+        'html[data-nav-page="home"] #homeView .home-dashboard-screen-inner'
+    )
+    assert hero and dash, (
+        "one of the two pager rails no longer declares a max-width where this "
+        f"guard reads it (hero={hero!r}, dashboard={dash!r}) -- re-point it at "
+        "however the rail is now expressed, do not delete the case"
+    )
+    assert hero == dash, (
+        f"screen 0's rail is {hero} but screen 1's is {dash}, so the content "
+        "shifts sideways on every pager snap -- move both or neither"
+    )
+
+
+def test_the_scroll_hint_steps_out_of_the_board_column():
+    """The hint is centred on the VIEWPORT, and the hero is two columns.
+
+    Fine while the hero was one column; beside a board card it puts "SEE YOUR
+    DASHBOARD" on top of the card -- measured 165x42px of overlap at 1920, and
+    the hint's own `z-index: 3` means it wins the pixels. The base rule keeps
+    viewport-centring because below 1201px the hero really is one column.
+
+    Both halves are asserted: an override that sets `left` but leaves the base
+    `translateX(-50%)` in place pulls the hint a half-width back toward the
+    card, which is the natural way to half-fix this.
+    """
+    base = [_CSS_COMMENT.sub("", block) for block in css_blocks(".home-scroll-hint")]
+    assert any("left: 50%" in block for block in base), (
+        "the scroll hint no longer viewport-centres by default -- the stacked "
+        "layout below 1201px relies on that; re-point this case if the anchor moved"
+    )
+    override = [
+        _CSS_COMMENT.sub("", block)
+        for block in css_blocks(
+            'html[data-nav-page="home"] #homeView .home-scroll-hint'
+        )
+    ]
+    assert override, (
+        "the two-column override is gone, so the hint is viewport-centred beside "
+        "the board card again -- it overlapped it by 165x42px at 1920 before this"
+    )
+    assert any(
+        "left:" in block and "transform: none" in block for block in override
+    ), (
+        "the override must reset BOTH `left` and the base rule's "
+        "`translateX(-50%)`; resetting only `left` leaves the hint pulled a "
+        f"half-width back over the card (blocks: {override!r})"
+    )

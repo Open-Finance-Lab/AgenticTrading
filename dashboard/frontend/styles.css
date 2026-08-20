@@ -5286,7 +5286,22 @@ html[data-nav-page="home"] #homeView .home-landing-hero-inner {
     /* Wider page-1 rail so a larger center gap does not crush the two columns.
        Page-2 padding (home-dashboard-screen-inner) stays untouched. */
     width: 100%;
-    max-width: 1440px;
+    /* 1440 left 240px of dead margin EACH SIDE at 1920 (measured: the rail sat
+       at x=232.5 inside 80px of hero padding, so 160px of it was pure centring
+       slack), and the board column is capped, so that slack came straight out
+       of the chart. Measured plot area was 320px at 1920 and 316px at 2560 --
+       NARROWER than the 627px the same board gets at 1100px wide, where the
+       hero stacks and the cap is released. The board being widest on a small
+       laptop and narrowest on a 4K monitor is the defect.
+
+       This number is NOT free: `#homeView` is a scroll-snap pager and
+       `.home-dashboard-screen-inner` (screen 1) caps its own rail at the same
+       value. Measured at 1920, 1720 here put this rail at x=93 against screen
+       1's x=203 -- a 110px sideways jump on every snap, where the pre-existing
+       mismatch was 29.5px. Matching lands both on x=202.5 exactly. Move this
+       only together with that one; pinned by
+       test_the_two_pager_screens_share_one_content_rail. */
+    max-width: 1500px;
     margin-inline: auto;
     justify-content: flex-start;
     align-items: center;
@@ -5309,9 +5324,22 @@ html[data-nav-page="home"] #homeView .home-landing-hero-copy {
    scrollbar and nothing failing. Stretch gives the board the row's definite
    height, which is the only thing that lets the rules below bound the panel. */
 html[data-nav-page="home"] #homeView .home-landing-board {
-    flex: 1 1 0;
+    /* Grows FASTER than the copy column rather than splitting 1:1. The copy is
+       a headline, a one-line lede and two buttons -- it stops improving past
+       ~720px, while the board holds a chart whose plot area is what this whole
+       screen is for. The endpoint rail needs a measured ~220px floor
+       (boardLabelBlockWidth) no matter how wide the card is, so at 660px of
+       card that rail WAS 40% of the canvas; the fix is a bigger denominator,
+       not a smaller rail.
+
+       1.5 rather than 1.25: measured plot area at 1280/1440/1600 was
+       270/319/385px at 1.25 against 302/363/444px at 1.5, while the copy
+       column only falls 490/551/611 -> 444/498/552, which still clears the
+       two-line headline at every one of those widths. At 1920+ the board is at
+       its own max-width, so the ratio stops mattering there. */
+    flex: 1.5 1 0;
     width: 100%;
-    max-width: 42rem;
+    max-width: 56rem;
     min-width: 0;
     flex-shrink: 0;
     display: flex;
@@ -5341,6 +5369,28 @@ html[data-nav-page="home"] #homeView .home-landing-board .home-module {
     height: 100%;
     min-height: 0;
     max-height: none;
+}
+
+/* The scroll hint is `left: 50%` on a containing block the full width of the
+   screen, so it centres on the VIEWPORT while the hero it labels is two
+   asymmetric columns. Already wrong before the board column was widened --
+   measured 28x42px of overlap with the board card at 1920 -- and widening the
+   board turned 28px into 165px, with the hint's own `z-index: 3` painting
+   "SEE YOUR DASHBOARD" across the card's bottom-left corner. Viewport-centre
+   is only the right anchor when the hero is ONE column, so below 1201px the
+   base rule still applies.
+
+   `calc(50% - 750px)` is the rail's left edge whenever the 1500px rail is
+   cap-limited, and the `max()` falls back to the hero's own padding at the
+   widths where it is viewport-limited instead -- the same two-branch geometry
+   the rail itself resolves, rather than a second constant that could drift
+   from it. `transform: none` undoes the base rule's `translateX(-50%)`, which
+   would otherwise pull it a half-width back over the card. */
+@media (min-width: 1201px) {
+    html[data-nav-page="home"] #homeView .home-scroll-hint {
+        left: max(clamp(40px, 5vw, 80px), calc(50% - 750px));
+        transform: none;
+    }
 }
 
 /* Below 1200px the hero stacks to a column (see the unscoped rule further down).
