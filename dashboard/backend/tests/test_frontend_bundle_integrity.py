@@ -14,7 +14,15 @@ drift apart silently, and either direction ships a blank page to prod:
   that makes the next refresh ambiguous about which bundle is live;
 * a forgotten *rebuild* leaves ``index-*.js`` older than ``landing/src`` — the page
   still renders, so nothing looks wrong, but it silently serves the previous CTA
-  wiring and every source edit since is simply absent from prod;
+  wiring and every source edit since is simply absent from prod. Note the scope of
+  what this file catches there: the two staleness checks below key on the **CTA
+  surface only** (how many ``data-landing-auth`` emitters, and the ``cta.ts``
+  labels), so a source change that touches neither is invisible here — measured,
+  by shipping the pre-rebuild bundle against this branch's five source fixes: all
+  seven cases below passed. Copy and behaviour are anchored instead by the
+  ``*_source_and_shipped_bundle_agree`` cases in test_landing_copy_register.py,
+  which read the bundle rather than the source; a source change outside both
+  needs its own agreement pin there, or nothing makes the missing build red;
 * an ``authMode`` the inline handler does not recognise is coerced to ``signup``
   rather than rejected, so a CTA declared in ``cta.ts`` can quietly open the wrong
   half of the modal — no console error, no failed request, page fully functional.

@@ -39,6 +39,10 @@ def _strip_comments(source: str) -> str:
 
 _HERO = _strip_comments((_HOME / "Hero.tsx").read_text(encoding="utf-8"))
 _BOARD = _strip_comments((_HOME / "BoardPreview.tsx").read_text(encoding="utf-8"))
+# The SECOND board card. There are two of them and they took the same window
+# chip in the same commit, so a layout guard scoped to one of them is scoped to
+# half the change -- see test_the_race_window_chip_cannot_out_size_its_header_row.
+_RACE = _strip_comments((_HOME / "Race.tsx").read_text(encoding="utf-8"))
 
 _BOARD_CHALLENGE = "Can you beat the strategies and baselines on the left?"
 _NO_REAL_MONEY = "No real money. Simulated money only."
@@ -138,27 +142,38 @@ def test_the_chart_column_escapes_the_container_on_its_left_edge_only():
 
 
 def test_the_landing_chart_uses_its_own_measured_clamp():
-    """`clamp(320px, 56vh, 520px)` -- the first draft's number, shared with /app
-    -- puts the card 25-46px BELOW the fold at 1440x768, 1366x768, 1280x800 and
-    1280x720. All four are ordinary laptop heights. The replacement is the
-    largest formula with non-negative fold slack at every tested viewport.
+    """Both reserves are derived, not taste, and there are TWO because the card's
+    non-chart height is not one number: one thing beside the copy at >=lg, and
+    another stacked at phone widths where the title, the window chip and the
+    caption all wrap and the chip strip runs to eight rows.
 
-    Both reserves are derived, not taste, and there are TWO because the card's
-    non-chart height is not one number: 218-241px beside the copy at >=lg, but
-    443px stacked at 390px wide, where the title, the "Illustrative example"
-    chip and the caption all wrap and the chip strip runs to five rows.
+    RE-DERIVED when the board went live -- the strip went from five hardcoded
+    entries to nine from the payload and the "Illustrative example" chip became
+    a longer window label -- and BOTH NUMBERS MOVED. Measured against the BUILT
+    card with the board READY, at the NARROWEST width of each band:
 
-        lg+     390 = ~218-241 non-chart + 120 chrome + ~14-43 fold margin
-        below   590 = 443 non-chart + 132 section padding + ~9 margin
+        lg+     460 = ceil10(136 cardTop + 313.75 non-chart @1024x768) + 10
+        below   730 = ceil10(132 cardTop + 583.25 non-chart @360x800)  + 10
 
-    Measured, not derived: the single desktop constant put the card 77px past
-    the fold at 390x844. RE-DERIVE BOTH if the caption, title or chip strip
-    changes height -- the failure mode is a silently half-visible card, not a
-    broken build. That is not hypothetical: unclipping the chip strip took it
-    from 24px to 152px at 390px wide, the stacked reserve from 480 to 590, and
-    then the FLOOR from 300 to 260 -- because at 844px tall the card had 269px
-    left for a chart whose floor was 300, so the floor, not the reserve, was
-    what put it 95px past the fold on the second pass.
+    The trailing +10 is measured too: rounding alone left 0.25px of fold slack
+    at 1024, a margin that survives exactly one browser.
+
+    THE OLD lg VALUE WAS MEASURED AT THE WRONG WIDTH, which is why it is pinned
+    here with the band spelled out. `lg:` binds from 1024, but 390 was derived
+    at 1440 where non-chart is 249.75; from 1024 to 1279 the strip takes a fifth
+    row and the card hung 55.75px BELOW THE FOLD across that entire band while
+    every viewport it had been checked at (1280+) passed with 4.25px to spare.
+    Re-derive at 1024 and 360, never at 1440 and 390.
+
+    The 260px FLOOR is what binds on a phone, not either reserve: at 390x844 the
+    card needs 920.5px against 844, so the strip's tail is below the fold at any
+    reserve. That is deliberate -- see the component comment. The floor is
+    pinned here so a future "fix" that shrinks it to chase the fold has to argue
+    with this docstring first: the chart already ends above the fold there, and
+    lowering the floor trades the chart for its own fallback key.
+
+    RE-DERIVE BOTH AGAIN if the caption, title or chip strip changes height. The
+    failure mode is a silently half-visible card, not a broken build.
 
     The var() indirection is load-bearing and not a tidy-up: the formula's
     commas defeat Tailwind's arbitrary-VALUE parser, so the breakpoint-dependent
@@ -166,15 +181,151 @@ def test_the_landing_chart_uses_its_own_measured_clamp():
     """
     board = _BOARD.replace(" ", "")
     assert "clamp(260px,calc(100dvh-var(--board-chart-reserve)),520px)" in board
-    assert "[--board-chart-reserve:590px]" in board, "the stacked-phone reserve"
-    assert "lg:[--board-chart-reserve:390px]" in board, "the side-by-side reserve"
+    # UNPREFIXED, and this is the severe one. As a bare substring check this
+    # assertion was satisfied by `md:[--board-chart-reserve:730px]`: below `md`
+    # the custom property is then undefined, `clamp(260px, calc(100dvh -
+    # var(--board-chart-reserve)), 520px)` is invalid at computed-value time, the
+    # `height` declaration is DROPPED, the container computes to `auto`, and
+    # <ResponsiveContainer height="100%"> resolves against zero. Measured in
+    # headless Chromium at 390x844: chart region 260px with the variable
+    # defined, 0px without -- the hero chart does not render at all on any
+    # phone, with this file at 19 passed and `npm run typecheck` clean.
+    #
+    # Read off _BOARD with its spaces INTACT rather than the collapsed `board`
+    # above, so the class can be anchored on the whitespace that separates
+    # Tailwind classes. A negative lookbehind for `<letter>:` was the first
+    # draft and has a hole: an arbitrary variant (`min-[390px]:`) ends `]:`,
+    # which no `[a-z]:` lookbehind rejects. Anchoring on the separator rejects
+    # every variant form, present and future, because a variant by definition
+    # occupies the characters between the separator and the class.
+    assert re.search(r'(?:^|\s)\[--board-chart-reserve:730px\](?=\s|"|$)', _BOARD), (
+        "the base reserve must be unprefixed, or the clamp is invalid below "
+        "that breakpoint and the chart region computes to 0"
+    )
+    assert "lg:[--board-chart-reserve:460px]" in board, "the side-by-side reserve"
     assert "56vh" not in _BOARD, "the first draft's clamp fails at four viewports"
     assert "h-[210px]" not in _BOARD and "md:h-[240px]" not in _BOARD
 
 
+def test_the_window_chip_cannot_out_size_the_header_row():
+    """The chip states the window the chart draws, and at 390px it used to run
+    38.8px past the card's right edge -- which is `overflow-hidden`, so the end
+    date was cut off -- while squeezing the <h2> beside it to width ZERO that
+    still rendered 112px tall.
+
+    Both symptoms came from one class: `shrink-0` on a chip whose text went from
+    19 characters ("Illustrative example") to 44 ("Competition window ·
+    2026-04-15 → 2026-05-15") when the board went live. Nothing failed: no
+    scrollbar, no ellipsis, no console error -- the same silent clipping the chip
+    strip below shipped once already.
+
+    Pinned as the two classes that fix it because the measurement that caught it
+    only exists in a browser, and nothing in CI opens one. `max-w-full` is what
+    lets the chip wrap instead of overflowing; `flex-wrap` is what lets it take
+    its own row instead of collapsing the title to reach it.
+
+    BOTH ARE REQUIRED UNPREFIXED, and as bare substring checks neither was:
+    `lg:flex-wrap` and `lg:max-w-full` satisfy `in`, bind only from 1024px, and
+    therefore restore the measured defect across the entire sub-1024 band --
+    including the 390px the measurement above was taken at -- with this file at
+    19 passed and `npm run typecheck` clean.
+
+    The OTHER board card has its own case,
+    test_the_race_window_chip_cannot_out_size_its_header_row, deliberately
+    separate rather than merged into this one: an edit aimed at one card must
+    not be able to delete the other card's pin. If you add a third board card,
+    add a third case -- do not widen either of these to scan several files.
+    """
+    row = re.search(r'<div className="([^"]*)">\s*<h2', _BOARD)
+    assert row, "could not find the header row that wraps the <h2>"
+    assert re.search(r"(?:^|\s)flex-wrap(?:\s|$)", row.group(1)), (
+        f"the title/chip row must wrap at every width, or the chip collapses "
+        f"the title to width 0; found {row.group(1)!r}"
+    )
+
+    chip = re.search(r'<span className="([^"]*)">\s*\{data\?\.windowLabel', _BOARD)
+    assert chip, "could not find the window chip — did the label move?"
+    assert "shrink-0" not in chip.group(1), (
+        f"shrink-0 on the window chip is what pushed it 38.8px past the card's "
+        f"edge; found {chip.group(1)!r}"
+    )
+    assert re.search(r"(?:^|\s)max-w-full(?:\s|$)", chip.group(1)), (
+        f"the window chip must be capped at the row width at every width; "
+        f"found {chip.group(1)!r}"
+    )
+
+
+def test_the_race_window_chip_cannot_out_size_its_header_row():
+    """The same 44-character chip, in the OTHER board card, which never got the
+    fix the hero card got.
+
+    "Illustrative example" (19 chars) became "Competition window ·
+    2026-04-15 → 2026-05-15" (44) in BOTH cards in the same commit. Only
+    BoardPreview.tsx was repaired, and the case above is scoped to `_BOARD`, so
+    nothing could see the other half. Measured in headless Chromium, base vs
+    HEAD in the same browser: at 390x844 Race's `<h3>Competition Standings</h3>`
+    goes 109px -> 0px wide while still rendering 56px tall, so its text
+    overflows under the chip's own `bg-muted` and the heading reads "Standings"
+    with "Competition" painted over; the chip's right edge lands 58.2px past the
+    card's inner right of 327; and at 360x800 `documentElement.scrollWidth`
+    becomes 385 against an `innerWidth` of 360 -- 25px of horizontal page scroll
+    on a 360px phone, on the highest-traffic anonymous surface in the product.
+
+    Deliberately a SEPARATE case per component rather than one merged scan: an
+    edit aimed at one card cannot then delete the other card's pin. Both cards
+    are guarded; neither guard is the other's.
+
+    The two classes are required UNPREFIXED. `lg:flex-wrap` and `lg:max-w-full`
+    satisfy a bare substring check and bind only from 1024px -- which restores
+    the measured defect across the entire sub-1024 band the measurements above
+    were taken in, with the guard green.
+    """
+    row = re.search(r'<div className="([^"]*)">\s*<h3', _RACE)
+    assert row, "could not find the Race header row that wraps the <h3>"
+    assert re.search(r"(?:^|\s)flex-wrap(?:\s|$)", row.group(1)), (
+        f"the title/chip row must wrap at every width, or the chip collapses "
+        f"the title to width 0; found {row.group(1)!r}"
+    )
+
+    chip = re.search(r'<span className="([^"]*)">\s*\{board\.status', _RACE)
+    assert chip, "could not find Race's window chip — did the label move?"
+    assert "shrink-0" not in chip.group(1), (
+        f"shrink-0 on the window chip is what pushed it 58.2px past the card's "
+        f"edge and put 25px of horizontal scroll on a 360px phone; found "
+        f"{chip.group(1)!r}"
+    )
+    assert re.search(r"(?:^|\s)max-w-full(?:\s|$)", chip.group(1)), (
+        f"the window chip must be capped at the row width at every width; "
+        f"found {chip.group(1)!r}"
+    )
+
+
 def test_landing_chart_axis_ticks_are_14px():
     assert _BOARD.count("fontSize={14}") == 2, "both XAxis and YAxis"
-    assert "fontSize={11}" not in _BOARD
+    assert "fontSize={11}" not in _BOARD, (
+        "11px belongs to the gutter labels, which live in EndpointRail.tsx"
+    )
+
+
+def test_the_y_axis_reserve_is_measured_rather_than_guessed():
+    """`width={56}` was measured against `$1030` at 11px; the tick font later
+    moved to 14px and four of five labels lost their leading `$` with nothing
+    failing. The axis is percent now, so the number would have to be re-measured
+    anyway -- measuring it at render removes the whole class."""
+    assert "width={56}" not in _BOARD
+    assert "domain={[960, 1240]}" not in _BOARD, "a hardcoded dollar domain"
+    # NOT a bare `"measureTextWidth" in _BOARD`. That string also appears in the
+    # file's import line, so replacing the whole computation with
+    # `const yAxisWidth = 60;` -- a guessed reserve, the exact regression this
+    # case is named for -- left the import behind and this case GREEN (verified
+    # by mutation; `noUnusedLocals` is off, so that mutant typechecks too).
+    # The measurement has to reach the axis, so pin the binding AND the fact
+    # that what is measured is the rendered tick text.
+    assert "width={yAxisWidth}" in _BOARD, "the YAxis must take the measured width"
+    assert "measureTextWidth(axisTick(" in _BOARD, (
+        "the reserve must be measured from the tick text this axis actually "
+        "renders, not guessed"
+    )
 
 
 def test_the_panel_title_is_text_xl():
@@ -184,35 +335,114 @@ def test_the_panel_title_is_text_xl():
 
 
 def test_the_standings_table_becomes_a_chip_strip_that_can_show_every_chip():
-    """Demotion, not deletion: the chart ships no <Legend> (a five-item legend
-    wraps to two rows at this width), so the table is the ONLY thing linking a
-    curve colour to a model name. The chips preserve that swatch-to-curve link
-    at a fraction of the height. The full table already lives in Race.tsx.
+    """Demotion, not deletion: the chart ships no <Legend>, so the chips are the
+    only thing linking a curve colour to a model name -- and they are now also
+    the fallback when the endpoint rail declines to draw (a narrow card, a
+    Recharts internal that moved). The full table lives in Race.tsx.
 
-    THE STRIP MUST WRAP. `flex-nowrap` with `overflow-hidden` cut entries off
-    the end wherever the strip was narrower than its content: measured
-    scrollWidth 910 against clientWidth 285 at 390 (one chip survives, keying
-    five drawn curves), 663 at 768, 895 at 1024 -- the whole lg band and every
-    phone, silently, because the only live-browser guard on it ran at 1440.
-    "One row" was the intent at the design width, not a constraint worth
-    dropping four of five model names for; and Race.tsx carries no swatches, so
-    a clipped chip has no fallback key anywhere on the page.
+    THE STRIP MUST WRAP, and the pressure just went up: it went from five
+    hardcoded entries to nine from the payload. `flex-nowrap` with
+    `overflow-hidden` cut entries off the end wherever the strip was narrower
+    than its content -- measured scrollWidth 910 against clientWidth 285 at 390
+    (one chip survives, keying five drawn curves), 663 at 768, 895 at 1024, so
+    the whole lg band and every phone, silently, because the only live-browser
+    guard on it ran at 1440.
     """
     board = _BOARD
     assert "grid-cols-12" not in board, "the 5-row table is what the chart needs the height of"
     assert "flex-wrap" in board and "flex-nowrap" not in board, (
         "a legend that cannot show its entries is not a legend"
     )
-    strip = board[board.index("SAMPLE_STANDINGS.map") - 400 : board.index("SAMPLE_STANDINGS.map")]
+    # Anchored on the JSX render site (`{standings.map`), NOT on the first
+    # `standings.map` in the file. The old card mapped its rows exactly once, so
+    # a bare `.index("SAMPLE_STANDINGS.map")` was the strip; the live card maps
+    # `standings` three times, and the two earlier call sites (the frameLayout
+    # labels and valueByKey) sit ~4.5KB above the strip. Anchoring on the first
+    # put this 400-char window over the ResizeObserver effect, where
+    # `overflow-hidden` can never appear -- verified by mutation: adding
+    # `overflow-hidden` to the chip strip's own className left this case GREEN.
+    strip = board[board.index("{standings.map") - 400 : board.index("{standings.map")]
     assert "overflow-hidden" not in strip, (
         "clipping the strip is the same failure by another route -- no scrollbar, "
         "no ellipsis, and nothing fails"
     )
     assert "text-base" in board, "text-sm rows were one of the three reported problems"
-    # The identity link and the guard corpus both depend on these staying here.
-    assert "SAMPLE_STANDINGS" in board
+    # The identity link. `swatch` is gone with the sample rows; the colour now
+    # comes off the same BoardSeries the curve is drawn from, which is stronger:
+    # a row and its curve cannot disagree because there is one value.
+    assert "item.color" in board
     assert "dataKey=" in board
-    assert "item.swatch" in board
+
+
+def test_the_hero_draws_the_board_the_signed_in_home_draws():
+    """The whole point of the change. No component may reintroduce a curve that
+    is not on the board, and the only way to be sure of that is for the data to
+    come from the API rather than from a literal.
+
+    THE PARENS ARE THE ASSERTION. A bare `"useLeaderboard" in _BOARD` holds
+    against the IMPORT line whether or not the hook is ever called, and
+    `noUnusedLocals` is off. Verified by mutation: keeping the import, adding a
+    module-level `function fabricatedBoard(): BoardState { ... }` of hardcoded
+    curves, returns and window label, and calling it instead left `npm run
+    typecheck` clean and the five landing suites at 113 passed -- with the hero
+    drawing an entirely invented board, which is precisely the state this change
+    exists to remove. The return-type annotation defeats TS literal narrowing,
+    so no branch below goes unreachable and nothing else notices either.
+
+    The companion assertion below is not a backstop: it bans the two retired
+    sample-data symbols by name and says nothing about where the data comes
+    from."""
+    assert "useLeaderboard()" in _BOARD, (
+        "the hero must CALL the hook, not merely import it — an unused import "
+        "type-checks clean and leaves the board free to be a literal"
+    )
+    assert "SAMPLE_CURVES" not in _BOARD and "SAMPLE_STANDINGS" not in _BOARD
+
+
+def test_the_hero_mounts_the_frame_it_reserves_room_for():
+    """The rail is only ever reached through this element, and nothing else on
+    the branch checks that anyone renders it.
+
+    `test_the_rail_*` cases in test_landing_live_board.py read EndpointRail.tsx's
+    OWN source, so they keep passing when the component becomes dead code.
+    Verified by mutation: deleting the `<Customized>` element, its two imports
+    and the reserved gutter -- the landing half of the frame removed wholesale --
+    left the eight-file focused suite at its usual 1 failed / 128 passed AND
+    typechecked clean, because an unmounted component still compiles.
+
+    The gutter and the three props are asserted separately rather than as one
+    blob: they fail independently in the browser. `right: frame.gutter` is the
+    reserved column the labels are drawn into -- lose it and the rail paints
+    over the plot area. `gap` is the one the rail cannot recover on its own: it
+    consumes the value and never calls frameLayout, so a dropped prop is silent
+    label collision, not an error. Three of the four (`gutter`, `drawLabels`,
+    `gap`) come off the ONE frameLayout call above, which is what keeps this
+    card from growing a second geometry; `valueByKey` is the endpoint values the
+    rail labels, and without it the rail has nothing to draw.
+    """
+    assert "component={EndpointRail}" in _BOARD, (
+        "the hero must actually mount the rail, not merely coexist with it"
+    )
+    assert "right: frame.gutter" in _BOARD, (
+        "the gutter is reserved by the one frameLayout call, not by a literal"
+    )
+    assert "valueByKey={valueByKey}" in _BOARD
+    assert "drawLabels={frame.drawLabels}" in _BOARD
+    assert "gap={frame.gap}" in _BOARD, (
+        "the rail never computes the gap -- this prop is where it comes from"
+    )
+
+
+def test_the_hero_reports_a_failed_load_instead_of_shimmering_forever():
+    """Three states, and they must be distinguishable. A permanent skeleton and
+    a silent fallback are the same defect: "the backend is down" and "the backend
+    is fine" would render near-identically."""
+    board = _collapse(_BOARD)
+    assert 'status === "error"' in board or "status === 'error'" in board
+    assert 'status === "loading"' in board or "status === 'loading'" in board
+    assert "state.message" in board or "board.message" in board, (
+        "the failed card must name the failure, not print a dead end"
+    )
 
 
 def test_talk_drops_the_three_step_list_but_keeps_its_pinned_strings():
@@ -286,24 +516,63 @@ def test_the_two_surfaces_agree_on_the_numbers_that_must_agree():
     assert "<Legend" not in _BOARD
     assert re.search(r"legend:\s*\{\s*display:\s*false\s*\}", home_js)
 
-    # UNITS: /app is percent. Asserted here rather than in the /app suite
-    # because the pressure to break it comes from THIS comparison -- someone
-    # noticing the two charts disagree and "aligning" screen 0 back to a dollar
-    # axis, which / uses.
+    # UNITS: percent on BOTH, and this is the assertion that inverted.
     #
-    # Why that is a regression and not a tidy-up: / plots fabricated curves that
-    # all share a base of 1000, so `$1210` is unambiguous and reads as
-    # SAMPLE_STANDINGS' +21.0%. Screen 0 plots LIVE entries, and every dollar
-    # level there is a x0.1 rescale of a $100,000 backtest onto the config's
-    # $10,000 display base (leaderboard service.py), so a `$10,749` tick names an
-    # account that never existed while the percent is what actually ran. The rank
-    # list beside it already renders percent, and it is the chart's only key.
+    # It used to pin an ASYMMETRY -- /app percent, / dollars -- and the
+    # justification was precise: / plotted fabricated curves that all shared a
+    # base of 1000, so `$1210` was unambiguous and read as SAMPLE_STANDINGS'
+    # +21.0%. That premise is gone. / now plots the same LIVE entries screen 0
+    # does, and every dollar level in that payload is a x0.1 rescale of a
+    # $100,000 backtest onto the config's $10,000 display base (leaderboard
+    # service.py), so a `$10,749` tick names an account that never existed while
+    # the percent is what actually ran.
     #
-    # NOT the reason, though an earlier draft of this plan said so: issue #365
-    # does NOT make a dollar axis draw a 10x break here. get_leaderboard
-    # normalises every entry to one display base before serving -- measured
-    # against a hand-built mixed-capital database -- so on this payload dollars
-    # and percent are an affine transform. Do not re-derive the scale argument
-    # and then "discover" it is false; the label argument above is the one that
-    # holds.
+    # NOT the reason, though an earlier draft of the chart-first plan said so:
+    # issue #365 does NOT make a dollar axis draw a 10x break here.
+    # get_leaderboard normalises every entry to one display base before serving
+    # -- measured against a hand-built mixed-capital database -- so on this
+    # payload dollars and percent are an affine transform. Do not re-derive the
+    # scale argument and then "discover" it is false; the label argument above
+    # is the one that holds.
     assert "(v * 100).toFixed(1)}%" in home_js
+    assert "toFixed(1)" in _BOARD, "the landing axis is percent to one decimal too"
+    assert not re.search(r"tickFormatter=\{\(v\) => `\$", _BOARD), (
+        "a dollar tick on this card names an account that never existed"
+    )
+    # The line above only sees an INLINE arrow formatter, and this file does not
+    # use one -- it binds the named `axisTick`, so the most natural way to put
+    # dollars back is to edit that function, where the regex cannot reach.
+    # `toFixed(1)` on its own does not close it either: a dollar tick has one
+    # decimal too. Verified by mutation: rewriting `axisTick` to return
+    # `$${(10000 * (1 + v)).toFixed(1)}` -- the exact $10,749 display-base tick
+    # the comment above forbids -- left this whole file GREEN. So pin the landing
+    # formatter's BODY the same way home_js's is pinned two lines above, which
+    # makes both surfaces fail on the same edit.
+    assert "(v * 100).toFixed(1)}%" in _BOARD, (
+        "the landing axis renders the percent that actually ran, not a level"
+    )
+    # ...AND pin what the axis is BOUND to, because the body pin above closes
+    # only half of it. `axisTick` is also referenced by
+    # `measureTextWidth(axisTick(domain[0]), ...)`, so it can be left byte-
+    # identical -- keeping the body assertion AND the y-axis-reserve guard green
+    # -- while a SECOND named formatter is declared beside it and bound to the
+    # axis instead. Verified by mutation: adding
+    # `function dollarTick(v) { return `$${(10000 * (1 + v)).toFixed(1)}`; }`
+    # and binding it left this file at 19 passed with `npm run typecheck` clean,
+    # and the hero rendering the $10,749-style ticks the comment above calls the
+    # one hard "must never" of this change. The inline-arrow ban is likewise
+    # blind to it: a named binding carries no arrow.
+    #
+    # Scoped to the <YAxis> ELEMENT, not the file, for the same reason the
+    # y-axis-reserve guard is: a substring that may live in an import line, a
+    # helper or a dead function is not a claim about what the axis renders.
+    # A prop containing `>` (an inline arrow formatter) makes the element regex
+    # miss and fires the first assertion -- fail-closed, which is the direction
+    # this guard has to fail in.
+    yaxis = re.search(r"<YAxis\b[^>]*?/>", _BOARD, re.S)
+    assert yaxis, "could not find the <YAxis> element"
+    assert "tickFormatter={axisTick}" in yaxis.group(0), (
+        "the y-axis must bind the percent formatter itself, not a second "
+        "formatter that walks around the body pin above; found "
+        f"{yaxis.group(0)!r}"
+    )
