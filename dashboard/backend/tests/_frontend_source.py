@@ -8,6 +8,12 @@ load each file once, and slice a named region out of it by brace matching.
 Shared rather than copied because the slicing is where the subtle bugs live -- a
 helper that returns the wrong region makes every assertion built on it vacuous,
 and a copy in each test file would have to be fixed in each test file.
+
+The three module constants are /app's files, but the scanners below take their
+source as an argument: the landing guards (test_landing_*.py) slice TSX with the
+same primitives, and the first copy of `match_paren` to live in one of those
+files also shipped its own `//`-stripping regex that ate the second slash of any
+URL. That is the failure this module's docstring is about, one directory over.
 """
 
 import re
@@ -17,6 +23,99 @@ FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 APP_HTML = (FRONTEND / "app.html").read_text(encoding="utf-8")
 APP_JS = (FRONTEND / "app.js").read_text(encoding="utf-8")
 STYLES = (FRONTEND / "styles.css").read_text(encoding="utf-8")
+
+
+def match_paren(source: str, index: int) -> int:
+    """Index of the ")" closing the "(" at `index`.
+
+    The paren twin of `_match_brace`, exported because an argument list is the
+    unit the landing guards assert over: "which collection is this call
+    measured across" is answerable only from the whole, balanced call, and a
+    `source[start:start + 200]` window over it silently includes the next
+    statement or cuts the argument in half.
+    """
+    depth = 0
+    while index < len(source):
+        if source[index] == "(":
+            depth += 1
+        elif source[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index
+        index += 1
+    raise AssertionError("unbalanced parentheses -- no ')' closes this '('")
+
+
+def call_args(source: str, callee: str) -> str:
+    """The first call to `callee` in `source`: its argument list, parens included.
+
+    Strip comments first (see `strip_comments`) when the assertion is about what
+    the call *does*. A call site worth guarding usually carries a note naming
+    which of two collections it must not use, and an un-stripped scan is then
+    satisfied by the prose explaining the bug rather than by the code avoiding
+    it -- the assertion passes on the comment, and would go on passing if the
+    code were reverted.
+    """
+    match = re.search(rf"\b{re.escape(callee)}\s*\(", source)
+    assert match, f"{callee} is not called in this source"
+    open_paren = source.index("(", match.start())
+    return source[open_paren : match_paren(source, open_paren) + 1]
+
+
+def strip_comments(source: str) -> str:
+    r"""JS/TS source with `//` and `/* */` comments removed, strings left intact.
+
+    A plain `re.sub(r"//[^\n]*", "", src)` also deletes the rest of any line
+    holding a URL -- `"https://example.com/x"` becomes `"https:` -- which does
+    not raise: it silently shortens the region a guard then asserts over, and
+    the guard reports whatever survives. Nothing in the sources scanned today
+    has a URL, so that is a trap set for the edit which adds one.
+
+    A scanner rather than a regex, because "is this `//` a comment" is a
+    question about what came before it. Two known limits, both checked against
+    the files scanned today and both stated here rather than left to be
+    rediscovered the way the `//` one was:
+
+    * a regex *literal* holding an escaped slash (`/https?:\/\//`) is not
+      tracked, so its trailing `\//` reads as a comment start;
+    * an apostrophe in bare JSX TEXT (`<p>didn't load</p>`) opens a string that
+      only closes at the next one, and any comment in between survives. Every
+      apostrophe in the scanned TSX is inside a comment or a double-quoted
+      string, which is safe by construction -- a comment is skipped whole,
+      before quote tracking sees it.
+
+    A file that grows either needs this taught about it, not a caller working
+    around it: the caller's workaround is what this function replaced.
+    """
+    out: list[str] = []
+    index = 0
+    length = len(source)
+    quote: str | None = None
+    while index < length:
+        char = source[index]
+        if quote is not None:
+            out.append(char)
+            if char == "\\" and index + 1 < length:
+                out.append(source[index + 1])
+                index += 2
+                continue
+            if char == quote:
+                quote = None
+            index += 1
+        elif char in "'\"`":
+            quote = char
+            out.append(char)
+            index += 1
+        elif source.startswith("//", index):
+            newline = source.find("\n", index)
+            index = length if newline == -1 else newline
+        elif source.startswith("/*", index):
+            end = source.find("*/", index + 2)
+            index = length if end == -1 else end + 2
+        else:
+            out.append(char)
+            index += 1
+    return "".join(out)
 
 
 def _match_brace(source: str, index: int) -> int:
@@ -47,17 +146,7 @@ def fn_body(signature: str) -> str:
     string in which every `assert "..." in body` fails, or worse, passes.
     """
     start = APP_JS.index(signature)
-    index = APP_JS.index("(", start)
-    depth = 0
-    while True:
-        if APP_JS[index] == "(":
-            depth += 1
-        elif APP_JS[index] == ")":
-            depth -= 1
-            if depth == 0:
-                break
-        index += 1
-    open_brace = APP_JS.index("{", index)
+    open_brace = APP_JS.index("{", match_paren(APP_JS, APP_JS.index("(", start)))
     return APP_JS[start : _match_brace(APP_JS, open_brace) + 1]
 
 

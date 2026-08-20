@@ -23,6 +23,8 @@ from pathlib import Path
 
 import pytest
 
+from dashboard.backend.tests._frontend_source import call_args, strip_comments
+
 _ROOT = Path(__file__).resolve().parents[2]
 _LIB = _ROOT / "landing" / "src" / "lib"
 _HOME_JS = (_ROOT / "frontend" / "home-page.js").read_text(encoding="utf-8")
@@ -1311,25 +1313,14 @@ def test_the_gutter_is_measured_over_the_curves_the_rail_actually_draws():
     Comments are stripped first, and that is load-bearing here: the call site's
     own note names BOTH collections, so an un-stripped scan is satisfied by the
     prose explaining the bug instead of by the code avoiding it.
-    """
-    src = re.sub(r"/\*.*?\*/", "", _BOARD_PREVIEW_TSX, flags=re.DOTALL)
-    src = re.sub(r"//[^\n]*", "", src)
 
-    start = src.find("frameLayout(")
-    assert start != -1, "BoardPreview.tsx no longer calls frameLayout"
-    open_paren = src.index("(", start)
-    depth = 0
-    close = -1
-    for index in range(open_paren, len(src)):
-        if src[index] == "(":
-            depth += 1
-        elif src[index] == ")":
-            depth -= 1
-            if depth == 0:
-                close = index
-                break
-    assert close != -1, "frameLayout's argument list is unbalanced"
-    call = src[open_paren : close + 1]
+    Both halves come from `_frontend_source` rather than being written here.
+    The paren walk is the same one `fn_body` has always used, and the stripping
+    is the part that was quietly wrong when this case first shipped its own: a
+    `//[^\n]*` sub deletes the rest of any line carrying a URL, which shortens
+    the region the assertions below run over without failing anything.
+    """
+    call = call_args(strip_comments(_BOARD_PREVIEW_TSX), "frameLayout")
 
     assert "series.map" in call, (
         "frameLayout must be measured over `series` -- the set the rail draws. "
@@ -1339,6 +1330,65 @@ def test_the_gutter_is_measured_over_the_curves_the_rail_actually_draws():
         "frameLayout is being measured over `standings`, which carries entries "
         "with no drawable curve: the gutter then reserves width for a pill the "
         "rail never paints, and can degrade the whole rail to arrow-only"
+    )
+
+
+def test_the_gutter_basis_source_and_shipped_bundle_agree():
+    """The case above reads `landing/src`; prod reads `frontend/assets/index-*.js`.
+
+    So it stays green against a bundle built before the fix, and that bundle
+    still measures the gutter over `standings` on the live site. Nothing else
+    catches it: test_frontend_bundle_integrity's staleness checks key on the CTA
+    surface only, and its docstring says in as many words that a source change
+    outside that surface needs its own agreement pin. This is that pin.
+
+    Anchoring a STRING on both sides is the usual technique and is unavailable
+    here -- the fix swapped one collection for another and introduced no copy.
+    What survives minification instead is property NAMES: esbuild mangles
+    locals, never object keys, so `.series`, `.standings` and `labels:` are all
+    still in the bundle verbatim. Resolving the two mangled locals through the
+    destructuring that reads those properties, then asking which one reaches
+    `labels:`, tests the shipped artifact rather than a marker planted for the
+    test.
+
+    Deliberately loud rather than lenient: if the aliases cannot be resolved
+    this fails instead of skipping, because "the bundle no longer looks like
+    that" and "the fix is not in the bundle" must not have the same outcome --
+    that equivalence is the whole failure mode the guard exists for.
+    """
+    bundles = sorted((_ROOT / "frontend" / "assets").glob("index-*.js"))
+    assert len(bundles) == 1, (
+        f"expected exactly one shipped entry bundle, found {[b.name for b in bundles]}"
+    )
+    shipped = bundles[0].read_text(encoding="utf-8")
+
+    def alias(prop: str) -> str:
+        # `a=(i==null?void 0:i.series)??[]` -- or `a=i?.series??[]` on a target
+        # that keeps optional chaining. Neither form contains a comma or a
+        # semicolon between the local and the property, which is what bounds
+        # the search to one declaration.
+        match = re.search(rf"([A-Za-z_$][\w$]*)=[^,;]*?\.{prop}\)?\?\?\[\]", shipped)
+        assert match, (
+            f"cannot find where the shipped bundle reads `.{prop}` off the board "
+            "payload, so this guard can no longer tell which collection the "
+            "gutter is measured over. Re-derive it from the current build "
+            "output -- do not delete it."
+        )
+        return match.group(1)
+
+    series, standings = alias("series"), alias("standings")
+    assert series != standings
+
+    assert f"labels:{series}.map" in shipped, (
+        f"the shipped bundle does not measure `labels` over `series` (local "
+        f"{series!r}). Either the fix was never rebuilt into frontend/assets/ "
+        "-- run the refresh in dashboard/landing/README.md -- or the call was "
+        "re-shaped and this guard needs re-deriving."
+    )
+    assert f"labels:{standings}.map" not in shipped, (
+        f"the shipped bundle measures `labels` over `standings` (local "
+        f"{standings!r}): frontend/assets/ predates the fix, so prod still "
+        "reserves gutter for pills the rail never paints."
     )
 
 
