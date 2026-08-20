@@ -1295,6 +1295,53 @@ console.log(JSON.stringify({
     assert result == {"isModel": True, "inSeries": False, "baselineIsNotAModel": False}
 
 
+def test_the_gutter_is_measured_over_the_curves_the_rail_actually_draws():
+    """`frameLayout` sizes the endpoint gutter, so it must be handed the curves
+    the rail will paint -- `series` -- and not every ranked entry.
+
+    The same asymmetry as the test above, one layer out. `buildBoardData` pushes
+    every selected entry to `standings` unconditionally and only reaches
+    `series.push` past `if (!values.some(v => v != null)) return`, so `series` is
+    a strict subset. Measured over `standings`, the gutter reserved width for a
+    pill the rail never paints -- and worse, `labelBlockWidth` could carry the
+    floor past BOARD_GUTTER_MAX_FRACTION and drop the WHOLE rail to arrow-only,
+    losing the labels of curves that would have fitted on account of one curve
+    that does not exist. deepseek_v4_pro in the ragged fixture is that entry.
+
+    Comments are stripped first, and that is load-bearing here: the call site's
+    own note names BOTH collections, so an un-stripped scan is satisfied by the
+    prose explaining the bug instead of by the code avoiding it.
+    """
+    src = re.sub(r"/\*.*?\*/", "", _BOARD_PREVIEW_TSX, flags=re.DOTALL)
+    src = re.sub(r"//[^\n]*", "", src)
+
+    start = src.find("frameLayout(")
+    assert start != -1, "BoardPreview.tsx no longer calls frameLayout"
+    open_paren = src.index("(", start)
+    depth = 0
+    close = -1
+    for index in range(open_paren, len(src)):
+        if src[index] == "(":
+            depth += 1
+        elif src[index] == ")":
+            depth -= 1
+            if depth == 0:
+                close = index
+                break
+    assert close != -1, "frameLayout's argument list is unbalanced"
+    call = src[open_paren : close + 1]
+
+    assert "series.map" in call, (
+        "frameLayout must be measured over `series` -- the set the rail draws. "
+        f"Its call site reads: {call.strip()!r}"
+    )
+    assert "standings" not in call, (
+        "frameLayout is being measured over `standings`, which carries entries "
+        "with no drawable curve: the gutter then reserves width for a pill the "
+        "rail never paints, and can degrade the whole rail to arrow-only"
+    )
+
+
 _RACE_TSX_SRC = (_ROOT / "landing" / "src" / "components" / "home" / "Race.tsx").read_text(
     encoding="utf-8"
 )

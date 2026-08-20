@@ -27,6 +27,14 @@ import { EndpointRail } from "./EndpointRail";
  *  lost their leading `$` with nothing failing. */
 const AXIS_TICK_FONT = "14px Inter, system-ui, sans-serif";
 
+/** Breathing room between the widest Y tick and the plot, added to the measured
+ *  text width. Recharts takes `yAxisWidth` as the whole axis band -- tick text
+ *  AND its gap -- so a width of exactly the text sets the ticks flush against
+ *  the curves. Local on purpose: unlike the gutter constants in `boardFrame`
+ *  this one mirrors nothing in `js/leaderboard.js`, whose left axis is drawn by
+ *  Chart.js and padded by Chart.js. */
+const AXIS_TICK_GUTTER_PX = 12;
+
 /** One decimal on the axis, two in the tooltip and the pills.
  *
  *  Same split screen 0 makes, for the same reason: an axis tick is a scale
@@ -117,14 +125,32 @@ export function BoardPreview() {
   // from a full board -- see chartCoverage's own note.
   const coverage = chartCoverage(series);
 
+  const valueByKey = useMemo(
+    () => Object.fromEntries(standings.map((s) => [s.key, s.ret])),
+    [standings],
+  );
+
+  // MEASURED OVER `series`, NOT `standings`, because the rail draws `series`.
+  // The two are not the same set and never can be: `buildBoardData` pushes
+  // every selected entry to `standings` unconditionally and only reaches
+  // `series.push` past `if (!values.some(v => v != null)) return`, so a
+  // curve-less model is in one and not the other -- the same asymmetry the
+  // caption's `chartCoverage` note describes. Measuring `standings` therefore
+  // reserved gutter for pills the rail never paints, and paid for it twice: the
+  // plot lost width to a phantom label, and `boardLabelBlockWidth` could push
+  // the floor past BOARD_GUTTER_MAX_FRACTION and degrade the WHOLE rail to
+  // arrow-only -- dropping the labels of curves that would have fitted, because
+  // of a name belonging to a curve that does not exist. Every `series` entry
+  // has a `standings` row (the subset runs that way, not the other), so the
+  // lookup below is total.
   const frame = useMemo(
     () =>
       frameLayout({
         width: size.width,
         height: size.height,
-        labels: standings.map((s) => ({ name: s.name, value: s.ret })),
+        labels: series.map((s) => ({ name: s.name, value: valueByKey[s.key] })),
       }),
-    [size.width, size.height, standings],
+    [size.width, size.height, series, valueByKey],
   );
 
   const domain = useMemo(() => percentDomain(series), [series]);
@@ -133,14 +159,10 @@ export function BoardPreview() {
       measureTextWidth(axisTick(domain[0]), AXIS_TICK_FONT),
       measureTextWidth(axisTick(domain[1]), AXIS_TICK_FONT),
     );
-    return Math.ceil(widest) + 12;
+    return Math.ceil(widest) + AXIS_TICK_GUTTER_PX;
   }, [domain]);
 
   const rows = useMemo(() => toRows(data?.times ?? [], series), [data, series]);
-  const valueByKey = useMemo(
-    () => Object.fromEntries(standings.map((s) => [s.key, s.ret])),
-    [standings],
-  );
 
   return (
     <div className="bg-card border border-card-border rounded-xl shadow-2xl overflow-hidden flex flex-col">
