@@ -22,7 +22,15 @@ const LeaderboardContext = createContext<BoardState>({ status: "loading" });
  *  failed" -- is plain, DOM-free logic that can be run and asserted on under
  *  node, the same way `leaderboard.ts`'s pure functions are. Everything else
  *  in this file needs a real React render (a mounted provider, an effect, a
- *  commit) to mean anything, which is why this is the one piece pulled out. */
+ *  commit) to mean anything, which is why this is the one piece pulled out.
+ *
+ *  SHOWING `err.message` VERBATIM IS SAFE ONLY BECAUSE `fetchLeaderboard`
+ *  SANITISES AT ITS OWN BOUNDARY -- it maps the browser's `TypeError: Failed to
+ *  fetch` and a `<!DOCTYPE`-shaped 2xx body onto visitor-facing sentences, and
+ *  re-throws AbortError untouched so the branch below can still see it. Do not
+ *  reintroduce a raw-message path here on the grounds that this function is
+ *  where the string is chosen; the sanitising has to happen where the cause is
+ *  known. */
 export function classifyFetchFailure(
   err: unknown,
   aborted: boolean,
@@ -44,15 +52,32 @@ export function LeaderboardProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const controller = new AbortController();
+    // A THIRD CAUSE OF `signal.aborted`, AND THE ONE THAT IS NOT A FAILURE.
+    // `classifyFetchFailure` splits an abort into "the 45s ceiling fired" and
+    // "the request failed on its own" -- but the cleanup below aborts too, and
+    // an unmount reaching that branch is reported to the user as "Timed out
+    // waiting for the board." Today the setState lands on an unmounted provider
+    // and is a no-op, so the bug is latent; add <StrictMode> to main.tsx and
+    // React 18 double-invokes this effect, aborting the first fetch on a
+    // component whose state survives -- so the first thing a visitor sees is
+    // the timeout copy, before the second fetch resolves over it. Intent is
+    // tracked explicitly rather than inferred from `signal.aborted`, which
+    // cannot tell the three cases apart.
+    let cancelled = false;
     // Generous, because a free-tier cold start is 30-60s and giving up at 10
     // would report a failure to every first visitor of the day. Same ceiling
     // MarketTicker already uses.
     const timeout = setTimeout(() => controller.abort(), 45_000);
     fetchLeaderboard(controller.signal)
-      .then((data) => setState({ status: "ready", data }))
-      .catch((err: unknown) => setState(classifyFetchFailure(err, controller.signal.aborted)))
+      .then((data) => {
+        if (!cancelled) setState({ status: "ready", data });
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setState(classifyFetchFailure(err, controller.signal.aborted));
+      })
       .finally(() => clearTimeout(timeout));
     return () => {
+      cancelled = true;
       clearTimeout(timeout);
       controller.abort();
     };

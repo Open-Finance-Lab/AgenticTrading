@@ -54,11 +54,24 @@ function toRows(times: string[], series: BoardSeries[]) {
  *  visually flat next to nof1's -34%..+34% -- and that is the honest picture.
  *  Do not widen the padding to manufacture a fan-out that did not happen. */
 function percentDomain(series: BoardSeries[]): [number, number] {
-  const values: number[] = [];
-  series.forEach((s) => s.values.forEach((v) => { if (v != null) values.push(v); }));
-  if (!values.length) return [-0.05, 0.05];
-  const lo = Math.min(...values);
-  const hi = Math.max(...values);
+  // TRACKED IN THE SCAN, NOT SPREAD INTO Math.min/Math.max. A spread is an
+  // argument-count-bounded CALL rather than a scan: nine series over the hourly
+  // contest window is ~1,400 arguments today, but that count is the product of
+  // the window length and the roster size, both of which live in
+  // dashboard/config/leaderboard.json. A longer window past the engine's
+  // argument limit throws `RangeError: Maximum call stack size exceeded` inside
+  // a useMemo and takes the whole hero card down rather than degrading. One
+  // pass costs nothing and has no ceiling.
+  let lo = Infinity;
+  let hi = -Infinity;
+  series.forEach((s) =>
+    s.values.forEach((v) => {
+      if (v == null || !Number.isFinite(v)) return;
+      if (v < lo) lo = v;
+      if (v > hi) hi = v;
+    }),
+  );
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return [-0.05, 0.05];
   const pad = Math.max((hi - lo) * 0.12, 0.005);
   return [lo - pad, hi + pad];
 }
@@ -166,10 +179,17 @@ export function BoardPreview() {
             reserves below and the card goes half-visible without anything
             failing. */}
         <p className="text-sm text-foreground/65 leading-relaxed">
+          {/* SCOPED TO THE CHART, because `chartCoverage` is what drives it.
+              `chartCoverage` and `standingsCoverage` are deliberately different
+              questions -- a model with no drawable curve reaches `standings`
+              and never reaches `series` -- so in that state this caption said
+              "No AI model results came back" while the chip strip 300px below
+              listed seven model names with their returns and Race showed a full
+              table. The chart branch may only make a claim about the chart. */}
           {coverage === "empty"
             ? "No curves came back for this window."
             : coverage === "baselines-only"
-              ? "No AI model results came back — the dashed lines are buy-and-hold and the index."
+              ? "No AI model curves were drawn — the dashed lines are buy-and-hold and the index."
               : "Each line is one AI model's return. Dashed lines are buy-and-hold and the index."}
         </p>
       </div>

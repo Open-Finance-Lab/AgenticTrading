@@ -32,6 +32,9 @@ export type BoardStanding = {
   key: string;
   name: string;
   ret: string;
+  /** The number `ret` was formatted FROM, carried so ranking never has to read
+   *  it back out of the display string. See the sort in `buildBoardData`. */
+  cumulativeReturn: number;
   color: string;
   /** Carried so a consumer can tell "no model results came back" from "the
    *  board is fine". `BoardSeries` answers the same question with
@@ -71,6 +74,25 @@ export const BASELINE_STYLES: Record<string, { color: string; dash: string }> = 
   buy_hold_djia: { color: '#38BDF8', dash: '10 6' },
   djia_index: { color: '#94A3B8', dash: '8 4 2 4' },
 };
+
+/** `Number()` WITH THE ABSENT CASES MAPPED TO NaN INSTEAD OF ZERO.
+ *
+ *  `Number(null)`, `Number('')` and `Number([])` are all `0`, so a plain
+ *  `Number(x)` -- and even a `Number.isFinite(Number(x))` guard after it -- reads
+ *  a MISSING value as a real zero and hands it downstream as fact. On this
+ *  payload that is not a rounding difference: a missing equity became a $0
+ *  account and rendered as -100%, dragging the whole percent axis to the floor,
+ *  and a missing `cumulative_return` published as a confident "0.00%" beside
+ *  models whose numbers were real.
+ *
+ *  A genuine `0` still passes through as `0` -- an account really at zero is
+ *  -100%, and dropping that would be the mirror-image lie. This only separates
+ *  "absent" from "zero", which is the distinction `Number` throws away. */
+export function finiteNumber(value: unknown): number {
+  if (value === null || value === undefined || value === '') return NaN;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : NaN;
+}
 
 export function formatPercent(fraction: number, decimals: number): string {
   if (!Number.isFinite(fraction)) return '—';
@@ -160,7 +182,22 @@ export function buildBoardData(payload: {
     (entry.equity_curve || []).forEach((pt) => {
       const key = timeKey(pt.timestamp);
       if (!key) return;
-      byTime[key] = Number(pt.equity) || 0;
+      // SKIPPED, NOT ZEROED. `Number(pt.equity) || 0` read every unparseable
+      // equity -- null, undefined, a string, NaN -- as a $0 account, and the
+      // base-relative transform below turns $0 into (0 - 10000) / 10000 = -100%.
+      // One such point does not misplace one marker: `percentDomain` then spans
+      // roughly [-1.12, hi], and the real board's -0.43%..+7.49% spread
+      // collapses into a sliver at the top of the axis with a spike to the
+      // floor. A missing point is exactly what the null-fill path below already
+      // handles, so hand it one.
+      //
+      // `finiteNumber`, NOT a `Number.isFinite(Number(...))` guard: `Number(null)`
+      // is 0, so the obvious guard passes the single most likely malformed shape
+      // straight through. A REAL zero still gets through and still reads -100%,
+      // which is what an account at zero actually did.
+      const equity = finiteNumber(pt.equity);
+      if (!Number.isFinite(equity)) return;
+      byTime[key] = equity;
       timeSet.add(key);
     });
     return { entry, byTime };
@@ -206,7 +243,8 @@ export function buildBoardData(payload: {
       key: entry.entry_id,
       name,
       // Two decimals, matching /app's rank rows and this card's own tooltip.
-      ret: formatPercent(Number(entry.cumulative_return), 2),
+      ret: formatPercent(finiteNumber(entry.cumulative_return), 2),
+      cumulativeReturn: finiteNumber(entry.cumulative_return),
       color: style.color,
       isModel,
     });
@@ -225,10 +263,77 @@ export function buildBoardData(payload: {
     });
   });
 
-  standings.sort(
-    (a, b) => parseFloat(b.ret) - parseFloat(a.ret),
-  );
+  // SORTED ON THE NUMBER, NOT ON THE FORMATTED STRING. `parseFloat(b.ret)`
+  // re-read the display text and carried two defects at once. Precision: `ret`
+  // is `formatPercent(..., 2)`, so any two entries within 0.005 percentage
+  // points compared EQUAL and kept payload order while Race printed them under
+  // distinct `#n` ranks. And totality: `formatPercent` returns the em-dash for
+  // a non-finite return, `parseFloat('—')` is NaN, and a comparator that
+  // returns NaN leaves V8's sort order implementation-defined for the WHOLE
+  // array -- one bad entry could scramble every rank and every chip on the
+  // page rather than just misplacing itself.
+  //
+  // Hence the explicit -1/0/1 form rather than `b.cumulativeReturn -
+  // a.cumulativeReturn`: subtraction reintroduces NaN for a non-finite entry,
+  // and sinking those to -Infinity does not help, because -Infinity minus
+  // -Infinity is NaN again. Non-finite returns rank last, together, in a
+  // defined order.
+  standings.sort((a, b) => {
+    const av = Number.isFinite(a.cumulativeReturn) ? a.cumulativeReturn : -Infinity;
+    const bv = Number.isFinite(b.cumulativeReturn) ? b.cumulativeReturn : -Infinity;
+    if (av === bv) return 0;
+    return bv > av ? 1 : -1;
+  });
   return { times, series, standings, windowLabel: payload.window?.label || '' };
+}
+
+/** How many models ran, how many reference curves they were ranked against,
+ *  and how many finished ahead of ALL of them.
+ *
+ *  NUMBERS ONLY, DELIBERATELY. The sentence Race builds from these stays in
+ *  Race.tsx, because `test_no_landing_component_claims_brokered_or_real_capital_trading`
+ *  scans `components/home/*.tsx` and not `lib/`, so copy moved in here would
+ *  leave that scan -- the guard's own docstring names relocation as the one
+ *  thing this class of copy reliably does.
+ *
+ *  Race hardcoded "Seven leading AI models ... Only one finished ahead of both"
+ *  beside a table that is now live off the same payload. An eighth `llm_agent`
+ *  entry in dashboard/config/leaderboard.json -- the documented way the roster
+ *  reached seven -- left that sentence saying "Seven" above eight rows, and a
+ *  re-run that put a second model ahead of buy-and-hold falsified the second
+ *  half with the counter-evidence rendered directly beside it.
+ *
+ *  "Ahead of ALL of them" rather than "of both": `BOARD_BASELINE_IDS` has two
+ *  entries today and the caller's copy says "both", but this function is not
+ *  the right place to assume that number, and it reports `baselines` so the
+ *  caller can. A board that resolved only one baseline must not be described
+ *  with "both". */
+export type BoardHeadlineCounts = { models: number; baselines: number; ahead: number };
+
+export function boardHeadlineCounts(standings: BoardStanding[]): BoardHeadlineCounts {
+  const rows = standings || [];
+  let models = 0;
+  let baselines = 0;
+  let bestBaseline = -Infinity;
+  for (const row of rows) {
+    if (row.isModel) {
+      models += 1;
+      continue;
+    }
+    baselines += 1;
+    if (Number.isFinite(row.cumulativeReturn) && row.cumulativeReturn > bestBaseline) {
+      bestBaseline = row.cumulativeReturn;
+    }
+  }
+  let ahead = 0;
+  if (Number.isFinite(bestBaseline)) {
+    for (const row of rows) {
+      if (row.isModel && Number.isFinite(row.cumulativeReturn) && row.cumulativeReturn > bestBaseline) {
+        ahead += 1;
+      }
+    }
+  }
+  return { models, baselines, ahead };
 }
 
 /** What a 200 actually delivered -- the question `status: "ready"` cannot
@@ -271,18 +376,51 @@ export function standingsCoverage(standings: BoardStanding[]): BoardCoverage {
   return 'full';
 }
 
-/** Root-relative, with no origin anywhere in it.
+export const BOARD_ERROR_UNREACHABLE = 'The board service could not be reached.';
+export const BOARD_ERROR_UNREADABLE =
+  'The board service sent a response this page could not read.';
+
+/** EVERY MESSAGE THAT ESCAPES THIS FUNCTION IS ALREADY VISITOR-FACING, which is
+ *  what lets `classifyFetchFailure` keep showing `err.message` verbatim.
  *
- *  dashboard/frontend/vercel.json rewrites /api/:path* to Render, and
- *  test_frontend_api_base.py requires an EMPTY production base for exactly that
- *  reason -- it calls a hardcoded Render origin a same-origin cookie auth
- *  regression. MarketTicker.tsx's apiBase() survives that guard only because it
- *  excludes minified assets/. This path is correct under Vercel and under local
- *  uvicorn alike. (Under `npm run dev` at :5173 it hits the Vite server and
- *  fails -- but so does apiBase(), which returns the dev server's own origin
- *  there. Neither pattern serves the dev server.) */
+ *  Two sources of raw transport text reached the card before this. The
+ *  browser's own rejection is one: a dead backend rejects `fetch` with
+ *  `TypeError: Failed to fetch`, which the hero rendered in `font-mono` and
+ *  Race rendered mid-sentence. The response body is the other, and it is the
+ *  worse of the two -- `res.json()` ran on ANY 2xx, so a Vercel or Render HTML
+ *  error page delivered with a 2xx status made the public failure message
+ *  `Unexpected token '<', "<!DOCTYPE "... is not valid JSON`.
+ *
+ *  AbortError is re-thrown rather than mapped: the provider's 45s ceiling
+ *  aborts this same signal, and `classifyFetchFailure` needs that distinction
+ *  to say "timed out" instead of "unreachable". Mapping it here would erase the
+ *  one thing that branch reads.
+ *
+ *  Root-relative, with no origin anywhere in it. dashboard/frontend/vercel.json
+ *  rewrites /api/:path* to Render, and test_frontend_api_base.py requires an
+ *  EMPTY production base for exactly that reason -- it calls a hardcoded Render
+ *  origin a same-origin cookie auth regression. MarketTicker.tsx's apiBase()
+ *  survives that guard only because it excludes minified assets/. This path is
+ *  correct under Vercel and under local uvicorn alike. (Under `npm run dev` at
+ *  :5173 it hits the Vite server and fails -- but so does apiBase(), which
+ *  returns the dev server's own origin there. Neither pattern serves the dev
+ *  server.) */
 export async function fetchLeaderboard(signal: AbortSignal): Promise<BoardData> {
-  const res = await fetch('/api/v1/leaderboard?period=contest', { signal });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return buildBoardData(await res.json());
+  let res: Response;
+  try {
+    res = await fetch('/api/v1/leaderboard?period=contest', { signal });
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') throw err;
+    throw new Error(BOARD_ERROR_UNREACHABLE);
+  }
+  if (!res.ok) throw new Error(`The board service returned HTTP ${res.status}.`);
+  const contentType = res.headers?.get('content-type') || '';
+  if (!contentType.includes('json')) throw new Error(BOARD_ERROR_UNREADABLE);
+  let payload: { entries?: LeaderboardEntry[]; window?: { label?: string } };
+  try {
+    payload = await res.json();
+  } catch {
+    throw new Error(BOARD_ERROR_UNREADABLE);
+  }
+  return buildBoardData(payload || {});
 }
