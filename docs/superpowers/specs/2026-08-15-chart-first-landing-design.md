@@ -378,6 +378,23 @@ in and inside the app, where the word is glossed throughout. No guard pins this 
 (verified: `test_app_copy_register.py:305-311` pins only `#homeModuleRanking`,
 `#homeModuleRankList`, `#homeScrollHint`, and the absence of the `"Talk to Agents"` pitch).
 
+**Superseded 2026-08-20 (PR #394).** Two things above are no longer true: the sentence
+shipped here has been replaced, and it *is* pinned now. The current lede is:
+
+> **Think you can beat them? Test your own idea on the same days.**
+
+The fact half went because the headline ("See where each model ranks") and the board's
+own meta line were already saying it — three elements describing one board. What did not
+go, and what a future edit must not take, is the trailing clause. Neither leaderboard
+accepts entries (`get_leaderboard` builds every row from the curated roster in
+`dashboard/config/leaderboard.json`; `api/routers/leaderboard.py` has no submission
+route), so a bare "Think you can beat them?" under a ranking headline and above a
+"Create a free account" button promises a place on the board. Naming the mechanism is
+what keeps the challenge true — it also aims at the CTA, which is the job the challenge
+was reaching for. Pinned by
+`test_the_screen_zero_lede_challenges_and_then_names_the_mechanism`, which asserts the
+shape (challenge, then something after the question mark) as well as the string.
+
 ### 5. Text reduction on `/`
 
 Trim in place. Five sections stay five sections; the Navbar, the FooterCTA breadcrumb and

@@ -27,6 +27,14 @@ import { EndpointRail } from "./EndpointRail";
  *  lost their leading `$` with nothing failing. */
 const AXIS_TICK_FONT = "14px Inter, system-ui, sans-serif";
 
+/** Breathing room between the widest Y tick and the plot, added to the measured
+ *  text width. Recharts takes `yAxisWidth` as the whole axis band -- tick text
+ *  AND its gap -- so a width of exactly the text sets the ticks flush against
+ *  the curves. Local on purpose: unlike the gutter constants in `boardFrame`
+ *  this one mirrors nothing in `js/leaderboard.js`, whose left axis is drawn by
+ *  Chart.js and padded by Chart.js. */
+const AXIS_TICK_GUTTER_PX = 12;
+
 /** One decimal on the axis, two in the tooltip and the pills.
  *
  *  Same split screen 0 makes, for the same reason: an axis tick is a scale
@@ -117,14 +125,50 @@ export function BoardPreview() {
   // from a full board -- see chartCoverage's own note.
   const coverage = chartCoverage(series);
 
+  // NULL PROTOTYPE, not `Object.fromEntries`. Not a live bug today, and worth
+  // being exact about which: both readers index this by a key that is already
+  // known to be present -- `series[].key` below, and `String(item.dataKey)` in
+  // EndpointRail, which Recharts took from those same series -- so the subset
+  // note under this comment is what keeps every lookup an own property, and
+  // the prototype is never consulted.
+  //
+  // It is the CONSEQUENCE OF THAT NOTE BEING WRONG that this changes. On a
+  // plain object a miss does not read as a miss: `constructor`, `toString` and
+  // `valueOf` answer from Object.prototype with a function, and the rail's
+  // `?? ""` cannot catch it because a function is not nullish -- so a `series`
+  // entry that ever escapes `standings` stops being a blank pill and becomes a
+  // stringified function, measured into the gutter as a label. That converts a
+  // future invariant break from visible-and-obvious into rendered-and-wrong,
+  // for a roster whose entry_ids come from config rather than from code. A
+  // dictionary with no prototype has nothing to inherit, so the miss stays a
+  // miss, and it costs one line to buy both readers out of the question.
+  const valueByKey = useMemo(() => {
+    const byKey: Record<string, string> = Object.create(null);
+    for (const s of standings) byKey[s.key] = s.ret;
+    return byKey;
+  }, [standings]);
+
+  // MEASURED OVER `series`, NOT `standings`, because the rail draws `series`.
+  // The two are not the same set and never can be: `buildBoardData` pushes
+  // every selected entry to `standings` unconditionally and only reaches
+  // `series.push` past `if (!values.some(v => v != null)) return`, so a
+  // curve-less model is in one and not the other -- the same asymmetry the
+  // caption's `chartCoverage` note describes. Measuring `standings` therefore
+  // reserved gutter for pills the rail never paints, and paid for it twice: the
+  // plot lost width to a phantom label, and `boardLabelBlockWidth` could push
+  // the floor past BOARD_GUTTER_MAX_FRACTION and degrade the WHOLE rail to
+  // arrow-only -- dropping the labels of curves that would have fitted, because
+  // of a name belonging to a curve that does not exist. Every `series` entry
+  // has a `standings` row (the subset runs that way, not the other), so the
+  // lookup below is total.
   const frame = useMemo(
     () =>
       frameLayout({
         width: size.width,
         height: size.height,
-        labels: standings.map((s) => ({ name: s.name, value: s.ret })),
+        labels: series.map((s) => ({ name: s.name, value: valueByKey[s.key] })),
       }),
-    [size.width, size.height, standings],
+    [size.width, size.height, series, valueByKey],
   );
 
   const domain = useMemo(() => percentDomain(series), [series]);
@@ -133,14 +177,10 @@ export function BoardPreview() {
       measureTextWidth(axisTick(domain[0]), AXIS_TICK_FONT),
       measureTextWidth(axisTick(domain[1]), AXIS_TICK_FONT),
     );
-    return Math.ceil(widest) + 12;
+    return Math.ceil(widest) + AXIS_TICK_GUTTER_PX;
   }, [domain]);
 
   const rows = useMemo(() => toRows(data?.times ?? [], series), [data, series]);
-  const valueByKey = useMemo(
-    () => Object.fromEntries(standings.map((s) => [s.key, s.ret])),
-    [standings],
-  );
 
   return (
     <div className="bg-card border border-card-border rounded-xl shadow-2xl overflow-hidden flex flex-col">
@@ -220,10 +260,25 @@ export function BoardPreview() {
           MEASURE THE lg RESERVE AT 1024, NOT AT 1440. This is what the old 390
           got wrong and what nothing caught: `lg:` binds from 1024 up, but 390
           was derived at 1440 where nonChart is 249.75. Between 1024 and 1279
-          the chip strip takes five rows instead of four and nonChart is
-          309.75, so the card hung 55.75px BELOW THE FOLD across that whole
-          band -- every 1280-wide-and-under laptop -- while the 1280+ viewports
-          the number was checked against passed with 4.25px to spare.
+          the chip strip takes FOUR rows instead of three and nonChart is
+          313.75, so the card hung below the fold across that whole band --
+          every 1280-wide-and-under laptop -- while the 1280+ viewports the
+          number was checked against passed with room to spare.
+
+          Those two figures were "five instead of four" and 309.75 until
+          2026-08-20. Both were wrong, and the second contradicted this
+          comment's OWN derivation four lines above it, which has always read
+          313.75 and is the number that produced the shipped 460. Re-measured
+          against the live payload (nine chips, not the five this was first
+          written for): 1024x768 -> 4 rows, nonChart 313.75, cardTop 136;
+          1280x800 and 1440x900 -> 3 rows, nonChart 249.75. The row PITCH is
+          32px (24px row + 8px `gap-y-2`), so one extra row is 32 of the 64px
+          gap between the bands and the wrapping title/chip bar is the rest.
+          Nothing shipped moves: ceil10(136 + 313.75) + 10 and
+          ceil10(136 + 309.75) + 10 are both 460, which is exactly why a wrong
+          number could sit here this long -- the constant it justifies is
+          insensitive to it, so only reading the two numbers against each other
+          catches it.
 
           THE 260px FLOOR, NOT THE RESERVE, IS WHAT BINDS ON A PHONE, and no
           value here can change that: at 390x844 the card needs 920.5px
