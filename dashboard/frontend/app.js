@@ -4030,6 +4030,10 @@ function updateAuthUI() {
     window.CreditsPage.syncAuth(user);
   }
 
+  if (window.AdminModelProviders) {
+    window.AdminModelProviders.syncAuth(user);
+  }
+
   if (typeof window.refreshHomeModules === 'function') {
     window.refreshHomeModules();
   }
@@ -4371,6 +4375,9 @@ function initAuthUI(options = {}) {
   document.getElementById('adminRefreshBtn')?.addEventListener('click', () => {
     loadAdminStats();
     loadAdminUsers();
+    if (window.AdminModelProviders) {
+      window.AdminModelProviders.onEnter();
+    }
   });
   document.getElementById('adminPrevBtn')?.addEventListener('click', () => {
     loadAdminUsers({ offset: adminUsersPage.offset - adminUsersPage.limit });
@@ -8438,6 +8445,9 @@ function navigateToPage(page, options = {}) {
             // pager click, which only changes the user page.
             loadAdminStats();
             loadAdminUsers();
+            if (window.AdminModelProviders) {
+                window.AdminModelProviders.onEnter();
+            }
         }
     }
 
