@@ -1853,6 +1853,13 @@
                 </button>
             </div>
 
+            <nav id="creditsTabs" class="credits-tabs" aria-label="Credits and Billing sections" role="tablist">
+                <button id="creditsTabOverview" class="credits-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="creditsPanelOverview" data-credits-tab="overview">Overview</button>
+                <button id="creditsTabTopup" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsPanelTopup" data-credits-tab="top-up">Top up</button>
+                <button id="creditsTabApiKeys" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsApiKeysPanel" data-credits-tab="api-keys">API Keys</button>
+                <button id="creditsTabActivity" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsPanelActivity" data-credits-tab="activity">Activity</button>
+            </nav>
+
             <section id="creditsSignedOut" class="credits-empty-state" hidden>
                 <h3>Sign in to manage Credits</h3>
                 <p>Your balance and purchase history belong to your ATL account.</p>
@@ -1860,18 +1867,21 @@
             </section>
 
             <div id="creditsSignedIn" hidden>
-                <section class="credits-balance-band" aria-labelledby="creditsBalanceHeading">
-                    <div>
-                        <p id="creditsBalanceHeading" class="credits-section-kicker">Credit balance</p>
-                        <p id="creditsBalance" class="credits-balance" aria-live="polite">—</p>
-                        <p id="creditsAccountStatus" class="credits-account-status">Loading account…</p>
-                    </div>
-                    <div class="credits-balance-note">
-                        <svg aria-hidden="true"><use href="#icon-shield-check"/></svg>
-                        <span>Credits are added only after a signed Stripe webhook is verified.</span>
-                    </div>
+                <section id="creditsPanelOverview" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabOverview" data-credits-panel="overview">
+                    <section class="credits-balance-band" aria-labelledby="creditsBalanceHeading">
+                        <div>
+                            <p id="creditsBalanceHeading" class="credits-section-kicker">Credit balance</p>
+                            <p id="creditsBalance" class="credits-balance" aria-live="polite">—</p>
+                            <p id="creditsAccountStatus" class="credits-account-status">Loading account…</p>
+                        </div>
+                        <div class="credits-balance-note">
+                            <svg aria-hidden="true"><use href="#icon-shield-check"/></svg>
+                            <span>Credits are added only after a signed Stripe webhook is verified.</span>
+                        </div>
+                    </section>
                 </section>
 
+                <section id="creditsPanelTopup" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabTopup" data-credits-panel="top-up" hidden>
                 <section class="credits-section" aria-labelledby="creditsPurchaseHeading">
                     <div class="credits-section-head">
                         <div>
@@ -1900,7 +1910,59 @@
                     </button>
                     <p id="creditsPurchaseStatus" class="credits-status" role="status" aria-live="polite"></p>
                 </section>
+                </section>
 
+                <section id="creditsApiKeysPanel" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabApiKeys" data-credits-panel="api-keys" hidden>
+                    <section class="credits-section credits-api-keys-section" aria-labelledby="creditsApiKeysHeading">
+                        <div class="credits-section-head">
+                            <div>
+                                <p class="credits-section-kicker">API Keys</p>
+                                <h3 id="creditsApiKeysHeading">Connect your model providers</h3>
+                            </div>
+                            <span class="credits-rate">Encrypted vault</span>
+                        </div>
+                        <p class="credits-api-keys-intro">Keys are verified against model discovery only. They stay with your account and are never shown again.</p>
+                        <div class="credits-api-keys-layout">
+                            <form id="creditsApiKeyForm" class="credits-api-key-form">
+                                <label class="credits-key-field" for="creditsApiKeyProvider">
+                                    <span>Provider</span>
+                                    <select id="creditsApiKeyProvider" autocomplete="off" required>
+                                        <option value="">Loading providers…</option>
+                                    </select>
+                                </label>
+                                <label class="credits-key-field" for="creditsApiKeyLabel">
+                                    <span>Name</span>
+                                    <input id="creditsApiKeyLabel" type="text" maxlength="80" autocomplete="off" placeholder="Research" required>
+                                </label>
+                                <label class="credits-key-field" for="creditsApiKeySecret">
+                                    <span>API key</span>
+                                    <input id="creditsApiKeySecret" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" required>
+                                </label>
+                                <label class="credits-key-default">
+                                    <input id="creditsApiKeyDefault" type="checkbox">
+                                    <span>Make this the verified default</span>
+                                </label>
+                                <button id="creditsApiKeySave" class="auth-btn auth-btn-primary credits-key-save" type="submit">
+                                    <svg aria-hidden="true"><use href="#icon-check-circle"/></svg>
+                                    <span>Save and verify</span>
+                                </button>
+                                <p id="creditsApiKeyStatus" class="credits-status" role="status" aria-live="polite"></p>
+                            </form>
+                            <div class="credits-key-list-wrap">
+                                <div class="credits-key-list-head">
+                                    <span class="credits-section-kicker">Saved keys</span>
+                                    <span id="creditsApiKeyCount" class="credits-muted"></span>
+                                </div>
+                                <div id="creditsApiKeyList" class="credits-key-list" aria-live="polite">
+                                    <p class="credits-muted">Loading keys…</p>
+                                </div>
+                            </div>
+                        </div>
+                        <p class="credits-api-keys-footnote">Spending Credits on model runs is not enabled yet.</p>
+                    </section>
+                </section>
+
+                <section id="creditsPanelActivity" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabActivity" data-credits-panel="activity" hidden>
                 <section class="credits-section" aria-labelledby="creditsActivityHeading">
                     <div class="credits-section-head">
                         <div>
@@ -1928,6 +1990,7 @@
                         </table>
                     </div>
                     <p id="creditsAdminStatus" class="credits-status" role="status" aria-live="polite"></p>
+                </section>
                 </section>
             </div>
         </div>
@@ -2018,7 +2081,7 @@
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/agent-editor.js?v=27" defer></script>
     <script src="app.js?v=115" defer></script>
-    <script src="js/credits.js?v=2" defer></script>
+    <script src="js/credits.js?v=3" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
     <script src="home-page.js?v=50" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and
