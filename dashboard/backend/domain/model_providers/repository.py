@@ -45,6 +45,8 @@ class ModelProviderStore:
 
     def _init_schema(self) -> None:
         conn = self._get_connection()
+        self._migrate_legacy_credential_schema(conn)
+        self._migrate_legacy_platform_schema(conn)
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS provider_registry (
@@ -66,7 +68,7 @@ class ModelProviderStore:
                 user_id INTEGER NOT NULL,
                 provider_id TEXT NOT NULL,
                 label TEXT NOT NULL,
-                api_key_enc TEXT NOT NULL,
+                api_key_enc TEXT,
                 key_last_four TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'verification_unavailable',
                 is_default INTEGER NOT NULL DEFAULT 0,
@@ -74,21 +76,28 @@ class ModelProviderStore:
                 updated_at TEXT NOT NULL,
                 last_verified_at TEXT,
                 revoked_at TEXT,
-                UNIQUE(user_id, provider_id, label),
                 FOREIGN KEY(provider_id) REFERENCES provider_registry(provider_id) ON DELETE RESTRICT,
-                CHECK (status IN ('verified', 'invalid', 'verification_unavailable', 'revoked'))
+                CHECK (status IN ('verified', 'invalid', 'verification_unavailable', 'revoked')),
+                CHECK ((status = 'revoked' AND api_key_enc IS NULL) OR (status <> 'revoked' AND api_key_enc IS NOT NULL))
             );
             CREATE INDEX IF NOT EXISTS idx_user_model_credentials_owner
                 ON user_model_credentials(user_id, provider_id, updated_at DESC);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_user_model_credentials_active_label
+                ON user_model_credentials(user_id, provider_id, label)
+                WHERE status <> 'revoked';
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_user_model_credentials_default
+                ON user_model_credentials(user_id, provider_id)
+                WHERE is_default = 1 AND status = 'verified';
             CREATE TABLE IF NOT EXISTS platform_model_credentials (
                 provider_id TEXT PRIMARY KEY,
-                api_key_enc TEXT NOT NULL,
+                api_key_enc TEXT,
                 key_last_four TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'verification_unavailable',
                 updated_at TEXT NOT NULL,
                 last_verified_at TEXT,
                 FOREIGN KEY(provider_id) REFERENCES provider_registry(provider_id) ON DELETE RESTRICT,
-                CHECK (status IN ('verified', 'invalid', 'verification_unavailable', 'revoked'))
+                CHECK (status IN ('verified', 'invalid', 'verification_unavailable', 'revoked')),
+                CHECK ((status = 'revoked' AND api_key_enc IS NULL) OR (status <> 'revoked' AND api_key_enc IS NOT NULL))
             );
             CREATE TABLE IF NOT EXISTS model_provider_admin_operations (
                 operation_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,12 +120,7 @@ class ModelProviderStore:
                     capabilities_json, byok_enabled, platform_enabled, status,
                     created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, 1, 0, 'enabled', ?, ?)
-                ON CONFLICT(provider_id) DO UPDATE SET
-                    display_name = excluded.display_name,
-                    adapter_type = excluded.adapter_type,
-                    approved_base_url = excluded.approved_base_url,
-                    capabilities_json = excluded.capabilities_json,
-                    updated_at = excluded.updated_at
+                ON CONFLICT(provider_id) DO NOTHING
                 """,
                 (
                     item["provider_id"],
@@ -130,6 +134,126 @@ class ModelProviderStore:
             )
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _migrate_legacy_platform_schema(conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'platform_model_credentials'"
+        ).fetchone()
+        if not row:
+            return
+        columns = {
+            item[1]: {"notnull": bool(item[3])}
+            for item in conn.execute("PRAGMA table_info(platform_model_credentials)").fetchall()
+        }
+        if not columns.get("api_key_enc", {}).get("notnull"):
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("ALTER TABLE platform_model_credentials RENAME TO platform_model_credentials_legacy")
+            conn.execute(
+                """
+                CREATE TABLE platform_model_credentials (
+                    provider_id TEXT PRIMARY KEY,
+                    api_key_enc TEXT,
+                    key_last_four TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'verification_unavailable',
+                    updated_at TEXT NOT NULL,
+                    last_verified_at TEXT,
+                    FOREIGN KEY(provider_id) REFERENCES provider_registry(provider_id) ON DELETE RESTRICT,
+                    CHECK (status IN ('verified', 'invalid', 'verification_unavailable', 'revoked')),
+                    CHECK ((status = 'revoked' AND api_key_enc IS NULL) OR (status <> 'revoked' AND api_key_enc IS NOT NULL))
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO platform_model_credentials (
+                    provider_id, api_key_enc, key_last_four, status, updated_at, last_verified_at
+                )
+                SELECT provider_id,
+                       CASE WHEN status = 'revoked' THEN NULL ELSE api_key_enc END,
+                       key_last_four, status, updated_at, last_verified_at
+                FROM platform_model_credentials_legacy
+                """
+            )
+            conn.execute("DROP TABLE platform_model_credentials_legacy")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    @staticmethod
+    def _migrate_legacy_credential_schema(conn: sqlite3.Connection) -> None:
+        """Rebuild the pre-tombstone SQLite table without losing active rows."""
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'user_model_credentials'"
+        ).fetchone()
+        if not row:
+            return
+        columns = {
+            item[1]: {"notnull": bool(item[3])}
+            for item in conn.execute("PRAGMA table_info(user_model_credentials)").fetchall()
+        }
+        legacy_sql = (row[0] or "").upper()
+        needs_rebuild = bool(
+            columns.get("api_key_enc", {}).get("notnull")
+            or "UNIQUE(USER_ID, PROVIDER_ID, LABEL)" in legacy_sql
+        )
+        if not needs_rebuild:
+            return
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conn.execute("ALTER TABLE user_model_credentials RENAME TO user_model_credentials_legacy")
+            conn.execute(
+                """
+                CREATE TABLE user_model_credentials (
+                    credential_id TEXT PRIMARY KEY,
+                    user_id INTEGER NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    api_key_enc TEXT,
+                    key_last_four TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'verification_unavailable',
+                    is_default INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    last_verified_at TEXT,
+                    revoked_at TEXT,
+                    FOREIGN KEY(provider_id) REFERENCES provider_registry(provider_id) ON DELETE RESTRICT,
+                    CHECK (status IN ('verified', 'invalid', 'verification_unavailable', 'revoked')),
+                    CHECK ((status = 'revoked' AND api_key_enc IS NULL) OR (status <> 'revoked' AND api_key_enc IS NOT NULL))
+                )
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX idx_user_model_credentials_active_label ON user_model_credentials(user_id, provider_id, label) WHERE status <> 'revoked'"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX uq_user_model_credentials_default ON user_model_credentials(user_id, provider_id) WHERE is_default = 1 AND status = 'verified'"
+            )
+            conn.execute(
+                "CREATE INDEX idx_user_model_credentials_owner ON user_model_credentials(user_id, provider_id, updated_at DESC)"
+            )
+            conn.execute(
+                """
+                INSERT INTO user_model_credentials (
+                    credential_id, user_id, provider_id, label, api_key_enc,
+                    key_last_four, status, is_default, created_at, updated_at,
+                    last_verified_at, revoked_at
+                )
+                SELECT credential_id, user_id, provider_id, label,
+                       CASE WHEN status = 'revoked' THEN NULL ELSE api_key_enc END,
+                       key_last_four, status, is_default, created_at, updated_at,
+                       last_verified_at, revoked_at
+                FROM user_model_credentials_legacy
+                """
+            )
+            conn.execute("DROP TABLE user_model_credentials_legacy")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     @staticmethod
     def _public_provider(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
@@ -377,7 +501,7 @@ class ModelProviderStore:
             raise CredentialNotFoundError("credential not found")
         if int(row["user_id"]) != int(user_id):
             raise CredentialOwnershipError("credential does not belong to this user")
-        if row["status"] == "revoked":
+        if row["status"] == "revoked" or not row["api_key_enc"]:
             raise CredentialConflictError("revoked credentials cannot be read")
         return _decrypt(row["api_key_enc"])
 
@@ -404,8 +528,8 @@ class ModelProviderStore:
                 raise CredentialOwnershipError("credential does not belong to this user")
             now = _utcnow_iso()
             conn.execute(
-                "UPDATE user_model_credentials SET status = ?, is_default = CASE WHEN ? <> 'verified' THEN 0 ELSE is_default END, updated_at = ?, last_verified_at = COALESCE(?, last_verified_at), revoked_at = CASE WHEN ? = 'revoked' THEN ? ELSE revoked_at END WHERE credential_id = ?",
-                (status, status, now, last_verified_at, status, now, str(credential_id)),
+                "UPDATE user_model_credentials SET api_key_enc = CASE WHEN ? = 'revoked' THEN NULL ELSE api_key_enc END, status = ?, is_default = CASE WHEN ? <> 'verified' THEN 0 ELSE is_default END, updated_at = ?, last_verified_at = COALESCE(?, last_verified_at), revoked_at = CASE WHEN ? = 'revoked' THEN ? ELSE revoked_at END WHERE credential_id = ?",
+                (status, status, status, now, last_verified_at, status, now, str(credential_id)),
             )
             conn.commit()
             result = conn.execute(
@@ -463,6 +587,7 @@ class ModelProviderStore:
             raise ValueError("invalid credential status")
         now = _utcnow_iso()
         conn = self._get_connection()
+        encrypted_secret = None if status == "revoked" else _encrypt(secret)
         conn.execute(
             """
             INSERT INTO platform_model_credentials (
@@ -475,7 +600,7 @@ class ModelProviderStore:
                 updated_at = excluded.updated_at,
                 last_verified_at = excluded.last_verified_at
             """,
-            (provider_id, _encrypt(secret), (key_last_four or secret[-4:])[-4:], status, now, last_verified_at),
+            (provider_id, encrypted_secret, (key_last_four or secret[-4:])[-4:], status, now, last_verified_at),
         )
         conn.commit()
         row = conn.execute(
@@ -497,18 +622,18 @@ class ModelProviderStore:
             (provider_id,),
         ).fetchone()
         conn.close()
-        if not row or row["status"] != "verified":
+        if not row or row["status"] != "verified" or not row["api_key_enc"]:
             return None
         return _decrypt(row["api_key_enc"])
 
     def get_platform_credential_secret_any_status(self, provider_id: str) -> str | None:
         conn = self._get_connection()
         row = conn.execute(
-            "SELECT api_key_enc FROM platform_model_credentials WHERE provider_id = ?",
+            "SELECT api_key_enc, status FROM platform_model_credentials WHERE provider_id = ?",
             (provider_id,),
         ).fetchone()
         conn.close()
-        return _decrypt(row["api_key_enc"]) if row else None
+        return _decrypt(row["api_key_enc"]) if row and row["status"] != "revoked" and row["api_key_enc"] else None
 
     def set_platform_credential_status(
         self,
@@ -521,8 +646,8 @@ class ModelProviderStore:
             raise ValueError("invalid credential status")
         conn = self._get_connection()
         conn.execute(
-            "UPDATE platform_model_credentials SET status = ?, updated_at = ?, last_verified_at = COALESCE(?, last_verified_at) WHERE provider_id = ?",
-            (status, _utcnow_iso(), last_verified_at, provider_id),
+            "UPDATE platform_model_credentials SET api_key_enc = CASE WHEN ? = 'revoked' THEN NULL ELSE api_key_enc END, status = ?, updated_at = ?, last_verified_at = COALESCE(?, last_verified_at) WHERE provider_id = ?",
+            (status, status, _utcnow_iso(), last_verified_at, provider_id),
         )
         conn.commit()
         row = conn.execute(
@@ -545,7 +670,10 @@ class ModelProviderStore:
 
     def delete_platform_credential(self, provider_id: str) -> bool:
         conn = self._get_connection()
-        cur = conn.execute("DELETE FROM platform_model_credentials WHERE provider_id = ?", (provider_id,))
+        cur = conn.execute(
+            "UPDATE platform_model_credentials SET api_key_enc = NULL, status = 'revoked', updated_at = ? WHERE provider_id = ?",
+            (_utcnow_iso(), provider_id),
+        )
         conn.commit()
         conn.close()
         return cur.rowcount > 0

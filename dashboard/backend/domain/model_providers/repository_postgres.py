@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS user_model_credentials (
     user_id BIGINT NOT NULL,
     provider_id TEXT NOT NULL,
     label TEXT NOT NULL,
-    api_key_enc TEXT NOT NULL,
+    api_key_enc TEXT,
     key_last_four TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'verification_unavailable',
     is_default BOOLEAN NOT NULL DEFAULT FALSE,
@@ -54,13 +54,17 @@ CREATE TABLE IF NOT EXISTS user_model_credentials (
     updated_at TEXT NOT NULL,
     last_verified_at TEXT,
     revoked_at TEXT,
-    UNIQUE(user_id, provider_id, label),
     FOREIGN KEY(provider_id) REFERENCES provider_registry(provider_id) ON DELETE RESTRICT,
-    CHECK (status IN ('verified', 'invalid', 'verification_unavailable', 'revoked'))
+    CHECK (status IN ('verified', 'invalid', 'verification_unavailable', 'revoked')),
+    CHECK ((status = 'revoked' AND api_key_enc IS NULL) OR (status <> 'revoked' AND api_key_enc IS NOT NULL))
 );
 
 CREATE INDEX IF NOT EXISTS idx_user_model_credentials_owner
 ON user_model_credentials(user_id, provider_id, updated_at DESC);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_user_model_credentials_active_label
+ON user_model_credentials(user_id, provider_id, label)
+WHERE status <> 'revoked';
 
 CREATE UNIQUE INDEX IF NOT EXISTS uq_user_model_credentials_default
 ON user_model_credentials(user_id, provider_id)
@@ -68,13 +72,14 @@ WHERE is_default = TRUE AND status = 'verified';
 
 CREATE TABLE IF NOT EXISTS platform_model_credentials (
     provider_id TEXT PRIMARY KEY,
-    api_key_enc TEXT NOT NULL,
+    api_key_enc TEXT,
     key_last_four TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'verification_unavailable',
     updated_at TEXT NOT NULL,
     last_verified_at TEXT,
     FOREIGN KEY(provider_id) REFERENCES provider_registry(provider_id) ON DELETE RESTRICT,
-    CHECK (status IN ('verified', 'invalid', 'verification_unavailable', 'revoked'))
+    CHECK (status IN ('verified', 'invalid', 'verification_unavailable', 'revoked')),
+    CHECK ((status = 'revoked' AND api_key_enc IS NULL) OR (status <> 'revoked' AND api_key_enc IS NOT NULL))
 );
 
 CREATE TABLE IF NOT EXISTS model_provider_admin_operations (
@@ -137,6 +142,35 @@ class PostgresModelProviderStore:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(MODEL_PROVIDERS_POSTGRES_DDL)
+                cur.execute("ALTER TABLE user_model_credentials ALTER COLUMN api_key_enc DROP NOT NULL")
+                cur.execute("ALTER TABLE platform_model_credentials ALTER COLUMN api_key_enc DROP NOT NULL")
+                cur.execute("UPDATE user_model_credentials SET api_key_enc = NULL WHERE status = 'revoked'")
+                cur.execute("UPDATE platform_model_credentials SET api_key_enc = NULL WHERE status = 'revoked'")
+                cur.execute(
+                    "ALTER TABLE user_model_credentials DROP CONSTRAINT IF EXISTS user_model_credentials_user_id_provider_id_label_key"
+                )
+                cur.execute(
+                    """
+                    DO $$
+                    BEGIN
+                        ALTER TABLE user_model_credentials
+                        ADD CONSTRAINT user_model_credentials_ciphertext_state
+                        CHECK ((status = 'revoked' AND api_key_enc IS NULL) OR (status <> 'revoked' AND api_key_enc IS NOT NULL));
+                    EXCEPTION WHEN duplicate_object THEN NULL;
+                    END $$
+                    """
+                )
+                cur.execute(
+                    """
+                    DO $$
+                    BEGIN
+                        ALTER TABLE platform_model_credentials
+                        ADD CONSTRAINT platform_model_credentials_ciphertext_state
+                        CHECK ((status = 'revoked' AND api_key_enc IS NULL) OR (status <> 'revoked' AND api_key_enc IS NOT NULL));
+                    EXCEPTION WHEN duplicate_object THEN NULL;
+                    END $$
+                    """
+                )
                 now = _utcnow_iso()
                 for item in SEEDED_PROVIDERS:
                     cur.execute(
@@ -146,12 +180,7 @@ class PostgresModelProviderStore:
                             capabilities_json, byok_enabled, platform_enabled,
                             status, created_at, updated_at
                         ) VALUES (%s, %s, %s, %s, %s, TRUE, FALSE, 'enabled', %s, %s)
-                        ON CONFLICT (provider_id) DO UPDATE SET
-                            display_name = EXCLUDED.display_name,
-                            adapter_type = EXCLUDED.adapter_type,
-                            approved_base_url = EXCLUDED.approved_base_url,
-                            capabilities_json = EXCLUDED.capabilities_json,
-                            updated_at = EXCLUDED.updated_at
+                        ON CONFLICT (provider_id) DO NOTHING
                         """,
                         (
                             item["provider_id"],
@@ -374,7 +403,7 @@ class PostgresModelProviderStore:
             raise CredentialNotFoundError("credential not found")
         if int(row["user_id"]) != int(user_id):
             raise CredentialOwnershipError("credential does not belong to this user")
-        if row["status"] == "revoked":
+        if row["status"] == "revoked" or not row["api_key_enc"]:
             raise CredentialConflictError("revoked credentials cannot be read")
         return _decrypt(row["api_key_enc"])
 
@@ -403,7 +432,8 @@ class PostgresModelProviderStore:
                 cur.execute(
                     """
                     UPDATE user_model_credentials
-                    SET status = %s,
+                    SET api_key_enc = CASE WHEN %s = 'revoked' THEN NULL ELSE api_key_enc END,
+                        status = %s,
                         is_default = CASE WHEN %s <> 'verified' THEN FALSE ELSE is_default END,
                         updated_at = %s,
                         last_verified_at = COALESCE(%s, last_verified_at),
@@ -411,7 +441,7 @@ class PostgresModelProviderStore:
                     WHERE credential_id = %s
                     RETURNING *
                     """,
-                    (status, status, now, last_verified_at, status, now, str(credential_id)),
+                    (status, status, status, now, last_verified_at, status, now, str(credential_id)),
                 )
                 result = cur.fetchone()
         return _public_credential(result)
@@ -458,7 +488,7 @@ class PostgresModelProviderStore:
         if status not in {"verified", "invalid", "verification_unavailable", "revoked"}:
             raise ValueError("invalid credential status")
         now = _utcnow_iso()
-        encrypted = _encrypt(secret)
+        encrypted = None if status == "revoked" else _encrypt(secret)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -495,7 +525,7 @@ class PostgresModelProviderStore:
                     (provider_id,),
                 )
                 row = cur.fetchone()
-        if not row or row["status"] != "verified":
+        if not row or row["status"] != "verified" or not row["api_key_enc"]:
             return None
         return _decrypt(row["api_key_enc"])
 
@@ -503,11 +533,11 @@ class PostgresModelProviderStore:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "SELECT api_key_enc FROM platform_model_credentials WHERE provider_id = %s",
+                    "SELECT api_key_enc, status FROM platform_model_credentials WHERE provider_id = %s",
                     (provider_id,),
                 )
                 row = cur.fetchone()
-        return _decrypt(row["api_key_enc"]) if row else None
+        return _decrypt(row["api_key_enc"]) if row and row["status"] != "revoked" and row["api_key_enc"] else None
 
     def set_platform_credential_status(
         self,
@@ -521,8 +551,8 @@ class PostgresModelProviderStore:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "UPDATE platform_model_credentials SET status = %s, updated_at = %s, last_verified_at = COALESCE(%s, last_verified_at) WHERE provider_id = %s RETURNING provider_id, key_last_four, status, updated_at, last_verified_at",
-                    (status, _utcnow_iso(), last_verified_at, provider_id),
+                    "UPDATE platform_model_credentials SET api_key_enc = CASE WHEN %s = 'revoked' THEN NULL ELSE api_key_enc END, status = %s, updated_at = %s, last_verified_at = COALESCE(%s, last_verified_at) WHERE provider_id = %s RETURNING provider_id, key_last_four, status, updated_at, last_verified_at",
+                    (status, status, _utcnow_iso(), last_verified_at, provider_id),
                 )
                 row = cur.fetchone()
         if not row:
@@ -543,8 +573,8 @@ class PostgresModelProviderStore:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    "DELETE FROM platform_model_credentials WHERE provider_id = %s",
-                    (provider_id,),
+                    "UPDATE platform_model_credentials SET api_key_enc = NULL, status = 'revoked', updated_at = %s WHERE provider_id = %s",
+                    (_utcnow_iso(), provider_id),
                 )
                 deleted = cur.rowcount > 0
         return deleted
