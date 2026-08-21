@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from dashboard.backend.infrastructure.llm.adapters import get_adapter
+from dashboard.backend.infrastructure.llm.adapters import safe_http
 
 
 @pytest.mark.parametrize(
@@ -70,3 +71,55 @@ def test_redirect_is_not_followed_and_is_unavailable():
     with httpx.Client(transport=transport, follow_redirects=False) as client:
         result = adapter.validate("https://api.openai.com/v1", "sk-fake-redirect", client=client)
     assert result.status == "invalid"
+
+
+def test_empty_model_discovery_response_is_not_verified():
+    adapter = get_adapter("openai")
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200, json={"data": []}))
+    with httpx.Client(transport=transport, follow_redirects=False) as client:
+        result = adapter.validate("https://api.openai.com/v1", "sk-fake-empty", client=client)
+    assert result.status == "invalid"
+    assert result.message == "Provider returned an invalid model list."
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(
+            200,
+            text="<html>not a model list</html>",
+            headers={"content-type": "text/html"},
+        ),
+        httpx.Response(200, json={"error": {"message": "bad key"}}),
+        httpx.Response(200, text="{not-json}"),
+    ],
+)
+def test_malformed_discovery_response_is_not_verified(response):
+    adapter = get_adapter("openai")
+    transport = httpx.MockTransport(lambda _request: response)
+    with httpx.Client(transport=transport, follow_redirects=False) as client:
+        result = adapter.validate("https://api.openai.com/v1", "sk-fake-malformed", client=client)
+    assert result.status == "invalid"
+
+
+def test_private_dns_result_is_rejected_before_network(monkeypatch):
+    calls = []
+
+    def fake_getaddrinfo(*args, **kwargs):
+        calls.append((args, kwargs))
+        return [
+            (
+                safe_http.socket.AF_INET,
+                safe_http.socket.SOCK_STREAM,
+                safe_http.socket.IPPROTO_TCP,
+                "",
+                ("127.0.0.1", 443),
+            )
+        ]
+
+    monkeypatch.setattr(safe_http.socket, "getaddrinfo", fake_getaddrinfo)
+    adapter = get_adapter("openai")
+    result = adapter.validate("https://public.example/v1", "sk-fake-private")
+    assert result.status == "invalid"
+    assert result.message == "Provider address is not allowed."
+    assert calls
