@@ -327,6 +327,12 @@ async def serve_strategy_viewer():
     """Serve the standalone strategy viewer (reads ?code=... client-side)."""
     return FileResponse(frontend_path / "strategy.html")
 
+
+@app.get("/mission-control.html", include_in_schema=False)
+async def serve_mission_control():
+    """Serve the real-money/paper wallet & holdings dashboard page."""
+    return FileResponse(frontend_path / "mission-control.html")
+
 @app.get("/styles.css", include_in_schema=False)
 async def serve_styles():
     """Serve styles.css."""
