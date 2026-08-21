@@ -34,6 +34,20 @@ _EXPECTED_KEYS = {
     "market_index",
     "mean_variance",
     "llm_agent",
+    "tradingagents_composite",
+    "capm_alpha_ranking",
+    "momentum_effect",
+    "volatility_effect",
+    "short_term_reversal",
+    "overnight_anomaly",
+    "turn_of_month",
+    "bandtastic",
+    "supertrend_triple",
+    "hlhb",
+    "trendrider",
+    "pattern_recognition",
+    "universal_macd",
+    "almgren_chriss_twap",
 }
 
 

@@ -56,6 +56,118 @@
       "symbols": []
     },
     {
+      "id": "tradingagents_composite",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "TradingAgents (technical composite)",
+      "strategy": "tradingagents_composite",
+      "symbols": []
+    },
+    {
+      "id": "capm_alpha_ranking",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "CAPM Alpha Ranking",
+      "strategy": "capm_alpha_ranking",
+      "symbols": []
+    },
+    {
+      "id": "momentum_effect",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "Momentum Effect",
+      "strategy": "momentum_effect",
+      "symbols": []
+    },
+    {
+      "id": "volatility_effect",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "Volatility Effect",
+      "strategy": "volatility_effect",
+      "symbols": []
+    },
+    {
+      "id": "short_term_reversal",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "Short-Term Reversal",
+      "strategy": "short_term_reversal",
+      "symbols": []
+    },
+    {
+      "id": "overnight_anomaly",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "Overnight Anomaly (SPY)",
+      "strategy": "overnight_anomaly",
+      "symbols": ["SPY"]
+    },
+    {
+      "id": "turn_of_month",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "Turn of the Month (SPY)",
+      "strategy": "turn_of_month",
+      "symbols": ["SPY"]
+    },
+    {
+      "id": "bandtastic",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "Bandtastic",
+      "strategy": "bandtastic",
+      "symbols": []
+    },
+    {
+      "id": "supertrend_triple",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "Supertrend x3",
+      "strategy": "supertrend_triple",
+      "symbols": []
+    },
+    {
+      "id": "hlhb",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "hlhb",
+      "strategy": "hlhb",
+      "symbols": []
+    },
+    {
+      "id": "trendrider",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "TrendRider (simplified)",
+      "strategy": "trendrider",
+      "symbols": []
+    },
+    {
+      "id": "pattern_recognition",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "Pattern Recognition",
+      "strategy": "pattern_recognition",
+      "symbols": []
+    },
+    {
+      "id": "universal_macd",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "UniversalMACD (zero-cross)",
+      "strategy": "universal_macd",
+      "symbols": []
+    },
+    {
+      "id": "almgren_chriss_twap",
+      "name": "Agentic Trading Lab",
+      "label": "Baseline Strategy",
+      "model": "AlmgrenChriss / TWAP",
+      "strategy": "almgren_chriss_twap",
+      "symbols": []
+    },
+    {
       "id": "claude_haiku_4_5",
       "name": "Claude Haiku 4.5",
       "label": "Model",
