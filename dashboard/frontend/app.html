@@ -1926,7 +1926,7 @@
                             <form id="creditsApiKeyForm" class="credits-api-key-form">
                                 <label class="credits-key-field" for="creditsApiKeyProvider">
                                     <span>Provider</span>
-                                    <select id="creditsApiKeyProvider" autocomplete="off" required>
+                                    <select id="creditsApiKeyProvider" class="control-select" autocomplete="off" required>
                                         <option value="">Loading providers…</option>
                                     </select>
                                 </label>
@@ -2068,10 +2068,10 @@
                     <p class="credits-section-kicker">Provider registry</p>
                     <label class="credits-key-field" for="adminProviderId"><span>Provider ID</span><input id="adminProviderId" type="text" maxlength="64" pattern="[a-z0-9_]{2,64}" autocomplete="off" required></label>
                     <label class="credits-key-field" for="adminProviderDisplayName"><span>Display name</span><input id="adminProviderDisplayName" type="text" maxlength="100" autocomplete="off" required></label>
-                    <label class="credits-key-field" for="adminProviderAdapter"><span>Adapter</span><select id="adminProviderAdapter" autocomplete="off"><option value="openai_compatible">OpenAI-compatible</option><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option></select></label>
+                    <label class="credits-key-field" for="adminProviderAdapter"><span>Adapter</span><select id="adminProviderAdapter" class="control-select" autocomplete="off"><option value="openai_compatible">OpenAI-compatible</option><option value="openrouter">OpenRouter</option><option value="openai">OpenAI</option><option value="anthropic">Anthropic</option><option value="gemini">Gemini</option></select></label>
                     <label class="credits-key-field" for="adminProviderBaseUrl"><span>Approved base URL</span><input id="adminProviderBaseUrl" type="url" maxlength="500" placeholder="https://provider.example/v1" autocomplete="off" required></label>
                     <div class="admin-provider-checks"><label><input id="adminProviderByok" type="checkbox" checked> BYOK enabled</label><label><input id="adminProviderPlatform" type="checkbox"> Platform enabled</label></div>
-                    <label class="credits-key-field" for="adminProviderStatus"><span>Status</span><select id="adminProviderStatus"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
+                    <label class="credits-key-field" for="adminProviderStatus"><span>Status</span><select id="adminProviderStatus" class="control-select"><option value="enabled">Enabled</option><option value="disabled">Disabled</option></select></label>
                     <label class="credits-key-field" for="adminProviderReason"><span>Reason</span><input id="adminProviderReason" type="text" maxlength="500" value="Provider registry update." autocomplete="off" required></label>
                     <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Save provider</span></button>
                     <p id="adminProviderStatusMessage" class="credits-status" role="status" aria-live="polite"></p>
@@ -2085,7 +2085,7 @@
                     </div>
                 </div>
                 <form id="adminPlatformKeyForm" class="admin-platform-key-form">
-                    <label class="credits-key-field" for="adminPlatformProvider"><span>Provider</span><select id="adminPlatformProvider" required><option value="">Select a provider</option></select></label>
+                    <label class="credits-key-field" for="adminPlatformProvider"><span>Provider</span><select id="adminPlatformProvider" class="control-select" required><option value="">Select a provider</option></select></label>
                     <label class="credits-key-field" for="adminPlatformKeySecret"><span>API key</span><input id="adminPlatformKeySecret" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" required></label>
                     <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Save and verify</span></button>
                 </form>
