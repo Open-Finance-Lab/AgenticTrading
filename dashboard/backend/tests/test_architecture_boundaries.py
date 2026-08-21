@@ -185,6 +185,30 @@ def test_every_route_registered_exactly_once():
     assert dupes == set(), f"routes registered more than once: {dupes}"
 
 
+def test_key_vault_pr_has_no_model_execution_runtime():
+    forbidden = (
+        "dashboard/backend/domain/model_execution/",
+        "dashboard/backend/infrastructure/llm/provider_executor.py",
+        "dashboard/backend/infrastructure/llm/routed_client.py",
+    )
+    changed = set(
+        subprocess.check_output(
+            ["git", "diff", "--name-only", "origin/main...HEAD"],
+            cwd=_REPO_ROOT,
+            text=True,
+        ).splitlines()
+    )
+    status = subprocess.check_output(
+        ["git", "status", "--short"], cwd=_REPO_ROOT, text=True
+    )
+    changed.update(
+        line[3:].strip() for line in status.splitlines() if len(line) >= 4
+    )
+    assert not any(
+        path == prefix.rstrip("/") or path.startswith(prefix) for path in changed for prefix in forbidden
+    )
+
+
 def test_paper_routes_stay_outside_api_prefix():
     from dashboard.backend.app import app
 

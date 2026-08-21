@@ -1,0 +1,72 @@
+"""Provider credential validation tests with no real network or keys."""
+
+from __future__ import annotations
+
+import httpx
+import pytest
+
+from dashboard.backend.infrastructure.llm.adapters import get_adapter
+
+
+@pytest.mark.parametrize(
+    ("adapter_type", "base_url", "expected_path", "header"),
+    [
+        ("openrouter", "https://openrouter.ai/api/v1", "/api/v1/models", "Authorization"),
+        ("openai", "https://api.openai.com/v1", "/v1/models", "Authorization"),
+        ("openai_compatible", "https://models.example.com/v1", "/v1/models", "Authorization"),
+        ("anthropic", "https://api.anthropic.com", "/v1/models", "x-api-key"),
+        ("gemini", "https://generativelanguage.googleapis.com", "/v1beta/models", "x-goog-api-key"),
+    ],
+)
+def test_validation_uses_model_discovery_only(adapter_type, base_url, expected_path, header):
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "data": [{"id": "fake/model"}],
+                "models": [{"name": "models/fake-gemini"}],
+            },
+        )
+
+    adapter = get_adapter(adapter_type)
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        result = adapter.validate(base_url, "sk-fake-validation-secret", client=client)
+
+    assert result.status == "verified"
+    assert calls and calls[0].method == "GET"
+    assert calls[0].url.path == expected_path
+    assert calls[0].headers[header]
+    assert "sk-fake-validation-secret" in calls[0].headers[header]
+    assert calls[0].url.query == b""
+    assert all(call.method == "GET" for call in calls)
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_authentication_failure_is_invalid(status):
+    adapter = get_adapter("openai")
+    transport = httpx.MockTransport(lambda _request: httpx.Response(status))
+    with httpx.Client(transport=transport) as client:
+        result = adapter.validate("https://api.openai.com/v1", "sk-fake-invalid", client=client)
+    assert result.status == "invalid"
+
+
+@pytest.mark.parametrize("status", [429, 500, 503])
+def test_transient_provider_failure_is_unavailable(status):
+    adapter = get_adapter("openai")
+    transport = httpx.MockTransport(lambda _request: httpx.Response(status))
+    with httpx.Client(transport=transport) as client:
+        result = adapter.validate("https://api.openai.com/v1", "sk-fake-transient", client=client)
+    assert result.status == "verification_unavailable"
+
+
+def test_redirect_is_not_followed_and_is_unavailable():
+    adapter = get_adapter("openai")
+    transport = httpx.MockTransport(
+        lambda _request: httpx.Response(302, headers={"location": "https://evil.example/models"})
+    )
+    with httpx.Client(transport=transport, follow_redirects=False) as client:
+        result = adapter.validate("https://api.openai.com/v1", "sk-fake-redirect", client=client)
+    assert result.status == "invalid"
