@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+import json
 from typing import Any, Protocol
 
 import httpx
@@ -23,6 +24,8 @@ from .repository import ModelProviderStore, model_provider_store
 from .repository_common import (
     CredentialConflictError,
     ProviderNotFoundError,
+    canonical_request_digest,
+    secret_fingerprint,
     validate_adapter_type,
     validate_approved_origin,
     validate_provider_id,
@@ -88,34 +91,75 @@ class ModelProviderService:
         provider_id = validate_provider_id(provider_id)
         validate_adapter_type(request.adapter_type)
         approved_base_url = validate_approved_origin(request.approved_base_url)
-        if self._admin_operation_replayed(
+        request_digest = canonical_request_digest(
+            {
+                "operation": "upsert_provider",
+                "actor_user_id": int(admin_user_id),
+                "provider_id": provider_id,
+                "display_name": request.display_name,
+                "adapter_type": request.adapter_type,
+                "approved_base_url": approved_base_url,
+                "capabilities": request.capabilities.model_dump(mode="json"),
+                "byok_enabled": request.byok_enabled,
+                "platform_enabled": request.platform_enabled,
+                "status": request.status,
+                "source": request.source,
+                "reason": request.reason,
+            }
+        )
+        replay = self._admin_operation_replayed(
             admin_user_id,
             "upsert_provider",
             provider_id,
             request.idempotency_key,
-        ):
-            provider = self.store.get_provider(provider_id)
+            request_digest,
+        )
+        if replay:
+            provider = self._replay_snapshot(replay) or self.store.get_provider(provider_id)
             if not provider:
                 raise ProviderNotFoundError("provider not found")
             return ProviderRecord.model_validate(provider)
-        provider = self.store.upsert_provider(
-            provider_id=provider_id,
-            display_name=request.display_name,
-            adapter_type=request.adapter_type,
-            approved_base_url=approved_base_url,
-            capabilities=request.capabilities,
-            byok_enabled=request.byok_enabled,
-            platform_enabled=request.platform_enabled,
-            status=request.status,
-        )
-        self.store.record_admin_operation(
-            actor_user_id=admin_user_id,
-            operation="upsert_provider",
-            provider_id=provider_id,
-            source=request.source,
-            reason=request.reason,
-            idempotency_key=request.idempotency_key,
-        )
+        audit = {
+            "actor_user_id": admin_user_id,
+            "operation": "upsert_provider",
+            "provider_id": provider_id,
+            "source": request.source,
+            "reason": request.reason,
+            "idempotency_key": request.idempotency_key,
+            "request_digest": request_digest,
+        }
+        atomic = getattr(self.store, "upsert_provider_with_audit", None)
+        if atomic:
+            provider = atomic(
+                provider_id=provider_id,
+                display_name=request.display_name,
+                adapter_type=request.adapter_type,
+                approved_base_url=approved_base_url,
+                capabilities=request.capabilities,
+                byok_enabled=request.byok_enabled,
+                platform_enabled=request.platform_enabled,
+                status=request.status,
+                audit=audit,
+            )
+        else:
+            provider = self.store.upsert_provider(
+                provider_id=provider_id,
+                display_name=request.display_name,
+                adapter_type=request.adapter_type,
+                approved_base_url=approved_base_url,
+                capabilities=request.capabilities,
+                byok_enabled=request.byok_enabled,
+                platform_enabled=request.platform_enabled,
+                status=request.status,
+            )
+            self.store.record_admin_operation(
+                **audit,
+                result_json=json.dumps(
+                    ProviderRecord.model_validate(provider).model_dump(mode="json"),
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
         return ProviderRecord.model_validate(provider)
 
     def set_platform_credential(
@@ -127,31 +171,61 @@ class ModelProviderService:
         provider = self.store.get_provider(provider_id)
         if not provider:
             raise ProviderNotFoundError("provider not found")
-        if self._admin_operation_replayed(
+        secret = request.api_key.get_secret_value()
+        fingerprint = secret_fingerprint(secret)
+        request_digest = canonical_request_digest(
+            {
+                "operation": "set_platform_credential",
+                "actor_user_id": int(admin_user_id),
+                "provider_id": provider_id,
+                "secret_fingerprint": fingerprint,
+                "source": request.source,
+                "reason": request.reason,
+            }
+        )
+        replay = self._admin_operation_replayed(
             admin_user_id,
             "set_platform_credential",
             provider_id,
             request.idempotency_key,
-        ):
-            credential = self.store.get_platform_credential_public(provider_id)
+            request_digest,
+        )
+        if replay:
+            credential = self._replay_snapshot(replay) or self.store.get_platform_credential_public(provider_id)
             if not credential:
                 raise ProviderNotFoundError("platform credential not found")
             return AdminPlatformCredentialPublic.model_validate(credential)
-        secret = request.api_key.get_secret_value()
-        self.store.upsert_platform_credential(
-            provider_id=provider_id,
-            secret=secret,
-            status="verification_unavailable",
-        )
-        result = self._verify_platform_credential(provider_id, secret)
-        self.store.record_admin_operation(
-            actor_user_id=admin_user_id,
-            operation="set_platform_credential",
-            provider_id=provider_id,
-            source=request.source,
-            reason=request.reason,
-            idempotency_key=request.idempotency_key,
-        )
+        validation = self._validate_platform_credential(provider, secret)
+        audit = {
+            "actor_user_id": admin_user_id,
+            "operation": "set_platform_credential",
+            "provider_id": provider_id,
+            "source": request.source,
+            "reason": request.reason,
+            "idempotency_key": request.idempotency_key,
+            "request_digest": request_digest,
+            "secret_fingerprint": fingerprint,
+        }
+        atomic = getattr(self.store, "upsert_platform_credential_with_audit", None)
+        if atomic:
+            result = atomic(
+                provider_id=provider_id,
+                secret=secret,
+                status=validation.status,
+                last_verified_at=_utcnow_iso() if validation.status == "verified" else None,
+                audit=audit,
+            )
+        else:
+            result = self.store.upsert_platform_credential(
+                provider_id=provider_id,
+                secret=secret,
+                status=validation.status,
+                last_verified_at=_utcnow_iso() if validation.status == "verified" else None,
+            )
+            self.store.record_admin_operation(
+                **audit,
+                result_json=json.dumps(result, sort_keys=True, separators=(",", ":")),
+            )
         return AdminPlatformCredentialPublic.model_validate(result)
 
     def reverify_platform_credential(
@@ -166,28 +240,61 @@ class ModelProviderService:
         provider = self.store.get_provider(provider_id)
         if not provider:
             raise ProviderNotFoundError("provider not found")
-        if self._admin_operation_replayed(
+        secret = self.store.get_platform_credential_secret_any_status(provider_id)
+        if not secret:
+            raise ProviderNotFoundError("platform credential not found")
+        fingerprint = secret_fingerprint(secret)
+        request_digest = canonical_request_digest(
+            {
+                "operation": "reverify_platform_credential",
+                "actor_user_id": int(admin_user_id),
+                "provider_id": provider_id,
+                "secret_fingerprint": fingerprint,
+                "source": source,
+                "reason": reason,
+            }
+        )
+        replay = self._admin_operation_replayed(
             admin_user_id,
             "reverify_platform_credential",
             provider_id,
             idempotency_key,
-        ):
-            credential = self.store.get_platform_credential_public(provider_id)
+            request_digest,
+        )
+        if replay:
+            credential = self._replay_snapshot(replay) or self.store.get_platform_credential_public(provider_id)
             if not credential:
                 raise ProviderNotFoundError("platform credential not found")
             return AdminPlatformCredentialPublic.model_validate(credential)
-        secret = self.store.get_platform_credential_secret_any_status(provider_id)
-        if not secret:
-            raise ProviderNotFoundError("platform credential not found")
-        result = self._verify_platform_credential(provider_id, secret)
-        self.store.record_admin_operation(
-            actor_user_id=admin_user_id,
-            operation="reverify_platform_credential",
-            provider_id=provider_id,
-            source=source,
-            reason=reason,
-            idempotency_key=idempotency_key,
-        )
+        validation = self._validate_platform_credential(provider, secret)
+        audit = {
+            "actor_user_id": admin_user_id,
+            "operation": "reverify_platform_credential",
+            "provider_id": provider_id,
+            "source": source,
+            "reason": reason,
+            "idempotency_key": idempotency_key,
+            "request_digest": request_digest,
+            "secret_fingerprint": fingerprint,
+        }
+        atomic = getattr(self.store, "set_platform_credential_status_with_audit", None)
+        if atomic:
+            result = atomic(
+                provider_id=provider_id,
+                status=validation.status,
+                last_verified_at=_utcnow_iso() if validation.status == "verified" else None,
+                audit=audit,
+            )
+        else:
+            result = self.store.set_platform_credential_status(
+                provider_id,
+                status=validation.status,
+                last_verified_at=_utcnow_iso() if validation.status == "verified" else None,
+            )
+            self.store.record_admin_operation(
+                **audit,
+                result_json=json.dumps(result, sort_keys=True, separators=(",", ":")),
+            )
         return AdminPlatformCredentialPublic.model_validate(result)
 
     def revoke_platform_credential(
@@ -199,24 +306,44 @@ class ModelProviderService:
         reason: str,
         idempotency_key: str,
     ) -> bool:
-        if self._admin_operation_replayed(
+        request_digest = canonical_request_digest(
+            {
+                "operation": "revoke_platform_credential",
+                "actor_user_id": int(admin_user_id),
+                "provider_id": provider_id,
+                "source": source,
+                "reason": reason,
+            }
+        )
+        replay = self._admin_operation_replayed(
             admin_user_id,
             "revoke_platform_credential",
             provider_id,
             idempotency_key,
-        ):
-            return True
-        deleted = self.store.delete_platform_credential(provider_id)
-        if not deleted:
-            raise ProviderNotFoundError("platform credential not found")
-        self.store.record_admin_operation(
-            actor_user_id=admin_user_id,
-            operation="revoke_platform_credential",
-            provider_id=provider_id,
-            source=source,
-            reason=reason,
-            idempotency_key=idempotency_key,
+            request_digest,
         )
+        if replay:
+            return True
+        audit = {
+            "actor_user_id": admin_user_id,
+            "operation": "revoke_platform_credential",
+            "provider_id": provider_id,
+            "source": source,
+            "reason": reason,
+            "idempotency_key": idempotency_key,
+            "request_digest": request_digest,
+        }
+        atomic = getattr(self.store, "delete_platform_credential_with_audit", None)
+        if atomic:
+            atomic(audit=audit)
+        else:
+            deleted = self.store.delete_platform_credential(provider_id)
+            if not deleted:
+                raise ProviderNotFoundError("platform credential not found")
+            self.store.record_admin_operation(
+                **audit,
+                result_json=json.dumps({"revoked": True}),
+            )
         return True
 
     def resolve_platform_secret(self, provider_id: str) -> str | None:
@@ -231,35 +358,45 @@ class ModelProviderService:
         operation: str,
         provider_id: str,
         idempotency_key: str,
-    ) -> bool:
+        request_digest: str,
+    ) -> dict[str, Any] | None:
         existing = self.store.get_admin_operation(idempotency_key)
         if not existing:
-            return False
+            return None
         if (
             int(existing["actor_user_id"]) != int(admin_user_id)
             or existing["operation"] != operation
             or existing["provider_id"] != provider_id
         ):
             raise CredentialConflictError("idempotency key already used")
-        return True
+        if "request_digest" in existing and existing.get("request_digest") != request_digest:
+            raise CredentialConflictError("idempotency key already used for different input")
+        return existing
 
-    def _verify_platform_credential(self, provider_id: str, secret: str) -> dict[str, Any]:
-        provider = self.store.get_provider(provider_id)
+    def _validate_platform_credential(
+        self, provider: dict[str, Any], secret: str
+    ) -> CredentialValidation:
         adapter = self.adapter_resolver(provider["adapter_type"])
         try:
-            validation = adapter.validate(
+            return adapter.validate(
                 provider["approved_base_url"], secret, client=self.http_client
             )
         except Exception:
-            validation = CredentialValidation(
+            return CredentialValidation(
                 status="verification_unavailable",
                 message="Provider verification was unavailable.",
             )
-        return self.store.set_platform_credential_status(
-            provider_id,
-            status=validation.status,
-            last_verified_at=_utcnow_iso() if validation.status == "verified" else None,
-        )
+
+    @staticmethod
+    def _replay_snapshot(existing: dict[str, Any]) -> dict[str, Any] | None:
+        raw = existing.get("result_json")
+        if not raw:
+            return None
+        try:
+            snapshot = json.loads(raw)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return snapshot if isinstance(snapshot, dict) else None
 
     def create_credential(
         self,

@@ -3,9 +3,14 @@
 from __future__ import annotations
 
 from urllib.parse import urlsplit
+import base64
+import hashlib
+import hmac
 import ipaddress
 import json
+import os
 import re
+from collections.abc import Mapping
 
 from .models import AdapterType, ProviderCapabilities
 
@@ -32,6 +37,31 @@ class ProviderNotFoundError(ModelProviderStoreError):
 
 class InvalidProviderOriginError(ModelProviderStoreError):
     pass
+
+
+def canonical_request_digest(payload: Mapping[str, object]) -> str:
+    """Return a stable digest for an admin mutation without retaining secrets."""
+
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def secret_fingerprint(secret: str) -> str:
+    """Return an HMAC fingerprint keyed by the configured Fernet key."""
+
+    configured = (os.getenv("BROKER_TOKEN_ENCRYPTION_KEY") or "").strip()
+    if not configured:
+        raise RuntimeError("BROKER_TOKEN_ENCRYPTION_KEY is not set")
+    try:
+        key = base64.urlsafe_b64decode(configured.encode("ascii"))
+    except (ValueError, UnicodeEncodeError) as exc:
+        raise RuntimeError("BROKER_TOKEN_ENCRYPTION_KEY is invalid") from exc
+    return hmac.new(key, secret.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 SUPPORTED_ADAPTER_TYPES: set[str] = {

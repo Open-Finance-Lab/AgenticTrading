@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+import json
 from typing import Any
 
 import psycopg
@@ -11,7 +12,7 @@ from dashboard.backend.db_url import require_postgres_url
 from dashboard.backend.domain.agents.repository import _utcnow_iso
 from dashboard.backend.domain.brokers.repository import _decrypt, _encrypt
 
-from .models import ProviderCapabilities
+from .models import ProviderCapabilities, ProviderRecord
 from .repository_common import (
     CredentialConflictError,
     CredentialNotFoundError,
@@ -90,6 +91,9 @@ CREATE TABLE IF NOT EXISTS model_provider_admin_operations (
     source TEXT NOT NULL,
     reason TEXT NOT NULL,
     idempotency_key TEXT NOT NULL UNIQUE,
+    request_digest TEXT NOT NULL DEFAULT '',
+    secret_fingerprint TEXT,
+    result_json TEXT,
     created_at TEXT NOT NULL
 );
 """
@@ -144,6 +148,15 @@ class PostgresModelProviderStore:
                 cur.execute(MODEL_PROVIDERS_POSTGRES_DDL)
                 cur.execute("ALTER TABLE user_model_credentials ALTER COLUMN api_key_enc DROP NOT NULL")
                 cur.execute("ALTER TABLE platform_model_credentials ALTER COLUMN api_key_enc DROP NOT NULL")
+                cur.execute(
+                    "ALTER TABLE model_provider_admin_operations ADD COLUMN IF NOT EXISTS request_digest TEXT NOT NULL DEFAULT ''"
+                )
+                cur.execute(
+                    "ALTER TABLE model_provider_admin_operations ADD COLUMN IF NOT EXISTS secret_fingerprint TEXT"
+                )
+                cur.execute(
+                    "ALTER TABLE model_provider_admin_operations ADD COLUMN IF NOT EXISTS result_json TEXT"
+                )
                 cur.execute("UPDATE user_model_credentials SET api_key_enc = NULL WHERE status = 'revoked'")
                 cur.execute("UPDATE platform_model_credentials SET api_key_enc = NULL WHERE status = 'revoked'")
                 cur.execute(
@@ -219,8 +232,9 @@ class PostgresModelProviderStore:
                     """
                     INSERT INTO model_provider_admin_operations (
                         actor_user_id, operation, provider_id, source, reason,
-                        idempotency_key, created_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        idempotency_key, request_digest, secret_fingerprint,
+                        result_json, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (idempotency_key) DO NOTHING
                     """,
                     (
@@ -230,6 +244,9 @@ class PostgresModelProviderStore:
                         str(values["source"]),
                         str(values["reason"]),
                         str(values["idempotency_key"]),
+                        str(values.get("request_digest", "")),
+                        values.get("secret_fingerprint"),
+                        values.get("result_json"),
                         _utcnow_iso(),
                     ),
                 )
@@ -243,6 +260,201 @@ class PostgresModelProviderStore:
                 )
                 row = cur.fetchone()
         return dict(row) if row else None
+
+    @staticmethod
+    def _insert_admin_operation_in_transaction(
+        cur, audit: dict[str, Any], result_json: str
+    ) -> None:
+        cur.execute(
+            """
+            INSERT INTO model_provider_admin_operations (
+                actor_user_id, operation, provider_id, source, reason,
+                idempotency_key, request_digest, secret_fingerprint,
+                result_json, created_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (idempotency_key) DO NOTHING
+            RETURNING operation_id
+            """,
+            (
+                int(audit["actor_user_id"]),
+                str(audit["operation"]),
+                str(audit["provider_id"]),
+                str(audit["source"]),
+                str(audit["reason"]),
+                str(audit["idempotency_key"]),
+                str(audit.get("request_digest", "")),
+                audit.get("secret_fingerprint"),
+                result_json,
+                _utcnow_iso(),
+            ),
+        )
+        if cur.fetchone() is None:
+            raise CredentialConflictError("idempotency key already used")
+
+    @staticmethod
+    def _provider_snapshot(row: dict[str, Any]) -> str:
+        return json.dumps(
+            ProviderRecord.model_validate(_public_provider(row)).model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def upsert_provider_with_audit(self, *, audit: dict[str, Any], **values: Any) -> dict[str, Any]:
+        validate_adapter_type(values["adapter_type"])
+        approved_base_url = validate_approved_origin(values["approved_base_url"])
+        if values.get("status", "enabled") not in {"enabled", "disabled"}:
+            raise ValueError("invalid provider status")
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO provider_registry (
+                        provider_id, display_name, adapter_type, approved_base_url,
+                        capabilities_json, byok_enabled, platform_enabled,
+                        status, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (provider_id) DO UPDATE SET
+                        display_name = EXCLUDED.display_name,
+                        adapter_type = EXCLUDED.adapter_type,
+                        approved_base_url = EXCLUDED.approved_base_url,
+                        capabilities_json = EXCLUDED.capabilities_json,
+                        byok_enabled = EXCLUDED.byok_enabled,
+                        platform_enabled = EXCLUDED.platform_enabled,
+                        status = EXCLUDED.status,
+                        updated_at = EXCLUDED.updated_at
+                    RETURNING *
+                    """,
+                    (
+                        values["provider_id"],
+                        str(values["display_name"]).strip(),
+                        values["adapter_type"],
+                        approved_base_url,
+                        serialize_capabilities(values["capabilities"]),
+                        bool(values["byok_enabled"]),
+                        bool(values["platform_enabled"]),
+                        values.get("status", "enabled"),
+                        now,
+                        now,
+                    ),
+                )
+                row = cur.fetchone()
+                self._insert_admin_operation_in_transaction(
+                    cur, audit, self._provider_snapshot(row)
+                )
+        return _public_provider(row)
+
+    def upsert_platform_credential_with_audit(
+        self,
+        *,
+        provider_id: str,
+        secret: str,
+        status: str,
+        last_verified_at: str | None,
+        audit: dict[str, Any],
+    ) -> dict[str, Any]:
+        if status not in {"verified", "invalid", "verification_unavailable", "revoked"}:
+            raise ValueError("invalid credential status")
+        encrypted = None if status == "revoked" else _encrypt(secret)
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT provider_id FROM provider_registry WHERE provider_id = %s",
+                    (provider_id,),
+                )
+                if cur.fetchone() is None:
+                    raise ProviderNotFoundError("provider not found")
+                cur.execute(
+                    """
+                    INSERT INTO platform_model_credentials (
+                        provider_id, api_key_enc, key_last_four, status,
+                        updated_at, last_verified_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (provider_id) DO UPDATE SET
+                        api_key_enc = EXCLUDED.api_key_enc,
+                        key_last_four = EXCLUDED.key_last_four,
+                        status = EXCLUDED.status,
+                        updated_at = EXCLUDED.updated_at,
+                        last_verified_at = EXCLUDED.last_verified_at
+                    RETURNING provider_id, key_last_four, status, updated_at, last_verified_at
+                    """,
+                    (
+                        provider_id,
+                        encrypted,
+                        secret[-4:],
+                        status,
+                        now,
+                        last_verified_at,
+                    ),
+                )
+                row = dict(cur.fetchone())
+                self._insert_admin_operation_in_transaction(
+                    cur,
+                    audit,
+                    json.dumps(row, sort_keys=True, separators=(",", ":")),
+                )
+        return row
+
+    def set_platform_credential_status_with_audit(
+        self,
+        provider_id: str,
+        *,
+        status: str,
+        last_verified_at: str | None,
+        audit: dict[str, Any],
+    ) -> dict[str, Any]:
+        if status not in {"verified", "invalid", "verification_unavailable", "revoked"}:
+            raise ValueError("invalid credential status")
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE platform_model_credentials
+                    SET api_key_enc = CASE WHEN %s = 'revoked' THEN NULL ELSE api_key_enc END,
+                        status = %s,
+                        updated_at = %s,
+                        last_verified_at = COALESCE(%s, last_verified_at)
+                    WHERE provider_id = %s
+                    RETURNING provider_id, key_last_four, status, updated_at, last_verified_at
+                    """,
+                    (status, status, _utcnow_iso(), last_verified_at, provider_id),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise ProviderNotFoundError("platform credential not found")
+                public = dict(row)
+                self._insert_admin_operation_in_transaction(
+                    cur,
+                    audit,
+                    json.dumps(public, sort_keys=True, separators=(",", ":")),
+                )
+        return public
+
+    def delete_platform_credential_with_audit(
+        self, *, audit: dict[str, Any]
+    ) -> bool:
+        provider_id = str(audit["provider_id"])
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE platform_model_credentials
+                    SET api_key_enc = NULL, status = 'revoked', updated_at = %s
+                    WHERE provider_id = %s
+                    RETURNING provider_id, key_last_four, status, updated_at, last_verified_at
+                    """,
+                    (_utcnow_iso(), provider_id),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    raise ProviderNotFoundError("platform credential not found")
+                self._insert_admin_operation_in_transaction(
+                    cur,
+                    audit,
+                    json.dumps(dict(row), sort_keys=True, separators=(",", ":")),
+                )
+        return True
 
     def get_provider(self, provider_id: str) -> dict[str, Any] | None:
         with self._get_connection() as conn:
