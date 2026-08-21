@@ -21,7 +21,10 @@ from dashboard.backend.domain.model_providers.repository_common import (
     ModelProviderStoreError,
     ProviderNotFoundError,
 )
-from dashboard.backend.domain.model_providers.service import model_provider_service
+from dashboard.backend.domain.model_providers.service import (
+    ModelProviderService,
+    get_model_provider_service,
+)
 
 
 router = APIRouter(
@@ -116,12 +119,13 @@ async def _parse_platform_credential_request(
 @router.get("")
 async def list_admin_model_providers(
     _admin: dict = Depends(require_admin),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
-    providers = await run_in_threadpool(model_provider_service.list_admin_providers)
+    providers = await run_in_threadpool(service.list_admin_providers)
     items = []
     for provider in providers:
         credential = await run_in_threadpool(
-            model_provider_service.get_platform_credential,
+            service.get_platform_credential,
             provider.provider_id,
         )
         items.append(
@@ -138,12 +142,13 @@ async def upsert_admin_model_provider(
     provider_id: str,
     payload: AdminProviderRequest,
     admin: dict = Depends(require_admin),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
     admin_user_id = int(admin["id"])
     _limit_mutation(admin_user_id)
     try:
         provider = await run_in_threadpool(
-            model_provider_service.upsert_provider,
+            service.upsert_provider,
             admin_user_id,
             provider_id,
             payload,
@@ -158,13 +163,14 @@ async def set_admin_platform_credential(
     provider_id: str,
     request: Request,
     admin: dict = Depends(require_admin),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
     admin_user_id = int(admin["id"])
     _limit_mutation(admin_user_id)
     payload = await _parse_platform_credential_request(request)
     try:
         credential = await run_in_threadpool(
-            model_provider_service.set_platform_credential,
+            service.set_platform_credential,
             admin_user_id,
             provider_id,
             payload,
@@ -179,12 +185,13 @@ async def reverify_admin_platform_credential(
     provider_id: str,
     payload: AdminProviderActionRequest,
     admin: dict = Depends(require_admin),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
     admin_user_id = int(admin["id"])
     _limit_mutation(admin_user_id)
     try:
         credential = await run_in_threadpool(
-            model_provider_service.reverify_platform_credential,
+            service.reverify_platform_credential,
             admin_user_id,
             provider_id,
             source=payload.source,
@@ -201,12 +208,13 @@ async def revoke_admin_platform_credential(
     provider_id: str,
     payload: AdminProviderActionRequest,
     admin: dict = Depends(require_admin),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
     admin_user_id = int(admin["id"])
     _limit_mutation(admin_user_id)
     try:
         revoked = await run_in_threadpool(
-            model_provider_service.revoke_platform_credential,
+            service.revoke_platform_credential,
             admin_user_id,
             provider_id,
             source=payload.source,

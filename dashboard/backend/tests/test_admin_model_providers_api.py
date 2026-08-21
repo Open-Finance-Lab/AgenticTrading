@@ -13,7 +13,10 @@ from dashboard.backend.app import app
 from dashboard.backend.domain.brokers import repository as broker_repository
 from dashboard.backend.domain.model_providers.models import CredentialValidation
 from dashboard.backend.domain.model_providers.repository import ModelProviderStore
-from dashboard.backend.domain.model_providers.service import ModelProviderService
+from dashboard.backend.domain.model_providers.service import (
+    ModelProviderService,
+    get_model_provider_service,
+)
 
 
 class FakeAdapter:
@@ -48,7 +51,7 @@ def admin_provider_api(tmp_path, monkeypatch):
     monkeypatch.setenv("BROKER_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setattr(broker_repository, "_fernet_instance", None)
     monkeypatch.setattr(users_module, "user_store", users)
-    monkeypatch.setattr(admin_router, "model_provider_service", service)
+    app.dependency_overrides[get_model_provider_service] = lambda: service
     admin_router.reset_admin_model_provider_limiter()
     yield SimpleNamespace(
         client=TestClient(app),
@@ -58,6 +61,7 @@ def admin_provider_api(tmp_path, monkeypatch):
         router=admin_router,
     )
     admin_router.reset_admin_model_provider_limiter()
+    app.dependency_overrides.pop(get_model_provider_service, None)
 
 
 def _signup(client: TestClient, email: str) -> dict:

@@ -13,7 +13,10 @@ from dashboard.backend.app import app
 from dashboard.backend.domain.brokers import repository as broker_repository
 from dashboard.backend.domain.model_providers.models import CredentialValidation
 from dashboard.backend.domain.model_providers.repository import ModelProviderStore
-from dashboard.backend.domain.model_providers.service import ModelProviderService
+from dashboard.backend.domain.model_providers.service import (
+    ModelProviderService,
+    get_model_provider_service,
+)
 from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 
 
@@ -40,8 +43,6 @@ class FakeAdapter:
 
 @pytest.fixture
 def credential_api(tmp_path, monkeypatch):
-    import dashboard.backend.api.routers.model_credentials as credentials_router
-
     database_path = tmp_path / "model-credentials-api.db"
     users = users_module.UserStore(database_path)
     store = ModelProviderStore(database_path)
@@ -53,7 +54,8 @@ def credential_api(tmp_path, monkeypatch):
     monkeypatch.setenv("BROKER_TOKEN_ENCRYPTION_KEY", Fernet.generate_key().decode())
     monkeypatch.setattr(broker_repository, "_fernet_instance", None)
     monkeypatch.setattr(users_module, "user_store", users)
-    monkeypatch.setattr(credentials_router, "model_provider_service", service)
+    app.dependency_overrides[get_model_provider_service] = lambda: service
+    import dashboard.backend.api.routers.model_credentials as credentials_router
     credentials_router._CREDENTIAL_MUTATION_LIMITER.reset()
     yield SimpleNamespace(
         client=TestClient(app),
@@ -62,6 +64,7 @@ def credential_api(tmp_path, monkeypatch):
         adapter=adapter,
         router=credentials_router,
     )
+    app.dependency_overrides.pop(get_model_provider_service, None)
 
 
 def _signup(client: TestClient, email: str) -> str:

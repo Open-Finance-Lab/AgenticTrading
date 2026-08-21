@@ -380,3 +380,9 @@ class ModelProviderService:
 
 
 model_provider_service = ModelProviderService(store=model_provider_store)
+
+
+def get_model_provider_service() -> ModelProviderService:
+    """Return the application service used by credential API dependencies."""
+
+    return model_provider_service

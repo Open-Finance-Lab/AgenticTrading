@@ -18,7 +18,10 @@ from dashboard.backend.domain.model_providers.repository_common import (
     CredentialOwnershipError,
     ProviderNotFoundError,
 )
-from dashboard.backend.domain.model_providers.service import model_provider_service
+from dashboard.backend.domain.model_providers.service import (
+    ModelProviderService,
+    get_model_provider_service,
+)
 
 
 router = APIRouter(tags=["model-credentials"])
@@ -108,8 +111,9 @@ async def _parse_create_request(request: Request) -> UserCredentialCreate:
 @router.get("/credits/model-providers")
 async def list_model_providers(
     _current_user: dict = Depends(get_current_user),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
-    providers = await run_in_threadpool(model_provider_service.list_providers)
+    providers = await run_in_threadpool(service.list_providers)
     return {"providers": [_public_provider(provider) for provider in providers]}
 
 
@@ -117,9 +121,10 @@ async def list_model_providers(
 async def list_model_credentials(
     provider_id: str | None = Query(default=None, min_length=2, max_length=64),
     current_user: dict = Depends(get_current_user),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
     credentials = await run_in_threadpool(
-        model_provider_service.list_credentials,
+        service.list_credentials,
         int(current_user["id"]),
         provider_id,
     )
@@ -130,13 +135,14 @@ async def list_model_credentials(
 async def create_model_credential(
     request: Request,
     current_user: dict = Depends(get_current_user),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
     user_id = int(current_user["id"])
     _limit_mutation(user_id)
     payload = await _parse_create_request(request)
     try:
         credential = await run_in_threadpool(
-            model_provider_service.create_credential,
+            service.create_credential,
             user_id,
             payload,
         )
@@ -149,12 +155,13 @@ async def create_model_credential(
 async def reverify_model_credential(
     credential_id: UUID,
     current_user: dict = Depends(get_current_user),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
     user_id = int(current_user["id"])
     _limit_mutation(user_id)
     try:
         credential = await run_in_threadpool(
-            model_provider_service.reverify_credential,
+            service.reverify_credential,
             user_id,
             str(credential_id),
         )
@@ -167,12 +174,13 @@ async def reverify_model_credential(
 async def set_default_model_credential(
     credential_id: UUID,
     current_user: dict = Depends(get_current_user),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
     user_id = int(current_user["id"])
     _limit_mutation(user_id)
     try:
         credential = await run_in_threadpool(
-            model_provider_service.set_default_credential,
+            service.set_default_credential,
             user_id,
             str(credential_id),
         )
@@ -185,12 +193,13 @@ async def set_default_model_credential(
 async def revoke_model_credential(
     credential_id: UUID,
     current_user: dict = Depends(get_current_user),
+    service: ModelProviderService = Depends(get_model_provider_service),
 ):
     user_id = int(current_user["id"])
     _limit_mutation(user_id)
     try:
         credential = await run_in_threadpool(
-            model_provider_service.revoke_credential,
+            service.revoke_credential,
             user_id,
             str(credential_id),
         )
