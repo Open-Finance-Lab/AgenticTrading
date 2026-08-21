@@ -903,9 +903,18 @@ def run_backtest_background(
         db_path = DB_PATH
         venv_dir = REPO_ROOT / ".venv"
         
-        # Determine the Python executable to use (from venv if available)
+        # Determine the Python executable to use (from venv if available).
+        # Windows venvs put the interpreter at Scripts\python.exe, not
+        # bin/python3 -- check both layouts rather than assuming Unix.
         if venv_dir.exists():
-            python_exe = str(venv_dir / "bin" / "python3")
+            win_py = venv_dir / "Scripts" / "python.exe"
+            unix_py = venv_dir / "bin" / "python3"
+            if win_py.exists():
+                python_exe = str(win_py)
+            elif unix_py.exists():
+                python_exe = str(unix_py)
+            else:
+                python_exe = sys.executable
             print(f"🐍 Using venv Python: {python_exe}", flush=True)
         else:
             python_exe = sys.executable

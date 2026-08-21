@@ -12,11 +12,21 @@ import os
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
-from dashboard.backend.paths import DEFAULT_DB_PATH
+from dashboard.backend.paths import DEFAULT_DB_PATH, REPO_ROOT
 from dashboard.backend.db_url import describe_database_url
 
-# Use persistent disk path if set (Render), otherwise local dashboard storage path
-DB_PATH = Path(os.getenv("DATABASE_PATH", str(DEFAULT_DB_PATH)))
+# Use persistent disk path if set (Render), otherwise local dashboard storage path.
+# A relative DATABASE_PATH (the .env.example default) is resolved against the
+# repo root, not the current process's cwd -- backtest runs spawn a subprocess
+# with cwd=DASHBOARD_DIR, which would otherwise silently write to a second,
+# wrong database nested at dashboard/dashboard/....
+_env_db_path = os.getenv("DATABASE_PATH")
+if _env_db_path:
+    DB_PATH = Path(_env_db_path)
+    if not DB_PATH.is_absolute():
+        DB_PATH = (REPO_ROOT / DB_PATH).resolve()
+else:
+    DB_PATH = DEFAULT_DB_PATH
 
 TRADE_OPTIONAL_AUDIT_FIELDS = (
     "reference_price",
