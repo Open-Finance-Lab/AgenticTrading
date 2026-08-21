@@ -16,7 +16,9 @@ from dashboard.backend.domain.model_providers.repository_common import (
     CredentialConflictError,
     CredentialNotFoundError,
     CredentialOwnershipError,
+    ModelProviderStoreError,
     ProviderNotFoundError,
+    validate_provider_id,
 )
 from dashboard.backend.domain.model_providers.service import (
     ModelProviderService,
@@ -43,6 +45,13 @@ def _public_provider(provider) -> dict:
         "display_name": provider.display_name,
         "capabilities": provider.capabilities.model_dump(mode="json"),
     }
+
+
+def _parse_credential_id(raw_value: str) -> str:
+    try:
+        return str(UUID(raw_value))
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=422, detail="Invalid API key identifier.") from None
 
 
 def _limit_mutation(user_id: int) -> None:
@@ -119,10 +128,15 @@ async def list_model_providers(
 
 @router.get("/credits/api-keys")
 async def list_model_credentials(
-    provider_id: str | None = Query(default=None, min_length=2, max_length=64),
+    provider_id: str | None = Query(default=None),
     current_user: dict = Depends(get_current_user),
     service: ModelProviderService = Depends(get_model_provider_service),
 ):
+    if provider_id is not None:
+        try:
+            provider_id = validate_provider_id(provider_id)
+        except (ModelProviderStoreError, ValueError):
+            raise HTTPException(status_code=422, detail="Invalid provider filter.") from None
     credentials = await run_in_threadpool(
         service.list_credentials,
         int(current_user["id"]),
@@ -153,10 +167,11 @@ async def create_model_credential(
 
 @router.post("/credits/api-keys/{credential_id}/verify")
 async def reverify_model_credential(
-    credential_id: UUID,
+    credential_id: str,
     current_user: dict = Depends(get_current_user),
     service: ModelProviderService = Depends(get_model_provider_service),
 ):
+    credential_id = _parse_credential_id(credential_id)
     user_id = int(current_user["id"])
     _limit_mutation(user_id)
     try:
@@ -172,10 +187,11 @@ async def reverify_model_credential(
 
 @router.post("/credits/api-keys/{credential_id}/default")
 async def set_default_model_credential(
-    credential_id: UUID,
+    credential_id: str,
     current_user: dict = Depends(get_current_user),
     service: ModelProviderService = Depends(get_model_provider_service),
 ):
+    credential_id = _parse_credential_id(credential_id)
     user_id = int(current_user["id"])
     _limit_mutation(user_id)
     try:
@@ -191,10 +207,11 @@ async def set_default_model_credential(
 
 @router.delete("/credits/api-keys/{credential_id}")
 async def revoke_model_credential(
-    credential_id: UUID,
+    credential_id: str,
     current_user: dict = Depends(get_current_user),
     service: ModelProviderService = Depends(get_model_provider_service),
 ):
+    credential_id = _parse_credential_id(credential_id)
     user_id = int(current_user["id"])
     _limit_mutation(user_id)
     try:

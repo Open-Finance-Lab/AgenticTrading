@@ -297,3 +297,31 @@ def test_missing_encryption_key_fails_closed(admin_provider_api, monkeypatch):
 
     assert response.status_code == 503
     assert response.json() == {"detail": "Credential encryption is unavailable."}
+
+
+def test_admin_secret_canary_is_not_reflected_by_path_or_validation_errors(
+    admin_provider_api,
+):
+    admin = _signup(admin_provider_api.client, "admin-secret-canary@example.com")
+    _promote(admin_provider_api, admin["id"])
+    secret = "sk-admin-url-canary-never-echo-abcd"
+
+    invalid_path = admin_provider_api.client.put(
+        f"/api/admin/model-providers/{secret}",
+        json=_provider_payload(),
+    )
+    invalid_provider_body = admin_provider_api.client.put(
+        "/api/admin/model-providers/openrouter",
+        json=_provider_payload(display_name={"secret": secret}),
+    )
+    invalid_action_body = admin_provider_api.client.post(
+        "/api/admin/model-providers/openrouter/platform-credential/verify",
+        json=_action_payload(reason={"secret": secret}),
+    )
+
+    assert invalid_path.status_code == 422
+    assert invalid_provider_body.status_code == 422
+    assert invalid_action_body.status_code == 422
+    assert secret not in invalid_path.text
+    assert secret not in invalid_provider_body.text
+    assert secret not in invalid_action_body.text

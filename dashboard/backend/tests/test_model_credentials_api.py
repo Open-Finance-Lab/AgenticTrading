@@ -263,3 +263,23 @@ def test_missing_encryption_configuration_fails_closed(credential_api, monkeypat
     assert response.json() == {"detail": "Credential encryption is unavailable."}
     assert secret not in response.text
     assert credential_api.store.list_user_credentials(1) == []
+
+
+def test_secret_canary_is_not_reflected_by_identifier_or_filter_validation(credential_api):
+    token = _signup(credential_api.client, "secret-canary-api@example.com")
+    secret = "sk-fake-url-canary-never-echo-abcd"
+
+    invalid_path = credential_api.client.post(
+        f"/api/credits/api-keys/{secret}/verify",
+        headers=_auth(token),
+    )
+    invalid_filter = credential_api.client.get(
+        "/api/credits/api-keys",
+        headers=_auth(token),
+        params={"provider_id": secret},
+    )
+
+    assert invalid_path.status_code == 422
+    assert invalid_filter.status_code == 422
+    assert secret not in invalid_path.text
+    assert secret not in invalid_filter.text

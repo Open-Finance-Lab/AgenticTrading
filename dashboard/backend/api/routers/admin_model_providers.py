@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from dashboard.backend.api.auth import require_admin
@@ -88,32 +88,36 @@ def _platform_credential_payload(credential) -> dict | None:
 async def _parse_platform_credential_request(
     request: Request,
 ) -> AdminPlatformCredentialRequest:
+    return await _parse_json_model(
+        request,
+        AdminPlatformCredentialRequest,
+        detail="Invalid platform credential request.",
+    )
+
+
+async def _parse_json_model(
+    request: Request,
+    model: type[BaseModel],
+    *,
+    detail: str,
+) -> BaseModel:
     content_length = request.headers.get("content-length")
     if content_length:
         try:
             if int(content_length) > _MAX_CREDENTIAL_BODY_BYTES:
-                raise HTTPException(
-                    status_code=413,
-                    detail="Platform credential request is too large.",
-                )
+                raise HTTPException(status_code=413, detail="Provider request is too large.")
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid request.") from None
     body = await request.body()
     if len(body) > _MAX_CREDENTIAL_BODY_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail="Platform credential request is too large.",
-        )
+            raise HTTPException(status_code=413, detail="Provider request is too large.")
     try:
         payload = json.loads(body)
         if not isinstance(payload, dict):
             raise ValueError("request body must be an object")
-        return AdminPlatformCredentialRequest.model_validate(payload)
+        return model.model_validate(payload)
     except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, ValueError):
-        raise HTTPException(
-            status_code=422,
-            detail="Invalid platform credential request.",
-        ) from None
+        raise HTTPException(status_code=422, detail=detail) from None
 
 
 @router.get("")
@@ -140,12 +144,17 @@ async def list_admin_model_providers(
 @router.put("/{provider_id}")
 async def upsert_admin_model_provider(
     provider_id: str,
-    payload: AdminProviderRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     service: ModelProviderService = Depends(get_model_provider_service),
 ):
     admin_user_id = int(admin["id"])
     _limit_mutation(admin_user_id)
+    payload = await _parse_json_model(
+        request,
+        AdminProviderRequest,
+        detail="Invalid provider configuration.",
+    )
     try:
         provider = await run_in_threadpool(
             service.upsert_provider,
@@ -183,12 +192,17 @@ async def set_admin_platform_credential(
 @router.post("/{provider_id}/platform-credential/verify")
 async def reverify_admin_platform_credential(
     provider_id: str,
-    payload: AdminProviderActionRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     service: ModelProviderService = Depends(get_model_provider_service),
 ):
     admin_user_id = int(admin["id"])
     _limit_mutation(admin_user_id)
+    payload = await _parse_json_model(
+        request,
+        AdminProviderActionRequest,
+        detail="Invalid provider action request.",
+    )
     try:
         credential = await run_in_threadpool(
             service.reverify_platform_credential,
@@ -206,12 +220,17 @@ async def reverify_admin_platform_credential(
 @router.delete("/{provider_id}/platform-credential")
 async def revoke_admin_platform_credential(
     provider_id: str,
-    payload: AdminProviderActionRequest,
+    request: Request,
     admin: dict = Depends(require_admin),
     service: ModelProviderService = Depends(get_model_provider_service),
 ):
     admin_user_id = int(admin["id"])
     _limit_mutation(admin_user_id)
+    payload = await _parse_json_model(
+        request,
+        AdminProviderActionRequest,
+        detail="Invalid provider action request.",
+    )
     try:
         revoked = await run_in_threadpool(
             service.revoke_platform_credential,
