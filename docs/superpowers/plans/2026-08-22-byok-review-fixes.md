@@ -4,7 +4,7 @@
 
 **Goal:** Close the two independent security/consistency findings on PR #396 and repair its shallow-checkout CI failure.
 
-**Architecture:** Keep proxy enforcement inside the outbound adapter boundary and make proxy eligibility an explicit property of each native adapter. Validate credentials before persistence, but preflight the existing Fernet configuration first; then pass the final verification state into the repository's existing single create transaction. Replace the remote-ref-dependent architecture test with a checkout-depth-independent local Git inventory assertion.
+**Architecture:** Keep proxy enforcement inside the outbound adapter boundary and make proxy eligibility an explicit property of each native adapter. Validate credentials before persistence, but preflight the existing Fernet configuration first; then pass the final verification state into the repository's existing single create transaction. Replace the remote-ref-dependent architecture test with a checkout-depth-independent local Git inventory plus ignored-runtime filesystem assertion.
 
 **Tech Stack:** Python 3.13, FastAPI domain services, httpx/httpcore, SQLite, PostgreSQL/psycopg, cryptography/Fernet, pytest.
 
@@ -289,7 +289,7 @@ git commit -m "fix(byok): persist verified credentials atomically"
 
 **Interfaces:**
 - Consumes: `_REPO_ROOT: pathlib.Path`.
-- Produces: a deterministic assertion that forbidden model-execution files are absent from the tracked and non-ignored local Git inventory.
+- Produces: a deterministic assertion that forbidden model-execution files are absent from both local Git inventory and ignored importable runtime artifacts.
 
 - [ ] **Step 1: Replace the remote-ref diff with a local Git inventory assertion**
 
@@ -322,7 +322,7 @@ def test_key_vault_pr_has_no_model_execution_runtime():
     assert violations == set(), f"key vault scope includes model execution: {violations}"
 ```
 
-The local inventory intentionally excludes ignored `__pycache__` artifacts. Do not remove `subprocess` from the module because later import-isolation tests also use it.
+Add an actual-filesystem helper using `importlib.machinery` suffixes so ignored `.pyc`, `__pycache__`, and native extension artifacts are also rejected. Cover the helper with temporary sourceless-bytecode fixtures. Do not remove `subprocess` from the module because later import-isolation tests also use it.
 
 - [ ] **Step 2: Run the exact CI failure and architecture suite**
 
