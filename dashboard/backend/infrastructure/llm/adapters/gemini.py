@@ -5,7 +5,11 @@ from .base import ProviderAdapter
 
 class GeminiAdapter(ProviderAdapter):
     def __init__(self) -> None:
-        super().__init__("gemini", "/v1beta/models")
+        super().__init__(
+            "gemini",
+            "/v1beta/models",
+            "https://generativelanguage.googleapis.com",
+        )
 
     def build_request(self, base_url: str, secret: str) -> tuple[str, dict[str, str]]:
         return f"{base_url.rstrip('/')}{self.discovery_path}", {

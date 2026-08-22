@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
-import os
 
 from dashboard.backend.domain.model_providers.models import CredentialValidation
 
@@ -18,12 +19,32 @@ from .safe_http import (
 )
 
 
+def _https_origin(url: str) -> tuple[str, int] | None:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    try:
+        host = parsed.hostname.strip().rstrip(".").lower().encode("idna").decode("ascii")
+        port = parsed.port or 443
+    except (UnicodeError, ValueError):
+        return None
+    return host, port
+
+
 @dataclass(frozen=True)
 class ProviderAdapter:
     """One provider's safe discovery endpoint and authentication headers."""
 
     adapter_type: str
     discovery_path: str
+    proxy_origin: str | None = None
 
     def build_request(self, base_url: str, secret: str) -> tuple[str, dict[str, str]]:
         return f"{base_url.rstrip('/')}{self.discovery_path}", {
@@ -51,10 +72,12 @@ class ProviderAdapter:
         return True, models, "API key verified."
 
     def _transport(self, url: str):
-        # Custom OpenAI-compatible origins never inherit the local proxy: they
-        # must remain on the public-address-pinned path.
         proxy = (os.getenv("BROKER_CREDENTIAL_VERIFICATION_PROXY") or "").strip()
-        if proxy and self.adapter_type != "openai_compatible":
+        if (
+            proxy
+            and self.proxy_origin
+            and _https_origin(url) == _https_origin(self.proxy_origin)
+        ):
             return build_explicit_proxy_transport(proxy)
         return build_pinned_transport(url)
 

@@ -147,7 +147,21 @@ def test_private_dns_result_is_rejected_before_network(monkeypatch):
     assert calls
 
 
-def test_explicit_proxy_is_used_only_for_native_provider(monkeypatch):
+@pytest.mark.parametrize(
+    ("adapter_type", "official_url"),
+    [
+        ("openrouter", "https://openrouter.ai/api/v1/key"),
+        ("openai", "https://api.openai.com/v1/models"),
+        ("anthropic", "https://api.anthropic.com/v1/models"),
+        (
+            "gemini",
+            "https://generativelanguage.googleapis.com/v1beta/models",
+        ),
+    ],
+)
+def test_explicit_proxy_is_limited_to_native_official_origins(
+    monkeypatch, adapter_type, official_url
+):
     monkeypatch.setenv("BROKER_CREDENTIAL_VERIFICATION_PROXY", "http://127.0.0.1:7897")
     monkeypatch.setattr(
         adapter_base,
@@ -159,10 +173,29 @@ def test_explicit_proxy_is_used_only_for_native_provider(monkeypatch):
         "build_pinned_transport",
         lambda url: ("pinned", url),
     )
-    assert get_adapter("openrouter")._transport("https://openrouter.ai/api/v1/key") == (
+
+    assert get_adapter(adapter_type)._transport(official_url) == (
         "proxy",
         "http://127.0.0.1:7897",
     )
+    assert get_adapter(adapter_type)._transport(
+        "https://custom-provider.example/v1/models"
+    ) == ("pinned", "https://custom-provider.example/v1/models")
+
+
+def test_openai_compatible_never_uses_explicit_proxy(monkeypatch):
+    monkeypatch.setenv("BROKER_CREDENTIAL_VERIFICATION_PROXY", "http://127.0.0.1:7897")
+    monkeypatch.setattr(
+        adapter_base,
+        "build_explicit_proxy_transport",
+        lambda proxy: ("proxy", proxy),
+    )
+    monkeypatch.setattr(
+        adapter_base,
+        "build_pinned_transport",
+        lambda url: ("pinned", url),
+    )
+
     assert get_adapter("openai_compatible")._transport(
         "https://models.example.com/v1/models"
     ) == ("pinned", "https://models.example.com/v1/models")

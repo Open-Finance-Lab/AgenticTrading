@@ -5,7 +5,7 @@ from .base import ProviderAdapter
 
 class AnthropicAdapter(ProviderAdapter):
     def __init__(self) -> None:
-        super().__init__("anthropic", "/v1/models")
+        super().__init__("anthropic", "/v1/models", "https://api.anthropic.com")
 
     def build_request(self, base_url: str, secret: str) -> tuple[str, dict[str, str]]:
         return f"{base_url.rstrip('/')}{self.discovery_path}", {

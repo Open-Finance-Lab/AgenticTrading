@@ -7,7 +7,7 @@ from .base import ProviderAdapter
 
 class OpenRouterAdapter(ProviderAdapter):
     def __init__(self) -> None:
-        super().__init__("openrouter", "/key")
+        super().__init__("openrouter", "/key", "https://openrouter.ai")
 
     def validate_payload(self, payload: Any) -> tuple[bool, list[str], str]:
         # /key is an authenticated identity endpoint. It intentionally does not
