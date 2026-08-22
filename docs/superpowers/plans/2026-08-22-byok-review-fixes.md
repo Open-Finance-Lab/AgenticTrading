@@ -4,7 +4,7 @@
 
 **Goal:** Close the two independent security/consistency findings on PR #396 and repair its shallow-checkout CI failure.
 
-**Architecture:** Keep proxy enforcement inside the outbound adapter boundary and make proxy eligibility an explicit property of each native adapter. Validate credentials before persistence, but preflight the existing Fernet configuration first; then pass the final verification state into the repository's existing single create transaction. Replace the Git-ref-dependent architecture test with a checkout-depth-independent filesystem assertion.
+**Architecture:** Keep proxy enforcement inside the outbound adapter boundary and make proxy eligibility an explicit property of each native adapter. Validate credentials before persistence, but preflight the existing Fernet configuration first; then pass the final verification state into the repository's existing single create transaction. Replace the remote-ref-dependent architecture test with a checkout-depth-independent local Git inventory assertion.
 
 **Tech Stack:** Python 3.13, FastAPI domain services, httpx/httpcore, SQLite, PostgreSQL/psycopg, cryptography/Fernet, pytest.
 
@@ -289,9 +289,9 @@ git commit -m "fix(byok): persist verified credentials atomically"
 
 **Interfaces:**
 - Consumes: `_REPO_ROOT: pathlib.Path`.
-- Produces: a deterministic assertion that forbidden model-execution paths do not exist in the checkout.
+- Produces: a deterministic assertion that forbidden model-execution files are absent from the tracked and non-ignored local Git inventory.
 
-- [ ] **Step 1: Replace the remote-ref subprocess with a filesystem assertion**
+- [ ] **Step 1: Replace the remote-ref diff with a local Git inventory assertion**
 
 Implement:
 
@@ -302,11 +302,27 @@ def test_key_vault_pr_has_no_model_execution_runtime():
         "dashboard/backend/infrastructure/llm/provider_executor.py",
         "dashboard/backend/infrastructure/llm/routed_client.py",
     )
-    existing = {path for path in forbidden if (_REPO_ROOT / path).exists()}
-    assert existing == set(), f"key vault scope includes model execution: {existing}"
+    files = set(
+        subprocess.check_output(
+            ["git", "ls-files"], cwd=_REPO_ROOT, text=True
+        ).splitlines()
+    )
+    files.update(
+        subprocess.check_output(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=_REPO_ROOT,
+            text=True,
+        ).splitlines()
+    )
+    violations = {
+        path
+        for path in files
+        if any(path == prefix or path.startswith(f"{prefix}/") for prefix in forbidden)
+    }
+    assert violations == set(), f"key vault scope includes model execution: {violations}"
 ```
 
-Do not remove `subprocess` from the module because later import-isolation tests still use it.
+The local inventory intentionally excludes ignored `__pycache__` artifacts. Do not remove `subprocess` from the module because later import-isolation tests also use it.
 
 - [ ] **Step 2: Run the exact CI failure and architecture suite**
 

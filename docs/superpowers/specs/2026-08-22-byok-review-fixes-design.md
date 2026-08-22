@@ -45,7 +45,7 @@ The repository still encrypts the secret during the single create transaction. T
 
 `test_key_vault_pr_has_no_model_execution_runtime` must not execute `git diff origin/main...HEAD`. GitHub Actions uses a shallow checkout where `origin/main` is not guaranteed to exist, so the current test fails after the full suite has otherwise passed.
 
-The replacement is a repository-state architecture assertion that the forbidden model-execution paths do not exist in the checked-out tree. This directly protects the PR's scope on every checkout depth and avoids coupling a unit test to a remote Git ref. PR diff review remains responsible for identifying unrelated changes outside those forbidden paths.
+The replacement is a repository-state architecture assertion over files reported by local `git ls-files` commands: tracked files plus untracked, non-ignored files. This directly protects the PR's scope on every checkout depth, avoids coupling a unit test to a remote Git ref, and ignores generated artifacts such as stale `__pycache__` directories. PR diff review remains responsible for identifying unrelated changes outside those forbidden paths.
 
 ## Tests
 
@@ -54,7 +54,7 @@ The replacement is a repository-state architecture assertion that the forbidden 
 - Missing or invalid encryption configuration prevents both adapter validation and persistence.
 - Creation calls the repository once with the final verification state and default intent.
 - SQLite and Postgres preserve one verified default per user and provider through their existing create transaction.
-- The architecture guard passes without `origin/main` and still fails if a forbidden path exists.
+- The architecture guard passes without `origin/main` and still fails if a forbidden tracked or non-ignored file exists.
 - Existing credential API, adapter, repository parity, and Postgres tests remain green.
 
 ## Non-Goals
