@@ -167,6 +167,9 @@
       meta.className = 'credits-key-meta';
       meta.appendChild(textNode('span', '', providerDisplayName(credential.provider_id)));
       meta.appendChild(textNode('span', 'credits-key-last-four', `•••• ${credential.key_last_four}`));
+      if (credential.verification_message) {
+        meta.appendChild(textNode('span', 'credits-key-verification-message', credential.verification_message));
+      }
       if (credential.is_default) meta.appendChild(textNode('span', 'credits-key-default-badge', 'Default'));
 
       const actions = document.createElement('div');

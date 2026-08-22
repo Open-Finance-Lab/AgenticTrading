@@ -10898,6 +10898,16 @@ body.agent-editor-open {
     letter-spacing: 0.04em;
 }
 
+.credits-key-verification-message {
+    flex-basis: 100%;
+    color: var(--text-muted);
+    line-height: 1.35;
+}
+
+.credits-key-meta > .credits-key-verification-message::before {
+    content: none;
+}
+
 .credits-key-status,
 .credits-key-default-badge {
     display: inline-flex;

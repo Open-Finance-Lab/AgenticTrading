@@ -125,6 +125,8 @@ class UserCredentialPublic(BaseModel):
     label: str
     key_last_four: str = Field(min_length=4, max_length=4)
     status: CredentialStatus
+    # Safe, provider-controlled wording only; never include upstream response bodies.
+    verification_message: str = Field(default="", max_length=240)
     is_default: bool = False
     created_at: str
     updated_at: str

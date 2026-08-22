@@ -164,8 +164,14 @@ def test_create_distinguishes_invalid_and_unavailable(credential_api):
 
     assert invalid.status_code == 201
     assert invalid.json()["credential"]["status"] == "invalid"
+    assert invalid.json()["credential"]["verification_message"] == (
+        "The provider rejected this API key."
+    )
     assert unavailable.status_code == 201
     assert unavailable.json()["credential"]["status"] == "verification_unavailable"
+    assert unavailable.json()["credential"]["verification_message"] == (
+        "Provider verification was unavailable."
+    )
 
 
 def test_multiple_named_keys_and_one_default_per_provider(credential_api):

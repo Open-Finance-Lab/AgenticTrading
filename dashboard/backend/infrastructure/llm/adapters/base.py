@@ -6,12 +6,14 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+import os
 
 from dashboard.backend.domain.model_providers.models import CredentialValidation
 
 from .safe_http import (
     ProviderAddressResolutionError,
     UnsafeProviderAddress,
+    build_explicit_proxy_transport,
     build_pinned_transport,
 )
 
@@ -40,11 +42,27 @@ class ProviderAdapter:
                     result.append(value.strip()[:200])
         return sorted(set(result))[:200]
 
+    def validate_payload(self, payload: Any) -> tuple[bool, list[str], str]:
+        """Validate a successful provider response without exposing its body."""
+
+        models = self.parse_models(payload)
+        if not models:
+            return False, [], "Provider returned an invalid model list."
+        return True, models, "API key verified."
+
+    def _transport(self, url: str):
+        # Custom OpenAI-compatible origins never inherit the local proxy: they
+        # must remain on the public-address-pinned path.
+        proxy = (os.getenv("BROKER_CREDENTIAL_VERIFICATION_PROXY") or "").strip()
+        if proxy and self.adapter_type != "openai_compatible":
+            return build_explicit_proxy_transport(proxy)
+        return build_pinned_transport(url)
+
     def validate(self, base_url: str, secret: str, *, client: httpx.Client | None = None) -> CredentialValidation:
         url, headers = self.build_request(base_url, secret)
         try:
             if client is None:
-                transport = build_pinned_transport(url)
+                transport = self._transport(url)
                 with httpx.Client(
                     timeout=httpx.Timeout(8.0, connect=3.0),
                     follow_redirects=False,
@@ -56,7 +74,7 @@ class ProviderAdapter:
                 response = client.get(url, headers=headers)
         except UnsafeProviderAddress:
             return CredentialValidation(
-                status="invalid",
+                status="verification_unavailable",
                 message="Provider address is not allowed.",
             )
         except ProviderAddressResolutionError:
@@ -64,7 +82,7 @@ class ProviderAdapter:
                 status="verification_unavailable",
                 message="Provider address could not be resolved.",
             )
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except (httpx.TimeoutException, httpx.NetworkError):
             return CredentialValidation(status="verification_unavailable", message="Provider verification timed out or was unavailable.")
         except httpx.HTTPError:
             return CredentialValidation(status="verification_unavailable", message="Provider verification was unavailable.")
@@ -72,21 +90,21 @@ class ProviderAdapter:
         if response.status_code in {401, 403}:
             return CredentialValidation(status="invalid", message="The provider rejected this API key.")
         if 300 <= response.status_code < 400:
-            return CredentialValidation(status="invalid", message="The provider returned an unexpected redirect.")
+            return CredentialValidation(status="verification_unavailable", message="The provider returned an unexpected redirect.")
         if response.status_code == 429 or response.status_code >= 500:
             return CredentialValidation(status="verification_unavailable", message="The provider is temporarily unavailable.")
         if response.status_code >= 400:
             return CredentialValidation(status="invalid", message="The provider rejected this API key or request.")
         if response.status_code != 200:
-            return CredentialValidation(status="invalid", message="Provider returned an unexpected response.")
+            return CredentialValidation(status="verification_unavailable", message="Provider returned an unexpected response.")
         content_type = response.headers.get("content-type", "").lower()
         if content_type and "json" not in content_type:
-            return CredentialValidation(status="invalid", message="Provider returned an invalid model list.")
+            return CredentialValidation(status="verification_unavailable", message="Provider returned an invalid verification response.")
         try:
             payload = response.json()
         except ValueError:
-            return CredentialValidation(status="invalid", message="Provider returned an invalid model list.")
-        models = self.parse_models(payload)
-        if not models:
-            return CredentialValidation(status="invalid", message="Provider returned an invalid model list.")
-        return CredentialValidation(status="verified", message="API key verified.", models=models)
+            return CredentialValidation(status="verification_unavailable", message="Provider returned an invalid verification response.")
+        valid, models, message = self.validate_payload(payload)
+        if not valid:
+            return CredentialValidation(status="verification_unavailable", message=message)
+        return CredentialValidation(status="verified", message=message, models=models)

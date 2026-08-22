@@ -8,6 +8,7 @@ import pytest
 
 from dashboard.backend.infrastructure.llm.adapters.safe_http import (
     build_pinned_transport,
+    build_explicit_proxy_transport,
     PinnedNetworkBackend,
     ResolvedAddress,
     UnsafeProviderAddress,
@@ -141,3 +142,27 @@ def test_pinned_transport_does_not_use_environment_proxy(monkeypatch):
         assert isinstance(transport._transport._pool._network_backend, PinnedNetworkBackend)
     finally:
         transport.close()
+
+
+def test_explicit_proxy_transport_is_opt_in_and_does_not_read_environment(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:8080")
+    transport = build_explicit_proxy_transport("http://127.0.0.1:7897")
+    try:
+        assert type(transport).__name__ == "HTTPTransport"
+        assert transport._pool._proxy_url is not None
+    finally:
+        transport.close()
+
+
+@pytest.mark.parametrize(
+    "proxy_url",
+    [
+        "",
+        "ftp://127.0.0.1:7897",
+        "http://user:pass@127.0.0.1:7897",
+        "http://127.0.0.1:7897/?token=secret",
+    ],
+)
+def test_explicit_proxy_transport_rejects_unsafe_proxy_url(proxy_url):
+    with pytest.raises(UnsafeProviderAddress):
+        build_explicit_proxy_transport(proxy_url)

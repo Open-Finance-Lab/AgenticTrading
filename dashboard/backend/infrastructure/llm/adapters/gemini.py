@@ -1,4 +1,4 @@
-"""Google Gemini API adapter."""
+"""Google Gemini authenticated model-discovery adapter."""
 
 from .base import ProviderAdapter
 

@@ -50,6 +50,7 @@ CREATE TABLE IF NOT EXISTS user_model_credentials (
     api_key_enc TEXT,
     key_last_four TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'verification_unavailable',
+    verification_message TEXT NOT NULL DEFAULT '',
     is_default BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
@@ -117,12 +118,21 @@ def _public_provider(row: dict[str, Any]) -> dict[str, Any]:
 
 def _public_credential(row: dict[str, Any]) -> dict[str, Any]:
     data = dict(row)
+    verification_message = str(data.get("verification_message") or "").strip()
+    if not verification_message:
+        verification_message = {
+            "verified": "API key verified.",
+            "invalid": "The provider rejected this API key.",
+            "verification_unavailable": "Provider verification was unavailable.",
+            "revoked": "Credential revoked.",
+        }.get(data["status"], "")
     return {
         "credential_id": data["credential_id"],
         "provider_id": data["provider_id"],
         "label": data["label"],
         "key_last_four": data["key_last_four"],
         "status": data["status"],
+        "verification_message": verification_message,
         "is_default": bool(data["is_default"]),
         "created_at": data["created_at"],
         "updated_at": data["updated_at"],
@@ -147,6 +157,9 @@ class PostgresModelProviderStore:
             with conn.cursor() as cur:
                 cur.execute(MODEL_PROVIDERS_POSTGRES_DDL)
                 cur.execute("ALTER TABLE user_model_credentials ALTER COLUMN api_key_enc DROP NOT NULL")
+                cur.execute(
+                    "ALTER TABLE user_model_credentials ADD COLUMN IF NOT EXISTS verification_message TEXT NOT NULL DEFAULT ''"
+                )
                 cur.execute("ALTER TABLE platform_model_credentials ALTER COLUMN api_key_enc DROP NOT NULL")
                 cur.execute(
                     "ALTER TABLE model_provider_admin_operations ADD COLUMN IF NOT EXISTS request_digest TEXT NOT NULL DEFAULT ''"
@@ -529,6 +542,7 @@ class PostgresModelProviderStore:
         secret: str,
         key_last_four: str | None = None,
         status: str = "verification_unavailable",
+        verification_message: str | None = None,
         set_default: bool = False,
         last_verified_at: str | None = None,
     ) -> dict[str, Any]:
@@ -552,9 +566,9 @@ class PostgresModelProviderStore:
                         """
                         INSERT INTO user_model_credentials (
                             credential_id, user_id, provider_id, label, api_key_enc,
-                            key_last_four, status, is_default, created_at,
-                            updated_at, last_verified_at, revoked_at
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            key_last_four, status, verification_message, is_default,
+                            created_at, updated_at, last_verified_at, revoked_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         RETURNING *
                         """,
                         (
@@ -565,6 +579,7 @@ class PostgresModelProviderStore:
                             encrypted,
                             (key_last_four or secret[-4:])[-4:],
                             status,
+                            (verification_message or "").strip(),
                             bool(set_default and status == "verified"),
                             now,
                             now,
@@ -626,6 +641,7 @@ class PostgresModelProviderStore:
         *,
         status: str,
         last_verified_at: str | None = None,
+        verification_message: str | None = None,
     ) -> dict[str, Any]:
         if status not in {"verified", "invalid", "verification_unavailable", "revoked"}:
             raise ValueError("invalid credential status")
@@ -646,6 +662,7 @@ class PostgresModelProviderStore:
                     UPDATE user_model_credentials
                     SET api_key_enc = CASE WHEN %s = 'revoked' THEN NULL ELSE api_key_enc END,
                         status = %s,
+                        verification_message = COALESCE(%s, CASE WHEN %s = 'revoked' THEN 'Credential revoked.' ELSE verification_message END),
                         is_default = CASE WHEN %s <> 'verified' THEN FALSE ELSE is_default END,
                         updated_at = %s,
                         last_verified_at = COALESCE(%s, last_verified_at),
@@ -653,7 +670,7 @@ class PostgresModelProviderStore:
                     WHERE credential_id = %s
                     RETURNING *
                     """,
-                    (status, status, status, now, last_verified_at, status, now, str(credential_id)),
+                    (status, status, verification_message, status, status, now, last_verified_at, status, now, str(credential_id)),
                 )
                 result = cur.fetchone()
         return _public_credential(result)

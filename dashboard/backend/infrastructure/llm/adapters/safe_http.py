@@ -209,3 +209,25 @@ def build_pinned_transport(url: str) -> PinnedHTTPTransport:
         raise UnsafeProviderAddress("provider URL has an invalid port") from exc
     addresses = resolve_public_addresses(parsed.hostname, port)
     return PinnedHTTPTransport(host=parsed.hostname, port=port, addresses=addresses)
+
+
+def build_explicit_proxy_transport(proxy_url: str) -> httpx.HTTPTransport:
+    """Build a proxy transport only when the operator explicitly opts in.
+
+    The normal verification path remains IP-pinned. This narrow escape hatch is
+    for development environments whose DNS is supplied by a local proxy; callers
+    must decide which provider adapters are allowed to use it.
+    """
+
+    parsed = urlsplit(str(proxy_url or "").strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise UnsafeProviderAddress("provider verification proxy must be an HTTP URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise UnsafeProviderAddress(
+            "provider verification proxy must not contain credentials or query data"
+        )
+    try:
+        parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError as exc:
+        raise UnsafeProviderAddress("provider verification proxy has an invalid port") from exc
+    return httpx.HTTPTransport(proxy=parsed.geturl(), trust_env=False)

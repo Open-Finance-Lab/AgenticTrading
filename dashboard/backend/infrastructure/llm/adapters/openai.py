@@ -1,4 +1,4 @@
-"""Native OpenAI model-discovery adapter."""
+"""Native OpenAI authenticated model-discovery adapter."""
 
 from .base import ProviderAdapter
 

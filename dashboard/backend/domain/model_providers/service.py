@@ -46,6 +46,37 @@ def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
+_SAFE_VERIFICATION_MESSAGES = frozenset(
+    {
+        "API key verified.",
+        "The provider rejected this API key.",
+        "The provider rejected this API key or request.",
+        "Provider address is not allowed.",
+        "Provider address could not be resolved.",
+        "Provider verification timed out or was unavailable.",
+        "Provider verification was unavailable.",
+        "The provider returned an unexpected redirect.",
+        "The provider is temporarily unavailable.",
+        "Provider returned an unexpected response.",
+        "Provider returned an invalid verification response.",
+        "Provider returned an invalid model list.",
+    }
+)
+
+
+def _safe_verification_message(validation: CredentialValidation) -> str:
+    """Persist only fixed, non-sensitive adapter wording."""
+
+    if validation.message in _SAFE_VERIFICATION_MESSAGES:
+        return validation.message
+    return {
+        "verified": "API key verified.",
+        "invalid": "The provider rejected this API key.",
+        "verification_unavailable": "Provider verification was unavailable.",
+        "revoked": "Credential revoked.",
+    }.get(validation.status, "Provider verification was unavailable.")
+
+
 class ModelProviderService:
     """Apply provider allowlisting, verification, and credential lifecycle rules."""
 
@@ -504,6 +535,7 @@ class ModelProviderService:
             user_id,
             credential["credential_id"],
             status=validation.status,
+            verification_message=_safe_verification_message(validation),
             last_verified_at=(
                 _utcnow_iso() if validation.status == "verified" else None
             ),

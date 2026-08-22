@@ -73,6 +73,7 @@ class ModelProviderStore:
                 api_key_enc TEXT,
                 key_last_four TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'verification_unavailable',
+                verification_message TEXT NOT NULL DEFAULT '',
                 is_default INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -116,6 +117,7 @@ class ModelProviderStore:
             );
             """
         )
+        self._ensure_user_credential_columns(conn)
         self._ensure_admin_operation_columns(conn)
         now = _utcnow_iso()
         for item in SEEDED_PROVIDERS:
@@ -140,6 +142,19 @@ class ModelProviderStore:
             )
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _ensure_user_credential_columns(conn: sqlite3.Connection) -> None:
+        columns = {
+            row[1]
+            for row in conn.execute(
+                "PRAGMA table_info(user_model_credentials)"
+            ).fetchall()
+        }
+        if "verification_message" not in columns:
+            conn.execute(
+                "ALTER TABLE user_model_credentials ADD COLUMN verification_message TEXT NOT NULL DEFAULT ''"
+            )
 
     @staticmethod
     def _ensure_admin_operation_columns(conn: sqlite3.Connection) -> None:
@@ -242,6 +257,7 @@ class ModelProviderStore:
                     api_key_enc TEXT,
                     key_last_four TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'verification_unavailable',
+                    verification_message TEXT NOT NULL DEFAULT '',
                     is_default INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
@@ -266,12 +282,12 @@ class ModelProviderStore:
                 """
                 INSERT INTO user_model_credentials (
                     credential_id, user_id, provider_id, label, api_key_enc,
-                    key_last_four, status, is_default, created_at, updated_at,
+                    key_last_four, status, verification_message, is_default, created_at, updated_at,
                     last_verified_at, revoked_at
                 )
                 SELECT credential_id, user_id, provider_id, label,
                        CASE WHEN status = 'revoked' THEN NULL ELSE api_key_enc END,
-                       key_last_four, status, is_default, created_at, updated_at,
+                       key_last_four, status, '', is_default, created_at, updated_at,
                        last_verified_at, revoked_at
                 FROM user_model_credentials_legacy
                 """
@@ -301,12 +317,21 @@ class ModelProviderStore:
     @staticmethod
     def _public_credential(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
         data = dict(row)
+        verification_message = str(data.get("verification_message") or "").strip()
+        if not verification_message:
+            verification_message = {
+                "verified": "API key verified.",
+                "invalid": "The provider rejected this API key.",
+                "verification_unavailable": "Provider verification was unavailable.",
+                "revoked": "Credential revoked.",
+            }.get(data["status"], "")
         return {
             "credential_id": data["credential_id"],
             "provider_id": data["provider_id"],
             "label": data["label"],
             "key_last_four": data["key_last_four"],
             "status": data["status"],
+            "verification_message": verification_message,
             "is_default": bool(data["is_default"]),
             "created_at": data["created_at"],
             "updated_at": data["updated_at"],
@@ -659,6 +684,7 @@ class ModelProviderStore:
         secret: str,
         key_last_four: str | None = None,
         status: str = "verification_unavailable",
+        verification_message: str | None = None,
         set_default: bool = False,
         last_verified_at: str | None = None,
     ) -> dict[str, Any]:
@@ -682,9 +708,9 @@ class ModelProviderStore:
                 """
                 INSERT INTO user_model_credentials (
                     credential_id, user_id, provider_id, label, api_key_enc,
-                    key_last_four, status, is_default, created_at, updated_at,
-                    last_verified_at, revoked_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    key_last_four, status, verification_message, is_default,
+                    created_at, updated_at, last_verified_at, revoked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     str(credential_id),
@@ -694,6 +720,7 @@ class ModelProviderStore:
                     _encrypt(secret),
                     last_four[-4:],
                     status,
+                    (verification_message or "").strip(),
                     int(bool(set_default and status == "verified")),
                     now,
                     now,
@@ -759,6 +786,7 @@ class ModelProviderStore:
         *,
         status: str,
         last_verified_at: str | None = None,
+        verification_message: str | None = None,
     ) -> dict[str, Any]:
         if status not in {"verified", "invalid", "verification_unavailable", "revoked"}:
             raise ValueError("invalid credential status")
@@ -775,8 +803,8 @@ class ModelProviderStore:
                 raise CredentialOwnershipError("credential does not belong to this user")
             now = _utcnow_iso()
             conn.execute(
-                "UPDATE user_model_credentials SET api_key_enc = CASE WHEN ? = 'revoked' THEN NULL ELSE api_key_enc END, status = ?, is_default = CASE WHEN ? <> 'verified' THEN 0 ELSE is_default END, updated_at = ?, last_verified_at = COALESCE(?, last_verified_at), revoked_at = CASE WHEN ? = 'revoked' THEN ? ELSE revoked_at END WHERE credential_id = ?",
-                (status, status, status, now, last_verified_at, status, now, str(credential_id)),
+                "UPDATE user_model_credentials SET api_key_enc = CASE WHEN ? = 'revoked' THEN NULL ELSE api_key_enc END, status = ?, verification_message = COALESCE(?, CASE WHEN ? = 'revoked' THEN 'Credential revoked.' ELSE verification_message END), is_default = CASE WHEN ? <> 'verified' THEN 0 ELSE is_default END, updated_at = ?, last_verified_at = COALESCE(?, last_verified_at), revoked_at = CASE WHEN ? = 'revoked' THEN ? ELSE revoked_at END WHERE credential_id = ?",
+                (status, status, verification_message, status, status, now, last_verified_at, status, now, str(credential_id)),
             )
             conn.commit()
             result = conn.execute(

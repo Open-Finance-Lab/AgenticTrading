@@ -1,4 +1,4 @@
-"""Anthropic Messages API adapter."""
+"""Anthropic authenticated model-discovery adapter."""
 
 from .base import ProviderAdapter
 

@@ -115,6 +115,29 @@ def test_create_requires_configured_encryption_key(tmp_path, monkeypatch):
     assert store.list_user_credentials(7) == []
 
 
+def test_verification_message_is_fixed_and_never_persists_adapter_details(tmp_path):
+    secret = "sk-or-fake-service-abcd"
+    adapter = FakeAdapter(
+        CredentialValidation(
+            status="invalid",
+            message=f"upstream body leaked {secret}",
+        )
+    )
+    service, store = _service(tmp_path, adapter)
+
+    created = service.create_credential(7, _request())
+
+    assert created.verification_message == "The provider rejected this API key."
+    assert secret not in created.model_dump_json()
+    with sqlite3.connect(store.db_path) as conn:
+        stored = conn.execute(
+            "SELECT verification_message FROM user_model_credentials WHERE credential_id = ?",
+            (str(created.credential_id),),
+        ).fetchone()[0]
+    assert stored == "The provider rejected this API key."
+    assert secret not in stored
+
+
 def test_reverify_updates_status_and_can_then_become_default(tmp_path):
     adapter = FakeAdapter(
         _validation("verification_unavailable"),
