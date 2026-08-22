@@ -105,14 +105,58 @@ def test_create_preserves_non_verified_outcome_without_default(tmp_path, status)
 
 
 def test_create_requires_configured_encryption_key(tmp_path, monkeypatch):
-    service, store = _service(tmp_path, FakeAdapter(_validation("verified")))
+    adapter = FakeAdapter(_validation("verified"))
+    service, store = _service(tmp_path, adapter)
     monkeypatch.delenv("BROKER_TOKEN_ENCRYPTION_KEY", raising=False)
     monkeypatch.setattr(broker_repository, "_fernet_instance", None)
 
     with pytest.raises(RuntimeError, match="BROKER_TOKEN_ENCRYPTION_KEY is not set"):
         service.create_credential(7, _request())
 
+    assert adapter.calls == []
     assert store.list_user_credentials(7) == []
+
+
+def test_create_rejects_invalid_encryption_key_before_verification(
+    tmp_path, monkeypatch
+):
+    adapter = FakeAdapter(_validation("verified"))
+    service, store = _service(tmp_path, adapter)
+    monkeypatch.setenv("BROKER_TOKEN_ENCRYPTION_KEY", "not-a-fernet-key")
+    monkeypatch.setattr(broker_repository, "_fernet_instance", None)
+
+    with pytest.raises(RuntimeError, match="is set but is not a valid Fernet key"):
+        service.create_credential(7, _request())
+
+    assert adapter.calls == []
+    assert store.list_user_credentials(7) == []
+
+
+def test_create_persists_final_state_without_follow_up_mutations(tmp_path, monkeypatch):
+    adapter = FakeAdapter(_validation("verified"))
+    service, store = _service(tmp_path, adapter)
+    original_create = store.create_user_credential
+    create_calls = []
+
+    def capture_create(**kwargs):
+        create_calls.append(kwargs)
+        return original_create(**kwargs)
+
+    def unexpected_mutation(*_args, **_kwargs):
+        raise AssertionError("credential creation must not perform a second write")
+
+    monkeypatch.setattr(store, "create_user_credential", capture_create)
+    monkeypatch.setattr(store, "set_user_credential_status", unexpected_mutation)
+    monkeypatch.setattr(store, "set_default_user_credential", unexpected_mutation)
+
+    created = service.create_credential(7, _request(set_default=True))
+
+    assert created.status == "verified"
+    assert created.is_default is True
+    assert len(create_calls) == 1
+    assert create_calls[0]["status"] == "verified"
+    assert create_calls[0]["set_default"] is True
+    assert create_calls[0]["last_verified_at"] is not None
 
 
 def test_verification_message_is_fixed_and_never_persists_adapter_details(tmp_path):

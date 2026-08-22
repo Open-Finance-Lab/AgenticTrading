@@ -20,7 +20,11 @@ from .models import (
     UserCredentialCreate,
     UserCredentialPublic,
 )
-from .repository import ModelProviderStore, model_provider_store
+from .repository import (
+    ModelProviderStore,
+    ensure_credential_encryption_ready,
+    model_provider_store,
+)
 from .repository_common import (
     CredentialConflictError,
     ProviderNotFoundError,
@@ -226,7 +230,7 @@ class ModelProviderService:
             if not credential:
                 raise ProviderNotFoundError("platform credential not found")
             return AdminPlatformCredentialPublic.model_validate(credential)
-        validation = self._validate_platform_credential(provider, secret)
+        validation = self._validate_credential(provider, secret)
         audit = {
             "actor_user_id": admin_user_id,
             "operation": "set_platform_credential",
@@ -297,7 +301,7 @@ class ModelProviderService:
             if not credential:
                 raise ProviderNotFoundError("platform credential not found")
             return AdminPlatformCredentialPublic.model_validate(credential)
-        validation = self._validate_platform_credential(provider, secret)
+        validation = self._validate_credential(provider, secret)
         audit = {
             "actor_user_id": admin_user_id,
             "operation": "reverify_platform_credential",
@@ -404,7 +408,7 @@ class ModelProviderService:
             raise CredentialConflictError("idempotency key already used for different input")
         return existing
 
-    def _validate_platform_credential(
+    def _validate_credential(
         self, provider: dict[str, Any], secret: str
     ) -> CredentialValidation:
         adapter = self.adapter_resolver(provider["adapter_type"])
@@ -436,19 +440,21 @@ class ModelProviderService:
     ) -> UserCredentialPublic:
         provider = self._get_byok_provider(request.provider_id)
         secret = request.api_key.get_secret_value()
+        ensure_credential_encryption_ready()
+        validation = self._validate_credential(provider, secret)
         created = self.store.create_user_credential(
             user_id=user_id,
             provider_id=provider["provider_id"],
             label=request.label,
             secret=secret,
-        )
-        return self._verify_and_update(
-            user_id=user_id,
-            credential=created,
-            provider=provider,
-            secret=secret,
+            status=validation.status,
+            verification_message=_safe_verification_message(validation),
             set_default=request.set_default,
+            last_verified_at=(
+                _utcnow_iso() if validation.status == "verified" else None
+            ),
         )
+        return UserCredentialPublic.model_validate(created)
 
     def list_credentials(
         self,
@@ -517,20 +523,7 @@ class ModelProviderService:
         secret: str,
         set_default: bool,
     ) -> UserCredentialPublic:
-        adapter = self.adapter_resolver(provider["adapter_type"])
-        try:
-            validation = adapter.validate(
-                provider["approved_base_url"],
-                secret,
-                client=self.http_client,
-            )
-        except Exception:
-            # Adapter failures are deliberately collapsed without including the
-            # exception, request headers, URL query, or credential in output.
-            validation = CredentialValidation(
-                status="verification_unavailable",
-                message="Provider verification was unavailable.",
-            )
+        validation = self._validate_credential(provider, secret)
         updated = self.store.set_user_credential_status(
             user_id,
             credential["credential_id"],

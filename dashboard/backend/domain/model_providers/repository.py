@@ -11,7 +11,7 @@ from typing import Any
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.domain.agents.repository import _utcnow_iso
-from dashboard.backend.domain.brokers.repository import _decrypt, _encrypt
+from dashboard.backend.domain.brokers.repository import _decrypt, _encrypt, _get_fernet
 
 from .repository_common import (
     CredentialConflictError,
@@ -25,6 +25,12 @@ from .repository_common import (
     validate_approved_origin,
 )
 from .models import ProviderRecord
+
+
+def ensure_credential_encryption_ready() -> None:
+    """Fail before verification when encrypted credential storage is unavailable."""
+
+    _get_fernet()
 
 
 class ModelProviderStore:
