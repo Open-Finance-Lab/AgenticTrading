@@ -14,6 +14,7 @@ across layers.
 
 import ast
 import importlib
+import importlib.machinery
 import os
 import subprocess
 import sys
@@ -25,6 +26,18 @@ from fastapi.routing import APIRoute
 _BACKEND = Path(__file__).resolve().parents[1]
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPTS = _REPO_ROOT / "dashboard" / "scripts"
+
+_MODEL_EXECUTION_TREE = "dashboard/backend/domain/model_execution"
+_MODEL_EXECUTION_MODULE_STEMS = (
+    _MODEL_EXECUTION_TREE,
+    "dashboard/backend/infrastructure/llm/provider_executor",
+    "dashboard/backend/infrastructure/llm/routed_client",
+)
+_IMPORTABLE_SUFFIXES = tuple(
+    importlib.machinery.SOURCE_SUFFIXES
+    + importlib.machinery.BYTECODE_SUFFIXES
+    + importlib.machinery.EXTENSION_SUFFIXES
+)
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +51,26 @@ def _production_py_files():
         if "tests" in parts or "__pycache__" in parts:
             continue
         yield path
+
+
+def _ignored_model_execution_runtime_files(repo_root: Path) -> set[str]:
+    """Find importable artifacts that Git inventory intentionally ignores."""
+
+    violations: set[str] = set()
+    tree = repo_root / _MODEL_EXECUTION_TREE
+    if tree.is_dir():
+        violations.update(
+            str(path.relative_to(repo_root))
+            for path in tree.rglob("*")
+            if path.is_file() and path.name.endswith(_IMPORTABLE_SUFFIXES)
+        )
+    for stem_value in _MODEL_EXECUTION_MODULE_STEMS:
+        stem = repo_root / stem_value
+        for suffix in _IMPORTABLE_SUFFIXES:
+            candidate = stem.with_name(f"{stem.name}{suffix}")
+            if candidate.is_file():
+                violations.add(str(candidate.relative_to(repo_root)))
+    return violations
 
 
 def _imported_modules(path: Path):
@@ -183,6 +216,49 @@ def test_every_route_registered_exactly_once():
     pairs = _app_route_pairs()
     dupes = {p for p in pairs if pairs.count(p) > 1}
     assert dupes == set(), f"routes registered more than once: {dupes}"
+
+
+def test_key_vault_pr_has_no_model_execution_runtime():
+    files = set(
+        subprocess.check_output(
+            ["git", "ls-files"], cwd=_REPO_ROOT, text=True
+        ).splitlines()
+    )
+    files.update(
+        subprocess.check_output(
+            ["git", "ls-files", "--others", "--exclude-standard"],
+            cwd=_REPO_ROOT,
+            text=True,
+        ).splitlines()
+    )
+    violations = {
+        path
+        for path in files
+        if path == _MODEL_EXECUTION_TREE
+        or path.startswith(f"{_MODEL_EXECUTION_TREE}/")
+        or any(
+            path == f"{stem}{suffix}"
+            for stem in _MODEL_EXECUTION_MODULE_STEMS
+            for suffix in _IMPORTABLE_SUFFIXES
+        )
+    }
+    violations.update(_ignored_model_execution_runtime_files(_REPO_ROOT))
+    assert violations == set(), f"key vault scope includes model execution: {violations}"
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "dashboard/backend/domain/model_execution/__pycache__/service.cpython-313.pyc",
+        "dashboard/backend/infrastructure/llm/provider_executor.pyc",
+    ],
+)
+def test_key_vault_scope_guard_detects_ignored_bytecode(tmp_path, relative_path):
+    artifact = tmp_path / relative_path
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"sourceless bytecode placeholder")
+
+    assert relative_path in _ignored_model_execution_runtime_files(tmp_path)
 
 
 def test_paper_routes_stay_outside_api_prefix():

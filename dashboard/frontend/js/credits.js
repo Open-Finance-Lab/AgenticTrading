@@ -18,6 +18,9 @@
     selectedAdminOrder: null,
     orderPollToken: 0,
     balanceMicro: 0,
+    activeTab: 'overview',
+    providers: [],
+    credentials: [],
   };
 
   function element(id) {
@@ -80,6 +83,209 @@
     return node;
   }
 
+  function appendIcon(button, iconId) {
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', `#${iconId}`);
+    icon.appendChild(use);
+    button.appendChild(icon);
+  }
+
+  function setCreditsTab(tab) {
+    const allowed = new Set(['overview', 'top-up', 'api-keys', 'activity']);
+    const next = allowed.has(tab) ? tab : 'overview';
+    state.activeTab = next;
+    document.querySelectorAll('[data-credits-tab]').forEach((button) => {
+      const selected = button.dataset.creditsTab === next;
+      button.classList.toggle('is-active', selected);
+      button.setAttribute('aria-selected', selected ? 'true' : 'false');
+      button.tabIndex = selected ? 0 : -1;
+    });
+    document.querySelectorAll('[data-credits-panel]').forEach((panel) => {
+      panel.hidden = panel.dataset.creditsPanel !== next;
+    });
+    if (next === 'api-keys' && state.user) loadApiKeys();
+  }
+
+  function renderProviderOptions() {
+    const select = element('creditsApiKeyProvider');
+    if (!select) return;
+    const current = select.value;
+    clearChildren(select);
+    if (!state.providers.length) {
+      select.appendChild(textNode('option', '', 'No approved providers available'));
+      select.value = '';
+      select.disabled = true;
+      return;
+    }
+    select.disabled = false;
+    state.providers.forEach((provider) => {
+      const option = document.createElement('option');
+      option.value = provider.provider_id;
+      option.textContent = provider.display_name;
+      select.appendChild(option);
+    });
+    if (state.providers.some((provider) => provider.provider_id === current)) {
+      select.value = current;
+    }
+  }
+
+  function providerDisplayName(providerId) {
+    return state.providers.find((provider) => provider.provider_id === providerId)?.display_name || providerId;
+  }
+
+  function credentialStatusLabel(status) {
+    if (status === 'verified') return 'Verified';
+    if (status === 'invalid') return 'Invalid';
+    if (status === 'revoked') return 'Revoked';
+    return 'Verification unavailable';
+  }
+
+  function renderApiKeys(items) {
+    const list = element('creditsApiKeyList');
+    const count = element('creditsApiKeyCount');
+    if (!list) return;
+    state.credentials = Array.isArray(items) ? items : [];
+    if (count) count.textContent = `${state.credentials.length} saved`;
+    clearChildren(list);
+    if (!state.credentials.length) {
+      list.appendChild(textNode('p', 'credits-muted', 'No API keys saved yet.'));
+      return;
+    }
+    state.credentials.forEach((credential) => {
+      const row = document.createElement('article');
+      row.className = 'credits-key-row';
+
+      const head = document.createElement('div');
+      head.className = 'credits-key-row-head';
+      head.appendChild(textNode('strong', 'credits-key-name', credential.label));
+      const status = textNode('span', `credits-key-status is-${credential.status}`, credentialStatusLabel(credential.status));
+      head.appendChild(status);
+
+      const meta = document.createElement('div');
+      meta.className = 'credits-key-meta';
+      meta.appendChild(textNode('span', '', providerDisplayName(credential.provider_id)));
+      meta.appendChild(textNode('span', 'credits-key-last-four', `•••• ${credential.key_last_four}`));
+      if (credential.verification_message) {
+        meta.appendChild(textNode('span', 'credits-key-verification-message', credential.verification_message));
+      }
+      if (credential.is_default) meta.appendChild(textNode('span', 'credits-key-default-badge', 'Default'));
+
+      const actions = document.createElement('div');
+      actions.className = 'credits-key-actions';
+      if (credential.status !== 'revoked') {
+        const verify = textNode('button', 'credits-key-action', 'Reverify');
+        verify.type = 'button';
+        verify.title = 'Verify this key again';
+        appendIcon(verify, 'icon-refresh');
+        verify.addEventListener('click', () => mutateCredential(credential, 'verify'));
+        actions.appendChild(verify);
+        if (credential.status === 'verified' && !credential.is_default) {
+          const makeDefault = textNode('button', 'credits-key-action', 'Set default');
+          makeDefault.type = 'button';
+          makeDefault.title = 'Set as the verified default';
+          appendIcon(makeDefault, 'icon-badge-check');
+          makeDefault.addEventListener('click', () => mutateCredential(credential, 'default'));
+          actions.appendChild(makeDefault);
+        }
+        const revoke = textNode('button', 'credits-key-action is-danger', 'Revoke');
+        revoke.type = 'button';
+        revoke.title = 'Revoke this key';
+        appendIcon(revoke, 'icon-x');
+        revoke.addEventListener('click', () => {
+          if (window.confirm(`Revoke “${credential.label}”?`)) mutateCredential(credential, 'revoke');
+        });
+        actions.appendChild(revoke);
+      }
+
+      row.append(head, meta, actions);
+      list.appendChild(row);
+    });
+  }
+
+  async function loadApiKeys() {
+    if (!state.user) return;
+    const [providersResult, credentialsResult] = await Promise.allSettled([
+      apiRequest('/api/credits/model-providers'),
+      apiRequest('/api/credits/api-keys'),
+    ]);
+    if (providersResult.status === 'fulfilled') {
+      state.providers = providersResult.value.providers || [];
+      renderProviderOptions();
+    } else {
+      state.providers = [];
+      renderProviderOptions();
+      setStatus(element('creditsApiKeyStatus'), 'Approved providers could not be loaded.', 'error');
+    }
+    if (credentialsResult.status === 'fulfilled') {
+      renderApiKeys(credentialsResult.value.items || []);
+    } else {
+      renderApiKeys([]);
+      setStatus(element('creditsApiKeyStatus'), 'Saved API keys could not be loaded.', 'error');
+    }
+  }
+
+  async function saveApiKey(event) {
+    event.preventDefault();
+    const provider = element('creditsApiKeyProvider')?.value;
+    const labelInput = element('creditsApiKeyLabel');
+    const secretInput = element('creditsApiKeySecret');
+    const defaultInput = element('creditsApiKeyDefault');
+    const save = element('creditsApiKeySave');
+    const secret = secretInput?.value || '';
+    if (!provider || !labelInput?.value.trim() || !secret) {
+      setStatus(element('creditsApiKeyStatus'), 'Choose a provider, name the key, and enter the key once.', 'error');
+      if (secretInput) secretInput.value = '';
+      return;
+    }
+    if (save) save.disabled = true;
+    setStatus(element('creditsApiKeyStatus'), 'Saving and verifying…', 'pending');
+    try {
+      const data = await apiRequest('/api/credits/api-keys', {
+        method: 'POST',
+        body: JSON.stringify({
+          provider_id: provider,
+          label: labelInput.value.trim(),
+          api_key: secret,
+          set_default: Boolean(defaultInput?.checked),
+        }),
+      });
+      const status = data.credential?.status;
+      setStatus(
+        element('creditsApiKeyStatus'),
+        status === 'verified' ? 'Key saved and verified.' : 'Key saved. Verification can be retried from the list.',
+        status === 'verified' ? 'success' : 'pending',
+      );
+      labelInput.value = '';
+      if (defaultInput) defaultInput.checked = false;
+      await loadApiKeys();
+    } catch (error) {
+      setStatus(element('creditsApiKeyStatus'), error.message || 'The key could not be saved.', 'error');
+    } finally {
+      // The full secret exists only for this submit lifecycle and is never put
+      // in state, browser storage, URL parameters, or a rendered node.
+      if (secretInput) secretInput.value = '';
+      if (save) save.disabled = false;
+    }
+  }
+
+  async function mutateCredential(credential, action) {
+    const endpoint = action === 'verify'
+      ? `/api/credits/api-keys/${encodeURIComponent(credential.credential_id)}/verify`
+      : action === 'default'
+        ? `/api/credits/api-keys/${encodeURIComponent(credential.credential_id)}/default`
+        : `/api/credits/api-keys/${encodeURIComponent(credential.credential_id)}`;
+    try {
+      setStatus(element('creditsApiKeyStatus'), action === 'revoke' ? 'Revoking key…' : 'Updating key…', 'pending');
+      await apiRequest(endpoint, { method: action === 'revoke' ? 'DELETE' : 'POST' });
+      setStatus(element('creditsApiKeyStatus'), action === 'revoke' ? 'Key revoked.' : 'Key updated.', 'success');
+      await loadApiKeys();
+    } catch (error) {
+      setStatus(element('creditsApiKeyStatus'), error.message || 'The key could not be updated.', 'error');
+    }
+  }
+
   function syncAuth(user) {
     const wasSignedIn = Boolean(state.user);
     state.user = user || null;
@@ -91,6 +297,12 @@
     if (!signedIn) {
       state.orderPollToken += 1;
       state.pendingPurchase = null;
+      state.providers = [];
+      state.credentials = [];
+      const secretInput = element('creditsApiKeySecret');
+      if (secretInput) secretInput.value = '';
+      renderProviderOptions();
+      renderApiKeys([]);
     } else if (!wasSignedIn && state.initialized && document.documentElement.dataset.navPage === 'credits') {
       loadBalanceAndLedger();
       loadAdminOrders();
@@ -425,6 +637,10 @@
     element('creditsRefundClose')?.addEventListener('click', closeRefundDialog);
     element('creditsRefundCancel')?.addEventListener('click', closeRefundDialog);
     element('creditsRefundForm')?.addEventListener('submit', submitRefund);
+    document.querySelectorAll('[data-credits-tab]').forEach((button) => {
+      button.addEventListener('click', () => setCreditsTab(button.dataset.creditsTab));
+    });
+    element('creditsApiKeyForm')?.addEventListener('submit', saveApiKey);
   }
 
   async function onEnter() {
@@ -436,6 +652,7 @@
     if (!state.user) return;
     setStatus(element('creditsAccountStatus'), 'Loading account…', 'pending');
     await loadBalanceAndLedger();
+    await loadApiKeys();
     await loadAdminOrders();
     inspectCheckoutReturn();
   }

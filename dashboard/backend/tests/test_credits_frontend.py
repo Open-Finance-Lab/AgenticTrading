@@ -96,3 +96,27 @@ def test_refund_retry_reuses_its_request_id_only_while_unchanged():
     source = CREDITS_JS_PATH.read_text(encoding="utf-8")
     assert "state.pendingRefund.amount_usd_cents !== cents" in source
     assert "state.pendingRefund.payment_order_id !== order.order_id" in source
+
+
+def test_credits_billing_has_four_tabs_and_api_keys_surface():
+    assert 'data-credits-tab="overview"' in APP_HTML
+    assert 'data-credits-tab="top-up"' in APP_HTML
+    assert 'data-credits-tab="api-keys"' in APP_HTML
+    assert 'data-credits-tab="activity"' in APP_HTML
+    assert 'id="creditsApiKeysPanel"' in APP_HTML
+    assert 'id="creditsApiKeyForm"' in APP_HTML
+    assert 'id="creditsApiKeyProvider"' in APP_HTML
+    assert 'id="creditsApiKeySecret"' in APP_HTML
+    assert 'id="creditsApiKeyList"' in APP_HTML
+
+
+def test_api_keys_client_never_persists_or_renders_full_secret():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    assert "/api/credits/model-providers" in source
+    assert "/api/credits/api-keys" in source
+    assert "creditsApiKeySecret" in source
+    assert "secretInput.value = ''" in source
+    assert "localStorage" not in source
+    assert ".innerHTML" not in source
+    assert "api_key: secret" in source
+    assert "Spending Credits on model runs is not enabled yet." in APP_HTML
