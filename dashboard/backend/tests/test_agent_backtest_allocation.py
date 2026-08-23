@@ -116,7 +116,18 @@ def test_patch_backtest_allocation_alone_is_not_no_fields_to_update(client):
     assert resp.status_code != 400
 
 
-@pytest.mark.parametrize("bad", [0, -100, 3001])
+def test_backtest_allocation_zero_is_accepted(client):
+    headers = _headers()
+    resp = client.post(
+        "/api/v1/agents",
+        json={"name": "alpha", "agent_type": "builtin", "backtest_allocation": 0},
+        headers=headers,
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["agent"]["backtest_allocation"] == 0
+
+
+@pytest.mark.parametrize("bad", [-100, 3001])
 def test_backtest_allocation_out_of_range_is_rejected(client, bad):
     headers = _headers()
     resp = client.post(

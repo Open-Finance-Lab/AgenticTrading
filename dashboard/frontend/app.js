@@ -260,8 +260,14 @@ function formatAgentCashAllocation(value) {
     style: 'currency',
     currency: 'USD',
     minimumFractionDigits: 0,
-    maximumFractionDigits: 0,
+    maximumFractionDigits: 2,
   }).format(Number(value));
+}
+
+function roundCashAmount(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return n;
+  return Number(n.toFixed(2));
 }
 
 function parseAgentCashAllocationInput(raw) {
@@ -275,13 +281,12 @@ function parseAgentCashAllocationInput(raw) {
   if (value > MAX_AGENT_CASH_ALLOCATION) {
     throw new Error(`Paper Trading Allocated Capital cannot exceed $${MAX_AGENT_CASH_ALLOCATION.toLocaleString()}.`);
   }
-  return Math.round(value);
+  return roundCashAmount(value);
 }
 
 /**
- * Native number spinners sometimes step by 1 on the first click even when a
- * larger step is configured. Intercept arrows and snap ±1 glitches so each
- * capital input follows its configured increment.
+ * Capital fields accept any amount in [min, max]. Round to cents on blur
+ * only — never snap to $100 (that made 1 / 99 / 101 / 150 unsavable).
  */
 const CASH_STEP_INPUT_IDS = [
   'externalAgentCashAllocation',
@@ -290,76 +295,27 @@ const CASH_STEP_INPUT_IDS = [
   'agentEditorBacktestAllocation',
 ];
 
-function cashStepMeta(input) {
-  const step = Math.max(1, Number(input.step) || 100);
+function cashAmountBounds(input) {
   const min = Number(input.min);
   const max = Number(input.max);
   return {
-    step,
     min: Number.isFinite(min) ? min : 0,
     max: Number.isFinite(max) ? max : Number.POSITIVE_INFINITY,
   };
 }
 
-function snapCashStepValue(input, raw) {
-  const { step, min, max } = cashStepMeta(input);
-  let value = Number(raw);
-  if (!Number.isFinite(value)) value = min;
-  value = Math.round(value / step) * step;
-  return Math.min(max, Math.max(min, value));
-}
-
-function nudgeCashStepInput(input, direction) {
-  const { step, min, max } = cashStepMeta(input);
-  const current = snapCashStepValue(input, input.value === '' ? min : input.value);
-  const next = Math.min(max, Math.max(min, current + direction * step));
-  input.value = String(next);
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.dispatchEvent(new Event('change', { bubbles: true }));
-}
-
 function bindCashStepInput(input) {
   if (!input || input.dataset.cashStepBound === '1') return;
   input.dataset.cashStepBound = '1';
-  if (!input.step || input.step === 'any') input.step = '100';
-
-  let lastValue = snapCashStepValue(input, input.value === '' ? 0 : input.value);
-
-  input.addEventListener('keydown', (event) => {
-    if (event.key === 'ArrowUp') {
-      event.preventDefault();
-      nudgeCashStepInput(input, 1);
-      lastValue = Number(input.value);
-    } else if (event.key === 'ArrowDown') {
-      event.preventDefault();
-      nudgeCashStepInput(input, -1);
-      lastValue = Number(input.value);
-    }
-  });
-
-  input.addEventListener('input', () => {
-    const value = Number(input.value);
-    if (!Number.isFinite(value)) return;
-    const diff = value - lastValue;
-    // Spinner glitch: first click often lands on ±1 instead of ±step.
-    if (Math.abs(diff) === 1) {
-      const step = Number(input.step) || 100;
-      const corrected = snapCashStepValue(
-        input,
-        lastValue + (diff > 0 ? step : -step),
-      );
-      input.value = String(corrected);
-      lastValue = corrected;
-      return;
-    }
-    lastValue = value;
-  });
+  input.step = '0.01';
 
   input.addEventListener('change', () => {
     if (input.value === '') return;
-    const snapped = snapCashStepValue(input, input.value);
-    if (String(snapped) !== input.value) input.value = String(snapped);
-    lastValue = snapped;
+    const value = Number(input.value);
+    if (!Number.isFinite(value)) return;
+    const { min, max } = cashAmountBounds(input);
+    const next = Math.min(max, Math.max(min, roundCashAmount(value)));
+    if (String(next) !== input.value) input.value = String(next);
   });
 }
 
@@ -907,12 +863,16 @@ function formatSignedReturnPct(frac) {
  * did, i.e. starting from its paper sleeve.
  */
 function resolveBacktestCapital(agent) {
-  const candidates = [agent?.backtest_allocation, agent?.cash_allocation];
-  for (const raw of candidates) {
-    const value = Number(raw);
-    if (Number.isFinite(value) && value > 0) {
-      return Math.min(Math.round(value), MAX_BACKTEST_ALLOCATED_CAPITAL);
+  const saved = agent?.backtest_allocation;
+  if (saved != null && saved !== '') {
+    const value = Number(saved);
+    if (Number.isFinite(value) && value >= 0) {
+      return Math.min(roundCashAmount(value), MAX_BACKTEST_ALLOCATED_CAPITAL);
     }
+  }
+  const sleeve = Number(agent?.cash_allocation);
+  if (Number.isFinite(sleeve) && sleeve > 0) {
+    return Math.min(roundCashAmount(sleeve), MAX_BACKTEST_ALLOCATED_CAPITAL);
   }
   return DEFAULT_AGENT_CASH_ALLOCATION;
 }

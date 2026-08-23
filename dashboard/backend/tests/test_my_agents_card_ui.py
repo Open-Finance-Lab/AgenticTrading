@@ -56,6 +56,7 @@ const MAX_BACKTEST_ALLOCATED_CAPITAL = 3000;
 const DEFAULT_AGENT_CASH_ALLOCATION = 1000;
 function escapeHtml(s) {{ return String(s); }}
 function formatAgentCashAllocation(v) {{ return '$' + Number(v).toLocaleString(); }}
+{_extract_function(_APP_JS, "roundCashAmount")}
 {_extract_function(_APP_JS, "resolveBacktestCapital")}
 {_extract_function(_APP_JS, "renderAgentAllocatedCapitalHero")}
 {body}
@@ -87,20 +88,28 @@ def test_card_backtest_capital_falls_back_to_the_sleeve():
 
 
 def test_zero_paper_sleeve_displays_as_zero_but_backtest_capital_does_not():
-    """The two capitals deliberately diverge at $0 -- this is not a bug.
+    """Unset backtest capital must not inherit a $0 paper sleeve.
 
-    `cash_allocation` is `ge=0` server-side: a $0 paper sleeve is a real,
-    legal state and must be shown honestly, not padded to a default. But
-    `backtest_allocation` is `ge=1` server-side -- a backtest cannot run on
-    $0 -- so `resolveBacktestCapital` treats a non-positive value as absent
-    and falls through to the $1,000 default. Rendering these two the same
-    way would either lie about a user's real (zero) money or hand a $0 into
-    an API call that would 422.
+    `cash_allocation` of $0 is a real paper sleeve and must render as $0.
+    `backtest_allocation: null` means "never set", so the display falls
+    through to the $1,000 default rather than copying the zero sleeve.
+    An explicit saved 0 is a different case and is shown as $0.
     """
     out = _run_node(
         _harness(
             "console.log(renderAgentAllocatedCapitalHero("
             "{cash_allocation: 0, backtest_allocation: null}));"
+        )
+    )
+    assert "$0" in out
+    assert "$1,000" in out
+
+
+def test_explicit_zero_backtest_capital_displays_as_zero():
+    out = _run_node(
+        _harness(
+            "console.log(renderAgentAllocatedCapitalHero("
+            "{cash_allocation: 1000, backtest_allocation: 0}));"
         )
     )
     assert "$0" in out

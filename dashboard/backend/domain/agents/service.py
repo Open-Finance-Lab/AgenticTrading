@@ -451,8 +451,8 @@ class AgentService:
         mechanical creation sequence below is identical between them.
 
         ``backtest_allocation`` is simulated capital with no ledger coupling
-        (validated only by ``ge=MIN_BACKTEST_INITIAL_CAPITAL,
-        le=MAX_BACKTEST_INITIAL_CAPITAL``), so it is safe to copy from a
+        (validated only by ``ge=0, le=MAX_BACKTEST_INITIAL_CAPITAL``), so it
+        is safe to copy from a
         source. ``cash_allocation`` is a real ledger debit and must NOT be
         copied here -- ``create_agent`` below is deliberately not passed one,
         so it falls back to ``DEFAULT_AGENT_CASH_ALLOCATION`` like any other
