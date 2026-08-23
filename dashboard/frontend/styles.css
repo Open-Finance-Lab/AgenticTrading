@@ -9195,13 +9195,27 @@ body.agent-editor-open {
 
 .agent-editor-header {
     display: flex;
-    align-items: flex-start;
-    gap: 16px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
     padding: 14px 20px;
     border-bottom: 1px solid var(--border-color);
     background: rgba(8, 18, 40, 0.92);
     backdrop-filter: blur(8px);
     flex-shrink: 0;
+}
+
+.agent-editor-toolbar {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+}
+
+.agent-editor-header-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
 }
 
 .agent-editor-back-btn {
@@ -9427,6 +9441,8 @@ body.agent-editor-open {
 }
 
 .agent-editor-dirty-badge {
+    display: inline-flex;
+    align-items: center;
     font-size: 11px;
     font-weight: 700;
     letter-spacing: 0.03em;
@@ -9436,6 +9452,15 @@ body.agent-editor-open {
     border-radius: 999px;
     background: rgba(251, 191, 36, 0.12);
     border: 1px solid rgba(251, 191, 36, 0.35);
+}
+
+/* Keep the toolbar width stable: [hidden] is display:none, which used to
+   shove Model/Market/Robinhood left when the badge appeared. Visibility
+   hides it without releasing the slot. */
+.agent-editor-dirty-badge[hidden] {
+    display: inline-flex !important;
+    visibility: hidden;
+    pointer-events: none;
 }
 
 .agent-editor-title {
@@ -9644,13 +9669,20 @@ body.agent-editor-open {
 
 @media (max-width: 640px) {
     .agent-editor-header {
-        flex-wrap: wrap;
         padding: 10px 12px;
+    }
+
+    .agent-editor-toolbar {
+        flex-wrap: wrap;
     }
 
     .agent-editor-header-actions {
         width: 100%;
         justify-content: stretch;
+    }
+
+    .agent-editor-dirty-badge[hidden] {
+        display: none !important;
     }
 
     .agent-editor-header-actions .home-btn {
@@ -10213,6 +10245,11 @@ body.agent-editor-open {
 }
 
 /* Agent editor — model picker (Demo 1) */
+.agent-editor-header-fields .agent-editor-model-field,
+.agent-editor-header-fields .agent-editor-managed-model-field {
+    margin-top: 0;
+}
+
 .agent-editor-model-field {
     display: flex;
     align-items: center;

@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=118">
+    <link rel="stylesheet" href="styles.css?v=119">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -785,7 +785,7 @@
                 </label>
                 <label class="auth-field">
                     <span>Paper Trading Allocated Capital (max $3,000)</span>
-                    <input id="externalAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="externalAgentCashHint">
+                    <input id="externalAgentCashAllocation" type="number" min="0" max="3000" step="0.01" value="1000" required aria-describedby="externalAgentCashHint">
                 </label>
                 <p id="externalAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createExternalAgentError" class="auth-error" hidden></p>
@@ -818,7 +818,7 @@
                 </label>
                 <label class="auth-field">
                     <span>Paper Trading Allocated Capital (max $3,000)</span>
-                    <input id="builtinAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="builtinAgentCashHint">
+                    <input id="builtinAgentCashAllocation" type="number" min="0" max="3000" step="0.01" value="1000" required aria-describedby="builtinAgentCashHint">
                 </label>
                 <p id="builtinAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createBuiltinAgentError" class="auth-error" hidden></p>
@@ -1007,13 +1007,22 @@
     <!-- Fullscreen Agent Editor -->
     <div id="agentEditorView" class="agent-editor-view" hidden>
         <header class="agent-editor-header">
-            <button id="agentEditorBackBtn" class="agent-editor-back-btn" type="button" aria-label="Back to My Agents">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
-                Back to My Agents
-            </button>
-            <div class="agent-editor-title-wrap">
-                <input id="agentEditorNameInput" class="agent-editor-name-input" type="text" maxlength="100" placeholder="Agent name" aria-label="Agent name" autocomplete="off">
-                <p id="agentEditorMeta" class="agent-editor-meta"></p>
+            <div class="agent-editor-toolbar">
+                <button id="agentEditorBackBtn" class="agent-editor-back-btn" type="button" aria-label="Back to My Agents">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+                    Back to My Agents
+                </button>
+                <div class="agent-editor-title-wrap">
+                    <input id="agentEditorNameInput" class="agent-editor-name-input" type="text" maxlength="100" placeholder="Agent name" aria-label="Agent name" autocomplete="off">
+                    <p id="agentEditorMeta" class="agent-editor-meta"></p>
+                </div>
+                <div class="agent-editor-header-actions">
+                    <span id="agentEditorDirtyBadge" class="agent-editor-dirty-badge" hidden>Unsaved changes</span>
+                    <button id="agentEditorRunBacktestBtn" class="home-btn home-btn-secondary" type="button">Run Backtest</button>
+                    <button id="agentEditorSaveBtn" class="home-btn home-btn-primary" type="button">Save</button>
+                </div>
+            </div>
+            <div class="agent-editor-header-fields">
                 <label id="agentEditorModelField" class="agent-editor-model-field" for="agentEditorModelSelect">
                     <span class="agent-editor-model-label">Model</span>
                     <select id="agentEditorModelSelect" class="agent-editor-model-select" aria-label="Agent model"></select>
@@ -1047,11 +1056,6 @@
                     <p id="agentEditorLiveRunResult" class="agent-editor-live-result" hidden></p>
                 </div>
             </div>
-            <div class="agent-editor-header-actions">
-                <span id="agentEditorDirtyBadge" class="agent-editor-dirty-badge" hidden>Unsaved changes</span>
-                <button id="agentEditorRunBacktestBtn" class="home-btn home-btn-secondary" type="button">Run Backtest</button>
-                <button id="agentEditorSaveBtn" class="home-btn home-btn-primary" type="button">Save</button>
-            </div>
         </header>
         <div class="agent-editor-body">
             <div class="agent-editor-layout">
@@ -1061,12 +1065,12 @@
                         <div class="agent-capital-grid">
                             <label class="agent-capital-field" for="agentEditorCashAllocation">
                                 <span class="agent-capital-label">Paper Trading <span class="agent-capital-max">max $3,000</span></span>
-                                <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital">
+                                <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="0.01" placeholder="1000" aria-label="Paper Trading Allocated Capital">
                                 <span class="agent-capital-note">Reserved from your My Portfolio balance while this agent paper-trades. Backtests use a separate simulated amount and never touch it.</span>
                             </label>
                             <label class="agent-capital-field" for="agentEditorBacktestAllocation">
                                 <span class="agent-capital-label">Backtesting <span class="agent-capital-max">max $3,000</span></span>
-                                <input id="agentEditorBacktestAllocation" class="agent-capital-input" type="number" min="1" max="3000" step="100" placeholder="1000" aria-label="Backtest Allocated Capital">
+                                <input id="agentEditorBacktestAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="0.01" placeholder="1000" aria-label="Backtest Allocated Capital">
                                 <span class="agent-capital-note">Simulated only. Never spends real cash.</span>
                             </label>
                         </div>
@@ -2128,8 +2132,8 @@
     <script src="market-events/MarketEventCard.js" defer></script>
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
-    <script src="js/agent-editor.js?v=27" defer></script>
-    <script src="app.js?v=115" defer></script>
+    <script src="js/agent-editor.js?v=29" defer></script>
+    <script src="app.js?v=117" defer></script>
     <script src="js/credits.js?v=3" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
