@@ -455,6 +455,55 @@ class ModelProviderService:
             secret=str(credential["secret"]),
         )
 
+    def preflight_user_default_credential(
+        self, user_id: int, provider_id: str
+    ) -> None:
+        """Check a BYOK lane without decrypting its credential.
+
+        The API performs this before it starts a worker. The worker is the
+        only process that later calls ``resolve_user_default_credential`` and
+        holds a transient plaintext key.
+        """
+
+        provider = self.store.get_provider(provider_id)
+        if (
+            not provider
+            or provider["status"] != "enabled"
+            or not provider["byok_enabled"]
+        ):
+            raise CredentialResolutionError(
+                ExecutionErrorCategory.CREDENTIAL_MISSING
+            )
+        matching = [
+            credential
+            for credential in self.store.list_user_credentials(
+                int(user_id), provider_id
+            )
+            if credential["status"] == "verified" and credential["is_default"]
+        ]
+        if len(matching) != 1:
+            raise CredentialResolutionError(
+                ExecutionErrorCategory.CREDENTIAL_MISSING
+            )
+
+    def preflight_platform_credential(self, provider_id: str) -> None:
+        """Check a Platform Credits lane without decrypting its credential."""
+
+        provider = self.store.get_provider(provider_id)
+        if (
+            not provider
+            or provider["status"] != "enabled"
+            or not provider["platform_enabled"]
+        ):
+            raise CredentialResolutionError(
+                ExecutionErrorCategory.CREDENTIAL_MISSING
+            )
+        credential = self.store.get_platform_credential_public(provider_id)
+        if not credential or credential["status"] != "verified":
+            raise CredentialResolutionError(
+                ExecutionErrorCategory.CREDENTIAL_MISSING
+            )
+
     def resolve_platform_secret(self, provider_id: str) -> str | None:
         """Legacy nullable wrapper retained for discovery-only callers."""
 

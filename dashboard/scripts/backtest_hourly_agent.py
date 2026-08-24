@@ -178,6 +178,10 @@ PortfolioManager = _portfolio_manager.PortfolioManager
 # legacy public path (bha.HourlyBacktester), main() below, and existing
 # subclasses (e.g. backtest_custom_algo) keep working unchanged.
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+from dashboard.backend.infrastructure.llm.execution.handoff import (
+    ExecutionHandoffError,
+    consume_execution_handoff,
+)
 
 
 # ============================================================================
@@ -217,6 +221,11 @@ def main():
         help="Path to the hosted runtime's non-secret JSON configuration",
     )
     parser.add_argument("--model", default=None, help="Override the LLM model id (e.g. anthropic/claude-haiku-4-5). Defaults to the gateway-appropriate slug.")
+    parser.add_argument(
+        "--execution-handoff-stdin",
+        action="store_true",
+        help="Read one signed, secret-free execution handoff from stdin",
+    )
     parser.add_argument("--run-id", default=None, help="Preset run id (used for live progress + DB row)")
     parser.add_argument("--progress-file", default=None, help="Path to write incremental equity snapshots for live dashboard charting")
     parser.add_argument(
@@ -243,6 +252,16 @@ def main():
     )
     
     args = parser.parse_args()
+    execution_handoff = None
+    if args.execution_handoff_stdin:
+        try:
+            execution_handoff = consume_execution_handoff(sys.stdin.read())
+        except ExecutionHandoffError:
+            parser.error("invalid execution handoff")
+        if args.run_id != execution_handoff.run_id:
+            parser.error("execution handoff run id does not match --run-id")
+        if args.model != execution_handoff.model_id:
+            parser.error("execution handoff model does not match --model")
     try:
         market_profile = get_market_profile(args.data_source, args.universe)
     except ValueError as exc:
@@ -276,6 +295,16 @@ def main():
     except ValueError as exc:
         parser.error(str(exc))
         return
+
+    if execution_handoff is not None:
+        if decision_source != LLM_DECISION_SOURCE:
+            parser.error("execution handoff requires decision_source='llm'")
+        print(
+            "Execution handoff verified: "
+            f"provider={execution_handoff.provider_id}, "
+            f"model={execution_handoff.model_id}, "
+            f"billing_mode={execution_handoff.billing_mode.value}"
+        )
     
     session_id = args.session_id
 

@@ -60,12 +60,16 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     get_market_profile,
     resolve_decision_source,
 )
-from dashboard.backend.infrastructure.llm.providers import (
-    LLMProviderConfigurationError,
-    ensure_llm_client_available,
+from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionError
+from dashboard.backend.infrastructure.llm.execution.handoff import (
+    create_execution_handoff,
+)
+from dashboard.backend.infrastructure.llm.execution.models import BillingMode
+from dashboard.backend.domain.model_providers.service import (
+    CredentialResolutionError,
+    get_model_provider_service,
 )
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
-from dashboard.backend.domain.entitlements import credits
 from dashboard.backend.domain.agents.service import agent_service
 from dashboard.backend.domain.agents.credential_store import (
     FINANCIAL_DATASETS_CREDENTIAL,
@@ -845,13 +849,12 @@ def run_backtest_background(
     runtime_type: str = DEFAULT_RUNTIME_TYPE,
     runtime_config: Optional[Dict[str, Any]] = None,
     financial_datasets_api_key: Optional[str] = None,
-    charged_credit_user_id: Optional[int] = None,
+    execution_handoff_payload: Optional[str] = None,
 ):
     """Run backtest in background thread.
 
-    ``charged_credit_user_id`` is set only when the endpoint actually took a
-    credit for this run (see ``domain/entitlements/credits.py``); the finally
-    block gives it back if the run turns out to have made no LLM call.
+    The execution handoff is passed through stdin so no credential or signed
+    worker payload appears in subprocess arguments or environment variables.
     """
     global backtest_status, backtest_session_id
 
@@ -967,6 +970,9 @@ def run_backtest_background(
         if uses_llm and model and model.strip():
             cmd += ["--model", model.strip()]
 
+        if execution_handoff_payload:
+            cmd += ["--execution-handoff-stdin"]
+
         cmd += ["--run-id", resolved_live_run_id, "--progress-file", progress_file]
 
         # Simulation capital is independent of the agent's portfolio sleeve.
@@ -989,7 +995,8 @@ def run_backtest_background(
             capture_output=True,
             text=True,
             timeout=subprocess_timeout,
-            env=env
+            env=env,
+            input=execution_handoff_payload or "",
         )
         
         # Print script output for debugging
@@ -1059,21 +1066,6 @@ def run_backtest_background(
             backtest_status["started_at"] = None
             backtest_status["live_run_id"] = None
             backtest_status["progress_file"] = None
-        if charged_credit_user_id:
-            # Refund only a run that never reached the model. llm_calls is the
-            # billing counter (it ticks even on a truncated response, which
-            # still cost money), so >0 means the credit was genuinely consumed
-            # however the run ended.
-            try:
-                row = db.get_run(live_run_id) if live_run_id else None
-                llm_calls = int((row or {}).get("llm_calls") or 0)
-            except Exception:  # noqa: BLE001 - see below
-                # Usage unknown. Treat it as spent: refunding on a failed read
-                # would hand back a credit for a run that may have made forty
-                # LLM calls, and the error direction that leaks operator money
-                # is the worse one.
-                llm_calls = 1
-            credits.refund_llm_run(charged_credit_user_id, llm_calls=llm_calls)
         if progress_file:
             try:
                 Path(progress_file).unlink(missing_ok=True)
@@ -1301,6 +1293,8 @@ class BacktestRunRequest(BaseModel):
     universe: Optional[str] = None
     timeframe: Optional[str] = None
     decision_source: Optional[Literal["rule_based", "llm"]] = None
+    billing_mode: Optional[BillingMode] = None
+    provider_id: Optional[str] = None
     # Simulation starting cash for this run only — independent of portfolio sleeves.
     initial_capital: Optional[float] = None
     # Tradeable universe for this run. Accepts a list or a comma-separated string.
@@ -1606,6 +1600,8 @@ def run_backtest_endpoint(
     agent_id: Optional[str] = None
     pipeline: Optional[List[Dict[str, Any]]] = None
     initial_capital: Optional[float] = None
+    billing_mode: Optional[BillingMode] = None
+    provider_id: Optional[str] = None
     raw_assets: Any = assets
     if body is not None:
         start_date = body.start_date or start_date
@@ -1622,6 +1618,10 @@ def run_backtest_endpoint(
             pipeline = body.pipeline
         if body.initial_capital is not None:
             initial_capital = body.initial_capital
+        if body.billing_mode is not None:
+            billing_mode = body.billing_mode
+        if body.provider_id is not None:
+            provider_id = body.provider_id
         if body.assets is not None:
             raw_assets = body.assets
 
@@ -1729,20 +1729,8 @@ def run_backtest_endpoint(
             detail="model is required when decision_source='llm'.",
         )
 
-    # Guard operator LLM spend BEFORE scheduling anything. Validation first (so a
-    # caller correcting a bad request isn't charged rate budget for a typo), then
-    # the per-client run budget.
+    # Validate before taking rate-limit capacity or scheduling the worker.
     _validate_backtest_params(start_date, end_date, strategy_prompt, model, pipeline)
-
-    if (
-        decision_source_was_explicit
-        and resolved_decision_source == LLM_DECISION_SOURCE
-        and runtime_type == PIPELINE_RUNTIME_TYPE
-    ):
-        try:
-            ensure_llm_client_available()
-        except LLMProviderConfigurationError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
     if not _backtest_rate_limiter.allow(client_key(request)):
         raise HTTPException(
@@ -1775,9 +1763,65 @@ def run_backtest_endpoint(
     )
     user_id = optional_user["id"] if optional_user else None
 
-    # Mint run id before the worker starts so callers (Discord job watcher)
-    # can key notifications on a stable id from the HTTP response.
+    # Mint the id before constructing the signed worker handoff. It is both the
+    # client-visible run identity and part of the handoff's tamper boundary.
     live_run_id = f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+
+    execution_handoff_payload: Optional[str] = None
+    if (
+        resolved_decision_source == LLM_DECISION_SOURCE
+        and runtime_type == PIPELINE_RUNTIME_TYPE
+    ):
+        if user_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Sign in before running an LLM backtest.",
+            )
+        if billing_mode is None or not provider_id or not provider_id.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="billing_mode and provider_id are required for LLM backtests.",
+            )
+        provider_id = provider_id.strip()
+        if not re.fullmatch(r"^[a-z0-9_]{2,64}$", provider_id):
+            raise HTTPException(status_code=422, detail="Invalid provider id.")
+        if not model or not model.strip():
+            raise HTTPException(
+                status_code=422,
+                detail="model is required for LLM backtests.",
+            )
+        provider_service = get_model_provider_service()
+        try:
+            if billing_mode is BillingMode.BYOK:
+                provider_service.preflight_user_default_credential(
+                    int(user_id), provider_id
+                )
+            else:
+                provider_service.preflight_platform_credential(provider_id)
+        except CredentialResolutionError as exc:
+            raise HTTPException(status_code=422, detail=exc.safe_message) from exc
+        except Exception as exc:  # noqa: BLE001 - never expose provider internals
+            raise HTTPException(
+                status_code=503,
+                detail=LLMExecutionError.safe("provider_unavailable").safe_message,
+            ) from exc
+
+        execution_handoff_payload = create_execution_handoff(
+            user_id=int(user_id),
+            run_id=live_run_id,
+            billing_mode=billing_mode,
+            provider_id=provider_id,
+            model_id=model.strip(),
+            prompt_metadata={
+                "start_date": start_date,
+                "end_date": end_date,
+                "strategy_prompt": strategy_prompt,
+                "pipeline": pipeline,
+                "data_source": data_source,
+                "universe": profile.universe,
+                "assets": selected_assets,
+            },
+        )
 
     refusal = _try_acquire_backtest_slot(
         live_run_id=live_run_id,
@@ -1793,28 +1837,6 @@ def run_backtest_endpoint(
             "success": False,
             "error": refusal,
         }
-
-    # Meter operator LLM spend — one credit per LLM-driven run. Deliberately
-    # AFTER the concurrency check: a request turned away because the caller is
-    # already at their slot limit never gets a run, and must not be charged for
-    # one. Order is load-bearing, not incidental — when the slot check sat
-    # below this block, every refusal silently debited a credit and returned
-    # success:false with nothing to refund it. The owner lookup is skipped
-    # entirely when metering is disarmed or the run is rule-based, so an
-    # unarmed deployment pays no round-trip for a control it is not using.
-    charged_credit_user_id: Optional[int] = None
-    if resolved_decision_source == LLM_DECISION_SOURCE and credits.metering_enabled():
-        owner_user_id = _owner_context(
-            request, request.headers.get("authorization")
-        )["user_id"]
-        outcome = credits.authorize_llm_run(owner_user_id)
-        if not outcome.allowed:
-            # Hand the slot back before 402ing: it was taken a few lines ago
-            # for a run that is not going to exist.
-            _release_slot(live_run_id)
-            raise HTTPException(status_code=402, detail=outcome.detail)
-        if outcome.charged:
-            charged_credit_user_id = int(owner_user_id)
 
     # Start backtest in background thread
     print(f"🧵 Starting background thread for backtest", flush=True)
@@ -1841,21 +1863,17 @@ def run_backtest_endpoint(
             "initial_capital": initial_capital,
             "assets": selected_assets,
             "decision_source": resolved_decision_source,
-            "charged_credit_user_id": charged_credit_user_id,
+            "execution_handoff_payload": execution_handoff_payload,
         },
         daemon=True
     )
     try:
         thread.start()
     except Exception:
-        # The credit is debited before the worker exists, so a thread that
-        # never starts would otherwise bill a run that made no LLM call — the
-        # one refund case the background thread's own finally block cannot
-        # reach, because it never ran. Releasing the slot is part of the same
+        # Releasing the slot is part of the same
         # unwind: leaving it held would burn one of the owner's concurrent
         # slots, and one of the server's, for the life of the process.
         _release_slot(live_run_id)
-        credits.refund_llm_run(charged_credit_user_id, llm_calls=0)
         raise
 
     response = {
@@ -1881,6 +1899,9 @@ def run_backtest_endpoint(
         # correct, doing it invisibly is not: the caller otherwise cannot tell
         # a honoured model from an ignored one.
         response["ignored_fields"] = ignored_llm_fields
+    if execution_handoff_payload:
+        response["billing_mode"] = billing_mode.value
+        response["provider_id"] = provider_id
     return response
 
 @router.get("/backtest/status")
