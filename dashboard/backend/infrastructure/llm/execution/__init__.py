@@ -1,7 +1,6 @@
 """Typed, provider-neutral execution contracts for real model calls."""
 
 from .errors import ExecutionErrorCategory, LLMExecutionError
-from .client import AnthropicCompatibleExecutionClient
 from .handoff import (
     ExecutionHandoff,
     ExecutionHandoffError,
@@ -22,7 +21,6 @@ from .models import (
 
 __all__ = [
     "BillingEvidence",
-    "AnthropicCompatibleExecutionClient",
     "BillingMode",
     "ExecutionErrorCategory",
     "ExecutionHandoff",

@@ -182,11 +182,11 @@ from dashboard.backend.infrastructure.llm.execution.handoff import (
     ExecutionHandoffError,
     consume_execution_handoff,
 )
-from dashboard.backend.infrastructure.llm.execution import (
+from dashboard.backend.infrastructure.llm.execution.client import (
     AnthropicCompatibleExecutionClient,
-    LLMExecutionError,
-    LLMExecutionService,
 )
+from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionError
+from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
 from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.domain.model_providers.service import get_model_provider_service
 
