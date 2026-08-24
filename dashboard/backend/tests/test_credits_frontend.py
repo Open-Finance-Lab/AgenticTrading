@@ -122,3 +122,31 @@ def test_api_keys_client_never_persists_or_renders_full_secret():
     assert ".innerHTML" not in source
     assert "api_key: secret" in source
     assert "Spending Credits on model runs is not enabled yet." in APP_HTML
+
+
+def test_verified_default_key_can_prepare_a_safe_byok_backtest():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    assert "/api/credits/execution-options" in source
+    assert "atlPendingByokBacktest" in source
+    assert "sessionStorage.setItem" in source
+    assert "billing_mode: 'byok'" in source
+    assert "provider_id: credential.provider_id" in source
+    assert "model_id: modelId" in source
+    assert "expires_at:" in source
+    assert "'Run Backtest'" in source
+    assert "localStorage" not in source
+    assert ".innerHTML" not in source
+
+
+def test_quick_start_state_never_contains_a_secret():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    start = source.index("function beginByokBacktest")
+    boundaries = (
+        source.find("\n  function ", start + 1),
+        source.find("\n  async function ", start + 1),
+    )
+    end = min(boundary for boundary in boundaries if boundary >= 0)
+    body = source[start:end]
+    assert "api_key" not in body
+    assert "key_last_four" not in body
+    assert "credential_id" not in body

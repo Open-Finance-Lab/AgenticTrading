@@ -10852,7 +10852,11 @@ body.agent-editor-open {
 
 .credits-key-row {
     display: grid;
-    grid-template-columns: minmax(120px, 1fr) minmax(150px, 1fr) auto;
+    grid-template-columns:
+        minmax(120px, 0.8fr)
+        minmax(170px, 1fr)
+        minmax(230px, 1fr)
+        auto;
     gap: 12px;
     align-items: center;
     min-height: 66px;
@@ -10939,6 +10943,35 @@ body.agent-editor-open {
 
 .credits-key-default-badge {
     border-color: rgba(34, 211, 238, 0.38);
+    color: #67e8f9;
+}
+
+.credits-key-launch {
+    display: grid;
+    grid-template-columns: minmax(130px, 1fr) auto;
+    gap: 6px;
+    align-items: end;
+}
+
+.credits-key-model-label {
+    grid-column: 1 / -1;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.credits-key-model {
+    min-width: 150px;
+    min-height: 30px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 11px;
+}
+
+.credits-key-run {
+    border-color: rgba(34, 211, 238, 0.45);
     color: #67e8f9;
 }
 
@@ -11540,6 +11573,14 @@ body.agent-editor-open {
         grid-template-columns: 1fr;
         gap: 8px;
         padding: 14px 0;
+    }
+
+    .credits-key-launch {
+        grid-template-columns: 1fr;
+    }
+
+    .credits-key-model-label {
+        grid-column: 1;
     }
 
     .credits-key-actions {

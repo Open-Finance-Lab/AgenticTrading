@@ -8,6 +8,8 @@
   const CREDITS_API_BASE = (
     window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   ) ? window.location.origin : '';
+  const PENDING_BYOK_STORAGE_KEY = 'atlPendingByokBacktest';
+  const PENDING_BYOK_TTL_MS = 10 * 60 * 1000;
 
   const state = {
     initialized: false,
@@ -21,6 +23,7 @@
     activeTab: 'overview',
     providers: [],
     credentials: [],
+    executionOptions: [],
   };
 
   function element(id) {
@@ -142,6 +145,12 @@
     return 'Verification unavailable';
   }
 
+  function executionOption(providerId) {
+    return state.executionOptions.find(
+      (item) => item.provider_id === providerId,
+    ) || null;
+  }
+
   function renderApiKeys(items) {
     const list = element('creditsApiKeyList');
     const count = element('creditsApiKeyCount');
@@ -199,16 +208,95 @@
         actions.appendChild(revoke);
       }
 
-      row.append(head, meta, actions);
+      row.append(head, meta);
+      if (credential.status === 'verified' && credential.is_default) {
+        const launch = document.createElement('div');
+        launch.className = 'credits-key-launch';
+
+        const modelLabel = textNode(
+          'label',
+          'credits-key-model-label',
+          'Model',
+        );
+        const modelSelect = document.createElement('select');
+        modelSelect.className = 'credits-key-model';
+        modelSelect.setAttribute(
+          'aria-label',
+          `Model for ${credential.label}`,
+        );
+
+        const option = executionOption(credential.provider_id);
+        (option?.models || []).forEach((model) => {
+          const modelOption = document.createElement('option');
+          modelOption.value = model.model_id;
+          modelOption.textContent = model.label;
+          modelSelect.appendChild(modelOption);
+        });
+
+        const run = textNode(
+          'button',
+          'credits-key-action credits-key-run',
+          'Run Backtest',
+        );
+        run.type = 'button';
+        run.disabled = (
+          !option?.byok_available
+          || modelSelect.options.length === 0
+        );
+        run.addEventListener(
+          'click',
+          () => beginByokBacktest(credential, modelSelect),
+        );
+
+        launch.append(modelLabel, modelSelect, run);
+        row.appendChild(launch);
+      }
+      row.appendChild(actions);
       list.appendChild(row);
     });
   }
 
+  function beginByokBacktest(credential, modelSelect) {
+    const modelId = String(modelSelect?.value || '').trim();
+    if (
+      credential.status !== 'verified'
+      || !credential.is_default
+      || !modelId
+    ) {
+      setStatus(
+        element('creditsApiKeyStatus'),
+        (
+          'Choose a verified default key and model '
+          + 'before starting a backtest.'
+        ),
+        'error',
+      );
+      return;
+    }
+    sessionStorage.setItem(
+      PENDING_BYOK_STORAGE_KEY,
+      JSON.stringify({
+        billing_mode: 'byok',
+        provider_id: credential.provider_id,
+        model_id: modelId,
+        expires_at: Date.now() + PENDING_BYOK_TTL_MS,
+      }),
+    );
+    const target = new URL(window.location.href);
+    target.searchParams.set('view', 'agents');
+    window.location.assign(target.href);
+  }
+
   async function loadApiKeys() {
     if (!state.user) return;
-    const [providersResult, credentialsResult] = await Promise.allSettled([
+    const [
+      providersResult,
+      credentialsResult,
+      executionOptionsResult,
+    ] = await Promise.allSettled([
       apiRequest('/api/credits/model-providers'),
       apiRequest('/api/credits/api-keys'),
+      apiRequest('/api/credits/execution-options'),
     ]);
     if (providersResult.status === 'fulfilled') {
       state.providers = providersResult.value.providers || [];
@@ -217,6 +305,12 @@
       state.providers = [];
       renderProviderOptions();
       setStatus(element('creditsApiKeyStatus'), 'Approved providers could not be loaded.', 'error');
+    }
+    if (executionOptionsResult.status === 'fulfilled') {
+      state.executionOptions = executionOptionsResult.value.providers || [];
+    } else {
+      state.executionOptions = [];
+      setStatus(element('creditsApiKeyStatus'), 'Backtest options could not be loaded.', 'error');
     }
     if (credentialsResult.status === 'fulfilled') {
       renderApiKeys(credentialsResult.value.items || []);
@@ -299,6 +393,7 @@
       state.pendingPurchase = null;
       state.providers = [];
       state.credentials = [];
+      state.executionOptions = [];
       const secretInput = element('creditsApiKeySecret');
       if (secretInput) secretInput.value = '';
       renderProviderOptions();
