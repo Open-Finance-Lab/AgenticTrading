@@ -53,6 +53,8 @@ class LLMExecutionRequest(BaseModel):
     system_message: str | None = Field(default=None, max_length=120_000)
     messages: tuple[LLMMessage, ...] = Field(min_length=1, max_length=128)
     usage_policy: UsagePolicy
+    temperature: float | None = Field(default=None, ge=0, le=2)
+    reasoning_effort: str | None = Field(default=None, max_length=32)
 
     @field_validator("run_id", "provider_id", "model_id")
     @classmethod
@@ -68,6 +70,14 @@ class LLMExecutionRequest(BaseModel):
         if value is None:
             return None
         value = value.strip()
+        return value or None
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def trim_reasoning_effort(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip().lower()
         return value or None
 
 
