@@ -4,12 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime, timezone
+from dataclasses import dataclass
 import json
 from typing import Any, Protocol
 
 import httpx
 
 from dashboard.backend.infrastructure.llm.adapters import get_adapter
+from dashboard.backend.infrastructure.llm.execution.errors import (
+    ExecutionErrorCategory,
+    LLMExecutionError,
+)
 
 from .models import (
     AdminPlatformCredentialPublic,
@@ -44,6 +49,27 @@ class CredentialAdapter(Protocol):
         *,
         client: httpx.Client | None = None,
     ) -> CredentialValidation: ...
+
+
+@dataclass(frozen=True)
+class ResolvedCredential:
+    """Transient credential material used only while constructing a provider client."""
+
+    credential_id: str | None
+    provider_id: str
+    key_last_four: str
+    secret: str
+
+
+class CredentialResolutionError(LLMExecutionError):
+    """A safe failure raised before a worker starts a model call."""
+
+    def __init__(
+        self,
+        category: ExecutionErrorCategory,
+        message: str | None = None,
+    ) -> None:
+        super().__init__(category, message)
 
 
 def _utcnow_iso() -> str:
@@ -381,11 +407,61 @@ class ModelProviderService:
             )
         return True
 
-    def resolve_platform_secret(self, provider_id: str) -> str | None:
+    def resolve_user_default_credential(
+        self, user_id: int, provider_id: str
+    ) -> ResolvedCredential:
+        """Resolve the caller's one verified default BYOK credential."""
+
         provider = self.store.get_provider(provider_id)
-        if not provider or provider["status"] != "enabled" or not provider["platform_enabled"]:
+        if (
+            not provider
+            or provider["status"] != "enabled"
+            or not provider["byok_enabled"]
+        ):
+            raise CredentialResolutionError(
+                ExecutionErrorCategory.CREDENTIAL_MISSING
+            )
+        credential = self.store.get_verified_default_user_credential(
+            int(user_id), provider_id
+        )
+        if not credential:
+            raise CredentialResolutionError(ExecutionErrorCategory.CREDENTIAL_MISSING)
+        return ResolvedCredential(
+            credential_id=str(credential["credential_id"]),
+            provider_id=str(credential["provider_id"]),
+            key_last_four=str(credential["key_last_four"])[-4:],
+            secret=str(credential["secret"]),
+        )
+
+    def resolve_platform_credential(self, provider_id: str) -> ResolvedCredential:
+        """Resolve the enabled provider's one verified platform credential."""
+
+        provider = self.store.get_provider(provider_id)
+        if (
+            not provider
+            or provider["status"] != "enabled"
+            or not provider["platform_enabled"]
+        ):
+            raise CredentialResolutionError(
+                ExecutionErrorCategory.CREDENTIAL_MISSING
+            )
+        credential = self.store.get_verified_platform_credential(provider_id)
+        if not credential:
+            raise CredentialResolutionError(ExecutionErrorCategory.CREDENTIAL_MISSING)
+        return ResolvedCredential(
+            credential_id=None,
+            provider_id=str(credential["provider_id"]),
+            key_last_four=str(credential["key_last_four"])[-4:],
+            secret=str(credential["secret"]),
+        )
+
+    def resolve_platform_secret(self, provider_id: str) -> str | None:
+        """Legacy nullable wrapper retained for discovery-only callers."""
+
+        try:
+            return self.resolve_platform_credential(provider_id).secret
+        except CredentialResolutionError:
             return None
-        return self.store.get_platform_credential_secret(provider_id)
 
     def _admin_operation_replayed(
         self,
