@@ -163,6 +163,7 @@ class HourlyBacktester:
         decision_source: Optional[str] = None,
         runtime_type: str = DEFAULT_RUNTIME_TYPE,
         runtime_config: Optional[Dict] = None,
+        execution_client: Any = None,
     ):
         # Validate and swap dates if they're in the wrong order
         from datetime import datetime as dt_parser
@@ -195,6 +196,7 @@ class HourlyBacktester:
         self.t1_deferrals: List[Dict] = []
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
+        self.execution_client = execution_client
         self.live_run_id = (live_run_id or "").strip() or None
         self.progress_file = (progress_file or "").strip() or None
         self.data_source = data_source
@@ -235,7 +237,7 @@ class HourlyBacktester:
             self.profile,
             requested_decision_source,
         )
-        self.strict_llm = (
+        self.strict_llm = bool(execution_client) or (
             decision_source is not None
             and data_source == IFIND_ASHARE
             and self.decision_source == LLM_DECISION_SOURCE
@@ -259,7 +261,7 @@ class HourlyBacktester:
             self.symbols = list(DJIA_30)
         self.all_data = {}
         wants_llm = self.decision_source == LLM_DECISION_SOURCE
-        self.use_llm = wants_llm and HAS_ANTHROPIC
+        self.use_llm = wants_llm and (execution_client is not None or HAS_ANTHROPIC)
         if self.runtime_type != PIPELINE_RUNTIME_TYPE:
             self.use_llm = False
         self.llm_client = None
@@ -268,6 +270,7 @@ class HourlyBacktester:
             self.runtime_type == PIPELINE_RUNTIME_TYPE
             and wants_llm
             and not HAS_ANTHROPIC
+            and execution_client is None
         ):
             if self.strict_llm:
                 raise llm_harness.LLMConfigurationError(
@@ -275,10 +278,16 @@ class HourlyBacktester:
                 )
             self.decision_source = RULE_BASED_DECISION_SOURCE
 
-        # Initialize LLM client if enabled. Prefer CommonStack (the model we host)
+        # A worker handoff supplies the provider-neutral compatibility client.
+        # Legacy direct LLM setup remains available only for non-worker callers.
+        if self.use_llm and execution_client is not None:
+            self.llm_client = execution_client
+            print(f"✅ Unified LLM execution initialized (model={self.model})")
+
+        # Initialize legacy LLM client if enabled. Prefer CommonStack (the model we host)
         # via make_llm_client(); it falls back to native Anthropic when only
         # ANTHROPIC_API_KEY is set, and returns None when no key/SDK is available.
-        if self.use_llm:
+        if self.use_llm and execution_client is None:
             self.llm_client = make_llm_client()
             if self.llm_client is None:
                 if self.strict_llm:

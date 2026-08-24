@@ -182,6 +182,13 @@ from dashboard.backend.infrastructure.llm.execution.handoff import (
     ExecutionHandoffError,
     consume_execution_handoff,
 )
+from dashboard.backend.infrastructure.llm.execution import (
+    AnthropicCompatibleExecutionClient,
+    LLMExecutionError,
+    LLMExecutionService,
+)
+from dashboard.backend.domain.credits.service import credits_service
+from dashboard.backend.domain.model_providers.service import get_model_provider_service
 
 
 # ============================================================================
@@ -305,6 +312,23 @@ def main():
             f"model={execution_handoff.model_id}, "
             f"billing_mode={execution_handoff.billing_mode.value}"
         )
+    elif (
+        decision_source == LLM_DECISION_SOURCE
+        and args.runtime_type == PIPELINE_RUNTIME_TYPE
+    ):
+        parser.error("explicit LLM execution requires a signed execution handoff")
+
+    execution_service = None
+    execution_client = None
+    if execution_handoff is not None:
+        execution_service = LLMExecutionService(
+            providers=get_model_provider_service(),
+            credits=credits_service,
+        )
+        execution_client = AnthropicCompatibleExecutionClient(
+            execution_service=execution_service,
+            handoff=execution_handoff,
+        )
     
     session_id = args.session_id
 
@@ -423,6 +447,7 @@ def main():
         decision_source=decision_source,
         runtime_type=args.runtime_type,
         runtime_config=runtime_config,
+        execution_client=execution_client,
     )
     
     if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
@@ -451,7 +476,18 @@ def main():
     # Step 3: Run backtests
     print("\n3️⃣ Running backtests...\n")
     
-    agent_id, agent_eq = backtester.run_agent_backtest()
+    try:
+        agent_id, agent_eq = backtester.run_agent_backtest()
+    finally:
+        if execution_service is not None and execution_handoff is not None:
+            try:
+                execution_service.finalize_run(
+                    execution_handoff.run_id,
+                    billing_mode=execution_handoff.billing_mode,
+                )
+            except LLMExecutionError as exc:
+                print(f"❌ LLM execution finalization failed: {exc.safe_message}")
+                raise
     
     # DEBUG: Show what agent bought
     print(f"\n📋 DEBUG - Agent Holdings Summary:")

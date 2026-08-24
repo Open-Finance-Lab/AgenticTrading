@@ -61,6 +61,7 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     resolve_decision_source,
 )
 from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionError
+from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
 from dashboard.backend.infrastructure.llm.execution.handoff import (
     create_execution_handoff,
 )
@@ -69,6 +70,7 @@ from dashboard.backend.domain.model_providers.service import (
     CredentialResolutionError,
     get_model_provider_service,
 )
+from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.agents.service import agent_service
 from dashboard.backend.domain.agents.credential_store import (
@@ -864,6 +866,7 @@ def run_backtest_background(
     progress_file = None
     # Bound so finally can always finalize even if minting the id fails early.
     resolved_live_run_id = live_run_id
+    execution_run_id = None
     # Snapshot the agent's pipeline as this run sees it, so the adapted-pipeline
     # write-back at the end can tell "nobody touched it" from "the user edited
     # it mid-run" (Configure stays open, and sibling runs adapt too).
@@ -885,6 +888,8 @@ def run_backtest_background(
             resolved_live_run_id = (
                 f"agent_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
             )
+        if execution_handoff_payload:
+            execution_run_id = resolved_live_run_id
         progress_file = str(
             Path(tempfile.gettempdir()) / f"backtest_progress_{resolved_live_run_id}.json"
         )
@@ -1055,6 +1060,20 @@ def run_backtest_background(
             _finalize_slot(resolved_live_run_id, error=summary, runs_count=0)
             resolved_live_run_id = None
     finally:
+        if execution_handoff_payload and execution_run_id:
+            try:
+                # The child normally finalizes itself. Repeating this from the
+                # parent also clears reservations when the subprocess is killed
+                # by timeout or exits before its own finally block runs.
+                LLMExecutionService(
+                    providers=get_model_provider_service(),
+                    credits=credits_service,
+                ).finalize_run(execution_run_id)
+            except LLMExecutionError as exc:
+                print(
+                    f"❌ LLM execution cleanup failed: {exc.safe_message}",
+                    flush=True,
+                )
         if resolved_live_run_id:
             _finalize_slot(resolved_live_run_id, error=None, runs_count=0)
         elif not live_run_id:

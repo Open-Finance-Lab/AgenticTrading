@@ -151,8 +151,6 @@ class LLMExecutionService:
 
         if billing_mode is BillingMode.BYOK:
             return []
-        if billing_mode is None and run_id not in self._platform_runs:
-            return []
         try:
             released = self.credits.release_run_llm_reservations(
                 run_id,

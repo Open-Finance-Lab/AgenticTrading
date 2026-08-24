@@ -266,7 +266,8 @@ class PortfolioManager:
         Returns:
             {"actions": [list of trading actions]}
         """
-        if not HAS_ANTHROPIC or not llm_client:
+        unified_client = bool(getattr(llm_client, "execution_service", None))
+        if (not llm_client) or (not HAS_ANTHROPIC and not unified_client):
             if strict_llm:
                 raise LLMDecisionError("Required LLM client is not available")
             print("\u26a0️  LLM client not available, using rule-based fallback")
@@ -724,9 +725,13 @@ class PortfolioManager:
             return {"actions": actions}
 
         except LLMDecisionError as strict_error:
+            if getattr(llm_client, "fail_closed", False):
+                raise
             return self._absorb_strict_llm_failure(portfolio_state, strict_error)
         except Exception as e:
             if strict_llm:
+                if getattr(llm_client, "fail_closed", False):
+                    raise
                 # Same treatment as an explicit strict violation. Built rather
                 # than raised because the budget may still absorb it; the cause
                 # is attached by hand so the traceback survives either way.
