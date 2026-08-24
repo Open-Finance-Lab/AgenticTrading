@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -12,7 +13,9 @@ from dashboard.backend.domain.credits.repository_common import (
     CreditAccountRestrictedStoreError,
     GrantPoolInsufficientError,
     GrantReclaimExceedsAvailableError,
+    InsufficientCreditsError,
     IdempotencyConflictError,
+    LLMReservationConflictError,
     OrderConflictError,
     RefundNotAllowedError,
     _positive_integer,
@@ -216,6 +219,51 @@ CREATE TABLE IF NOT EXISTS credit_grant_pool_ledger_entries (
 
 CREATE INDEX IF NOT EXISTS idx_credit_grant_pool_ledger_pool_id
 ON credit_grant_pool_ledger_entries(pool_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS credit_llm_reservations (
+    reservation_id TEXT PRIMARY KEY CHECK (length(trim(reservation_id)) > 0),
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+    call_index INTEGER NOT NULL CHECK (call_index >= 0),
+    reserved_micro BIGINT NOT NULL CHECK (reserved_micro > 0),
+    reserved_grant_micro BIGINT NOT NULL CHECK (reserved_grant_micro >= 0),
+    reserved_purchased_micro BIGINT NOT NULL CHECK (reserved_purchased_micro >= 0),
+    settled_micro BIGINT NOT NULL DEFAULT 0 CHECK (settled_micro >= 0),
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'settled', 'released')),
+    operation_key TEXT NOT NULL UNIQUE CHECK (length(trim(operation_key)) > 0),
+    request_digest TEXT NOT NULL CHECK (length(trim(request_digest)) > 0),
+    evidence_json TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
+    CHECK (settled_micro <= reserved_micro),
+    UNIQUE (user_id, run_id, call_index)
+);
+
+CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_user_status
+ON credit_llm_reservations(user_id, status, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
+ON credit_llm_reservations(run_id, status, call_index);
+
+CREATE TABLE IF NOT EXISTS credit_llm_usage_entries (
+    id BIGSERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    reservation_id TEXT NOT NULL
+        REFERENCES credit_llm_reservations(reservation_id) ON DELETE RESTRICT,
+    run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+    call_index INTEGER NOT NULL CHECK (call_index >= 0),
+    bucket TEXT NOT NULL CHECK (bucket IN ('grant', 'purchased')),
+    amount_micro BIGINT NOT NULL CHECK (amount_micro < 0),
+    operation_key TEXT NOT NULL UNIQUE CHECK (length(trim(operation_key)) > 0),
+    evidence_json TEXT NOT NULL CHECK (length(trim(evidence_json)) > 0),
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_credit_llm_usage_user_id
+ON credit_llm_usage_entries(user_id, id DESC);
 """
 
 
@@ -481,6 +529,34 @@ class PostgresCreditsStore:
                     (unique_ids,),
                 )
                 rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT
+                        user_id,
+                        COALESCE(SUM(CASE WHEN bucket = 'grant' THEN amount_micro ELSE 0 END), 0)
+                            AS grant_usage_micro,
+                        COALESCE(SUM(CASE WHEN bucket = 'purchased' THEN amount_micro ELSE 0 END), 0)
+                            AS purchased_usage_micro
+                    FROM credit_llm_usage_entries
+                    WHERE user_id = ANY(%s)
+                    GROUP BY user_id
+                    """,
+                    (unique_ids,),
+                )
+                usage_rows = cur.fetchall()
+                cur.execute(
+                    """
+                    SELECT
+                        user_id,
+                        COALESCE(SUM(reserved_grant_micro), 0) AS reserved_grant_micro,
+                        COALESCE(SUM(reserved_purchased_micro), 0) AS reserved_purchased_micro
+                    FROM credit_llm_reservations
+                    WHERE user_id = ANY(%s) AND status = 'open'
+                    GROUP BY user_id
+                    """,
+                    (unique_ids,),
+                )
+                reservation_rows = cur.fetchall()
 
         amounts = {
             int(row["user_id"]): (
@@ -489,20 +565,179 @@ class PostgresCreditsStore:
             )
             for row in rows
         }
+        usage_amounts = {
+            int(row["user_id"]): (
+                int(row["grant_usage_micro"]),
+                int(row["purchased_usage_micro"]),
+            )
+            for row in usage_rows
+        }
+        reserved_amounts = {
+            int(row["user_id"]): (
+                int(row["reserved_grant_micro"]),
+                int(row["reserved_purchased_micro"]),
+            )
+            for row in reservation_rows
+        }
         projections: dict[int, dict[str, int]] = {}
         for user_id in unique_ids:
             grant_micro, purchased_micro = amounts.get(user_id, (0, 0))
+            grant_usage, purchased_usage = usage_amounts.get(user_id, (0, 0))
+            reserved_grant, reserved_purchased = reserved_amounts.get(user_id, (0, 0))
+            grant_micro += grant_usage
+            purchased_micro += purchased_usage
             projections[user_id] = {
                 "grant_committed_micro": grant_micro,
                 "purchased_committed_micro": purchased_micro,
-                "grant_available_micro": grant_micro,
-                "purchased_available_micro": purchased_micro,
-                "total_available_micro": grant_micro + purchased_micro,
+                "grant_available_micro": grant_micro - reserved_grant,
+                "purchased_available_micro": purchased_micro - reserved_purchased,
+                "total_available_micro": grant_micro + purchased_micro - reserved_grant - reserved_purchased,
             }
         return projections
 
     def get_balance_micro(self, user_id: int) -> int:
         return self.get_balance_projection(user_id)["total_available_micro"]
+
+    @staticmethod
+    def _llm_reservation_result(cur, reservation) -> dict[str, Any]:
+        cur.execute(
+            """
+            SELECT id, bucket, amount_micro
+            FROM credit_llm_usage_entries
+            WHERE reservation_id = %s ORDER BY id
+            """,
+            (reservation["reservation_id"],),
+        )
+        entries = cur.fetchall()
+        row = dict(reservation)
+        row.update(
+            released_micro=int(row["reserved_micro"]) - int(row["settled_micro"]),
+            grant_debited_micro=sum(-int(e["amount_micro"]) for e in entries if e["bucket"] == "grant"),
+            purchased_debited_micro=sum(-int(e["amount_micro"]) for e in entries if e["bucket"] == "purchased"),
+            ledger_entry_ids=tuple(int(e["id"]) for e in entries),
+        )
+        return row
+
+    def reserve_llm_credits(self, *, reservation_id: str, user_id: int, run_id: str,
+                            call_index: int, reserved_micro: int,
+                            operation_key: str, request_digest: str) -> dict[str, Any]:
+        reservation_id = _required_text(reservation_id, "reservation_id", max_length=160)
+        run_id = _required_text(run_id, "run_id", max_length=128)
+        operation_key = _required_text(operation_key, "operation_key", max_length=200)
+        request_digest = _required_text(request_digest, "request_digest", max_length=128)
+        _positive_integer(user_id, "user_id")
+        _positive_integer(reserved_micro, "reserved_micro")
+        if not isinstance(call_index, int) or isinstance(call_index, bool) or call_index < 0:
+            raise ValueError("call_index must be a non-negative integer")
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                self._ensure_account_in_transaction(cur, user_id)
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s))",
+                    (operation_key,),
+                )
+                cur.execute(
+                    "SELECT * FROM credit_llm_reservations WHERE reservation_id = %s OR operation_key = %s OR (user_id = %s AND run_id = %s AND call_index = %s) FOR UPDATE",
+                    (reservation_id, operation_key, user_id, run_id, call_index),
+                )
+                existing = cur.fetchone()
+                if existing:
+                    if (existing["reservation_id"] != reservation_id
+                            or int(existing["user_id"]) != user_id
+                            or existing["run_id"] != run_id
+                            or int(existing["call_index"]) != call_index
+                            or int(existing["reserved_micro"]) != reserved_micro
+                            or existing["operation_key"] != operation_key or existing["request_digest"] != request_digest):
+                        raise LLMReservationConflictError("reservation key already represents different input")
+                    return dict(existing)
+                cur.execute("SELECT status FROM credit_accounts WHERE user_id = %s FOR UPDATE", (user_id,))
+                account = cur.fetchone()
+                if account["status"] == "restricted":
+                    raise CreditAccountRestrictedStoreError("restricted credit account cannot reserve model usage")
+                projection = self._balance_projection_in_transaction(cur, user_id)
+                if projection["total_available_micro"] < reserved_micro:
+                    raise InsufficientCreditsError("insufficient available Credits")
+                reserved_grant = min(max(projection["grant_available_micro"], 0), reserved_micro)
+                reserved_purchased = reserved_micro - reserved_grant
+                now = _utcnow_iso()
+                cur.execute(
+                    """
+                    INSERT INTO credit_llm_reservations (
+                        reservation_id, user_id, run_id, call_index,
+                        reserved_micro, reserved_grant_micro, reserved_purchased_micro,
+                        operation_key, request_digest, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (reservation_id, user_id, run_id, call_index, reserved_micro,
+                     reserved_grant, reserved_purchased, operation_key, request_digest, now, now),
+                )
+                return dict(cur.fetchone())
+
+    def settle_llm_credits(self, reservation_id: str, *, actual_micro: int,
+                           evidence: dict[str, Any]) -> dict[str, Any]:
+        reservation_id = _required_text(reservation_id, "reservation_id", max_length=160)
+        if not isinstance(actual_micro, int) or isinstance(actual_micro, bool) or actual_micro < 0:
+            raise ValueError("actual_micro must be a non-negative integer")
+        evidence_json = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM credit_llm_reservations WHERE reservation_id = %s FOR UPDATE", (reservation_id,))
+                reservation = cur.fetchone()
+                if not reservation:
+                    raise LLMReservationConflictError("reservation was not found")
+                if reservation["status"] == "settled":
+                    if int(reservation["settled_micro"]) != actual_micro or reservation["evidence_json"] != evidence_json:
+                        raise LLMReservationConflictError("settlement replay has different input")
+                    return self._llm_reservation_result(cur, reservation)
+                if reservation["status"] != "open":
+                    raise LLMReservationConflictError("released reservation cannot be settled")
+                if actual_micro > int(reservation["reserved_micro"]):
+                    raise LLMReservationConflictError("actual usage exceeds reserved Credits")
+                grant_debit = min(actual_micro, int(reservation["reserved_grant_micro"]))
+                purchased_debit = actual_micro - grant_debit
+                now = _utcnow_iso()
+                for bucket, amount in (("grant", grant_debit), ("purchased", purchased_debit)):
+                    if amount <= 0:
+                        continue
+                    cur.execute(
+                        """
+                        INSERT INTO credit_llm_usage_entries (
+                            user_id, reservation_id, run_id, call_index, bucket,
+                            amount_micro, operation_key, evidence_json, created_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (reservation["user_id"], reservation_id, reservation["run_id"], reservation["call_index"], bucket,
+                         -amount, f"{reservation['operation_key']}:{bucket}", evidence_json, now),
+                    )
+                cur.execute(
+                    "UPDATE credit_llm_reservations SET settled_micro = %s, status = 'settled', evidence_json = %s, updated_at = %s WHERE reservation_id = %s RETURNING *",
+                    (actual_micro, evidence_json, now, reservation_id),
+                )
+                return self._llm_reservation_result(cur, cur.fetchone())
+
+    def release_llm_credits(self, reservation_id: str, *, reason: str) -> dict[str, Any]:
+        reservation_id = _required_text(reservation_id, "reservation_id", max_length=160)
+        reason = _required_text(reason, "reason", max_length=120)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT * FROM credit_llm_reservations WHERE reservation_id = %s FOR UPDATE", (reservation_id,))
+                reservation = cur.fetchone()
+                if not reservation:
+                    raise LLMReservationConflictError("reservation was not found")
+                if reservation["status"] == "open":
+                    cur.execute("UPDATE credit_llm_reservations SET status = 'released', failure_reason = %s, updated_at = %s WHERE reservation_id = %s RETURNING *", (reason, _utcnow_iso(), reservation_id))
+                    reservation = cur.fetchone()
+                return self._llm_reservation_result(cur, reservation)
+
+    def release_run_llm_reservations(self, run_id: str, *, reason: str) -> list[dict[str, Any]]:
+        run_id = _required_text(run_id, "run_id", max_length=128)
+        reason = _required_text(reason, "reason", max_length=120)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE credit_llm_reservations SET status = 'released', failure_reason = %s, updated_at = %s WHERE run_id = %s AND status = 'open'", (reason, _utcnow_iso(), run_id))
+                cur.execute("SELECT * FROM credit_llm_reservations WHERE run_id = %s ORDER BY call_index", (run_id,))
+                return [self._llm_reservation_result(cur, row) for row in cur.fetchall()]
 
     def create_or_get_order(
         self,
@@ -1016,12 +1251,43 @@ class PostgresCreditsStore:
         row = cur.fetchone()
         grant_micro = int(row["grant_committed_micro"])
         purchased_micro = int(row["purchased_committed_micro"])
+        if through_entry_id is None:
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(SUM(CASE WHEN bucket = 'grant' THEN amount_micro ELSE 0 END), 0)
+                        AS grant_usage_micro,
+                    COALESCE(SUM(CASE WHEN bucket = 'purchased' THEN amount_micro ELSE 0 END), 0)
+                        AS purchased_usage_micro
+                FROM credit_llm_usage_entries
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            usage = cur.fetchone()
+            grant_micro += int(usage["grant_usage_micro"])
+            purchased_micro += int(usage["purchased_usage_micro"])
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(SUM(reserved_grant_micro), 0) AS reserved_grant_micro,
+                    COALESCE(SUM(reserved_purchased_micro), 0) AS reserved_purchased_micro
+                FROM credit_llm_reservations
+                WHERE user_id = %s AND status = 'open'
+                """,
+                (user_id,),
+            )
+            reserved = cur.fetchone()
+            reserved_grant = int(reserved["reserved_grant_micro"])
+            reserved_purchased = int(reserved["reserved_purchased_micro"])
+        else:
+            reserved_grant = reserved_purchased = 0
         return {
             "grant_committed_micro": grant_micro,
             "purchased_committed_micro": purchased_micro,
-            "grant_available_micro": grant_micro,
-            "purchased_available_micro": purchased_micro,
-            "total_available_micro": grant_micro + purchased_micro,
+            "grant_available_micro": grant_micro - reserved_grant,
+            "purchased_available_micro": purchased_micro - reserved_purchased,
+            "total_available_micro": grant_micro + purchased_micro - reserved_grant - reserved_purchased,
         }
 
     @staticmethod
@@ -2140,7 +2406,11 @@ class PostgresCreditsStore:
                             WHERE bucket = 'grant'
                               AND reference_type = 'grant_pool'
                               AND reference_id = p.pool_id
-                        ), 0) AS allocated_to_users_micro,
+                        ), 0) + CASE WHEN p.pool_id = 'default' THEN COALESCE((
+                            SELECT SUM(amount_micro)
+                            FROM credit_llm_usage_entries
+                            WHERE bucket = 'grant'
+                        ), 0) ELSE 0 END AS allocated_to_users_micro,
                         COALESCE((
                             SELECT SUM(
                                 CASE WHEN entry_type = 'assign'

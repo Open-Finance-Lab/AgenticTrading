@@ -16,6 +16,8 @@ from dashboard.backend.domain.credits.models import (
     CheckoutResult,
     GrantMutationResult,
     GrantPoolSummary,
+    LLMReservation,
+    LLMSettlementResult,
     RefundCreationResult,
     WebhookResult,
     credits_micro_for_cents,
@@ -149,6 +151,40 @@ class CreditsService:
         return BalanceProjection(**payload)
 
     @staticmethod
+    def _llm_reservation_model(value: Mapping[str, Any]) -> LLMReservation:
+        return LLMReservation(
+            reservation_id=str(value["reservation_id"]),
+            user_id=int(value["user_id"]),
+            run_id=str(value["run_id"]),
+            call_index=int(value["call_index"]),
+            reserved_micro=int(value["reserved_micro"]),
+            settled_micro=int(value["settled_micro"]),
+            status=str(value["status"]),
+            created_at=str(value["created_at"]),
+            updated_at=str(value["updated_at"]),
+            failure_reason=value.get("failure_reason"),
+        )
+
+    @staticmethod
+    def _llm_settlement_model(value: Mapping[str, Any]) -> LLMSettlementResult:
+        return LLMSettlementResult(
+            reservation_id=str(value["reservation_id"]),
+            user_id=int(value["user_id"]),
+            run_id=str(value["run_id"]),
+            reserved_micro=int(value["reserved_micro"]),
+            settled_micro=int(value["settled_micro"]),
+            released_micro=int(value["released_micro"]),
+            status=str(value["status"]),
+            grant_debited_micro=int(value.get("grant_debited_micro") or 0),
+            purchased_debited_micro=int(
+                value.get("purchased_debited_micro") or 0
+            ),
+            ledger_entry_ids=tuple(
+                int(item) for item in value.get("ledger_entry_ids", ())
+            ),
+        )
+
+    @staticmethod
     def _pool_summary_model(value: Mapping[str, Any]) -> GrantPoolSummary:
         payload = dict(value)
         payload.setdefault(
@@ -175,6 +211,86 @@ class CreditsService:
             int(user_id): self._projection_model(projection)
             for user_id, projection in projections.items()
         }
+
+    def reserve_llm_credits(
+        self,
+        *,
+        user_id: int,
+        run_id: str,
+        call_index: int,
+        amount_micro: int,
+        operation_key: str | None = None,
+        request_digest: str | None = None,
+    ) -> LLMReservation:
+        """Temporarily hold a usage ceiling; no Credit debit occurs here."""
+
+        operation_key = operation_key or _operation_id(
+            "llm_reserve", user_id, run_id, call_index
+        )
+        request_digest = request_digest or _canonical_digest(
+            {
+                "user_id": int(user_id),
+                "run_id": run_id,
+                "call_index": call_index,
+                "amount_micro": amount_micro,
+            }
+        )
+        reservation_id = _operation_id(
+            "llm_res", user_id, run_id, call_index, operation_key
+        )
+        return self._llm_reservation_model(
+            self.store.reserve_llm_credits(
+                reservation_id=reservation_id,
+                user_id=int(user_id),
+                run_id=str(run_id),
+                call_index=int(call_index),
+                reserved_micro=int(amount_micro),
+                operation_key=operation_key,
+                request_digest=request_digest,
+            )
+        )
+
+    def settle_llm_credits(
+        self,
+        reservation_id: str,
+        *,
+        actual_micro: int,
+        evidence: Mapping[str, Any],
+    ) -> LLMSettlementResult:
+        """Debit only the exact usage amount and release the unused ceiling."""
+
+        return self._llm_settlement_model(
+            self.store.settle_llm_credits(
+                reservation_id,
+                actual_micro=int(actual_micro),
+                evidence=dict(evidence),
+            )
+        )
+
+    def release_llm_credits(
+        self,
+        reservation_id: str,
+        *,
+        reason: str,
+    ) -> LLMSettlementResult:
+        """Release an unused usage ceiling without creating a debit."""
+
+        return self._llm_settlement_model(
+            self.store.release_llm_credits(reservation_id, reason=reason)
+        )
+
+    def release_run_llm_reservations(
+        self,
+        run_id: str,
+        *,
+        reason: str,
+    ) -> list[LLMSettlementResult]:
+        return [
+            self._llm_settlement_model(result)
+            for result in self.store.release_run_llm_reservations(
+                run_id, reason=reason
+            )
+        ]
 
     def get_grant_pool_summary(
         self, pool_id: str = "default", month_start_iso: str | None = None

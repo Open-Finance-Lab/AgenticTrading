@@ -36,6 +36,14 @@ class CreditAccountRestrictedStoreError(CreditsStoreError):
     """A Grant operation targets a restricted credit account."""
 
 
+class InsufficientCreditsError(CreditsStoreError):
+    """A usage reservation would exceed the user's available Credits."""
+
+
+class LLMReservationConflictError(CreditsStoreError):
+    """A reservation replay or state transition conflicts with prior data."""
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
