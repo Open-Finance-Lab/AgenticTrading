@@ -98,9 +98,11 @@ def test_refund_retry_reuses_its_request_id_only_while_unchanged():
     assert "state.pendingRefund.payment_order_id !== order.order_id" in source
 
 
-def test_credits_billing_has_four_tabs_and_api_keys_surface():
+def test_credits_billing_has_three_tabs_and_api_keys_surface():
     assert 'data-credits-tab="overview"' in APP_HTML
-    assert 'data-credits-tab="top-up"' in APP_HTML
+    assert '>Credits</button>' in APP_HTML
+    assert 'data-credits-tab="top-up"' not in APP_HTML
+    assert 'id="creditsPanelTopup"' not in APP_HTML
     assert 'data-credits-tab="api-keys"' in APP_HTML
     assert 'data-credits-tab="activity"' in APP_HTML
     assert 'id="creditsApiKeysPanel"' in APP_HTML

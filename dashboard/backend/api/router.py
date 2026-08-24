@@ -7,6 +7,7 @@ from dashboard.backend.api.routers.admin_users import router as admin_users_rout
 from dashboard.backend.api.auth import router as auth_router
 from dashboard.backend.api.routers.discord import router as discord_router
 from dashboard.backend.api.routers.credits import router as credits_router
+from dashboard.backend.api.routers.admin_credits import router as admin_credits_router
 from dashboard.backend.api.routers.admin_model_providers import router as admin_model_providers_router
 from dashboard.backend.api.routers.model_credentials import router as model_credentials_router
 from dashboard.backend.api.routers.environments import router as environments_router
@@ -28,6 +29,7 @@ api_router.include_router(algo_router)
 api_router.include_router(agents_router)
 api_router.include_router(discord_router)
 api_router.include_router(credits_router)
+api_router.include_router(admin_credits_router)
 api_router.include_router(admin_model_providers_router)
 api_router.include_router(model_credentials_router)
 api_router.include_router(agent_versions_router)

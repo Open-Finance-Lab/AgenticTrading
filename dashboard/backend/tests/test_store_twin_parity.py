@@ -307,9 +307,12 @@ def _string_literals(source: str) -> list[str]:
         if isinstance(node, ast.JoinedStr):
             literals.append(
                 "".join(
-                    part.value
-                    if isinstance(part, ast.Constant) and isinstance(part.value, str)
-                    else _EXPR
+                    (
+                        part.value
+                        if isinstance(part, ast.Constant)
+                        and isinstance(part.value, str)
+                        else _EXPR
+                    )
                     for part in node.values
                 )
             )
@@ -600,4 +603,101 @@ def test_postgres_twin_repeats_every_sqlite_lazy_migration(
         f"existing table. Declaring them in the Postgres CREATE TABLE alone is "
         f"not enough -- add `ALTER TABLE <t> ADD COLUMN IF NOT EXISTS <c> ...` "
         f"beside the others in its _init_schema:\n" + "\n".join(gaps)
+    )
+
+
+def test_credits_postgres_migrates_every_column_added_by_sqlite_rebuild():
+    """Credits rebuilds its ledger instead of using SQLite ADD COLUMN statements.
+
+    The generic lazy-migration guard above cannot infer those added columns from
+    ALTER syntax, so pin the shipped pre-Grant baseline and require every newer
+    SQLite ledger column to have an explicit PostgreSQL ADD COLUMN migration.
+    """
+
+    pre_grant_columns = {
+        "id",
+        "user_id",
+        "entry_type",
+        "amount_micro",
+        "payment_order_id",
+        "refund_request_id",
+        "stripe_event_id",
+        "operation_key",
+        "created_at",
+    }
+    sqlite_source = _module_source_path(
+        "dashboard.backend.domain.credits.repository"
+    ).read_text(encoding="utf-8")
+    postgres_source = _module_source_path(
+        "dashboard.backend.domain.credits.repository_postgres"
+    ).read_text(encoding="utf-8")
+    sqlite_columns = _parse_ddl(sqlite_source).declared["credit_ledger_entries"]
+    postgres_migrations = _parse_ddl(postgres_source).migrated.get(
+        "credit_ledger_entries", set()
+    )
+    expected = sqlite_columns - pre_grant_columns
+
+    assert expected <= postgres_migrations, (
+        "CreditsStore rebuilds credit_ledger_entries with columns that the "
+        "Postgres deployed-table migration never adds: "
+        f"{sorted(expected - postgres_migrations)}"
+    )
+
+
+def test_credits_postgres_migrates_pool_columns_added_by_sqlite_rebuild():
+    pre_snapshot_columns = {
+        "id",
+        "pool_id",
+        "entry_type",
+        "amount_micro",
+        "operation_id",
+        "idempotency_key",
+        "request_digest",
+        "actor_user_id",
+        "source",
+        "reason",
+        "user_id",
+        "user_ledger_entry_id",
+        "created_at",
+    }
+    sqlite_source = _module_source_path(
+        "dashboard.backend.domain.credits.repository"
+    ).read_text(encoding="utf-8")
+    postgres_source = _module_source_path(
+        "dashboard.backend.domain.credits.repository_postgres"
+    ).read_text(encoding="utf-8")
+    table = "credit_grant_pool_ledger_entries"
+    sqlite_columns = _parse_ddl(sqlite_source).declared[table]
+    postgres_migrations = _parse_ddl(postgres_source).migrated.get(table, set())
+    expected = sqlite_columns - pre_snapshot_columns
+
+    assert expected <= postgres_migrations, (
+        "CreditsStore rebuilds the Grant Pool ledger with columns that the "
+        "Postgres deployed-table migration never adds: "
+        f"{sorted(expected - postgres_migrations)}"
+    )
+
+
+def test_credits_twins_and_postgres_migration_reject_blank_operation_keys():
+    sqlite_source = _module_source_path(
+        "dashboard.backend.domain.credits.repository"
+    ).read_text(encoding="utf-8")
+    postgres_source = _module_source_path(
+        "dashboard.backend.domain.credits.repository_postgres"
+    ).read_text(encoding="utf-8")
+    sqlite_sql = re.sub(r"\s+", " ", sqlite_source)
+    postgres_sql = re.sub(r"\s+", " ", postgres_source)
+    constraint = (
+        "operation_key TEXT NOT NULL UNIQUE " "CHECK (length(trim(operation_key)) > 0)"
+    )
+
+    assert constraint in sqlite_sql
+    assert constraint in postgres_sql
+    assert (
+        "DROP CONSTRAINT IF EXISTS credit_ledger_entries_operation_key_check"
+        in postgres_sql
+    )
+    assert (
+        "ADD CONSTRAINT credit_ledger_entries_operation_key_check "
+        "CHECK (length(trim(operation_key)) > 0)" in postgres_sql
     )

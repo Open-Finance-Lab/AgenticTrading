@@ -1,6 +1,7 @@
 """Static contracts for the separate Admin provider vault surface."""
 
 from pathlib import Path
+import re
 
 
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
@@ -33,6 +34,13 @@ def test_admin_provider_client_uses_admin_routes_and_clears_secret():
 def test_admin_provider_surface_has_responsive_styles():
     assert ".admin-provider-section" in STYLES
     assert ".admin-provider-grid" in STYLES
+    assert ".admin-provider-form > .auth-btn" in STYLES
+    assert ".admin-platform-key-form > .auth-btn" in STYLES
+    assert re.search(
+        r"\.admin-provider-form \.auth-btn svg\s*,\s*\.admin-platform-key-form \.auth-btn svg\s*\{[^}]*width:\s*15px;[^}]*height:\s*15px;",
+        STYLES,
+        re.DOTALL,
+    )
     assert "@media (max-width: 600px)" in STYLES
 
 

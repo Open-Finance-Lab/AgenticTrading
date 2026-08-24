@@ -123,6 +123,20 @@ def test_apply_role_and_list_admin(store):
     assert listed[0]["entitlements"]["max_concurrent_backtests"] == 5
 
 
+def test_admin_user_search_is_trimmed_case_insensitive_and_escaped(store):
+    store.create_user("alice@example.com", "Research Alice", "securepass1")
+    store.create_user("bob@example.com", "Operations", "securepass1")
+    store.create_user("percent%name@example.com", "Percent Name", "securepass1")
+
+    assert [row["email"] for row in store.list_users_admin(query="  ALICE  ")] == [
+        "alice@example.com"
+    ]
+    assert store.count_users(query="research") == 1
+    assert store.list_users_admin(query="%")[0]["email"] == (
+        "percent%name@example.com"
+    )
+
+
 def test_cannot_demote_last_admin(store):
     user = store.create_user("a@example.com", "A", "securepass1")
     _promote(store, user["id"])

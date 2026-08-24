@@ -82,9 +82,12 @@ def _public_order(order: dict[str, Any]) -> dict[str, Any]:
 def _public_ledger_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": entry["id"],
+        "bucket": entry["bucket"],
         "entry_type": entry["entry_type"],
         "amount_micro": entry["amount_micro"],
         "display_credits": format_credits(entry["amount_micro"]),
+        "source": entry["source"],
+        "reason": entry["reason"],
         "payment_order_id": entry["payment_order_id"],
         "created_at": entry["created_at"],
     }

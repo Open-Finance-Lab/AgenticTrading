@@ -16,6 +16,7 @@ from dashboard.backend.api.routers import admin as admin_canon
 from dashboard.backend.api.routers import backtests as backtests_canon
 from dashboard.backend.api.routers import config as config_canon
 from dashboard.backend.api.routers import credits as credits_canon
+from dashboard.backend.api.routers import admin_credits as admin_credits_canon
 from dashboard.backend.api.routers import health as health_canon
 from dashboard.backend.api.routers import market as market_canon
 from dashboard.backend import middleware as middleware_mod
@@ -49,6 +50,16 @@ EXPECTED_CREDITS_ROUTES = {
         "reinstate_credit_account",
     ),
     ("POST", "/webhooks/stripe", "stripe_webhook"),
+}
+EXPECTED_ADMIN_CREDITS_ROUTES = {
+    ("GET", "/admin/credits/grant-pool", "get_grant_pool"),
+    ("GET", "/admin/credits/grant-pool/activity", "get_grant_pool_activity"),
+    ("POST", "/admin/credits/grant-pool/fund", "fund_grant_pool"),
+    ("POST", "/admin/credits/grant-pool/reduce", "reduce_grant_pool"),
+    ("GET", "/admin/credits/users", "list_grant_users"),
+    ("POST", "/admin/credits/grants/assign", "assign_grant"),
+    ("POST", "/admin/credits/grants/reclaim", "reclaim_grant"),
+    ("GET", "/admin/credits/activity", "get_grant_activity"),
 }
 EXPECTED_BACKTESTS_ROUTES = {
     ("POST", "/backtest/run", "run_backtest_endpoint"),
@@ -87,6 +98,14 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/admin/credits/orders"),
     ("POST", "/api/admin/credits/refunds"),
     ("POST", "/api/admin/credits/accounts/{user_id}/reinstate"),
+    ("GET", "/api/admin/credits/grant-pool"),
+    ("GET", "/api/admin/credits/grant-pool/activity"),
+    ("POST", "/api/admin/credits/grant-pool/fund"),
+    ("POST", "/api/admin/credits/grant-pool/reduce"),
+    ("GET", "/api/admin/credits/users"),
+    ("POST", "/api/admin/credits/grants/assign"),
+    ("POST", "/api/admin/credits/grants/reclaim"),
+    ("GET", "/api/admin/credits/activity"),
     ("POST", "/api/webhooks/stripe"),
     ("GET", "/api/strategies/{code}"),
     ("POST", "/api/strategies"),
@@ -285,6 +304,10 @@ def test_config_router_contract():
 
 def test_credits_router_contract():
     assert _route_triples(credits_canon.router) == EXPECTED_CREDITS_ROUTES
+
+
+def test_admin_credits_router_contract():
+    assert _route_triples(admin_credits_canon.router) == EXPECTED_ADMIN_CREDITS_ROUTES
 
 
 def test_admin_router_contract():

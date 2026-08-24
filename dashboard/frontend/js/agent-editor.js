@@ -830,7 +830,7 @@
       if (value > 3000) {
         throw new Error('Paper Trading Allocated Capital cannot exceed $3,000.');
       }
-      cash_allocation = Number(value.toFixed(2));
+      cash_allocation = Math.round(value);
     } else {
       cash_allocation = 1000;
     }
@@ -838,20 +838,20 @@
     let backtest_allocation = null;
     if (backtestInput && backtestInput.value !== '') {
       const value = Number(backtestInput.value);
-      if (!Number.isFinite(value) || value < 0) {
-        throw new Error('Backtest Allocated Capital must be between $0 and $3,000.');
+      if (!Number.isFinite(value) || value < 1) {
+        throw new Error('Backtest Allocated Capital must be at least $1.');
       }
       if (value > 3000) {
         throw new Error('Backtest Allocated Capital cannot exceed $3,000.');
       }
-      backtest_allocation = Number(value.toFixed(2));
+      backtest_allocation = Math.round(value);
     } else {
-      // Blank field (mid-edit or never set): fall back to the paper sleeve
-      // when that sleeve is positive, otherwise $1,000. An explicit 0 above
-      // is a real saved value and must not take this path.
+      // Non-positive counts as absent: cash_allocation is legally 0 (a $0 paper
+      // sleeve), but backtest capital is >= 1 server-side, so 0 must fall
+      // through to the default rather than becoming an unsaveable value.
       backtest_allocation =
         Number.isFinite(Number(cash_allocation)) && Number(cash_allocation) > 0
-          ? Math.min(Number(Number(cash_allocation).toFixed(2)), 3000)
+          ? Math.min(Math.round(Number(cash_allocation)), 3000)
           : 1000;
     }
     const modelSelect = document.getElementById('agentEditorModelSelect');
@@ -979,17 +979,16 @@
     }
     const backtestInput = document.getElementById('agentEditorBacktestAllocation');
     if (backtestInput) {
+      // Non-positive counts as absent: cash_allocation is legally 0 (a $0 paper
+      // sleeve), but backtest capital is >= 1 server-side, so 0 must fall
+      // through to the default rather than becoming an unsaveable value.
+      const candidates = [agent.backtest_allocation, agent.cash_allocation];
       let resolved = 1000;
-      if (agent.backtest_allocation != null && agent.backtest_allocation !== '') {
-        const saved = Number(agent.backtest_allocation);
-        if (Number.isFinite(saved) && saved >= 0) {
-          resolved = saved;
-        }
-      } else {
-        const sleeve = Number(agent.cash_allocation);
-        if (Number.isFinite(sleeve) && sleeve > 0) resolved = sleeve;
+      for (const raw of candidates) {
+        const value = Number(raw);
+        if (Number.isFinite(value) && value > 0) { resolved = value; break; }
       }
-      backtestInput.value = String(Math.min(Number(Number(resolved).toFixed(2)), 3000));
+      backtestInput.value = String(Math.min(Math.round(resolved), 3000));
     }
     if (meta) {
       meta.textContent = agent.agent_type === 'builtin' ? 'Built-in agent' : 'External agent';

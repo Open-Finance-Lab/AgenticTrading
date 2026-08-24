@@ -187,11 +187,18 @@ def test_balance_ledger_and_order_return_only_public_fields(billing_api):
 
     assert balance.status_code == 200
     assert balance.json()["balance"]["balance_micro"] == 0
+    assert balance.json()["balance"]["grant_available_micro"] == 0
+    assert balance.json()["balance"]["purchased_available_micro"] == 0
+    assert balance.json()["balance"]["total_available_micro"] == 0
+    assert balance.json()["balance"]["spending_enabled"] is False
     assert checkout_response.status_code == 200
     assert checkout_response.json()["test_mode"] is True
     assert paid.status_code == 200
     assert paid.json()["result"]["balance_micro"] == 10_000_000
     assert ledger.json()["items"][0]["amount_micro"] == 10_000_000
+    assert ledger.json()["items"][0]["bucket"] == "purchased"
+    assert ledger.json()["items"][0]["source"] == "stripe"
+    assert ledger.json()["items"][0]["reason"] == "Stripe checkout purchase."
     assert order.json()["order"]["status"] == "paid"
     serialized = str({"ledger": ledger.json(), "order": order.json()})
     assert "stripe_event_id" not in serialized

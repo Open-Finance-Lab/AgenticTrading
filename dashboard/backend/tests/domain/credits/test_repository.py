@@ -108,6 +108,8 @@ def test_schema_is_created_and_new_account_balance_is_zero(tmp_path):
         "credit_refund_requests",
         "stripe_webhook_events",
         "credit_ledger_entries",
+        "credit_grant_pools",
+        "credit_grant_pool_ledger_entries",
     }.issubset(tables)
 
 
@@ -384,6 +386,8 @@ def test_partial_refund_posts_negative_entry_and_updates_refundable_amount(tmp_p
         -4_000_000,
         10_000_000,
     ]
+    assert {entry["bucket"] for entry in entries} == {"purchased"}
+    assert {entry["source"] for entry in entries} == {"stripe"}
     admin_order = store.list_orders_for_admin()["items"][0]
     assert admin_order["refundable_credits_micro"] == 6_000_000
     assert admin_order["refundable_usd_cents"] == 600

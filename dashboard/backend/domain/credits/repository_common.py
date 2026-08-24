@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+from collections.abc import Mapping
 from datetime import datetime, timezone
 
 
@@ -17,8 +20,51 @@ class RefundNotAllowedError(CreditsStoreError):
     """A refund would exceed the unused, unrefunded purchase lot."""
 
 
+class IdempotencyConflictError(CreditsStoreError):
+    """An idempotent Grant operation was retried with different data."""
+
+
+class GrantPoolInsufficientError(CreditsStoreError):
+    """A Grant operation would make the pool balance negative."""
+
+
+class GrantReclaimExceedsAvailableError(CreditsStoreError):
+    """A reclaim exceeds the user's available Grant Credits."""
+
+
+class CreditAccountRestrictedStoreError(CreditsStoreError):
+    """A Grant operation targets a restricted credit account."""
+
+
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _required_text(value: object, name: str, max_length: int | None = None) -> str:
+    if not isinstance(value, str) or not value or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+    if value != value.strip():
+        raise ValueError(f"{name} must be trimmed")
+    if max_length is not None and len(value) > max_length:
+        raise ValueError(f"{name} must be at most {max_length} characters")
+    return value
+
+
+def _nonzero_integer(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value == 0:
+        raise ValueError(f"{name} must be a non-zero integer")
+    return value
+
+
+def _canonical_digest(parts: Mapping[str, object]) -> str:
+    payload = json.dumps(
+        dict(parts),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _positive_integer(value: int, name: str) -> int:

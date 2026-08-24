@@ -212,3 +212,109 @@ def test_admin_credit_refund_requires_csrf_for_cookie_session(csrf_client, monke
     assert blocked.status_code == 403
     assert "CSRF" in blocked.json()["detail"]
     assert allowed.status_code == 200
+
+
+def test_admin_grant_mutations_require_csrf_for_cookie_session(
+    csrf_client, monkeypatch
+):
+    """Every Admin Grant Credits write route stays behind the cookie CSRF gate."""
+    from dashboard.backend import users
+    from dashboard.backend.api.routers import admin_credits
+    from dashboard.backend.domain.credits.repository import CreditsStore
+    from dashboard.backend.domain.credits.service import CreditsService
+
+    _signup(csrf_client, email="grant-csrf@example.com")
+    admin_id = users.user_store.get_user_by_email("grant-csrf@example.com")["id"]
+    users.user_store.apply_admin_patch(admin_id, role="admin")
+
+    # CreditsStore's ledger entries reference the users table, so the test
+    # store must share the auth database instead of creating an isolated file.
+    grant_store = CreditsStore(users.user_store.db_path)
+    monkeypatch.setattr(
+        admin_credits, "credits_service", CreditsService(store=grant_store)
+    )
+    admin_credits.reset_admin_credits_limiter()
+
+    fund_payload = {
+        "client_request_id": "99999999-9999-4999-8999-999999999991",
+        "amount_micro": 5_000_000,
+        "source": "operations_budget",
+        "reason": "CSRF test funding.",
+    }
+    blocked_fund = csrf_client.post(
+        "/api/admin/credits/grant-pool/fund",
+        headers={"Origin": "http://testserver"},
+        json=fund_payload,
+    )
+    allowed_fund = csrf_client.post(
+        "/api/admin/credits/grant-pool/fund",
+        headers=_csrf_headers(csrf_client),
+        json=fund_payload,
+    )
+
+    reduce_payload = {
+        "client_request_id": "99999999-9999-4999-8999-999999999992",
+        "amount_micro": 1_000_000,
+        "source": "operations_budget",
+        "reason": "CSRF test reduction.",
+    }
+    blocked_reduce = csrf_client.post(
+        "/api/admin/credits/grant-pool/reduce",
+        headers={"Origin": "http://testserver"},
+        json=reduce_payload,
+    )
+    allowed_reduce = csrf_client.post(
+        "/api/admin/credits/grant-pool/reduce",
+        headers=_csrf_headers(csrf_client),
+        json=reduce_payload,
+    )
+
+    assert blocked_fund.status_code == 403
+    assert blocked_reduce.status_code == 403
+    assert "CSRF" in blocked_fund.json()["detail"]
+    assert "CSRF" in blocked_reduce.json()["detail"]
+    assert allowed_fund.status_code == 200, allowed_fund.text
+    assert allowed_reduce.status_code == 200, allowed_reduce.text
+
+    assign_payload = {
+        "client_request_id": "99999999-9999-4999-8999-999999999993",
+        "user_id": admin_id,
+        "amount_micro": 2_000_000,
+        "source": "operations_budget",
+        "reason": "CSRF test assignment.",
+    }
+    blocked_assign = csrf_client.post(
+        "/api/admin/credits/grants/assign",
+        headers={"Origin": "http://testserver"},
+        json=assign_payload,
+    )
+    allowed_assign = csrf_client.post(
+        "/api/admin/credits/grants/assign",
+        headers=_csrf_headers(csrf_client),
+        json=assign_payload,
+    )
+
+    reclaim_payload = {
+        "client_request_id": "99999999-9999-4999-8999-999999999994",
+        "user_id": admin_id,
+        "amount_micro": 1_000_000,
+        "source": "operations_budget",
+        "reason": "CSRF test reclaim.",
+    }
+    blocked_reclaim = csrf_client.post(
+        "/api/admin/credits/grants/reclaim",
+        headers={"Origin": "http://testserver"},
+        json=reclaim_payload,
+    )
+    allowed_reclaim = csrf_client.post(
+        "/api/admin/credits/grants/reclaim",
+        headers=_csrf_headers(csrf_client),
+        json=reclaim_payload,
+    )
+
+    assert blocked_assign.status_code == 403
+    assert blocked_reclaim.status_code == 403
+    assert "CSRF" in blocked_assign.json()["detail"]
+    assert "CSRF" in blocked_reclaim.json()["detail"]
+    assert allowed_assign.status_code == 200, allowed_assign.text
+    assert allowed_reclaim.status_code == 200, allowed_reclaim.text
