@@ -62,6 +62,24 @@ class ProviderRecord(BaseModel):
     updated_at: str | None = None
 
 
+class ExecutionModelOption(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    model_id: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=100)
+
+
+class ExecutionProviderOption(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_id: str = Field(min_length=2, max_length=64)
+    display_name: str = Field(min_length=1, max_length=100)
+    adapter_type: AdapterType
+    byok_available: bool
+    platform_credits_available: bool
+    models: tuple[ExecutionModelOption, ...] = ()
+
+
 class AdminProviderRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

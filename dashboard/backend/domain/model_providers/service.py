@@ -16,11 +16,14 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     LLMExecutionError,
 )
 
+from .execution_catalog import list_execution_model_routes
 from .models import (
     AdminPlatformCredentialPublic,
     AdminPlatformCredentialRequest,
     AdminProviderRequest,
     CredentialValidation,
+    ExecutionModelOption,
+    ExecutionProviderOption,
     ProviderRecord,
     UserCredentialCreate,
     UserCredentialPublic,
@@ -132,6 +135,51 @@ class ModelProviderService:
             ProviderRecord.model_validate(provider)
             for provider in self.store.list_all_providers()
         ]
+
+    def list_execution_options(
+        self,
+        user_id: int,
+    ) -> list[ExecutionProviderOption]:
+        default_counts: dict[str, int] = {}
+        for credential in self.store.list_user_credentials(int(user_id)):
+            if credential["status"] != "verified" or not credential["is_default"]:
+                continue
+            provider_id = str(credential["provider_id"])
+            default_counts[provider_id] = default_counts.get(provider_id, 0) + 1
+
+        options: list[ExecutionProviderOption] = []
+        for raw_provider in self.store.list_all_providers():
+            provider = ProviderRecord.model_validate(raw_provider)
+            if provider.status != "enabled":
+                continue
+            platform = self.store.get_platform_credential_public(
+                provider.provider_id
+            )
+            routes = list_execution_model_routes(provider)
+            options.append(
+                ExecutionProviderOption(
+                    provider_id=provider.provider_id,
+                    display_name=provider.display_name,
+                    adapter_type=provider.adapter_type,
+                    byok_available=(
+                        provider.byok_enabled
+                        and default_counts.get(provider.provider_id, 0) == 1
+                    ),
+                    platform_credits_available=(
+                        provider.platform_enabled
+                        and bool(platform)
+                        and platform["status"] == "verified"
+                    ),
+                    models=tuple(
+                        ExecutionModelOption(
+                            model_id=route.catalog_id,
+                            label=route.label,
+                        )
+                        for route in routes
+                    ),
+                )
+            )
+        return options
 
     def get_platform_credential(
         self, provider_id: str

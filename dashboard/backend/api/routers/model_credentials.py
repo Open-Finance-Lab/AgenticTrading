@@ -126,6 +126,23 @@ async def list_model_providers(
     return {"providers": [_public_provider(provider) for provider in providers]}
 
 
+@router.get("/credits/execution-options")
+async def list_execution_options(
+    current_user: dict = Depends(get_current_user),
+    service: ModelProviderService = Depends(get_model_provider_service),
+):
+    providers = await run_in_threadpool(
+        service.list_execution_options,
+        int(current_user["id"]),
+    )
+    return {
+        "providers": [
+            provider.model_dump(mode="json")
+            for provider in providers
+        ]
+    }
+
+
 @router.get("/credits/api-keys")
 async def list_model_credentials(
     provider_id: str | None = Query(default=None),
