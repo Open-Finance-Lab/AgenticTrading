@@ -16,7 +16,11 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     LLMExecutionError,
 )
 
-from .execution_catalog import list_execution_model_routes
+from .execution_catalog import (
+    ExecutionModelRoute,
+    list_execution_model_routes,
+    resolve_execution_model_route,
+)
 from .models import (
     AdminPlatformCredentialPublic,
     AdminPlatformCredentialRequest,
@@ -479,6 +483,19 @@ class ModelProviderService:
             provider_id=str(credential["provider_id"]),
             key_last_four=str(credential["key_last_four"])[-4:],
             secret=str(credential["secret"]),
+        )
+
+    def preflight_execution_model(
+        self,
+        provider_id: str,
+        catalog_model_id: str,
+    ) -> ExecutionModelRoute:
+        provider = self.store.get_provider(provider_id)
+        if not provider or provider["status"] != "enabled":
+            raise ProviderNotFoundError("provider not found")
+        return resolve_execution_model_route(
+            ProviderRecord.model_validate(provider),
+            catalog_model_id,
         )
 
     def resolve_platform_credential(self, provider_id: str) -> ResolvedCredential:

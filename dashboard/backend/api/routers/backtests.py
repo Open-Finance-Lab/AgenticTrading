@@ -66,6 +66,9 @@ from dashboard.backend.infrastructure.llm.execution.handoff import (
     create_execution_handoff,
 )
 from dashboard.backend.infrastructure.llm.execution.models import BillingMode
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    UnsupportedExecutionModel,
+)
 from dashboard.backend.domain.model_providers.service import (
     CredentialResolutionError,
     get_model_provider_service,
@@ -1811,12 +1814,24 @@ def run_backtest_endpoint(
             )
         provider_service = get_model_provider_service()
         try:
+            route = provider_service.preflight_execution_model(
+                provider_id,
+                model.strip(),
+            )
             if billing_mode is BillingMode.BYOK:
                 provider_service.preflight_user_default_credential(
                     int(user_id), provider_id
                 )
             else:
                 provider_service.preflight_platform_credential(provider_id)
+        except UnsupportedExecutionModel as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "The selected model is not available "
+                    "from this provider."
+                ),
+            ) from exc
         except CredentialResolutionError as exc:
             raise HTTPException(status_code=422, detail=exc.safe_message) from exc
         except Exception as exc:  # noqa: BLE001 - never expose provider internals
@@ -1830,7 +1845,7 @@ def run_backtest_endpoint(
             run_id=live_run_id,
             billing_mode=billing_mode,
             provider_id=provider_id,
-            model_id=model.strip(),
+            model_id=route.catalog_id,
             prompt_metadata={
                 "start_date": start_date,
                 "end_date": end_date,
