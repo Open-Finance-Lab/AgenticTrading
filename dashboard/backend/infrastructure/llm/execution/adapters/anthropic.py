@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    UnsupportedExecutionModel,
+    resolve_execution_model_route,
+)
 from dashboard.backend.domain.model_providers.models import ProviderRecord
 from dashboard.backend.infrastructure.llm.execution.models import LLMExecutionRequest
 
@@ -54,6 +58,13 @@ class AnthropicExecutionAdapter:
         client = None
         owned_http_client = None
         try:
+            try:
+                provider_model_id = resolve_execution_model_route(
+                    provider,
+                    request.model_id,
+                ).provider_model_id
+            except UnsupportedExecutionModel as exc:
+                raise ProviderExecutionError("provider_unavailable") from exc
             owned_http_client = build_safe_http_client(
                 provider.approved_base_url,
                 proxy_origin="https://api.anthropic.com",
@@ -64,7 +75,7 @@ class AnthropicExecutionAdapter:
                 http_client=owned_http_client,
             )
             kwargs: dict[str, Any] = {
-                "model": request.model_id,
+                "model": provider_model_id,
                 "max_tokens": request.usage_policy.max_output_tokens,
                 "messages": messages,
             }
@@ -83,7 +94,7 @@ class AnthropicExecutionAdapter:
             ) if usage is not None else None
             return AdapterResponse(
                 text=text,
-                model_id=str(value_at(response, "model", request.model_id)),
+                model_id=request.model_id,
                 usage=normalized_usage,
                 provider_cost_usd=optional_nonnegative_float(
                     value_at(response, "cost", value_at(usage, "cost"))

@@ -15,6 +15,9 @@ from pathlib import Path
 
 import pytest
 
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    ATL_EXECUTION_MODELS,
+)
 from dashboard.backend.tests._frontend_source import APP_HTML, APP_JS, fn_body, js_const
 
 _CATALOG = json.loads(
@@ -61,6 +64,17 @@ def test_every_supported_model_matches_a_vendor_prefix():
     prefixes = [row[1] for row in _vendor_rows()]
     for slug in re.findall(r"slug:\s*'([^']+)'", js_const("SUPPORTED_MODELS")):
         assert any(slug.lower().startswith(p) for p in prefixes), slug
+
+
+def test_backend_execution_catalog_matches_supported_models():
+    frontend_slugs = re.findall(
+        r"slug:\s*'([^']+)'",
+        js_const("SUPPORTED_MODELS"),
+    )
+
+    assert frontend_slugs == [
+        model.catalog_id for model in ATL_EXECUTION_MODELS
+    ]
 
 
 def test_supported_model_vendor_fields_agree_with_the_vendor_table():

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from urllib.parse import quote
 
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    UnsupportedExecutionModel,
+    resolve_execution_model_route,
+)
 from dashboard.backend.domain.model_providers.models import ProviderRecord
 from dashboard.backend.infrastructure.llm.execution.models import LLMExecutionRequest
 
@@ -56,9 +60,16 @@ class GeminiExecutionAdapter:
             generation["temperature"] = request.temperature  # type: ignore[index]
         client = None
         try:
+            try:
+                provider_model_id = resolve_execution_model_route(
+                    provider,
+                    request.model_id,
+                ).provider_model_id
+            except UnsupportedExecutionModel as exc:
+                raise ProviderExecutionError("provider_unavailable") from exc
             client = build_safe_http_client(provider.approved_base_url)
             response = client.post(
-                _endpoint(provider.approved_base_url, request.model_id),
+                _endpoint(provider.approved_base_url, provider_model_id),
                 headers={"x-goog-api-key": credential.secret, "Accept": "application/json"},
                 json=payload,
             )
