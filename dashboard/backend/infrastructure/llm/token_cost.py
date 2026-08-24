@@ -15,7 +15,15 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any, Tuple
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from typing import Any, Mapping, Tuple
+
+from dashboard.backend.infrastructure.llm.execution.models import (
+    BillingEvidence,
+    BillingMode,
+    LLMUsage,
+    PricingSnapshot,
+)
 
 # JSON / structured text packs slightly more tokens per character than prose.
 # ~3.8 chars/token tracks Claude + GPT tokenizers well for this payload shape.
@@ -62,6 +70,9 @@ _FREE_MODEL_MARKERS = ("rule-based", "local-model", "local", "demo", "baseline",
 
 # Fallback pricing when a real-looking model name is not in the table.
 _DEFAULT_PRICING: Tuple[float, float] = (1.0, 5.0)
+PRICING_SOURCE_VERSION = "pricing-table-2026-08-24"
+USD_PER_CREDIT = Decimal("1")
+CREDITS_MICRO_PER_CREDIT = 1_000_000
 
 
 def is_free_model(model: str | None) -> bool:
@@ -111,6 +122,132 @@ def estimate_cost_usd(model: str | None, input_tokens: int, output_tokens: int) 
     in_price, out_price = price_for_model(model)
     cost = (input_tokens / 1_000_000) * in_price + (output_tokens / 1_000_000) * out_price
     return round(cost, 6)
+
+
+def normalize_usage(payload: Any) -> LLMUsage:
+    """Normalize provider usage shapes without treating missing values as zero."""
+
+    if isinstance(payload, LLMUsage):
+        return payload
+    value = payload
+    if isinstance(payload, Mapping) and isinstance(payload.get("usageMetadata"), Mapping):
+        value = payload["usageMetadata"]
+
+    def pick(*names: str) -> Any:
+        for name in names:
+            if isinstance(value, Mapping) and name in value:
+                return value[name]
+            candidate = getattr(value, name, None)
+            if candidate is not None:
+                return candidate
+        return None
+
+    input_value = pick("input_tokens", "prompt_tokens", "promptTokenCount")
+    output_value = pick("output_tokens", "completion_tokens", "candidatesTokenCount")
+    try:
+        input_tokens = int(input_value) if input_value is not None else 0
+        output_tokens = int(output_value) if output_value is not None else 0
+    except (TypeError, ValueError, OverflowError):
+        return LLMUsage(input_tokens=0, output_tokens=0, usage_available=False)
+    if input_tokens < 0 or output_tokens < 0 or input_value is None or output_value is None:
+        return LLMUsage(
+            input_tokens=max(input_tokens, 0),
+            output_tokens=max(output_tokens, 0),
+            usage_available=False,
+        )
+    return LLMUsage(
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        usage_available=True,
+    )
+
+
+def estimate_cost_from_snapshot(
+    snapshot: PricingSnapshot,
+    usage: LLMUsage,
+) -> float | None:
+    """Calculate exact six-decimal USD cost from the captured price snapshot."""
+
+    if not usage.usage_available:
+        return None
+    try:
+        input_cost = (
+            Decimal(usage.input_tokens)
+            * Decimal(str(snapshot.input_usd_per_million_tokens))
+            / Decimal(1_000_000)
+        )
+        output_cost = (
+            Decimal(usage.output_tokens)
+            * Decimal(str(snapshot.output_usd_per_million_tokens))
+            / Decimal(1_000_000)
+        )
+        total = (input_cost + output_cost).quantize(
+            Decimal("0.000001"), rounding=ROUND_HALF_UP
+        )
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return float(total)
+
+
+def credits_micro_for_usd(cost_usd: float | Decimal | None) -> int:
+    """Convert USD to ATL Credit micro-units at the fixed $1 = 1 Credit rate."""
+
+    if cost_usd is None:
+        return 0
+    try:
+        value = Decimal(str(cost_usd))
+    except (InvalidOperation, TypeError, ValueError):
+        return 0
+    if value < 0:
+        raise ValueError("cost_usd must not be negative")
+    return int(
+        (value / USD_PER_CREDIT * CREDITS_MICRO_PER_CREDIT).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    )
+
+
+def build_cost_evidence(
+    *,
+    billing_mode: BillingMode,
+    provider_id: str,
+    model_id: str,
+    usage: LLMUsage,
+    provider_cost_usd: float | None,
+    pricing_snapshot: PricingSnapshot,
+) -> BillingEvidence:
+    """Build serializable evidence for both billable and BYOK lanes."""
+
+    if (
+        pricing_snapshot.provider_id != provider_id
+        or pricing_snapshot.model_id != model_id
+    ):
+        raise ValueError("pricing snapshot does not match provider and model")
+    if provider_cost_usd is not None and (
+        not math.isfinite(float(provider_cost_usd)) or provider_cost_usd < 0
+    ):
+        provider_cost_usd = None
+    estimated = estimate_cost_from_snapshot(pricing_snapshot, usage)
+    if not usage.usage_available:
+        authority = "unavailable"
+    elif provider_cost_usd is not None:
+        authority = "provider_reported_cost"
+    elif estimated is not None:
+        authority = "provider_usage_pricing_snapshot"
+    else:
+        authority = "unavailable"
+    return BillingEvidence(
+        billing_source=billing_mode,
+        usage_authority=authority,
+        provider_cost_usd=provider_cost_usd,
+        estimated_cost_usd=estimated,
+        pricing_snapshot=pricing_snapshot,
+        debited_credits_micro=(
+            credits_micro_for_usd(provider_cost_usd if provider_cost_usd is not None else estimated)
+            if billing_mode is BillingMode.PLATFORM_CREDITS and usage.usage_available
+            else 0
+        ),
+    )
 
 
 def summarize(

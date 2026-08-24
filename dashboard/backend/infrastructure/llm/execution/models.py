@@ -103,6 +103,25 @@ class PricingSnapshot(BaseModel):
     currency: Literal["USD"] = "USD"
     source_version: str = Field(min_length=1, max_length=64)
 
+    @classmethod
+    def from_model(
+        cls,
+        model_id: str,
+        provider_id: str = "unknown",
+        *,
+        source_version: str = "pricing-table-2026-08-24",
+    ) -> "PricingSnapshot":
+        from dashboard.backend.infrastructure.llm.token_cost import price_for_model
+
+        input_price, output_price = price_for_model(model_id)
+        return cls(
+            provider_id=provider_id,
+            model_id=model_id,
+            input_usd_per_million_tokens=input_price,
+            output_usd_per_million_tokens=output_price,
+            source_version=source_version,
+        )
+
 
 class BillingEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
