@@ -6,19 +6,157 @@ import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from dashboard.backend.database import DB_PATH
 from dashboard.backend.db_url import describe_database_url
 from dashboard.backend.domain.credits.repository_common import (
+    CreditAccountRestrictedStoreError,
+    GrantPoolInsufficientError,
+    GrantReclaimExceedsAvailableError,
+    IdempotencyConflictError,
     OrderConflictError,
     RefundNotAllowedError,
     _positive_integer,
     _positive_limit,
+    _required_text,
     _utcnow_iso,
     _validate_amount_pair,
 )
+
+
+_CREDIT_LEDGER_DDL = """
+CREATE TABLE credit_ledger_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    bucket TEXT NOT NULL CHECK (bucket IN ('grant', 'purchased')),
+    entry_type TEXT NOT NULL CHECK (entry_type IN (
+        'purchase', 'refund', 'admin_grant_assign', 'admin_grant_reclaim'
+    )),
+    amount_micro INTEGER NOT NULL CHECK (amount_micro <> 0),
+    payment_order_id TEXT,
+    refund_request_id TEXT,
+    stripe_event_id TEXT,
+    operation_key TEXT NOT NULL UNIQUE
+        CHECK (length(trim(operation_key)) > 0),
+    operation_id TEXT NOT NULL CHECK (length(trim(operation_id)) > 0),
+    idempotency_key TEXT NOT NULL UNIQUE
+        CHECK (length(trim(idempotency_key)) > 0),
+    request_digest TEXT CHECK (
+        request_digest IS NULL OR length(trim(request_digest)) > 0
+    ),
+    actor_user_id INTEGER,
+    source TEXT NOT NULL CHECK (length(trim(source)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    reference_type TEXT,
+    reference_id TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (payment_order_id)
+        REFERENCES credit_payment_orders(id) ON DELETE RESTRICT,
+    FOREIGN KEY (refund_request_id)
+        REFERENCES credit_refund_requests(id) ON DELETE RESTRICT,
+    FOREIGN KEY (stripe_event_id)
+        REFERENCES stripe_webhook_events(stripe_event_id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CHECK (
+        (
+            entry_type = 'purchase'
+            AND bucket = 'purchased'
+            AND amount_micro > 0
+            AND payment_order_id IS NOT NULL
+            AND refund_request_id IS NULL
+            AND stripe_event_id IS NOT NULL
+            AND request_digest IS NULL
+            AND actor_user_id IS NULL
+            AND reference_type IS NULL
+            AND reference_id IS NULL
+        )
+        OR (
+            entry_type = 'refund'
+            AND bucket = 'purchased'
+            AND amount_micro < 0
+            AND payment_order_id IS NOT NULL
+            AND refund_request_id IS NOT NULL
+            AND stripe_event_id IS NOT NULL
+            AND request_digest IS NULL
+            AND actor_user_id IS NULL
+            AND reference_type IS NULL
+            AND reference_id IS NULL
+        )
+        OR (
+            entry_type IN ('admin_grant_assign', 'admin_grant_reclaim')
+            AND bucket = 'grant'
+            AND payment_order_id IS NULL
+            AND refund_request_id IS NULL
+            AND stripe_event_id IS NULL
+            AND request_digest IS NOT NULL
+            AND actor_user_id IS NOT NULL
+            AND reference_type = 'grant_pool'
+            AND reference_id IS NOT NULL
+            AND (
+                (entry_type = 'admin_grant_assign' AND amount_micro > 0)
+                OR (entry_type = 'admin_grant_reclaim' AND amount_micro < 0)
+            )
+        )
+    )
+)
+"""
+
+
+_GRANT_POOL_DDL = """
+CREATE TABLE IF NOT EXISTS credit_grant_pools (
+    pool_id TEXT PRIMARY KEY CHECK (length(trim(pool_id)) > 0),
+    name TEXT NOT NULL CHECK (length(trim(name)) > 0),
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'disabled')),
+    created_at TEXT NOT NULL
+)
+"""
+
+
+_GRANT_POOL_LEDGER_DDL = """
+CREATE TABLE IF NOT EXISTS credit_grant_pool_ledger_entries (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pool_id TEXT NOT NULL,
+    pool_name_snapshot TEXT NOT NULL
+        CHECK (length(trim(pool_name_snapshot)) > 0),
+    pool_status_snapshot TEXT NOT NULL
+        CHECK (pool_status_snapshot IN ('active', 'disabled')),
+    entry_type TEXT NOT NULL
+        CHECK (entry_type IN ('fund', 'reduce', 'assign', 'reclaim')),
+    amount_micro INTEGER NOT NULL CHECK (amount_micro <> 0),
+    operation_id TEXT NOT NULL UNIQUE
+        CHECK (length(trim(operation_id)) > 0),
+    idempotency_key TEXT NOT NULL UNIQUE
+        CHECK (length(trim(idempotency_key)) > 0),
+    request_digest TEXT NOT NULL CHECK (length(trim(request_digest)) > 0),
+    actor_user_id INTEGER NOT NULL,
+    source TEXT NOT NULL CHECK (length(trim(source)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    user_id INTEGER,
+    user_ledger_entry_id INTEGER UNIQUE,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (pool_id)
+        REFERENCES credit_grant_pools(pool_id) ON DELETE RESTRICT,
+    FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    FOREIGN KEY (user_ledger_entry_id)
+        REFERENCES credit_ledger_entries(id) ON DELETE RESTRICT,
+    CHECK (
+        (entry_type = 'fund' AND amount_micro > 0
+            AND user_id IS NULL AND user_ledger_entry_id IS NULL)
+        OR (entry_type = 'reduce' AND amount_micro < 0
+            AND user_id IS NULL AND user_ledger_entry_id IS NULL)
+        OR (entry_type = 'assign' AND amount_micro < 0
+            AND user_id IS NOT NULL AND user_ledger_entry_id IS NOT NULL)
+        OR (entry_type = 'reclaim' AND amount_micro > 0
+            AND user_id IS NOT NULL AND user_ledger_entry_id IS NOT NULL)
+    )
+)
+"""
 
 
 def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
@@ -145,35 +283,199 @@ class CreditsStore:
                     reason TEXT,
                     created_at TEXT NOT NULL
                 );
-
-                CREATE TABLE IF NOT EXISTS credit_ledger_entries (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    entry_type TEXT NOT NULL
-                        CHECK (entry_type IN ('purchase', 'refund')),
-                    amount_micro INTEGER NOT NULL CHECK (amount_micro <> 0),
-                    payment_order_id TEXT NOT NULL,
-                    refund_request_id TEXT,
-                    stripe_event_id TEXT NOT NULL,
-                    operation_key TEXT NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-                    FOREIGN KEY (payment_order_id)
-                        REFERENCES credit_payment_orders(id) ON DELETE RESTRICT,
-                    FOREIGN KEY (refund_request_id)
-                        REFERENCES credit_refund_requests(id) ON DELETE RESTRICT,
-                    FOREIGN KEY (stripe_event_id)
-                        REFERENCES stripe_webhook_events(stripe_event_id)
-                        ON DELETE RESTRICT
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_credit_ledger_user_id
-                ON credit_ledger_entries(user_id, id DESC);
-
-                CREATE INDEX IF NOT EXISTS idx_credit_ledger_payment_order
-                ON credit_ledger_entries(payment_order_id, id DESC);
                 """
             )
+            self._begin(conn)
+            self._migrate_credit_ledger_in_transaction(conn)
+            self._create_grant_pool_schema_in_transaction(conn)
+
+    @staticmethod
+    def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
+        return {str(row["name"]) for row in conn.execute(f"PRAGMA table_info({table})")}
+
+    @classmethod
+    def _migrate_credit_ledger_in_transaction(
+        cls, conn: sqlite3.Connection
+    ) -> None:
+        columns = cls._table_columns(conn, "credit_ledger_entries")
+        if not columns:
+            conn.execute(_CREDIT_LEDGER_DDL)
+        elif "bucket" not in columns:
+            legacy_evidence = conn.execute(
+                """
+                SELECT COUNT(*) AS row_count,
+                       COALESCE(SUM(amount_micro), 0) AS amount_sum
+                FROM credit_ledger_entries
+                """
+            ).fetchone()
+            conn.execute(
+                "ALTER TABLE credit_ledger_entries "
+                "RENAME TO credit_ledger_entries_legacy"
+            )
+            conn.execute(_CREDIT_LEDGER_DDL)
+            conn.execute(
+                """
+                INSERT INTO credit_ledger_entries (
+                    id, user_id, bucket, entry_type, amount_micro,
+                    payment_order_id, refund_request_id, stripe_event_id,
+                    operation_key, operation_id, idempotency_key,
+                    request_digest, actor_user_id, source, reason,
+                    reference_type, reference_id, created_at
+                )
+                SELECT
+                    id,
+                    user_id,
+                    'purchased',
+                    entry_type,
+                    amount_micro,
+                    payment_order_id,
+                    refund_request_id,
+                    stripe_event_id,
+                    operation_key,
+                    operation_key,
+                    operation_key,
+                    NULL,
+                    NULL,
+                    'stripe',
+                    CASE entry_type
+                        WHEN 'purchase' THEN 'Historical Stripe purchase.'
+                        ELSE 'Historical Stripe refund.'
+                    END,
+                    NULL,
+                    NULL,
+                    created_at
+                FROM credit_ledger_entries_legacy
+                ORDER BY id
+                """
+            )
+            migrated_evidence = conn.execute(
+                """
+                SELECT COUNT(*) AS row_count,
+                       COALESCE(SUM(amount_micro), 0) AS amount_sum
+                FROM credit_ledger_entries
+                """
+            ).fetchone()
+            if (
+                int(migrated_evidence["row_count"])
+                != int(legacy_evidence["row_count"])
+                or int(migrated_evidence["amount_sum"])
+                != int(legacy_evidence["amount_sum"])
+            ):
+                raise RuntimeError("Credits ledger migration evidence mismatch")
+            conn.execute("DROP TABLE credit_ledger_entries_legacy")
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_credit_ledger_user_id
+            ON credit_ledger_entries(user_id, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_credit_ledger_payment_order
+            ON credit_ledger_entries(payment_order_id, id DESC)
+            """
+        )
+
+    @classmethod
+    def _create_grant_pool_schema_in_transaction(
+        cls,
+        conn: sqlite3.Connection,
+    ) -> None:
+        conn.execute(_GRANT_POOL_DDL)
+        columns = cls._table_columns(conn, "credit_grant_pool_ledger_entries")
+        if not columns:
+            conn.execute(_GRANT_POOL_LEDGER_DDL)
+        elif (
+            not {
+                "pool_name_snapshot",
+                "pool_status_snapshot",
+            }
+            <= columns
+        ):
+            legacy_evidence = conn.execute(
+                """
+                SELECT COUNT(*) AS row_count,
+                       COALESCE(SUM(amount_micro), 0) AS amount_sum,
+                       COALESCE(MAX(id), 0) AS max_id
+                FROM credit_grant_pool_ledger_entries
+                """
+            ).fetchone()
+            pool_name = (
+                "legacy.pool_name_snapshot"
+                if "pool_name_snapshot" in columns
+                else "pool.name"
+            )
+            pool_status = (
+                "legacy.pool_status_snapshot"
+                if "pool_status_snapshot" in columns
+                else "pool.status"
+            )
+            conn.execute(
+                "ALTER TABLE credit_grant_pool_ledger_entries "
+                "RENAME TO credit_grant_pool_ledger_entries_legacy"
+            )
+            conn.execute(_GRANT_POOL_LEDGER_DDL)
+            conn.execute(
+                f"""
+                INSERT INTO credit_grant_pool_ledger_entries (
+                    id, pool_id, pool_name_snapshot, pool_status_snapshot,
+                    entry_type, amount_micro, operation_id, idempotency_key,
+                    request_digest, actor_user_id, source, reason, user_id,
+                    user_ledger_entry_id, created_at
+                )
+                SELECT
+                    legacy.id,
+                    legacy.pool_id,
+                    {pool_name},
+                    {pool_status},
+                    legacy.entry_type,
+                    legacy.amount_micro,
+                    legacy.operation_id,
+                    legacy.idempotency_key,
+                    legacy.request_digest,
+                    legacy.actor_user_id,
+                    legacy.source,
+                    legacy.reason,
+                    legacy.user_id,
+                    legacy.user_ledger_entry_id,
+                    legacy.created_at
+                FROM credit_grant_pool_ledger_entries_legacy AS legacy
+                JOIN credit_grant_pools AS pool ON pool.pool_id = legacy.pool_id
+                ORDER BY legacy.id
+                """
+            )
+            migrated_evidence = conn.execute(
+                """
+                SELECT COUNT(*) AS row_count,
+                       COALESCE(SUM(amount_micro), 0) AS amount_sum,
+                       COALESCE(MAX(id), 0) AS max_id
+                FROM credit_grant_pool_ledger_entries
+                """
+            ).fetchone()
+            if tuple(migrated_evidence) != tuple(legacy_evidence):
+                raise RuntimeError("Grant Pool ledger migration evidence mismatch")
+            conn.execute("DROP TABLE credit_grant_pool_ledger_entries_legacy")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_credit_grant_pool_ledger_pool_id
+            ON credit_grant_pool_ledger_entries(pool_id, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_credit_grant_user_reference
+            ON credit_ledger_entries(reference_type, reference_id, user_id, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO credit_grant_pools (pool_id, name, status, created_at)
+            VALUES ('default', 'Platform Research Grants', 'active', ?)
+            ON CONFLICT(pool_id) DO NOTHING
+            """,
+            (_utcnow_iso(),),
+        )
 
     @staticmethod
     def _begin(conn: sqlite3.Connection) -> None:
@@ -202,18 +504,97 @@ class CreditsStore:
             ).fetchone()
             return dict(row)
 
-    def get_balance_micro(self, user_id: int) -> int:
+    @staticmethod
+    def _balance_projection_in_transaction(
+        conn: sqlite3.Connection,
+        user_id: int,
+        through_entry_id: int | None = None,
+    ) -> dict[str, int]:
+        cutoff_sql = ""
+        params: list[Any] = [user_id]
+        if through_entry_id is not None:
+            cutoff_sql = "AND id <= ?"
+            params.append(through_entry_id)
+        row = conn.execute(
+            f"""
+            SELECT
+                COALESCE(SUM(
+                    CASE WHEN bucket = 'grant' THEN amount_micro ELSE 0 END
+                ), 0) AS grant_committed_micro,
+                COALESCE(SUM(
+                    CASE WHEN bucket = 'purchased' THEN amount_micro ELSE 0 END
+                ), 0) AS purchased_committed_micro
+            FROM credit_ledger_entries
+            WHERE user_id = ?
+              {cutoff_sql}
+            """,
+            params,
+        ).fetchone()
+        grant_micro = int(row["grant_committed_micro"])
+        purchased_micro = int(row["purchased_committed_micro"])
+        return {
+            "grant_committed_micro": grant_micro,
+            "purchased_committed_micro": purchased_micro,
+            "grant_available_micro": grant_micro,
+            "purchased_available_micro": purchased_micro,
+            "total_available_micro": grant_micro + purchased_micro,
+        }
+
+    def get_balance_projection(self, user_id: int) -> dict[str, int]:
         _positive_integer(user_id, "user_id")
         with self._get_connection() as conn:
-            row = conn.execute(
-                """
-                SELECT COALESCE(SUM(amount_micro), 0) AS balance_micro
+            return self._balance_projection_in_transaction(conn, user_id)
+
+    def get_balance_projections(
+        self, user_ids: list[int] | tuple[int, ...]
+    ) -> dict[int, dict[str, int]]:
+        if not isinstance(user_ids, (list, tuple)):
+            raise ValueError("user_ids must be a list or tuple")
+        validated = [_positive_integer(user_id, "user_id") for user_id in user_ids]
+        if not validated:
+            return {}
+
+        unique_ids = list(dict.fromkeys(validated))
+        placeholders = ", ".join("?" for _ in unique_ids)
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                    user_id,
+                    COALESCE(SUM(
+                        CASE WHEN bucket = 'grant' THEN amount_micro ELSE 0 END
+                    ), 0) AS grant_committed_micro,
+                    COALESCE(SUM(
+                        CASE WHEN bucket = 'purchased' THEN amount_micro ELSE 0 END
+                    ), 0) AS purchased_committed_micro
                 FROM credit_ledger_entries
-                WHERE user_id = ?
+                WHERE user_id IN ({placeholders})
+                GROUP BY user_id
                 """,
-                (user_id,),
-            ).fetchone()
-            return int(row["balance_micro"])
+                unique_ids,
+            ).fetchall()
+
+        amounts = {
+            int(row["user_id"]): (
+                int(row["grant_committed_micro"]),
+                int(row["purchased_committed_micro"]),
+            )
+            for row in rows
+        }
+        projections: dict[int, dict[str, int]] = {}
+        for user_id in unique_ids:
+            grant_micro, purchased_micro = amounts.get(user_id, (0, 0))
+            projections[user_id] = {
+                "grant_committed_micro": grant_micro,
+                "purchased_committed_micro": purchased_micro,
+                "grant_available_micro": grant_micro,
+                "purchased_available_micro": purchased_micro,
+                "total_available_micro": grant_micro + purchased_micro,
+            }
+        return projections
+
+    def get_balance_micro(self, user_id: int) -> int:
+        return self.get_balance_projection(user_id)["total_available_micro"]
 
     def create_or_get_order(
         self,
@@ -606,16 +987,22 @@ class CreditsStore:
             conn.execute(
                 """
                 INSERT INTO credit_ledger_entries (
-                    user_id, entry_type, amount_micro, payment_order_id,
-                    refund_request_id, stripe_event_id, operation_key, created_at
+                    user_id, bucket, entry_type, amount_micro, payment_order_id,
+                    refund_request_id, stripe_event_id, operation_key,
+                    operation_id, idempotency_key, source, reason, created_at
                 )
-                VALUES (?, 'purchase', ?, ?, NULL, ?, ?, ?)
+                VALUES (
+                    ?, 'purchased', 'purchase', ?, ?, NULL, ?, ?, ?, ?,
+                    'stripe', 'Stripe checkout purchase.', ?
+                )
                 """,
                 (
                     order["user_id"],
                     order["credits_micro"],
                     order_id,
                     event_id,
+                    operation_key,
+                    operation_key,
                     operation_key,
                     now,
                 ),
@@ -638,14 +1025,8 @@ class CreditsStore:
 
     @staticmethod
     def _balance_in_transaction(conn: sqlite3.Connection, user_id: int) -> int:
-        row = conn.execute(
-            """
-            SELECT COALESCE(SUM(amount_micro), 0) AS balance_micro
-            FROM credit_ledger_entries WHERE user_id = ?
-            """,
-            (user_id,),
-        ).fetchone()
-        return int(row["balance_micro"])
+        projection = CreditsStore._balance_projection_in_transaction(conn, user_id)
+        return projection["total_available_micro"]
 
     def get_order_for_user(
         self, order_id: str, user_id: int
@@ -1135,10 +1516,14 @@ class CreditsStore:
             conn.execute(
                 """
                 INSERT INTO credit_ledger_entries (
-                    user_id, entry_type, amount_micro, payment_order_id,
-                    refund_request_id, stripe_event_id, operation_key, created_at
+                    user_id, bucket, entry_type, amount_micro, payment_order_id,
+                    refund_request_id, stripe_event_id, operation_key,
+                    operation_id, idempotency_key, source, reason, created_at
                 )
-                VALUES (?, 'refund', ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, 'purchased', 'refund', ?, ?, ?, ?, ?, ?, ?,
+                    'stripe', 'Stripe refund.', ?
+                )
                 """,
                 (
                     refund["user_id"],
@@ -1146,6 +1531,8 @@ class CreditsStore:
                     refund["payment_order_id"],
                     refund_id,
                     event_id,
+                    operation_key,
+                    operation_key,
                     operation_key,
                     now,
                 ),
@@ -1290,6 +1677,425 @@ class CreditsStore:
         return {
             "items": items,
             "next_cursor": items[-1]["sequence"] if has_more and items else None,
+        }
+
+    @staticmethod
+    def _ensure_pool_in_transaction(
+        conn: sqlite3.Connection, pool_id: str
+    ) -> sqlite3.Row:
+        if pool_id == "default":
+            conn.execute(
+                """
+                INSERT INTO credit_grant_pools (pool_id, name, status, created_at)
+                VALUES ('default', 'Platform Research Grants', 'active', ?)
+                ON CONFLICT(pool_id) DO NOTHING
+                """,
+                (_utcnow_iso(),),
+            )
+        pool = conn.execute(
+            "SELECT * FROM credit_grant_pools WHERE pool_id = ?", (pool_id,)
+        ).fetchone()
+        if pool is None:
+            raise ValueError("grant pool does not exist")
+        return pool
+
+    @staticmethod
+    def _pool_balance_in_transaction(
+        conn: sqlite3.Connection,
+        pool_id: str,
+        through_entry_id: int | None = None,
+    ) -> int:
+        cutoff_sql = ""
+        params: list[Any] = [pool_id]
+        if through_entry_id is not None:
+            cutoff_sql = "AND id <= ?"
+            params.append(through_entry_id)
+        row = conn.execute(
+            f"""
+            SELECT COALESCE(SUM(amount_micro), 0) AS balance_micro
+            FROM credit_grant_pool_ledger_entries
+            WHERE pool_id = ?
+              {cutoff_sql}
+            """,
+            params,
+        ).fetchone()
+        return int(row["balance_micro"])
+
+    @staticmethod
+    def _insert_user_grant_entry_in_transaction(
+        conn: sqlite3.Connection,
+        *,
+        pool_id: str,
+        user_id: int,
+        entry_type: str,
+        amount_micro: int,
+        operation_id: str,
+        idempotency_key: str,
+        request_digest: str,
+        actor_user_id: int,
+        source: str,
+        reason: str,
+        created_at: str,
+    ) -> int:
+        cursor = conn.execute(
+            """
+            INSERT INTO credit_ledger_entries (
+                user_id, bucket, entry_type, amount_micro,
+                payment_order_id, refund_request_id, stripe_event_id,
+                operation_key, operation_id, idempotency_key,
+                request_digest, actor_user_id, source, reason,
+                reference_type, reference_id, created_at
+            )
+            VALUES (
+                ?, 'grant', ?, ?, NULL, NULL, NULL,
+                ?, ?, ?, ?, ?, ?, ?, 'grant_pool', ?, ?
+            )
+            """,
+            (
+                user_id,
+                entry_type,
+                amount_micro,
+                f"{operation_id}:user",
+                operation_id,
+                f"{idempotency_key}:user",
+                request_digest,
+                actor_user_id,
+                source,
+                reason,
+                pool_id,
+                created_at,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    @staticmethod
+    def _insert_grant_pool_entry_in_transaction(
+        conn: sqlite3.Connection,
+        *,
+        pool_id: str,
+        pool_name_snapshot: str,
+        pool_status_snapshot: str,
+        entry_type: str,
+        amount_micro: int,
+        operation_id: str,
+        idempotency_key: str,
+        request_digest: str,
+        actor_user_id: int,
+        source: str,
+        reason: str,
+        user_id: int | None,
+        user_ledger_entry_id: int | None,
+        created_at: str,
+    ) -> int:
+        cursor = conn.execute(
+            """
+            INSERT INTO credit_grant_pool_ledger_entries (
+                pool_id, pool_name_snapshot, pool_status_snapshot,
+                entry_type, amount_micro, operation_id,
+                idempotency_key, request_digest, actor_user_id,
+                source, reason, user_id, user_ledger_entry_id, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                pool_id,
+                pool_name_snapshot,
+                pool_status_snapshot,
+                entry_type,
+                amount_micro,
+                operation_id,
+                idempotency_key,
+                request_digest,
+                actor_user_id,
+                source,
+                reason,
+                user_id,
+                user_ledger_entry_id,
+                created_at,
+            ),
+        )
+        return int(cursor.lastrowid)
+
+    @classmethod
+    def _grant_mutation_result_in_transaction(
+        cls, conn: sqlite3.Connection, pool_entry: sqlite3.Row
+    ) -> dict[str, Any]:
+        user_id = pool_entry["user_id"]
+        user_entry = None
+        user_balance = None
+        if pool_entry["user_ledger_entry_id"] is not None:
+            user_entry = conn.execute(
+                "SELECT * FROM credit_ledger_entries WHERE id = ?",
+                (pool_entry["user_ledger_entry_id"],),
+            ).fetchone()
+        if user_id is not None:
+            user_balance = cls._balance_projection_in_transaction(
+                conn,
+                int(user_id),
+                through_entry_id=int(pool_entry["user_ledger_entry_id"]),
+            )
+        return {
+            "entry": dict(pool_entry),
+            "user_entry": _dict(user_entry),
+            "pool": {
+                "pool_id": pool_entry["pool_id"],
+                "name": pool_entry["pool_name_snapshot"],
+                "status": pool_entry["pool_status_snapshot"],
+                "balance_micro": cls._pool_balance_in_transaction(
+                    conn,
+                    pool_entry["pool_id"],
+                    through_entry_id=int(pool_entry["id"]),
+                ),
+            },
+            "user_balance": user_balance,
+        }
+
+    def _grant_mutation(
+        self,
+        *,
+        operation_type: str,
+        pool_id: str,
+        amount_micro: int,
+        operation_id: str,
+        idempotency_key: str,
+        request_digest: str,
+        actor_user_id: int,
+        source: str,
+        reason: str,
+        user_id: int | None = None,
+    ) -> dict[str, Any]:
+        _required_text(pool_id, "pool_id", max_length=120)
+        _positive_integer(amount_micro, "amount_micro")
+        _required_text(operation_id, "operation_id")
+        _required_text(idempotency_key, "idempotency_key")
+        _required_text(request_digest, "request_digest")
+        _positive_integer(actor_user_id, "actor_user_id")
+        _required_text(source, "source", max_length=120)
+        _required_text(reason, "reason", max_length=500)
+        if operation_type not in {"fund", "reduce", "assign", "reclaim"}:
+            raise ValueError("unsupported Grant operation")
+        if operation_type in {"assign", "reclaim"}:
+            _positive_integer(user_id, "user_id")
+        elif user_id is not None:
+            raise ValueError("user_id is only valid for assign and reclaim")
+        expected_pool_amount = (
+            amount_micro
+            if operation_type in {"fund", "reclaim"}
+            else -amount_micro
+        )
+
+        with self._get_connection() as conn:
+            self._begin(conn)
+            pool = self._ensure_pool_in_transaction(conn, pool_id)
+            existing = conn.execute(
+                """
+                SELECT * FROM credit_grant_pool_ledger_entries
+                WHERE idempotency_key = ? OR operation_id = ?
+                """,
+                (idempotency_key, operation_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["idempotency_key"] != idempotency_key
+                    or existing["operation_id"] != operation_id
+                    or existing["request_digest"] != request_digest
+                    or existing["pool_id"] != pool_id
+                    or existing["entry_type"] != operation_type
+                    or int(existing["amount_micro"]) != expected_pool_amount
+                    or existing["actor_user_id"] != actor_user_id
+                    or existing["source"] != source
+                    or existing["reason"] != reason
+                    or existing["user_id"] != user_id
+                ):
+                    raise IdempotencyConflictError(
+                        "Grant idempotency key conflicts with an existing operation"
+                    )
+                return self._grant_mutation_result_in_transaction(conn, existing)
+
+            pool_balance = self._pool_balance_in_transaction(conn, pool_id)
+            if operation_type in {"reduce", "assign"} and pool_balance < amount_micro:
+                raise GrantPoolInsufficientError(
+                    "Grant Pool does not have enough available Credits"
+                )
+
+            user_entry_id = None
+            created_at = _utcnow_iso()
+            if operation_type == "assign":
+                self._ensure_account_in_transaction(conn, int(user_id))
+                account = conn.execute(
+                    "SELECT status FROM credit_accounts WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()
+                if account["status"] == "restricted":
+                    raise CreditAccountRestrictedStoreError(
+                        "restricted credit account cannot receive Grant Credits"
+                    )
+                user_entry_id = self._insert_user_grant_entry_in_transaction(
+                    conn,
+                    pool_id=pool_id,
+                    user_id=int(user_id),
+                    entry_type="admin_grant_assign",
+                    amount_micro=amount_micro,
+                    operation_id=operation_id,
+                    idempotency_key=idempotency_key,
+                    request_digest=request_digest,
+                    actor_user_id=actor_user_id,
+                    source=source,
+                    reason=reason,
+                    created_at=created_at,
+                )
+            elif operation_type == "reclaim":
+                projection = self._balance_projection_in_transaction(
+                    conn, int(user_id)
+                )
+                if projection["grant_available_micro"] < amount_micro:
+                    raise GrantReclaimExceedsAvailableError(
+                        "reclaim exceeds available Grant Credits"
+                    )
+                user_entry_id = self._insert_user_grant_entry_in_transaction(
+                    conn,
+                    pool_id=pool_id,
+                    user_id=int(user_id),
+                    entry_type="admin_grant_reclaim",
+                    amount_micro=-amount_micro,
+                    operation_id=operation_id,
+                    idempotency_key=idempotency_key,
+                    request_digest=request_digest,
+                    actor_user_id=actor_user_id,
+                    source=source,
+                    reason=reason,
+                    created_at=created_at,
+                )
+
+            pool_entry_id = self._insert_grant_pool_entry_in_transaction(
+                conn,
+                pool_id=pool_id,
+                pool_name_snapshot=pool["name"],
+                pool_status_snapshot=pool["status"],
+                entry_type=operation_type,
+                amount_micro=expected_pool_amount,
+                operation_id=operation_id,
+                idempotency_key=idempotency_key,
+                request_digest=request_digest,
+                actor_user_id=actor_user_id,
+                source=source,
+                reason=reason,
+                user_id=user_id,
+                user_ledger_entry_id=user_entry_id,
+                created_at=created_at,
+            )
+            pool_entry = conn.execute(
+                "SELECT * FROM credit_grant_pool_ledger_entries WHERE id = ?",
+                (pool_entry_id,),
+            ).fetchone()
+            return self._grant_mutation_result_in_transaction(conn, pool_entry)
+
+    def fund_grant_pool(self, **kwargs: Any) -> dict[str, Any]:
+        return self._grant_mutation(operation_type="fund", **kwargs)
+
+    def reduce_grant_pool(self, **kwargs: Any) -> dict[str, Any]:
+        return self._grant_mutation(operation_type="reduce", **kwargs)
+
+    def assign_grant(self, *, user_id: int, **kwargs: Any) -> dict[str, Any]:
+        return self._grant_mutation(
+            operation_type="assign", user_id=user_id, **kwargs
+        )
+
+    def reclaim_grant(self, *, user_id: int, **kwargs: Any) -> dict[str, Any]:
+        return self._grant_mutation(
+            operation_type="reclaim", user_id=user_id, **kwargs
+        )
+
+    @staticmethod
+    def _validate_utc_boundary(month_start_iso: str) -> str:
+        value = _required_text(month_start_iso, "month_start_iso")
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("month_start_iso must be an ISO timestamp") from exc
+        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+            raise ValueError("month_start_iso must use UTC")
+        return parsed.isoformat()
+
+    def get_grant_pool_summary(
+        self, pool_id: str, month_start_iso: str
+    ) -> dict[str, Any]:
+        _required_text(pool_id, "pool_id", max_length=120)
+        boundary = self._validate_utc_boundary(month_start_iso)
+        with self._get_connection() as conn:
+            # Pin every metric to the same SQLite snapshot under concurrent writes.
+            conn.execute("BEGIN")
+            pool = conn.execute(
+                "SELECT * FROM credit_grant_pools WHERE pool_id = ?", (pool_id,)
+            ).fetchone()
+            if pool is None:
+                raise ValueError("grant pool does not exist")
+            pool_available_micro = self._pool_balance_in_transaction(conn, pool_id)
+            allocated = conn.execute(
+                """
+                SELECT COALESCE(SUM(amount_micro), 0) AS amount_micro
+                FROM credit_ledger_entries
+                WHERE bucket = 'grant'
+                  AND reference_type = 'grant_pool'
+                  AND reference_id = ?
+                """,
+                (pool_id,),
+            ).fetchone()
+            monthly = conn.execute(
+                """
+                SELECT
+                    COALESCE(SUM(
+                        CASE WHEN entry_type = 'assign' THEN -amount_micro ELSE 0 END
+                    ), 0) AS assigned_micro,
+                    COALESCE(SUM(
+                        CASE WHEN entry_type = 'reclaim' THEN amount_micro ELSE 0 END
+                    ), 0) AS reclaimed_micro
+                FROM credit_grant_pool_ledger_entries
+                WHERE pool_id = ? AND created_at >= ?
+                """,
+                (pool_id, boundary),
+            ).fetchone()
+            return {
+                "pool_id": pool["pool_id"],
+                "pool_name": pool["name"],
+                "pool_status": pool["status"],
+                "pool_available_micro": pool_available_micro,
+                "allocated_to_users_micro": int(allocated["amount_micro"]),
+                "assigned_this_month_micro": int(monthly["assigned_micro"]),
+                "reclaimed_this_month_micro": int(monthly["reclaimed_micro"]),
+                "month_start_iso": boundary,
+            }
+
+    def list_grant_pool_activity(
+        self,
+        pool_id: str,
+        *,
+        limit: int = 50,
+        cursor: int | None = None,
+    ) -> dict[str, Any]:
+        _required_text(pool_id, "pool_id", max_length=120)
+        page_size = _positive_limit(limit)
+        params: list[Any] = [pool_id]
+        cursor_sql = ""
+        if cursor is not None:
+            cursor_sql = "AND id < ?"
+            params.append(_positive_integer(cursor, "cursor"))
+        params.append(page_size + 1)
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT * FROM credit_grant_pool_ledger_entries
+                WHERE pool_id = ? {cursor_sql}
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+        has_more = len(rows) > page_size
+        items = [dict(row) for row in rows[:page_size]]
+        return {
+            "items": items,
+            "next_cursor": items[-1]["id"] if has_more and items else None,
         }
 
 

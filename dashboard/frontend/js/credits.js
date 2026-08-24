@@ -93,8 +93,8 @@
   }
 
   function setCreditsTab(tab) {
-    const allowed = new Set(['overview', 'top-up', 'api-keys', 'activity']);
-    const next = allowed.has(tab) ? tab : 'overview';
+    const allowed = new Set(['overview', 'api-keys', 'activity']);
+    const next = tab === 'top-up' ? 'overview' : (allowed.has(tab) ? tab : 'overview');
     state.activeTab = next;
     document.querySelectorAll('[data-credits-tab]').forEach((button) => {
       const selected = button.dataset.creditsTab === next;

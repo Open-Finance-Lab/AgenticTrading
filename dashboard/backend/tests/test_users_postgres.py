@@ -648,6 +648,24 @@ def test_admin_counts_and_listing_postgres(temp_postgres_store):
 
 
 @pg_only
+def test_admin_search_is_trimmed_case_insensitive_and_escaped_postgres(
+    temp_postgres_store,
+):
+    store = temp_postgres_store
+    store.create_user("pgalice@example.com", "Research Alice", "securepass1")
+    store.create_user("pgbob@example.com", "Operations", "securepass1")
+    store.create_user("pgpercent%name@example.com", "Percent Name", "securepass1")
+
+    assert [row["email"] for row in store.list_users_admin(query="  ALICE  ")] == [
+        "pgalice@example.com"
+    ]
+    assert store.count_users(query="research") == 1
+    assert store.list_users_admin(query="%")[0]["email"] == (
+        "pgpercent%name@example.com"
+    )
+
+
+@pg_only
 def test_promote_first_admin_is_one_shot_postgres(temp_postgres_store):
     """Prod's copy of the bootstrap predicate, which had no test at all.
 

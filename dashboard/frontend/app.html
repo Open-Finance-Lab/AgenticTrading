@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=119">
+    <link rel="stylesheet" href="styles.css?v=124">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -785,7 +785,7 @@
                 </label>
                 <label class="auth-field">
                     <span>Paper Trading Allocated Capital (max $3,000)</span>
-                    <input id="externalAgentCashAllocation" type="number" min="0" max="3000" step="0.01" value="1000" required aria-describedby="externalAgentCashHint">
+                    <input id="externalAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="externalAgentCashHint">
                 </label>
                 <p id="externalAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createExternalAgentError" class="auth-error" hidden></p>
@@ -818,7 +818,7 @@
                 </label>
                 <label class="auth-field">
                     <span>Paper Trading Allocated Capital (max $3,000)</span>
-                    <input id="builtinAgentCashAllocation" type="number" min="0" max="3000" step="0.01" value="1000" required aria-describedby="builtinAgentCashHint">
+                    <input id="builtinAgentCashAllocation" type="number" min="0" max="3000" step="100" value="1000" required aria-describedby="builtinAgentCashHint">
                 </label>
                 <p id="builtinAgentCashHint" class="credential-hint">Cash reserved from My Portfolio for this agent's paper trading. Backtests start from this amount by default but never spend it.</p>
                 <p id="createBuiltinAgentError" class="auth-error" hidden></p>
@@ -1007,22 +1007,13 @@
     <!-- Fullscreen Agent Editor -->
     <div id="agentEditorView" class="agent-editor-view" hidden>
         <header class="agent-editor-header">
-            <div class="agent-editor-toolbar">
-                <button id="agentEditorBackBtn" class="agent-editor-back-btn" type="button" aria-label="Back to My Agents">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
-                    Back to My Agents
-                </button>
-                <div class="agent-editor-title-wrap">
-                    <input id="agentEditorNameInput" class="agent-editor-name-input" type="text" maxlength="100" placeholder="Agent name" aria-label="Agent name" autocomplete="off">
-                    <p id="agentEditorMeta" class="agent-editor-meta"></p>
-                </div>
-                <div class="agent-editor-header-actions">
-                    <span id="agentEditorDirtyBadge" class="agent-editor-dirty-badge" hidden>Unsaved changes</span>
-                    <button id="agentEditorRunBacktestBtn" class="home-btn home-btn-secondary" type="button">Run Backtest</button>
-                    <button id="agentEditorSaveBtn" class="home-btn home-btn-primary" type="button">Save</button>
-                </div>
-            </div>
-            <div class="agent-editor-header-fields">
+            <button id="agentEditorBackBtn" class="agent-editor-back-btn" type="button" aria-label="Back to My Agents">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5"/><path d="m12 19-7-7 7-7"/></svg>
+                Back to My Agents
+            </button>
+            <div class="agent-editor-title-wrap">
+                <input id="agentEditorNameInput" class="agent-editor-name-input" type="text" maxlength="100" placeholder="Agent name" aria-label="Agent name" autocomplete="off">
+                <p id="agentEditorMeta" class="agent-editor-meta"></p>
                 <label id="agentEditorModelField" class="agent-editor-model-field" for="agentEditorModelSelect">
                     <span class="agent-editor-model-label">Model</span>
                     <select id="agentEditorModelSelect" class="agent-editor-model-select" aria-label="Agent model"></select>
@@ -1056,6 +1047,11 @@
                     <p id="agentEditorLiveRunResult" class="agent-editor-live-result" hidden></p>
                 </div>
             </div>
+            <div class="agent-editor-header-actions">
+                <span id="agentEditorDirtyBadge" class="agent-editor-dirty-badge" hidden>Unsaved changes</span>
+                <button id="agentEditorRunBacktestBtn" class="home-btn home-btn-secondary" type="button">Run Backtest</button>
+                <button id="agentEditorSaveBtn" class="home-btn home-btn-primary" type="button">Save</button>
+            </div>
         </header>
         <div class="agent-editor-body">
             <div class="agent-editor-layout">
@@ -1065,12 +1061,12 @@
                         <div class="agent-capital-grid">
                             <label class="agent-capital-field" for="agentEditorCashAllocation">
                                 <span class="agent-capital-label">Paper Trading <span class="agent-capital-max">max $3,000</span></span>
-                                <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="0.01" placeholder="1000" aria-label="Paper Trading Allocated Capital">
+                                <input id="agentEditorCashAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="100" placeholder="1000" aria-label="Paper Trading Allocated Capital">
                                 <span class="agent-capital-note">Reserved from your My Portfolio balance while this agent paper-trades. Backtests use a separate simulated amount and never touch it.</span>
                             </label>
                             <label class="agent-capital-field" for="agentEditorBacktestAllocation">
                                 <span class="agent-capital-label">Backtesting <span class="agent-capital-max">max $3,000</span></span>
-                                <input id="agentEditorBacktestAllocation" class="agent-capital-input" type="number" min="0" max="3000" step="0.01" placeholder="1000" aria-label="Backtest Allocated Capital">
+                                <input id="agentEditorBacktestAllocation" class="agent-capital-input" type="number" min="1" max="3000" step="100" placeholder="1000" aria-label="Backtest Allocated Capital">
                                 <span class="agent-capital-note">Simulated only. Never spends real cash.</span>
                             </label>
                         </div>
@@ -1858,8 +1854,7 @@
             </div>
 
             <nav id="creditsTabs" class="credits-tabs" aria-label="Credits and Billing sections" role="tablist">
-                <button id="creditsTabOverview" class="credits-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="creditsPanelOverview" data-credits-tab="overview">Overview</button>
-                <button id="creditsTabTopup" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsPanelTopup" data-credits-tab="top-up">Top up</button>
+                <button id="creditsTabOverview" class="credits-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="creditsPanelOverview" data-credits-tab="overview">Credits</button>
                 <button id="creditsTabApiKeys" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsApiKeysPanel" data-credits-tab="api-keys">API Keys</button>
                 <button id="creditsTabActivity" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsPanelActivity" data-credits-tab="activity">Activity</button>
             </nav>
@@ -1883,9 +1878,7 @@
                             <span>Credits are added only after a signed Stripe webhook is verified.</span>
                         </div>
                     </section>
-                </section>
 
-                <section id="creditsPanelTopup" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabTopup" data-credits-panel="top-up" hidden>
                 <section class="credits-section" aria-labelledby="creditsPurchaseHeading">
                     <div class="credits-section-head">
                         <div>
@@ -2004,18 +1997,104 @@
         <div class="page-header">
             <div>
                 <h2 class="page-title">Admin</h2>
-                <p class="page-description">All registered accounts. Change role in one click (with confirm). Edit concurrent limits and credits, then Save quotas. Set a concurrent limit of 0 to suspend an account's backtests.</p>
+                <p class="page-description">Manage Grant Credits, accounts, approved providers, and the audit trail.</p>
             </div>
             <button id="adminRefreshBtn" class="auth-btn auth-btn-secondary" type="button">Refresh</button>
         </div>
+        <p id="adminError" class="auth-error" hidden></p>
+        <p id="adminSuccess" class="account-success" hidden></p>
+
+        <nav id="adminTabs" class="admin-tabs" aria-label="Admin sections" role="tablist">
+            <button id="adminTabUsers" class="admin-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="adminPanelUsers" data-admin-tab="users">Users</button>
+            <button id="adminTabProviders" class="admin-tab" type="button" role="tab" aria-selected="false" aria-controls="adminPanelProviders" data-admin-tab="providers">Providers</button>
+            <button id="adminTabActivity" class="admin-tab" type="button" role="tab" aria-selected="false" aria-controls="adminPanelActivity" data-admin-tab="activity">Activity</button>
+        </nav>
+        <p id="adminCreditsStatus" class="credits-status admin-credits-status" role="status" aria-live="polite"></p>
+
+        <section id="adminPanelUsers" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabUsers" data-admin-panel="users">
         <div id="adminStats" class="admin-stats" aria-label="Site stats">
             <div class="admin-stat"><span class="admin-stat-value" data-stat="users">—</span><span class="admin-stat-label">Users</span></div>
             <div class="admin-stat"><span class="admin-stat-value" data-stat="admins">—</span><span class="admin-stat-label">Admins</span></div>
             <div class="admin-stat"><span class="admin-stat-value" data-stat="agents">—</span><span class="admin-stat-label">Agents</span></div>
             <div class="admin-stat"><span class="admin-stat-value" data-stat="active_dashboard_backtests">—</span><span class="admin-stat-label">Running backtests</span></div>
         </div>
-        <p id="adminError" class="auth-error" hidden></p>
-        <p id="adminSuccess" class="account-success" hidden></p>
+            <section id="adminCreditsSection" class="admin-credits-console" aria-labelledby="adminCreditsHeading">
+            <div class="admin-credits-heading">
+                <div>
+                    <p class="credits-section-kicker">Credits administration</p>
+                    <h3 id="adminCreditsHeading">Grant Pool</h3>
+                    <p class="admin-credits-summary-copy">Fund the platform pool, allocate Grant Credits to an account, and keep every movement auditable.</p>
+                </div>
+                <div class="admin-credits-heading-actions">
+                    <span class="credits-admin-badge">Admin only</span>
+                    <button id="adminCreditsRefreshBtn" class="credits-icon-btn" type="button" aria-label="Refresh Grant Credits" title="Refresh Grant Credits">
+                        <svg aria-hidden="true"><use href="#icon-refresh"/></svg>
+                    </button>
+                </div>
+            </div>
+
+            <div class="admin-credits-pool-layout">
+            <div id="adminCreditsPoolSummary" class="admin-credits-summary" aria-label="Grant Pool summary">
+                <div class="admin-credits-pool-ring" role="img" aria-label="Grant Pool allocation">
+                    <svg viewBox="0 0 220 220" aria-hidden="true">
+                        <circle class="admin-credits-pool-ring-track" cx="110" cy="110" r="78"></circle>
+                        <circle id="adminCreditsPoolRingAvailable" class="admin-credits-pool-ring-available" cx="110" cy="110" r="78"></circle>
+                        <circle id="adminCreditsPoolRingAllocated" class="admin-credits-pool-ring-allocated" cx="110" cy="110" r="78"></circle>
+                    </svg>
+                    <div class="admin-credits-pool-ring-center">
+                        <span>Total Pool</span>
+                        <strong id="adminCreditsPoolTotal">—</strong>
+                        <small>Credits</small>
+                    </div>
+                </div>
+                <div class="admin-credits-pool-legend" aria-label="Grant Pool allocation details">
+                    <div class="admin-credits-pool-legend-row">
+                        <span class="admin-credits-pool-swatch is-available" aria-hidden="true"></span>
+                        <span class="admin-credits-pool-legend-label">Available</span>
+                        <strong id="adminCreditsPoolAvailable">—</strong>
+                    </div>
+                    <div class="admin-credits-pool-legend-row">
+                        <span class="admin-credits-pool-swatch is-allocated" aria-hidden="true"></span>
+                        <span class="admin-credits-pool-legend-label">Allocated</span>
+                        <strong id="adminCreditsAllocated">—</strong>
+                    </div>
+                </div>
+            </div>
+
+            <div class="admin-credits-actions">
+                <form id="adminGrantPoolForm" class="admin-credits-form">
+                    <div class="admin-credits-form-heading">
+                        <div>
+                            <p class="credits-section-kicker">Pool adjustment</p>
+                            <h4>Adjust Grant Pool</h4>
+                        </div>
+                        <svg aria-hidden="true"><use href="#icon-wallet"/></svg>
+                    </div>
+                    <label class="credits-key-field" for="adminGrantPoolAmount"><span>Credits (+ add, − remove)</span><input id="adminGrantPoolAmount" type="number" step="0.000001" inputmode="decimal" autocomplete="off" placeholder="0.000000" required></label>
+                    <label class="credits-key-field" for="adminGrantPoolReason"><span>Reason</span><input id="adminGrantPoolReason" type="text" maxlength="500" placeholder="Budget approval reference" required></label>
+                    <button class="auth-btn auth-btn-primary" type="submit"><svg aria-hidden="true"><use href="#icon-check-circle"/></svg><span>Apply adjustment</span></button>
+                </form>
+            </div>
+            </div>
+            </section>
+            <div class="admin-credits-users">
+                <div class="admin-credits-subheading">
+                    <h4 id="adminCreditsUsersHeading">Account Management</h4>
+                    <span id="adminCreditsUserCount" class="admin-credits-count" aria-live="polite"></span>
+                </div>
+                <form id="adminCreditsUserSearch" class="admin-credits-search" role="search">
+                    <label class="sr-only" for="adminCreditsUserQuery">Search users</label>
+                    <input id="adminCreditsUserQuery" type="search" maxlength="120" placeholder="Search by email or display name" autocomplete="off">
+                    <button class="credits-icon-btn" type="submit" aria-label="Search users" title="Search users"><svg aria-hidden="true"><use href="#icon-search"/></svg></button>
+                </form>
+                <div class="admin-credits-table-wrap">
+                    <table class="admin-credits-users-table" aria-label="Grant Credits user allocation">
+                        <thead><tr><th scope="col">Account</th><th scope="col">Role</th><th scope="col">Grant</th><th scope="col">Purchased</th><th scope="col">Total</th><th scope="col">Amount</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
+                        <tbody id="adminCreditsUsersBody"><tr><td colspan="7" class="admin-empty">Search for an account to allocate Grant Credits.</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        <div id="adminLegacyUsersPanel" class="admin-legacy-users" hidden>
         <div class="admin-table-wrap">
             <table class="admin-users-table" aria-label="Users">
                 <thead>
@@ -2024,13 +2103,6 @@
                         <th scope="col">Display name</th>
                         <th scope="col">Role</th>
                         <th scope="col">Max concurrent backtests</th>
-                        <!-- "Not enforced yet" is load-bearing, not a caveat.
-                             credits has a column, bounds, a Postgres twin, an
-                             editable input here and a slot on /api/auth/me, and
-                             is read by nothing in domain/ — so an operator
-                             zeroing it on an abusive account sees a 200 and
-                             walks away believing they stopped something. Delete
-                             this label only together with the enforcement. -->
                         <th scope="col">Credits <span class="admin-th-note" id="adminCreditsNote">(checking…)</span></th>
                         <th scope="col"></th>
                     </tr>
@@ -2047,7 +2119,10 @@
                 <button id="adminNextBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Next</button>
             </div>
         </div>
+        </div>
+        </section>
 
+        <section id="adminPanelProviders" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabProviders" data-admin-panel="providers" hidden>
         <section id="adminModelProvidersSection" class="admin-provider-section" aria-labelledby="adminModelProvidersHeading">
             <div class="admin-provider-heading">
                 <div>
@@ -2096,7 +2171,47 @@
                 <p id="adminPlatformKeyStatus" class="credits-status" role="status" aria-live="polite"></p>
             </div>
         </section>
+        </section>
+
+        <section id="adminPanelActivity" class="admin-tab-panel" role="tabpanel" aria-labelledby="adminTabActivity" data-admin-panel="activity" hidden>
+            <div class="admin-credits-activity">
+                <div class="admin-credits-subheading">
+                    <div>
+                        <p class="credits-section-kicker">Audit trail</p>
+                        <h4>Grant Activity</h4>
+                    </div>
+                    <button id="adminCreditsActivityMoreBtn" class="auth-btn auth-btn-secondary" type="button" hidden>Load more</button>
+                </div>
+                <div class="admin-credits-table-wrap">
+                    <table class="admin-credits-activity-table" aria-label="Grant Credits activity">
+                        <thead><tr><th scope="col">Time</th><th scope="col">Operation</th><th scope="col">Account</th><th scope="col">Amount</th><th scope="col">Source</th><th scope="col">Reason</th></tr></thead>
+                        <tbody id="adminCreditsActivityBody"><tr><td colspan="6" class="admin-empty">No Grant activity yet.</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
     </div>
+
+    <dialog id="adminGrantReasonDialog" class="credits-refund-dialog admin-grant-reason-dialog" aria-labelledby="adminGrantReasonTitle">
+        <form id="adminGrantReasonForm">
+            <div class="credits-refund-head">
+                <div>
+                    <p class="credits-section-kicker">Grant allocation</p>
+                    <h2 id="adminGrantReasonTitle">Confirm Assign</h2>
+                </div>
+                <button id="adminGrantReasonClose" class="credits-icon-btn" type="button" aria-label="Close assign confirmation" title="Close">
+                    <svg aria-hidden="true"><use href="#icon-x"/></svg>
+                </button>
+            </div>
+            <p id="adminGrantReasonSummary" class="credits-refund-order"></p>
+            <label class="credits-key-field" for="adminGrantReason"><span>Reason</span><input id="adminGrantReason" type="text" maxlength="500" value="Approved Grant allocation." required></label>
+            <p id="adminGrantReasonStatus" class="credits-status" role="status" aria-live="polite"></p>
+            <div class="credits-refund-actions">
+                <button id="adminGrantReasonCancel" class="auth-btn auth-btn-secondary" type="button">Cancel</button>
+                <button id="adminGrantReasonSubmit" class="auth-btn auth-btn-primary" type="submit">Assign Credits</button>
+            </div>
+        </form>
+    </dialog>
 
     <dialog id="creditsRefundDialog" class="credits-refund-dialog" aria-labelledby="creditsRefundTitle">
         <form id="creditsRefundForm" method="dialog">
@@ -2132,10 +2247,12 @@
     <script src="market-events/MarketEventCard.js" defer></script>
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
-    <script src="js/agent-editor.js?v=29" defer></script>
-    <script src="app.js?v=117" defer></script>
-    <script src="js/credits.js?v=3" defer></script>
+    <script src="js/agent-editor.js?v=27" defer></script>
+    <script src="app.js?v=115" defer></script>
+    <script src="js/credits.js?v=4" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
+    <script src="js/admin-credits.js?v=4" defer></script>
+    <script src="js/admin-tabs.js?v=2" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
     <script src="home-page.js?v=50" defer></script>
     <!-- Load order: must come after app.js (API/API_BASE/escapeHtml) and

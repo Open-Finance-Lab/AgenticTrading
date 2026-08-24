@@ -642,6 +642,15 @@ def admin_user_rows_to_payloads(
     return results
 
 
+def admin_user_search_pattern(query: str | None) -> str | None:
+    """Return an escaped case-insensitive LIKE pattern for Admin search."""
+    text = str(query or "").strip()
+    if not text:
+        return None
+    escaped = text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return f"%{escaped}%"
+
+
 class UserStore:
     """Minimal user + auth session persistence."""
 
@@ -1587,23 +1596,41 @@ class UserStore:
             "admins": int(data.get("n_admins") or 0),
         }
 
-    def count_users(self) -> int:
+    def count_users(self, query: str | None = None) -> int:
         conn = self._get_connection()
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) AS n FROM users")
+        pattern = admin_user_search_pattern(query)
+        where_sql = ""
+        params: tuple[str, ...] = ()
+        if pattern is not None:
+            where_sql = (
+                " WHERE lower(email) LIKE lower(?) ESCAPE '\\'"
+                " OR lower(display_name) LIKE lower(?) ESCAPE '\\'"
+            )
+            params = (pattern, pattern)
+        cursor.execute(f"SELECT COUNT(*) AS n FROM users{where_sql}", params)
         row = cursor.fetchone()
         conn.close()
         return int(row["n"] if row else 0)
 
     def list_users_admin(
-        self, *, limit: int = 100, offset: int = 0
+        self, *, limit: int = 100, offset: int = 0, query: str | None = None
     ) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
         conn = self._get_connection()
         cursor = conn.cursor()
+        pattern = admin_user_search_pattern(query)
+        where_sql = ""
+        params: tuple[object, ...] = (limit, offset)
+        if pattern is not None:
+            where_sql = (
+                " WHERE lower(users.email) LIKE lower(?) ESCAPE '\\'"
+                " OR lower(users.display_name) LIKE lower(?) ESCAPE '\\'"
+            )
+            params = (pattern, pattern, limit, offset)
         cursor.execute(
-            """
+            f"""
             SELECT users.*,
                    user_entitlements.max_concurrent_backtests,
                    user_entitlements.credits,
@@ -1611,10 +1638,11 @@ class UserStore:
                    user_entitlements.updated_by_admin_id
             FROM users
             LEFT JOIN user_entitlements ON user_entitlements.user_id = users.id
+            {where_sql}
             ORDER BY users.id ASC
             LIMIT ? OFFSET ?
             """,
-            (limit, offset),
+            params,
         )
         rows = cursor.fetchall()
         conn.close()

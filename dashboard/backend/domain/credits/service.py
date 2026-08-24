@@ -4,14 +4,18 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from typing import Any
 
 from dashboard.backend.domain.credits.config import load_billing_config
 from dashboard.backend.domain.credits.models import (
     AdminRefundRequest,
     BalanceResult,
+    BalanceProjection,
     CheckoutRequest,
     CheckoutResult,
+    GrantMutationResult,
+    GrantPoolSummary,
     RefundCreationResult,
     WebhookResult,
     credits_micro_for_cents,
@@ -22,6 +26,7 @@ from dashboard.backend.domain.credits.repository import (
     RefundNotAllowedError,
     credits_store,
 )
+from dashboard.backend.domain.credits.repository_common import _canonical_digest
 from dashboard.backend.domain.credits.stripe_gateway import (
     StripeGatewayDefinitiveError,
     StripeGatewayError,
@@ -107,17 +112,183 @@ class CreditsService:
 
     def get_balance(self, user_id: int) -> BalanceResult:
         account = self.store.ensure_account(user_id)
-        balance = self.store.get_balance_micro(user_id)
+        projection = self._projection_model(self.store.get_balance_projection(user_id))
         gateway = self.gateway
         if gateway is None:
             config = load_billing_config()
         else:
             config = getattr(gateway, "config", None)
         return BalanceResult(
-            balance_micro=balance,
-            display_credits=format_credits(balance),
+            balance_micro=projection.total_available_micro,
+            display_credits=projection.display_total_credits,
+            **projection.model_dump(),
             account_status=account["status"],
             billing_available=(True if config is None else bool(config.ready)),
+        )
+
+    @staticmethod
+    def _month_start_iso() -> str:
+        now = datetime.now(timezone.utc)
+        return now.replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        ).isoformat()
+
+    @staticmethod
+    def _projection_model(value: Mapping[str, Any]) -> BalanceProjection:
+        payload = dict(value)
+        payload.setdefault(
+            "display_grant_credits", format_credits(payload["grant_available_micro"])
+        )
+        payload.setdefault(
+            "display_purchased_credits",
+            format_credits(payload["purchased_available_micro"]),
+        )
+        payload.setdefault(
+            "display_total_credits", format_credits(payload["total_available_micro"])
+        )
+        return BalanceProjection(**payload)
+
+    @staticmethod
+    def _pool_summary_model(value: Mapping[str, Any]) -> GrantPoolSummary:
+        payload = dict(value)
+        payload.setdefault(
+            "display_pool_available_credits",
+            format_credits(payload["pool_available_micro"]),
+        )
+        payload.setdefault(
+            "display_allocated_to_users_credits",
+            format_credits(payload["allocated_to_users_micro"]),
+        )
+        payload.setdefault(
+            "display_assigned_this_month_credits",
+            format_credits(payload["assigned_this_month_micro"]),
+        )
+        payload.setdefault(
+            "display_reclaimed_this_month_credits",
+            format_credits(payload["reclaimed_this_month_micro"]),
+        )
+        return GrantPoolSummary(**payload)
+
+    def get_balance_projections(self, user_ids: list[int]) -> dict[int, BalanceProjection]:
+        projections = self.store.get_balance_projections(user_ids)
+        return {
+            int(user_id): self._projection_model(projection)
+            for user_id, projection in projections.items()
+        }
+
+    def get_grant_pool_summary(
+        self, pool_id: str = "default", month_start_iso: str | None = None
+    ) -> GrantPoolSummary:
+        boundary = month_start_iso or self._month_start_iso()
+        return self._pool_summary_model(
+            self.store.get_grant_pool_summary(pool_id, boundary)
+        )
+
+    def list_grant_pool_activity(
+        self, pool_id: str = "default", *, limit: int = 50, cursor: int | None = None
+    ) -> dict[str, Any]:
+        return self.store.list_grant_pool_activity(
+            pool_id, limit=limit, cursor=cursor
+        )
+
+    def _grant_command(
+        self,
+        *,
+        operation: str,
+        admin_id: int,
+        user_id: int | None,
+        request: Any,
+    ) -> dict[str, Any]:
+        parts = {
+            "operation": operation,
+            "actor_user_id": int(admin_id),
+            "pool_id": getattr(request, "pool_id", "default"),
+            "user_id": user_id,
+            "amount_micro": request.amount_micro,
+            "source": request.source,
+            "reason": request.reason,
+        }
+        return {
+            **{key: value for key, value in parts.items() if key != "operation"},
+            "operation_id": _operation_id(
+                f"grant_{operation}", request.client_request_id
+            ),
+            "idempotency_key": f"admin-grant:{request.client_request_id}",
+            "request_digest": _canonical_digest(parts),
+        }
+
+    def _grant_result(
+        self, *, operation: str, raw: Mapping[str, Any]
+    ) -> GrantMutationResult:
+        entry = raw["entry"]
+        operation_types = {
+            "fund": "fund_grant_pool",
+            "reduce": "reduce_grant_pool",
+            "assign": "assign_grant",
+            "reclaim": "reclaim_grant",
+        }
+        summary = None
+        if raw.get("pool") is not None:
+            summary = self.get_grant_pool_summary(str(entry["pool_id"]))
+        user_balance = raw.get("user_balance")
+        return GrantMutationResult(
+            operation_id=entry["operation_id"],
+            operation_type=operation_types[operation],
+            actor_user_id=int(entry["actor_user_id"]),
+            target_user_id=(
+                int(entry["user_id"]) if entry.get("user_id") is not None else None
+            ),
+            amount_micro=abs(int(entry["amount_micro"])),
+            source=entry["source"],
+            reason=entry["reason"],
+            created_at=entry["created_at"],
+            pool=summary,
+            user_balance=(
+                self._projection_model(user_balance) if user_balance is not None else None
+            ),
+            pool_ledger_entry_id=int(entry["id"]),
+            user_ledger_entry_id=(
+                int(entry["user_ledger_entry_id"])
+                if entry.get("user_ledger_entry_id") is not None
+                else None
+            ),
+        )
+
+    def fund_grant_pool(self, *, admin_id: int, request: Any) -> GrantMutationResult:
+        command = self._grant_command(
+            operation="fund", admin_id=admin_id, user_id=None, request=request
+        )
+        return self._grant_result(
+            operation="fund", raw=self.store.fund_grant_pool(**command)
+        )
+
+    def reduce_grant_pool(self, *, admin_id: int, request: Any) -> GrantMutationResult:
+        command = self._grant_command(
+            operation="reduce", admin_id=admin_id, user_id=None, request=request
+        )
+        return self._grant_result(
+            operation="reduce", raw=self.store.reduce_grant_pool(**command)
+        )
+
+    def assign_grant(
+        self, *, admin_id: int, user_id: int, request: Any
+    ) -> GrantMutationResult:
+        command = self._grant_command(
+            operation="assign", admin_id=admin_id, user_id=user_id, request=request
+        )
+        return self._grant_result(
+            operation="assign", raw=self.store.assign_grant(**command)
+        )
+
+    def reclaim_grant(
+        self, *, admin_id: int, user_id: int, request: Any
+    ) -> GrantMutationResult:
+        command = self._grant_command(
+            operation="reclaim", admin_id=admin_id, user_id=user_id, request=request
+        )
+        return self._grant_result(
+            operation="reclaim",
+            raw=self.store.reclaim_grant(**command),
         )
 
     def list_ledger(self, user_id: int, *, limit: int, cursor: int | None):

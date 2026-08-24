@@ -33,6 +33,7 @@ from dashboard.backend.users import (
     _utcnow,
     _utcnow_iso,
     admin_user_rows_to_payloads,
+    admin_user_search_pattern,
     credits_refund_params,
     credits_seed_applies,
     credits_seed_params,
@@ -874,22 +875,40 @@ class PostgresUserStore:
             "admins": int(data.get("n_admins") or 0),
         }
 
-    def count_users(self) -> int:
+    def count_users(self, query: str | None = None) -> int:
+        pattern = admin_user_search_pattern(query)
+        where_sql = ""
+        params: tuple[str, ...] = ()
+        if pattern is not None:
+            where_sql = (
+                " WHERE lower(email) LIKE lower(%s) ESCAPE '\\'"
+                " OR lower(display_name) LIKE lower(%s) ESCAPE '\\'"
+            )
+            params = (pattern, pattern)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) AS n FROM users")
+                cur.execute(f"SELECT COUNT(*) AS n FROM users{where_sql}", params)
                 row = cur.fetchone()
         return int(row["n"] if row else 0)
 
     def list_users_admin(
-        self, *, limit: int = 100, offset: int = 0
+        self, *, limit: int = 100, offset: int = 0, query: str | None = None
     ) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), 500))
         offset = max(0, int(offset))
+        pattern = admin_user_search_pattern(query)
+        where_sql = ""
+        params: tuple[object, ...] = (limit, offset)
+        if pattern is not None:
+            where_sql = (
+                " WHERE lower(users.email) LIKE lower(%s) ESCAPE '\\'"
+                " OR lower(users.display_name) LIKE lower(%s) ESCAPE '\\'"
+            )
+            params = (pattern, pattern, limit, offset)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """
+                    f"""
                     SELECT users.*,
                            user_entitlements.max_concurrent_backtests,
                            user_entitlements.credits,
@@ -897,10 +916,11 @@ class PostgresUserStore:
                            user_entitlements.updated_by_admin_id
                     FROM users
                     LEFT JOIN user_entitlements ON user_entitlements.user_id = users.id
+                    {where_sql}
                     ORDER BY users.id ASC
                     LIMIT %s OFFSET %s
                     """,
-                    (limit, offset),
+                    params,
                 )
                 rows = cur.fetchall()
         return admin_user_rows_to_payloads(rows)

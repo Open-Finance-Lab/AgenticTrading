@@ -228,6 +228,15 @@ def test_balance_format_is_exact_and_not_float_based(tmp_path):
     assert service.get_balance(1).model_dump() == {
         "balance_micro": 0,
         "display_credits": "0.000000",
+        "grant_committed_micro": 0,
+        "purchased_committed_micro": 0,
+        "grant_available_micro": 0,
+        "purchased_available_micro": 0,
+        "total_available_micro": 0,
+        "display_grant_credits": "0.000000",
+        "display_purchased_credits": "0.000000",
+        "display_total_credits": "0.000000",
+        "spending_enabled": False,
         "account_status": "active",
         "billing_available": True,
     }
