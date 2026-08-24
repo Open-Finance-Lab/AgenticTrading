@@ -139,9 +139,10 @@ Verified default key row
   -> choose agent
   -> Run Backtest modal consumes pending selection
   -> POST /backtest/run with billing_mode + provider_id + ATL catalog model id
-  -> backend validates compatibility and normalizes the provider request model
+  -> backend validates compatibility and signs the ATL catalog model id
   -> backend resolves the current verified default credential
   -> signed worker handoff
+  -> provider adapter derives the provider-native request model id
   -> provider call
   -> usage/cost evidence
 ```
@@ -216,8 +217,9 @@ not deduct ATL Credits.
 3. A non-default, invalid, unavailable, or revoked key cannot be used by the
    quick-start action.
 4. The Run Backtest modal submits explicit `billing_mode`, `provider_id`, and
-   ATL catalog model id for pipeline LLM runs; the backend validates and
-   normalizes that model before creating the worker handoff.
+   ATL catalog model id for pipeline LLM runs. The backend validates the pairing
+   before creating the worker handoff, retains the catalog id for pricing and
+   evidence, and derives the provider-native request id at the adapter boundary.
 5. A BYOK run never changes ATL Credit balances.
 6. A Platform Credits run is metered from real usage and pricing evidence.
 7. Rule-based and hosted runtime flows retain their existing behavior.
