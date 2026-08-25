@@ -52,7 +52,9 @@ _APP_JS = (_FRONTEND / "app.js").read_text(encoding="utf-8")
 def test_run_backtest_modal_has_no_editable_capital_input():
     """Capital is set in Configure now; the modal only reports it."""
     modal = _slice(_APP_HTML, 'id="runBacktestModal"', 'id="runBacktestModalSubmit"')
+    assert modal.find('id="runBacktestBillingGroup"') >= 0
     assert 'id="backtestInitialCapital"' not in modal
+    assert 'type="number"' not in modal
 
 
 def test_run_backtest_modal_links_to_configure():

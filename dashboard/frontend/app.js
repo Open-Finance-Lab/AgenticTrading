@@ -1786,13 +1786,13 @@ function findBacktestModelOption(modelSelect, modelName) {
   ) || null;
 }
 
-/**
- * The picker is a live control only for iFinD A-share, where it doubles as the
- * rule-based-vs-LLM decision source. Everywhere else the run uses the agent's
- * saved model, so the picker is hidden behind a read-only echo of it.
- */
+/** The picker is live for every pipeline runtime that can use an LLM. */
 function backtestModelPickerIsLiveControl() {
-  return document.getElementById('marketDataSourceSelect')?.value === IFIND_ASHARE_SOURCE;
+  const source = document.getElementById('marketDataSourceSelect')?.value || 'alpaca';
+  return (
+    (runBacktestModalAgent?.runtime_type || 'pipeline') === 'pipeline'
+    && source !== 'vnpy_simulation'
+  );
 }
 
 function resolveBacktestModelRequest(modelSelect, agent) {
@@ -1810,20 +1810,31 @@ function resolveBacktestModelRequest(modelSelect, agent) {
   return selectedModel || agent?.model_name || 'claude-haiku-4.5';
 }
 
-/** Show the picker only where it is a real control; otherwise echo the agent's model. */
+/** Show execution controls only for pipeline LLM runs. */
 function syncBacktestModelFieldMode() {
   const modelSelect = document.getElementById('modelSelect');
   const readonly = document.getElementById('runBacktestModelReadonly');
+  const billingGroup = document.getElementById('runBacktestBillingGroup');
   const source = document.getElementById('marketDataSourceSelect')?.value || 'alpaca';
+  const isHostedRuntime = (
+    runBacktestModalAgent?.runtime_type || 'pipeline'
+  ) !== 'pipeline';
+  const isSimulation = source === 'vnpy_simulation';
   const isIFind = source === IFIND_ASHARE_SOURCE;
-  if (modelSelect) modelSelect.hidden = !isIFind;
-  if (!readonly) return;
-  readonly.hidden = isIFind;
-  readonly.textContent = (runBacktestModalAgent?.runtime_type || 'pipeline') !== 'pipeline'
-    ? 'AI Hedge Fund — hosted runtime'
-    : (source === 'vnpy_simulation'
-      ? 'Rule-based — simulated practice data, no AI involved'
-      : formatAgentModelLabel(runBacktestModalAgent?.model_name));
+  const isRuleBased = (
+    isSimulation
+    || (isIFind && modelSelect?.value === RULE_BASED_DECISION_SOURCE)
+  );
+  const modelIsEditable = !isHostedRuntime && !isSimulation;
+  if (modelSelect) modelSelect.hidden = !modelIsEditable;
+  if (readonly) {
+    readonly.hidden = modelIsEditable;
+    readonly.textContent = isHostedRuntime
+      ? 'AI Hedge Fund — hosted runtime'
+      : 'Rule-based — simulated practice data, no AI involved';
+  }
+  if (billingGroup) billingGroup.hidden = isHostedRuntime || isRuleBased;
+  syncRunBacktestSubmitAvailability();
 }
 
 /**
@@ -2870,7 +2881,7 @@ function syncMarketDataSourceUI(options = {}) {
   if (modelSelectHint && !isIFind) {
     modelSelectHint.textContent = isSimulation
       ? 'vn.py simulation uses rule-based decisions.'
-      : 'Set on the agent in Configure — this backtest always runs the agent’s saved model.';
+      : 'Choose a provider-compatible model for this run.';
   }
   if (notice) notice.hidden = !isSimulation;
   if (ifindNotice) ifindNotice.hidden = !isIFind;
@@ -4927,6 +4938,21 @@ document.addEventListener('DOMContentLoaded', async () => {
     document.getElementById('runBacktestModalBackdrop')?.addEventListener('click', closeRunBacktestModal);
     document.getElementById('runBacktestModalSubmit')?.addEventListener('click', () => {
         runBacktest();
+    });
+    document
+        .querySelectorAll('#runBacktestBillingGroup [data-billing-mode]')
+        .forEach((button) => {
+            button.addEventListener('click', () => {
+                setRunBacktestBillingMode(button.dataset.billingMode);
+            });
+        });
+    document.getElementById('runBacktestProviderSelect')?.addEventListener(
+        'change',
+        () => syncRunBacktestModelOptions(),
+    );
+    document.getElementById('modelSelect')?.addEventListener('change', () => {
+        syncBacktestModelFieldMode();
+        syncRunBacktestSubmitAvailability();
     });
     document.getElementById('runBacktestEditCapitalBtn')?.addEventListener('click', () => {
         const agent = runBacktestModalAgent;
@@ -7244,8 +7270,268 @@ async function loadTradingLogForRun(runId) {
 }
 
 const BACKTEST_LAUNCH_CONFIG_KEY = 'backtest-launch-configs';
+const PENDING_BYOK_STORAGE_KEY = 'atlPendingByokBacktest';
 /** @type {null | object} */
 let runBacktestModalAgent = null;
+let runBacktestExecutionOptions = [];
+let runBacktestBillingMode = null;
+let runBacktestOptionsReady = false;
+
+function readPendingByokBacktest() {
+    let parsed = null;
+    try {
+        parsed = JSON.parse(
+            sessionStorage.getItem(PENDING_BYOK_STORAGE_KEY) || 'null',
+        );
+    } catch (_error) {
+        parsed = null;
+    }
+    const valid = (
+        parsed
+        && parsed.billing_mode === 'byok'
+        && /^[a-z0-9_]{2,64}$/.test(String(parsed.provider_id || ''))
+        && /^[A-Za-z0-9][A-Za-z0-9._\/-]{0,63}$/.test(
+            String(parsed.model_id || ''),
+        )
+        && Number.isFinite(Number(parsed.expires_at))
+        && Number(parsed.expires_at) > Date.now()
+    );
+    if (!valid) {
+        clearPendingByokBacktest();
+        return null;
+    }
+    return parsed;
+}
+
+function clearPendingByokBacktest() {
+    try {
+        sessionStorage.removeItem(PENDING_BYOK_STORAGE_KEY);
+    } catch (_error) {
+        /* Browser storage may be unavailable in hardened contexts. */
+    }
+}
+
+function runBacktestExecutionOption(providerId) {
+    return runBacktestExecutionOptions.find(
+        (option) => option.provider_id === providerId,
+    ) || null;
+}
+
+function runBacktestLaneAvailable(option, billingMode) {
+    if (!option || !Array.isArray(option.models) || option.models.length === 0) {
+        return false;
+    }
+    return billingMode === 'byok'
+        ? option.byok_available === true
+        : (
+            billingMode === 'platform_credits'
+            && option.platform_credits_available === true
+        );
+}
+
+function findRunBacktestExecutionModel(option, modelId) {
+    const normalized = normalizeBacktestModelId(modelId);
+    if (!normalized) return null;
+    return (option?.models || []).find(
+        (model) => normalizeBacktestModelId(model.model_id) === normalized,
+    ) || null;
+}
+
+function availableRunBacktestProviders(billingMode) {
+    return runBacktestExecutionOptions.filter(
+        (option) => runBacktestLaneAvailable(option, billingMode),
+    );
+}
+
+function clearSelectOptions(select) {
+    if (!select) return;
+    while (select.firstChild) select.removeChild(select.firstChild);
+}
+
+function syncRunBacktestSubmitAvailability() {
+    const submit = document.getElementById('runBacktestModalSubmit');
+    if (!submit) return;
+    const agent = runBacktestModalAgent;
+    const isHostedRuntime = (agent?.runtime_type || 'pipeline') !== 'pipeline';
+    const dataSource = document.getElementById('marketDataSourceSelect')?.value || 'alpaca';
+    const modelId = document.getElementById('modelSelect')?.value || '';
+    const isRuleBased = (
+        dataSource === 'vnpy_simulation'
+        || (
+            dataSource === IFIND_ASHARE_SOURCE
+            && modelId === RULE_BASED_DECISION_SOURCE
+        )
+    );
+    if (isHostedRuntime || isRuleBased) {
+        submit.disabled = false;
+        return;
+    }
+    const providerId = document.getElementById('runBacktestProviderSelect')?.value || '';
+    const option = runBacktestExecutionOption(providerId);
+    submit.disabled = !(
+        runBacktestOptionsReady
+        && runBacktestBillingMode
+        && providerId
+        && modelId
+        && modelId !== RULE_BASED_DECISION_SOURCE
+        && runBacktestLaneAvailable(option, runBacktestBillingMode)
+        && Boolean(findRunBacktestExecutionModel(option, modelId))
+    );
+}
+
+function syncRunBacktestModelOptions(preferredModelId = '') {
+    const providerSelect = document.getElementById('runBacktestProviderSelect');
+    const modelSelect = document.getElementById('modelSelect');
+    if (!modelSelect) return;
+    const previousRuleBased = modelSelect.value === RULE_BASED_DECISION_SOURCE;
+    const option = runBacktestExecutionOption(providerSelect?.value || '');
+    clearSelectOptions(modelSelect);
+    (option?.models || []).forEach((model) => {
+        const modelOption = document.createElement('option');
+        modelOption.value = model.model_id;
+        modelOption.textContent = model.label;
+        modelSelect.appendChild(modelOption);
+    });
+    const preferred = findRunBacktestExecutionModel(option, preferredModelId)
+        || findRunBacktestExecutionModel(option, runBacktestModalAgent?.model_name)
+        || option?.models?.[0]
+        || null;
+    if (preferred) modelSelect.value = preferred.model_id;
+    if (document.getElementById('marketDataSourceSelect')?.value === IFIND_ASHARE_SOURCE) {
+        syncIFindModelControl();
+        if (previousRuleBased) modelSelect.value = RULE_BASED_DECISION_SOURCE;
+    }
+    syncBacktestModelFieldMode();
+    syncRunBacktestSubmitAvailability();
+}
+
+function setRunBacktestBillingMode(
+    billingMode,
+    { providerId = '', modelId = '' } = {},
+) {
+    const supported = new Set(['byok', 'platform_credits']);
+    const providers = supported.has(billingMode)
+        ? availableRunBacktestProviders(billingMode)
+        : [];
+    runBacktestBillingMode = providers.length ? billingMode : null;
+    document
+        .querySelectorAll('#runBacktestBillingGroup [data-billing-mode]')
+        .forEach((button) => {
+            const selected = button.dataset.billingMode === runBacktestBillingMode;
+            button.setAttribute('aria-checked', selected ? 'true' : 'false');
+            button.classList.toggle('is-selected', selected);
+        });
+
+    const providerSelect = document.getElementById('runBacktestProviderSelect');
+    clearSelectOptions(providerSelect);
+    providers.forEach((provider) => {
+        const option = document.createElement('option');
+        option.value = provider.provider_id;
+        option.textContent = provider.display_name;
+        providerSelect?.appendChild(option);
+    });
+    if (providerSelect && providers.length) {
+        providerSelect.value = providers.some(
+            (provider) => provider.provider_id === providerId,
+        ) ? providerId : providers[0].provider_id;
+    }
+    syncRunBacktestModelOptions(modelId);
+
+    const hint = document.getElementById('runBacktestBillingHint');
+    if (hint) {
+        hint.textContent = runBacktestBillingMode === 'byok'
+            ? 'Provider charges go directly to your API key. ATL Credits are not deducted.'
+            : (runBacktestBillingMode === 'platform_credits'
+                ? 'ATL Credits are settled from actual model usage.'
+                : 'Choose an available AI billing method.');
+    }
+}
+
+function setRunBacktestExecutionUnavailable(message) {
+    runBacktestBillingMode = null;
+    clearSelectOptions(document.getElementById('runBacktestProviderSelect'));
+    const modelSelect = document.getElementById('modelSelect');
+    clearSelectOptions(modelSelect);
+    if (
+        modelSelect
+        && document.getElementById('marketDataSourceSelect')?.value
+            === IFIND_ASHARE_SOURCE
+    ) {
+        const ruleOption = document.createElement('option');
+        ruleOption.value = RULE_BASED_DECISION_SOURCE;
+        ruleOption.textContent = 'Rule-based';
+        modelSelect.appendChild(ruleOption);
+        modelSelect.value = RULE_BASED_DECISION_SOURCE;
+    }
+    document
+        .querySelectorAll('#runBacktestBillingGroup [data-billing-mode]')
+        .forEach((button) => {
+            button.setAttribute('aria-checked', 'false');
+            button.classList.remove('is-selected');
+        });
+    const hint = document.getElementById('runBacktestBillingHint');
+    if (hint) hint.textContent = message;
+    syncBacktestModelFieldMode();
+    syncRunBacktestSubmitAvailability();
+}
+
+async function loadRunBacktestExecutionOptions(agent) {
+    const pending = readPendingByokBacktest();
+    if (pending) clearPendingByokBacktest();
+    runBacktestOptionsReady = false;
+    syncRunBacktestSubmitAvailability();
+    try {
+        const data = await API.request(`${API_BASE}/api/credits/execution-options`);
+        if (runBacktestModalAgent?.agent_id !== agent?.agent_id) return;
+        runBacktestExecutionOptions = Array.isArray(data?.providers)
+            ? data.providers
+            : [];
+        runBacktestOptionsReady = true;
+    } catch (_error) {
+        if (runBacktestModalAgent?.agent_id !== agent?.agent_id) return;
+        runBacktestExecutionOptions = [];
+        runBacktestOptionsReady = false;
+        setRunBacktestExecutionUnavailable('Backtest execution options could not be loaded.');
+        return;
+    }
+
+    if (pending) {
+        const pendingProvider = runBacktestExecutionOption(pending.provider_id);
+        const pendingModel = findRunBacktestExecutionModel(
+            pendingProvider,
+            pending.model_id,
+        );
+        if (
+            runBacktestLaneAvailable(pendingProvider, 'byok')
+            && pendingModel
+        ) {
+            setRunBacktestBillingMode('byok', {
+                providerId: pending.provider_id,
+                modelId: pendingModel.model_id,
+            });
+            return;
+        }
+    }
+
+    for (const billingMode of ['byok', 'platform_credits']) {
+        const provider = availableRunBacktestProviders(billingMode).find(
+            (option) => Boolean(
+                findRunBacktestExecutionModel(option, agent?.model_name),
+            ),
+        );
+        if (provider) {
+            setRunBacktestBillingMode(billingMode, {
+                providerId: provider.provider_id,
+                modelId: agent?.model_name || '',
+            });
+            return;
+        }
+    }
+
+    setRunBacktestExecutionUnavailable(
+        'Add and verify a default API key, or ask an administrator to enable a platform provider.',
+    );
+}
 
 function readBacktestLaunchConfigMap() {
     try {
@@ -7551,6 +7837,9 @@ function closeRunBacktestModal() {
     const modal = document.getElementById('runBacktestModal');
     if (modal) modal.hidden = true;
     runBacktestModalAgent = null;
+    runBacktestExecutionOptions = [];
+    runBacktestBillingMode = null;
+    runBacktestOptionsReady = false;
     const err = document.getElementById('runBacktestModalError');
     if (err) {
         err.hidden = true;
@@ -7558,7 +7847,7 @@ function closeRunBacktestModal() {
     }
 }
 
-function openRunBacktestModal(agent) {
+async function openRunBacktestModal(agent) {
     if (!agent?.agent_id) {
         alert('Please create or select an agent first.');
         return;
@@ -7579,6 +7868,9 @@ function openRunBacktestModal(agent) {
     }
 
     runBacktestModalAgent = agent;
+    runBacktestExecutionOptions = [];
+    runBacktestBillingMode = null;
+    runBacktestOptionsReady = false;
     const isHostedRuntime = (agent.runtime_type || 'pipeline') !== 'pipeline';
     populateBacktestAgentSelect();
     const select = document.getElementById('backtestAgentSelect');
@@ -7635,12 +7927,16 @@ function openRunBacktestModal(agent) {
     }
     const submit = document.getElementById('runBacktestModalSubmit');
     if (submit) {
-        submit.disabled = false;
-        submit.textContent = '▶ Run Backtest';
+        submit.disabled = true;
+        submit.textContent = 'Loading execution options…';
     }
 
     const modal = document.getElementById('runBacktestModal');
     if (modal) modal.hidden = false;
+    await loadRunBacktestExecutionOptions(agent);
+    if (runBacktestModalAgent?.agent_id !== agent.agent_id) return;
+    if (submit) submit.textContent = '▶ Run Backtest';
+    syncBacktestModelFieldMode();
 }
 
 window.openRunBacktestModal = openRunBacktestModal;
@@ -7729,6 +8025,32 @@ async function runBacktest() {
     const model = isRuleBasedDecision
         ? null
         : (isHostedRuntime ? null : resolveBacktestModelRequest(modelSelect, activeAgent));
+
+    let selectedProviderId = '';
+    if (
+        decisionSource === LLM_DECISION_SOURCE
+        && !isHostedRuntime
+    ) {
+        selectedProviderId = (
+            document.getElementById('runBacktestProviderSelect')?.value || ''
+        );
+        const providerOption = runBacktestExecutionOption(selectedProviderId);
+        if (
+            !runBacktestBillingMode
+            || !selectedProviderId
+            || !model
+            || !runBacktestLaneAvailable(
+                providerOption,
+                runBacktestBillingMode,
+            )
+            || !findRunBacktestExecutionModel(providerOption, model)
+        ) {
+            showModalError(
+                'Choose an AI billing method, provider, and model.',
+            );
+            return;
+        }
+    }
 
     const initialCapital = resolveBacktestCapital(activeAgent);
 
@@ -7843,8 +8165,15 @@ async function runBacktest() {
             payload.universe = selectedIFindUniverse;
             payload.timeframe = '60m';
         }
-        if (decisionSource === LLM_DECISION_SOURCE && model) {
+        if (
+            decisionSource === LLM_DECISION_SOURCE
+            && !isHostedRuntime
+        ) {
             params.set('model', model);
+            params.set('billing_mode', runBacktestBillingMode);
+            params.set('provider_id', selectedProviderId);
+            payload.billing_mode = runBacktestBillingMode;
+            payload.provider_id = selectedProviderId;
             payload.model = model;
         }
         if (activeAgent?.agent_id && !String(activeAgent.agent_id).startsWith('mock-')) {

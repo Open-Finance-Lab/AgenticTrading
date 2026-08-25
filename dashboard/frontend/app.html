@@ -407,10 +407,41 @@
                     <p id="runBacktestCapitalHint" class="control-helper">Simulated starting cash. Does not change Paper Trading Allocated Capital.</p>
                 </div>
 
+                <div class="control-group" id="runBacktestBillingGroup">
+                    <label>AI billing</label>
+                    <div
+                        class="run-backtest-billing-toggle"
+                        role="radiogroup"
+                        aria-label="AI billing"
+                    >
+                        <button
+                            type="button"
+                            data-billing-mode="byok"
+                            role="radio"
+                            aria-checked="false"
+                        >Use my API key</button>
+                        <button
+                            type="button"
+                            data-billing-mode="platform_credits"
+                            role="radio"
+                            aria-checked="false"
+                        >Use ATL Credits</button>
+                    </div>
+                    <label for="runBacktestProviderSelect">Provider</label>
+                    <select
+                        class="control-select"
+                        id="runBacktestProviderSelect"
+                    ></select>
+                    <p
+                        id="runBacktestBillingHint"
+                        class="control-helper"
+                    ></p>
+                </div>
+
                 <div class="control-group">
-                    <label for="modelSelect">Model</label>
+                    <label for="modelSelect">Model for this run</label>
                     <p id="runBacktestModelReadonly" class="run-backtest-readonly" hidden>—</p>
-                    <p id="modelSelectHint" class="control-helper">Set on the agent in Configure — this backtest always runs the agent's saved model.</p>
+                    <p id="modelSelectHint" class="control-helper">Choose a provider-compatible model for this run.</p>
                     <!-- Options are written by populateSupportedModelSelects() from
                          SUPPORTED_MODELS in app.js. Do not hardcode them here: this
                          list and #builtinAgentModel's drifted apart once already. -->

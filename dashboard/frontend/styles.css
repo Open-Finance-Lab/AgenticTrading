@@ -4877,6 +4877,33 @@ a.header-brand:hover .title-section h1 {
     flex-direction: column;
 }
 
+.run-backtest-billing-toggle {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.55);
+}
+
+.run-backtest-billing-toggle button {
+    min-height: 34px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.run-backtest-billing-toggle button[aria-checked="true"] {
+    border-color: rgba(34, 211, 238, 0.42);
+    background: rgba(34, 211, 238, 0.12);
+    color: #67e8f9;
+}
+
 /*
  * Pin the primary CTA. The panel's content runs ~1080px tall, so on a 1440x900
  * screen the "▶ Run Backtest" button rendered at y=1045 -- 145px past the fold
