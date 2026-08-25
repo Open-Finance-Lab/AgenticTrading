@@ -8,6 +8,8 @@
   const CREDITS_API_BASE = (
     window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
   ) ? window.location.origin : '';
+  const PENDING_BYOK_STORAGE_KEY = 'atlPendingByokBacktest';
+  const PENDING_BYOK_TTL_MS = 10 * 60 * 1000;
 
   const state = {
     initialized: false,
@@ -18,9 +20,10 @@
     selectedAdminOrder: null,
     orderPollToken: 0,
     balanceMicro: 0,
-    activeTab: 'overview',
+    activeTab: 'api-keys',
     providers: [],
     credentials: [],
+    executionOptions: [],
   };
 
   function element(id) {
@@ -142,6 +145,12 @@
     return 'Verification unavailable';
   }
 
+  function executionOption(providerId) {
+    return state.executionOptions.find(
+      (item) => item.provider_id === providerId,
+    ) || null;
+  }
+
   function renderApiKeys(items) {
     const list = element('creditsApiKeyList');
     const count = element('creditsApiKeyCount');
@@ -175,12 +184,16 @@
       const actions = document.createElement('div');
       actions.className = 'credits-key-actions';
       if (credential.status !== 'revoked') {
-        const verify = textNode('button', 'credits-key-action', 'Reverify');
+        const verify = textNode(
+          'button',
+          'credits-key-action credits-key-inline-action',
+          'Reverify',
+        );
         verify.type = 'button';
         verify.title = 'Verify this key again';
         appendIcon(verify, 'icon-refresh');
         verify.addEventListener('click', () => mutateCredential(credential, 'verify'));
-        actions.appendChild(verify);
+        head.appendChild(verify);
         if (credential.status === 'verified' && !credential.is_default) {
           const makeDefault = textNode('button', 'credits-key-action', 'Set default');
           makeDefault.type = 'button';
@@ -189,26 +202,111 @@
           makeDefault.addEventListener('click', () => mutateCredential(credential, 'default'));
           actions.appendChild(makeDefault);
         }
-        const revoke = textNode('button', 'credits-key-action is-danger', 'Revoke');
-        revoke.type = 'button';
-        revoke.title = 'Revoke this key';
-        appendIcon(revoke, 'icon-x');
-        revoke.addEventListener('click', () => {
-          if (window.confirm(`Revoke “${credential.label}”?`)) mutateCredential(credential, 'revoke');
+        const deleteButton = textNode(
+          'button',
+          'credits-key-action credits-key-delete is-danger',
+          'Delete',
+        );
+        deleteButton.type = 'button';
+        deleteButton.title = 'Delete this key';
+        appendIcon(deleteButton, 'icon-x');
+        deleteButton.addEventListener('click', () => {
+          if (window.confirm(`Delete “${credential.label}”?`)) {
+            mutateCredential(credential, 'revoke');
+          }
         });
-        actions.appendChild(revoke);
+        actions.appendChild(deleteButton);
       }
 
-      row.append(head, meta, actions);
+      row.append(head, meta);
+      if (credential.status === 'verified' && credential.is_default) {
+        const launch = document.createElement('div');
+        launch.className = 'credits-key-launch';
+
+        const modelLabel = textNode(
+          'label',
+          'credits-key-model-label',
+          'Model',
+        );
+        const modelSelect = document.createElement('select');
+        modelSelect.className = 'credits-key-model';
+        modelSelect.setAttribute(
+          'aria-label',
+          `Model for ${credential.label}`,
+        );
+
+        const option = executionOption(credential.provider_id);
+        (option?.models || []).forEach((model) => {
+          const modelOption = document.createElement('option');
+          modelOption.value = model.model_id;
+          modelOption.textContent = model.label;
+          modelSelect.appendChild(modelOption);
+        });
+
+        const run = textNode(
+          'button',
+          'credits-key-action credits-key-run',
+          'Run Backtest',
+        );
+        run.type = 'button';
+        run.disabled = (
+          !option?.byok_available
+          || modelSelect.options.length === 0
+        );
+        run.addEventListener(
+          'click',
+          () => beginByokBacktest(credential, modelSelect),
+        );
+
+        launch.append(modelLabel, modelSelect, run);
+        row.appendChild(launch);
+      }
+      row.appendChild(actions);
       list.appendChild(row);
     });
   }
 
+  function beginByokBacktest(credential, modelSelect) {
+    const modelId = String(modelSelect?.value || '').trim();
+    if (
+      credential.status !== 'verified'
+      || !credential.is_default
+      || !modelId
+    ) {
+      setStatus(
+        element('creditsApiKeyStatus'),
+        (
+          'Choose a verified default key and model '
+          + 'before starting a backtest.'
+        ),
+        'error',
+      );
+      return;
+    }
+    sessionStorage.setItem(
+      PENDING_BYOK_STORAGE_KEY,
+      JSON.stringify({
+        billing_mode: 'byok',
+        provider_id: credential.provider_id,
+        model_id: modelId,
+        expires_at: Date.now() + PENDING_BYOK_TTL_MS,
+      }),
+    );
+    const target = new URL(window.location.href);
+    target.searchParams.set('view', 'agents');
+    window.location.assign(target.href);
+  }
+
   async function loadApiKeys() {
     if (!state.user) return;
-    const [providersResult, credentialsResult] = await Promise.allSettled([
+    const [
+      providersResult,
+      credentialsResult,
+      executionOptionsResult,
+    ] = await Promise.allSettled([
       apiRequest('/api/credits/model-providers'),
       apiRequest('/api/credits/api-keys'),
+      apiRequest('/api/credits/execution-options'),
     ]);
     if (providersResult.status === 'fulfilled') {
       state.providers = providersResult.value.providers || [];
@@ -217,6 +315,12 @@
       state.providers = [];
       renderProviderOptions();
       setStatus(element('creditsApiKeyStatus'), 'Approved providers could not be loaded.', 'error');
+    }
+    if (executionOptionsResult.status === 'fulfilled') {
+      state.executionOptions = executionOptionsResult.value.providers || [];
+    } else {
+      state.executionOptions = [];
+      setStatus(element('creditsApiKeyStatus'), 'Backtest options could not be loaded.', 'error');
     }
     if (credentialsResult.status === 'fulfilled') {
       renderApiKeys(credentialsResult.value.items || []);
@@ -299,6 +403,7 @@
       state.pendingPurchase = null;
       state.providers = [];
       state.credentials = [];
+      state.executionOptions = [];
       const secretInput = element('creditsApiKeySecret');
       if (secretInput) secretInput.value = '';
       renderProviderOptions();
@@ -329,15 +434,7 @@
     } else if (!balance.billing_available) {
       setStatus(accountStatus, 'Stripe Test Mode is not configured on this server.', 'error');
     } else {
-      // Not "Available for model runs and backtests." Purchased Credits land in
-      // credit_ledger_entries, and the only metered surface in this repo
-      // (POST /backtest/run, domain/entitlements/credits.py) spends a different
-      // counter — user_entitlements.credits — which nothing here tops up. This
-      // PR ships the purchase side deliberately and defers consumption, so the
-      // balance is real money that currently buys nothing. Saying otherwise
-      // tells the buyer they have spending power they do not have. Change this
-      // string only together with the code that actually debits this ledger.
-      setStatus(accountStatus, 'Held on your account. Spending Credits on model runs is not enabled yet.', 'success');
+      setStatus(accountStatus, 'Available for metered ATL model runs. BYOK runs use your provider account and do not deduct ATL Credits.', 'success');
     }
     setPurchaseEnabled(!restricted && balance.billing_available);
   }
@@ -355,12 +452,29 @@
 
       const meta = document.createElement('div');
       meta.className = 'credits-ledger-meta';
-      const isRefund = entry.entry_type === 'refund';
-      meta.appendChild(textNode('strong', '', isRefund ? 'Refund' : 'Credit purchase'));
-      meta.appendChild(textNode('span', '', formatTimestamp(entry.created_at)));
+      const isUsage = entry.entry_type === 'llm_usage';
+      const isNegative = isUsage || entry.entry_type === 'refund';
+      const title = isUsage
+        ? 'Model usage'
+        : (entry.entry_type === 'refund' ? 'Refund' : 'Credit purchase');
+      meta.appendChild(textNode('strong', '', title));
+      const usageDetail = isUsage
+        ? [entry.provider_id, entry.model_id, entry.run_id ? `run ${String(entry.run_id).slice(0, 12)}` : null]
+          .filter(Boolean)
+          .join(' · ')
+        : null;
+      meta.appendChild(textNode(
+        'span',
+        '',
+        [usageDetail, formatTimestamp(entry.created_at)].filter(Boolean).join(' · '),
+      ));
 
       const formatted = formatCreditDisplay(entry.display_credits);
-      const amount = textNode('span', `credits-ledger-amount ${isRefund ? 'is-negative' : 'is-positive'}`, `${isRefund ? '' : '+'}${formatted}`);
+      const amount = textNode(
+        'span',
+        `credits-ledger-amount ${isNegative ? 'is-negative' : 'is-positive'}`,
+        `${isNegative ? '' : '+'}${formatted}`,
+      );
       row.append(meta, amount);
       list.appendChild(row);
     });

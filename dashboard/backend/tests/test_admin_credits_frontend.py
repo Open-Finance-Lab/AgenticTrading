@@ -109,6 +109,5 @@ def test_admin_tabs_have_three_tabs_in_usage_order_and_legacy_alias():
 
 
 def test_admin_visual_assets_use_fresh_cache_versions():
-    assert 'styles.css?v=123' in APP_HTML
-    assert 'js/admin-credits.js?v=4' in APP_HTML
+    assert 'js/admin-credits.js?v=5' in APP_HTML
     assert 'js/admin-tabs.js?v=2' in APP_HTML

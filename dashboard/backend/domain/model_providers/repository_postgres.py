@@ -634,6 +634,35 @@ class PostgresModelProviderStore:
             raise CredentialConflictError("revoked credentials cannot be read")
         return _decrypt(row["api_key_enc"])
 
+    def get_verified_default_user_credential(
+        self, user_id: int, provider_id: str
+    ) -> dict[str, Any] | None:
+        """Return one verified default credential with a transient decrypted secret."""
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT credential_id, provider_id, key_last_four, status, api_key_enc
+                    FROM user_model_credentials
+                    WHERE user_id = %s
+                      AND provider_id = %s
+                      AND status = 'verified'
+                      AND is_default = TRUE
+                    """,
+                    (int(user_id), str(provider_id)),
+                )
+                row = cur.fetchone()
+        if not row or not row["api_key_enc"]:
+            return None
+        return {
+            "credential_id": row["credential_id"],
+            "provider_id": row["provider_id"],
+            "key_last_four": row["key_last_four"],
+            "status": row["status"],
+            "secret": _decrypt(row["api_key_enc"]),
+        }
+
     def set_user_credential_status(
         self,
         user_id: int,
@@ -757,6 +786,31 @@ class PostgresModelProviderStore:
         if not row or row["status"] != "verified" or not row["api_key_enc"]:
             return None
         return _decrypt(row["api_key_enc"])
+
+    def get_verified_platform_credential(
+        self, provider_id: str
+    ) -> dict[str, Any] | None:
+        """Return the verified platform credential with a transient secret."""
+
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT provider_id, key_last_four, status, api_key_enc
+                    FROM platform_model_credentials
+                    WHERE provider_id = %s AND status = 'verified'
+                    """,
+                    (str(provider_id),),
+                )
+                row = cur.fetchone()
+        if not row or not row["api_key_enc"]:
+            return None
+        return {
+            "provider_id": row["provider_id"],
+            "key_last_four": row["key_last_four"],
+            "status": row["status"],
+            "secret": _decrypt(row["api_key_enc"]),
+        }
 
     def get_platform_credential_secret_any_status(self, provider_id: str) -> str | None:
         with self._get_connection() as conn:

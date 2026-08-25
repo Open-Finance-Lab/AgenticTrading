@@ -178,6 +178,17 @@ PortfolioManager = _portfolio_manager.PortfolioManager
 # legacy public path (bha.HourlyBacktester), main() below, and existing
 # subclasses (e.g. backtest_custom_algo) keep working unchanged.
 from dashboard.backend.domain.backtesting.engine import HourlyBacktester
+from dashboard.backend.infrastructure.llm.execution.handoff import (
+    ExecutionHandoffError,
+    consume_execution_handoff,
+)
+from dashboard.backend.infrastructure.llm.execution.client import (
+    AnthropicCompatibleExecutionClient,
+)
+from dashboard.backend.infrastructure.llm.execution.errors import LLMExecutionError
+from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
+from dashboard.backend.domain.credits.service import credits_service
+from dashboard.backend.domain.model_providers.service import get_model_provider_service
 
 
 # ============================================================================
@@ -217,6 +228,11 @@ def main():
         help="Path to the hosted runtime's non-secret JSON configuration",
     )
     parser.add_argument("--model", default=None, help="Override the LLM model id (e.g. anthropic/claude-haiku-4-5). Defaults to the gateway-appropriate slug.")
+    parser.add_argument(
+        "--execution-handoff-stdin",
+        action="store_true",
+        help="Read one signed, secret-free execution handoff from stdin",
+    )
     parser.add_argument("--run-id", default=None, help="Preset run id (used for live progress + DB row)")
     parser.add_argument("--progress-file", default=None, help="Path to write incremental equity snapshots for live dashboard charting")
     parser.add_argument(
@@ -243,6 +259,16 @@ def main():
     )
     
     args = parser.parse_args()
+    execution_handoff = None
+    if args.execution_handoff_stdin:
+        try:
+            execution_handoff = consume_execution_handoff(sys.stdin.read())
+        except ExecutionHandoffError:
+            parser.error("invalid execution handoff")
+        if args.run_id != execution_handoff.run_id:
+            parser.error("execution handoff run id does not match --run-id")
+        if args.model != execution_handoff.model_id:
+            parser.error("execution handoff model does not match --model")
     try:
         market_profile = get_market_profile(args.data_source, args.universe)
     except ValueError as exc:
@@ -276,6 +302,33 @@ def main():
     except ValueError as exc:
         parser.error(str(exc))
         return
+
+    if execution_handoff is not None:
+        if decision_source != LLM_DECISION_SOURCE:
+            parser.error("execution handoff requires decision_source='llm'")
+        print(
+            "Execution handoff verified: "
+            f"provider={execution_handoff.provider_id}, "
+            f"model={execution_handoff.model_id}, "
+            f"billing_mode={execution_handoff.billing_mode.value}"
+        )
+    elif (
+        decision_source == LLM_DECISION_SOURCE
+        and args.runtime_type == PIPELINE_RUNTIME_TYPE
+    ):
+        parser.error("explicit LLM execution requires a signed execution handoff")
+
+    execution_service = None
+    execution_client = None
+    if execution_handoff is not None:
+        execution_service = LLMExecutionService(
+            providers=get_model_provider_service(),
+            credits=credits_service,
+        )
+        execution_client = AnthropicCompatibleExecutionClient(
+            execution_service=execution_service,
+            handoff=execution_handoff,
+        )
     
     session_id = args.session_id
 
@@ -394,6 +447,7 @@ def main():
         decision_source=decision_source,
         runtime_type=args.runtime_type,
         runtime_config=runtime_config,
+        execution_client=execution_client,
     )
     
     if args.runtime_type == AI_HEDGE_FUND_RUNTIME_TYPE:
@@ -422,7 +476,18 @@ def main():
     # Step 3: Run backtests
     print("\n3️⃣ Running backtests...\n")
     
-    agent_id, agent_eq = backtester.run_agent_backtest()
+    try:
+        agent_id, agent_eq = backtester.run_agent_backtest()
+    finally:
+        if execution_service is not None and execution_handoff is not None:
+            try:
+                execution_service.finalize_run(
+                    execution_handoff.run_id,
+                    billing_mode=execution_handoff.billing_mode,
+                )
+            except LLMExecutionError as exc:
+                print(f"❌ LLM execution finalization failed: {exc.safe_message}")
+                raise
     
     # DEBUG: Show what agent bought
     print(f"\n📋 DEBUG - Agent Holdings Summary:")

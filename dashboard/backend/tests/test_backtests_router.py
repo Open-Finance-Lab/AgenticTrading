@@ -20,6 +20,10 @@ from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    ExecutionModelRoute,
+    UnsupportedExecutionModel,
+)
 import dashboard.backend.api.routers.backtests as bt
 
 
@@ -326,6 +330,73 @@ class _Spy:
         self.last_kwargs = k
 
 
+class _ExecutionPreflightService:
+    def __init__(self):
+        self.execution_calls = []
+        self.credential_calls = []
+
+    def preflight_execution_model(self, provider_id, catalog_model_id):
+        self.execution_calls.append((provider_id, catalog_model_id))
+        if provider_id != "openai" or catalog_model_id != "openai/gpt-5.5":
+            raise UnsupportedExecutionModel(catalog_model_id)
+        return ExecutionModelRoute(
+            catalog_id="openai/gpt-5.5",
+            label="GPT-5.5",
+            provider_model_id="gpt-5.5",
+        )
+
+    def preflight_user_default_credential(self, user_id, provider_id):
+        self.credential_calls.append((user_id, provider_id))
+
+    def preflight_platform_credential(self, provider_id):
+        self.credential_calls.append((None, provider_id))
+
+
+_ATL_EXECUTION_MODEL_IDS = (
+    "anthropic/claude-haiku-4-5",
+    "anthropic/claude-sonnet-4-6",
+    "openai/gpt-5.5",
+    "google/gemini-3.1-pro-preview",
+    "deepseek/deepseek-v4-pro",
+    "qwen/qwen3.7-plus",
+)
+
+
+class _OpenRouterExecutionPreflightService:
+    def __init__(self):
+        self.execution_calls = []
+        self.credential_calls = []
+
+    def preflight_execution_model(self, provider_id, catalog_model_id):
+        self.execution_calls.append((provider_id, catalog_model_id))
+        if (
+            provider_id != "openrouter"
+            or catalog_model_id not in _ATL_EXECUTION_MODEL_IDS
+        ):
+            raise UnsupportedExecutionModel(catalog_model_id)
+        return ExecutionModelRoute(
+            catalog_id=catalog_model_id,
+            label=catalog_model_id,
+            provider_model_id=catalog_model_id,
+        )
+
+    def preflight_user_default_credential(self, user_id, provider_id):
+        self.credential_calls.append((user_id, provider_id))
+
+    def preflight_platform_credential(self, provider_id):
+        self.credential_calls.append((None, provider_id))
+
+
+def _enable_authenticated_openrouter_byok(monkeypatch):
+    service = _OpenRouterExecutionPreflightService()
+    monkeypatch.setattr(bt, "get_model_provider_service", lambda: service)
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": 7},
+    )
+    return service
+
+
 def _run_record(metadata=None):
     return {
         "run_id": "run_source",
@@ -475,6 +546,46 @@ def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
     assert response.rejected_orders_truncated is None
     assert response.order_events_count is None
     assert response.order_events_truncated is None
+    assert response.llm_execution is None
+
+
+def test_run_metadata_response_exposes_sanitized_llm_execution_evidence():
+    response = bt._run_metadata_response(
+        _run_record({
+            "data_source": "alpaca",
+            "llm_execution": {
+                "billing_mode": "platform_credits",
+                "provider_id": "openrouter",
+                "model_id": "openai/gpt-5.5",
+                "credential_id": "credential-safe-id",
+                "credential_key_last_four": "1234",
+                "call_count": 2,
+                "input_tokens": 30,
+                "output_tokens": 13,
+                "usage_available": True,
+                "provider_cost_usd": 0.03,
+                "estimated_cost_usd": 0.028,
+                "pricing_snapshot": {
+                    "provider_id": "openrouter",
+                    "model_id": "openai/gpt-5.5",
+                    "input_usd_per_million_tokens": 5,
+                    "output_usd_per_million_tokens": 30,
+                    "currency": "USD",
+                    "source_version": "test-pricing-v1",
+                },
+                "debited_credits_micro": 24_000,
+                "outstanding_credits_micro": 5_000,
+                "outcome": "settled_overage",
+                "provider_api_key": "raw-secret-must-not-leak",
+            },
+        })
+    )
+
+    serialized = response.model_dump(mode="json")
+    assert serialized["llm_execution"]["outcome"] == "settled_overage"
+    assert serialized["llm_execution"]["credential_key_last_four"] == "1234"
+    assert "raw-secret-must-not-leak" not in str(serialized)
+    assert "provider_api_key" not in serialized["llm_execution"]
 
 
 @pytest.fixture(autouse=True)
@@ -501,7 +612,11 @@ def _sess():
 def test_backtest_run_valid_request_ok():
     resp = TestClient(app).post(
         "/backtest/run",
-        json={"start_date": "2026-05-01", "end_date": "2026-05-07"},
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-07",
+            "decision_source": "rule_based",
+        },
         headers=_sess(),
     )
     assert resp.status_code == 200
@@ -529,8 +644,8 @@ def test_backtest_run_targets_builtin_agent_session(client, monkeypatch):
         json={
             "start_date": "2026-05-01",
             "end_date": "2026-05-02",
-            "strategy_prompt": "buy low sell high",
             "agent_id": agent_id,
+            "decision_source": "rule_based",
         },
         headers={"X-Session-Id": str(uuid.uuid4())},
     )
@@ -758,6 +873,7 @@ def test_backtest_run_forwards_selected_assets(client, monkeypatch):
             "start_date": "2026-05-01",
             "end_date": "2026-05-02",
             "assets": mag7,
+            "decision_source": "rule_based",
         },
         headers=_sess(),
     )
@@ -769,7 +885,7 @@ def test_backtest_run_forwards_selected_assets(client, monkeypatch):
     # argument.
     assert spy.last_args == ()
     assert spy.last_kwargs["assets"] == mag7
-    assert spy.last_kwargs["decision_source"] == "llm"
+    assert spy.last_kwargs["decision_source"] == "rule_based"
 
 
 def test_backtest_run_rejects_bad_assets(monkeypatch):
@@ -810,32 +926,33 @@ def client():
     return TestClient(app)
 
 
-@pytest.mark.parametrize("model", [
-    # Exactly the options the dashboard UI dropdown (app.html) offers. A pricing-
-    # table allowlist previously 422'd gpt-5.2 / gpt-5-mini / deepseek-* / gemini-*,
-    # breaking the UI's own model choices.
-    "claude-haiku-4.5", "claude-sonnet-4.6", "claude-opus-4.7",
-    "gpt-5.2", "gpt-5-mini", "deepseek-v4-flash", "deepseek-v4-pro",
-    "gemini-3.5-flash", "gemini-2.5-pro",
-    "openai/gpt-5.5", "google/gemini-3.1-pro-preview",
-])
-def test_backtest_run_accepts_frontend_model_options(model):
+@pytest.mark.parametrize("model", _ATL_EXECUTION_MODEL_IDS)
+def test_openrouter_byok_accepts_every_catalog_model(monkeypatch, model):
+    service = _enable_authenticated_openrouter_byok(monkeypatch)
+
     resp = TestClient(app).post(
         "/backtest/run",
-        json={"start_date": "2026-05-01", "end_date": "2026-05-02", "model": model},
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "billing_mode": "byok",
+            "provider_id": "openrouter",
+            "model": model,
+        },
         headers=_sess(),
     )
+
     assert resp.status_code == 200, (model, resp.text)
+    assert service.execution_calls == [("openrouter", model)]
+    assert service.credential_calls == [(7, "openrouter")]
 
 
-@pytest.mark.parametrize("model", [
-    "claude-haiku-4.5", "claude-sonnet-4.6", "claude-opus-4.7",
-    "gpt-5.2", "gpt-5-mini", "deepseek-v4-flash", "deepseek-v4-pro",
-    "gemini-3.5-flash", "gemini-2.5-pro",
-])
-def test_ifind_llm_accepts_every_frontend_model(monkeypatch, model):
+@pytest.mark.parametrize("model", _ATL_EXECUTION_MODEL_IDS)
+def test_ifind_llm_accepts_every_openrouter_catalog_model(monkeypatch, model):
     monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
     monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
+    service = _enable_authenticated_openrouter_byok(monkeypatch)
     monkeypatch.setattr(
         bt,
         "ensure_llm_client_available",
@@ -852,6 +969,8 @@ def test_ifind_llm_accepts_every_frontend_model(monkeypatch, model):
             "universe": "a_share_demo_6",
             "timeframe": "60m",
             "decision_source": "llm",
+            "billing_mode": "byok",
+            "provider_id": "openrouter",
             "model": model,
         },
         headers=_sess(),
@@ -859,6 +978,8 @@ def test_ifind_llm_accepts_every_frontend_model(monkeypatch, model):
 
     assert resp.status_code == 200, (model, resp.text)
     assert resp.json()["decision_source"] == "llm"
+    assert service.execution_calls == [("openrouter", model)]
+    assert service.credential_calls == [(7, "openrouter")]
 
 
 def test_explicit_llm_requires_model_before_scheduling(monkeypatch):
@@ -886,6 +1007,77 @@ def test_explicit_llm_requires_model_before_scheduling(monkeypatch):
 
     assert resp.status_code == 422
     assert "model" in resp.text.lower()
+    assert spy.calls == 0
+
+
+def test_openai_byok_accepts_gpt_catalog_id_and_keeps_it_in_handoff(monkeypatch):
+    spy = _Spy()
+    service = _ExecutionPreflightService()
+    captured_handoff = {}
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "get_model_provider_service", lambda: service)
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": 7},
+    )
+
+    def capture_handoff(**kwargs):
+        captured_handoff.update(kwargs)
+        return "signed-test-handoff"
+
+    monkeypatch.setattr(bt, "create_execution_handoff", capture_handoff)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "billing_mode": "byok",
+            "provider_id": "openai",
+            "model": "openai/gpt-5.5",
+        },
+        headers=_sess(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured_handoff["model_id"] == "openai/gpt-5.5"
+    assert service.execution_calls == [("openai", "openai/gpt-5.5")]
+    assert service.credential_calls == [(7, "openai")]
+    assert spy.calls == 1
+
+
+def test_openai_byok_rejects_claude_before_worker_start(monkeypatch):
+    spy = _Spy()
+    service = _ExecutionPreflightService()
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "get_model_provider_service", lambda: service)
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": 7},
+    )
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "billing_mode": "byok",
+            "provider_id": "openai",
+            "model": "anthropic/claude-sonnet-4-6",
+        },
+        headers=_sess(),
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "The selected model is not available from this provider."
+    }
+    assert service.execution_calls == [
+        ("openai", "anthropic/claude-sonnet-4-6")
+    ]
+    assert service.credential_calls == []
     assert spy.calls == 0
 
 
@@ -1143,7 +1335,11 @@ def test_backtest_run_rate_limited_per_client(monkeypatch):
     )
     client = TestClient(app)
     headers = _sess()  # same session -> same rate key across the three calls
-    body = {"start_date": "2026-05-01", "end_date": "2026-05-02"}
+    body = {
+        "start_date": "2026-05-01",
+        "end_date": "2026-05-02",
+        "decision_source": "rule_based",
+    }
     assert client.post("/backtest/run", json=body, headers=headers).status_code == 200
     assert client.post("/backtest/run", json=body, headers=headers).status_code == 200
     assert client.post("/backtest/run", json=body, headers=headers).status_code == 429
@@ -1199,9 +1395,18 @@ def test_rule_based_reports_the_llm_fields_it_dropped(monkeypatch):
 
 
 def test_llm_run_reports_no_ignored_fields(monkeypatch):
+    _enable_authenticated_openrouter_byok(monkeypatch)
+
     resp = TestClient(app).post(
         "/backtest/run",
-        json={"start_date": "2026-05-01", "end_date": "2026-05-02"},
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "billing_mode": "byok",
+            "provider_id": "openrouter",
+            "model": "openai/gpt-5.5",
+        },
         headers=_sess(),
     )
 

@@ -4827,12 +4827,25 @@ a.header-brand:hover .title-section h1 {
     margin: 0;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 0;
 }
 
 .backtest-config-row {
     display: grid;
     gap: 4px;
+}
+
+.backtest-config-core-row {
+    grid-template-columns: 76px minmax(0, 1fr);
+    align-items: start;
+    gap: 12px;
+    padding: 12px 0;
+    border-top: 1px solid var(--border-color);
+}
+
+.backtest-config-core-row:first-child {
+    padding-top: 0;
+    border-top: 0;
 }
 
 .backtest-config-row dt {
@@ -4850,6 +4863,108 @@ a.header-brand:hover .title-section h1 {
     font-weight: 600;
     color: var(--text-primary);
     word-break: break-word;
+}
+
+.backtest-config-secondary-value {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.backtest-config-detail-group {
+    margin-top: 5px;
+    border-top: 1px solid var(--border-color);
+}
+
+.backtest-config-details {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.backtest-config-details summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 13px 0;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 700;
+    list-style: none;
+}
+
+.backtest-config-details summary::-webkit-details-marker {
+    display: none;
+}
+
+.backtest-config-details summary::after {
+    color: var(--info-color);
+    content: '+';
+    font-size: 16px;
+    font-weight: 400;
+}
+
+.backtest-config-details[open] summary::after {
+    content: '−';
+}
+
+.backtest-config-detail-row {
+    margin: 0 0 13px;
+    padding: 0 0 13px;
+    border-left: 2px solid rgba(79, 195, 247, 0.45);
+    padding-left: 10px;
+}
+
+.backtest-config-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 13px 12px;
+    padding: 0 0 14px;
+}
+
+.backtest-config-detail-cell {
+    min-width: 0;
+}
+
+.backtest-config-detail-cell span {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.backtest-config-detail-cell strong {
+    display: block;
+    color: var(--text-primary);
+    font-size: 11px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.backtest-config-meta-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding-top: 13px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.45;
+}
+
+.backtest-config-meta-row span {
+    min-width: 0;
+}
+
+.backtest-config-meta-row strong {
+    display: block;
+    color: var(--text-primary);
+    font-size: 10px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
 }
 
 .backtest-config-prompt {
@@ -4875,6 +4990,33 @@ a.header-brand:hover .title-section h1 {
     /* Column layout so the submit button can be pinned to the bottom below. */
     display: flex;
     flex-direction: column;
+}
+
+.run-backtest-billing-toggle {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    padding: 4px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background: rgba(15, 23, 42, 0.55);
+}
+
+.run-backtest-billing-toggle button {
+    min-height: 34px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.run-backtest-billing-toggle button[aria-checked="true"] {
+    border-color: rgba(34, 211, 238, 0.42);
+    background: rgba(34, 211, 238, 0.12);
+    color: #67e8f9;
 }
 
 /*
@@ -10852,8 +10994,12 @@ body.agent-editor-open {
 
 .credits-key-row {
     display: grid;
-    grid-template-columns: minmax(120px, 1fr) minmax(150px, 1fr) auto;
-    gap: 12px;
+    grid-template-columns:
+        minmax(120px, 0.75fr)
+        minmax(180px, 1fr)
+        minmax(360px, 1.35fr)
+        max-content;
+    gap: 14px;
     align-items: center;
     min-height: 66px;
     padding: 11px 0;
@@ -10942,11 +11088,56 @@ body.agent-editor-open {
     color: #67e8f9;
 }
 
+.credits-key-launch {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    gap: 8px;
+    align-items: end;
+    min-width: 0;
+}
+
+.credits-key-model-label {
+    grid-column: 1 / -1;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.credits-key-model {
+    width: 100%;
+    min-width: 0;
+    min-height: 30px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    font-size: 11px;
+}
+
+.credits-key-run {
+    border-color: rgba(34, 211, 238, 0.45);
+    color: #67e8f9;
+    white-space: nowrap;
+}
+
 .credits-key-actions {
     display: flex;
     align-items: center;
     justify-content: flex-end;
     gap: 6px;
+    align-self: start;
+}
+
+.credits-key-inline-action {
+    flex-basis: 100%;
+    justify-content: flex-start;
+    margin-top: 2px;
+    width: max-content;
+}
+
+.credits-key-delete {
+    border-color: rgba(248, 113, 113, 0.52);
+    color: #f87171;
 }
 
 .credits-key-action {
@@ -11542,6 +11733,14 @@ body.agent-editor-open {
         padding: 14px 0;
     }
 
+    .credits-key-launch {
+        grid-template-columns: 1fr;
+    }
+
+    .credits-key-model-label {
+        grid-column: 1;
+    }
+
     .credits-key-actions {
         justify-content: flex-start;
         flex-wrap: wrap;
@@ -12045,6 +12244,30 @@ body.agent-editor-open {
     border: 1px solid var(--border-color);
     border-radius: 8px;
     background: var(--bg-card);
+}
+
+.admin-credits-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+}
+
+.admin-credits-pager-range {
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.admin-credits-pager-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.admin-credits-pager-buttons .auth-btn[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
 }
 
 .admin-credits-users-table,

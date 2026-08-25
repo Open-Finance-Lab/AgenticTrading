@@ -67,23 +67,22 @@ def test_credits_layout_has_mobile_contract():
 # The balance must not claim spending power the platform does not have.
 # ---------------------------------------------------------------------------
 
-def test_balance_does_not_claim_credits_are_spendable():
-    """Purchased Credits currently buy nothing, by design.
-
-    They land in credit_ledger_entries; the only metered surface in this repo
-    (POST /backtest/run via domain/entitlements/credits.py) spends
-    user_entitlements.credits, which nothing here tops up. This PR ships the
-    purchase side and defers consumption, so telling the buyer the balance is
-    "available for model runs and backtests" sells spending power that does not
-    exist. Delete this test only together with the code that debits this ledger.
-    """
+def test_balance_copy_describes_platform_and_byok_lanes():
+    """Credits are available for metered runs while BYOK stays user-funded."""
     source = CREDITS_JS_PATH.read_text(encoding="utf-8")
-    banned = "Available for model runs and backtests."
-    # The claim is also spelled out in a comment above the corrected string, so
-    # match on the rendered call rather than raw presence anywhere in the file.
-    assert f"setStatus(accountStatus, '{banned}'" not in source
-    assert "not enabled yet" in source
+    wording = "Available for metered ATL model runs. BYOK runs use your provider account and do not deduct ATL Credits."
+    assert "not enabled yet" not in source
+    assert wording in source
     assert ">Available balance<" not in APP_HTML
+
+
+def test_activity_renders_negative_model_usage_with_safe_context():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    assert "entry.entry_type === 'llm_usage'" in source
+    assert "'Model usage'" in source
+    assert "entry.provider_id" in source
+    assert "entry.model_id" in source
+    assert "String(entry.run_id).slice(0, 12)" in source
 
 
 def test_refund_retry_reuses_its_request_id_only_while_unchanged():
@@ -112,6 +111,32 @@ def test_credits_billing_has_three_tabs_and_api_keys_surface():
     assert 'id="creditsApiKeyList"' in APP_HTML
 
 
+def test_api_keys_is_the_primary_credits_tab():
+    tabs = APP_HTML[APP_HTML.index('<nav id="creditsTabs"'):APP_HTML.index('</nav>', APP_HTML.index('<nav id="creditsTabs"'))]
+    assert tabs.index('data-credits-tab="api-keys"') < tabs.index('data-credits-tab="overview"')
+    assert 'id="creditsTabApiKeys" class="credits-tab is-active"' in tabs
+    assert 'id="creditsTabOverview" class="credits-tab"' in tabs
+    assert 'data-credits-panel="api-keys">' in APP_HTML
+    assert 'data-credits-panel="overview" hidden>' in APP_HTML
+
+
+def test_saved_key_launch_controls_have_room_for_model_and_action():
+    assert 'minmax(360px, 1.35fr)' in STYLES
+    assert 'grid-template-columns: minmax(0, 1fr) max-content;' in STYLES
+    assert 'white-space: nowrap;' in STYLES
+
+
+def test_saved_key_actions_keep_reverify_with_status_and_delete_in_corner():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    assert "credits-key-inline-action" in source
+    assert "credits-key-delete" in source
+    assert "'Delete'" in source
+    assert "'Revoke'" not in source
+    assert "mutateCredential(credential, 'revoke')" in source
+    assert ".credits-key-inline-action" in STYLES
+    assert ".credits-key-delete" in STYLES
+
+
 def test_api_keys_client_never_persists_or_renders_full_secret():
     source = CREDITS_JS_PATH.read_text(encoding="utf-8")
     assert "/api/credits/model-providers" in source
@@ -121,4 +146,32 @@ def test_api_keys_client_never_persists_or_renders_full_secret():
     assert "localStorage" not in source
     assert ".innerHTML" not in source
     assert "api_key: secret" in source
-    assert "Spending Credits on model runs is not enabled yet." in APP_HTML
+    assert "Available for metered ATL model runs. BYOK runs use your provider account and do not deduct ATL Credits." in APP_HTML
+
+
+def test_verified_default_key_can_prepare_a_safe_byok_backtest():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    assert "/api/credits/execution-options" in source
+    assert "atlPendingByokBacktest" in source
+    assert "sessionStorage.setItem" in source
+    assert "billing_mode: 'byok'" in source
+    assert "provider_id: credential.provider_id" in source
+    assert "model_id: modelId" in source
+    assert "expires_at:" in source
+    assert "'Run Backtest'" in source
+    assert "localStorage" not in source
+    assert ".innerHTML" not in source
+
+
+def test_quick_start_state_never_contains_a_secret():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    start = source.index("function beginByokBacktest")
+    boundaries = (
+        source.find("\n  function ", start + 1),
+        source.find("\n  async function ", start + 1),
+    )
+    end = min(boundary for boundary in boundaries if boundary >= 0)
+    body = source[start:end]
+    assert "api_key" not in body
+    assert "key_last_four" not in body
+    assert "credential_id" not in body

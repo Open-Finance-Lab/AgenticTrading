@@ -391,6 +391,8 @@ def run_post_trade_analysis(
             parsed = parse_llm_response(extract_response_text(response))
         except Exception as exc:
             print(f"   ⚠️  Post-trade analysis failed: {exc}")
+            if getattr(client, "fail_closed", False):
+                raise
             parsed = None
 
         if not isinstance(parsed, dict):

@@ -407,10 +407,41 @@
                     <p id="runBacktestCapitalHint" class="control-helper">Simulated starting cash. Does not change Paper Trading Allocated Capital.</p>
                 </div>
 
+                <div class="control-group" id="runBacktestBillingGroup">
+                    <label>AI billing</label>
+                    <div
+                        class="run-backtest-billing-toggle"
+                        role="radiogroup"
+                        aria-label="AI billing"
+                    >
+                        <button
+                            type="button"
+                            data-billing-mode="byok"
+                            role="radio"
+                            aria-checked="false"
+                        >Use my API key</button>
+                        <button
+                            type="button"
+                            data-billing-mode="platform_credits"
+                            role="radio"
+                            aria-checked="false"
+                        >Use ATL Credits</button>
+                    </div>
+                    <label for="runBacktestProviderSelect">Provider</label>
+                    <select
+                        class="control-select"
+                        id="runBacktestProviderSelect"
+                    ></select>
+                    <p
+                        id="runBacktestBillingHint"
+                        class="control-helper"
+                    ></p>
+                </div>
+
                 <div class="control-group">
-                    <label for="modelSelect">Model</label>
+                    <label for="modelSelect">Model for this run</label>
                     <p id="runBacktestModelReadonly" class="run-backtest-readonly" hidden>—</p>
-                    <p id="modelSelectHint" class="control-helper">Set on the agent in Configure — this backtest always runs the agent's saved model.</p>
+                    <p id="modelSelectHint" class="control-helper">Choose a provider-compatible model for this run.</p>
                     <!-- Options are written by populateSupportedModelSelects() from
                          SUPPORTED_MODELS in app.js. Do not hardcode them here: this
                          list and #builtinAgentModel's drifted apart once already. -->
@@ -1120,89 +1151,63 @@
                 <h3 class="control-title">Run config</h3>
                 <p id="backtestConfigEmpty" class="control-helper">No backtests yet. Run one from My Agents.</p>
                 <dl id="backtestConfigList" class="backtest-config-list" hidden>
-                    <div class="backtest-config-row">
+                    <div class="backtest-config-row backtest-config-core-row">
                         <dt>Agent</dt>
                         <dd id="backtestConfigAgent">—</dd>
                     </div>
-                    <div class="backtest-config-row">
+                    <div class="backtest-config-row backtest-config-core-row">
                         <dt>Model</dt>
                         <dd id="backtestConfigModel">—</dd>
                     </div>
-                    <div class="backtest-config-row" id="backtestConfigPromptRow" hidden>
-                        <dt>Instruction</dt>
-                        <dd id="backtestConfigPrompt" class="backtest-config-prompt">—</dd>
+                    <div class="backtest-config-row backtest-config-core-row">
+                        <dt>Market</dt>
+                        <dd><span id="backtestConfigMarketData">—</span><span id="backtestConfigUniverse" class="backtest-config-secondary-value"></span></dd>
                     </div>
-                    <div class="backtest-config-row">
-                        <dt>Started</dt>
-                        <dd id="backtestConfigStarted">—</dd>
+                    <div class="backtest-config-row backtest-config-core-row">
+                        <dt>Date range</dt>
+                        <dd id="backtestConfigWindow">—</dd>
                     </div>
-                    <div class="backtest-config-row">
+                    <div class="backtest-config-row backtest-config-core-row">
                         <dt>Initial capital</dt>
                         <dd id="backtestConfigCapital">—</dd>
                     </div>
-                    <div class="backtest-config-row" id="backtestConfigNativeCapitalRow" hidden>
-                        <dt>CNY trading capital</dt>
-                        <dd id="backtestConfigNativeCapital">—</dd>
+                    <div class="backtest-config-row backtest-config-core-row">
+                        <dt>Billing</dt>
+                        <dd id="backtestConfigBilling">—</dd>
                     </div>
-                    <div class="backtest-config-row" id="backtestConfigFxSourceRow" hidden>
-                        <dt>FX source</dt>
-                        <dd id="backtestConfigFxSource">—</dd>
+
+                    <div class="backtest-config-detail-group">
+                        <details class="backtest-config-details" id="backtestConfigInstructionDetails">
+                            <summary>Show instruction</summary>
+                            <div class="backtest-config-row backtest-config-detail-row" id="backtestConfigPromptRow" hidden>
+                                <dt>Instruction</dt>
+                                <dd id="backtestConfigPrompt" class="backtest-config-prompt">—</dd>
+                            </div>
+                        </details>
+
+                        <details class="backtest-config-details">
+                            <summary>Show advanced details</summary>
+                            <div class="backtest-config-detail-grid">
+                                <div class="backtest-config-detail-cell"><span>Symbols</span><strong id="backtestConfigSymbols">—</strong></div>
+                                <div class="backtest-config-detail-cell"><span>Timeframe</span><strong id="backtestConfigTimeframe">—</strong></div>
+                                <div class="backtest-config-detail-cell"><span>Decision method</span><strong id="backtestConfigDecisionSource">—</strong></div>
+                                <div class="backtest-config-detail-cell"><span>Status</span><strong id="backtestConfigStatus">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigNativeCapitalRow" hidden><span>CNY trading capital</span><strong id="backtestConfigNativeCapital">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigFxSourceRow" hidden><span>FX source</span><strong id="backtestConfigFxSource">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigFxRateRow" hidden><span>Start FX rate</span><strong id="backtestConfigFxRate">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigTransactionCostsRow" hidden><span>Transaction costs</span><strong id="backtestConfigTransactionCosts">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigCostProfileRow" hidden><span>Cost profile</span><strong id="backtestConfigCostProfile">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigTotalCostsRow" hidden><span>Total costs</span><strong id="backtestConfigTotalCosts">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigMarketRulesRow" hidden><span>A-share market rules</span><strong id="backtestConfigMarketRules">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigRuleRejectionsRow" hidden><span>Rule rejections</span><strong id="backtestConfigRuleRejections">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigBaselineRulesRow" hidden><span>Baseline rule delays</span><strong id="backtestConfigBaselineRules">—</strong></div>
+                            </div>
+                        </details>
                     </div>
-                    <div class="backtest-config-row" id="backtestConfigFxRateRow" hidden>
-                        <dt>Start FX rate</dt>
-                        <dd id="backtestConfigFxRate">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigTransactionCostsRow" hidden>
-                        <dt>Transaction costs</dt>
-                        <dd id="backtestConfigTransactionCosts">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigCostProfileRow" hidden>
-                        <dt>Cost profile</dt>
-                        <dd id="backtestConfigCostProfile">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigTotalCostsRow" hidden>
-                        <dt>Total costs</dt>
-                        <dd id="backtestConfigTotalCosts">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigMarketRulesRow" hidden>
-                        <dt>A-share market rules</dt>
-                        <dd id="backtestConfigMarketRules">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigRuleRejectionsRow" hidden>
-                        <dt>Rule rejections</dt>
-                        <dd id="backtestConfigRuleRejections">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigBaselineRulesRow" hidden>
-                        <dt>Baseline rule delays</dt>
-                        <dd id="backtestConfigBaselineRules">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Market data</dt>
-                        <dd id="backtestConfigMarketData">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Universe</dt>
-                        <dd id="backtestConfigUniverse">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Symbols</dt>
-                        <dd id="backtestConfigSymbols">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Timeframe</dt>
-                        <dd id="backtestConfigTimeframe">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Decision method</dt>
-                        <dd id="backtestConfigDecisionSource">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Time window</dt>
-                        <dd id="backtestConfigWindow">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Status</dt>
-                        <dd id="backtestConfigStatus">—</dd>
+
+                    <div class="backtest-config-meta-row">
+                        <span>Started <strong id="backtestConfigStarted">—</strong></span>
+                        <span>Market data <strong id="backtestConfigMarketDataMeta">—</strong></span>
                     </div>
                 </dl>
 
@@ -1854,8 +1859,8 @@
             </div>
 
             <nav id="creditsTabs" class="credits-tabs" aria-label="Credits and Billing sections" role="tablist">
-                <button id="creditsTabOverview" class="credits-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="creditsPanelOverview" data-credits-tab="overview">Credits</button>
-                <button id="creditsTabApiKeys" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsApiKeysPanel" data-credits-tab="api-keys">API Keys</button>
+                <button id="creditsTabApiKeys" class="credits-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="creditsApiKeysPanel" data-credits-tab="api-keys">API Keys</button>
+                <button id="creditsTabOverview" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsPanelOverview" data-credits-tab="overview">Credits</button>
                 <button id="creditsTabActivity" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsPanelActivity" data-credits-tab="activity">Activity</button>
             </nav>
 
@@ -1866,7 +1871,7 @@
             </section>
 
             <div id="creditsSignedIn" hidden>
-                <section id="creditsPanelOverview" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabOverview" data-credits-panel="overview">
+                <section id="creditsPanelOverview" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabOverview" data-credits-panel="overview" hidden>
                     <section class="credits-balance-band" aria-labelledby="creditsBalanceHeading">
                         <div>
                             <p id="creditsBalanceHeading" class="credits-section-kicker">Credit balance</p>
@@ -1909,7 +1914,7 @@
                 </section>
                 </section>
 
-                <section id="creditsApiKeysPanel" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabApiKeys" data-credits-panel="api-keys" hidden>
+                <section id="creditsApiKeysPanel" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabApiKeys" data-credits-panel="api-keys">
                     <section class="credits-section credits-api-keys-section" aria-labelledby="creditsApiKeysHeading">
                         <div class="credits-section-head">
                             <div>
@@ -1955,7 +1960,7 @@
                                 </div>
                             </div>
                         </div>
-                        <p class="credits-api-keys-footnote">Spending Credits on model runs is not enabled yet.</p>
+                        <p class="credits-api-keys-footnote">Available for metered ATL model runs. BYOK runs use your provider account and do not deduct ATL Credits.</p>
                     </section>
                 </section>
 
@@ -2092,6 +2097,13 @@
                         <thead><tr><th scope="col">Account</th><th scope="col">Role</th><th scope="col">Grant</th><th scope="col">Purchased</th><th scope="col">Total</th><th scope="col">Amount</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead>
                         <tbody id="adminCreditsUsersBody"><tr><td colspan="7" class="admin-empty">Search for an account to allocate Grant Credits.</td></tr></tbody>
                     </table>
+                </div>
+                <div class="admin-credits-pager" aria-label="Account pages">
+                    <span id="adminCreditsUsersRange" class="admin-credits-pager-range" aria-live="polite">Showing 0 of 0</span>
+                    <div class="admin-credits-pager-buttons">
+                        <button id="adminCreditsUsersPrevBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Previous</button>
+                        <button id="adminCreditsUsersNextBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Next</button>
+                    </div>
                 </div>
             </div>
         <div id="adminLegacyUsersPanel" class="admin-legacy-users" hidden>
@@ -2251,7 +2263,7 @@
     <script src="app.js?v=115" defer></script>
     <script src="js/credits.js?v=4" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
-    <script src="js/admin-credits.js?v=4" defer></script>
+    <script src="js/admin-credits.js?v=5" defer></script>
     <script src="js/admin-tabs.js?v=2" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
     <script src="home-page.js?v=50" defer></script>

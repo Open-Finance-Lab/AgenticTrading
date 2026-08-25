@@ -163,6 +163,7 @@ class HourlyBacktester:
         decision_source: Optional[str] = None,
         runtime_type: str = DEFAULT_RUNTIME_TYPE,
         runtime_config: Optional[Dict] = None,
+        execution_client: Any = None,
     ):
         # Validate and swap dates if they're in the wrong order
         from datetime import datetime as dt_parser
@@ -195,6 +196,7 @@ class HourlyBacktester:
         self.t1_deferrals: List[Dict] = []
         # Model id; defaults to the gateway-appropriate slug (CommonStack vs native).
         self.model = model or default_model_name()
+        self.execution_client = execution_client
         self.live_run_id = (live_run_id or "").strip() or None
         self.progress_file = (progress_file or "").strip() or None
         self.data_source = data_source
@@ -235,7 +237,7 @@ class HourlyBacktester:
             self.profile,
             requested_decision_source,
         )
-        self.strict_llm = (
+        self.strict_llm = bool(execution_client) or (
             decision_source is not None
             and data_source == IFIND_ASHARE
             and self.decision_source == LLM_DECISION_SOURCE
@@ -259,7 +261,7 @@ class HourlyBacktester:
             self.symbols = list(DJIA_30)
         self.all_data = {}
         wants_llm = self.decision_source == LLM_DECISION_SOURCE
-        self.use_llm = wants_llm and HAS_ANTHROPIC
+        self.use_llm = wants_llm and (execution_client is not None or HAS_ANTHROPIC)
         if self.runtime_type != PIPELINE_RUNTIME_TYPE:
             self.use_llm = False
         self.llm_client = None
@@ -268,6 +270,7 @@ class HourlyBacktester:
             self.runtime_type == PIPELINE_RUNTIME_TYPE
             and wants_llm
             and not HAS_ANTHROPIC
+            and execution_client is None
         ):
             if self.strict_llm:
                 raise llm_harness.LLMConfigurationError(
@@ -275,10 +278,16 @@ class HourlyBacktester:
                 )
             self.decision_source = RULE_BASED_DECISION_SOURCE
 
-        # Initialize LLM client if enabled. Prefer CommonStack (the model we host)
+        # A worker handoff supplies the provider-neutral compatibility client.
+        # Legacy direct LLM setup remains available only for non-worker callers.
+        if self.use_llm and execution_client is not None:
+            self.llm_client = execution_client
+            print(f"✅ Unified LLM execution initialized (model={self.model})")
+
+        # Initialize legacy LLM client if enabled. Prefer CommonStack (the model we host)
         # via make_llm_client(); it falls back to native Anthropic when only
         # ANTHROPIC_API_KEY is set, and returns None when no key/SDK is available.
-        if self.use_llm:
+        if self.use_llm and execution_client is None:
             self.llm_client = make_llm_client()
             if self.llm_client is None:
                 if self.strict_llm:
@@ -789,6 +798,14 @@ class HourlyBacktester:
             meta["decision_source"] = decision_source
         if self.use_llm:
             meta["llm_max_output_tokens"] = llm_harness.DEFAULT_MAX_OUTPUT_TOKENS
+        llm_execution = getattr(self, "_llm_execution_evidence", None)
+        execution_client = getattr(self, "execution_client", None)
+        if llm_execution is None and execution_client is not None:
+            summary = getattr(execution_client, "execution_summary", None)
+            if callable(summary):
+                llm_execution = summary()
+        if llm_execution is not None:
+            meta["llm_execution"] = llm_execution.model_dump(mode="json")
         if self.prompt_adaptations:
             meta["prompt_adaptations"] = self.prompt_adaptations
         if self.initial_pipeline is not None:
@@ -1249,9 +1266,24 @@ class HourlyBacktester:
         # row self-consistent rather than silently understating the run.
         llm_calls_total = manager.llm_calls + runtime_calls
 
-        est_cost = token_cost.estimate_cost_usd(
-            llm_model, manager.input_tokens, manager.output_tokens
-        )
+        llm_execution = None
+        execution_client = getattr(self, "execution_client", None)
+        if execution_client is not None:
+            summary = getattr(execution_client, "execution_summary", None)
+            if callable(summary):
+                llm_execution = summary()
+        if llm_execution is not None:
+            est_cost = (
+                llm_execution.provider_cost_usd
+                if llm_execution.provider_cost_usd is not None
+                else llm_execution.estimated_cost_usd
+            )
+            est_cost = float(est_cost or 0)
+        else:
+            est_cost = token_cost.estimate_cost_usd(
+                llm_model, manager.input_tokens, manager.output_tokens
+            )
+        self._llm_execution_evidence = llm_execution
 
         self.t1_deferrals = self._serialize_t1_deferrals(manager.t1_deferrals)
         self.rejected_orders = self._serialize_rejected_orders(

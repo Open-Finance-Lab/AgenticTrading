@@ -81,7 +81,10 @@ def test_backtest_config_prompt_label_is_replaced_with_instruction():
     """Scoped to the single config row, not the whole document -- "Prompt"
     could otherwise match unrelated substrings ("Prompting LLMs" etc.).
     """
-    row = _html_region('<div class="backtest-config-row" id="backtestConfigPromptRow"')
+    row = _html_region(
+        '<div class="backtest-config-row backtest-config-detail-row" '
+        'id="backtestConfigPromptRow"'
+    )
     assert "<dt>Instruction</dt>" in row
     assert "<dt>Prompt</dt>" not in row
 
@@ -246,8 +249,8 @@ def test_resource_subtitles_are_plain_language():
 
 
 def test_decision_source_row_says_decision_method():
-    assert "<dt>Decision method</dt>" in _HTML
-    assert "<dt>Decision source</dt>" not in _HTML
+    assert "<span>Decision method</span>" in _HTML
+    assert "Decision source" not in _HTML
 
 
 def test_market_data_notice_names_no_ai_not_no_llm():

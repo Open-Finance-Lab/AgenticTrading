@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
+import io
 import json
 import subprocess
 import sys
@@ -18,6 +19,9 @@ from dashboard.backend.api.routers import backtests as backtests_router
 from dashboard.backend.database import BacktestDatabase
 from dashboard.backend.domain.backtesting import engine as engine_module
 from dashboard.backend.domain.backtesting import portfolio_manager as portfolio_module
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    ExecutionModelRoute,
+)
 from dashboard.backend import equity_plot
 from dashboard.backend.infrastructure.market_data import provider as provider_module
 from dashboard.backend.infrastructure.market_data.ifind_adapter import response_to_frames
@@ -165,21 +169,39 @@ def _scheduled_profile(thread):
     )
 
 
-class _FakeLLMMessages:
+class _FakeExecutionService:
     def __init__(self) -> None:
-        self.calls = []
+        self.requests = []
+        self.finalized = []
 
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
+    def execute(self, request):
+        self.requests.append(request)
         return SimpleNamespace(
-            content=[SimpleNamespace(type="text", text='{"actions": []}')],
+            text='{"actions": []}',
+            model_id=request.model_id,
             usage=SimpleNamespace(input_tokens=12, output_tokens=2),
         )
 
+    def finalize_run(self, run_id, *, billing_mode=None):
+        self.finalized.append((run_id, billing_mode))
+        return []
 
-class _FakeLLMClient:
-    def __init__(self) -> None:
-        self.messages = _FakeLLMMessages()
+
+class _OpenRouterByokPreflight:
+    def preflight_execution_model(self, provider_id, catalog_model_id):
+        assert provider_id == "openrouter"
+        assert catalog_model_id == "openai/gpt-5.5"
+        return ExecutionModelRoute(
+            catalog_id=catalog_model_id,
+            label="GPT-5.5",
+            provider_model_id=catalog_model_id,
+        )
+
+    def preflight_user_default_credential(self, user_id, provider_id):
+        assert (user_id, provider_id) == (7, "openrouter")
+
+    def preflight_platform_credential(self, provider_id):
+        raise AssertionError(f"unexpected Platform Credits preflight: {provider_id}")
 
 
 def _fail_external(name: str):
@@ -224,6 +246,7 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
             "data_source": IFIND_ASHARE,
             "universe": universe,
             "timeframe": "60m",
+            "decision_source": "rule_based",
         },
         headers={"X-Session-Id": session_id},
     )
@@ -242,7 +265,7 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
         "universe": universe,
         "timeframe": "60m",
         "timezone": "Asia/Shanghai",
-        "decision_source": "llm",
+        "decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
         "assets": list(symbols),
     }
@@ -258,7 +281,7 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
         "60m",
         None,
         list(symbols),
-        "llm",
+        "rule_based",
     )
 
     captured = {}
@@ -275,7 +298,7 @@ def test_ifind_api_background_builds_one_controlled_cli_command(
     assert command[command.index("--data-source") + 1] == IFIND_ASHARE
     assert command[command.index("--universe") + 1] == universe
     assert command[command.index("--timeframe") + 1] == "60m"
-    assert command[command.index("--decision-source") + 1] == "llm"
+    assert command[command.index("--decision-source") + 1] == "rule_based"
     assert "--use-llm" not in command
     assert "--no-llm" not in command
     assert secret not in " ".join(command)
@@ -312,6 +335,7 @@ def test_ifind_refresh_token_is_inherited_by_subprocess_without_leaking(
             "data_source": IFIND_ASHARE,
             "universe": A_SHARE_DEMO_6,
             "timeframe": "60m",
+            "decision_source": "rule_based",
         },
         headers={"X-Session-Id": session_id},
     )
@@ -352,7 +376,7 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     session_id = str(uuid.uuid4())
     test_db = BacktestDatabase(tmp_path / "ifind_llm_e2e.db")
     fake_ifind = _FakeIFindClient(_official_payload(symbols))
-    fake_llm = _FakeLLMClient()
+    fake_execution = _FakeExecutionService()
     _CapturingThread.last = None
 
     monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
@@ -360,8 +384,27 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     monkeypatch.setattr(backtests_router, "_BackgroundThread", _CapturingThread)
     monkeypatch.setattr(
         backtests_router,
-        "ensure_llm_client_available",
-        lambda: fake_llm,
+        "get_model_provider_service",
+        _OpenRouterByokPreflight,
+    )
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": 7},
+    )
+    monkeypatch.setattr(
+        backtests_router,
+        "LLMExecutionService",
+        lambda **_kwargs: fake_execution,
+    )
+    monkeypatch.setattr(
+        backtest_hourly_agent,
+        "LLMExecutionService",
+        lambda **_kwargs: fake_execution,
+    )
+    monkeypatch.setattr(
+        backtest_hourly_agent,
+        "get_model_provider_service",
+        lambda: object(),
     )
     backtests_router._backtest_rate_limiter.reset()
     backtests_router.backtest_status.update(
@@ -385,9 +428,6 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
         )
 
     monkeypatch.setattr(engine_module, "create_market_data_provider", create_offline_provider)
-    monkeypatch.setattr(engine_module, "HAS_ANTHROPIC", True)
-    monkeypatch.setattr(engine_module, "make_llm_client", lambda: fake_llm)
-    monkeypatch.setattr(portfolio_module, "HAS_ANTHROPIC", True)
     monkeypatch.setattr(engine_module, "db", test_db)
     monkeypatch.setattr(backtest_hourly_agent, "db", test_db)
     monkeypatch.setattr(backtests_router, "db", test_db)
@@ -411,8 +451,10 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
 
     def run_cli_in_process(command, **_kwargs):
         assert command[command.index("--decision-source") + 1] == "llm"
-        assert command[command.index("--model") + 1] == "gpt-5.2"
+        assert command[command.index("--model") + 1] == "openai/gpt-5.5"
+        assert "--execution-handoff-stdin" in command
         monkeypatch.setattr(sys, "argv", [str(command[1]), *command[2:]])
+        monkeypatch.setattr(sys, "stdin", io.StringIO(_kwargs["input"]))
         backtest_hourly_agent.main()
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
@@ -427,7 +469,9 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
             "universe": selected_universe,
             "timeframe": "60m",
             "decision_source": "llm",
-            "model": "gpt-5.2",
+            "billing_mode": "byok",
+            "provider_id": "openrouter",
+            "model": "openai/gpt-5.5",
         },
         headers={"X-Session-Id": session_id},
     )
@@ -443,11 +487,20 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     assert backtests_router.backtest_status["error"] is None
     assert fake_ifind.calls == [(symbols, START, END)]
     assert [call[3] for call in fake_ifind.fx_calls] == ["RMB", "MHB"]
-    assert len(fake_llm.messages.calls) == 60
-    assert all(call["model"] == "gpt-5.2" for call in fake_llm.messages.calls)
-    assert all("Chinese A-share" in call["system"] for call in fake_llm.messages.calls)
-    assert all("DJIA" not in call["system"] for call in fake_llm.messages.calls)
-    first_prompt = fake_llm.messages.calls[0]["messages"][0]["content"]
+    assert len(fake_execution.requests) == 60
+    assert all(
+        request.model_id == "openai/gpt-5.5"
+        for request in fake_execution.requests
+    )
+    assert all(
+        "Chinese A-share" in request.system_message
+        for request in fake_execution.requests
+    )
+    assert all(
+        "DJIA" not in request.system_message
+        for request in fake_execution.requests
+    )
+    first_prompt = fake_execution.requests[0].messages[0].content
     assert all(symbol in first_prompt for symbol in symbols)
 
     runs = test_db.get_runs_by_session(session_id)
@@ -461,7 +514,7 @@ def test_ifind_llm_request_reaches_engine_database_and_chart_without_fallback(
     assert agent_run["metadata"]["reporting_currency"] == "USD"
     assert agent_run["metadata"]["fx_start_rate"] == pytest.approx(7.0)
     assert agent_run["metadata"]["native_initial_capital"] == pytest.approx(7_000)
-    assert agent_run["llm_model"] == "gpt-5.2"
+    assert agent_run["llm_model"] == "openai/gpt-5.5"
     assert agent_run["llm_calls"] == 60
     assert agent_run["input_tokens"] == 60 * 12
     assert agent_run["output_tokens"] == 60 * 2

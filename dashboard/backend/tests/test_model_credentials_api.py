@@ -107,6 +107,7 @@ def _create(
 def test_routes_require_authentication(credential_api):
     for method, path in (
         ("get", "/api/credits/model-providers"),
+        ("get", "/api/credits/execution-options"),
         ("get", "/api/credits/api-keys"),
         ("post", "/api/credits/api-keys"),
         ("post", "/api/credits/api-keys/00000000-0000-4000-8000-000000000000/verify"),
@@ -131,6 +132,105 @@ def test_provider_list_contains_approved_byok_providers(credential_api):
         "openai",
         "openrouter",
     }
+
+
+def test_execution_options_return_safe_openrouter_models(credential_api):
+    token = _signup(credential_api.client, "execution-options-api@example.com")
+    secret = "sk-or-fake-execution-options-abcd"
+    credential_api.adapter.queue("verified")
+    created = _create(
+        credential_api,
+        token,
+        secret=secret,
+        set_default=True,
+    )
+
+    response = credential_api.client.get(
+        "/api/credits/execution-options",
+        headers=_auth(token),
+    )
+
+    assert created.status_code == 201
+    assert response.status_code == 200
+    provider = next(
+        item
+        for item in response.json()["providers"]
+        if item["provider_id"] == "openrouter"
+    )
+    assert provider == {
+        "provider_id": "openrouter",
+        "display_name": "OpenRouter",
+        "adapter_type": "openrouter",
+        "byok_available": True,
+        "platform_credits_available": False,
+        "models": [
+            {
+                "model_id": "anthropic/claude-haiku-4-5",
+                "label": "Claude Haiku 4.5",
+            },
+            {
+                "model_id": "anthropic/claude-sonnet-4-6",
+                "label": "Claude Sonnet 4.6",
+            },
+            {"model_id": "openai/gpt-5.5", "label": "GPT-5.5"},
+            {
+                "model_id": "google/gemini-3.1-pro-preview",
+                "label": "Gemini 3.1 Pro Preview",
+            },
+            {
+                "model_id": "deepseek/deepseek-v4-pro",
+                "label": "DeepSeek V4 Pro",
+            },
+            {"model_id": "qwen/qwen3.7-plus", "label": "Qwen3.7 Plus"},
+        ],
+    }
+    payload = response.text
+    assert secret not in payload
+    for forbidden in (
+        "api_key",
+        "credential_id",
+        "encrypted",
+        "fingerprint",
+        "key_last_four",
+        "proxy_url",
+        "upstream_body",
+    ):
+        assert forbidden not in payload
+
+
+def test_execution_options_expose_env_backed_platform_credits_without_secret(
+    credential_api, monkeypatch
+):
+    token = _signup(credential_api.client, "env-platform-options-api@example.com")
+    provider = credential_api.store.get_provider("openrouter")
+    assert provider is not None
+    credential_api.store.upsert_provider(
+        provider_id="openrouter",
+        display_name=provider["display_name"],
+        adapter_type=provider["adapter_type"],
+        approved_base_url=provider["approved_base_url"],
+        capabilities=provider["capabilities"],
+        byok_enabled=provider["byok_enabled"],
+        platform_enabled=True,
+        status=provider["status"],
+    )
+    sentinel = "sk-or-api-env-options-abcd"
+    monkeypatch.setenv("OPENROUTER_API_KEY", sentinel)
+
+    response = credential_api.client.get(
+        "/api/credits/execution-options",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    item = next(
+        item
+        for item in response.json()["providers"]
+        if item["provider_id"] == "openrouter"
+    )
+    assert item["platform_credits_available"] is True
+    assert sentinel not in response.text
+    assert "api_key" not in response.text.lower()
 
 
 def test_create_and_list_never_return_or_log_full_key(credential_api, caplog):

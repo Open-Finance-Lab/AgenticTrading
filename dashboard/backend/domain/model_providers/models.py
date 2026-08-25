@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Literal
 from uuid import UUID
 
@@ -25,6 +26,25 @@ class ProviderCapabilities(BaseModel):
     reasoning_token_usage: bool = False
     reported_monetary_cost: bool = False
     supported_parameters: tuple[str, ...] = ()
+    model_allowlist: tuple[str, ...] = ()
+
+    @field_validator("model_allowlist")
+    @classmethod
+    def validate_model_allowlist(
+        cls,
+        values: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        cleaned: list[str] = []
+        for value in values:
+            item = str(value).strip()
+            if (
+                len(item) > 64
+                or not re.fullmatch(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,63}$", item)
+            ):
+                raise ValueError("model_allowlist contains an invalid model id")
+            if item not in cleaned:
+                cleaned.append(item)
+        return tuple(cleaned)
 
 
 class ProviderRecord(BaseModel):
@@ -40,6 +60,24 @@ class ProviderRecord(BaseModel):
     status: Literal["enabled", "disabled"] = "enabled"
     created_at: str | None = None
     updated_at: str | None = None
+
+
+class ExecutionModelOption(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    model_id: str = Field(min_length=1, max_length=64)
+    label: str = Field(min_length=1, max_length=100)
+
+
+class ExecutionProviderOption(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider_id: str = Field(min_length=2, max_length=64)
+    display_name: str = Field(min_length=1, max_length=100)
+    adapter_type: AdapterType
+    byok_available: bool
+    platform_credits_available: bool
+    models: tuple[ExecutionModelOption, ...] = ()
 
 
 class AdminProviderRequest(BaseModel):

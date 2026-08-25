@@ -3,6 +3,7 @@
 import ast
 from pathlib import Path
 
+from dashboard.backend.infrastructure.llm.execution.models import PricingSnapshot
 from dashboard.backend.infrastructure.llm.token_cost import (
     CHARS_PER_TOKEN,
     estimate_cost_usd,
@@ -55,6 +56,18 @@ def test_price_for_model_table_and_markers():
     assert price_for_model("some-unknown-model") == (1.0, 5.0)
     assert price_for_model("") == (1.0, 5.0)
     assert price_for_model(None) == (1.0, 5.0)
+
+
+def test_gpt_5_5_pricing_snapshot_uses_canonical_catalog_id():
+    snapshot = PricingSnapshot.from_model(
+        "openai/gpt-5.5",
+        "openai",
+    )
+
+    assert snapshot.model_id == "openai/gpt-5.5"
+    assert snapshot.provider_id == "openai"
+    assert snapshot.input_usd_per_million_tokens == 5.0
+    assert snapshot.output_usd_per_million_tokens == 30.0
 
 
 def test_estimate_cost_usd_formula():

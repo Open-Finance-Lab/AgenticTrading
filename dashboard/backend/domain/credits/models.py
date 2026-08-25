@@ -156,12 +156,10 @@ def _validate_balance_projection(
     display_total_credits: str,
 ) -> None:
     if (
-        grant_committed_micro != grant_available_micro
-        or purchased_committed_micro != purchased_available_micro
+        grant_committed_micro - grant_available_micro < 0
+        or purchased_committed_micro - purchased_available_micro < 0
     ):
-        raise ValueError(
-            "committed and available balances must match without reservations"
-        )
+        raise ValueError("available balances cannot exceed committed balances")
     if total_available_micro != grant_available_micro + purchased_available_micro:
         raise ValueError(
             "total_available_micro must equal the sum of available balances"
@@ -340,3 +338,37 @@ class WebhookResult(BaseModel):
     reason: str | None = None
     balance_micro: int | None = None
     account_restricted: bool = False
+
+
+class LLMReservation(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reservation_id: str
+    user_id: StrictInt
+    run_id: str
+    call_index: StrictInt
+    reserved_micro: StrictInt
+    settled_micro: StrictInt
+    actual_micro: StrictInt = Field(default=0, ge=0)
+    outstanding_micro: StrictInt = Field(default=0, ge=0)
+    status: Literal["open", "settled", "released"]
+    created_at: str
+    updated_at: str
+    failure_reason: str | None = None
+
+
+class LLMSettlementResult(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    reservation_id: str
+    user_id: StrictInt
+    run_id: str
+    reserved_micro: StrictInt
+    settled_micro: StrictInt
+    actual_micro: StrictInt = Field(default=0, ge=0)
+    outstanding_micro: StrictInt = Field(default=0, ge=0)
+    released_micro: StrictInt
+    status: Literal["open", "settled", "released"]
+    grant_debited_micro: StrictInt = 0
+    purchased_debited_micro: StrictInt = 0
+    ledger_entry_ids: tuple[StrictInt, ...] = ()

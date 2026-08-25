@@ -1,8 +1,9 @@
-"""Credit metering — the ledger, the policy, and the /backtest/run seam.
+"""Legacy quota coverage and the unified /backtest/run billing seam.
 
 Folded in from issue #351: ``user_entitlements.credits`` was stored, capped,
-admin-editable and returned to clients, but nothing anywhere read it. One
-credit now buys one LLM-driven dashboard backtest.
+admin-editable and returned to clients. Unified model execution no longer
+charges that quota per run: BYOK bypasses ATL Credits, while Platform Credits
+are reserved and settled from actual provider usage inside the worker.
 """
 
 import sqlite3
@@ -17,12 +18,32 @@ import dashboard.backend.api.routers.backtests as bt
 import dashboard.backend.users as users_module
 from dashboard.backend.app import app
 from dashboard.backend.domain.entitlements import credits
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    ExecutionModelRoute,
+)
 from dashboard.backend.tests._frontend_source import APP_HTML, APP_JS, fn_body
 
-# Captured before the autouse fixture below replaces it with a no-op: the
-# refund path lives in the real function's finally block, so one test needs the
-# genuine article while every other test in this file must never launch a run.
+# Captured before the autouse fixture below replaces it with a no-op: one test
+# exercises an early worker failure while every endpoint test must never launch
+# a subprocess.
 _REAL_RUN_BACKGROUND = bt.run_backtest_background
+
+
+class _ExecutionPreflightService:
+    def preflight_execution_model(self, provider_id, catalog_model_id):
+        assert provider_id == "openrouter"
+        return ExecutionModelRoute(
+            catalog_id=catalog_model_id,
+            label=catalog_model_id,
+            provider_model_id=catalog_model_id,
+        )
+
+    def preflight_user_default_credential(self, user_id, provider_id):
+        assert int(user_id) > 0
+        assert provider_id == "openrouter"
+
+    def preflight_platform_credential(self, provider_id):
+        assert provider_id == "openrouter"
 
 
 @pytest.fixture
@@ -241,7 +262,7 @@ def _reset_backtest_guards(monkeypatch):
 
 @pytest.fixture
 def metered(monkeypatch):
-    """TestClient over a fresh user store, with metering armed.
+    """TestClient over a fresh legacy quota store and safe execution preflight.
 
     A private store because these tests sign up accounts and edit balances;
     doing that in the shared conftest store would leak rows into every later
@@ -251,6 +272,11 @@ def metered(monkeypatch):
     monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
     monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
     monkeypatch.setattr(bt, "ensure_llm_client_available", object, raising=False)
+    monkeypatch.setattr(
+        bt,
+        "get_model_provider_service",
+        lambda: _ExecutionPreflightService(),
+    )
     with tempfile.TemporaryDirectory() as tmpdir:
         store = users_module.UserStore(db_path=Path(tmpdir) / "users.db")
         monkeypatch.setattr(users_module, "user_store", store)
@@ -274,6 +300,8 @@ def _llm_run(client, **overrides):
         "universe": "a_share_demo_6",
         "timeframe": "60m",
         "decision_source": "llm",
+        "billing_mode": "byok",
+        "provider_id": "openrouter",
         "model": "deepseek/deepseek-v4-pro",
     }
     body.update(overrides)
@@ -282,29 +310,31 @@ def _llm_run(client, **overrides):
     )
 
 
-def test_signed_out_llm_run_is_refused_when_armed(metered):
+def test_signed_out_llm_run_is_refused_before_execution_preflight(metered):
     client, _ = metered
     resp = _llm_run(client)
-    assert resp.status_code == 402
+    assert resp.status_code == 401
     assert "sign in" in resp.text.lower()
 
 
-def test_signed_in_llm_run_debits_one_credit(metered):
+def test_signed_in_byok_run_does_not_debit_legacy_quota(metered):
     client, store = metered
     user = _signup(client)
     before = store.get_entitlements(user["id"])["credits"]
     resp = _llm_run(client)
     assert resp.status_code == 200, resp.text
-    assert store.get_entitlements(user["id"])["credits"] == before - 1
+    assert resp.json()["billing_mode"] == "byok"
+    assert store.get_entitlements(user["id"])["credits"] == before
 
 
-def test_an_empty_balance_is_refused_and_names_the_way_out(metered):
+def test_byok_run_ignores_the_retired_per_run_quota(metered):
     client, store = metered
     user = _signup(client)
     store.set_entitlements(user["id"], credits=0, updated_by_admin_id=user["id"])
     resp = _llm_run(client)
-    assert resp.status_code == 402
-    assert "credits" in resp.text.lower()
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["billing_mode"] == "byok"
+    assert store.get_entitlements(user["id"])["credits"] == 0
 
 
 def test_a_rule_based_run_is_never_charged(metered):
@@ -357,7 +387,7 @@ def test_a_run_refused_for_capacity_is_not_charged(metered):
         bt._reset_slots_for_tests()
 
 
-def test_a_disarmed_deployment_does_not_debit(metered, monkeypatch):
+def test_byok_does_not_depend_on_the_legacy_metering_switch(metered, monkeypatch):
     client, store = metered
     monkeypatch.delenv("CREDITS_METERING_ENABLED", raising=False)
     user = _signup(client)
@@ -367,7 +397,7 @@ def test_a_disarmed_deployment_does_not_debit(metered, monkeypatch):
     assert store.get_entitlements(user["id"])["credits"] == 0
 
 
-def test_a_thread_that_never_starts_gives_the_credit_back(metered, monkeypatch):
+def test_a_thread_that_never_starts_needs_no_flat_credit_refund(metered, monkeypatch):
     client, store = metered
     user = _signup(client)
     before = store.get_entitlements(user["id"])["credits"]
@@ -383,7 +413,8 @@ def test_a_thread_that_never_starts_gives_the_credit_back(metered, monkeypatch):
     with pytest.raises(RuntimeError):
         _llm_run(client)
 
-    # The one refund case the worker's own finally block cannot reach.
+    # Unified billing reserves per model call inside the worker, so a thread
+    # that never starts has no flat run charge to refund.
     assert store.get_entitlements(user["id"])["credits"] == before
     # And the slot is released, or it burns one of the owner's concurrent slots
     # and one of the server's for the life of the process. Asserted on the
@@ -393,22 +424,20 @@ def test_a_thread_that_never_starts_gives_the_credit_back(metered, monkeypatch):
     assert bt.backtest_status["running"] is False
 
 
-def test_a_run_that_never_reached_the_model_is_refunded(metered):
+def test_a_run_that_never_reaches_the_model_does_not_mutate_legacy_quota(metered):
     _client, store = metered
     user = _user(store, "worker@example.com")
     store.set_entitlements(user["id"], credits=5, updated_by_admin_id=user["id"])
 
-    # An unknown data source fails before any decision, so no agent_runs row
-    # is ever written and llm_calls is 0.
+    # An unknown data source fails before any decision or model reservation.
     _REAL_RUN_BACKGROUND(
         start_date="2026-05-01",
         end_date="2026-05-02",
         session_id="s",
         data_source="not-a-real-source",
         live_run_id="never-persisted",
-        charged_credit_user_id=user["id"],
     )
-    assert store.get_entitlements(user["id"])["credits"] == 6
+    assert store.get_entitlements(user["id"])["credits"] == 5
 
 
 def test_admin_stats_reports_whether_the_column_binds(metered):

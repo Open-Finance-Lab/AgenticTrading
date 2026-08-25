@@ -230,13 +230,28 @@ def _projection_payload() -> dict[str, object]:
         ({"display_grant_credits": "4.000001"}, "display_grant_credits"),
         ({"display_purchased_credits": "2.500001"}, "display_purchased_credits"),
         ({"display_total_credits": "6.500001"}, "display_total_credits"),
-        ({"grant_committed_micro": 5_000_000}, "reservations"),
-        ({"purchased_committed_micro": 3_000_000}, "reservations"),
     ],
 )
 def test_balance_projection_rejects_inconsistent_accounting(updates, message):
     with pytest.raises(ValidationError, match=message):
         BalanceProjection(**{**_projection_payload(), **updates})
+
+
+def test_balance_projection_allows_open_reservations():
+    projection = BalanceProjection(
+        **{
+            **_projection_payload(),
+            "grant_committed_micro": 5_000_000,
+            "purchased_committed_micro": 3_000_000,
+        }
+    )
+
+    assert projection.grant_committed_micro - projection.grant_available_micro == 1_000_000
+    assert (
+        projection.purchased_committed_micro
+        - projection.purchased_available_micro
+        == 500_000
+    )
 
 
 def test_balance_result_rejects_inconsistent_full_projection():

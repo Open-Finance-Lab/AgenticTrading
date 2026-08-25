@@ -206,6 +206,57 @@ def test_balance_ledger_and_order_return_only_public_fields(billing_api):
     assert "checkout_session_id" not in serialized
 
 
+def test_credit_activity_exposes_safe_aggregated_llm_usage(billing_api):
+    token = _signup(billing_api.client, "usage-api@example.com")
+    checkout = _checkout(billing_api.client, token).json()["checkout"]
+    billing_api.gateway.event = _paid_checkout_event(checkout)
+    assert _deliver_webhook(billing_api).status_code == 200
+    reservation = billing_api.store.reserve_llm_credits(
+        reservation_id="api-usage-reservation",
+        user_id=1,
+        run_id="run-api-usage",
+        call_index=0,
+        reserved_micro=1_000_000,
+        operation_key="api-usage-reserve",
+        request_digest="f" * 64,
+    )
+    billing_api.store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_000_000,
+        evidence={
+            "billing_source": "platform_credits",
+            "pricing_snapshot": {
+                "provider_id": "openrouter",
+                "model_id": "openai/gpt-5.5",
+            },
+            "api_key": "raw-provider-secret",
+        },
+    )
+
+    response = billing_api.client.get(
+        "/api/credits/ledger?limit=1",
+        headers=_auth(token),
+    )
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["items"][0]["entry_type"] == "llm_usage"
+    assert body["items"][0]["amount_micro"] == -1_000_000
+    assert body["items"][0]["provider_id"] == "openrouter"
+    assert body["items"][0]["model_id"] == "openai/gpt-5.5"
+    assert isinstance(body["next_cursor"], str)
+    assert "evidence_json" not in str(body)
+    assert "raw-provider-secret" not in str(body)
+
+    second = billing_api.client.get(
+        "/api/credits/ledger",
+        params={"limit": 1, "cursor": body["next_cursor"]},
+        headers=_auth(token),
+    )
+    assert second.status_code == 200
+    assert second.json()["items"][0]["entry_type"] == "purchase"
+
+
 def test_checkout_input_is_server_allowlisted_and_idempotent(billing_api):
     token = _signup(billing_api.client, "price-api@example.com")
 
