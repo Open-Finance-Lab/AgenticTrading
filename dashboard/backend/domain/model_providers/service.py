@@ -6,6 +6,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 from dataclasses import dataclass
 import json
+import os
 from typing import Any, Protocol
 
 import httpx
@@ -77,6 +78,21 @@ class CredentialResolutionError(LLMExecutionError):
         message: str | None = None,
     ) -> None:
         super().__init__(category, message)
+
+
+_ENVIRONMENT_PLATFORM_KEY_NAMES = {
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def _environment_platform_secret(provider_id: str) -> str | None:
+    """Return an explicitly mapped deployment secret without persisting it."""
+
+    variable_name = _ENVIRONMENT_PLATFORM_KEY_NAMES.get(provider_id)
+    if not variable_name:
+        return None
+    secret = os.getenv(variable_name, "").strip()
+    return secret or None
 
 
 def _utcnow_iso() -> str:
@@ -511,14 +527,22 @@ class ModelProviderService:
                 ExecutionErrorCategory.CREDENTIAL_MISSING
             )
         credential = self.store.get_verified_platform_credential(provider_id)
-        if not credential:
-            raise CredentialResolutionError(ExecutionErrorCategory.CREDENTIAL_MISSING)
-        return ResolvedCredential(
-            credential_id=None,
-            provider_id=str(credential["provider_id"]),
-            key_last_four=str(credential["key_last_four"])[-4:],
-            secret=str(credential["secret"]),
-        )
+        if credential:
+            return ResolvedCredential(
+                credential_id=None,
+                provider_id=str(credential["provider_id"]),
+                key_last_four=str(credential["key_last_four"])[-4:],
+                secret=str(credential["secret"]),
+            )
+        secret = _environment_platform_secret(provider_id)
+        if secret:
+            return ResolvedCredential(
+                credential_id=None,
+                provider_id=provider_id,
+                key_last_four=secret[-4:],
+                secret=secret,
+            )
+        raise CredentialResolutionError(ExecutionErrorCategory.CREDENTIAL_MISSING)
 
     def preflight_user_default_credential(
         self, user_id: int, provider_id: str
@@ -564,6 +588,10 @@ class ModelProviderService:
                 ExecutionErrorCategory.CREDENTIAL_MISSING
             )
         credential = self.store.get_platform_credential_public(provider_id)
+        if credential and credential["status"] == "verified":
+            return
+        if _environment_platform_secret(provider_id):
+            return
         if not credential or credential["status"] != "verified":
             raise CredentialResolutionError(
                 ExecutionErrorCategory.CREDENTIAL_MISSING

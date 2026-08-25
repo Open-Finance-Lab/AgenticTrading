@@ -18,7 +18,11 @@ from dashboard.backend.domain.model_providers.repository_common import (
     CredentialConflictError,
     CredentialOwnershipError,
 )
-from dashboard.backend.domain.model_providers.service import ModelProviderService
+from dashboard.backend.domain.model_providers.service import (
+    CredentialResolutionError,
+    ModelProviderService,
+)
+from dashboard.backend.infrastructure.llm.execution.errors import ExecutionErrorCategory
 
 
 class FakeAdapter:
@@ -342,6 +346,62 @@ def test_execution_options_expose_models_only_for_safe_availability_flags(tmp_pa
             {"model_id": "qwen/qwen3.7-plus", "label": "Qwen3.7 Plus"},
         ],
     }
+
+
+def test_platform_resolver_uses_openrouter_environment_key_when_store_is_empty(
+    tmp_path, monkeypatch
+):
+    service, store = _service(tmp_path, FakeAdapter())
+    _set_provider_modes(store, "openrouter", byok_enabled=True, platform_enabled=True)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env-test-abcd")
+
+    resolved = service.resolve_platform_credential("openrouter")
+
+    assert resolved.credential_id is None
+    assert resolved.key_last_four == "abcd"
+    assert resolved.secret == "sk-or-env-test-abcd"
+
+
+def test_verified_stored_platform_credential_precedes_environment_key(
+    tmp_path, monkeypatch
+):
+    service, store = _service(tmp_path, FakeAdapter())
+    _set_provider_modes(store, "openrouter", byok_enabled=True, platform_enabled=True)
+    store.upsert_platform_credential(
+        provider_id="openrouter",
+        secret="sk-or-stored-test-wxyz",
+        status="verified",
+    )
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env-test-abcd")
+
+    resolved = service.resolve_platform_credential("openrouter")
+
+    assert resolved.key_last_four == "wxyz"
+    assert resolved.secret == "sk-or-stored-test-wxyz"
+
+
+def test_environment_fallback_is_provider_specific_and_fails_closed(
+    tmp_path, monkeypatch
+):
+    service, store = _service(tmp_path, FakeAdapter())
+    _set_provider_modes(store, "openai", byok_enabled=True, platform_enabled=True)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env-test-abcd")
+
+    with pytest.raises(CredentialResolutionError) as exc_info:
+        service.resolve_platform_credential("openai")
+
+    assert exc_info.value.category is ExecutionErrorCategory.CREDENTIAL_MISSING
+
+
+def test_environment_fallback_requires_platform_enabled(tmp_path, monkeypatch):
+    service, store = _service(tmp_path, FakeAdapter())
+    _set_provider_modes(store, "openrouter", byok_enabled=True, platform_enabled=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env-test-abcd")
+
+    with pytest.raises(CredentialResolutionError) as exc_info:
+        service.preflight_platform_credential("openrouter")
+
+    assert exc_info.value.category is ExecutionErrorCategory.CREDENTIAL_MISSING
 
 
 def test_execution_options_require_both_platform_flag_and_verified_status(tmp_path):
