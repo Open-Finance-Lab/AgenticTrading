@@ -4827,12 +4827,25 @@ a.header-brand:hover .title-section h1 {
     margin: 0;
     display: flex;
     flex-direction: column;
-    gap: 12px;
+    gap: 0;
 }
 
 .backtest-config-row {
     display: grid;
     gap: 4px;
+}
+
+.backtest-config-core-row {
+    grid-template-columns: 76px minmax(0, 1fr);
+    align-items: start;
+    gap: 12px;
+    padding: 12px 0;
+    border-top: 1px solid var(--border-color);
+}
+
+.backtest-config-core-row:first-child {
+    padding-top: 0;
+    border-top: 0;
 }
 
 .backtest-config-row dt {
@@ -4850,6 +4863,108 @@ a.header-brand:hover .title-section h1 {
     font-weight: 600;
     color: var(--text-primary);
     word-break: break-word;
+}
+
+.backtest-config-secondary-value {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.backtest-config-detail-group {
+    margin-top: 5px;
+    border-top: 1px solid var(--border-color);
+}
+
+.backtest-config-details {
+    border-bottom: 1px solid var(--border-color);
+}
+
+.backtest-config-details summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 13px 0;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 11px;
+    font-weight: 700;
+    list-style: none;
+}
+
+.backtest-config-details summary::-webkit-details-marker {
+    display: none;
+}
+
+.backtest-config-details summary::after {
+    color: var(--info-color);
+    content: '+';
+    font-size: 16px;
+    font-weight: 400;
+}
+
+.backtest-config-details[open] summary::after {
+    content: '−';
+}
+
+.backtest-config-detail-row {
+    margin: 0 0 13px;
+    padding: 0 0 13px;
+    border-left: 2px solid rgba(79, 195, 247, 0.45);
+    padding-left: 10px;
+}
+
+.backtest-config-detail-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 13px 12px;
+    padding: 0 0 14px;
+}
+
+.backtest-config-detail-cell {
+    min-width: 0;
+}
+
+.backtest-config-detail-cell span {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.backtest-config-detail-cell strong {
+    display: block;
+    color: var(--text-primary);
+    font-size: 11px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+}
+
+.backtest-config-meta-row {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    padding-top: 13px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.45;
+}
+
+.backtest-config-meta-row span {
+    min-width: 0;
+}
+
+.backtest-config-meta-row strong {
+    display: block;
+    color: var(--text-primary);
+    font-size: 10px;
+    font-weight: 600;
+    overflow-wrap: anywhere;
 }
 
 .backtest-config-prompt {

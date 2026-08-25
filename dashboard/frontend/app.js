@@ -7663,6 +7663,17 @@ function renderBacktestRunConfig(
     const agentName = cfg?.agentName || run?.agent_name || '—';
     const model = cfg?.model || run?.llm_model || '—';
     const capital = cfg?.initialCapital ?? run?.initial_equity;
+    const billingMode = cfg?.billingMode
+        || metadata.billing_mode
+        || run?.billing_mode
+        || null;
+    const billingProvider = cfg?.providerId
+        || metadata.provider_id
+        || run?.provider_id
+        || null;
+    const billingLabel = billingMode === 'byok'
+        ? 'BYOK' + (billingProvider ? ' · ' + billingProvider : '')
+        : (billingMode === 'platform_credits' ? 'ATL Credits' : '—');
     const nativeInitialCapital = metadata.native_initial_capital
         ?? run?.native_initial_capital;
     const startFxRate = metadata.fx_start_rate ?? run?.fx_start_rate;
@@ -7719,12 +7730,14 @@ function renderBacktestRunConfig(
 
     setBacktestConfigText('backtestConfigAgent', agentName);
     setBacktestConfigText('backtestConfigModel', model || '—');
+    setBacktestConfigText('backtestConfigBilling', billingLabel);
     setBacktestConfigText('backtestConfigStarted', started);
     setBacktestConfigText(
         'backtestConfigCapital',
         Number.isFinite(Number(capital)) ? `$${Number(capital).toLocaleString()}` : '—',
     );
     setBacktestConfigText('backtestConfigMarketData', marketData);
+    setBacktestConfigText('backtestConfigMarketDataMeta', marketData);
     const showFx = dataSource === IFIND_ASHARE_SOURCE
         && Number.isFinite(Number(nativeInitialCapital))
         && Number.isFinite(Number(startFxRate));
@@ -7825,11 +7838,14 @@ function renderBacktestRunConfig(
 
     const promptRow = document.getElementById('backtestConfigPromptRow');
     const promptEl = document.getElementById('backtestConfigPrompt');
+    const promptDetails = document.getElementById('backtestConfigInstructionDetails');
     if (prompt) {
         if (promptRow) promptRow.hidden = false;
+        if (promptDetails) promptDetails.hidden = false;
         if (promptEl) promptEl.textContent = prompt;
     } else if (promptRow) {
         promptRow.hidden = true;
+        if (promptDetails) promptDetails.hidden = true;
     }
 }
 
@@ -8095,6 +8111,8 @@ async function runBacktest() {
         symbolCount: assets.length,
         timeframe: isIFind ? IFIND_ASHARE_TIMEFRAME : '60m',
         decisionSource,
+        billingMode: isRuleBasedDecision ? null : selectedBillingMode,
+        providerId: isRuleBasedDecision ? null : selectedProviderId,
         marketDataLabel: isIFind
             ? 'iFinD A-Share'
             : (isSimulation ? 'vn.py Simulation' : 'Alpaca'),

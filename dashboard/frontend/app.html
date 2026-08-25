@@ -1151,89 +1151,63 @@
                 <h3 class="control-title">Run config</h3>
                 <p id="backtestConfigEmpty" class="control-helper">No backtests yet. Run one from My Agents.</p>
                 <dl id="backtestConfigList" class="backtest-config-list" hidden>
-                    <div class="backtest-config-row">
+                    <div class="backtest-config-row backtest-config-core-row">
                         <dt>Agent</dt>
                         <dd id="backtestConfigAgent">—</dd>
                     </div>
-                    <div class="backtest-config-row">
+                    <div class="backtest-config-row backtest-config-core-row">
                         <dt>Model</dt>
                         <dd id="backtestConfigModel">—</dd>
                     </div>
-                    <div class="backtest-config-row" id="backtestConfigPromptRow" hidden>
-                        <dt>Instruction</dt>
-                        <dd id="backtestConfigPrompt" class="backtest-config-prompt">—</dd>
+                    <div class="backtest-config-row backtest-config-core-row">
+                        <dt>Market</dt>
+                        <dd><span id="backtestConfigMarketData">—</span><span id="backtestConfigUniverse" class="backtest-config-secondary-value"></span></dd>
                     </div>
-                    <div class="backtest-config-row">
-                        <dt>Started</dt>
-                        <dd id="backtestConfigStarted">—</dd>
+                    <div class="backtest-config-row backtest-config-core-row">
+                        <dt>Date range</dt>
+                        <dd id="backtestConfigWindow">—</dd>
                     </div>
-                    <div class="backtest-config-row">
+                    <div class="backtest-config-row backtest-config-core-row">
                         <dt>Initial capital</dt>
                         <dd id="backtestConfigCapital">—</dd>
                     </div>
-                    <div class="backtest-config-row" id="backtestConfigNativeCapitalRow" hidden>
-                        <dt>CNY trading capital</dt>
-                        <dd id="backtestConfigNativeCapital">—</dd>
+                    <div class="backtest-config-row backtest-config-core-row">
+                        <dt>Billing</dt>
+                        <dd id="backtestConfigBilling">—</dd>
                     </div>
-                    <div class="backtest-config-row" id="backtestConfigFxSourceRow" hidden>
-                        <dt>FX source</dt>
-                        <dd id="backtestConfigFxSource">—</dd>
+
+                    <div class="backtest-config-detail-group">
+                        <details class="backtest-config-details" id="backtestConfigInstructionDetails">
+                            <summary>Show instruction</summary>
+                            <div class="backtest-config-row backtest-config-detail-row" id="backtestConfigPromptRow" hidden>
+                                <dt>Instruction</dt>
+                                <dd id="backtestConfigPrompt" class="backtest-config-prompt">—</dd>
+                            </div>
+                        </details>
+
+                        <details class="backtest-config-details">
+                            <summary>Show advanced details</summary>
+                            <div class="backtest-config-detail-grid">
+                                <div class="backtest-config-detail-cell"><span>Symbols</span><strong id="backtestConfigSymbols">—</strong></div>
+                                <div class="backtest-config-detail-cell"><span>Timeframe</span><strong id="backtestConfigTimeframe">—</strong></div>
+                                <div class="backtest-config-detail-cell"><span>Decision method</span><strong id="backtestConfigDecisionSource">—</strong></div>
+                                <div class="backtest-config-detail-cell"><span>Status</span><strong id="backtestConfigStatus">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigNativeCapitalRow" hidden><span>CNY trading capital</span><strong id="backtestConfigNativeCapital">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigFxSourceRow" hidden><span>FX source</span><strong id="backtestConfigFxSource">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigFxRateRow" hidden><span>Start FX rate</span><strong id="backtestConfigFxRate">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigTransactionCostsRow" hidden><span>Transaction costs</span><strong id="backtestConfigTransactionCosts">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigCostProfileRow" hidden><span>Cost profile</span><strong id="backtestConfigCostProfile">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigTotalCostsRow" hidden><span>Total costs</span><strong id="backtestConfigTotalCosts">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigMarketRulesRow" hidden><span>A-share market rules</span><strong id="backtestConfigMarketRules">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigRuleRejectionsRow" hidden><span>Rule rejections</span><strong id="backtestConfigRuleRejections">—</strong></div>
+                                <div class="backtest-config-detail-cell" id="backtestConfigBaselineRulesRow" hidden><span>Baseline rule delays</span><strong id="backtestConfigBaselineRules">—</strong></div>
+                            </div>
+                        </details>
                     </div>
-                    <div class="backtest-config-row" id="backtestConfigFxRateRow" hidden>
-                        <dt>Start FX rate</dt>
-                        <dd id="backtestConfigFxRate">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigTransactionCostsRow" hidden>
-                        <dt>Transaction costs</dt>
-                        <dd id="backtestConfigTransactionCosts">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigCostProfileRow" hidden>
-                        <dt>Cost profile</dt>
-                        <dd id="backtestConfigCostProfile">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigTotalCostsRow" hidden>
-                        <dt>Total costs</dt>
-                        <dd id="backtestConfigTotalCosts">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigMarketRulesRow" hidden>
-                        <dt>A-share market rules</dt>
-                        <dd id="backtestConfigMarketRules">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigRuleRejectionsRow" hidden>
-                        <dt>Rule rejections</dt>
-                        <dd id="backtestConfigRuleRejections">—</dd>
-                    </div>
-                    <div class="backtest-config-row" id="backtestConfigBaselineRulesRow" hidden>
-                        <dt>Baseline rule delays</dt>
-                        <dd id="backtestConfigBaselineRules">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Market data</dt>
-                        <dd id="backtestConfigMarketData">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Universe</dt>
-                        <dd id="backtestConfigUniverse">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Symbols</dt>
-                        <dd id="backtestConfigSymbols">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Timeframe</dt>
-                        <dd id="backtestConfigTimeframe">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Decision method</dt>
-                        <dd id="backtestConfigDecisionSource">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Time window</dt>
-                        <dd id="backtestConfigWindow">—</dd>
-                    </div>
-                    <div class="backtest-config-row">
-                        <dt>Status</dt>
-                        <dd id="backtestConfigStatus">—</dd>
+
+                    <div class="backtest-config-meta-row">
+                        <span>Started <strong id="backtestConfigStarted">—</strong></span>
+                        <span>Market data <strong id="backtestConfigMarketDataMeta">—</strong></span>
                     </div>
                 </dl>
 
