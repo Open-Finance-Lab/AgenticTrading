@@ -186,12 +186,21 @@ def test_agent_model_sync_accepts_provider_paths_and_version_separators(js):
     )
 
 
-def test_ifind_request_uses_selected_profile_and_explicit_decision_source(js):
+def test_ifind_request_uses_selected_profile_and_execution_lane(js):
     assert re.search(r"payload\.universe\s*=\s*selectedIFindUniverse", js)
     assert re.search(r"payload\.timeframe\s*=\s*['\"]60m['\"]", js)
     assert re.search(r"payload\.decision_source\s*=\s*decisionSource", js)
     assert re.search(r"params\.set\(\s*['\"]decision_source['\"]\s*,\s*decisionSource", js)
-    assert re.search(r"if\s*\(\s*decisionSource\s*===\s*LLM_DECISION_SOURCE\s*&&\s*model", js)
+    assert re.search(
+        r"if\s*\(\s*decisionSource\s*===\s*LLM_DECISION_SOURCE"
+        r"\s*&&\s*!isHostedRuntime\s*\)",
+        js,
+    )
+    assert re.search(r"params\.set\(\s*['\"]billing_mode['\"]\s*,\s*runBacktestBillingMode", js)
+    assert re.search(r"params\.set\(\s*['\"]provider_id['\"]\s*,\s*selectedProviderId", js)
+    assert re.search(r"payload\.billing_mode\s*=\s*runBacktestBillingMode", js)
+    assert re.search(r"payload\.provider_id\s*=\s*selectedProviderId", js)
+    assert re.search(r"payload\.model\s*=\s*model", js)
     assert re.search(r"if\s*\(\s*decisionSource\s*===\s*LLM_DECISION_SOURCE\s*&&\s*pipeline\?\.length", js)
     assert re.search(r"const\s+pipeline\s*=\s*isRuleBasedDecision\s*\?\s*null", js)
 

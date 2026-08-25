@@ -1,17 +1,10 @@
-"""Configure header chrome: Unsaved changes must not shove fields sideways.
-
-Model / Market / Description / Robinhood used to live in the same flex row as
-the dirty badge. Showing the badge grew the action column and narrowed every
-field beside it. The toolbar is now its own row; those fields sit full-width
-below it. The hidden badge still occupies its slot so the name row does not
-jump either.
-"""
+"""Configure header chrome: fields and actions stay in separate header areas."""
 
 from pathlib import Path
 
 _FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 _APP_HTML = (_FRONTEND / "app.html").read_text(encoding="utf-8")
-_STYLES = (_FRONTEND / "styles.css").read_text(encoding="utf-8")
+_AGENT_EDITOR_JS = (_FRONTEND / "js" / "agent-editor.js").read_text(encoding="utf-8")
 
 
 def _slice(text: str, start_marker: str, end_marker: str) -> str:
@@ -20,28 +13,29 @@ def _slice(text: str, start_marker: str, end_marker: str) -> str:
     return text[start:end]
 
 
-def test_configure_fields_are_not_in_the_toolbar_row():
-    toolbar = _slice(
-        _APP_HTML, 'class="agent-editor-toolbar"', 'class="agent-editor-header-fields"'
+def test_configure_fields_stay_out_of_header_actions():
+    title_wrap = _slice(
+        _APP_HTML, 'class="agent-editor-title-wrap"', 'class="agent-editor-header-actions"'
     )
-    assert 'id="agentEditorDirtyBadge"' in toolbar
-    assert 'id="agentEditorRunBacktestBtn"' in toolbar
-    assert 'id="agentEditorSaveBtn"' in toolbar
-    assert 'id="agentEditorNameInput"' in toolbar
-    assert 'id="agentEditorModelField"' not in toolbar
-    assert 'id="agentEditorCategoryField"' not in toolbar
-    assert 'id="agentEditorDescription"' not in toolbar
-    assert 'id="agentEditorBrokerPanel"' not in toolbar
+    actions = _slice(_APP_HTML, 'class="agent-editor-header-actions"', "</header>")
 
-    fields = _slice(_APP_HTML, 'class="agent-editor-header-fields"', "</header>")
-    assert 'id="agentEditorModelField"' in fields
-    assert 'id="agentEditorCategoryField"' in fields
-    assert 'id="agentEditorDescription"' in fields
-    assert 'id="agentEditorBrokerPanel"' in fields
-    assert 'id="agentEditorDirtyBadge"' not in fields
+    assert 'id="agentEditorNameInput"' in title_wrap
+    assert 'id="agentEditorModelField"' in title_wrap
+    assert 'id="agentEditorCategoryField"' in title_wrap
+    assert 'id="agentEditorDescription"' in title_wrap
+    assert 'id="agentEditorBrokerPanel"' in title_wrap
+
+    assert 'id="agentEditorDirtyBadge"' in actions
+    assert 'id="agentEditorRunBacktestBtn"' in actions
+    assert 'id="agentEditorSaveBtn"' in actions
+    assert 'id="agentEditorModelField"' not in actions
+    assert 'id="agentEditorCategoryField"' not in actions
+    assert 'id="agentEditorDescription"' not in actions
+    assert 'id="agentEditorBrokerPanel"' not in actions
 
 
-def test_dirty_badge_keeps_its_slot_when_hidden():
-    hidden = _slice(_STYLES, ".agent-editor-dirty-badge[hidden] {", "}")
-    assert "visibility: hidden" in hidden
-    assert "display: inline-flex !important" in hidden
+def test_dirty_badge_is_hidden_by_default_and_toggled_by_editor_state():
+    badge = _slice(_APP_HTML, 'id="agentEditorDirtyBadge"', ">")
+    assert 'class="agent-editor-dirty-badge"' in badge
+    assert " hidden" in badge
+    assert "badge.hidden = !dirty" in _AGENT_EDITOR_JS

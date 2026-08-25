@@ -24,7 +24,9 @@ from dashboard.backend.infrastructure.market_data.profiles import (
     CSI300_SAMPLE_20_2026H2,
     CSI300_SAMPLE_20_2026H2_SYMBOLS,
 )
-from dashboard.backend.infrastructure.llm import providers as llm_providers
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    ExecutionModelRoute,
+)
 
 REAL_RUN_BACKTEST_BACKGROUND = backtests.run_backtest_background
 
@@ -51,6 +53,41 @@ _PROFILE_KWARGS = (
 
 def session_headers():
     return {"X-Session-Id": str(uuid.uuid4())}
+
+
+class _OpenRouterByokPreflight:
+    def __init__(self, failure: Exception | None = None):
+        self.failure = failure
+        self.execution_calls = []
+        self.credential_calls = []
+
+    def preflight_execution_model(self, provider_id, catalog_model_id):
+        self.execution_calls.append((provider_id, catalog_model_id))
+        if self.failure is not None:
+            raise self.failure
+        assert provider_id == "openrouter"
+        assert catalog_model_id == "openai/gpt-5.5"
+        return ExecutionModelRoute(
+            catalog_id=catalog_model_id,
+            label="GPT-5.5",
+            provider_model_id=catalog_model_id,
+        )
+
+    def preflight_user_default_credential(self, user_id, provider_id):
+        self.credential_calls.append((user_id, provider_id))
+
+    def preflight_platform_credential(self, provider_id):
+        raise AssertionError(f"unexpected Platform Credits preflight: {provider_id}")
+
+
+def _enable_authenticated_openrouter_byok(monkeypatch, *, failure=None):
+    service = _OpenRouterByokPreflight(failure=failure)
+    monkeypatch.setattr(backtests, "get_model_provider_service", lambda: service)
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": 7},
+    )
+    return service
 
 
 @pytest.fixture(autouse=True)
@@ -189,6 +226,7 @@ def test_disabled_ifind_returns_403_before_scheduling(monkeypatch):
             "data_source": IFIND_ASHARE,
             "universe": A_SHARE_DEMO_6,
             "timeframe": "60m",
+            "decision_source": "rule_based",
         },
         headers=session_headers(),
     )
@@ -212,6 +250,7 @@ def test_missing_ifind_token_returns_503_before_scheduling(monkeypatch):
             "data_source": IFIND_ASHARE,
             "universe": A_SHARE_DEMO_6,
             "timeframe": "60m",
+            "decision_source": "rule_based",
         },
         headers=session_headers(),
     )
@@ -237,6 +276,7 @@ def test_refresh_token_allows_ifind_backtest_scheduling(monkeypatch):
             "data_source": IFIND_ASHARE,
             "universe": A_SHARE_DEMO_6,
             "timeframe": "60m",
+            "decision_source": "rule_based",
         },
         headers=session_headers(),
     )
@@ -342,6 +382,7 @@ def test_enabled_ifind_profile_is_passed_to_background_runner(monkeypatch):
             "data_source": IFIND_ASHARE,
             "universe": A_SHARE_DEMO_6,
             "timeframe": "60m",
+            "decision_source": "rule_based",
         },
         headers=session_headers(),
     )
@@ -360,7 +401,7 @@ def test_enabled_ifind_profile_is_passed_to_background_runner(monkeypatch):
         "universe": A_SHARE_DEMO_6,
         "timeframe": "60m",
         "timezone": "Asia/Shanghai",
-        "decision_source": "llm",
+        "decision_source": "rule_based",
         "benchmark": "equal_weight_buyhold",
         "assets": list(A_SHARE_DEMO_6_SYMBOLS),
     }
@@ -374,7 +415,7 @@ def test_enabled_ifind_profile_is_passed_to_background_runner(monkeypatch):
         "timeframe": "60m",
         "initial_capital": None,
         "assets": list(A_SHARE_DEMO_6_SYMBOLS),
-        "decision_source": "llm",
+        "decision_source": "rule_based",
     }
 
 
@@ -382,13 +423,7 @@ def test_enabled_ifind_profile_is_passed_to_background_runner(monkeypatch):
 def test_ifind_explicit_llm_is_preflighted_and_scheduled(monkeypatch, universe):
     monkeypatch.setenv("ENABLE_IFIND_ASHARE", "true")
     monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
-    preflight_calls = []
-    monkeypatch.setattr(
-        backtests,
-        "ensure_llm_client_available",
-        lambda: preflight_calls.append(True) or object(),
-        raising=False,
-    )
+    service = _enable_authenticated_openrouter_byok(monkeypatch)
     spy = Spy()
     monkeypatch.setattr(backtests, "run_backtest_background", spy)
 
@@ -401,7 +436,9 @@ def test_ifind_explicit_llm_is_preflighted_and_scheduled(monkeypatch, universe):
             "universe": universe,
             "timeframe": "60m",
             "decision_source": "llm",
-            "model": "gpt-5.2",
+            "billing_mode": "byok",
+            "provider_id": "openrouter",
+            "model": "openai/gpt-5.5",
             "strategy_prompt": "A-share momentum",
         },
         headers=session_headers(),
@@ -409,11 +446,15 @@ def test_ifind_explicit_llm_is_preflighted_and_scheduled(monkeypatch, universe):
 
     assert response.status_code == 200, response.text
     assert response.json()["decision_source"] == "llm"
-    assert preflight_calls == [True]
+    assert response.json()["billing_mode"] == "byok"
+    assert response.json()["provider_id"] == "openrouter"
+    assert service.execution_calls == [("openrouter", "openai/gpt-5.5")]
+    assert service.credential_calls == [(7, "openrouter")]
     kwargs = spy.calls[0][1]
     assert kwargs["strategy_prompt"] == "A-share momentum"
-    assert kwargs["model"] == "gpt-5.2"
+    assert kwargs["model"] == "openai/gpt-5.5"
     assert kwargs["decision_source"] == "llm"
+    assert kwargs["execution_handoff_payload"]
 
 
 def test_ifind_body_decision_source_overrides_query(monkeypatch):
@@ -457,20 +498,12 @@ def test_ifind_explicit_llm_configuration_error_is_sanitized(monkeypatch):
     monkeypatch.setenv("IFIND_ACCESS_TOKEN", "test-token-not-a-secret")
     secret = "provider-secret-that-must-not-leak"
     monkeypatch.setenv("COMMONSTACK_API_KEY", secret)
+    _enable_authenticated_openrouter_byok(
+        monkeypatch,
+        failure=RuntimeError(secret),
+    )
     spy = Spy()
     monkeypatch.setattr(backtests, "run_backtest_background", spy)
-
-    def fail_preflight():
-        raise llm_providers.LLMProviderConfigurationError(
-            "LLM provider client is unavailable"
-        )
-
-    monkeypatch.setattr(
-        backtests,
-        "ensure_llm_client_available",
-        fail_preflight,
-        raising=False,
-    )
 
     response = TestClient(app).post(
         "/backtest/run",
@@ -479,13 +512,15 @@ def test_ifind_explicit_llm_configuration_error_is_sanitized(monkeypatch):
             "universe": A_SHARE_DEMO_6,
             "timeframe": "60m",
             "decision_source": "llm",
-            "model": "gpt-5.2",
+            "billing_mode": "byok",
+            "provider_id": "openrouter",
+            "model": "openai/gpt-5.5",
         },
         headers=session_headers(),
     )
 
     assert response.status_code == 503
-    assert "client is unavailable" in response.text
+    assert "The selected model provider is unavailable." in response.text
     assert secret not in response.text
     assert spy.calls == []
 
@@ -507,6 +542,7 @@ def test_enabled_ifind_csi300_sample20_is_passed_to_background_runner(
             "universe": CSI300_SAMPLE_20_2026H2,
             "timeframe": "60m",
             "assets": ["AAPL"],
+            "decision_source": "rule_based",
         },
         headers=session_headers(),
     )
@@ -515,7 +551,7 @@ def test_enabled_ifind_csi300_sample20_is_passed_to_background_runner(
     body = response.json()
     assert body["universe"] == CSI300_SAMPLE_20_2026H2
     assert body["assets"] == list(CSI300_SAMPLE_20_2026H2_SYMBOLS)
-    assert body["decision_source"] == "llm"
+    assert body["decision_source"] == "rule_based"
     assert len(spy.calls) == 1
     kwargs = spy.calls[0][1]
     assert {key: kwargs[key] for key in _PROFILE_KWARGS} == {
@@ -525,7 +561,7 @@ def test_enabled_ifind_csi300_sample20_is_passed_to_background_runner(
         "timeframe": "60m",
         "initial_capital": None,
         "assets": list(CSI300_SAMPLE_20_2026H2_SYMBOLS),
-        "decision_source": "llm",
+        "decision_source": "rule_based",
     }
 
 

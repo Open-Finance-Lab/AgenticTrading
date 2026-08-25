@@ -85,6 +85,7 @@ EXPECTED_FULL_CONTRACT = {
     ("POST", "/api/credits/checkout-sessions"),
     ("GET", "/api/credits/orders/{order_id}"),
     ("GET", "/api/credits/model-providers"),
+    ("GET", "/api/credits/execution-options"),
     ("GET", "/api/credits/api-keys"),
     ("POST", "/api/credits/api-keys"),
     ("POST", "/api/credits/api-keys/{credential_id}/verify"),
