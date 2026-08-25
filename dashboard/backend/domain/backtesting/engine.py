@@ -778,7 +778,7 @@ class HourlyBacktester:
             )
         return metadata
 
-    def _agent_run_metadata(self, llm_execution=None) -> Dict:
+    def _agent_run_metadata(self) -> Dict:
         """Provenance plus the effective config the agent run actually used.
 
         LLM_MAX_OUTPUT_TOKENS is an env knob that changes a run's spend and
@@ -798,8 +798,10 @@ class HourlyBacktester:
             meta["decision_source"] = decision_source
         if self.use_llm:
             meta["llm_max_output_tokens"] = llm_harness.DEFAULT_MAX_OUTPUT_TOKENS
-        if llm_execution is None and self.execution_client is not None:
-            summary = getattr(self.execution_client, "execution_summary", None)
+        llm_execution = getattr(self, "_llm_execution_evidence", None)
+        execution_client = getattr(self, "execution_client", None)
+        if llm_execution is None and execution_client is not None:
+            summary = getattr(execution_client, "execution_summary", None)
             if callable(summary):
                 llm_execution = summary()
         if llm_execution is not None:
@@ -1265,8 +1267,9 @@ class HourlyBacktester:
         llm_calls_total = manager.llm_calls + runtime_calls
 
         llm_execution = None
-        if self.execution_client is not None:
-            summary = getattr(self.execution_client, "execution_summary", None)
+        execution_client = getattr(self, "execution_client", None)
+        if execution_client is not None:
+            summary = getattr(execution_client, "execution_summary", None)
             if callable(summary):
                 llm_execution = summary()
         if llm_execution is not None:
@@ -1280,6 +1283,7 @@ class HourlyBacktester:
             est_cost = token_cost.estimate_cost_usd(
                 llm_model, manager.input_tokens, manager.output_tokens
             )
+        self._llm_execution_evidence = llm_execution
 
         self.t1_deferrals = self._serialize_t1_deferrals(manager.t1_deferrals)
         self.rejected_orders = self._serialize_rejected_orders(
@@ -1307,7 +1311,7 @@ class HourlyBacktester:
             input_tokens=manager.input_tokens,
             output_tokens=manager.output_tokens,
             est_cost_usd=est_cost,
-            metadata=self._agent_run_metadata(llm_execution),
+            metadata=self._agent_run_metadata(),
         )
 
         db.insert_equity_points(run_id, equity_curve)

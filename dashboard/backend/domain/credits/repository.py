@@ -1655,8 +1655,11 @@ class CreditsStore:
                 f"""
                 WITH historical_activity AS (
                     SELECT id AS source_id, 'ledger' AS source_kind,
-                           bucket, entry_type, amount_micro, payment_order_id,
-                           source, reason, created_at,
+                           user_id, bucket, entry_type, amount_micro,
+                           payment_order_id, refund_request_id, stripe_event_id,
+                           operation_key, operation_id, idempotency_key,
+                           request_digest, actor_user_id, source, reason,
+                           reference_type, reference_id, created_at,
                            NULL AS reservation_id, NULL AS run_id,
                            NULL AS call_index, NULL AS evidence_json
                     FROM credit_ledger_entries
@@ -1664,14 +1667,21 @@ class CreditsStore:
                 ),
                 llm_activity AS (
                     SELECT MAX(id) AS source_id, 'llm_usage' AS source_kind,
-                           NULL AS bucket, 'llm_usage' AS entry_type,
+                           user_id, NULL AS bucket,
+                           'llm_usage' AS entry_type,
                            SUM(amount_micro) AS amount_micro,
-                           NULL AS payment_order_id, 'llm_execution' AS source,
-                           'Model usage.' AS reason, created_at,
+                           NULL AS payment_order_id,
+                           NULL AS refund_request_id, NULL AS stripe_event_id,
+                           NULL AS operation_key, NULL AS operation_id,
+                           NULL AS idempotency_key, NULL AS request_digest,
+                           NULL AS actor_user_id, 'llm_execution' AS source,
+                           'Model usage.' AS reason,
+                           NULL AS reference_type, NULL AS reference_id,
+                           created_at,
                            reservation_id, run_id, call_index, evidence_json
                     FROM credit_llm_usage_entries
                     WHERE user_id = ?
-                    GROUP BY reservation_id, run_id, call_index,
+                    GROUP BY user_id, reservation_id, run_id, call_index,
                              evidence_json, created_at
                 ),
                 activity AS (

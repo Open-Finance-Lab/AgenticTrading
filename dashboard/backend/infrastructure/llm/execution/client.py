@@ -128,7 +128,11 @@ class AnthropicCompatibleExecutionClient:
         # Reserve a unique id for every attempt, including a failed provider call.
         self._next_call_index += 1
         result = self.execution_service.execute(request)
-        self._completed_results.append(result)
+        # Production services return the complete typed result. Older test and
+        # extension doubles return only the SDK-compatible attributes; keep
+        # those callers working, but do not invent billing evidence for them.
+        if isinstance(result, LLMExecutionResult):
+            self._completed_results.append(result)
         return SimpleNamespace(
             content=[SimpleNamespace(type="text", text=result.text)],
             model=result.model_id,

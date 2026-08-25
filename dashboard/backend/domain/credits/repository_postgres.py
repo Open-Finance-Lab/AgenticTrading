@@ -1450,8 +1450,12 @@ class PostgresCreditsStore:
                     f"""
                     WITH historical_activity AS (
                         SELECT id AS source_id, 'ledger' AS source_kind,
-                               bucket, entry_type, amount_micro, payment_order_id,
-                               source, reason, created_at,
+                               user_id, bucket, entry_type, amount_micro,
+                               payment_order_id, refund_request_id,
+                               stripe_event_id, operation_key, operation_id,
+                               idempotency_key, request_digest, actor_user_id,
+                               source, reason, reference_type, reference_id,
+                               created_at,
                                NULL::TEXT AS reservation_id, NULL::TEXT AS run_id,
                                NULL::BIGINT AS call_index, NULL::TEXT AS evidence_json
                         FROM credit_ledger_entries
@@ -1459,15 +1463,25 @@ class PostgresCreditsStore:
                     ),
                     llm_activity AS (
                         SELECT MAX(id) AS source_id, 'llm_usage' AS source_kind,
-                               NULL::TEXT AS bucket, 'llm_usage' AS entry_type,
+                               user_id, NULL::TEXT AS bucket,
+                               'llm_usage' AS entry_type,
                                SUM(amount_micro) AS amount_micro,
                                NULL::TEXT AS payment_order_id,
+                               NULL::TEXT AS refund_request_id,
+                               NULL::TEXT AS stripe_event_id,
+                               NULL::TEXT AS operation_key,
+                               NULL::TEXT AS operation_id,
+                               NULL::TEXT AS idempotency_key,
+                               NULL::TEXT AS request_digest,
+                               NULL::INTEGER AS actor_user_id,
                                'llm_execution' AS source, 'Model usage.' AS reason,
+                               NULL::TEXT AS reference_type,
+                               NULL::TEXT AS reference_id,
                                created_at, reservation_id, run_id, call_index,
                                evidence_json
                         FROM credit_llm_usage_entries
                         WHERE user_id = %s
-                        GROUP BY reservation_id, run_id, call_index,
+                        GROUP BY user_id, reservation_id, run_id, call_index,
                                  evidence_json, created_at
                     ),
                     activity AS (
