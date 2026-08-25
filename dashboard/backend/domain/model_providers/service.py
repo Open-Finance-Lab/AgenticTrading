@@ -175,6 +175,12 @@ class ModelProviderService:
             platform = self.store.get_platform_credential_public(
                 provider.provider_id
             )
+            platform_credential_available = bool(
+                platform and platform["status"] == "verified"
+            )
+            environment_available = bool(
+                _environment_platform_secret(provider.provider_id)
+            )
             routes = list_execution_model_routes(provider)
             options.append(
                 ExecutionProviderOption(
@@ -187,8 +193,10 @@ class ModelProviderService:
                     ),
                     platform_credits_available=(
                         provider.platform_enabled
-                        and bool(platform)
-                        and platform["status"] == "verified"
+                        and (
+                            platform_credential_available
+                            or environment_available
+                        )
                     ),
                     models=tuple(
                         ExecutionModelOption(

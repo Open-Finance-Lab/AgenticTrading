@@ -404,6 +404,39 @@ def test_environment_fallback_requires_platform_enabled(tmp_path, monkeypatch):
     assert exc_info.value.category is ExecutionErrorCategory.CREDENTIAL_MISSING
 
 
+def test_execution_options_expose_environment_backed_platform_credits(
+    tmp_path, monkeypatch
+):
+    service, store = _service(tmp_path, FakeAdapter())
+    _set_provider_modes(store, "openrouter", byok_enabled=True, platform_enabled=True)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-env-options-abcd")
+
+    option = next(
+        item
+        for item in service.list_execution_options(7)
+        if item.provider_id == "openrouter"
+    )
+
+    assert option.platform_credits_available is True
+    assert "sk-or-env-options-abcd" not in option.model_dump_json()
+
+
+def test_execution_options_hide_platform_credits_without_any_platform_key(
+    tmp_path, monkeypatch
+):
+    service, store = _service(tmp_path, FakeAdapter())
+    _set_provider_modes(store, "openrouter", byok_enabled=True, platform_enabled=True)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    option = next(
+        item
+        for item in service.list_execution_options(7)
+        if item.provider_id == "openrouter"
+    )
+
+    assert option.platform_credits_available is False
+
+
 def test_execution_options_require_both_platform_flag_and_verified_status(tmp_path):
     service, store = _service(tmp_path, FakeAdapter())
     _set_provider_modes(

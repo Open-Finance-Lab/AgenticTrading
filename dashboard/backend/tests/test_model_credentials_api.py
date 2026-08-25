@@ -198,6 +198,41 @@ def test_execution_options_return_safe_openrouter_models(credential_api):
         assert forbidden not in payload
 
 
+def test_execution_options_expose_env_backed_platform_credits_without_secret(
+    credential_api, monkeypatch
+):
+    token = _signup(credential_api.client, "env-platform-options-api@example.com")
+    provider = credential_api.store.get_provider("openrouter")
+    assert provider is not None
+    credential_api.store.upsert_provider(
+        provider_id="openrouter",
+        display_name=provider["display_name"],
+        adapter_type=provider["adapter_type"],
+        approved_base_url=provider["approved_base_url"],
+        capabilities=provider["capabilities"],
+        byok_enabled=provider["byok_enabled"],
+        platform_enabled=True,
+        status=provider["status"],
+    )
+    sentinel = "sk-or-api-env-options-abcd"
+    monkeypatch.setenv("OPENROUTER_API_KEY", sentinel)
+
+    response = credential_api.client.get(
+        "/api/credits/execution-options",
+        headers=_auth(token),
+    )
+
+    assert response.status_code == 200
+    item = next(
+        item
+        for item in response.json()["providers"]
+        if item["provider_id"] == "openrouter"
+    )
+    assert item["platform_credits_available"] is True
+    assert sentinel not in response.text
+    assert "api_key" not in response.text.lower()
+
+
 def test_create_and_list_never_return_or_log_full_key(credential_api, caplog):
     token = _signup(credential_api.client, "safe-output-api@example.com")
     secret = "sk-or-fake-never-return-abcd"
