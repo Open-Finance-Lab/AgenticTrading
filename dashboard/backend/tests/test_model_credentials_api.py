@@ -43,6 +43,7 @@ class FakeAdapter:
 
 @pytest.fixture
 def credential_api(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     database_path = tmp_path / "model-credentials-api.db"
     users = users_module.UserStore(database_path)
     store = ModelProviderStore(database_path)

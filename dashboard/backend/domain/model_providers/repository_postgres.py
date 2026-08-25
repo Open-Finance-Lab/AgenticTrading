@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 import json
+import os
 from typing import Any
 
 import psycopg
@@ -96,6 +97,11 @@ CREATE TABLE IF NOT EXISTS model_provider_admin_operations (
     secret_fingerprint TEXT,
     result_json TEXT,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS model_provider_migrations (
+    migration_id TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
 );
 """
 
@@ -205,7 +211,7 @@ class PostgresModelProviderStore:
                             provider_id, display_name, adapter_type, approved_base_url,
                             capabilities_json, byok_enabled, platform_enabled,
                             status, created_at, updated_at
-                        ) VALUES (%s, %s, %s, %s, %s, TRUE, FALSE, 'enabled', %s, %s)
+                        ) VALUES (%s, %s, %s, %s, %s, TRUE, %s, 'enabled', %s, %s)
                         ON CONFLICT (provider_id) DO NOTHING
                         """,
                         (
@@ -214,10 +220,63 @@ class PostgresModelProviderStore:
                             item["adapter_type"],
                             item["approved_base_url"],
                             serialize_capabilities(item["capabilities"]),
+                            bool(item.get("platform_enabled", False)),
                             now,
                             now,
                         ),
                     )
+                self._migrate_legacy_openrouter_platform_flag(cur)
+
+    @staticmethod
+    def _migrate_legacy_openrouter_platform_flag(cur) -> None:
+        """Enable the legacy Render-backed OpenRouter lane once, safely."""
+
+        migration_id = "openrouter-platform-key-v1"
+        cur.execute(
+            "SELECT 1 FROM model_provider_migrations WHERE migration_id = %s",
+            (migration_id,),
+        )
+        if cur.fetchone():
+            return
+        if not os.getenv("OPENROUTER_API_KEY", "").strip():
+            return
+        cur.execute(
+            "SELECT status, platform_enabled FROM provider_registry WHERE provider_id = 'openrouter'"
+        )
+        provider = cur.fetchone()
+        if not provider or provider["status"] != "enabled" or provider["platform_enabled"]:
+            return
+        cur.execute(
+            "SELECT 1 FROM platform_model_credentials WHERE provider_id = 'openrouter'"
+        )
+        if cur.fetchone():
+            return
+        cur.execute(
+            """
+            SELECT operation, result_json
+            FROM model_provider_admin_operations
+            WHERE provider_id = 'openrouter' AND operation = 'upsert_provider'
+            ORDER BY operation_id DESC
+            LIMIT 1
+            """
+        )
+        latest_operation = cur.fetchone()
+        if latest_operation:
+            try:
+                snapshot = json.loads(latest_operation["result_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                snapshot = {}
+            if snapshot.get("platform_enabled") is False:
+                return
+        now = _utcnow_iso()
+        cur.execute(
+            "UPDATE provider_registry SET platform_enabled = TRUE, updated_at = %s WHERE provider_id = 'openrouter'",
+            (now,),
+        )
+        cur.execute(
+            "INSERT INTO model_provider_migrations (migration_id, applied_at) VALUES (%s, %s)",
+            (migration_id, now),
+        )
 
     def list_enabled_providers(self, *, mode: str = "byok") -> list[dict[str, Any]]:
         if mode not in {"byok", "platform"}:
