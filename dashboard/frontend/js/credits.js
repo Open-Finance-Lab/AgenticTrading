@@ -452,12 +452,29 @@
 
       const meta = document.createElement('div');
       meta.className = 'credits-ledger-meta';
-      const isRefund = entry.entry_type === 'refund';
-      meta.appendChild(textNode('strong', '', isRefund ? 'Refund' : 'Credit purchase'));
-      meta.appendChild(textNode('span', '', formatTimestamp(entry.created_at)));
+      const isUsage = entry.entry_type === 'llm_usage';
+      const isNegative = isUsage || entry.entry_type === 'refund';
+      const title = isUsage
+        ? 'Model usage'
+        : (entry.entry_type === 'refund' ? 'Refund' : 'Credit purchase');
+      meta.appendChild(textNode('strong', '', title));
+      const usageDetail = isUsage
+        ? [entry.provider_id, entry.model_id, entry.run_id ? `run ${String(entry.run_id).slice(0, 12)}` : null]
+          .filter(Boolean)
+          .join(' · ')
+        : null;
+      meta.appendChild(textNode(
+        'span',
+        '',
+        [usageDetail, formatTimestamp(entry.created_at)].filter(Boolean).join(' · '),
+      ));
 
       const formatted = formatCreditDisplay(entry.display_credits);
-      const amount = textNode('span', `credits-ledger-amount ${isRefund ? 'is-negative' : 'is-positive'}`, `${isRefund ? '' : '+'}${formatted}`);
+      const amount = textNode(
+        'span',
+        `credits-ledger-amount ${isNegative ? 'is-negative' : 'is-positive'}`,
+        `${isNegative ? '' : '+'}${formatted}`,
+      );
       row.append(meta, amount);
       list.appendChild(row);
     });

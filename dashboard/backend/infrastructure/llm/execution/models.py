@@ -136,7 +136,9 @@ class BillingEvidence(BaseModel):
     provider_cost_usd: float | None = Field(default=None, ge=0)
     estimated_cost_usd: float | None = Field(default=None, ge=0)
     pricing_snapshot: PricingSnapshot | None = None
+    provider_cost_credits_micro: int = Field(default=0, ge=0)
     debited_credits_micro: int = Field(default=0, ge=0)
+    outstanding_credits_micro: int = Field(default=0, ge=0)
 
 
 class LLMExecutionResult(BaseModel):
@@ -151,11 +153,42 @@ class LLMExecutionResult(BaseModel):
     billing: BillingEvidence
 
 
+class LLMRunEvidence(BaseModel):
+    """Secret-free aggregate of every completed model call in one run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    billing_mode: BillingMode
+    provider_id: str = Field(min_length=2, max_length=64)
+    model_id: str = Field(min_length=1, max_length=64)
+    credential_id: str | None = Field(default=None, max_length=128)
+    credential_key_last_four: str | None = Field(
+        default=None,
+        min_length=4,
+        max_length=4,
+    )
+    call_count: int = Field(ge=1)
+    input_tokens: int = Field(ge=0)
+    output_tokens: int = Field(ge=0)
+    usage_available: bool
+    provider_cost_usd: float | None = Field(default=None, ge=0)
+    estimated_cost_usd: float | None = Field(default=None, ge=0)
+    pricing_snapshot: PricingSnapshot | None = None
+    debited_credits_micro: int = Field(ge=0)
+    outstanding_credits_micro: int = Field(ge=0)
+    outcome: Literal["byok", "settled", "settled_overage", "unavailable"]
+
+    @property
+    def total_tokens(self) -> int:
+        return self.input_tokens + self.output_tokens
+
+
 __all__ = [
     "BillingEvidence",
     "BillingMode",
     "LLMExecutionRequest",
     "LLMExecutionResult",
+    "LLMRunEvidence",
     "LLMMessage",
     "LLMUsage",
     "PricingSnapshot",

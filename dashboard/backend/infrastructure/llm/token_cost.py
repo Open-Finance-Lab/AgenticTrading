@@ -236,14 +236,18 @@ def build_cost_evidence(
         authority = "provider_usage_pricing_snapshot"
     else:
         authority = "unavailable"
+    cost_micro = credits_micro_for_usd(
+        provider_cost_usd if provider_cost_usd is not None else estimated
+    )
     return BillingEvidence(
         billing_source=billing_mode,
         usage_authority=authority,
         provider_cost_usd=provider_cost_usd,
         estimated_cost_usd=estimated,
         pricing_snapshot=pricing_snapshot,
+        provider_cost_credits_micro=(cost_micro if usage.usage_available else 0),
         debited_credits_micro=(
-            credits_micro_for_usd(provider_cost_usd if provider_cost_usd is not None else estimated)
+            cost_micro
             if billing_mode is BillingMode.PLATFORM_CREDITS and usage.usage_available
             else 0
         ),

@@ -7528,6 +7528,24 @@ async function loadRunBacktestExecutionOptions(agent) {
         }
     }
 
+    for (const billingMode of ['byok', 'platform_credits']) {
+        const provider = availableRunBacktestProviders(billingMode).find(
+            (option) => Array.isArray(option.models) && option.models.length > 0,
+        );
+        const fallbackModel = provider?.models?.[0] || null;
+        if (provider && fallbackModel) {
+            setRunBacktestBillingMode(billingMode, {
+                providerId: provider.provider_id,
+                modelId: fallbackModel.model_id,
+            });
+            const hint = document.getElementById('runBacktestBillingHint');
+            if (hint) {
+                hint.textContent = `Saved model is unavailable; this run will use ${fallbackModel.label || fallbackModel.model_id} instead.`;
+            }
+            return;
+        }
+    }
+
     setRunBacktestExecutionUnavailable(
         'Add and verify a default API key, or ask an administrator to enable a platform provider.',
     );
@@ -7654,6 +7672,12 @@ function renderBacktestRunConfig(
     const metadata = run?.metadata && typeof run.metadata === 'object'
         ? run.metadata
         : {};
+    const llmExecution = run?.llm_execution && typeof run.llm_execution === 'object'
+        ? run.llm_execution
+        : (metadata.llm_execution && typeof metadata.llm_execution === 'object'
+            ? metadata.llm_execution
+            : null);
+    const completedExecution = !running ? llmExecution : null;
     const dataSource = cfg?.dataSource || metadata.data_source || run?.data_source || null;
     const universeKey = cfg?.universeKey || metadata.universe || run?.universe || null;
     const runSymbols = cfg?.assets || metadata.symbols || run?.symbols || null;
@@ -7661,19 +7685,24 @@ function renderBacktestRunConfig(
         ? getIFindUniverseProfile(universeKey)
         : null;
     const agentName = cfg?.agentName || run?.agent_name || '—';
-    const model = cfg?.model || run?.llm_model || '—';
+    const model = completedExecution?.model_id || cfg?.model || run?.llm_model || '—';
     const capital = cfg?.initialCapital ?? run?.initial_equity;
-    const billingMode = cfg?.billingMode
+    const billingMode = completedExecution?.billing_mode
+        || cfg?.billingMode
         || metadata.billing_mode
         || run?.billing_mode
         || null;
-    const billingProvider = cfg?.providerId
+    const billingProvider = completedExecution?.provider_id
+        || cfg?.providerId
         || metadata.provider_id
         || run?.provider_id
         || null;
-    const billingLabel = billingMode === 'byok'
+    let billingLabel = billingMode === 'byok'
         ? 'BYOK' + (billingProvider ? ' · ' + billingProvider : '')
         : (billingMode === 'platform_credits' ? 'ATL Credits' : '—');
+    if (completedExecution && completedExecution.usage_available === false) {
+        billingLabel += ' · Usage unavailable';
+    }
     const nativeInitialCapital = metadata.native_initial_capital
         ?? run?.native_initial_capital;
     const startFxRate = metadata.fx_start_rate ?? run?.fx_start_rate;

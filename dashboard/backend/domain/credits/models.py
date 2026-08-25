@@ -349,6 +349,8 @@ class LLMReservation(BaseModel):
     call_index: StrictInt
     reserved_micro: StrictInt
     settled_micro: StrictInt
+    actual_micro: StrictInt = Field(default=0, ge=0)
+    outstanding_micro: StrictInt = Field(default=0, ge=0)
     status: Literal["open", "settled", "released"]
     created_at: str
     updated_at: str
@@ -363,6 +365,8 @@ class LLMSettlementResult(BaseModel):
     run_id: str
     reserved_micro: StrictInt
     settled_micro: StrictInt
+    actual_micro: StrictInt = Field(default=0, ge=0)
+    outstanding_micro: StrictInt = Field(default=0, ge=0)
     released_micro: StrictInt
     status: Literal["open", "settled", "released"]
     grant_debited_micro: StrictInt = 0

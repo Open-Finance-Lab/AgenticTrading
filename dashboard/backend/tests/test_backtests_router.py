@@ -546,6 +546,46 @@ def test_run_metadata_response_keeps_new_fields_optional_for_legacy_runs():
     assert response.rejected_orders_truncated is None
     assert response.order_events_count is None
     assert response.order_events_truncated is None
+    assert response.llm_execution is None
+
+
+def test_run_metadata_response_exposes_sanitized_llm_execution_evidence():
+    response = bt._run_metadata_response(
+        _run_record({
+            "data_source": "alpaca",
+            "llm_execution": {
+                "billing_mode": "platform_credits",
+                "provider_id": "openrouter",
+                "model_id": "openai/gpt-5.5",
+                "credential_id": "credential-safe-id",
+                "credential_key_last_four": "1234",
+                "call_count": 2,
+                "input_tokens": 30,
+                "output_tokens": 13,
+                "usage_available": True,
+                "provider_cost_usd": 0.03,
+                "estimated_cost_usd": 0.028,
+                "pricing_snapshot": {
+                    "provider_id": "openrouter",
+                    "model_id": "openai/gpt-5.5",
+                    "input_usd_per_million_tokens": 5,
+                    "output_usd_per_million_tokens": 30,
+                    "currency": "USD",
+                    "source_version": "test-pricing-v1",
+                },
+                "debited_credits_micro": 24_000,
+                "outstanding_credits_micro": 5_000,
+                "outcome": "settled_overage",
+                "provider_api_key": "raw-secret-must-not-leak",
+            },
+        })
+    )
+
+    serialized = response.model_dump(mode="json")
+    assert serialized["llm_execution"]["outcome"] == "settled_overage"
+    assert serialized["llm_execution"]["credential_key_last_four"] == "1234"
+    assert "raw-secret-must-not-leak" not in str(serialized)
+    assert "provider_api_key" not in serialized["llm_execution"]
 
 
 @pytest.fixture(autouse=True)

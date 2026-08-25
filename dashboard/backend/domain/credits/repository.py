@@ -22,6 +22,9 @@ from dashboard.backend.domain.credits.repository_common import (
     LLMReservationConflictError,
     OrderConflictError,
     RefundNotAllowedError,
+    decode_activity_cursor,
+    encode_activity_cursor,
+    normalize_activity_item,
     _positive_integer,
     _positive_limit,
     _required_text,
@@ -119,6 +122,8 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     reserved_grant_micro INTEGER NOT NULL CHECK (reserved_grant_micro >= 0),
     reserved_purchased_micro INTEGER NOT NULL CHECK (reserved_purchased_micro >= 0),
     settled_micro INTEGER NOT NULL DEFAULT 0 CHECK (settled_micro >= 0),
+    actual_micro INTEGER NOT NULL DEFAULT 0 CHECK (actual_micro >= 0),
+    outstanding_micro INTEGER NOT NULL DEFAULT 0 CHECK (outstanding_micro >= 0),
     status TEXT NOT NULL DEFAULT 'open'
         CHECK (status IN ('open', 'settled', 'released')),
     operation_key TEXT NOT NULL UNIQUE CHECK (length(trim(operation_key)) > 0),
@@ -426,11 +431,32 @@ class CreditsStore:
             """
         )
 
-    @staticmethod
+    @classmethod
     def _create_llm_billing_schema_in_transaction(
+        cls,
         conn: sqlite3.Connection,
     ) -> None:
         conn.execute(_LLM_RESERVATION_DDL)
+        reservation_columns = cls._table_columns(conn, "credit_llm_reservations")
+        if "actual_micro" not in reservation_columns:
+            conn.execute(
+                "ALTER TABLE credit_llm_reservations "
+                "ADD COLUMN actual_micro INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (actual_micro >= 0)"
+            )
+        if "outstanding_micro" not in reservation_columns:
+            conn.execute(
+                "ALTER TABLE credit_llm_reservations "
+                "ADD COLUMN outstanding_micro INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (outstanding_micro >= 0)"
+            )
+        conn.execute(
+            """
+            UPDATE credit_llm_reservations
+            SET actual_micro = settled_micro
+            WHERE status = 'settled' AND actual_micro = 0
+            """
+        )
         conn.execute(_LLM_USAGE_LEDGER_DDL)
         conn.execute(
             """
@@ -915,7 +941,7 @@ class CreditsStore:
                 raise LLMReservationConflictError("reservation was not found")
             if reservation["status"] == "settled":
                 if (
-                    int(reservation["settled_micro"]) != actual_micro
+                    int(reservation["actual_micro"]) != actual_micro
                     or reservation["evidence_json"] != evidence_json
                 ):
                     raise LLMReservationConflictError(
@@ -928,15 +954,13 @@ class CreditsStore:
                 raise LLMReservationConflictError(
                     "released reservation cannot be settled"
                 )
-            if actual_micro > int(reservation["reserved_micro"]):
-                raise LLMReservationConflictError(
-                    "actual usage exceeds reserved Credits"
-                )
-
+            reserved_micro = int(reservation["reserved_micro"])
+            debit_micro = min(actual_micro, reserved_micro)
+            outstanding_micro = actual_micro - debit_micro
             grant_debit = min(
-                actual_micro, int(reservation["reserved_grant_micro"])
+                debit_micro, int(reservation["reserved_grant_micro"])
             )
-            purchased_debit = actual_micro - grant_debit
+            purchased_debit = debit_micro - grant_debit
             now = _utcnow_iso()
             for bucket, amount in (
                 ("grant", grant_debit),
@@ -968,12 +992,25 @@ class CreditsStore:
             conn.execute(
                 """
                 UPDATE credit_llm_reservations
-                SET settled_micro = ?, status = 'settled',
+                SET settled_micro = ?, actual_micro = ?, outstanding_micro = ?,
+                    status = 'settled',
                     evidence_json = ?, failure_reason = NULL, updated_at = ?
                 WHERE reservation_id = ?
                 """,
-                (actual_micro, evidence_json, now, reservation_id),
+                (
+                    debit_micro,
+                    actual_micro,
+                    outstanding_micro,
+                    evidence_json,
+                    now,
+                    reservation_id,
+                ),
             )
+            if outstanding_micro > 0:
+                conn.execute(
+                    "UPDATE credit_accounts SET status = 'restricted' WHERE user_id = ?",
+                    (reservation["user_id"],),
+                )
             settled = conn.execute(
                 "SELECT * FROM credit_llm_reservations WHERE reservation_id = ?",
                 (reservation_id,),
@@ -1578,31 +1615,90 @@ class CreditsStore:
         user_id: int,
         *,
         limit: int = 50,
-        cursor: int | None = None,
+        cursor: str | int | None = None,
     ) -> dict[str, Any]:
         page_size = _positive_limit(limit)
-        params: list[Any] = [user_id]
-        cursor_sql = ""
-        if cursor is not None:
-            _positive_integer(cursor, "cursor")
-            cursor_sql = "AND id < ?"
-            params.append(cursor)
-        params.append(page_size + 1)
+        boundary: tuple[str, str, int] | None = None
         with self._get_connection() as conn:
+            if cursor is not None:
+                decoded = decode_activity_cursor(cursor)
+                if isinstance(decoded, int):
+                    legacy = conn.execute(
+                        "SELECT created_at FROM credit_ledger_entries "
+                        "WHERE user_id = ? AND id = ?",
+                        (user_id, decoded),
+                    ).fetchone()
+                    if not legacy:
+                        raise ValueError("invalid activity cursor")
+                    boundary = (str(legacy["created_at"]), "ledger", decoded)
+                else:
+                    boundary = decoded
+            params: list[Any] = [user_id, user_id]
+            cursor_sql = ""
+            if boundary is not None:
+                created_at, source_kind, source_id = boundary
+                cursor_sql = """
+                    WHERE created_at < ?
+                       OR (created_at = ? AND source_kind < ?)
+                       OR (created_at = ? AND source_kind = ? AND source_id < ?)
+                """
+                params.extend([
+                    created_at,
+                    created_at,
+                    source_kind,
+                    created_at,
+                    source_kind,
+                    source_id,
+                ])
+            params.append(page_size + 1)
             rows = conn.execute(
                 f"""
-                SELECT * FROM credit_ledger_entries
-                WHERE user_id = ? {cursor_sql}
-                ORDER BY id DESC
+                WITH historical_activity AS (
+                    SELECT id AS source_id, 'ledger' AS source_kind,
+                           bucket, entry_type, amount_micro, payment_order_id,
+                           source, reason, created_at,
+                           NULL AS reservation_id, NULL AS run_id,
+                           NULL AS call_index, NULL AS evidence_json
+                    FROM credit_ledger_entries
+                    WHERE user_id = ?
+                ),
+                llm_activity AS (
+                    SELECT MAX(id) AS source_id, 'llm_usage' AS source_kind,
+                           NULL AS bucket, 'llm_usage' AS entry_type,
+                           SUM(amount_micro) AS amount_micro,
+                           NULL AS payment_order_id, 'llm_execution' AS source,
+                           'Model usage.' AS reason, created_at,
+                           reservation_id, run_id, call_index, evidence_json
+                    FROM credit_llm_usage_entries
+                    WHERE user_id = ?
+                    GROUP BY reservation_id, run_id, call_index,
+                             evidence_json, created_at
+                ),
+                activity AS (
+                    SELECT * FROM historical_activity
+                    UNION ALL
+                    SELECT * FROM llm_activity
+                )
+                SELECT * FROM activity
+                {cursor_sql}
+                ORDER BY created_at DESC, source_kind DESC, source_id DESC
                 LIMIT ?
                 """,
                 params,
             ).fetchall()
         has_more = len(rows) > page_size
-        items = [dict(row) for row in rows[:page_size]]
+        items = [normalize_activity_item(dict(row)) for row in rows[:page_size]]
         return {
             "items": items,
-            "next_cursor": items[-1]["id"] if has_more and items else None,
+            "next_cursor": (
+                encode_activity_cursor(
+                    str(items[-1]["created_at"]),
+                    str(items[-1]["source_kind"]),
+                    int(items[-1]["id"]),
+                )
+                if has_more and items
+                else None
+            ),
         }
 
     @staticmethod

@@ -199,10 +199,18 @@ class LLMExecutionService:
                 raise LLMExecutionError(ExecutionErrorCategory.USAGE_UNAVAILABLE)
 
             if reservation_id is not None:
-                if billing.debited_credits_micro > reserved_micro:
-                    raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
-                self._settle(reservation_id, billing)
-            elif billing.debited_credits_micro > 0:
+                actual_micro = billing.provider_cost_credits_micro
+                billing = billing.model_copy(
+                    update={
+                        "debited_credits_micro": min(actual_micro, reserved_micro),
+                        "outstanding_credits_micro": max(
+                            actual_micro - reserved_micro,
+                            0,
+                        ),
+                    }
+                )
+                self._settle(reservation_id, billing, actual_micro=actual_micro)
+            elif billing.provider_cost_credits_micro > 0:
                 # A zero-priced snapshot must not become a paid call after the
                 # fact; there is no held balance from which to settle it.
                 raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
@@ -316,11 +324,17 @@ class LLMExecutionService:
         except Exception as exc:  # noqa: BLE001 - invalid cost data stays internal
             raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED) from exc
 
-    def _settle(self, reservation_id: str, billing: BillingEvidence) -> None:
+    def _settle(
+        self,
+        reservation_id: str,
+        billing: BillingEvidence,
+        *,
+        actual_micro: int,
+    ) -> None:
         try:
             settlement = self.credits.settle_llm_credits(
                 reservation_id,
-                actual_micro=billing.debited_credits_micro,
+                actual_micro=actual_micro,
                 evidence=billing.model_dump(mode="json"),
             )
         except Exception as exc:  # noqa: BLE001 - store errors stay internal
@@ -328,6 +342,8 @@ class LLMExecutionService:
         if (
             settlement.status != "settled"
             or settlement.settled_micro != billing.debited_credits_micro
+            or settlement.actual_micro != actual_micro
+            or settlement.outstanding_micro != billing.outstanding_credits_micro
         ):
             raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
 

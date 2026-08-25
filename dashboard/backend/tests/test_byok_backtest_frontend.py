@@ -44,3 +44,27 @@ def test_pipeline_llm_payload_sends_explicit_execution_lane():
     _assert_contains(body, "payload.provider_id")
     _assert_contains(body, "payload.model")
     _assert_contains(body, "Choose an AI billing method, provider, and model.")
+
+
+def test_completed_run_config_prefers_backend_execution_evidence():
+    body = _function_body("renderBacktestRunConfig")
+    _assert_contains(body, "run?.llm_execution")
+    _assert_contains(body, "const completedExecution = !running ? llmExecution : null")
+    _assert_contains(body, "completedExecution?.model_id")
+    _assert_contains(body, "completedExecution?.billing_mode")
+    _assert_contains(body, "completedExecution?.provider_id")
+    _assert_contains(body, "Usage unavailable")
+
+
+def test_legacy_saved_model_falls_back_to_a_one_run_execution_lane():
+    body = _function_body("loadRunBacktestExecutionOptions")
+    pending_at = body.index("if (pending)")
+    exact_at = body.index("findRunBacktestExecutionModel(option, agent?.model_name)")
+    fallback_at = body.index("const fallbackModel = provider?.models?.[0] || null")
+    unavailable_at = body.rindex("setRunBacktestExecutionUnavailable(")
+
+    assert pending_at < exact_at < fallback_at < unavailable_at
+    _assert_contains(body, "for (const billingMode of ['byok', 'platform_credits'])")
+    _assert_contains(body, "Saved model is unavailable; this run will use")
+    _assert_contains(body, "providerId: provider.provider_id")
+    _assert_contains(body, "modelId: fallbackModel.model_id")

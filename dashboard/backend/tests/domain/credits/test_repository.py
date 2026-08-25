@@ -12,6 +12,10 @@ from dashboard.backend.domain.credits.repository import (
     OrderConflictError,
     RefundNotAllowedError,
 )
+from dashboard.backend.domain.credits.repository_common import (
+    CreditAccountRestrictedStoreError,
+    LLMReservationConflictError,
+)
 
 
 def _store(tmp_path) -> CreditsStore:
@@ -111,6 +115,64 @@ def test_schema_is_created_and_new_account_balance_is_zero(tmp_path):
         "credit_grant_pools",
         "credit_grant_pool_ledger_entries",
     }.issubset(tables)
+
+
+def test_llm_overage_debits_the_hold_and_restricts_the_account(tmp_path):
+    store = _store(tmp_path)
+    _pending_order(store)
+    _pay_order(store)
+    reservation = store.reserve_llm_credits(
+        reservation_id="llm-res-overage",
+        user_id=1,
+        run_id="run-overage",
+        call_index=0,
+        reserved_micro=1_000_000,
+        operation_key="llm-reserve-overage",
+        request_digest="a" * 64,
+    )
+    evidence = {
+        "provider_id": "openrouter",
+        "model_id": "openai/gpt-5.5",
+        "provider_cost_credits_micro": 1_250_000,
+        "debited_credits_micro": 1_000_000,
+        "outstanding_credits_micro": 250_000,
+    }
+
+    settled = store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_250_000,
+        evidence=evidence,
+    )
+
+    assert settled["status"] == "settled"
+    assert settled["actual_micro"] == 1_250_000
+    assert settled["settled_micro"] == 1_000_000
+    assert settled["outstanding_micro"] == 250_000
+    assert settled["released_micro"] == 0
+    assert store.get_balance_micro(1) == 9_000_000
+    assert store.ensure_account(1)["status"] == "restricted"
+    assert store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_250_000,
+        evidence=evidence,
+    ) == settled
+
+    with pytest.raises(LLMReservationConflictError, match="different input"):
+        store.settle_llm_credits(
+            reservation["reservation_id"],
+            actual_micro=1_250_001,
+            evidence=evidence,
+        )
+    with pytest.raises(CreditAccountRestrictedStoreError, match="restricted"):
+        store.reserve_llm_credits(
+            reservation_id="llm-res-blocked",
+            user_id=1,
+            run_id="run-blocked",
+            call_index=0,
+            reserved_micro=1,
+            operation_key="llm-reserve-blocked",
+            request_digest="b" * 64,
+        )
 
 
 @pytest.mark.parametrize(
@@ -348,6 +410,85 @@ def test_ledger_is_cursor_paginated_and_exposes_no_mutation_method(tmp_path):
     assert first["items"][0]["id"] != second["items"][0]["id"]
     assert not hasattr(store, "update_ledger_entry")
     assert not hasattr(store, "delete_ledger_entry")
+
+
+def test_activity_merges_two_bucket_llm_usage_with_opaque_cursor(tmp_path):
+    store = _store(tmp_path)
+    grant_common = {
+        "pool_id": "default",
+        "actor_user_id": 2,
+        "source": "test",
+    }
+    store.fund_grant_pool(
+        amount_micro=1_000_000,
+        operation_id="activity-fund",
+        idempotency_key="activity-fund-key",
+        request_digest="activity-fund-digest",
+        reason="Fund activity test pool.",
+        **grant_common,
+    )
+    store.assign_grant(
+        user_id=1,
+        amount_micro=1_000_000,
+        operation_id="activity-assign",
+        idempotency_key="activity-assign-key",
+        request_digest="activity-assign-digest",
+        reason="Assign activity test Credits.",
+        **grant_common,
+    )
+    _pending_order(store)
+    _pay_order(store)
+    reservation = store.reserve_llm_credits(
+        reservation_id="activity-reservation",
+        user_id=1,
+        run_id="run-activity-evidence",
+        call_index=3,
+        reserved_micro=1_500_000,
+        operation_key="activity-reserve",
+        request_digest="e" * 64,
+    )
+    store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_500_000,
+        evidence={
+            "billing_source": "platform_credits",
+            "pricing_snapshot": {
+                "provider_id": "openrouter",
+                "model_id": "openai/gpt-5.5",
+            },
+            "provider_cost_credits_micro": 1_500_000,
+            "debited_credits_micro": 1_500_000,
+            "api_key": "must-not-leak",
+        },
+    )
+
+    first = store.list_ledger_entries(1, limit=1)
+    all_items = list(first["items"])
+    cursor = first["next_cursor"]
+    assert isinstance(cursor, str) and not cursor.isdecimal()
+    while cursor:
+        page = store.list_ledger_entries(1, limit=1, cursor=cursor)
+        all_items.extend(page["items"])
+        cursor = page["next_cursor"]
+
+    identities = [(item["source_kind"], item["id"]) for item in all_items]
+    assert len(identities) == len(set(identities))
+    usage = next(item for item in all_items if item["entry_type"] == "llm_usage")
+    assert usage["amount_micro"] == -1_500_000
+    assert usage["run_id"] == "run-activity-evidence"
+    assert usage["provider_id"] == "openrouter"
+    assert usage["model_id"] == "openai/gpt-5.5"
+    assert usage["billing_source"] == "platform_credits"
+    assert "evidence_json" not in usage
+    assert "must-not-leak" not in str(usage)
+
+    purchase = next(item for item in all_items if item["entry_type"] == "purchase")
+    legacy_page = store.list_ledger_entries(
+        1,
+        limit=10,
+        cursor=purchase["id"],
+    )
+    assert isinstance(legacy_page["items"], list)
 
 
 def test_partial_refund_posts_negative_entry_and_updates_refundable_amount(tmp_path):

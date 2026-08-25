@@ -778,7 +778,7 @@ class HourlyBacktester:
             )
         return metadata
 
-    def _agent_run_metadata(self) -> Dict:
+    def _agent_run_metadata(self, llm_execution=None) -> Dict:
         """Provenance plus the effective config the agent run actually used.
 
         LLM_MAX_OUTPUT_TOKENS is an env knob that changes a run's spend and
@@ -798,6 +798,12 @@ class HourlyBacktester:
             meta["decision_source"] = decision_source
         if self.use_llm:
             meta["llm_max_output_tokens"] = llm_harness.DEFAULT_MAX_OUTPUT_TOKENS
+        if llm_execution is None and self.execution_client is not None:
+            summary = getattr(self.execution_client, "execution_summary", None)
+            if callable(summary):
+                llm_execution = summary()
+        if llm_execution is not None:
+            meta["llm_execution"] = llm_execution.model_dump(mode="json")
         if self.prompt_adaptations:
             meta["prompt_adaptations"] = self.prompt_adaptations
         if self.initial_pipeline is not None:
@@ -1258,9 +1264,22 @@ class HourlyBacktester:
         # row self-consistent rather than silently understating the run.
         llm_calls_total = manager.llm_calls + runtime_calls
 
-        est_cost = token_cost.estimate_cost_usd(
-            llm_model, manager.input_tokens, manager.output_tokens
-        )
+        llm_execution = None
+        if self.execution_client is not None:
+            summary = getattr(self.execution_client, "execution_summary", None)
+            if callable(summary):
+                llm_execution = summary()
+        if llm_execution is not None:
+            est_cost = (
+                llm_execution.provider_cost_usd
+                if llm_execution.provider_cost_usd is not None
+                else llm_execution.estimated_cost_usd
+            )
+            est_cost = float(est_cost or 0)
+        else:
+            est_cost = token_cost.estimate_cost_usd(
+                llm_model, manager.input_tokens, manager.output_tokens
+            )
 
         self.t1_deferrals = self._serialize_t1_deferrals(manager.t1_deferrals)
         self.rejected_orders = self._serialize_rejected_orders(
@@ -1288,7 +1307,7 @@ class HourlyBacktester:
             input_tokens=manager.input_tokens,
             output_tokens=manager.output_tokens,
             est_cost_usd=est_cost,
-            metadata=self._agent_run_metadata(),
+            metadata=self._agent_run_metadata(llm_execution),
         )
 
         db.insert_equity_points(run_id, equity_curve)

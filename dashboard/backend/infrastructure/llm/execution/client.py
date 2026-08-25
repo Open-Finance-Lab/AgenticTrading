@@ -12,8 +12,11 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
 )
 from dashboard.backend.infrastructure.llm.execution.handoff import ExecutionHandoff
 from dashboard.backend.infrastructure.llm.execution.models import (
+    BillingMode,
     LLMExecutionRequest,
+    LLMExecutionResult,
     LLMMessage,
+    LLMRunEvidence,
     UsagePolicy,
 )
 from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
@@ -74,6 +77,7 @@ class AnthropicCompatibleExecutionClient:
         self.handoff = handoff
         self.fail_closed = True
         self._next_call_index = 0
+        self._completed_results: list[LLMExecutionResult] = []
         self.messages = _Messages(self)
 
     def _create(self, **kwargs: Any) -> Any:
@@ -124,6 +128,7 @@ class AnthropicCompatibleExecutionClient:
         # Reserve a unique id for every attempt, including a failed provider call.
         self._next_call_index += 1
         result = self.execution_service.execute(request)
+        self._completed_results.append(result)
         return SimpleNamespace(
             content=[SimpleNamespace(type="text", text=result.text)],
             model=result.model_id,
@@ -131,6 +136,106 @@ class AnthropicCompatibleExecutionClient:
                 input_tokens=result.usage.input_tokens,
                 output_tokens=result.usage.output_tokens,
             ),
+        )
+
+    def execution_summary(self) -> LLMRunEvidence | None:
+        """Return safe, backend-authoritative evidence for completed calls."""
+
+        if not self._completed_results:
+            return None
+
+        expected_identity = (
+            self.handoff.billing_mode,
+            self.handoff.provider_id,
+            self.handoff.model_id,
+        )
+        for result in self._completed_results:
+            if (
+                result.billing.billing_source,
+                result.provider_id,
+                result.model_id,
+            ) != expected_identity:
+                raise RuntimeError("inconsistent LLM execution identity")
+
+        first = self._completed_results[0]
+
+        snapshots = [
+            result.billing.pricing_snapshot for result in self._completed_results
+        ]
+        pricing_snapshot = (
+            snapshots[0]
+            if all(snapshot == snapshots[0] for snapshot in snapshots[1:])
+            else None
+        )
+
+        usage_available = all(
+            result.usage.usage_available for result in self._completed_results
+        )
+        provider_costs = [
+            result.billing.provider_cost_usd for result in self._completed_results
+        ]
+        estimated_costs = [
+            result.billing.estimated_cost_usd for result in self._completed_results
+        ]
+        outstanding = sum(
+            result.billing.outstanding_credits_micro
+            for result in self._completed_results
+        )
+        credential_ids = {result.credential_id for result in self._completed_results}
+        credential_last_fours = {
+            result.credential_key_last_four for result in self._completed_results
+        }
+
+        if not usage_available:
+            outcome = "unavailable"
+        elif self.handoff.billing_mode is BillingMode.BYOK:
+            outcome = "byok"
+        elif outstanding:
+            outcome = "settled_overage"
+        else:
+            outcome = "settled"
+
+        return LLMRunEvidence(
+            billing_mode=self.handoff.billing_mode,
+            provider_id=first.provider_id,
+            model_id=first.model_id,
+            credential_id=(credential_ids.pop() if len(credential_ids) == 1 else None),
+            credential_key_last_four=(
+                credential_last_fours.pop()
+                if len(credential_last_fours) == 1
+                else None
+            ),
+            call_count=len(self._completed_results),
+            input_tokens=sum(
+                result.usage.input_tokens for result in self._completed_results
+            ),
+            output_tokens=sum(
+                result.usage.output_tokens for result in self._completed_results
+            ),
+            usage_available=usage_available,
+            provider_cost_usd=(
+                round(
+                    sum(float(value) for value in provider_costs if value is not None),
+                    6,
+                )
+                if all(value is not None for value in provider_costs)
+                else None
+            ),
+            estimated_cost_usd=(
+                round(
+                    sum(float(value) for value in estimated_costs if value is not None),
+                    6,
+                )
+                if all(value is not None for value in estimated_costs)
+                else None
+            ),
+            pricing_snapshot=pricing_snapshot,
+            debited_credits_micro=sum(
+                result.billing.debited_credits_micro
+                for result in self._completed_results
+            ),
+            outstanding_credits_micro=outstanding,
+            outcome=outcome,
         )
 
     def close(self) -> None:

@@ -18,6 +18,9 @@ from dashboard.backend.domain.credits.repository_common import (
     LLMReservationConflictError,
     OrderConflictError,
     RefundNotAllowedError,
+    decode_activity_cursor,
+    encode_activity_cursor,
+    normalize_activity_item,
     _positive_integer,
     _positive_limit,
     _required_text,
@@ -229,6 +232,8 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     reserved_grant_micro BIGINT NOT NULL CHECK (reserved_grant_micro >= 0),
     reserved_purchased_micro BIGINT NOT NULL CHECK (reserved_purchased_micro >= 0),
     settled_micro BIGINT NOT NULL DEFAULT 0 CHECK (settled_micro >= 0),
+    actual_micro BIGINT NOT NULL DEFAULT 0 CHECK (actual_micro >= 0),
+    outstanding_micro BIGINT NOT NULL DEFAULT 0 CHECK (outstanding_micro >= 0),
     status TEXT NOT NULL DEFAULT 'open'
         CHECK (status IN ('open', 'settled', 'released')),
     operation_key TEXT NOT NULL UNIQUE CHECK (length(trim(operation_key)) > 0),
@@ -286,6 +291,14 @@ ALTER TABLE credit_ledger_entries
 ADD COLUMN IF NOT EXISTS reference_type TEXT;
 ALTER TABLE credit_ledger_entries
 ADD COLUMN IF NOT EXISTS reference_id TEXT;
+
+ALTER TABLE credit_llm_reservations
+ADD COLUMN IF NOT EXISTS actual_micro BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE credit_llm_reservations
+ADD COLUMN IF NOT EXISTS outstanding_micro BIGINT NOT NULL DEFAULT 0;
+UPDATE credit_llm_reservations
+SET actual_micro = settled_micro
+WHERE status = 'settled' AND actual_micro = 0;
 
 ALTER TABLE credit_grant_pool_ledger_entries
 ADD COLUMN IF NOT EXISTS pool_name_snapshot TEXT;
@@ -687,15 +700,16 @@ class PostgresCreditsStore:
                 if not reservation:
                     raise LLMReservationConflictError("reservation was not found")
                 if reservation["status"] == "settled":
-                    if int(reservation["settled_micro"]) != actual_micro or reservation["evidence_json"] != evidence_json:
+                    if int(reservation["actual_micro"]) != actual_micro or reservation["evidence_json"] != evidence_json:
                         raise LLMReservationConflictError("settlement replay has different input")
                     return self._llm_reservation_result(cur, reservation)
                 if reservation["status"] != "open":
                     raise LLMReservationConflictError("released reservation cannot be settled")
-                if actual_micro > int(reservation["reserved_micro"]):
-                    raise LLMReservationConflictError("actual usage exceeds reserved Credits")
-                grant_debit = min(actual_micro, int(reservation["reserved_grant_micro"]))
-                purchased_debit = actual_micro - grant_debit
+                reserved_micro = int(reservation["reserved_micro"])
+                debit_micro = min(actual_micro, reserved_micro)
+                outstanding_micro = actual_micro - debit_micro
+                grant_debit = min(debit_micro, int(reservation["reserved_grant_micro"]))
+                purchased_debit = debit_micro - grant_debit
                 now = _utcnow_iso()
                 for bucket, amount in (("grant", grant_debit), ("purchased", purchased_debit)):
                     if amount <= 0:
@@ -711,10 +725,16 @@ class PostgresCreditsStore:
                          -amount, f"{reservation['operation_key']}:{bucket}", evidence_json, now),
                     )
                 cur.execute(
-                    "UPDATE credit_llm_reservations SET settled_micro = %s, status = 'settled', evidence_json = %s, updated_at = %s WHERE reservation_id = %s RETURNING *",
-                    (actual_micro, evidence_json, now, reservation_id),
+                    "UPDATE credit_llm_reservations SET settled_micro = %s, actual_micro = %s, outstanding_micro = %s, status = 'settled', evidence_json = %s, failure_reason = NULL, updated_at = %s WHERE reservation_id = %s RETURNING *",
+                    (debit_micro, actual_micro, outstanding_micro, evidence_json, now, reservation_id),
                 )
-                return self._llm_reservation_result(cur, cur.fetchone())
+                settled = cur.fetchone()
+                if outstanding_micro > 0:
+                    cur.execute(
+                        "UPDATE credit_accounts SET status = 'restricted' WHERE user_id = %s",
+                        (reservation["user_id"],),
+                    )
+                return self._llm_reservation_result(cur, settled)
 
     def release_llm_credits(self, reservation_id: str, *, reason: str) -> dict[str, Any]:
         reservation_id = _required_text(reservation_id, "reservation_id", max_length=160)
@@ -1392,33 +1412,90 @@ class PostgresCreditsStore:
         user_id: int,
         *,
         limit: int = 50,
-        cursor: int | None = None,
+        cursor: str | int | None = None,
     ) -> dict[str, Any]:
         page_size = _positive_limit(limit)
-        params: list[Any] = [user_id]
-        cursor_sql = ""
-        if cursor is not None:
-            _positive_integer(cursor, "cursor")
-            cursor_sql = "AND id < %s"
-            params.append(cursor)
-        params.append(page_size + 1)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
+                boundary: tuple[str, str, int] | None = None
+                if cursor is not None:
+                    decoded = decode_activity_cursor(cursor)
+                    if isinstance(decoded, int):
+                        cur.execute(
+                            "SELECT created_at FROM credit_ledger_entries "
+                            "WHERE user_id = %s AND id = %s",
+                            (user_id, decoded),
+                        )
+                        legacy = cur.fetchone()
+                        if not legacy:
+                            raise ValueError("invalid activity cursor")
+                        boundary = (str(legacy["created_at"]), "ledger", decoded)
+                    else:
+                        boundary = decoded
+                params: list[Any] = [user_id, user_id]
+                cursor_sql = ""
+                if boundary is not None:
+                    created_at, source_kind, source_id = boundary
+                    cursor_sql = """
+                        WHERE created_at < %s
+                           OR (created_at = %s AND source_kind < %s)
+                           OR (created_at = %s AND source_kind = %s AND source_id < %s)
+                    """
+                    params.extend([
+                        created_at, created_at, source_kind,
+                        created_at, source_kind, source_id,
+                    ])
+                params.append(page_size + 1)
                 cur.execute(
                     f"""
-                    SELECT * FROM credit_ledger_entries
-                    WHERE user_id = %s {cursor_sql}
-                    ORDER BY id DESC
+                    WITH historical_activity AS (
+                        SELECT id AS source_id, 'ledger' AS source_kind,
+                               bucket, entry_type, amount_micro, payment_order_id,
+                               source, reason, created_at,
+                               NULL::TEXT AS reservation_id, NULL::TEXT AS run_id,
+                               NULL::BIGINT AS call_index, NULL::TEXT AS evidence_json
+                        FROM credit_ledger_entries
+                        WHERE user_id = %s
+                    ),
+                    llm_activity AS (
+                        SELECT MAX(id) AS source_id, 'llm_usage' AS source_kind,
+                               NULL::TEXT AS bucket, 'llm_usage' AS entry_type,
+                               SUM(amount_micro) AS amount_micro,
+                               NULL::TEXT AS payment_order_id,
+                               'llm_execution' AS source, 'Model usage.' AS reason,
+                               created_at, reservation_id, run_id, call_index,
+                               evidence_json
+                        FROM credit_llm_usage_entries
+                        WHERE user_id = %s
+                        GROUP BY reservation_id, run_id, call_index,
+                                 evidence_json, created_at
+                    ),
+                    activity AS (
+                        SELECT * FROM historical_activity
+                        UNION ALL
+                        SELECT * FROM llm_activity
+                    )
+                    SELECT * FROM activity
+                    {cursor_sql}
+                    ORDER BY created_at DESC, source_kind DESC, source_id DESC
                     LIMIT %s
                     """,
                     params,
                 )
                 rows = cur.fetchall()
         has_more = len(rows) > page_size
-        items = [dict(row) for row in rows[:page_size]]
+        items = [normalize_activity_item(dict(row)) for row in rows[:page_size]]
         return {
             "items": items,
-            "next_cursor": items[-1]["id"] if has_more and items else None,
+            "next_cursor": (
+                encode_activity_cursor(
+                    str(items[-1]["created_at"]),
+                    str(items[-1]["source_kind"]),
+                    int(items[-1]["id"]),
+                )
+                if has_more and items
+                else None
+            ),
         }
 
     @staticmethod

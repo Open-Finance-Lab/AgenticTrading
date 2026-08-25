@@ -65,7 +65,10 @@ from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionS
 from dashboard.backend.infrastructure.llm.execution.handoff import (
     create_execution_handoff,
 )
-from dashboard.backend.infrastructure.llm.execution.models import BillingMode
+from dashboard.backend.infrastructure.llm.execution.models import (
+    BillingMode,
+    LLMRunEvidence,
+)
 from dashboard.backend.domain.model_providers.execution_catalog import (
     UnsupportedExecutionModel,
 )
@@ -247,6 +250,7 @@ class RunMetadata(BaseModel):
     baseline_djia_run_id: Optional[str] = None
     baseline_buyhold_run_id: Optional[str] = None
     llm_model: Optional[str] = None
+    llm_execution: Optional[Dict[str, Any]] = None
     data_source: str = ALPACA
     market: Optional[str] = None
     universe: Optional[str] = None
@@ -363,9 +367,23 @@ def _run_metadata_response(run: Dict[str, Any]) -> RunMetadata:
             "order_events_truncated",
             "t1_deferred_events",
             "t1_deferred_shares",
+            "llm_execution",
         ):
             if field in metadata:
-                payload[field] = metadata[field]
+                if field == "llm_execution" and isinstance(metadata[field], dict):
+                    safe_evidence = {
+                        name: metadata[field][name]
+                        for name in LLMRunEvidence.model_fields
+                        if name in metadata[field]
+                    }
+                    try:
+                        payload[field] = LLMRunEvidence.model_validate(
+                            safe_evidence
+                        ).model_dump(mode="json")
+                    except Exception:  # noqa: BLE001 - legacy/malformed metadata
+                        continue
+                else:
+                    payload[field] = metadata[field]
     return RunMetadata(**payload)
 
 

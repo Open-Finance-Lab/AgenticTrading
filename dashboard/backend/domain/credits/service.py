@@ -159,6 +159,8 @@ class CreditsService:
             call_index=int(value["call_index"]),
             reserved_micro=int(value["reserved_micro"]),
             settled_micro=int(value["settled_micro"]),
+            actual_micro=int(value.get("actual_micro") or 0),
+            outstanding_micro=int(value.get("outstanding_micro") or 0),
             status=str(value["status"]),
             created_at=str(value["created_at"]),
             updated_at=str(value["updated_at"]),
@@ -173,6 +175,8 @@ class CreditsService:
             run_id=str(value["run_id"]),
             reserved_micro=int(value["reserved_micro"]),
             settled_micro=int(value["settled_micro"]),
+            actual_micro=int(value.get("actual_micro") or 0),
+            outstanding_micro=int(value.get("outstanding_micro") or 0),
             released_micro=int(value["released_micro"]),
             status=str(value["status"]),
             grant_debited_micro=int(value.get("grant_debited_micro") or 0),
@@ -257,7 +261,7 @@ class CreditsService:
         actual_micro: int,
         evidence: Mapping[str, Any],
     ) -> LLMSettlementResult:
-        """Debit only the exact usage amount and release the unused ceiling."""
+        """Debit the held amount, recording and restricting on any overage."""
 
         return self._llm_settlement_model(
             self.store.settle_llm_credits(
@@ -407,7 +411,13 @@ class CreditsService:
             raw=self.store.reclaim_grant(**command),
         )
 
-    def list_ledger(self, user_id: int, *, limit: int, cursor: int | None):
+    def list_ledger(
+        self,
+        user_id: int,
+        *,
+        limit: int,
+        cursor: str | int | None,
+    ):
         return self.store.list_ledger_entries(user_id, limit=limit, cursor=cursor)
 
     def get_order(self, order_id: str, user_id: int):

@@ -80,8 +80,9 @@ def _public_order(order: dict[str, Any]) -> dict[str, Any]:
 
 
 def _public_ledger_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    return {
+    result = {
         "id": entry["id"],
+        "source_kind": entry.get("source_kind", "ledger"),
         "bucket": entry["bucket"],
         "entry_type": entry["entry_type"],
         "amount_micro": entry["amount_micro"],
@@ -91,6 +92,18 @@ def _public_ledger_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "payment_order_id": entry["payment_order_id"],
         "created_at": entry["created_at"],
     }
+    if entry.get("entry_type") == "llm_usage":
+        result.update(
+            {
+                "reservation_id": entry.get("reservation_id"),
+                "run_id": entry.get("run_id"),
+                "call_index": entry.get("call_index"),
+                "provider_id": entry.get("provider_id"),
+                "model_id": entry.get("model_id"),
+                "billing_source": entry.get("billing_source"),
+            }
+        )
+    return result
 
 
 def _public_admin_order(order: dict[str, Any]) -> dict[str, Any]:
@@ -161,7 +174,7 @@ def get_credit_balance(current_user: dict = Depends(get_current_user)):
 @router.get("/credits/ledger")
 def get_credit_ledger(
     limit: int = Query(default=50, ge=1, le=100),
-    cursor: int | None = Query(default=None, ge=1),
+    cursor: str | None = Query(default=None, min_length=1, max_length=256),
     current_user: dict = Depends(get_current_user),
 ):
     try:

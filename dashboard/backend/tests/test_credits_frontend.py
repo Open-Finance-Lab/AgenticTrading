@@ -76,6 +76,15 @@ def test_balance_copy_describes_platform_and_byok_lanes():
     assert ">Available balance<" not in APP_HTML
 
 
+def test_activity_renders_negative_model_usage_with_safe_context():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    assert "entry.entry_type === 'llm_usage'" in source
+    assert "'Model usage'" in source
+    assert "entry.provider_id" in source
+    assert "entry.model_id" in source
+    assert "String(entry.run_id).slice(0, 12)" in source
+
+
 def test_refund_retry_reuses_its_request_id_only_while_unchanged():
     """The server derives the refund id from client_request_id.
 
