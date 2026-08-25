@@ -12246,6 +12246,30 @@ body.agent-editor-open {
     background: var(--bg-card);
 }
 
+.admin-credits-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+}
+
+.admin-credits-pager-range {
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.admin-credits-pager-buttons {
+    display: flex;
+    gap: 8px;
+}
+
+.admin-credits-pager-buttons .auth-btn[disabled] {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .admin-credits-users-table,
 .admin-credits-activity-table {
     width: 100%;

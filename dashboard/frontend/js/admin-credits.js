@@ -5,6 +5,10 @@
   const state = {
     initialized: false,
     users: [],
+    usersOffset: 0,
+    usersTotal: 0,
+    usersLimit: 100,
+    usersRequestSeq: 0,
     activityCursor: null,
     activityItems: [],
     pendingGrantReason: null,
@@ -158,12 +162,29 @@
     return user.display_name || user.email || `User #${user.id}`;
   }
 
-  function renderUsers(users) {
+  function renderUsersPager() {
+    const range = element('adminCreditsUsersRange');
+    const previous = element('adminCreditsUsersPrevBtn');
+    const next = element('adminCreditsUsersNextBtn');
+    const { usersOffset, usersTotal, usersLimit } = state;
+    const shown = Math.min(usersLimit, Math.max(0, usersTotal - usersOffset));
+    if (range) {
+      range.textContent = usersTotal
+        ? `Showing ${usersOffset + 1}–${usersOffset + shown} of ${usersTotal}`
+        : 'Showing 0 of 0';
+    }
+    if (previous) previous.disabled = usersOffset <= 0;
+    if (next) next.disabled = usersOffset + usersLimit >= usersTotal;
+  }
+
+  function renderUsers(users, total = 0) {
     const body = element('adminCreditsUsersBody');
     const count = element('adminCreditsUserCount');
     if (!body) return;
     state.users = Array.isArray(users) ? users : [];
+    state.usersTotal = Number.isFinite(Number(total)) ? Math.max(0, Number(total)) : state.users.length;
     if (count) count.textContent = `${state.users.length} shown`;
+    renderUsersPager();
     clear(body);
     if (!state.users.length) {
       const row = document.createElement('tr');
@@ -240,12 +261,34 @@
     });
   }
 
-  async function loadUsers() {
+  async function loadUsers({ offset = state.usersOffset } = {}) {
     const query = String(element('adminCreditsUserQuery')?.value || '').trim();
-    const params = new URLSearchParams({ limit: '100', offset: '0' });
+    state.usersOffset = Math.max(0, Number.isFinite(Number(offset)) ? Number(offset) : 0);
+    const seq = ++state.usersRequestSeq;
+    const params = new URLSearchParams({
+      limit: String(state.usersLimit),
+      offset: String(state.usersOffset),
+    });
     if (query) params.set('query', query);
     const data = await request(`/api/admin/credits/users?${params.toString()}`);
-    renderUsers(data?.users);
+    if (seq !== state.usersRequestSeq) return;
+    const responseOffset = Number(data?.offset);
+    const responseLimit = Number(data?.limit);
+    if (Number.isFinite(responseOffset)) state.usersOffset = Math.max(0, responseOffset);
+    if (Number.isFinite(responseLimit) && responseLimit > 0) state.usersLimit = responseLimit;
+    const responseTotal = Math.max(0, Number(data?.total) || 0);
+    if (!Array.isArray(data?.users) && responseTotal > 0) {
+      renderUsers([], responseTotal);
+      return;
+    }
+    if (!data?.users?.length && state.usersOffset >= responseTotal && state.usersOffset > 0) {
+      const lastPageOffset = Math.floor((responseTotal - 1) / state.usersLimit) * state.usersLimit;
+      if (lastPageOffset !== state.usersOffset) {
+        await loadUsers({ offset: lastPageOffset });
+        return;
+      }
+    }
+    renderUsers(data?.users, data?.total);
   }
 
   function operationLabel(entryType) {
@@ -476,8 +519,18 @@
     });
     element('adminCreditsUserSearch')?.addEventListener('submit', (event) => {
       event.preventDefault();
-      loadUsers().catch((error) => {
+      loadUsers({ offset: 0 }).catch((error) => {
         if (!handleAccessLost(error)) setStatus(error.message || 'User search failed.', 'error');
+      });
+    });
+    element('adminCreditsUsersPrevBtn')?.addEventListener('click', () => {
+      loadUsers({ offset: state.usersOffset - state.usersLimit }).catch((error) => {
+        if (!handleAccessLost(error)) setStatus(error.message || 'Previous account page failed.', 'error');
+      });
+    });
+    element('adminCreditsUsersNextBtn')?.addEventListener('click', () => {
+      loadUsers({ offset: state.usersOffset + state.usersLimit }).catch((error) => {
+        if (!handleAccessLost(error)) setStatus(error.message || 'Next account page failed.', 'error');
       });
     });
     element('adminGrantReasonForm')?.addEventListener('submit', confirmAssignReason);
@@ -505,6 +558,8 @@
   function syncAuth(user) {
     if (user?.role === 'admin') return;
     state.users = [];
+    state.usersOffset = 0;
+    state.usersTotal = 0;
     state.activityItems = [];
     setStatus('');
   }

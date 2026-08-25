@@ -2098,6 +2098,13 @@
                         <tbody id="adminCreditsUsersBody"><tr><td colspan="7" class="admin-empty">Search for an account to allocate Grant Credits.</td></tr></tbody>
                     </table>
                 </div>
+                <div class="admin-credits-pager" aria-label="Account pages">
+                    <span id="adminCreditsUsersRange" class="admin-credits-pager-range" aria-live="polite">Showing 0 of 0</span>
+                    <div class="admin-credits-pager-buttons">
+                        <button id="adminCreditsUsersPrevBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Previous</button>
+                        <button id="adminCreditsUsersNextBtn" class="auth-btn auth-btn-secondary" type="button" disabled>Next</button>
+                    </div>
+                </div>
             </div>
         <div id="adminLegacyUsersPanel" class="admin-legacy-users" hidden>
         <div class="admin-table-wrap">
@@ -2256,7 +2263,7 @@
     <script src="app.js?v=115" defer></script>
     <script src="js/credits.js?v=4" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
-    <script src="js/admin-credits.js?v=4" defer></script>
+    <script src="js/admin-credits.js?v=5" defer></script>
     <script src="js/admin-tabs.js?v=2" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
     <script src="home-page.js?v=50" defer></script>
