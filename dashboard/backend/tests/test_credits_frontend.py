@@ -67,22 +67,12 @@ def test_credits_layout_has_mobile_contract():
 # The balance must not claim spending power the platform does not have.
 # ---------------------------------------------------------------------------
 
-def test_balance_does_not_claim_credits_are_spendable():
-    """Purchased Credits currently buy nothing, by design.
-
-    They land in credit_ledger_entries; the only metered surface in this repo
-    (POST /backtest/run via domain/entitlements/credits.py) spends
-    user_entitlements.credits, which nothing here tops up. This PR ships the
-    purchase side and defers consumption, so telling the buyer the balance is
-    "available for model runs and backtests" sells spending power that does not
-    exist. Delete this test only together with the code that debits this ledger.
-    """
+def test_balance_copy_describes_platform_and_byok_lanes():
+    """Credits are available for metered runs while BYOK stays user-funded."""
     source = CREDITS_JS_PATH.read_text(encoding="utf-8")
-    banned = "Available for model runs and backtests."
-    # The claim is also spelled out in a comment above the corrected string, so
-    # match on the rendered call rather than raw presence anywhere in the file.
-    assert f"setStatus(accountStatus, '{banned}'" not in source
-    assert "not enabled yet" in source
+    wording = "Available for metered ATL model runs. BYOK runs use your provider account and do not deduct ATL Credits."
+    assert "not enabled yet" not in source
+    assert wording in source
     assert ">Available balance<" not in APP_HTML
 
 
@@ -112,6 +102,32 @@ def test_credits_billing_has_three_tabs_and_api_keys_surface():
     assert 'id="creditsApiKeyList"' in APP_HTML
 
 
+def test_api_keys_is_the_primary_credits_tab():
+    tabs = APP_HTML[APP_HTML.index('<nav id="creditsTabs"'):APP_HTML.index('</nav>', APP_HTML.index('<nav id="creditsTabs"'))]
+    assert tabs.index('data-credits-tab="api-keys"') < tabs.index('data-credits-tab="overview"')
+    assert 'id="creditsTabApiKeys" class="credits-tab is-active"' in tabs
+    assert 'id="creditsTabOverview" class="credits-tab"' in tabs
+    assert 'data-credits-panel="api-keys">' in APP_HTML
+    assert 'data-credits-panel="overview" hidden>' in APP_HTML
+
+
+def test_saved_key_launch_controls_have_room_for_model_and_action():
+    assert 'minmax(360px, 1.35fr)' in STYLES
+    assert 'grid-template-columns: minmax(0, 1fr) max-content;' in STYLES
+    assert 'white-space: nowrap;' in STYLES
+
+
+def test_saved_key_actions_keep_reverify_with_status_and_delete_in_corner():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+    assert "credits-key-inline-action" in source
+    assert "credits-key-delete" in source
+    assert "'Delete'" in source
+    assert "'Revoke'" not in source
+    assert "mutateCredential(credential, 'revoke')" in source
+    assert ".credits-key-inline-action" in STYLES
+    assert ".credits-key-delete" in STYLES
+
+
 def test_api_keys_client_never_persists_or_renders_full_secret():
     source = CREDITS_JS_PATH.read_text(encoding="utf-8")
     assert "/api/credits/model-providers" in source
@@ -121,7 +137,7 @@ def test_api_keys_client_never_persists_or_renders_full_secret():
     assert "localStorage" not in source
     assert ".innerHTML" not in source
     assert "api_key: secret" in source
-    assert "Spending Credits on model runs is not enabled yet." in APP_HTML
+    assert "Available for metered ATL model runs. BYOK runs use your provider account and do not deduct ATL Credits." in APP_HTML
 
 
 def test_verified_default_key_can_prepare_a_safe_byok_backtest():

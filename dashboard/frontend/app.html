@@ -1885,8 +1885,8 @@
             </div>
 
             <nav id="creditsTabs" class="credits-tabs" aria-label="Credits and Billing sections" role="tablist">
-                <button id="creditsTabOverview" class="credits-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="creditsPanelOverview" data-credits-tab="overview">Credits</button>
-                <button id="creditsTabApiKeys" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsApiKeysPanel" data-credits-tab="api-keys">API Keys</button>
+                <button id="creditsTabApiKeys" class="credits-tab is-active" type="button" role="tab" aria-selected="true" aria-controls="creditsApiKeysPanel" data-credits-tab="api-keys">API Keys</button>
+                <button id="creditsTabOverview" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsPanelOverview" data-credits-tab="overview">Credits</button>
                 <button id="creditsTabActivity" class="credits-tab" type="button" role="tab" aria-selected="false" aria-controls="creditsPanelActivity" data-credits-tab="activity">Activity</button>
             </nav>
 
@@ -1897,7 +1897,7 @@
             </section>
 
             <div id="creditsSignedIn" hidden>
-                <section id="creditsPanelOverview" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabOverview" data-credits-panel="overview">
+                <section id="creditsPanelOverview" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabOverview" data-credits-panel="overview" hidden>
                     <section class="credits-balance-band" aria-labelledby="creditsBalanceHeading">
                         <div>
                             <p id="creditsBalanceHeading" class="credits-section-kicker">Credit balance</p>
@@ -1940,7 +1940,7 @@
                 </section>
                 </section>
 
-                <section id="creditsApiKeysPanel" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabApiKeys" data-credits-panel="api-keys" hidden>
+                <section id="creditsApiKeysPanel" class="credits-panel" role="tabpanel" aria-labelledby="creditsTabApiKeys" data-credits-panel="api-keys">
                     <section class="credits-section credits-api-keys-section" aria-labelledby="creditsApiKeysHeading">
                         <div class="credits-section-head">
                             <div>
@@ -1986,7 +1986,7 @@
                                 </div>
                             </div>
                         </div>
-                        <p class="credits-api-keys-footnote">Spending Credits on model runs is not enabled yet.</p>
+                        <p class="credits-api-keys-footnote">Available for metered ATL model runs. BYOK runs use your provider account and do not deduct ATL Credits.</p>
                     </section>
                 </section>
 

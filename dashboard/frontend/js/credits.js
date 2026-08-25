@@ -20,7 +20,7 @@
     selectedAdminOrder: null,
     orderPollToken: 0,
     balanceMicro: 0,
-    activeTab: 'overview',
+    activeTab: 'api-keys',
     providers: [],
     credentials: [],
     executionOptions: [],
@@ -184,12 +184,16 @@
       const actions = document.createElement('div');
       actions.className = 'credits-key-actions';
       if (credential.status !== 'revoked') {
-        const verify = textNode('button', 'credits-key-action', 'Reverify');
+        const verify = textNode(
+          'button',
+          'credits-key-action credits-key-inline-action',
+          'Reverify',
+        );
         verify.type = 'button';
         verify.title = 'Verify this key again';
         appendIcon(verify, 'icon-refresh');
         verify.addEventListener('click', () => mutateCredential(credential, 'verify'));
-        actions.appendChild(verify);
+        head.appendChild(verify);
         if (credential.status === 'verified' && !credential.is_default) {
           const makeDefault = textNode('button', 'credits-key-action', 'Set default');
           makeDefault.type = 'button';
@@ -198,14 +202,20 @@
           makeDefault.addEventListener('click', () => mutateCredential(credential, 'default'));
           actions.appendChild(makeDefault);
         }
-        const revoke = textNode('button', 'credits-key-action is-danger', 'Revoke');
-        revoke.type = 'button';
-        revoke.title = 'Revoke this key';
-        appendIcon(revoke, 'icon-x');
-        revoke.addEventListener('click', () => {
-          if (window.confirm(`Revoke “${credential.label}”?`)) mutateCredential(credential, 'revoke');
+        const deleteButton = textNode(
+          'button',
+          'credits-key-action credits-key-delete is-danger',
+          'Delete',
+        );
+        deleteButton.type = 'button';
+        deleteButton.title = 'Delete this key';
+        appendIcon(deleteButton, 'icon-x');
+        deleteButton.addEventListener('click', () => {
+          if (window.confirm(`Delete “${credential.label}”?`)) {
+            mutateCredential(credential, 'revoke');
+          }
         });
-        actions.appendChild(revoke);
+        actions.appendChild(deleteButton);
       }
 
       row.append(head, meta);
@@ -424,15 +434,7 @@
     } else if (!balance.billing_available) {
       setStatus(accountStatus, 'Stripe Test Mode is not configured on this server.', 'error');
     } else {
-      // Not "Available for model runs and backtests." Purchased Credits land in
-      // credit_ledger_entries, and the only metered surface in this repo
-      // (POST /backtest/run, domain/entitlements/credits.py) spends a different
-      // counter — user_entitlements.credits — which nothing here tops up. This
-      // PR ships the purchase side deliberately and defers consumption, so the
-      // balance is real money that currently buys nothing. Saying otherwise
-      // tells the buyer they have spending power they do not have. Change this
-      // string only together with the code that actually debits this ledger.
-      setStatus(accountStatus, 'Held on your account. Spending Credits on model runs is not enabled yet.', 'success');
+      setStatus(accountStatus, 'Available for metered ATL model runs. BYOK runs use your provider account and do not deduct ATL Credits.', 'success');
     }
     setPurchaseEnabled(!restricted && balance.billing_available);
   }

@@ -10880,11 +10880,11 @@ body.agent-editor-open {
 .credits-key-row {
     display: grid;
     grid-template-columns:
-        minmax(120px, 0.8fr)
-        minmax(170px, 1fr)
-        minmax(230px, 1fr)
-        auto;
-    gap: 12px;
+        minmax(120px, 0.75fr)
+        minmax(180px, 1fr)
+        minmax(360px, 1.35fr)
+        max-content;
+    gap: 14px;
     align-items: center;
     min-height: 66px;
     padding: 11px 0;
@@ -10975,9 +10975,10 @@ body.agent-editor-open {
 
 .credits-key-launch {
     display: grid;
-    grid-template-columns: minmax(130px, 1fr) auto;
-    gap: 6px;
+    grid-template-columns: minmax(0, 1fr) max-content;
+    gap: 8px;
     align-items: end;
+    min-width: 0;
 }
 
 .credits-key-model-label {
@@ -10988,7 +10989,8 @@ body.agent-editor-open {
 }
 
 .credits-key-model {
-    min-width: 150px;
+    width: 100%;
+    min-width: 0;
     min-height: 30px;
     border: 1px solid var(--border-color);
     border-radius: 4px;
@@ -11000,6 +11002,7 @@ body.agent-editor-open {
 .credits-key-run {
     border-color: rgba(34, 211, 238, 0.45);
     color: #67e8f9;
+    white-space: nowrap;
 }
 
 .credits-key-actions {
@@ -11007,6 +11010,19 @@ body.agent-editor-open {
     align-items: center;
     justify-content: flex-end;
     gap: 6px;
+    align-self: start;
+}
+
+.credits-key-inline-action {
+    flex-basis: 100%;
+    justify-content: flex-start;
+    margin-top: 2px;
+    width: max-content;
+}
+
+.credits-key-delete {
+    border-color: rgba(248, 113, 113, 0.52);
+    color: #f87171;
 }
 
 .credits-key-action {
