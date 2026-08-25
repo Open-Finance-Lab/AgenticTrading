@@ -8043,21 +8043,23 @@ async function runBacktest() {
         : (isHostedRuntime ? null : resolveBacktestModelRequest(modelSelect, activeAgent));
 
     let selectedProviderId = '';
+    let selectedBillingMode = null;
     if (
         decisionSource === LLM_DECISION_SOURCE
         && !isHostedRuntime
     ) {
+        selectedBillingMode = runBacktestBillingMode;
         selectedProviderId = (
             document.getElementById('runBacktestProviderSelect')?.value || ''
         );
         const providerOption = runBacktestExecutionOption(selectedProviderId);
         if (
-            !runBacktestBillingMode
+            !selectedBillingMode
             || !selectedProviderId
             || !model
             || !runBacktestLaneAvailable(
                 providerOption,
-                runBacktestBillingMode,
+                selectedBillingMode,
             )
             || !findRunBacktestExecutionModel(providerOption, model)
         ) {
@@ -8188,9 +8190,9 @@ async function runBacktest() {
             && !isHostedRuntime
         ) {
             params.set('model', model);
-            params.set('billing_mode', runBacktestBillingMode);
+            params.set('billing_mode', selectedBillingMode);
             params.set('provider_id', selectedProviderId);
-            payload.billing_mode = runBacktestBillingMode;
+            payload.billing_mode = selectedBillingMode;
             payload.provider_id = selectedProviderId;
             payload.model = model;
         }
