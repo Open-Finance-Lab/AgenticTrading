@@ -196,9 +196,9 @@ def test_ifind_request_uses_selected_profile_and_execution_lane(js):
         r"\s*&&\s*!isHostedRuntime\s*\)",
         js,
     )
-    assert re.search(r"params\.set\(\s*['\"]billing_mode['\"]\s*,\s*runBacktestBillingMode", js)
+    assert re.search(r"params\.set\(\s*['\"]billing_mode['\"]\s*,\s*selectedBillingMode", js)
     assert re.search(r"params\.set\(\s*['\"]provider_id['\"]\s*,\s*selectedProviderId", js)
-    assert re.search(r"payload\.billing_mode\s*=\s*runBacktestBillingMode", js)
+    assert re.search(r"payload\.billing_mode\s*=\s*selectedBillingMode", js)
     assert re.search(r"payload\.provider_id\s*=\s*selectedProviderId", js)
     assert re.search(r"payload\.model\s*=\s*model", js)
     assert re.search(r"if\s*\(\s*decisionSource\s*===\s*LLM_DECISION_SOURCE\s*&&\s*pipeline\?\.length", js)
