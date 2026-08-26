@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 import dashboard.backend.infrastructure.llm.token_cost as token_cost
+from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.domain.agents.repository import agent_store
 from dashboard.backend.database import db
 from dashboard.backend.execution.base import TERMINAL_STATUSES
@@ -717,6 +718,15 @@ class ExternalBacktestSession:
         db.insert_trades(self.run_id, self.manager.trades)
         db.insert_decisions(self.run_id, self.decision_log)
 
+        analytics_user_id = getattr(self, "analytics_user_id", None)
+        if analytics_user_id is not None:
+            analytics_instrumentation.emit_run_event(
+                event_name="backtest_completed",
+                user_id=int(analytics_user_id),
+                run_id=self.run_id,
+                correlation_id=self.backtest_id,
+            )
+
         # The run is fully persisted now — publish "completed" here, in-request.
         # is_active()/cancel() read self.status without _step_lock, so the flip
         # must land before this method returns (T1 already moved the slow work —
@@ -1034,6 +1044,7 @@ def start_backtest(
     symbols: Optional[List[str]] = None,
     initial_capital: Optional[float] = None,
     enforce_session_cap: bool = False,
+    emit_analytics: bool = False,
 ) -> Dict[str, Any]:
     """Open an external-agent backtest session.
 
@@ -1058,6 +1069,15 @@ def start_backtest(
         initial_capital=initial_capital,
     )
     session.status = "loading"
+    session.analytics_user_id = None
+    if emit_analytics:
+        try:
+            agent = agent_store.get_agent_by_session(session_id)
+            owner_user_id = agent.get("owner_user_id") if agent else None
+            if owner_user_id is not None:
+                session.analytics_user_id = int(owner_user_id)
+        except Exception:
+            pass
 
     with _lock:
         # Counted and inserted under one acquisition: as a check in the router
@@ -1067,6 +1087,18 @@ def start_backtest(
         if enforce_session_cap:
             _raise_if_at_capacity(session_id)
         _sessions[backtest_id] = session
+
+    if session.analytics_user_id is not None:
+        analytics_instrumentation.emit_run_event(
+            event_name="backtest_requested",
+            user_id=session.analytics_user_id,
+            run_id=backtest_id,
+        )
+        analytics_instrumentation.emit_run_event(
+            event_name="backtest_started",
+            user_id=session.analytics_user_id,
+            run_id=backtest_id,
+        )
 
     # Fast path: creation runs under the caller's _create_lock, where blocking
     # is forbidden — peek() is non-blocking. A resident dataset means no loader
@@ -1089,6 +1121,13 @@ def start_backtest(
             except (Exception, SystemExit) as exc:
                 session.status = "failed"
                 session.error = str(exc)
+                if session.analytics_user_id is not None:
+                    analytics_instrumentation.emit_run_event(
+                        event_name="backtest_failed",
+                        user_id=session.analytics_user_id,
+                        run_id=backtest_id,
+                        error_category="provider_unavailable",
+                    )
 
         threading.Thread(target=_load_in_background, daemon=True).start()
 
