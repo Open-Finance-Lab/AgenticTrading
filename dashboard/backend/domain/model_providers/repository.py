@@ -121,6 +121,10 @@ class ModelProviderStore:
                 result_json TEXT,
                 created_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS model_provider_migrations (
+                migration_id TEXT PRIMARY KEY,
+                applied_at TEXT NOT NULL
+            );
             """
         )
         self._ensure_user_credential_columns(conn)
@@ -133,7 +137,7 @@ class ModelProviderStore:
                     provider_id, display_name, adapter_type, approved_base_url,
                     capabilities_json, byok_enabled, platform_enabled, status,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 1, 0, 'enabled', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, 1, ?, 'enabled', ?, ?)
                 ON CONFLICT(provider_id) DO NOTHING
                 """,
                 (
@@ -142,12 +146,60 @@ class ModelProviderStore:
                     item["adapter_type"],
                     item["approved_base_url"],
                     serialize_capabilities(item["capabilities"]),
+                    int(bool(item.get("platform_enabled", False))),
                     now,
                     now,
                 ),
             )
+        self._migrate_legacy_openrouter_platform_flag(conn)
         conn.commit()
         conn.close()
+
+    @staticmethod
+    def _migrate_legacy_openrouter_platform_flag(conn: sqlite3.Connection) -> None:
+        """Enable the legacy Render-backed OpenRouter lane once, safely."""
+
+        migration_id = "openrouter-platform-key-v1"
+        if conn.execute(
+            "SELECT 1 FROM model_provider_migrations WHERE migration_id = ?",
+            (migration_id,),
+        ).fetchone():
+            return
+        if not os.getenv("OPENROUTER_API_KEY", "").strip():
+            return
+        provider = conn.execute(
+            "SELECT status, platform_enabled FROM provider_registry WHERE provider_id = 'openrouter'"
+        ).fetchone()
+        if not provider or provider["status"] != "enabled" or provider["platform_enabled"]:
+            return
+        if conn.execute(
+            "SELECT 1 FROM platform_model_credentials WHERE provider_id = 'openrouter'"
+        ).fetchone():
+            return
+        latest_operation = conn.execute(
+            """
+            SELECT operation, result_json
+            FROM model_provider_admin_operations
+            WHERE provider_id = 'openrouter' AND operation = 'upsert_provider'
+            ORDER BY operation_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if latest_operation:
+            try:
+                snapshot = json.loads(latest_operation["result_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                snapshot = {}
+            if snapshot.get("platform_enabled") is False:
+                return
+        conn.execute(
+            "UPDATE provider_registry SET platform_enabled = 1, updated_at = ? WHERE provider_id = 'openrouter'",
+            (_utcnow_iso(),),
+        )
+        conn.execute(
+            "INSERT INTO model_provider_migrations (migration_id, applied_at) VALUES (?, ?)",
+            (migration_id, _utcnow_iso()),
+        )
 
     @staticmethod
     def _ensure_user_credential_columns(conn: sqlite3.Connection) -> None:

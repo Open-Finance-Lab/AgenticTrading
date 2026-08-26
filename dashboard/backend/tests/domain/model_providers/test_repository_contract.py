@@ -78,6 +78,97 @@ def test_seed_initialization_does_not_overwrite_admin_configuration(store_factor
     assert reopened.get_provider("openai")["status"] == "disabled"
 
 
+def test_seeded_openrouter_is_platform_enabled(store):
+    assert store.get_provider("openrouter")["platform_enabled"] is True
+
+
+def test_legacy_openrouter_platform_flag_migrates_when_environment_key_exists(
+    store_factory, monkeypatch
+):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    store = store_factory()
+    connection = store._get_connection()
+    connection.execute(
+        "UPDATE provider_registry SET platform_enabled = 0 WHERE provider_id = 'openrouter'"
+    )
+    connection.commit()
+    connection.close()
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-migration-test-abcd")
+    reopened = store_factory()
+
+    assert reopened.get_provider("openrouter")["platform_enabled"] is True
+    marker = reopened._get_connection().execute(
+        "SELECT migration_id FROM model_provider_migrations"
+    ).fetchone()
+    assert marker[0] == "openrouter-platform-key-v1"
+
+
+def test_legacy_migration_respects_admin_platform_disable(
+    store_factory, monkeypatch
+):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    store = store_factory()
+    provider = store.get_provider("openrouter")
+    store.upsert_provider_with_audit(
+        provider_id="openrouter",
+        display_name=provider["display_name"],
+        adapter_type=provider["adapter_type"],
+        approved_base_url=provider["approved_base_url"],
+        capabilities=provider["capabilities"],
+        byok_enabled=True,
+        platform_enabled=False,
+        status="enabled",
+        audit={
+            "actor_user_id": 11,
+            "operation": "upsert_provider",
+            "provider_id": "openrouter",
+            "source": "admin-console",
+            "reason": "Disable platform access for maintenance.",
+            "idempotency_key": "openrouter-disable-migration-test",
+        },
+    )
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-migration-test-abcd")
+    reopened = store_factory()
+
+    assert reopened.get_provider("openrouter")["platform_enabled"] is False
+    assert (
+        reopened._get_connection()
+        .execute("SELECT COUNT(*) FROM model_provider_migrations")
+        .fetchone()[0]
+        == 0
+    )
+
+
+def test_legacy_migration_does_not_override_existing_platform_credential(
+    store_factory, monkeypatch
+):
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    store = store_factory()
+    provider = store.get_provider("openrouter")
+    store.upsert_provider(
+        provider_id="openrouter",
+        display_name=provider["display_name"],
+        adapter_type=provider["adapter_type"],
+        approved_base_url=provider["approved_base_url"],
+        capabilities=provider["capabilities"],
+        byok_enabled=True,
+        platform_enabled=False,
+        status="enabled",
+    )
+    store.upsert_platform_credential(
+        provider_id="openrouter",
+        secret="sk-or-existing-platform-abcd",
+        status="verified",
+    )
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-migration-test-wxyz")
+    reopened = store_factory()
+
+    assert reopened.get_provider("openrouter")["platform_enabled"] is False
+
+
 def test_platform_revoke_crypto_shreds_secret(store):
     store.upsert_platform_credential(
         provider_id="openai",

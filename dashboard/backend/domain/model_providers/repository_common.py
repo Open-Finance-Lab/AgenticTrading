@@ -80,6 +80,7 @@ SEEDED_PROVIDERS = (
         "provider_id": "openrouter",
         "display_name": "OpenRouter",
         "adapter_type": "openrouter",
+        "platform_enabled": True,
         "approved_base_url": "https://openrouter.ai/api/v1",
         "capabilities": ProviderCapabilities(
             model_discovery=True,
