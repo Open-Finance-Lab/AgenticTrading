@@ -13,6 +13,8 @@ from pathlib import Path
 from fastapi.routing import APIRoute
 
 from dashboard.backend.api.routers import admin as admin_canon
+from dashboard.backend.api.routers import admin_analytics as admin_analytics_canon
+from dashboard.backend.api.routers import analytics as analytics_canon
 from dashboard.backend.api.routers import backtests as backtests_canon
 from dashboard.backend.api.routers import config as config_canon
 from dashboard.backend.api.routers import credits as credits_canon
@@ -60,6 +62,19 @@ EXPECTED_ADMIN_CREDITS_ROUTES = {
     ("POST", "/admin/credits/grants/assign", "assign_grant"),
     ("POST", "/admin/credits/grants/reclaim", "reclaim_grant"),
     ("GET", "/admin/credits/activity", "get_grant_activity"),
+}
+EXPECTED_ANALYTICS_ROUTES = {
+    ("POST", "/analytics/events", "ingest_analytics_event"),
+}
+EXPECTED_ADMIN_ANALYTICS_ROUTES = {
+    ("GET", "/admin/analytics/overview", "get_overview"),
+    ("GET", "/admin/analytics/users", "list_users"),
+    ("GET", "/admin/analytics/users/{user_id}", "get_user_profile"),
+    (
+        "GET",
+        "/admin/analytics/users/{user_id}/activity",
+        "get_user_activity",
+    ),
 }
 EXPECTED_BACKTESTS_ROUTES = {
     ("POST", "/backtest/run", "run_backtest_endpoint"),
@@ -119,6 +134,10 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/admin/users"),
     ("GET", "/api/admin/users/{user_id}"),
     ("PATCH", "/api/admin/users/{user_id}"),
+    ("GET", "/api/admin/analytics/overview"),
+    ("GET", "/api/admin/analytics/users"),
+    ("GET", "/api/admin/analytics/users/{user_id}"),
+    ("GET", "/api/admin/analytics/users/{user_id}/activity"),
     ("POST", "/api/admin/bootstrap"),
     ("POST", "/api/algo/chat"),
     ("GET", "/api/algo/defaults"),
@@ -144,6 +163,7 @@ EXPECTED_FULL_CONTRACT = {
     ("GET", "/api/auth/robinhood/callback"),
     ("POST", "/api/auth/robinhood/complete"),
     ("POST", "/api/auth/robinhood/start"),
+    ("POST", "/api/analytics/events"),
     ("GET", "/api/backtest/compare/latest"),
     ("GET", "/api/backtest/runs"),
     ("GET", "/api/backtest/{run_id}"),
@@ -287,7 +307,15 @@ def _imported_modules(path: Path):
 # ---------------------------------------------------------------------------
 
 def test_canonical_router_modules_import():
-    for mod in (health_canon, market_canon, config_canon, admin_canon, backtests_canon):
+    for mod in (
+        health_canon,
+        market_canon,
+        config_canon,
+        admin_canon,
+        analytics_canon,
+        admin_analytics_canon,
+        backtests_canon,
+    ):
         assert mod.router.__class__.__name__ == "APIRouter"
 
 
@@ -309,6 +337,17 @@ def test_credits_router_contract():
 
 def test_admin_credits_router_contract():
     assert _route_triples(admin_credits_canon.router) == EXPECTED_ADMIN_CREDITS_ROUTES
+
+
+def test_analytics_router_contract():
+    assert _route_triples(analytics_canon.router) == EXPECTED_ANALYTICS_ROUTES
+
+
+def test_admin_analytics_router_contract():
+    assert (
+        _route_triples(admin_analytics_canon.router)
+        == EXPECTED_ADMIN_ANALYTICS_ROUTES
+    )
 
 
 def test_admin_router_contract():
@@ -342,6 +381,14 @@ def test_extracted_routes_registered_exactly_once():
     )
     for method, path, _name in extracted:
         assert counts.get((method, path)) == 1, (method, path, counts.get((method, path)))
+    api_extracted = EXPECTED_ANALYTICS_ROUTES | EXPECTED_ADMIN_ANALYTICS_ROUTES
+    for method, path, _name in api_extracted:
+        app_path = f"/api{path}"
+        assert counts.get((method, app_path)) == 1, (
+            method,
+            app_path,
+            counts.get((method, app_path)),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +508,15 @@ def test_cors_preflight_allows_every_routed_method():
 # ---------------------------------------------------------------------------
 
 def test_canonical_routers_do_not_import_scripts():
-    for mod in (health_canon, market_canon, config_canon, admin_canon, backtests_canon):
+    for mod in (
+        health_canon,
+        market_canon,
+        config_canon,
+        admin_canon,
+        analytics_canon,
+        admin_analytics_canon,
+        backtests_canon,
+    ):
         modules = _imported_modules(Path(mod.__file__))
         for m in modules:
             assert not m.startswith("dashboard.scripts"), (mod.__name__, m)
