@@ -62,6 +62,10 @@ services:
       # session; users sign in again.
       - key: SESSION_HASH_SECRET
         sync: false
+      # Monthly HMAC key for non-reversible Analytics network grouping.
+      # Missing/invalid values omit network_hash; Analytics never stores plaintext IP.
+      - key: ANALYTICS_PSEUDONYMIZATION_KEY
+        sync: false
       # Optional session lifetimes; both default in session_tokens.py.
       # SESSION_TTL_DAYS (7) is the absolute cap, SESSION_IDLE_HOURS (24) the
       # idle window.
