@@ -95,6 +95,52 @@ def test_create_agent_returns_full_schema(svc):
     assert agent["api_key"].startswith("ag_")
 
 
+def test_owned_agent_lifecycle_emits_after_repository_success(svc, monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        service_module.analytics_instrumentation,
+        "emit_agent_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+
+    agent = svc.create_agent(
+        name="owned",
+        model_name="model",
+        owner_user_id=7,
+        owner_browser_session="browser",
+    )
+    svc.update_agent(agent["agent_id"], name="updated")
+    assert svc.delete_agent(agent["agent_id"]) is True
+    assert svc.delete_agent(agent["agent_id"]) is False
+
+    assert [event["event_name"] for event in events] == [
+        "agent_created",
+        "agent_updated",
+        "agent_deleted",
+    ]
+    assert all(event["user_id"] == 7 for event in events)
+
+
+def test_guest_agent_lifecycle_is_not_attributed_to_user(svc, monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        service_module.analytics_instrumentation,
+        "emit_agent_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+
+    agent = svc.create_agent(
+        name="guest",
+        model_name="model",
+        owner_user_id=None,
+        owner_browser_session="browser",
+    )
+    svc.update_agent(agent["agent_id"], name="updated")
+    svc.delete_agent(agent["agent_id"])
+
+    assert events == []
+
+
 def test_runtime_type_update_resets_runtime_specific_config(svc):
     agent = svc.create_agent(
         name="hosted",

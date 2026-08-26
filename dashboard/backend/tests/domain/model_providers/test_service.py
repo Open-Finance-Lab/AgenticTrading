@@ -22,6 +22,7 @@ from dashboard.backend.domain.model_providers.service import (
     CredentialResolutionError,
     ModelProviderService,
 )
+from dashboard.backend.domain.model_providers import service as service_module
 from dashboard.backend.infrastructure.llm.execution.errors import ExecutionErrorCategory
 
 
@@ -96,6 +97,67 @@ def test_create_encrypts_verifies_and_returns_only_public_metadata(tmp_path):
         ).fetchone()[0]
     assert stored != "sk-or-fake-service-abcd"
     assert "sk-or-fake-service-abcd" not in stored
+
+
+def test_credential_lifecycle_emits_only_post_commit_safe_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    adapter = FakeAdapter(_validation("verified"), _validation("verified"))
+    service, _store = _service(tmp_path, adapter)
+    events = []
+    errors = []
+    monkeypatch.setattr(
+        service_module.analytics_instrumentation,
+        "emit_credential_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+    monkeypatch.setattr(
+        service_module.analytics_instrumentation,
+        "emit_safe_error_event",
+        lambda **kwargs: errors.append(kwargs),
+    )
+
+    created = service.create_credential(7, _request(set_default=True))
+    service.reverify_credential(7, str(created.credential_id))
+    service.set_default_credential(7, str(created.credential_id))
+    service.revoke_credential(7, str(created.credential_id))
+
+    assert [event["event_name"] for event in events] == [
+        "credential_saved",
+        "credential_verified",
+        "credential_defaulted",
+        "credential_reverified",
+        "credential_defaulted",
+        "credential_revoked",
+    ]
+    assert errors == []
+    assert "sk-or-fake-service-abcd" not in repr(events)
+
+
+def test_invalid_credential_emits_safe_category_not_adapter_detail(
+    tmp_path,
+    monkeypatch,
+):
+    service, _store = _service(tmp_path, FakeAdapter(_validation("invalid")))
+    events = []
+    errors = []
+    monkeypatch.setattr(
+        service_module.analytics_instrumentation,
+        "emit_credential_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+    monkeypatch.setattr(
+        service_module.analytics_instrumentation,
+        "emit_safe_error_event",
+        lambda **kwargs: errors.append(kwargs),
+    )
+
+    service.create_credential(7, _request())
+
+    assert [event["event_name"] for event in events] == ["credential_saved"]
+    assert errors[0]["error_category"] == "credential_invalid"
+    assert "api_key" not in repr(errors)
 
 
 @pytest.mark.parametrize("status", ["invalid", "verification_unavailable"])

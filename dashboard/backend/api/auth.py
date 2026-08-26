@@ -27,6 +27,7 @@ from dashboard.backend.api.rate_limit import (
     rate_limited_error,
 )
 from dashboard.backend.domain.brokers.repository import broker_store
+from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
 from dashboard.backend.infrastructure.email import sender as email_sender
 from dashboard.backend import users as users_module
@@ -437,6 +438,12 @@ async def signup(payload: SignupRequest, request: Request):
         raise
 
     token, entitlements = await asyncio.to_thread(_issue_session, user, request)
+    analytics_instrumentation.emit_account_event(
+        event_name="account_signed_up",
+        user_id=user["id"],
+        source_record_id=user["id"],
+        version=None,
+    )
     return _auth_json(user, token, entitlements=entitlements)
 
 
@@ -478,6 +485,11 @@ async def login(payload: LoginRequest, request: Request):
         raise HTTPException(status_code=401, detail=LOGIN_FAILURE_DETAIL)
 
     token, entitlements = await asyncio.to_thread(_issue_session, user, request)
+    analytics_instrumentation.emit_account_event(
+        event_name="authenticated_session_started",
+        user_id=user["id"],
+        source_record_id=user["id"],
+    )
     return _auth_json(public_user(user), token, entitlements=entitlements)
 
 
