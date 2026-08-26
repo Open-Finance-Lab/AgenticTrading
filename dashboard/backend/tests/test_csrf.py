@@ -1,6 +1,7 @@
 """CSRF gate for cookie-authenticated mutating requests."""
 
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -318,3 +319,46 @@ def test_admin_grant_mutations_require_csrf_for_cookie_session(
     assert "CSRF" in blocked_reclaim.json()["detail"]
     assert allowed_assign.status_code == 200, allowed_assign.text
     assert allowed_reclaim.status_code == 200, allowed_reclaim.text
+
+
+def test_analytics_ingestion_requires_csrf_for_cookie_session(
+    csrf_client,
+    monkeypatch,
+):
+    from dashboard.backend.domain.analytics.models import AppendEventResult
+    from dashboard.backend.domain.analytics.service import get_analytics_service
+
+    _signup(csrf_client, email="analytics-csrf@example.com")
+
+    class FakeAnalyticsService:
+        def accept_frontend_event(self, **kwargs):
+            event = kwargs["payload"]
+            return AppendEventResult.model_construct(event=event, created=True)
+
+    app.dependency_overrides[get_analytics_service] = lambda: FakeAnalyticsService()
+    payload = {
+        "event_id": "30000000-0000-4000-8000-000000000001",
+        "schema_version": 1,
+        "event_name": "page_viewed",
+        "session_id": "30000000-0000-4000-8000-000000000002",
+        "occurred_at": datetime.now(timezone.utc).isoformat(),
+        "page_view": "home",
+        "properties": {},
+    }
+    try:
+        blocked = csrf_client.post(
+            "/api/analytics/events",
+            headers={"Origin": "http://testserver"},
+            json=payload,
+        )
+        allowed = csrf_client.post(
+            "/api/analytics/events",
+            headers=_csrf_headers(csrf_client),
+            json=payload,
+        )
+    finally:
+        app.dependency_overrides.pop(get_analytics_service, None)
+
+    assert blocked.status_code == 403
+    assert "CSRF" in blocked.json()["detail"]
+    assert allowed.status_code == 202, allowed.text
