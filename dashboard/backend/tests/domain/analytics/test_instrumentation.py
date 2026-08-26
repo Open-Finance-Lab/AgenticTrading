@@ -25,6 +25,7 @@ class RecordingService:
 def _service(monkeypatch) -> RecordingService:
     service = RecordingService()
     monkeypatch.setattr(instrumentation, "get_analytics_service", lambda: service)
+    monkeypatch.setattr(instrumentation, "_snapshot_recalculator", lambda _user_id: None)
     return service
 
 
@@ -154,3 +155,45 @@ def test_unsupported_event_name_is_contained(monkeypatch, capsys):
 
     assert service.calls == []
     assert "category=ValueError" in capsys.readouterr().out
+
+
+def test_stored_event_recalculates_snapshot_best_effort(monkeypatch):
+    _service(monkeypatch)
+    users = []
+    monkeypatch.setattr(
+        instrumentation,
+        "_snapshot_recalculator",
+        lambda user_id: users.append(user_id),
+    )
+
+    instrumentation.emit_agent_event(
+        event_name="agent_created",
+        user_id=7,
+        agent_id="agent-1",
+        occurred_at=NOW,
+    )
+
+    assert users == [7]
+
+
+def test_snapshot_failure_never_escapes_or_logs_exception_text(
+    monkeypatch,
+    capsys,
+):
+    _service(monkeypatch)
+
+    def fail(_user_id):
+        raise RuntimeError("snapshot-secret-canary")
+
+    monkeypatch.setattr(instrumentation, "_snapshot_recalculator", fail)
+
+    instrumentation.emit_agent_event(
+        event_name="agent_created",
+        user_id=7,
+        agent_id="agent-1",
+        occurred_at=NOW,
+    )
+
+    output = capsys.readouterr().out
+    assert "snapshot-secret-canary" not in output
+    assert "category=RuntimeError" in output
