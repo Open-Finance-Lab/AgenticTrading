@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -21,6 +22,7 @@ from .repository_common import (
     encode_event_cursor,
     positive_limit,
     positive_user_id,
+    utc_iso,
 )
 from .rollups import AnalyticsRollupStore, DailyRollup
 from .states import (
@@ -45,6 +47,19 @@ _USAGE_EVENTS = {
     "credits_settled",
     "credits_refunded",
 }
+
+
+@dataclass(frozen=True)
+class _MetricEvent:
+    event_name: str
+    event_group: str
+    user_id: int
+    occurred_at: datetime
+    provider_id: str | None
+    model_id: str | None
+    billing_mode: str | None
+    error_category: str | None
+    properties: dict[str, Any]
 
 
 def _utc(value: datetime, field_name: str) -> datetime:
@@ -296,6 +311,157 @@ class AnalyticsQueryStore:
             result[snapshot.user_id] = snapshot
         return result
 
+    def list_metric_events(
+        self,
+        *,
+        start: datetime,
+        end: datetime,
+        include_internal: bool,
+    ) -> list[_MetricEvent]:
+        """Load only fields used by Overview formulas.
+
+        Full Analytics event validation is intentionally reserved for detail
+        responses. Overview can touch tens of thousands of rows, and rebuilding
+        UUID/session/source models for fields it never returns dominated the
+        page latency without adding a privacy or correctness check.
+        """
+
+        params = (utc_iso(start), utc_iso(end))
+        sql = """
+            SELECT event_name, event_group, user_id, occurred_at,
+                   provider_id, model_id, billing_mode, error_category,
+                   properties_json
+            FROM analytics_events
+            WHERE occurred_at >= {start_placeholder}
+              AND occurred_at < {end_placeholder}
+            ORDER BY occurred_at ASC, sequence ASC
+        """
+        if self.is_postgres:
+            with self.base_store._get_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        sql.format(
+                            start_placeholder="%s",
+                            end_placeholder="%s",
+                        ),
+                        params,
+                    )
+                    rows = cur.fetchall()
+        else:
+            with self.base_store._get_connection() as conn:
+                rows = conn.execute(
+                    sql.format(
+                        start_placeholder="?",
+                        end_placeholder="?",
+                    ),
+                    params,
+                ).fetchall()
+        excluded = (
+            set()
+            if include_internal
+            else self.base_store.list_excluded_user_ids(
+                include_admin_accounts=True
+            )
+        )
+        events = []
+        for row in rows:
+            user_id = int(row["user_id"])
+            if user_id in excluded:
+                continue
+            event_name = str(row["event_name"])
+            properties = (
+                json.loads(str(row["properties_json"]))
+                if event_name == "model_usage_recorded"
+                else {}
+            )
+            if not isinstance(properties, dict):
+                raise ValueError("stored Analytics properties are invalid")
+            events.append(
+                _MetricEvent(
+                    event_name=event_name,
+                    event_group=str(row["event_group"]),
+                    user_id=user_id,
+                    occurred_at=_parse_timestamp(row["occurred_at"]),
+                    provider_id=(
+                        str(row["provider_id"])
+                        if row["provider_id"] is not None
+                        else None
+                    ),
+                    model_id=(
+                        str(row["model_id"])
+                        if row["model_id"] is not None
+                        else None
+                    ),
+                    billing_mode=(
+                        str(row["billing_mode"])
+                        if row["billing_mode"] is not None
+                        else None
+                    ),
+                    error_category=(
+                        str(row["error_category"])
+                        if row["error_category"] is not None
+                        else None
+                    ),
+                    properties=properties,
+                )
+            )
+        return events
+
+    def summarize_users(
+        self,
+        *,
+        user_ids: set[int],
+        start: datetime,
+        end: datetime,
+    ) -> dict[int, dict[str, Any]]:
+        """Return bounded 30-day summaries without hydrating event models."""
+
+        if not user_ids:
+            return {}
+        result: dict[int, dict[str, Any]] = {}
+        ordered_ids = sorted(positive_user_id(user_id) for user_id in user_ids)
+        for offset in range(0, len(ordered_ids), 500):
+            chunk = ordered_ids[offset : offset + 500]
+            placeholder = "%s" if self.is_postgres else "?"
+            id_placeholders = ", ".join(placeholder for _ in chunk)
+            params: list[Any] = [utc_iso(start), utc_iso(end), *chunk]
+            sql = f"""
+                SELECT user_id,
+                       MAX(CASE
+                           WHEN event_group <> 'experience'
+                                OR event_name = 'page_viewed'
+                           THEN occurred_at
+                       END) AS last_meaningful_activity,
+                       SUM(CASE WHEN event_group = 'run' THEN 1 ELSE 0 END)
+                           AS recent_runs,
+                       SUM(CASE WHEN event_name = 'backtest_failed' THEN 1 ELSE 0 END)
+                           AS recent_failures
+                FROM analytics_events
+                WHERE occurred_at >= {placeholder}
+                  AND occurred_at < {placeholder}
+                  AND user_id IN ({id_placeholders})
+                GROUP BY user_id
+            """
+            if self.is_postgres:
+                with self.base_store._get_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(sql, params)
+                        rows = cur.fetchall()
+            else:
+                with self.base_store._get_connection() as conn:
+                    rows = conn.execute(sql, params).fetchall()
+            for row in rows:
+                result[int(row["user_id"])] = {
+                    "last_meaningful_activity": (
+                        _parse_timestamp(row["last_meaningful_activity"])
+                        if row["last_meaningful_activity"] is not None
+                        else None
+                    ),
+                    "recent_runs": int(row["recent_runs"] or 0),
+                    "recent_failures": int(row["recent_failures"] or 0),
+                }
+        return result
+
     def list_activity_rows(
         self,
         *,
@@ -510,11 +676,11 @@ class AnalyticsQueryService:
         daily_completed: dict[str, int] = {}
         funnel: dict[str, int] = {}
         failures: list[FailureCategoryCount] = []
-        raw_events: list[AnalyticsEventRecord] = []
+        raw_events: list[_MetricEvent] = []
 
         if effective_end > filters.start:
             try:
-                raw_events = self.query_store.rollups.list_events(
+                raw_events = self.query_store.list_metric_events(
                     start=filters.start,
                     end=effective_end,
                     include_internal=filters.include_internal,
@@ -701,6 +867,9 @@ class AnalyticsQueryService:
 
         state_counts: dict[str, int] = {}
         attention: list[AnalyticsUserListItem] = []
+        snapshots: dict[int, UserAnalyticsSnapshot] = {}
+        excluded: set[int] = set()
+        snapshots_available = False
         try:
             snapshots = self.query_store.list_snapshots()
             excluded = (
@@ -715,22 +884,57 @@ class AnalyticsQueryService:
                     if user_id not in excluded
                 )
             )
+            snapshots_available = True
         except Exception:
             availability["friction"] = _availability(False)
         try:
-            listed = self.list_users(
-                filters=AnalyticsUserFilters(
-                    sort="recent_failures",
-                    order="desc",
-                    include_internal=filters.include_internal,
-                ),
-                limit=100,
-                offset=0,
-                now=current,
+            if not snapshots_available:
+                raise RuntimeError("Analytics snapshots are unavailable")
+            attention_ids = {
+                user_id
+                for user_id, snapshot in snapshots.items()
+                if user_id not in excluded
+                and snapshot.status in _ATTENTION_STATES
+            }
+            summaries = self.query_store.summarize_users(
+                user_ids=attention_ids,
+                start=current - timedelta(days=30),
+                end=current + timedelta(microseconds=1),
             )
-            attention = [
-                item for item in listed.items if item.status in _ATTENTION_STATES
-            ][:10]
+            identities = {
+                int(user["id"]): user
+                for user in _all_users(self.user_store)
+                if int(user["id"]) in attention_ids
+            }
+            candidates = []
+            for user_id in attention_ids:
+                user = identities.get(user_id)
+                if user is None:
+                    continue
+                snapshot = snapshots[user_id]
+                summary = summaries.get(user_id, {})
+                candidates.append(
+                    AnalyticsUserListItem(
+                        user_id=user_id,
+                        display_name=str(user.get("display_name") or ""),
+                        email=str(user.get("email") or ""),
+                        joined_at=_parse_timestamp(user["created_at"]),
+                        status=snapshot.status,
+                        reason_code=snapshot.reason_code,
+                        human_readable_reason=snapshot.human_readable_reason,
+                        last_meaningful_activity=summary.get(
+                            "last_meaningful_activity"
+                        ),
+                        recent_runs=int(summary.get("recent_runs", 0)),
+                        recent_failures=int(summary.get("recent_failures", 0)),
+                        profile_path=f"/admin/analytics/users/{user_id}",
+                    )
+                )
+            candidates.sort(
+                key=lambda item: (item.recent_failures, item.user_id),
+                reverse=True,
+            )
+            attention = candidates[:10]
         except Exception:
             availability["attention"] = _availability(False)
 
@@ -1075,7 +1279,7 @@ class AnalyticsQueryService:
 
 
 def _event_matches_filters(
-    event: AnalyticsEventRecord,
+    event: AnalyticsEventRecord | _MetricEvent,
     filters: AnalyticsMetricFilters,
 ) -> bool:
     if filters.billing_mode is not None and event.billing_mode != filters.billing_mode:
