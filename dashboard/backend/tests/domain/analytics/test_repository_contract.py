@@ -8,12 +8,23 @@ from uuid import uuid4
 
 import pytest
 
+from dashboard.backend.domain.analytics.metrics import AnalyticsMetricFilters
 from dashboard.backend.domain.analytics.models import AnalyticsEventRecord
+from dashboard.backend.domain.analytics.query_service import (
+    AnalyticsQueryService,
+    AnalyticsUserFilters,
+)
 from dashboard.backend.domain.analytics.repository import AnalyticsStore
 from dashboard.backend.domain.analytics.repository_common import (
     AnalyticsIdempotencyConflictError,
     AnalyticsStoreError,
     decode_event_cursor,
+)
+from dashboard.backend.domain.analytics.service import AnalyticsService
+from dashboard.backend.domain.analytics.states import (
+    AnalyticsStateStore,
+    UserAnalyticsSnapshot,
+    recalculate_user_snapshot,
 )
 from dashboard.backend.users import UserStore
 
@@ -161,6 +172,158 @@ def assert_subject_and_access_contract(store, admin_id, user_id):
     assert user_id not in store.list_excluded_user_ids()
 
 
+class ContractUsers:
+    def __init__(self, user_id: int):
+        self.user = {
+            "id": user_id,
+            "email": "analytics-user@example.test",
+            "display_name": "Analytics User",
+            "role": "user",
+            "created_at": (NOW - timedelta(days=20)).isoformat(),
+        }
+
+    def list_users_admin(self, *, limit=100, offset=0, query=None):
+        rows = [self.user]
+        if query:
+            needle = query.lower()
+            rows = [
+                row
+                for row in rows
+                if needle in row["email"].lower()
+                or needle in row["display_name"].lower()
+            ]
+        return rows[offset : offset + limit]
+
+    def get_user_admin(self, user_id):
+        return self.user if user_id == self.user["id"] else None
+
+
+def assert_pr2_query_contract(store, user_id):
+    events = AnalyticsService(store)
+    common = {
+        "user_id": user_id,
+        "source_record_type": "run",
+        "received_at": NOW,
+    }
+    events.record_server_event(
+        event_name="account_signed_up",
+        source_event_id=f"account:account_signed_up:{user_id}",
+        source_record_type="user",
+        source_record_id=str(user_id),
+        occurred_at=NOW - timedelta(days=20),
+        **{key: value for key, value in common.items() if key != "source_record_type"},
+    )
+    events.record_server_event(
+        event_name="backtest_failed",
+        source_event_id="run:backtest_failed:contract-failed",
+        source_record_id="contract-failed",
+        correlation_id="contract-failed",
+        outcome="failed",
+        error_category="provider_timeout",
+        occurred_at=NOW - timedelta(hours=3),
+        **common,
+    )
+    completed = events.record_server_event(
+        event_name="backtest_completed",
+        source_event_id="run:backtest_completed:contract-success",
+        source_record_id="contract-success",
+        correlation_id="contract-success",
+        outcome="succeeded",
+        occurred_at=NOW - timedelta(hours=2),
+        **common,
+    ).event
+    events.record_server_event(
+        event_name="model_usage_recorded",
+        source_event_id="resource:model_usage_recorded:contract-success:0",
+        source_record_id="contract-success",
+        correlation_id="contract-success",
+        provider_id="openrouter",
+        model_id="openai/gpt-5.5",
+        billing_mode="platform_credits",
+        outcome="succeeded",
+        properties={
+            "input_tokens": 120,
+            "output_tokens": 30,
+            "cost_micro_usd": 250_000,
+        },
+        occurred_at=NOW - timedelta(hours=1),
+        **common,
+    )
+    events.record_server_event(
+        event_name="credits_settled",
+        source_event_id="resource:credits_settled:contract-success:0",
+        source_record_type="credit_reservation",
+        source_record_id="contract-reservation",
+        correlation_id="contract-success",
+        billing_mode="platform_credits",
+        properties={"amount_micro": 100, "bucket": "grant"},
+        occurred_at=NOW - timedelta(minutes=59),
+        **{key: value for key, value in common.items() if key != "source_record_type"},
+    )
+    state_store = AnalyticsStateStore(store)
+    recalculate_user_snapshot(user_id, now=NOW, store=state_store)
+    service = AnalyticsQueryService(
+        store=store,
+        user_store=ContractUsers(user_id),
+    )
+
+    overview = service.get_overview(
+        filters=AnalyticsMetricFilters(
+            start=NOW - timedelta(days=30),
+            end=NOW + timedelta(seconds=1),
+        ),
+        now=NOW,
+    )
+    users = service.list_users(
+        filters=AnalyticsUserFilters(),
+        limit=10,
+        offset=0,
+        now=NOW,
+    )
+    profile = service.get_user_profile(user_id=user_id, now=NOW)
+    activity = service.get_user_activity(
+        user_id=user_id,
+        section="runs",
+        limit=10,
+        cursor=None,
+    )
+    state_store.upsert_snapshot(
+        UserAnalyticsSnapshot(
+            user_id=user_id,
+            status="needs_attention",
+            reason_code="invalid_default_credential",
+            human_readable_reason="The default model credential is invalid.",
+            evidence_event_ids=[completed.event_id],
+            calculated_at=NOW,
+        )
+    )
+    attention_overview = service.get_overview(
+        filters=AnalyticsMetricFilters(
+            start=NOW - timedelta(days=30),
+            end=NOW + timedelta(seconds=1),
+        ),
+        now=NOW,
+    )
+
+    assert overview.completed_runs == 1
+    assert overview.failed_runs == 1
+    assert overview.platform_model_cost_usd == 0.25
+    assert users.total == 1
+    assert users.items[0].status == "active"
+    assert profile.state.status == "active"
+    assert completed.event_id in profile.state.evidence_event_ids
+    assert profile.input_tokens == 120
+    assert profile.output_tokens == 30
+    assert profile.credits_debited_micro == 100
+    assert [item.event_name for item in activity.items] == [
+        "backtest_completed",
+        "backtest_failed",
+    ]
+    assert activity.next_cursor is None
+    assert attention_overview.users_needing_attention[0].user_id == user_id
+    assert attention_overview.users_needing_attention[0].recent_failures == 1
+
+
 def test_sqlite_schema_contains_all_foundation_tables(sqlite_contract):
     store, _admin_id, _user_id = sqlite_contract
     with store._get_connection() as conn:
@@ -193,6 +356,11 @@ def test_sqlite_runs_shared_cursor_contract(sqlite_contract):
 def test_sqlite_runs_shared_subject_and_access_contract(sqlite_contract):
     store, admin_id, user_id = sqlite_contract
     assert_subject_and_access_contract(store, admin_id, user_id)
+
+
+def test_sqlite_runs_pr2_query_contract(sqlite_contract):
+    store, _admin_id, user_id = sqlite_contract
+    assert_pr2_query_contract(store, user_id)
 
 
 @pytest.mark.parametrize("cursor", ["", "not-base64!", "WzEsMl0", "W10"])
