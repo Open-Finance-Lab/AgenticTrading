@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
 
+import pytest
+from fastapi.testclient import TestClient
+
+from dashboard.backend import users as users_module
+from dashboard.backend.app import app
 from dashboard.backend.domain.analytics.metrics import AnalyticsMetricFilters
 from dashboard.backend.domain.analytics.query_service import (
     AnalyticsQueryService,
     AnalyticsUserFilters,
+    get_analytics_query_service,
 )
 from dashboard.backend.domain.analytics.repository import AnalyticsStore
 from dashboard.backend.domain.analytics.rollups import (
@@ -17,6 +25,7 @@ from dashboard.backend.domain.analytics.rollups import (
     DailyRollup,
 )
 from dashboard.backend.domain.analytics.service import AnalyticsService
+from dashboard.backend.domain.analytics.service import get_analytics_service
 from dashboard.backend.domain.analytics.models import (
     FrontendAnalyticsEvent,
     RequestAnalyticsContext,
@@ -25,6 +34,7 @@ from dashboard.backend.domain.analytics.states import (
     AnalyticsStateStore,
     recalculate_user_snapshot,
 )
+from dashboard.backend.users import UserStore
 
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
@@ -324,3 +334,221 @@ def test_overview_marks_only_failed_rollup_panel_unavailable(tmp_path, monkeypat
     assert overview.availability["snapshot"].available is True
     assert overview.availability["growth"].available is False
     assert overview.availability["growth"].error_code == "temporarily_unavailable"
+
+
+@pytest.fixture
+def admin_analytics_api(monkeypatch):
+    with TemporaryDirectory() as tmpdir:
+        path = Path(tmpdir) / "admin-analytics.db"
+        users = UserStore(path)
+        admin = users.create_user(
+            "admin@example.test", "Analytics Admin", "SecurePass1!"
+        )
+        users.apply_admin_patch(admin["id"], role="admin")
+        outsider = users.create_user(
+            "outsider@example.test", "Outsider", "SecurePass1!"
+        )
+        subject = users.create_user(
+            "subject@example.test", "Subject", "SecurePass1!"
+        )
+        analytics = AnalyticsStore(path)
+        event_service = AnalyticsService(analytics)
+        at = datetime.now(timezone.utc).replace(microsecond=0)
+        event_service.record_server_event(
+            event_name="account_signed_up",
+            user_id=subject["id"],
+            source_event_id=f"account:account_signed_up:{subject['id']}",
+            source_record_type="user",
+            source_record_id=str(subject["id"]),
+            occurred_at=at - timedelta(days=10),
+        )
+        for index in range(3):
+            event_service.record_server_event(
+                event_name="backtest_completed",
+                user_id=subject["id"],
+                source_event_id=f"run:backtest_completed:api-run-{index}",
+                source_record_type="run",
+                source_record_id=f"api-run-{index}",
+                correlation_id=f"api-run-{index}",
+                outcome="succeeded",
+                occurred_at=at - timedelta(minutes=index + 1),
+            )
+        state_store = AnalyticsStateStore(analytics)
+        recalculate_user_snapshot(subject["id"], now=at, store=state_store)
+        query_service = AnalyticsQueryService(store=analytics, user_store=users)
+        monkeypatch.setattr(users_module, "user_store", users)
+        app.dependency_overrides[get_analytics_query_service] = lambda: query_service
+        app.dependency_overrides[get_analytics_service] = lambda: event_service
+        admin_token = users.create_session(admin["id"])
+        outsider_token = users.create_session(outsider["id"])
+        with TestClient(app) as client:
+            yield {
+                "client": client,
+                "analytics": analytics,
+                "event_service": event_service,
+                "query_service": query_service,
+                "admin": admin,
+                "subject": subject,
+                "admin_headers": {"Authorization": f"Bearer {admin_token}"},
+                "outsider_headers": {"Authorization": f"Bearer {outsider_token}"},
+            }
+        app.dependency_overrides.pop(get_analytics_query_service, None)
+        app.dependency_overrides.pop(get_analytics_service, None)
+
+
+def test_non_admin_cannot_query_any_admin_analytics_route(admin_analytics_api):
+    api = admin_analytics_api
+    subject_id = api["subject"]["id"]
+    calls = [
+        ("/api/admin/analytics/overview", {}),
+        ("/api/admin/analytics/users", {}),
+        (f"/api/admin/analytics/users/{subject_id}", {}),
+        (
+            f"/api/admin/analytics/users/{subject_id}/activity",
+            {"section": "runs"},
+        ),
+    ]
+
+    for path, params in calls:
+        response = api["client"].get(
+            path,
+            params=params,
+            headers=api["outsider_headers"],
+        )
+        assert response.status_code == 403, (path, response.text)
+
+
+def test_admin_overview_accepts_documented_filters(admin_analytics_api):
+    api = admin_analytics_api
+    response = api["client"].get(
+        "/api/admin/analytics/overview",
+        params={
+            "from": "2026-08-01",
+            "to": "2026-08-26",
+            "billing_mode": "byok",
+            "provider": "openrouter",
+            "model": "openai/gpt-5.5",
+            "include_internal": "false",
+        },
+        headers=api["admin_headers"],
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["filters"]["billing_mode"] == "byok"
+    assert body["filters"]["provider_id"] == "openrouter"
+    assert body["filters"]["model_id"] == "openai/gpt-5.5"
+
+
+def test_profile_and_activity_reads_record_access_without_body(admin_analytics_api):
+    api = admin_analytics_api
+    subject_id = api["subject"]["id"]
+    profile = api["client"].get(
+        f"/api/admin/analytics/users/{subject_id}",
+        headers=api["admin_headers"],
+    )
+    activity = api["client"].get(
+        f"/api/admin/analytics/users/{subject_id}/activity",
+        params={"section": "runs", "limit": 2},
+        headers=api["admin_headers"],
+    )
+    access = api["analytics"].list_admin_access(subject_id, limit=10)
+
+    assert profile.status_code == 200, profile.text
+    assert activity.status_code == 200, activity.text
+    assert activity.json()["next_cursor"] is not None
+    assert [row["section"] for row in access[:2]] == ["runs", "overview"]
+    assert all("response" not in row for row in access)
+
+
+def test_admin_analytics_rejects_invalid_queries_without_echo(admin_analytics_api):
+    api = admin_analytics_api
+    canary = "synthetic-secret-query-canary"
+    response = api["client"].get(
+        "/api/admin/analytics/overview",
+        params={"provider": f"{canary}!"},
+        headers=api["admin_headers"],
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid Analytics query."}
+    assert canary not in response.text
+
+
+def test_admin_user_list_accepts_documented_filters(admin_analytics_api):
+    api = admin_analytics_api
+    today = datetime.now(timezone.utc).date()
+    response = api["client"].get(
+        "/api/admin/analytics/users",
+        params={
+            "q": "Subject",
+            "status": "active",
+            "last_activity_from": (today - timedelta(days=1)).isoformat(),
+            "last_activity_to": today.isoformat(),
+            "sort": "recent_runs",
+            "order": "desc",
+            "limit": "1",
+            "offset": "0",
+        },
+        headers=api["admin_headers"],
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["total"] == 1
+    assert response.json()["items"][0]["user_id"] == api["subject"]["id"]
+
+
+def test_admin_analytics_maps_not_found_and_cursor_errors_safely(
+    admin_analytics_api,
+):
+    api = admin_analytics_api
+    canary = "synthetic-secret-cursor-canary"
+    missing = api["client"].get(
+        "/api/admin/analytics/users/999999",
+        headers=api["admin_headers"],
+    )
+    invalid_cursor = api["client"].get(
+        f"/api/admin/analytics/users/{api['subject']['id']}/activity",
+        params={"section": "runs", "cursor": f"{canary}!"},
+        headers=api["admin_headers"],
+    )
+
+    assert missing.status_code == 404
+    assert missing.json() == {"detail": "Analytics user was not found."}
+    assert invalid_cursor.status_code == 422
+    assert invalid_cursor.json() == {"detail": "Invalid Analytics query."}
+    assert canary not in invalid_cursor.text
+
+
+def test_admin_analytics_maps_service_and_access_failures_safely(
+    admin_analytics_api,
+    monkeypatch,
+):
+    api = admin_analytics_api
+    canary = "synthetic-secret-storage-canary"
+    monkeypatch.setattr(
+        api["query_service"],
+        "get_overview",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError(canary)),
+    )
+    overview = api["client"].get(
+        "/api/admin/analytics/overview",
+        headers=api["admin_headers"],
+    )
+
+    monkeypatch.setattr(
+        api["event_service"],
+        "record_admin_profile_access",
+        lambda **_kwargs: (_ for _ in ()).throw(RuntimeError(canary)),
+    )
+    profile = api["client"].get(
+        f"/api/admin/analytics/users/{api['subject']['id']}",
+        headers=api["admin_headers"],
+    )
+
+    for response in (overview, profile):
+        assert response.status_code == 503
+        assert response.json() == {
+            "detail": "Analytics is temporarily unavailable."
+        }
+        assert canary not in response.text
