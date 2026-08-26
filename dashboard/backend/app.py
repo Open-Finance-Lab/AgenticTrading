@@ -248,6 +248,20 @@ async def startup_event():
         )
 
     try:
+        from dashboard.backend.domain.analytics.maintenance import (
+            run_analytics_maintenance,
+        )
+        from dashboard.backend.domain.runs.service import register_reaper_sweep
+
+        register_reaper_sweep(run_analytics_maintenance)
+        print("🧹 Analytics maintenance sweep registered with the reaper")
+    except Exception as e:
+        print(
+            "WARNING: analytics.maintenance_registration_failed "
+            f"category={type(e).__name__}"
+        )
+
+    try:
         from dashboard.backend.domain.runs.service import start_reaper
         start_reaper()
         print("🧹 Run reaper started")
