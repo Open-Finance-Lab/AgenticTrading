@@ -126,10 +126,9 @@
       : '';
 
   // The simple-instruction contract (preset key + trading-actions output format)
-  // has a single source of truth in app.js, published on `window`. app.js loads
-  // AFTER this file, so read lazily at call time — every use below is inside an
-  // event-driven function, by which point window.* is populated. The fallbacks
-  // only matter if app.js somehow failed to load (whole app is broken anyway).
+  // has a single source of truth in app.js, published on `window`. Read lazily
+  // at call time so event-driven uses stay decoupled from script evaluation.
+  // The fallbacks only matter if app.js somehow failed to load.
   function simplePresetKey() {
     return (
       (typeof window !== 'undefined' && window.SIMPLE_INSTRUCTION_PRESET_KEY) ||
@@ -1256,6 +1255,7 @@
       view.hidden = false;
       document.body.classList.add('agent-editor-open');
     }
+    window.ATLAnalytics?.enterTransientView('agent_editor');
 
     const playgroundView = document.getElementById('playgroundView');
     if (playgroundView) playgroundView.setAttribute('aria-hidden', 'true');
@@ -1274,6 +1274,7 @@
     hideAiHedgeFundTooltip(activeAiHedgeFundTooltipOption);
     const view = document.getElementById('agentEditorView');
     if (view) view.hidden = true;
+    window.ATLAnalytics?.leaveTransientView();
     document.body.classList.remove('agent-editor-open');
 
     const playgroundView = document.getElementById('playgroundView');
