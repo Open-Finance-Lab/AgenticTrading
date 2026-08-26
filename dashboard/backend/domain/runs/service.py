@@ -45,6 +45,7 @@ from dashboard.backend.domain.runs.protocol import (
     resolve_order_quantity,
 )
 from dashboard.backend.domain.runs.repository import run_store
+from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 
 _runs: Dict[str, "ProtocolRun"] = {}
 _registry_lock = threading.Lock()
@@ -78,6 +79,39 @@ _reaper_lock = threading.Lock()
 # must serialize on the same lock or an agent could race one create per surface
 # past the combined cap.
 _create_lock = threading.Lock()
+
+
+def _analytics_owner_user_id(agent_id: Optional[str]) -> Optional[int]:
+    """Resolve a persisted Agent owner without inventing API-only subjects."""
+
+    if not agent_id:
+        return None
+    try:
+        from dashboard.backend.domain.agents.repository import agent_store
+
+        agent = agent_store.get_agent(agent_id)
+        owner_user_id = agent.get("owner_user_id") if agent else None
+        return int(owner_user_id) if owner_user_id is not None else None
+    except Exception:
+        return None
+
+
+def _emit_run_transition(
+    *,
+    event_name: str,
+    run_id: str,
+    agent_id: Optional[str],
+    error_category: Optional[str] = None,
+) -> None:
+    user_id = _analytics_owner_user_id(agent_id)
+    if user_id is None:
+        return
+    analytics_instrumentation.emit_run_event(
+        event_name=event_name,
+        user_id=user_id,
+        run_id=run_id,
+        error_category=error_category,
+    )
 
 
 def resolve_owner_cap_context(agent: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -383,7 +417,9 @@ def _sync_status(run: "ProtocolRun") -> Dict[str, Any]:
 
     engine_status = session.get_status()  # applies timeout side-effects
     estatus = engine_status.get("status")
+    previous_status = run.status
     run.status = _RUN_STATUS_MAP.get(estatus, run.status)
+    record = run_store.get_run(run.run_id) or {}
 
     if estatus == "completed" and not run.result_run_id and session.run_id:
         run.result_run_id = session.run_id
@@ -392,8 +428,21 @@ def _sync_status(run: "ProtocolRun") -> Dict[str, Any]:
             result_run_id=session.run_id,
             status="completed",
         )
+        if previous_status != "completed":
+            _emit_run_transition(
+                event_name="backtest_completed",
+                run_id=run.run_id,
+                agent_id=record.get("agent_id"),
+            )
     elif estatus == "failed":
         run_store.update_run(run.run_id, status="failed")
+        if previous_status != "failed":
+            _emit_run_transition(
+                event_name="backtest_failed",
+                run_id=run.run_id,
+                agent_id=record.get("agent_id"),
+                error_category="internal_error",
+            )
     return {"engine_status": engine_status, "run_status": run.status}
 
 
@@ -635,6 +684,19 @@ def create_run(
             backtest_id=backtest_id,
             status="running",
         )
+
+        owner_user_id = agent.get("owner_user_id")
+        if owner_user_id is not None:
+            analytics_instrumentation.emit_run_event(
+                event_name="backtest_requested",
+                user_id=int(owner_user_id),
+                run_id=record["run_id"],
+            )
+            analytics_instrumentation.emit_run_event(
+                event_name="backtest_started",
+                user_id=int(owner_user_id),
+                run_id=record["run_id"],
+            )
 
         run = ProtocolRun(record=record, environment=environment)
         with _registry_lock:
