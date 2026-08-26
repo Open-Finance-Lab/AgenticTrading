@@ -92,6 +92,39 @@ def test_signup_login_me_logout_flow(client):
     assert me_after.status_code == 401
 
 
+def test_signup_and_login_emit_authoritative_account_events(client, monkeypatch):
+    from dashboard.backend.domain.analytics import instrumentation
+
+    events = []
+    monkeypatch.setattr(
+        instrumentation,
+        "emit_account_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "analytics@example.com",
+            "display_name": "Analytics",
+            "password": "securepass1",
+        },
+    )
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "analytics@example.com", "password": "securepass1"},
+    )
+
+    assert signup.status_code == 200
+    assert login.status_code == 200
+    assert [event["event_name"] for event in events] == [
+        "account_signed_up",
+        "authenticated_session_started",
+    ]
+    assert all(event["user_id"] == signup.json()["user"]["id"] for event in events)
+    assert "password" not in repr(events)
+
+
 def test_me_requires_auth(client):
     response = client.get("/api/auth/me")
     assert response.status_code == 401

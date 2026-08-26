@@ -16,6 +16,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
 )
+from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 
 from .execution_catalog import (
     ExecutionModelRoute,
@@ -680,7 +681,45 @@ class ModelProviderService:
                 _utcnow_iso() if validation.status == "verified" else None
             ),
         )
-        return UserCredentialPublic.model_validate(created)
+        result = UserCredentialPublic.model_validate(created)
+        analytics_instrumentation.emit_credential_event(
+            event_name="credential_saved",
+            user_id=user_id,
+            credential_id=str(result.credential_id),
+            provider_id=result.provider_id,
+        )
+        if result.status == "verified":
+            analytics_instrumentation.emit_credential_event(
+                event_name="credential_verified",
+                user_id=user_id,
+                credential_id=str(result.credential_id),
+                provider_id=result.provider_id,
+            )
+            if result.is_default:
+                analytics_instrumentation.emit_credential_event(
+                    event_name="credential_defaulted",
+                    user_id=user_id,
+                    credential_id=str(result.credential_id),
+                    provider_id=result.provider_id,
+                    version=result.updated_at,
+                )
+        elif result.status == "invalid":
+            analytics_instrumentation.emit_safe_error_event(
+                user_id=user_id,
+                source_record_type="credential",
+                source_record_id=str(result.credential_id),
+                error_category="credential_invalid",
+                version=result.updated_at,
+            )
+        elif result.status == "verification_unavailable":
+            analytics_instrumentation.emit_safe_error_event(
+                user_id=user_id,
+                source_record_type="credential",
+                source_record_id=str(result.credential_id),
+                error_category="provider_unavailable",
+                version=result.updated_at,
+            )
+        return result
 
     def list_credentials(
         self,
@@ -704,31 +743,67 @@ class ModelProviderService:
         if credential["status"] == "revoked":
             raise CredentialConflictError("revoked credentials cannot be verified")
         provider = self._get_byok_provider(credential["provider_id"])
-        return self._verify_and_update(
+        result = self._verify_and_update(
             user_id=user_id,
             credential=credential,
             provider=provider,
             secret=secret,
             set_default=False,
         )
+        if result.status == "verified":
+            analytics_instrumentation.emit_credential_event(
+                event_name="credential_reverified",
+                user_id=user_id,
+                credential_id=str(result.credential_id),
+                provider_id=result.provider_id,
+                version=result.updated_at,
+            )
+        else:
+            analytics_instrumentation.emit_safe_error_event(
+                user_id=user_id,
+                source_record_type="credential",
+                source_record_id=str(result.credential_id),
+                error_category=(
+                    "credential_invalid"
+                    if result.status == "invalid"
+                    else "provider_unavailable"
+                ),
+                version=result.updated_at,
+            )
+        return result
 
     def set_default_credential(
         self,
         user_id: int,
         credential_id: str,
     ) -> UserCredentialPublic:
-        return UserCredentialPublic.model_validate(
+        result = UserCredentialPublic.model_validate(
             self.store.set_default_user_credential(user_id, credential_id)
         )
+        analytics_instrumentation.emit_credential_event(
+            event_name="credential_defaulted",
+            user_id=user_id,
+            credential_id=str(result.credential_id),
+            provider_id=result.provider_id,
+            version=result.updated_at,
+        )
+        return result
 
     def revoke_credential(
         self,
         user_id: int,
         credential_id: str,
     ) -> UserCredentialPublic:
-        return UserCredentialPublic.model_validate(
+        result = UserCredentialPublic.model_validate(
             self.store.revoke_user_credential(user_id, credential_id)
         )
+        analytics_instrumentation.emit_credential_event(
+            event_name="credential_revoked",
+            user_id=user_id,
+            credential_id=str(result.credential_id),
+            provider_id=result.provider_id,
+        )
+        return result
 
     def _get_byok_provider(self, provider_id: str) -> dict[str, Any]:
         provider = self.store.get_provider(provider_id)
