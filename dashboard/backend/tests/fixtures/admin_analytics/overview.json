@@ -1,0 +1,67 @@
+{
+  "active_users_7d": 42,
+  "first_success_conversion": 0.625,
+  "backtest_success_rate": 0.8,
+  "repeat_run_rate": 0.55,
+  "platform_model_cost_usd": 12.34,
+  "completed_runs": 40,
+  "failed_runs": 10,
+  "input_tokens": 182500,
+  "output_tokens": 44100,
+  "daily_active_users": {
+    "2026-08-25": 31,
+    "2026-08-26": 36
+  },
+  "daily_completed_runs": {
+    "2026-08-25": 18,
+    "2026-08-26": 22
+  },
+  "activation_funnel": {
+    "account_signed_up": 80,
+    "credential_verified": 67,
+    "agent_created": 59,
+    "backtest_completed": 50
+  },
+  "user_state_counts": {
+    "blocked": 2,
+    "needs_attention": 3,
+    "dormant": 8,
+    "onboarding": 11,
+    "active": 37
+  },
+  "top_failure_categories": [
+    {"error_category": "credential_invalid", "affected_users": 4},
+    {"error_category": "provider_timeout", "affected_users": 2}
+  ],
+  "users_needing_attention": [
+    {
+      "user_id": 101,
+      "display_name": "Synthetic Ada",
+      "email": "ada.synthetic@example.test",
+      "joined_at": "2026-07-01T09:00:00Z",
+      "status": "needs_attention",
+      "reason_code": "three_failed_runs_24h",
+      "human_readable_reason": "Three consecutive runs failed in the last 24 hours.",
+      "last_meaningful_activity": "2026-08-26T11:20:00Z",
+      "recent_runs": 6,
+      "recent_failures": 3,
+      "profile_path": "/admin/analytics/users/101"
+    }
+  ],
+  "last_updated": "2026-08-26T12:34:56Z",
+  "filters": {
+    "start": "2026-07-28T00:00:00Z",
+    "end": "2026-08-27T00:00:00Z",
+    "billing_mode": null,
+    "provider_id": null,
+    "model_id": null,
+    "include_internal": false
+  },
+  "availability": {
+    "snapshot": {"available": true, "error_code": null},
+    "growth": {"available": true, "error_code": null},
+    "funnel": {"available": true, "error_code": null},
+    "friction": {"available": true, "error_code": null},
+    "attention": {"available": true, "error_code": null}
+  }
+}
