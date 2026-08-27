@@ -1413,11 +1413,12 @@ function renderAgentCards(grid, agents, categoryKey) {
     const card = document.createElement('div');
     card.className = `section-card agent-card agent-card--status agent-card--${statusBadge.key}${isBuiltin ? ' agent-card-builtin' : ''}`;
     card.setAttribute('data-agent-id', agent.agent_id);
-    const model = escapeHtml(formatAgentModelLabel(agent.model_name));
-    const type = escapeHtml(agentTypeLabel(agent));
+    const model = formatAgentModelLabel(agent.model_name);
+    const type = agentTypeLabel(agent);
     // Under the All chip the Stocks shelf mixes markets, so the card has to
     // say which. Omitted rather than guessed when agentMarketKey returns ''.
     const market = MARKET_LABELS[agentMarketKey(agent)];
+    const submeta = `${model} · ${type}${market ? ` · ${market}` : ''}`;
     const running = getAgentBacktestRunning(agent.agent_id);
     if (running) card.classList.add('agent-card--running');
 
@@ -1427,7 +1428,7 @@ function renderAgentCards(grid, agents, categoryKey) {
           ${agentRobotIcon()}
           <div class="agent-card-identity-text">
             <h3 class="agent-name">${escapeHtml(agent.name)}${agent.agent_id === defaultId ? ' <span class="agent-default-badge">Default</span>' : ''}</h3>
-            <p class="agent-card-submeta">${model} · ${type}${market ? ` · ${escapeHtml(market)}` : ''}</p>
+            <p class="agent-card-submeta" title="${escapeHtml(submeta)}">${escapeHtml(submeta)}</p>
           </div>
         </div>
         <span class="status-badge ${statusBadge.className}"><span class="status-badge-dot" aria-hidden="true"></span>${statusBadge.label}</span>
@@ -2350,7 +2351,7 @@ function renderMarketplaceGrid() {
           ${agentRobotIcon()}
           <div class="agent-card-identity-text">
             <h3 class="agent-name">${escapeHtml(template.name)}</h3>
-            <p class="agent-card-submeta">${escapeHtml(modelLabel)} · ${escapeHtml(categoryLabel)}</p>
+            <p class="agent-card-submeta" title="${escapeHtml(`${modelLabel} · ${categoryLabel}`)}">${escapeHtml(modelLabel)} · ${escapeHtml(categoryLabel)}</p>
           </div>
         </div>
         <span class="marketplace-mode-chip">${escapeHtml(modeLabel)}</span>

@@ -148,3 +148,51 @@ def test_running_animation_respects_reduced_motion():
     css = (_FRONTEND / "styles.css").read_text(encoding="utf-8")
     start = css.index(".agent-card-running-dot")
     assert "prefers-reduced-motion" in css[start:]
+
+
+def _css_rule(css: str, selector: str) -> str:
+    start = css.index(selector)
+    open_brace = css.index("{", start)
+    depth = 0
+    i = open_brace
+    while i < len(css):
+        if css[i] == "{":
+            depth += 1
+        elif css[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return css[start : i + 1]
+        i += 1
+    raise AssertionError(f"unclosed rule for {selector}")
+
+
+def test_submeta_stays_one_line_so_cards_in_a_row_align():
+    """A wrapping model line used to stagger Paper Trading / Configure
+    across cards in the same grid row (high zoom, long names like
+    'Nemotron 3 Nano 30b A3b · Hosted AI · U.S.').
+
+    nowrap+ellipsis is not enough on its own: a grid item's min-width:auto
+    lets the nowrap string grow the card, and a wrap that still happens
+    (cached CSS, high zoom) must not change the box height.
+    """
+    css = (_FRONTEND / "styles.css").read_text(encoding="utf-8")
+    card = _css_rule(css, ".agent-card,\n.participant-card {")
+    assert "min-width: 0" in card
+    identity = _css_rule(css, ".agent-card-identity-text {")
+    assert "overflow: hidden" in identity
+    rule = _css_rule(css, ".agent-card-submeta {")
+    assert "white-space: nowrap" in rule
+    assert "text-overflow: ellipsis" in rule
+    assert "height: 1.35em" in rule
+    assert "max-width: 100%" in rule
+    assert "overflow-wrap: anywhere" not in rule
+    placeholder = _css_rule(css, ".agent-card--placeholder .agent-card-submeta {")
+    assert "white-space: normal" in placeholder
+    assert "height: auto" in placeholder
+
+
+def test_agent_card_submeta_exposes_full_line_on_hover():
+    """Ellipsis hides the tail; title keeps the full model · type · market."""
+    render = _extract_function(_APP_JS, "renderAgentCards")
+    assert 'class="agent-card-submeta" title="' in render
+    assert "overflow-wrap: anywhere" not in render

@@ -7723,6 +7723,10 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     display: flex;
     flex-direction: column;
     gap: 10px;
+    /* Grid items default to min-width: auto, so a long nowrap submeta
+       ("Nemotron 3 Nano 30b A3b · Hosted AI · U.S.") would grow the card
+       instead of ellipsizing. 0 lets the track width win. */
+    min-width: 0;
 }
 
 /* My Agents loading skeletons — shipped in app.html so the grid shows card
@@ -8494,6 +8498,13 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     align-items: flex-start;
     justify-content: space-between;
     gap: 10px;
+    min-width: 0;
+}
+
+.agent-card-top > .status-badge,
+.agent-card-top > .marketplace-mode-chip {
+    flex-shrink: 0;
+    white-space: nowrap;
 }
 
 .agent-card-identity {
@@ -8501,6 +8512,7 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     align-items: center;
     gap: 12px;
     min-width: 0;
+    flex: 1;
 }
 
 .agent-card-icon {
@@ -8523,6 +8535,8 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
 
 .agent-card-identity-text {
     min-width: 0;
+    flex: 1;
+    overflow: hidden;
 }
 
 .agent-card--status .agent-name {
@@ -8530,14 +8544,36 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     font-size: 16px;
     font-weight: 700;
     line-height: 1.25;
-    overflow-wrap: anywhere;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .agent-card-submeta {
     margin: 3px 0 0;
     font-size: 13px;
+    line-height: 1.35;
     color: var(--text-secondary);
-    overflow-wrap: anywhere;
+    /* One line, always: wrapping "Claude Haiku 4.5 · Hosted AI · U.S."
+       used to push Paper Trading / Configure down on some cards in a
+       row and not others, so the grid looked staggered at high zoom.
+       Height pins the box to a single line-height so a wrap (cached CSS,
+       min-width:auto on a grid item, high zoom) cannot change card layout;
+       the full string stays on `title` for hover. */
+    display: block;
+    max-width: 100%;
+    min-width: 0;
+    height: 1.35em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agent-card--placeholder .agent-card-submeta {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: unset;
+    height: auto;
 }
 
 .agent-card-hero {
