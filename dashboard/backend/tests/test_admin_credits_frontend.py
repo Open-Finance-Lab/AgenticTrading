@@ -45,7 +45,8 @@ def test_admin_grant_console_is_integrated_into_admin_users_panel():
     nav_start = admin_markup.index('<nav id="adminTabs"')
     nav_end = admin_markup.index('</nav>', nav_start)
     nav_markup = admin_markup[nav_start:nav_end]
-    assert nav_markup.count('data-admin-tab=') == 3
+    assert nav_markup.count('data-admin-tab=') == 4
+    assert nav_markup.index('data-admin-tab="analytics"') < nav_markup.index('data-admin-tab="users"')
     assert nav_markup.index('data-admin-tab="users"') < nav_markup.index('data-admin-tab="providers"')
     assert nav_markup.index('data-admin-tab="providers"') < nav_markup.index('data-admin-tab="activity"')
     assert admin_markup.index('id="adminStats"') < admin_markup.index('id="adminCreditsSection"')
@@ -90,24 +91,25 @@ def test_admin_grant_console_has_responsive_operation_and_audit_styles():
     assert "@media (max-width: 600px)" in STYLES
 
 
-def test_admin_tabs_default_to_users_and_are_url_backed():
-    assert "DEFAULT_TAB = 'users'" in ADMIN_TABS_JS
+def test_admin_tabs_default_to_analytics_and_are_url_backed():
+    assert "DEFAULT_TAB = 'analytics'" in ADMIN_TABS_JS
     assert "adminTab" in ADMIN_TABS_JS
     assert "aria-selected" in ADMIN_TABS_JS
 
 
-def test_admin_tabs_have_three_tabs_in_usage_order_and_legacy_alias():
+def test_admin_tabs_have_four_tabs_in_usage_order_and_legacy_alias():
     admin_start = APP_HTML.index('id="adminView"')
     nav_start = APP_HTML.index('<nav id="adminTabs"', admin_start)
     nav_end = APP_HTML.index('</nav>', nav_start)
     nav_markup = APP_HTML[nav_start:nav_end]
-    assert nav_markup.count('data-admin-tab=') == 3
+    assert nav_markup.count('data-admin-tab=') == 4
+    assert nav_markup.index('data-admin-tab="analytics"') < nav_markup.index('data-admin-tab="users"')
     assert nav_markup.index('data-admin-tab="users"') < nav_markup.index('data-admin-tab="providers"')
     assert nav_markup.index('data-admin-tab="providers"') < nav_markup.index('data-admin-tab="activity"')
-    assert "value === 'grant-pool' ? DEFAULT_TAB : value" in ADMIN_TABS_JS
+    assert "value === 'grant-pool' ? 'users' : value" in ADMIN_TABS_JS
     assert "setTab(requested || DEFAULT_TAB);" in ADMIN_TABS_JS
 
 
 def test_admin_visual_assets_use_fresh_cache_versions():
     assert 'js/admin-credits.js?v=5' in APP_HTML
-    assert 'js/admin-tabs.js?v=2' in APP_HTML
+    assert 'js/admin-tabs.js?v=3' in APP_HTML
