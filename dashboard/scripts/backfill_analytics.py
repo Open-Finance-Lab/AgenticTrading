@@ -63,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     except ValueError as exc:
         _parser().error(str(exc))
+        return 2
     safe_counts = report.model_dump(exclude={"source_event_ids"})
     print(json.dumps(safe_counts, sort_keys=True, separators=(",", ":")))
     return 0
