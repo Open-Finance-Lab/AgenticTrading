@@ -3,6 +3,12 @@
 import json
 from pathlib import Path
 
+from dashboard.backend.domain.analytics.query_service import (
+    AnalyticsActivityPage,
+    AnalyticsOverview,
+    AnalyticsUserProfile,
+    PaginatedUsers,
+)
 from dashboard.backend.tests._frontend_source import APP_HTML, APP_JS, STYLES
 
 
@@ -59,6 +65,20 @@ def test_fixtures_match_committed_pr2_shapes():
     assert "next_cursor" in load_fixture("activity_timeline.json")
 
 
+def test_fixtures_validate_against_committed_pr2_models():
+    AnalyticsOverview.model_validate(load_fixture("overview.json"))
+    AnalyticsOverview.model_validate(load_fixture("overview_partial_error.json"))
+    PaginatedUsers.model_validate(load_fixture("users.json"))
+    AnalyticsUserProfile.model_validate(load_fixture("user_detail.json"))
+    for name in (
+        "activity_timeline.json",
+        "activity_runs.json",
+        "activity_usage.json",
+        "activity_sessions.json",
+    ):
+        AnalyticsActivityPage.model_validate(load_fixture(name))
+
+
 def test_byok_fixture_never_reports_atl_cost():
     payload = load_fixture("activity_usage.json")
     byok = next(item for item in payload["items"] if item["billing_mode"] == "byok")
@@ -112,8 +132,8 @@ def test_client_uses_exact_pr2_endpoints_and_query_names():
     ):
         assert query_name in source
     assert "start_date" not in source
-    assert "provider_id" not in source
-    assert "model_id" not in source
+    assert "params.set('provider_id'" not in source
+    assert "params.set('model_id'" not in source
 
 
 def test_client_owns_url_state_partial_errors_and_independent_sections():
