@@ -1,0 +1,27 @@
+{
+  "items": [
+    {
+      "item_type": "run",
+      "event_id": "evt_synthetic_run_1",
+      "event_name": "backtest_completed",
+      "occurred_at": "2026-08-26T11:02:00Z",
+      "outcome": "succeeded",
+      "error_category": null,
+      "page_view": null,
+      "provider_id": "openrouter",
+      "model_id": "openai/gpt-5.5",
+      "billing_mode": "platform_credits",
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_micro_usd": null,
+      "amount_micro": null,
+      "bucket": null,
+      "session_event_count": null,
+      "visible_ms": null,
+      "country_code": null,
+      "device_category": null,
+      "browser_family": null
+    }
+  ],
+  "next_cursor": null
+}
