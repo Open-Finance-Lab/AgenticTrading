@@ -64,7 +64,10 @@ def test_rate_limit_returns_429_envelope_with_retry_after():
     key, sid, agent_id = _agent("rl-agent")
     _register_run("run_rl_http", sid)
     # Drain the bucket so the next call is denied.
-    rate_limit.limiter._buckets[agent_id] = (0.0, time.monotonic())
+    # Keep the bucket empty for the whole request even on a slow CI runner;
+    # with 120 tokens/minute, a real-time timestamp could refill one token
+    # during TestClient startup and make this assertion flaky.
+    rate_limit.limiter._buckets[agent_id] = (0.0, time.monotonic() + 60.0)
     r = client.get("/api/v2/runs/run_rl_http/context", headers={"X-API-Key": key})
     assert r.status_code == 429
     assert r.json()["error"]["code"] == "rate_limited"

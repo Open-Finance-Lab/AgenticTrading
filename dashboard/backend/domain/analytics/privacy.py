@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from fastapi import Request
 
-from dashboard.backend.api.rate_limit import client_ip
+from dashboard.backend.infrastructure.request_metadata import client_ip
 
 from .models import RequestAnalyticsContext
 

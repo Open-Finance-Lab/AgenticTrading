@@ -34,6 +34,11 @@ from typing import Callable, Deque, Dict
 
 from fastapi import HTTPException, Request
 
+from dashboard.backend.infrastructure.request_metadata import (
+    _MAX_IP_KEY_LEN,
+    client_ip,
+)
+
 
 class FixedWindowRateLimiter:
     """Sliding-window counter: at most ``max_events`` per ``window_seconds`` per key.
@@ -198,39 +203,6 @@ def rate_limited_error(
         detail=detail,
         headers={"Retry-After": str(limiter.retry_after_seconds(key))},
     )
-
-
-# Longest textual IPv6 form ("ffff:...:255.255.255.255%eth0" territory). The
-# forwarded header is attacker-controlled and unbounded, and an untruncated
-# value would let one client mint arbitrarily large dict keys.
-_MAX_IP_KEY_LEN = 64
-
-
-def client_ip(request: Request) -> str:
-    """Best-effort originating client IP.
-
-    Reads the left-most ``X-Forwarded-For`` entry before falling back to the
-    socket peer, because behind a PaaS router the peer is *the router* — the
-    same value for every visitor on earth, which collapses a per-client budget
-    into one shared site-wide budget.
-
-    uvicorn can do this itself, but only when the peer appears in
-    ``--forwarded-allow-ips``, which ``uvicorn.Config`` resolves to
-    ``os.environ["FORWARDED_ALLOW_IPS"]`` or ``"127.0.0.1"``. Prod sets that to
-    ``*`` so uvicorn now trusts Render's router too, but this module doesn't
-    rely on it: a launch-config var set in a dashboard nobody here can see is
-    not something to depend on, and dev/test never set it at all. Doing it
-    here keeps the behaviour independent of how the process happens to be
-    launched.
-
-    The header is trivially spoofable, so this is a granularity fix, not a
-    security control — see the module docstring.
-    """
-    for part in request.headers.get("x-forwarded-for", "").split(","):
-        candidate = part.strip()
-        if candidate:
-            return candidate[:_MAX_IP_KEY_LEN]
-    return request.client.host if request.client else "unknown"
 
 
 def client_key(request: Request) -> str:
