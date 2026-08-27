@@ -1,0 +1,46 @@
+{
+  "active_users_7d": 42,
+  "first_success_conversion": 0.625,
+  "backtest_success_rate": null,
+  "repeat_run_rate": 0.55,
+  "platform_model_cost_usd": null,
+  "completed_runs": null,
+  "failed_runs": null,
+  "input_tokens": null,
+  "output_tokens": null,
+  "daily_active_users": {},
+  "daily_completed_runs": {},
+  "activation_funnel": {
+    "account_signed_up": 80,
+    "credential_verified": 67,
+    "agent_created": 59,
+    "backtest_completed": 50
+  },
+  "user_state_counts": {
+    "blocked": 2,
+    "needs_attention": 3,
+    "dormant": 8,
+    "onboarding": 11,
+    "active": 37
+  },
+  "top_failure_categories": [
+    {"error_category": "credential_invalid", "affected_users": 4}
+  ],
+  "users_needing_attention": [],
+  "last_updated": "2026-08-26T12:34:56Z",
+  "filters": {
+    "start": "2026-07-28T00:00:00Z",
+    "end": "2026-08-27T00:00:00Z",
+    "billing_mode": null,
+    "provider_id": null,
+    "model_id": null,
+    "include_internal": false
+  },
+  "availability": {
+    "snapshot": {"available": true, "error_code": null},
+    "growth": {"available": false, "error_code": "temporarily_unavailable"},
+    "funnel": {"available": true, "error_code": null},
+    "friction": {"available": true, "error_code": null},
+    "attention": {"available": true, "error_code": null}
+  }
+}

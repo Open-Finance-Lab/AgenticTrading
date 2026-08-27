@@ -1,0 +1,56 @@
+{
+  "user_id": 101,
+  "display_name": "Synthetic Ada",
+  "email": "ada.synthetic@example.test",
+  "joined_at": "2026-07-01T09:00:00Z",
+  "last_meaningful_activity": "2026-08-26T11:20:00Z",
+  "state": {
+    "status": "needs_attention",
+    "reason_code": "three_failed_runs_24h",
+    "human_readable_reason": "Three consecutive runs failed in the last 24 hours.",
+    "evidence_event_ids": ["evt_synthetic_001", "evt_synthetic_002"],
+    "calculated_at": "2026-08-26T12:33:00Z"
+  },
+  "primary_billing_lane": "platform_credits",
+  "default_provider": "openrouter",
+  "country_code": "US",
+  "device_category": "desktop",
+  "browser_family": "Chrome",
+  "activation_milestones": {
+    "account_signed_up": "2026-07-01T09:00:00Z",
+    "credential_verified": "2026-07-01T10:00:00Z",
+    "agent_created": "2026-07-01T11:00:00Z",
+    "backtest_completed": "2026-07-02T10:00:00Z"
+  },
+  "recent_footprint": [
+    {
+      "event_id": "evt_synthetic_004",
+      "event_name": "page_viewed",
+      "occurred_at": "2026-08-26T11:20:00Z",
+      "page_view": "agents",
+      "provider_id": null,
+      "model_id": null,
+      "billing_mode": null,
+      "outcome": null,
+      "error_category": null
+    },
+    {
+      "event_id": "evt_synthetic_003",
+      "event_name": "backtest_failed",
+      "occurred_at": "2026-08-26T11:00:00Z",
+      "page_view": null,
+      "provider_id": "openrouter",
+      "model_id": "openai/gpt-5.5",
+      "billing_mode": "platform_credits",
+      "outcome": "failed",
+      "error_category": "provider_timeout"
+    }
+  ],
+  "run_summary": {"requested": 12, "completed": 8, "failed": 3, "cancelled": 1},
+  "billing_lane_mix": {"platform_credits": 7, "byok": 5},
+  "input_tokens": 12000,
+  "output_tokens": 3000,
+  "platform_model_cost_usd": 4.25,
+  "credits_debited_micro": 4250000,
+  "top_product_page": "agents"
+}
