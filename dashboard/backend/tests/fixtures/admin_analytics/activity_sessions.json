@@ -1,0 +1,49 @@
+{
+  "items": [
+    {
+      "item_type": "session",
+      "event_id": null,
+      "event_name": "session",
+      "occurred_at": "2026-08-26T10:30:00Z",
+      "outcome": null,
+      "error_category": null,
+      "page_view": null,
+      "provider_id": null,
+      "model_id": null,
+      "billing_mode": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_micro_usd": null,
+      "amount_micro": null,
+      "bucket": null,
+      "session_event_count": 9,
+      "visible_ms": 2100000,
+      "country_code": "US",
+      "device_category": "desktop",
+      "browser_family": "Chrome"
+    },
+    {
+      "item_type": "session",
+      "event_id": null,
+      "event_name": "session",
+      "occurred_at": "2026-08-25T08:00:00Z",
+      "outcome": null,
+      "error_category": null,
+      "page_view": null,
+      "provider_id": null,
+      "model_id": null,
+      "billing_mode": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "cost_micro_usd": null,
+      "amount_micro": null,
+      "bucket": null,
+      "session_event_count": 4,
+      "visible_ms": 480000,
+      "country_code": null,
+      "device_category": null,
+      "browser_family": null
+    }
+  ],
+  "next_cursor": "synthetic-session-cursor"
+}

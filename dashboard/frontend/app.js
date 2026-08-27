@@ -4050,6 +4050,10 @@ function updateAuthUI() {
     window.AdminCredits.syncAuth(user);
   }
 
+  if (window.AdminAnalytics) {
+    window.AdminAnalytics.syncAuth(user);
+  }
+
   if (typeof window.refreshHomeModules === 'function') {
     window.refreshHomeModules();
   }
@@ -4391,6 +4395,9 @@ function initAuthUI(options = {}) {
   document.getElementById('adminRefreshBtn')?.addEventListener('click', () => {
     loadAdminStats();
     loadAdminUsers();
+    if (window.AdminAnalytics) {
+      window.AdminAnalytics.refresh();
+    }
     if (window.AdminModelProviders) {
       window.AdminModelProviders.onEnter();
     }
@@ -8831,6 +8838,12 @@ function navigateToPage(page, options = {}) {
             // pager click, which only changes the user page.
             loadAdminStats();
             loadAdminUsers();
+            if (window.AdminTabs) {
+                window.AdminTabs.onEnter();
+            }
+            if (window.AdminAnalytics) {
+                window.AdminAnalytics.onEnter();
+            }
             if (window.AdminModelProviders) {
                 window.AdminModelProviders.onEnter();
             }

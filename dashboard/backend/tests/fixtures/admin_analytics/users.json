@@ -1,0 +1,33 @@
+{
+  "items": [
+    {
+      "user_id": 101,
+      "display_name": "Synthetic Ada",
+      "email": "ada.synthetic@example.test",
+      "joined_at": "2026-07-01T09:00:00Z",
+      "status": "needs_attention",
+      "reason_code": "three_failed_runs_24h",
+      "human_readable_reason": "Three consecutive runs failed in the last 24 hours.",
+      "last_meaningful_activity": "2026-08-26T11:20:00Z",
+      "recent_runs": 6,
+      "recent_failures": 3,
+      "profile_path": "/admin/analytics/users/101"
+    },
+    {
+      "user_id": 102,
+      "display_name": "<Synthetic & Grace>",
+      "email": "grace.synthetic@example.test",
+      "joined_at": "2026-08-12T15:30:00Z",
+      "status": "blocked",
+      "reason_code": "credential_invalid",
+      "human_readable_reason": "The default provider credential could not be verified.",
+      "last_meaningful_activity": null,
+      "recent_runs": 2,
+      "recent_failures": 2,
+      "profile_path": "/admin/analytics/users/102"
+    }
+  ],
+  "total": 2,
+  "limit": 25,
+  "offset": 0
+}
