@@ -36,7 +36,9 @@ from dashboard.backend.domain.runs.service import (
     check_owner_active_run_cap,
     owner_cap_message,
     resolve_owner_cap_context,
+    _analytics_owner_user_id,
 )
+from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 # Late-bound module reference (run_repo.run_store) so tests that swap the
 # run_store singleton cover this module too.
 from dashboard.backend.domain.runs import repository as run_repo
@@ -128,6 +130,18 @@ def _archive_run(run_id: str, entry: Dict[str, Any], backend: Any) -> None:
         # Keep the backend live so the next sweep retries.
         print(f"⚠️ v2 archive: row update failed for {run_id}, retrying next sweep: {exc}")
         return
+    owner_user_id = _analytics_owner_user_id(entry.get("agent_id"))
+    if owner_user_id is not None:
+        event_name = {
+            "completed": "backtest_completed",
+            "closed": "backtest_cancelled",
+        }.get(status, "backtest_failed")
+        analytics_instrumentation.emit_run_event(
+            event_name=event_name,
+            user_id=owner_user_id,
+            run_id=run_id,
+            error_category=("internal_error" if event_name == "backtest_failed" else None),
+        )
     archived = ArchivedBacktestBackend(
         run_id=run_id,
         session_id=entry["session_id"],
@@ -412,13 +426,33 @@ def create_run(body: CreateRunBody, response: Response,
             backtest_id=None,
             status="loading",
         )
+        owner_user_id = agent.get("owner_user_id")
+        if owner_user_id is not None:
+            analytics_instrumentation.emit_run_event(
+                event_name="backtest_requested",
+                user_id=int(owner_user_id),
+                run_id=run_id,
+            )
         try:
             backend.start_background_load()
             register_run(run_id, backend, agent["session_id"], agent["agent_id"])
+            if owner_user_id is not None:
+                analytics_instrumentation.emit_run_event(
+                    event_name="backtest_started",
+                    user_id=int(owner_user_id),
+                    run_id=run_id,
+                )
         except Exception:
             # Never leak an active-looking row for a run that never started.
             try:
                 run_repo.run_store.update_run(run_id, status="failed")
+                if owner_user_id is not None:
+                    analytics_instrumentation.emit_run_event(
+                        event_name="backtest_failed",
+                        user_id=int(owner_user_id),
+                        run_id=run_id,
+                        error_category="internal_error",
+                    )
             except Exception:
                 pass
             raise
@@ -489,6 +523,22 @@ def cancel_run(run_id: str, agent: dict = Depends(require_scope("runs:write"))):
         # reads "completed" and that is what lands — never a downgrade.
         try:
             run_repo.run_store.update_run(run_id, status=status)
+            owner_user_id = agent.get("owner_user_id")
+            if owner_user_id is not None:
+                analytics_instrumentation.emit_run_event(
+                    event_name=(
+                        "backtest_completed"
+                        if status == "completed"
+                        else "backtest_cancelled"
+                        if status == "closed"
+                        else "backtest_failed"
+                    ),
+                    user_id=int(owner_user_id),
+                    run_id=run_id,
+                    error_category=(
+                        "internal_error" if status not in {"completed", "closed"} else None
+                    ),
+                )
         except Exception:
             pass  # best-effort; the sweep reconciles
     return {"run_id": run_id, "status": status}

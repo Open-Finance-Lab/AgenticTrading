@@ -235,6 +235,33 @@ async def startup_event():
         print(f"⚠️ legacy session sweep registration error: {e}")
 
     try:
+        from dashboard.backend.domain.analytics.retention import (
+            analytics_retention_coordinator,
+        )
+        from dashboard.backend.domain.runs.service import register_reaper_sweep
+        register_reaper_sweep(analytics_retention_coordinator.run_if_due)
+        print("🧹 Analytics retention sweep registered with the reaper")
+    except Exception as e:
+        print(
+            "WARNING: analytics.retention_registration_failed "
+            f"category={type(e).__name__}"
+        )
+
+    try:
+        from dashboard.backend.domain.analytics.maintenance import (
+            run_analytics_maintenance,
+        )
+        from dashboard.backend.domain.runs.service import register_reaper_sweep
+
+        register_reaper_sweep(run_analytics_maintenance)
+        print("🧹 Analytics maintenance sweep registered with the reaper")
+    except Exception as e:
+        print(
+            "WARNING: analytics.maintenance_registration_failed "
+            f"category={type(e).__name__}"
+        )
+
+    try:
         from dashboard.backend.domain.runs.service import start_reaper
         start_reaper()
         print("🧹 Run reaper started")

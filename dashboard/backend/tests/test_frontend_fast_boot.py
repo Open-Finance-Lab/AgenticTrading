@@ -191,6 +191,7 @@ def test_cache_busters_bumped():
     # "fixed" by loosening it. That collision has already cost this repo one
     # round of follow-ups (#347/#348).
     assert "app.js?v=116" in APP_HTML
+    assert "js/agent-editor.js?v=28" in APP_HTML
     assert "styles.css?v=125" in APP_HTML
     assert "js/leaderboard.js?v=32" in APP_HTML
     assert "home-page.js?v=50" in APP_HTML

@@ -76,6 +76,7 @@ from dashboard.backend.domain.model_providers.service import (
     CredentialResolutionError,
     get_model_provider_service,
 )
+from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.api.rate_limit import FixedWindowRateLimiter, client_key
 from dashboard.backend.domain.agents.service import agent_service
@@ -659,6 +660,13 @@ def _update_slot(live_run_id: str, **fields: Any) -> None:
             _mirror_slot_to_legacy(slot)
 
 
+def _slot_analytics_user_id(live_run_id: str) -> Optional[int]:
+    with _backtest_slots_lock:
+        slot = _active_slots.get(live_run_id) or _recent_slots.get(live_run_id)
+        user_id = slot.get("user_id") if slot else None
+    return int(user_id) if user_id is not None else None
+
+
 def _finalize_slot(live_run_id: str, *, error: Optional[str], runs_count: int) -> None:
     with _backtest_slots_lock:
         slot = _active_slots.pop(live_run_id, None)
@@ -685,6 +693,15 @@ def _finalize_slot(live_run_id: str, *, error: Optional[str], runs_count: int) -
             _mirror_slot_to_legacy(slot)
             backtest_status["progress_file"] = None
             backtest_status["started_at"] = None
+    user_id = slot.get("user_id")
+    if user_id is not None:
+        succeeded = error is None and runs_count > 0
+        analytics_instrumentation.emit_run_event(
+            event_name=("backtest_completed" if succeeded else "backtest_failed"),
+            user_id=int(user_id),
+            run_id=live_run_id,
+            error_category=(None if succeeded else "internal_error"),
+        )
 
 
 def _release_slot(live_run_id: str) -> None:
@@ -922,6 +939,13 @@ def run_backtest_background(
             progress_file=progress_file,
             session_id=session_id,
         )
+        analytics_user_id = _slot_analytics_user_id(resolved_live_run_id)
+        if analytics_user_id is not None:
+            analytics_instrumentation.emit_run_event(
+                event_name="backtest_started",
+                user_id=analytics_user_id,
+                run_id=resolved_live_run_id,
+            )
         # Legacy mirror for code paths that still read the globals directly.
         backtest_session_id = session_id
 
@@ -1890,6 +1914,18 @@ def run_backtest_endpoint(
             "error": refusal,
         }
 
+    if user_id is not None:
+        analytics_instrumentation.emit_run_event(
+            event_name="backtest_requested",
+            user_id=int(user_id),
+            run_id=live_run_id,
+        )
+        analytics_instrumentation.emit_run_event(
+            event_name="backtest_queued",
+            user_id=int(user_id),
+            run_id=live_run_id,
+        )
+
     # Start backtest in background thread
     print(f"🧵 Starting background thread for backtest", flush=True)
     # Keyword args, not positional: this call passes 14 of them and universe /
@@ -1926,6 +1962,13 @@ def run_backtest_endpoint(
         # unwind: leaving it held would burn one of the owner's concurrent
         # slots, and one of the server's, for the life of the process.
         _release_slot(live_run_id)
+        if user_id is not None:
+            analytics_instrumentation.emit_run_event(
+                event_name="backtest_failed",
+                user_id=int(user_id),
+                run_id=live_run_id,
+                error_category="internal_error",
+            )
         raise
 
     response = {

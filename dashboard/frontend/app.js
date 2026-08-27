@@ -214,7 +214,7 @@ const SIMPLE_INSTRUCTION_PRESET_KEY = 'simple_instruction';
 const SIMPLE_INSTRUCTION_OUTPUT_FORMAT =
   'JSON: { "orders": [{ "symbol": "...", "side": "buy|sell|hold", "qty": number, "order_type": "market|limit", "limit_price": number|null, "reason": "..." }] }';
 // Single source of truth for the Simple-mode trading-actions contract. Published
-// on `window` so agent-editor.js (which loads BEFORE this file) reads the exact
+// on `window` so agent-editor.js (which loads after this file) reads the exact
 // same preset key + output format at call time instead of keeping its own copy.
 window.SIMPLE_INSTRUCTION_PRESET_KEY = SIMPLE_INSTRUCTION_PRESET_KEY;
 window.SIMPLE_INSTRUCTION_OUTPUT_FORMAT = SIMPLE_INSTRUCTION_OUTPUT_FORMAT;
@@ -8847,6 +8847,7 @@ function navigateToPage(page, options = {}) {
 
     clearNavBootState();
     persistNavigation();
+    window.ATLAnalytics?.recordNavigation(page, { playgroundTab, competitionTab });
 
     if (historyMode === 'none') return;
     const nextState = getNavigationState();
@@ -8864,6 +8865,12 @@ function switchPlaygroundTab(tab) {
     // history — syncNavigationHistory early-returns when the URL and state are
     // already the current entry, which is exactly this case.
     showPlaygroundPanel(tab);
+    // showPlaygroundPanel can redirect a retired tab to Community. Only record
+    // the Playground view after the panel has updated and that redirect did not
+    // occur, so heartbeats and visibility events keep the correct page_view.
+    if (currentPage === 'playground') {
+        window.ATLAnalytics?.recordNavigation('playground', { playgroundTab });
+    }
     syncNavigationHistory({ replace: false });
 }
 
