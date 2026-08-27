@@ -15,6 +15,7 @@ exactly like v1 runs do:
    a second worker's live runs are no longer collateral damage.
 """
 
+import inspect
 import sqlite3
 import uuid
 
@@ -22,6 +23,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import dashboard.backend.api.v2.runs as runs_mod
+import dashboard.backend.app as app_module
 import dashboard.backend.domain.runs.repository as run_store_module
 import dashboard.backend.domain.runs.service as run_service
 from dashboard.backend.app import app
@@ -181,14 +183,20 @@ def test_reap_runs_invokes_registered_sweeps(monkeypatch):
     assert calls == ["swept"]
 
 
-def test_reap_runs_survives_a_raising_sweep(monkeypatch):
+def test_startup_registers_analytics_retention_sweep_once():
+    source = inspect.getsource(app_module.startup_event)
+    call = "register_reaper_sweep(analytics_retention_coordinator.run_if_due)"
+    assert source.count(call) == 1
+
+
+def test_reap_runs_survives_a_raising_analytics_retention_sweep(monkeypatch):
     calls = []
 
-    def _boom():
-        raise RuntimeError("sweep exploded")
+    def analytics_retention_sweep():
+        raise RuntimeError("synthetic retention failure")
 
     monkeypatch.setattr(run_service, "_extra_reaper_sweeps", [])
-    run_service.register_reaper_sweep(_boom)
+    run_service.register_reaper_sweep(analytics_retention_sweep)
     run_service.register_reaper_sweep(lambda: calls.append("still swept"))
     run_service.reap_runs()  # must not raise
     assert calls == ["still swept"]

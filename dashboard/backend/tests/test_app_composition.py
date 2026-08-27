@@ -91,6 +91,7 @@ EXPECTED_FULL_CONTRACT = {
     ("POST", "/api/credits/api-keys/{credential_id}/verify"),
     ("POST", "/api/credits/api-keys/{credential_id}/default"),
     ("DELETE", "/api/credits/api-keys/{credential_id}"),
+    ("POST", "/api/analytics/events"),
     ("GET", "/api/admin/model-providers"),
     ("PUT", "/api/admin/model-providers/{provider_id}"),
     ("PUT", "/api/admin/model-providers/{provider_id}/platform-credential"),

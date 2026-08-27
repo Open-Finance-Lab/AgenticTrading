@@ -46,6 +46,9 @@ os.environ["DATABASE_PATH"] = _TEST_DB_PATH
 # time; tests must always fall back to the plain SQLite UserStore.
 os.environ.pop("USERS_DATABASE_URL", None)
 
+# A developer's deployment pseudonymization secret must never affect tests.
+os.environ.pop("ANALYTICS_PSEUDONYMIZATION_KEY", None)
+
 # Hermetic HMAC key for session-token digests (see session_tokens.py).
 os.environ["SESSION_HASH_SECRET"] = "test-session-hash-secret"
 

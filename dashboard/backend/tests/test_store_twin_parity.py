@@ -96,6 +96,12 @@ _TWINS = [
         "PostgresStrategyStore",
     ),
     (
+        "dashboard.backend.domain.analytics.repository",
+        "AnalyticsStore",
+        "dashboard.backend.domain.analytics.repository_postgres",
+        "PostgresAnalyticsStore",
+    ),
+    (
         "dashboard.backend.users",
         "UserStore",
         "dashboard.backend.users_postgres",
