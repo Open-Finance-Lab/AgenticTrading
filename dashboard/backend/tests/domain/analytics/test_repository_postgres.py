@@ -21,6 +21,7 @@ from dashboard.backend.tests._postgres_testing import require_local_postgres_url
 from dashboard.backend.tests.domain.analytics.test_repository_contract import (
     assert_cursor_contract,
     assert_event_idempotency_contract,
+    assert_pr2_query_contract,
     assert_source_event_idempotency_contract,
     assert_subject_and_access_contract,
 )
@@ -55,12 +56,24 @@ def postgres_contract_store():
                     """
                     CREATE TABLE users (
                         id INTEGER PRIMARY KEY,
-                        role TEXT NOT NULL DEFAULT 'user'
+                        email TEXT NOT NULL,
+                        display_name TEXT NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        role TEXT NOT NULL DEFAULT 'user',
+                        created_at TEXT NOT NULL
                     )
                     """
                 )
                 cur.execute(
-                    "INSERT INTO users (id, role) VALUES (1, 'admin'), (2, 'user')"
+                    """
+                    INSERT INTO users (
+                        id, email, display_name, password_hash, role, created_at
+                    ) VALUES
+                        (1, 'admin@example.test', 'Admin', 'x', 'admin',
+                         '2026-08-01T00:00:00+00:00'),
+                        (2, 'analytics-user@example.test', 'Analytics User', 'x',
+                         'user', '2026-08-06T12:00:00+00:00')
+                    """
                 )
         yield PostgresAnalyticsStore(scoped_url), 1, 2
     finally:
@@ -153,3 +166,9 @@ def test_postgres_runs_shared_cursor_contract(postgres_contract_store):
 def test_postgres_runs_shared_subject_and_access_contract(postgres_contract_store):
     store, admin_id, user_id = postgres_contract_store
     assert_subject_and_access_contract(store, admin_id, user_id)
+
+
+@pg_only
+def test_postgres_runs_pr2_query_contract(postgres_contract_store):
+    store, _admin_id, user_id = postgres_contract_store
+    assert_pr2_query_contract(store, user_id)

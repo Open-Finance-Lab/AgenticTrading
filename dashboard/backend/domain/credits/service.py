@@ -35,6 +35,7 @@ from dashboard.backend.domain.credits.stripe_gateway import (
     StripeTestGateway,
     StripeWebhookEvent,
 )
+from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 
 
 class CreditsServiceError(RuntimeError):
@@ -242,17 +243,25 @@ class CreditsService:
         reservation_id = _operation_id(
             "llm_res", user_id, run_id, call_index, operation_key
         )
-        return self._llm_reservation_model(
-            self.store.reserve_llm_credits(
-                reservation_id=reservation_id,
-                user_id=int(user_id),
-                run_id=str(run_id),
-                call_index=int(call_index),
-                reserved_micro=int(amount_micro),
-                operation_key=operation_key,
-                request_digest=request_digest,
-            )
+        raw = self.store.reserve_llm_credits(
+            reservation_id=reservation_id,
+            user_id=int(user_id),
+            run_id=str(run_id),
+            call_index=int(call_index),
+            reserved_micro=int(amount_micro),
+            operation_key=operation_key,
+            request_digest=request_digest,
         )
+        result = self._llm_reservation_model(raw)
+        self._emit_credit_buckets(
+            event_name="credits_reserved",
+            raw=raw,
+            amounts={
+                "grant": int(raw.get("reserved_grant_micro") or 0),
+                "purchased": int(raw.get("reserved_purchased_micro") or 0),
+            },
+        )
+        return result
 
     def settle_llm_credits(
         self,
@@ -263,13 +272,22 @@ class CreditsService:
     ) -> LLMSettlementResult:
         """Debit the held amount, recording and restricting on any overage."""
 
-        return self._llm_settlement_model(
-            self.store.settle_llm_credits(
-                reservation_id,
-                actual_micro=int(actual_micro),
-                evidence=dict(evidence),
-            )
+        raw = self.store.settle_llm_credits(
+            reservation_id,
+            actual_micro=int(actual_micro),
+            evidence=dict(evidence),
         )
+        result = self._llm_settlement_model(raw)
+        self._emit_credit_buckets(
+            event_name="credits_settled",
+            raw=raw,
+            amounts={
+                "grant": result.grant_debited_micro,
+                "purchased": result.purchased_debited_micro,
+            },
+        )
+        self._emit_released_credit_buckets(raw, result)
+        return result
 
     def release_llm_credits(
         self,
@@ -279,9 +297,10 @@ class CreditsService:
     ) -> LLMSettlementResult:
         """Release an unused usage ceiling without creating a debit."""
 
-        return self._llm_settlement_model(
-            self.store.release_llm_credits(reservation_id, reason=reason)
-        )
+        raw = self.store.release_llm_credits(reservation_id, reason=reason)
+        result = self._llm_settlement_model(raw)
+        self._emit_released_credit_buckets(raw, result)
+        return result
 
     def release_run_llm_reservations(
         self,
@@ -289,12 +308,60 @@ class CreditsService:
         *,
         reason: str,
     ) -> list[LLMSettlementResult]:
-        return [
-            self._llm_settlement_model(result)
-            for result in self.store.release_run_llm_reservations(
-                run_id, reason=reason
+        results = []
+        for raw in self.store.release_run_llm_reservations(run_id, reason=reason):
+            result = self._llm_settlement_model(raw)
+            self._emit_released_credit_buckets(raw, result)
+            results.append(result)
+        return results
+
+    @staticmethod
+    def _emit_credit_buckets(
+        *,
+        event_name: str,
+        raw: Mapping[str, Any],
+        amounts: Mapping[str, int],
+    ) -> None:
+        for bucket in ("grant", "purchased"):
+            amount_micro = int(amounts.get(bucket) or 0)
+            if amount_micro <= 0:
+                continue
+            analytics_instrumentation.emit_resource_event(
+                event_name=event_name,
+                user_id=int(raw["user_id"]),
+                source_record_type="credit_reservation",
+                source_record_id=str(raw["reservation_id"]),
+                correlation_id=str(raw["run_id"]),
+                billing_mode="platform_credits",
+                properties={
+                    "amount_micro": amount_micro,
+                    "bucket": bucket,
+                },
+                version=bucket,
             )
-        ]
+
+    @classmethod
+    def _emit_released_credit_buckets(
+        cls,
+        raw: Mapping[str, Any],
+        result: LLMSettlementResult,
+    ) -> None:
+        cls._emit_credit_buckets(
+            event_name="credits_refunded",
+            raw=raw,
+            amounts={
+                "grant": max(
+                    0,
+                    int(raw.get("reserved_grant_micro") or 0)
+                    - result.grant_debited_micro,
+                ),
+                "purchased": max(
+                    0,
+                    int(raw.get("reserved_purchased_micro") or 0)
+                    - result.purchased_debited_micro,
+                ),
+            },
+        )
 
     def get_grant_pool_summary(
         self, pool_id: str = "default", month_start_iso: str | None = None

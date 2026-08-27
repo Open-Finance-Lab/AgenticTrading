@@ -8,6 +8,7 @@ from typing import Any
 
 from dashboard.backend.domain.credits.models import LLMSettlementResult
 from dashboard.backend.domain.credits.service import CreditsService
+from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.domain.model_providers.models import ProviderRecord
 from dashboard.backend.domain.model_providers.service import (
     ModelProviderService,
@@ -102,38 +103,102 @@ class LLMExecutionService:
 
     def execute(self, request: LLMExecutionRequest) -> LLMExecutionResult:
         """Run exactly one requested model call with its selected payment lane."""
-
-        provider = self._resolve_provider(request.provider_id)
-        credential = self._resolve_credential(request)
-        pricing_snapshot = self.pricing_snapshot_factory(
-            request.model_id, request.provider_id
-        )
-        self._validate_pricing_snapshot(request, pricing_snapshot)
-        adapter = self._resolve_adapter(provider)
-
-        if request.billing_mode is BillingMode.BYOK:
-            response = self._complete(adapter, request, credential, provider)
-            usage = self._result_usage(response)
-            billing = self._build_evidence(
-                request=request,
-                usage=usage,
-                provider_cost_usd=response.provider_cost_usd,
-                pricing_snapshot=pricing_snapshot,
+        try:
+            provider = self._resolve_provider(request.provider_id)
+            credential = self._resolve_credential(request)
+            pricing_snapshot = self.pricing_snapshot_factory(
+                request.model_id, request.provider_id
             )
-            return self._result(
-                request=request,
-                credential=credential,
-                usage=usage,
-                billing=billing,
-                text=response.text,
-            )
+            self._validate_pricing_snapshot(request, pricing_snapshot)
+            adapter = self._resolve_adapter(provider)
 
-        return self._execute_platform(
-            request=request,
-            provider=provider,
-            credential=credential,
-            adapter=adapter,
-            pricing_snapshot=pricing_snapshot,
+            if request.billing_mode is BillingMode.BYOK:
+                response = self._complete(adapter, request, credential, provider)
+                usage = self._result_usage(response)
+                billing = self._build_evidence(
+                    request=request,
+                    usage=usage,
+                    provider_cost_usd=response.provider_cost_usd,
+                    pricing_snapshot=pricing_snapshot,
+                )
+                result = self._result(
+                    request=request,
+                    credential=credential,
+                    usage=usage,
+                    billing=billing,
+                    text=response.text,
+                )
+            else:
+                result = self._execute_platform(
+                    request=request,
+                    provider=provider,
+                    credential=credential,
+                    adapter=adapter,
+                    pricing_snapshot=pricing_snapshot,
+                )
+            self._emit_model_usage(request, result)
+            return result
+        except LLMExecutionError as exc:
+            analytics_instrumentation.emit_safe_error_event(
+                user_id=request.user_id,
+                source_record_type="run",
+                source_record_id=request.run_id,
+                error_category=self._analytics_error_category(exc.category),
+                correlation_id=request.run_id,
+                version=f"{request.call_index}:{exc.category.value}",
+            )
+            raise
+        except Exception:
+            analytics_instrumentation.emit_safe_error_event(
+                user_id=request.user_id,
+                source_record_type="run",
+                source_record_id=request.run_id,
+                error_category="internal_error",
+                correlation_id=request.run_id,
+                version=f"{request.call_index}:internal_error",
+            )
+            raise
+
+    @staticmethod
+    def _analytics_error_category(
+        category: ExecutionErrorCategory,
+    ) -> str:
+        return {
+            ExecutionErrorCategory.CREDENTIAL_MISSING: "credential_missing",
+            ExecutionErrorCategory.CREDENTIAL_INVALID: "credential_invalid",
+            ExecutionErrorCategory.PROVIDER_UNAVAILABLE: "provider_unavailable",
+            ExecutionErrorCategory.PROVIDER_TIMEOUT: "provider_timeout",
+            ExecutionErrorCategory.BILLING_FAILED: "credits_unavailable",
+        }.get(category, "internal_error")
+
+    @staticmethod
+    def _emit_model_usage(
+        request: LLMExecutionRequest,
+        result: LLMExecutionResult,
+    ) -> None:
+        cost_usd = 0.0
+        if request.billing_mode is BillingMode.PLATFORM_CREDITS:
+            cost_usd = (
+                result.billing.provider_cost_usd
+                if result.billing.provider_cost_usd is not None
+                else result.billing.estimated_cost_usd or 0.0
+            )
+        analytics_instrumentation.emit_resource_event(
+            event_name="model_usage_recorded",
+            user_id=request.user_id,
+            source_record_type="run",
+            source_record_id=request.run_id,
+            correlation_id=request.run_id,
+            provider_id=request.provider_id,
+            model_id=request.model_id,
+            billing_mode=request.billing_mode.value,
+            outcome="succeeded",
+            properties={
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "cost_micro_usd": max(0, round(cost_usd * 1_000_000)),
+            },
+            version=request.call_index,
         )
 
     def finalize_run(

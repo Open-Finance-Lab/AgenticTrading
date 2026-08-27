@@ -114,6 +114,7 @@ def api_start_backtest(
             # protocol_runs, so the entitlement/per-agent/global caps on the
             # /v1/runs and /v2 surfaces are all blind to them.
             enforce_session_cap=True,
+            emit_analytics=True,
         )
     except BacktestCapacityError as exc:
         raise HTTPException(

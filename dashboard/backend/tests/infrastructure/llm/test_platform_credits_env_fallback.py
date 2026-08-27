@@ -16,14 +16,17 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     LLMExecutionError,
 )
 from dashboard.backend.infrastructure.llm.execution.models import (
+    BillingEvidence,
     BillingMode,
     LLMExecutionRequest,
+    LLMExecutionResult,
     LLMMessage,
     LLMUsage,
     PricingSnapshot,
     UsagePolicy,
 )
 from dashboard.backend.infrastructure.llm.execution.service import LLMExecutionService
+from dashboard.backend.infrastructure.llm.execution import service as execution_service_module
 
 
 USER_ID = 1
@@ -189,6 +192,93 @@ def test_platform_execution_uses_env_key_and_debits_grant_before_purchased(
     balance = credits_store.get_balance_projection(USER_ID)
     assert balance["grant_available_micro"] == 0
     assert balance["purchased_available_micro"] == 900_000
+
+
+def test_platform_execution_emits_bucketed_resource_evidence(
+    tmp_path,
+    monkeypatch,
+):
+    adapter = FakeExecutionAdapter(LLMUsage(input_tokens=100, output_tokens=100))
+    service, _credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+    events = []
+    monkeypatch.setattr(
+        execution_service_module.analytics_instrumentation,
+        "emit_resource_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+
+    service.execute(_request("analytics-platform-run"))
+
+    names = [event["event_name"] for event in events]
+    assert names == [
+        "credits_reserved",
+        "credits_reserved",
+        "credits_settled",
+        "credits_settled",
+        "credits_refunded",
+        "model_usage_recorded",
+    ]
+    usage = events[-1]
+    assert usage["billing_mode"] == "platform_credits"
+    assert usage["properties"] == {
+        "input_tokens": 100,
+        "output_tokens": 100,
+        "cost_micro_usd": 200_000,
+    }
+    assert "sk-or-execution-test-abcd" not in repr(events)
+
+
+def test_byok_usage_reports_tokens_with_zero_atl_cost(monkeypatch):
+    events = []
+    monkeypatch.setattr(
+        execution_service_module.analytics_instrumentation,
+        "emit_resource_event",
+        lambda **kwargs: events.append(kwargs),
+    )
+    request = _request("analytics-byok-run").model_copy(
+        update={"billing_mode": BillingMode.BYOK}
+    )
+    result = LLMExecutionResult(
+        text="BUY",
+        provider_id="openrouter",
+        model_id=MODEL_ID,
+        usage=LLMUsage(input_tokens=50, output_tokens=25),
+        billing=BillingEvidence(
+            billing_source=BillingMode.BYOK,
+            usage_authority="not_billable_by_atl",
+            provider_cost_usd=99.0,
+        ),
+    )
+
+    LLMExecutionService._emit_model_usage(request, result)
+
+    assert events[0]["billing_mode"] == "byok"
+    assert events[0]["properties"] == {
+        "input_tokens": 50,
+        "output_tokens": 25,
+        "cost_micro_usd": 0,
+    }
+
+
+def test_execution_failure_emits_only_safe_error_category(
+    tmp_path,
+    monkeypatch,
+):
+    adapter = FakeExecutionAdapter(None)
+    service, _credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+    errors = []
+    monkeypatch.setattr(
+        execution_service_module.analytics_instrumentation,
+        "emit_safe_error_event",
+        lambda **kwargs: errors.append(kwargs),
+    )
+
+    with pytest.raises(LLMExecutionError):
+        service.execute(_request("analytics-failed-run"))
+
+    assert errors[0]["error_category"] == "internal_error"
+    assert "Analyze the market" not in repr(errors[0])
+    assert "sk-or-execution-test-abcd" not in repr(errors[0])
 
 
 def test_platform_execution_releases_reservation_when_usage_is_missing(

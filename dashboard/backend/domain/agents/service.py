@@ -33,6 +33,7 @@ from dashboard.backend.domain.agents.version_repository import (
     agent_version_store,
 )
 from dashboard.backend.database import db
+from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 
 
 # Baseline comparison series written alongside every backtest. They are plotted
@@ -365,6 +366,14 @@ class AgentService:
             # credential routes gate on the *current* runtime, so the value
             # would survive with no way for its owner to see or remove it.
             agent_credential_store.delete_all(agent_id)
+        owner_user_id = agent.get("owner_user_id")
+        if owner_user_id is not None:
+            analytics_instrumentation.emit_agent_event(
+                event_name="agent_updated",
+                user_id=int(owner_user_id),
+                agent_id=agent_id,
+                version=agent.get("last_used_at"),
+            )
         return self.attach_equity_sparklines([self.agent_with_stats(agent)])[0]
 
     def create_agent(
@@ -425,6 +434,12 @@ class AgentService:
             pipeline = default_starter_pipeline()
             self.agents.update_agent(agent["agent_id"], pipeline=pipeline)
             agent["pipeline"] = pipeline
+        if owner_user_id is not None:
+            analytics_instrumentation.emit_agent_event(
+                event_name="agent_created",
+                user_id=int(owner_user_id),
+                agent_id=agent["agent_id"],
+            )
         return agent
 
     def _create_builtin_copy(
@@ -676,8 +691,15 @@ class AgentService:
         return self.agents.resolve_api_key(api_key)
 
     def delete_agent(self, agent_id: str) -> bool:
+        current = self.agents.get_agent(agent_id)
         result = self.agents.delete_agent(agent_id)
         auth_cache.invalidate_agent(agent_id)
+        if result and current and current.get("owner_user_id") is not None:
+            analytics_instrumentation.emit_agent_event(
+                event_name="agent_deleted",
+                user_id=int(current["owner_user_id"]),
+                agent_id=agent_id,
+            )
         return result
 
     def rotate_api_key(self, agent_id: str) -> Optional[str]:
