@@ -8864,6 +8864,12 @@ function switchPlaygroundTab(tab) {
     // history — syncNavigationHistory early-returns when the URL and state are
     // already the current entry, which is exactly this case.
     showPlaygroundPanel(tab);
+    // showPlaygroundPanel can redirect a retired tab to Community. Only record
+    // the Playground view after the panel has updated and that redirect did not
+    // occur, so heartbeats and visibility events keep the correct page_view.
+    if (currentPage === 'playground') {
+        window.ATLAnalytics?.recordNavigation('playground', { playgroundTab });
+    }
     syncNavigationHistory({ replace: false });
 }
 

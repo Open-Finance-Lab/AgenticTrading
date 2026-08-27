@@ -120,6 +120,14 @@ def test_navigation_records_only_after_final_normalization():
     assert body.index(call) > body.index("persistNavigation()")
 
 
+def test_same_page_playground_tab_switch_records_navigation_after_panel_update():
+    body = fn_body("function switchPlaygroundTab(")
+    call = "window.ATLAnalytics?.recordNavigation('playground', { playgroundTab })"
+    assert call in body
+    assert body.index(call) > body.index("showPlaygroundPanel(tab)")
+    assert body.index(call) < body.index("syncNavigationHistory({ replace: false })")
+
+
 def test_agent_editor_enters_and_leaves_transient_view():
     open_body = _function_body(_AGENT_EDITOR_JS, "function open(")
     close_body = _function_body(_AGENT_EDITOR_JS, "function close(")

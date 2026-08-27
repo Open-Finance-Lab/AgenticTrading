@@ -14,6 +14,10 @@ RAW_EVENT_RETENTION_DAYS = 180
 ADMIN_ACCESS_RETENTION_DAYS = 365
 RETENTION_BATCH_SIZE = 1000
 RETENTION_INTERVAL_SECONDS = 24 * 60 * 60
+# Retention normally runs once a day. A capped run that reports more expired
+# rows retries after a short interval instead of deferring the backlog for a
+# full day.
+RETENTION_BACKLOG_RETRY_SECONDS = 60
 MAX_BATCHES_PER_RUN = 20
 
 
@@ -77,7 +81,7 @@ class AnalyticsRetentionService:
 
 
 class AnalyticsRetentionCoordinator:
-    """Run retention at most daily without blocking or breaking the reaper."""
+    """Run retention daily, with bounded retries while expired rows remain."""
 
     def __init__(
         self,
@@ -114,6 +118,10 @@ class AnalyticsRetentionCoordinator:
                 )
                 return None
             self.consecutive_failures = 0
+            if result.has_more_raw_events or result.has_more_access_rows:
+                self._next_run_at = now + min(
+                    self.interval_seconds, RETENTION_BACKLOG_RETRY_SECONDS
+                )
             return result
         finally:
             self._lock.release()

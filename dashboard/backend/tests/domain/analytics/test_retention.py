@@ -13,6 +13,7 @@ from dashboard.backend.domain.analytics.repository import AnalyticsStore
 from dashboard.backend.domain.analytics.retention import (
     ADMIN_ACCESS_RETENTION_DAYS,
     RAW_EVENT_RETENTION_DAYS,
+    RETENTION_BACKLOG_RETRY_SECONDS,
     RETENTION_INTERVAL_SECONDS,
     AnalyticsRetentionCoordinator,
     AnalyticsRetentionService,
@@ -51,6 +52,15 @@ class RecordingRetentionService:
     def run_once(self):
         self.calls += 1
         return RetentionResult()
+
+
+class AlwaysBackloggedStore:
+    def __init__(self):
+        self.calls = 0
+
+    def delete_expired(self, **_kwargs):
+        self.calls += 1
+        return RetentionResult(raw_events_deleted=1, has_more_raw_events=True)
 
 
 class FailingRetentionService:
@@ -105,6 +115,33 @@ def test_coordinator_runs_at_most_once_per_24_hours():
     clock.advance(RETENTION_INTERVAL_SECONDS)
     coordinator.run_if_due()
     assert service.calls == 2
+
+
+def test_coordinator_retries_soon_when_retention_batch_limit_leaves_backlog():
+    clock = FakeClock()
+    store = AlwaysBackloggedStore()
+    service = AnalyticsRetentionService(
+        store=store,
+        batch_size=1,
+        max_batches=2,
+    )
+    coordinator = AnalyticsRetentionCoordinator(service=service, clock=clock)
+
+    assert coordinator.run_if_due() == RetentionResult(
+        raw_events_deleted=2,
+        has_more_raw_events=True,
+    )
+    assert store.calls == 2
+
+    clock.advance(RETENTION_BACKLOG_RETRY_SECONDS - 1)
+    assert coordinator.run_if_due() is None
+
+    clock.advance(1)
+    assert coordinator.run_if_due() == RetentionResult(
+        raw_events_deleted=2,
+        has_more_raw_events=True,
+    )
+    assert store.calls == 4
 
 
 def test_retention_failure_is_swallowed_and_reports_only_safe_metadata(capsys):
