@@ -2034,7 +2034,7 @@
                 <form id="adminAnalyticsFilters" class="admin-analytics-filters" aria-label="Analytics filters">
                     <label for="adminAnalyticsStart"><span>Start date</span><input id="adminAnalyticsStart" type="date" required></label>
                     <label for="adminAnalyticsEnd"><span>End date</span><input id="adminAnalyticsEnd" type="date" required></label>
-                    <label for="adminAnalyticsBilling"><span>Billing mode</span><select id="adminAnalyticsBilling"><option value="all">All billing modes</option><option value="byok">BYOK</option><option value="platform_credits">Platform Credits</option></select></label>
+                    <label for="adminAnalyticsBilling"><span>Billing mode</span><select id="adminAnalyticsBilling" class="filter-select"><option value="all">All billing modes</option><option value="byok">BYOK</option><option value="platform_credits">Platform Credits</option></select></label>
                     <label for="adminAnalyticsProvider"><span>Provider ID</span><input id="adminAnalyticsProvider" type="text" maxlength="64" pattern="[a-z0-9_]{2,64}" placeholder="All providers" autocomplete="off"></label>
                     <label for="adminAnalyticsModel"><span>Model ID</span><input id="adminAnalyticsModel" type="text" maxlength="256" placeholder="All models" autocomplete="off"></label>
                     <label class="admin-analytics-check" for="adminAnalyticsInternal"><input id="adminAnalyticsInternal" type="checkbox"><span>Include internal accounts</span></label>
@@ -2092,8 +2092,8 @@
                     <div class="admin-analytics-section-head"><div><p class="credits-section-kicker">Operator queue</p><h4 id="adminAnalyticsAttentionHeading" tabindex="-1">Users needing attention</h4></div><span id="adminAnalyticsUserRange" aria-live="polite"></span></div>
                     <form id="adminAnalyticsUserFilters" class="admin-analytics-attention-filters" role="search">
                         <label for="adminAnalyticsUserQuery"><span>Search</span><input id="adminAnalyticsUserQuery" type="search" maxlength="100" autocomplete="off" placeholder="Search name or email"></label>
-                        <label for="adminAnalyticsUserStatus"><span>State</span><select id="adminAnalyticsUserStatus"><option value="all">All states</option><option value="blocked">Blocked</option><option value="needs_attention">Needs Attention</option><option value="dormant">Dormant</option><option value="onboarding">Onboarding</option><option value="active">Active</option></select></label>
-                        <label for="adminAnalyticsUserSort"><span>Sort</span><select id="adminAnalyticsUserSort"><option value="recent_failures">Most failures</option><option value="last_activity">Latest activity</option><option value="recent_runs">Most runs</option><option value="joined_at">Newest accounts</option></select></label>
+                        <label for="adminAnalyticsUserStatus"><span>State</span><select id="adminAnalyticsUserStatus" class="filter-select"><option value="all">All states</option><option value="blocked">Blocked</option><option value="needs_attention">Needs Attention</option><option value="dormant">Dormant</option><option value="onboarding">Onboarding</option><option value="active">Active</option></select></label>
+                        <label for="adminAnalyticsUserSort"><span>Sort</span><select id="adminAnalyticsUserSort" class="filter-select"><option value="recent_failures">Most failures</option><option value="last_activity">Latest activity</option><option value="recent_runs">Most runs</option><option value="joined_at">Newest accounts</option></select></label>
                         <button class="auth-btn auth-btn-secondary" type="submit">Update queue</button>
                     </form>
                     <p data-panel-error role="alert" hidden></p>
