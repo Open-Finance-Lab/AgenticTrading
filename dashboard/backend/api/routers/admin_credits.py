@@ -178,7 +178,7 @@ def reduce_grant_pool(
 @router.get("/users")
 def list_grant_users(
     query: str | None = Query(default=None, max_length=120),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=25, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     _admin: dict = Depends(require_admin),
 ):

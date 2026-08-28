@@ -3,12 +3,14 @@
   'use strict';
 
   const { formatCredits, formatCreditsMicro } = window.CreditFormat;
+  const ADMIN_CREDITS_USERS_PAGE_SIZE = 25;
+
   const state = {
     initialized: false,
     users: [],
     usersOffset: 0,
     usersTotal: 0,
-    usersLimit: 100,
+    usersLimit: ADMIN_CREDITS_USERS_PAGE_SIZE,
     usersRequestSeq: 0,
     activityCursor: null,
     activityItems: [],
