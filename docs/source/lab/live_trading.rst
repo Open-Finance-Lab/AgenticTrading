@@ -28,7 +28,7 @@ You need:
   against it, so live trading is not available to signed-out browser sessions;
 - a **real agent** under **Playground → My Agents**. The demo agents on the
   dashboard cannot be connected; create one, or add one from the
-  :doc:`Agent Marketplace <marketplace>` first;
+  :doc:`Agent Supermarket <marketplace>` first;
 - a **Robinhood account** eligible for Robinhood's Agentic Trading (MCP) access;
 - a deployment configured for Robinhood (:ref:`robinhood-config`). If it is not,
   connecting fails with *Robinhood OAuth is not configured*.
@@ -160,8 +160,8 @@ Troubleshooting
    * - *Robinhood OAuth is not configured*
      - The deployment has no Robinhood settings. See :ref:`robinhood-config`.
    * - *Create a real agent in My Agents first*
-     - You are on a demo agent. Create one, or add one from the marketplace,
-       then retry.
+     - You are on a demo agent. Create one, or add one from the Agent
+       Supermarket, then retry.
    * - *Connect Robinhood first*
      - No brokerage account is linked to your ATL account.
    * - *Enable live trading for this agent*

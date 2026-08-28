@@ -96,7 +96,7 @@ Start from a template
 ---------------------
 
 Rather than writing an agent from scratch, open **Community → Agent
-Marketplace** and add a ready-made template to **My Agents**, then edit its
+Supermarket** and add a ready-made template to **My Agents**, then edit its
 prompts and backtest it. The section chips there filter templates by market, so
 you can jump straight to U.S. stocks or A-shares. See :doc:`marketplace`.
 

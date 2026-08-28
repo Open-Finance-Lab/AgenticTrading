@@ -231,7 +231,7 @@ def list_agents(
 
 @router.get("/marketplace")
 def list_marketplace_agents():
-    """List open agent templates available in the Agent Marketplace.
+    """List open agent templates available in the Agent Supermarket.
 
     Public and unauthenticated. Templates are config-driven and do not expose
     API keys or owner information.
