@@ -10,6 +10,24 @@
   ) ? window.location.origin : '';
   const PENDING_BYOK_STORAGE_KEY = 'atlPendingByokBacktest';
   const PENDING_BYOK_TTL_MS = 10 * 60 * 1000;
+  const OFFICIAL_API_KEY_PAGES = Object.freeze({
+    openai: Object.freeze({
+      displayName: 'OpenAI',
+      url: 'https://platform.openai.com/api-keys',
+    }),
+    openrouter: Object.freeze({
+      displayName: 'OpenRouter',
+      url: 'https://openrouter.ai/keys',
+    }),
+    anthropic: Object.freeze({
+      displayName: 'Anthropic',
+      url: 'https://platform.claude.com/settings/keys',
+    }),
+    gemini: Object.freeze({
+      displayName: 'Google Gemini',
+      url: 'https://aistudio.google.com/apikey',
+    }),
+  });
 
   const state = {
     initialized: false,
@@ -113,13 +131,17 @@
 
   function renderProviderOptions() {
     const select = element('creditsApiKeyProvider');
-    if (!select) return;
+    if (!select) {
+      renderProviderGuide();
+      return;
+    }
     const current = select.value;
     clearChildren(select);
     if (!state.providers.length) {
       select.appendChild(textNode('option', '', 'No approved providers available'));
       select.value = '';
       select.disabled = true;
+      renderProviderGuide();
       return;
     }
     select.disabled = false;
@@ -132,10 +154,41 @@
     if (state.providers.some((provider) => provider.provider_id === current)) {
       select.value = current;
     }
+    renderProviderGuide();
   }
 
   function providerDisplayName(providerId) {
     return state.providers.find((provider) => provider.provider_id === providerId)?.display_name || providerId;
+  }
+
+  function renderProviderGuide() {
+    const guide = element('creditsApiKeyGuide');
+    const steps = element('creditsApiKeyGuideSteps');
+    const fallback = element('creditsApiKeyGuideFallback');
+    const officialLink = element('creditsApiKeyOfficialLink');
+    const providerCopy = element('creditsApiKeyGuideProvider');
+    const providerId = element('creditsApiKeyProvider')?.value || '';
+    const selectedProvider = state.providers.find(
+      (provider) => provider.provider_id === providerId,
+    ) || null;
+    const officialPage = OFFICIAL_API_KEY_PAGES[providerId] || null;
+
+    if (!guide || !steps || !fallback || !officialLink || !providerCopy) return;
+    guide.hidden = !selectedProvider;
+    steps.hidden = !officialPage;
+    fallback.hidden = Boolean(officialPage);
+    officialLink.removeAttribute('href');
+    officialLink.removeAttribute('aria-label');
+
+    if (!selectedProvider || !officialPage) return;
+    officialLink.href = officialPage.url;
+    officialLink.setAttribute(
+      'aria-label',
+      `Open ${officialPage.displayName} official API key page in a new tab`,
+    );
+    providerCopy.textContent = (
+      `Continue on ${officialPage.displayName}, then return to ATL.`
+    );
   }
 
   function credentialStatusLabel(status) {
@@ -407,6 +460,7 @@
       const secretInput = element('creditsApiKeySecret');
       if (secretInput) secretInput.value = '';
       renderProviderOptions();
+      renderProviderGuide();
       renderApiKeys([]);
     } else if (!wasSignedIn && state.initialized && document.documentElement.dataset.navPage === 'credits') {
       loadBalanceAndLedger();
@@ -754,6 +808,7 @@
     document.querySelectorAll('[data-credits-tab]').forEach((button) => {
       button.addEventListener('click', () => setCreditsTab(button.dataset.creditsTab));
     });
+    element('creditsApiKeyProvider')?.addEventListener('change', renderProviderGuide);
     element('creditsApiKeyForm')?.addEventListener('submit', saveApiKey);
   }
 

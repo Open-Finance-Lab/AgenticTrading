@@ -8,6 +8,17 @@ APP_HTML = (FRONTEND / "app.html").read_text(encoding="utf-8")
 APP_JS = (FRONTEND / "app.js").read_text(encoding="utf-8")
 STYLES = (FRONTEND / "styles.css").read_text(encoding="utf-8")
 CREDITS_JS_PATH = FRONTEND / "js" / "credits.js"
+CREDITS_JS = CREDITS_JS_PATH.read_text(encoding="utf-8")
+
+
+def _credits_function(name: str) -> str:
+    start = CREDITS_JS.index(f"  function {name}(")
+    boundaries = (
+        CREDITS_JS.find("\n  function ", start + 1),
+        CREDITS_JS.find("\n  async function ", start + 1),
+    )
+    end = min(boundary for boundary in boundaries if boundary >= 0)
+    return CREDITS_JS[start:end]
 
 
 def test_credits_page_is_reachable_from_the_account_menu():
@@ -109,6 +120,55 @@ def test_credits_billing_has_three_tabs_and_api_keys_surface():
     assert 'id="creditsApiKeyProvider"' in APP_HTML
     assert 'id="creditsApiKeySecret"' in APP_HTML
     assert 'id="creditsApiKeyList"' in APP_HTML
+
+
+def test_api_key_guide_has_three_semantic_steps_and_safe_external_link():
+    start = APP_HTML.index('id="creditsApiKeyGuide"')
+    end = APP_HTML.index('id="creditsApiKeyGuideFallback"', start)
+    guide = APP_HTML[start:end]
+    assert 'id="creditsApiKeyGuideSteps"' in guide
+    assert '<ol' in guide
+    assert guide.count('class="credits-key-guide-step"') == 3
+    assert 'id="creditsApiKeyOfficialLink"' in guide
+    assert 'target="_blank"' in guide
+    assert 'rel="noopener noreferrer"' in guide
+    assert 'Open official API key page' in guide
+    assert 'Create and copy the key' in guide
+    assert 'Return here and paste it below' in guide
+
+
+def test_api_key_guide_uses_only_the_exact_official_provider_allowlist():
+    expected = {
+        "openai": "https://platform.openai.com/api-keys",
+        "openrouter": "https://openrouter.ai/keys",
+        "anthropic": "https://platform.claude.com/settings/keys",
+        "gemini": "https://aistudio.google.com/apikey",
+    }
+    for provider_id, url in expected.items():
+        assert f"{provider_id}: Object.freeze({{" in CREDITS_JS
+        assert f"url: '{url}'" in CREDITS_JS
+    render = _credits_function("renderProviderGuide")
+    assert "approved_base_url" not in render
+    assert "adapter_type" not in render
+    assert "creditsApiKeyProvider')?.addEventListener('change', renderProviderGuide)" in CREDITS_JS
+
+
+def test_custom_provider_guide_never_guesses_an_external_destination():
+    assert 'id="creditsApiKeyGuideFallback"' in APP_HTML
+    assert 'ATL does not have an official setup link for this provider.' in APP_HTML
+    assert "officialPage = OFFICIAL_API_KEY_PAGES[providerId] || null" in CREDITS_JS
+    assert "officialLink.removeAttribute('href')" in CREDITS_JS
+    assert "steps.hidden = !officialPage" in CREDITS_JS
+    assert "fallback.hidden = Boolean(officialPage)" in CREDITS_JS
+    assert ".credits-key-guide-steps[hidden]" in STYLES
+
+
+def test_official_provider_link_keeps_button_layout():
+    start = STYLES.index(".credits-key-guide-link {")
+    end = STYLES.index("}", start)
+    link_styles = STYLES[start:end]
+    assert "display: inline-flex;" in link_styles
+    assert "width: 100%;" in link_styles
 
 
 def test_api_keys_is_the_primary_credits_tab():

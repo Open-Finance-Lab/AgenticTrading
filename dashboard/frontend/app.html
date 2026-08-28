@@ -1919,7 +1919,7 @@
                         <div class="credits-section-head">
                             <div>
                                 <p class="credits-section-kicker">API Keys</p>
-                                <h3 id="creditsApiKeysHeading">Connect your model providers</h3>
+                                <h3 id="creditsApiKeysHeading" tabindex="-1">Connect your model providers</h3>
                             </div>
                             <span class="credits-rate">Encrypted vault</span>
                         </div>
@@ -1932,6 +1932,62 @@
                                         <option value="">Loading providers…</option>
                                     </select>
                                 </label>
+                                <div id="creditsApiKeyGuide" class="credits-key-guide" hidden>
+                                    <ol id="creditsApiKeyGuideSteps" class="credits-key-guide-steps" aria-label="API key setup steps">
+                                        <li class="credits-key-guide-step">
+                                            <div class="credits-key-guide-head">
+                                                <span class="credits-key-guide-number" aria-hidden="true">1</span>
+                                                <div>
+                                                    <h4>Open official API key page</h4>
+                                                    <p id="creditsApiKeyGuideProvider" aria-live="polite">Open the selected provider's official key page.</p>
+                                                </div>
+                                            </div>
+                                            <a
+                                                id="creditsApiKeyOfficialLink"
+                                                class="auth-btn auth-btn-secondary credits-key-guide-link"
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                            >
+                                                <span>Open official API key page</span>
+                                                <svg aria-hidden="true"><use href="#icon-external-link"/></svg>
+                                            </a>
+                                            <svg class="credits-key-guide-arrow" aria-hidden="true"><use href="#icon-arrow-right"/></svg>
+                                        </li>
+                                        <li class="credits-key-guide-step">
+                                            <div class="credits-key-guide-head">
+                                                <span class="credits-key-guide-number" aria-hidden="true">2</span>
+                                                <div>
+                                                    <h4>Create and copy the key</h4>
+                                                    <p>Sign in there, create a key, then copy it once.</p>
+                                                </div>
+                                            </div>
+                                            <div class="credits-key-guide-illustration" aria-hidden="true">
+                                                <span class="credits-key-guide-window-bar"></span>
+                                                <span class="credits-key-guide-create">Create API key</span>
+                                                <span class="credits-key-guide-masked">sk-...7K2</span>
+                                                <span class="credits-key-guide-copy">Copy</span>
+                                            </div>
+                                            <svg class="credits-key-guide-arrow" aria-hidden="true"><use href="#icon-arrow-right"/></svg>
+                                        </li>
+                                        <li class="credits-key-guide-step">
+                                            <div class="credits-key-guide-head">
+                                                <span class="credits-key-guide-number" aria-hidden="true">3</span>
+                                                <div>
+                                                    <h4>Return here and paste it below</h4>
+                                                    <p>Use the real ATL fields below, then save and verify.</p>
+                                                </div>
+                                            </div>
+                                            <div class="credits-key-guide-paste" aria-hidden="true">
+                                                <span>API key</span>
+                                                <span class="credits-key-guide-input">Paste key here</span>
+                                                <span class="credits-key-guide-verify">Save and verify</span>
+                                            </div>
+                                        </li>
+                                    </ol>
+                                    <p id="creditsApiKeyGuideFallback" class="credits-key-guide-fallback" hidden>
+                                        ATL does not have an official setup link for this provider. Contact the administrator who enabled it.
+                                    </p>
+                                </div>
                                 <label class="credits-key-field" for="creditsApiKeyLabel">
                                     <span>Name</span>
                                     <input id="creditsApiKeyLabel" type="text" maxlength="80" autocomplete="off" placeholder="Research" required>
