@@ -48,6 +48,16 @@ def test_build_credits_store_defaults_to_sqlite(monkeypatch, capsys):
     )
 
 
+def test_postgres_schema_declares_the_welcome_promotion_ledger():
+    ddl = pg_module.CREDITS_POSTGRES_DDL
+
+    assert "CREATE TABLE IF NOT EXISTS credit_promotion_grants" in ddl
+    assert "campaign_key TEXT NOT NULL" in ddl
+    assert "operation_id TEXT NOT NULL UNIQUE" in ddl
+    assert "idempotency_key TEXT NOT NULL UNIQUE" in ddl
+    assert "UNIQUE (campaign_key, user_id)" in ddl
+
+
 def test_build_credits_store_picks_postgres_from_users_url(monkeypatch, capsys):
     created = {}
 

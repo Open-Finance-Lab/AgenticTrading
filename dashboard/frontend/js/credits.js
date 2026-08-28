@@ -1,4 +1,4 @@
-/** Credits & Billing page. Stripe webhooks remain the only source of balance changes. */
+/** Credits & Billing page. Server ledgers remain the only source of balance changes. */
 (function () {
   'use strict';
 
@@ -453,10 +453,13 @@
       const meta = document.createElement('div');
       meta.className = 'credits-ledger-meta';
       const isUsage = entry.entry_type === 'llm_usage';
+      const isWelcomeGrant = entry.entry_type === 'system_promotion_grant';
       const isNegative = isUsage || entry.entry_type === 'refund';
       const title = isUsage
         ? 'Model usage'
-        : (entry.entry_type === 'refund' ? 'Refund' : 'Credit purchase');
+        : (entry.entry_type === 'refund'
+          ? 'Refund'
+          : (isWelcomeGrant ? 'Welcome Credits' : 'Credit purchase'));
       meta.appendChild(textNode('strong', '', title));
       const usageDetail = isUsage
         ? [entry.provider_id, entry.model_id, entry.run_id ? `run ${String(entry.run_id).slice(0, 12)}` : null]

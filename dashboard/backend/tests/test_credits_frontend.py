@@ -85,6 +85,13 @@ def test_activity_renders_negative_model_usage_with_safe_context():
     assert "String(entry.run_id).slice(0, 12)" in source
 
 
+def test_activity_names_the_automatic_welcome_grant():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+
+    assert "entry.entry_type === 'system_promotion_grant'" in source
+    assert "'Welcome Credits'" in source
+
+
 def test_refund_retry_reuses_its_request_id_only_while_unchanged():
     """The server derives the refund id from client_request_id.
 
