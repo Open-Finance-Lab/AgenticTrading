@@ -1,7 +1,7 @@
 # BYOK API Key Guidance Design
 
 **Date:** 2026-08-28
-**Status:** Approved for specification; awaiting written-spec review
+**Status:** Approved
 **Target base:** latest `origin/main`
 **Scope:** frontend guidance for creating, copying, saving, and verifying BYOK credentials
 
