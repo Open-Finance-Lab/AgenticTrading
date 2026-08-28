@@ -107,7 +107,7 @@ def _checkout(service, *, cents=None, request_id=CLIENT_REQUEST_ID):
         if cents is not None
         else CheckoutRequest(
             client_request_id=request_id,
-            package_id="usd_10",
+            package_id="usd_5",
         )
     )
     return service.create_checkout(1, request)
@@ -180,7 +180,7 @@ def _refund_event(
 
 @pytest.mark.parametrize(
     ("package_id", "cents"),
-    [("usd_5", 500), ("usd_10", 1000), ("usd_20", 2000), ("usd_50", 5000)],
+    [("usd_0_50", 50), ("usd_1", 100), ("usd_2", 200), ("usd_5", 500)],
 )
 def test_fixed_packages_are_resolved_server_side(package_id, cents):
     request = CheckoutRequest(
@@ -192,7 +192,7 @@ def test_fixed_packages_are_resolved_server_side(package_id, cents):
     assert credits_micro_for_cents(cents) == cents * 10_000
 
 
-@pytest.mark.parametrize("cents", [500, 501, 20_000])
+@pytest.mark.parametrize("cents", [50, 51, 500])
 def test_custom_amount_accepts_integer_cent_boundaries(cents):
     request = CheckoutRequest(
         client_request_id=CLIENT_REQUEST_ID,
@@ -202,12 +202,21 @@ def test_custom_amount_accepts_integer_cent_boundaries(cents):
     assert request.amount_usd_cents == cents
 
 
-@pytest.mark.parametrize("cents", [499, 20_001, 500.0, True])
+@pytest.mark.parametrize("cents", [49, 501, 50.0, True])
 def test_custom_amount_rejects_out_of_range_or_non_integer_values(cents):
     with pytest.raises(ValidationError):
         CheckoutRequest(
             client_request_id=CLIENT_REQUEST_ID,
             custom_amount_usd_cents=cents,
+        )
+
+
+@pytest.mark.parametrize("package_id", ["usd_10", "usd_20", "usd_50"])
+def test_retired_large_packages_are_rejected(package_id):
+    with pytest.raises(ValidationError):
+        CheckoutRequest(
+            client_request_id=CLIENT_REQUEST_ID,
+            package_id=package_id,
         )
 
 
@@ -282,7 +291,7 @@ def test_same_client_request_cannot_change_the_purchase_amount(tmp_path):
     _checkout(service)
 
     with pytest.raises(OrderConflictError, match="different purchase"):
-        _checkout(service, cents=500)
+        _checkout(service, cents=400)
 
 
 def test_checkout_gateway_timeout_leaves_one_retryable_pending_order(tmp_path):
@@ -309,9 +318,9 @@ def test_paid_checkout_posts_once_and_duplicate_events_are_noops(tmp_path):
     gateway.event = _checkout_event(checkout, event_id="evt_checkout_paid_again")
     second_event = service.handle_webhook(b"paid-again", "valid")
 
-    assert first.balance_micro == 10_000_000
+    assert first.balance_micro == 5_000_000
     assert duplicate.outcome == second_event.outcome == "duplicate"
-    assert service.get_balance(1).balance_micro == 10_000_000
+    assert service.get_balance(1).balance_micro == 5_000_000
     assert len(service.store.list_ledger_entries(1)["items"]) == 1
 
 
@@ -424,7 +433,7 @@ def test_admin_refund_reserves_calls_stripe_and_settles_negative_entry(tmp_path)
     settled = service.handle_webhook(b"refund", "valid")
 
     assert settled.outcome == "processed"
-    assert settled.balance_micro == 6_000_000
+    assert settled.balance_micro == 1_000_000
     assert service.store.get_order_for_admin(checkout.order_id)["status"] == (
         "partially_refunded"
     )
@@ -453,9 +462,9 @@ def test_duplicate_refund_events_never_reverse_credits_twice(tmp_path):
     )
     second_event = service.handle_webhook(b"refund-again", "valid")
 
-    assert first.balance_micro == 6_000_000
+    assert first.balance_micro == 1_000_000
     assert duplicate.outcome == second_event.outcome == "duplicate"
-    assert service.get_balance(1).balance_micro == 6_000_000
+    assert service.get_balance(1).balance_micro == 1_000_000
     assert len(service.store.list_ledger_entries(1)["items"]) == 2
 
 
@@ -491,8 +500,8 @@ def test_pending_refund_event_records_no_credit_change_then_success_can_settle(
     succeeded = service.handle_webhook(b"succeeded", "valid")
 
     assert pending.outcome == "ignored"
-    assert balance_while_pending == 10_000_000
-    assert succeeded.balance_micro == 6_000_000
+    assert balance_while_pending == 5_000_000
+    assert succeeded.balance_micro == 1_000_000
 
 
 def test_live_mode_refund_is_rejected_without_balance_change(tmp_path):
@@ -512,7 +521,7 @@ def test_live_mode_refund_is_rejected_without_balance_change(tmp_path):
     result = service.handle_webhook(b"live-refund", "valid")
 
     assert result.outcome == "rejected"
-    assert service.get_balance(1).balance_micro == 10_000_000
+    assert service.get_balance(1).balance_micro == 5_000_000
 
 
 def test_refund_gateway_timeout_keeps_one_retryable_reservation(tmp_path):
@@ -536,7 +545,7 @@ def test_refund_gateway_timeout_keeps_one_retryable_reservation(tmp_path):
         gateway.refund_calls[1]["idempotency_key"]
     )
     assert (
-        service.store.list_orders_for_admin()["items"][0]["refundable_usd_cents"] == 600
+        service.store.list_orders_for_admin()["items"][0]["refundable_usd_cents"] == 100
     )
 
 
@@ -547,7 +556,7 @@ def test_failed_refund_event_releases_reservation(tmp_path):
     request = AdminRefundRequest(
         client_request_id=UUID("44444444-4444-4444-8444-444444444444"),
         payment_order_id=checkout.order_id,
-        amount_usd_cents=1000,
+        amount_usd_cents=500,
     )
     refund = service.create_admin_refund(2, request)
     gateway.event = _refund_event(
@@ -562,7 +571,7 @@ def test_failed_refund_event_releases_reservation(tmp_path):
     assert failed.outcome == "processed"
     assert (
         service.store.list_orders_for_admin()["items"][0]["refundable_usd_cents"]
-        == 1000
+        == 500
     )
 
 
@@ -585,11 +594,11 @@ def test_succeeded_dashboard_refund_is_reconciled_without_local_metadata(tmp_pat
     reconciled = service.handle_webhook(b"external", "valid")
 
     assert reconciled.outcome == "processed"
-    assert reconciled.balance_micro == 6_000_000
+    assert reconciled.balance_micro == 1_000_000
     ledger = service.store.list_ledger_entries(1)["items"]
     assert sorted(entry["amount_micro"] for entry in ledger) == [
         -4_000_000,
-        10_000_000,
+        5_000_000,
     ]
 
 
@@ -615,7 +624,7 @@ def test_unaffordable_dashboard_refund_restricts_account(tmp_path):
     assert result.account_restricted is True
     admin_order = service.store.list_orders_for_admin()["items"][0]
     assert admin_order["account_status"] == "restricted"
-    assert service.get_balance(1).balance_micro == 10_000_000
+    assert service.get_balance(1).balance_micro == 5_000_000
 
 
 class RefundCreationResultFixture:

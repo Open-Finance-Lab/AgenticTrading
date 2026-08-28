@@ -91,7 +91,7 @@ def test_admin_analytics_surface_and_module_exist():
     assert 'id="adminPanelAnalytics"' in APP_HTML
     assert 'id="adminAnalyticsOverview"' in APP_HTML
     assert 'id="adminAnalyticsProfile"' in APP_HTML
-    assert 'js/admin-analytics.js?v=1' in APP_HTML
+    assert 'js/admin-analytics.js?v=2' in APP_HTML
     assert ANALYTICS_JS_PATH.exists()
     assert ".admin-analytics-overview" in STYLES
     assert ".admin-analytics-profile" in STYLES
@@ -192,8 +192,14 @@ def test_app_lifecycle_and_cache_versions_are_wired():
     assert "window.AdminAnalytics.refresh()" in APP_JS
     assert 'styles.css?v=125' in APP_HTML
     assert 'app.js?v=116' in APP_HTML
-    assert 'js/admin-analytics.js?v=1' in APP_HTML
+    assert 'js/admin-analytics.js?v=2' in APP_HTML
     assert 'js/admin-tabs.js?v=3' in APP_HTML
+
+
+def test_credit_costs_use_the_shared_exact_formatter():
+    source = analytics_source()
+    assert "window.CreditFormat.formatCreditsMicro(value)" in source
+    assert "numeric / 1000000" not in source
 
 
 def test_scoped_responsive_accessible_styles_exist():

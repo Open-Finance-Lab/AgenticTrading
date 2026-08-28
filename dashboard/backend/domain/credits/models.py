@@ -15,16 +15,16 @@ from pydantic import (
 )
 
 
-CreditPackageId = Literal["usd_5", "usd_10", "usd_20", "usd_50"]
+CreditPackageId = Literal["usd_0_50", "usd_1", "usd_2", "usd_5"]
 
 FIXED_PACKAGES_USD_CENTS: dict[str, int] = {
+    "usd_0_50": 50,
+    "usd_1": 100,
+    "usd_2": 200,
     "usd_5": 500,
-    "usd_10": 1000,
-    "usd_20": 2000,
-    "usd_50": 5000,
 }
-MIN_CUSTOM_USD_CENTS = 500
-MAX_CUSTOM_USD_CENTS = 20_000
+MIN_CUSTOM_USD_CENTS = 50
+MAX_CUSTOM_USD_CENTS = 500
 MICRO_CREDITS_PER_USD_CENT = 10_000
 
 
@@ -61,7 +61,7 @@ class CheckoutRequest(BaseModel):
         if custom and not (
             MIN_CUSTOM_USD_CENTS <= self.custom_amount_usd_cents <= MAX_CUSTOM_USD_CENTS
         ):
-            raise ValueError("custom amount must be from 500 through 20,000 cents")
+            raise ValueError("custom amount must be from 50 through 500 cents")
         return self
 
     @property

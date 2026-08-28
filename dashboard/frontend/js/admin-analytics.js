@@ -216,10 +216,8 @@
   }
 
   function formatCreditsMicro(value) {
-    if (value == null || value === '') return '—';
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return '—';
-    return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 6 }).format(numeric / 1000000)} Credits`;
+    const formatted = window.CreditFormat.formatCreditsMicro(value);
+    return formatted === '—' ? '—' : `${formatted} Credits`;
   }
 
   function formatTimestamp(value, fallback = '—') {
