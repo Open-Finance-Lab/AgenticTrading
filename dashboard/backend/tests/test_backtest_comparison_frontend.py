@@ -50,6 +50,40 @@ def run_helper(expression):
     return json.loads(result.stdout)
 
 
+def extract_app_function(source, name):
+    for marker in (f"async function {name}(", f"function {name}("):
+        start = source.find(marker)
+        if start != -1:
+            break
+    else:
+        raise AssertionError(f"{name} not found in app.js")
+    depth = 0
+    index = source.index("{", start)
+    while index < len(source):
+        if source[index] == "{":
+            depth += 1
+        elif source[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start:index + 1]
+        index += 1
+    raise AssertionError(f"unterminated function {name}")
+
+
+def run_app_functions(source, names, harness_lines):
+    script = "\n".join(
+        [*(extract_app_function(source, name) for name in names), *harness_lines]
+    )
+    result = subprocess.run(
+        ["node", "-e", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 def test_model_canonicalizes_shuffled_series_and_calculates_deltas():
     model = run_helper("BacktestComparison.buildModel(fixture.chart, fixture.run)")
     assert [column["key"] for column in model["columns"]] == [
@@ -205,3 +239,32 @@ def test_comparison_states_and_focus_styles_ship():
         "displayNoMetrics",
     ):
         assert removed not in APP_JS
+
+
+def test_request_token_rejects_previous_run_after_selection_changes():
+    result = run_app_functions(
+        APP_JS,
+        ["beginBacktestSurfaceRequest", "isCurrentBacktestSurfaceRequest"],
+        [
+            "global.window = { SELECTED_RUN: { run_id: 'run-a' } };",
+            "let liveBacktestChartActive = false;",
+            "let backtestSurfaceRequestSeq = 0;",
+            "const first = beginBacktestSurfaceRequest('run-a');",
+            "window.SELECTED_RUN = { run_id: 'run-b' };",
+            "const second = beginBacktestSurfaceRequest('run-b');",
+            "console.log(JSON.stringify({",
+            "  first: isCurrentBacktestSurfaceRequest(first),",
+            "  second: isCurrentBacktestSurfaceRequest(second),",
+            "}));",
+        ],
+    )
+    assert result == {"first": False, "second": True}
+
+
+def test_historical_surfaces_settle_independently():
+    body = fn_body("async function loadHistoricalBacktestSurfaces(")
+    assert "Promise.allSettled" in body
+    assert "setPerformanceComparisonState(" in body
+    assert "'error'" in body
+    assert "loadTradingLogForRun" in body
+    assert "isCurrentBacktestSurfaceRequest" in body

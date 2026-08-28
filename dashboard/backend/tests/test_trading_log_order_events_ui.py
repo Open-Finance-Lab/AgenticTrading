@@ -24,8 +24,18 @@ def _extract_function(source: str, name: str) -> str:
             break
     else:
         raise AssertionError(f"{name} not found in {_APP_JS.name}")
+    paren_depth = 0
+    paren_index = source.index("(", start)
+    while paren_index < len(source):
+        if source[paren_index] == "(":
+            paren_depth += 1
+        elif source[paren_index] == ")":
+            paren_depth -= 1
+            if paren_depth == 0:
+                break
+        paren_index += 1
     depth = 0
-    index = source.index("{", start)
+    index = source.index("{", paren_index)
     while index < len(source):
         if source[index] == "{":
             depth += 1
@@ -369,3 +379,25 @@ def test_ordinary_a_share_fill_carries_no_market_rule_audit_line():
     assert "¥13.00" not in result
     assert "Official close" not in result
     assert "Official status" not in result
+
+
+def test_late_trading_log_response_cannot_repaint_a_newer_run():
+    source = _APP_JS.read_text(encoding="utf-8")
+    function_source = _extract_function(source, "loadTradingLogForRun")
+    body = function_source[function_source.index("{") :]
+    assert body.count("if (!isCurrent()) return") >= 2
+    result = _run_node([
+        "const API_BASE = '';",
+        "const paints = [];",
+        "const API = { get: async () => ({ trades: [{ symbol: 'AAPL' }] }) };",
+        "const resolveTradingLogRecords = (payload) => payload.trades;",
+        "const resolveTradingLogTruncation = () => 0;",
+        "const renderTradingLog = () => paints.push('render');",
+        "const clearTradingLog = () => paints.push('clear');",
+        function_source,
+        "(async () => {",
+        "  await loadTradingLogForRun('run-a', { isCurrent: () => false });",
+        "  console.log(JSON.stringify(paints));",
+        "})();",
+    ])
+    assert result == []

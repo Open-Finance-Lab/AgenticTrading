@@ -4918,6 +4918,7 @@ let userHasNavigated = false;
 let allRuns = [];
 let comparisonData = null;
 let backtestChartData = null;
+let backtestSurfaceRequestSeq = 0;
 let defaultConfig = null;
 
 // Initialize on page load
@@ -6554,6 +6555,7 @@ function initLiveBacktestChart() {
 
 /** Clear history chart/metrics/log and pin the view to a soon-to-start live run. */
 function prepareLiveBacktestView(launchConfig = null) {
+    backtestSurfaceRequestSeq += 1;
     liveBacktestChartActive = true;
     liveBacktestRunId = null;
     liveBacktestLaunchPending = true;
@@ -6574,6 +6576,7 @@ function prepareLiveBacktestView(launchConfig = null) {
 /** Switch the Backtest surface onto an in-flight run (chart + log + config). */
 function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
     if (!runId) return;
+    backtestSurfaceRequestSeq += 1;
     liveBacktestLaunchPending = false;
     liveBacktestLaunchError = false;
     const alreadyLive =
@@ -6644,6 +6647,7 @@ function showBacktestLaunchFailure(message, launchConfig, runKey = null) {
         clearAgentBacktestRunning(runKey);
         applyAgentFilters(false);
     }
+    backtestSurfaceRequestSeq += 1;
     liveBacktestChartActive = false;
     liveBacktestRunId = null;
     liveBacktestLaunchPending = false;
@@ -7289,18 +7293,20 @@ function updateLiveTradingLog(progress) {
     });
 }
 
-async function loadTradingLogForRun(runId) {
+async function loadTradingLogForRun(runId, { isCurrent = () => true } = {}) {
     if (!runId) {
-        clearTradingLog('Run a backtest to see orders here.');
+        if (isCurrent()) clearTradingLog('Run a backtest to see orders here.');
         return;
     }
     try {
         const data = await API.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/trades?t=${Date.now()}`);
+        if (!isCurrent()) return;
         renderTradingLog(resolveTradingLogRecords(data), {
             emptyMessage: 'No orders were submitted by the selected strategy.',
             truncatedCount: resolveTradingLogTruncation(data),
         });
     } catch (error) {
+        if (!isCurrent()) return;
         console.warn('Could not load orders:', error.message);
         clearTradingLog('Order log unavailable for this run.');
     }
@@ -9278,6 +9284,49 @@ function resolveSelectedRun(sessionRuns) {
     return latestRun(realRuns);
 }
 
+function beginBacktestSurfaceRequest(runId) {
+    return { seq: ++backtestSurfaceRequestSeq, runId };
+}
+
+function isCurrentBacktestSurfaceRequest(token) {
+    return token?.seq === backtestSurfaceRequestSeq
+        && token.runId === window.SELECTED_RUN?.run_id
+        && !liveBacktestChartActive;
+}
+
+async function loadHistoricalBacktestSurfaces(selectedRun) {
+    const token = beginBacktestSurfaceRequest(selectedRun.run_id);
+    clearPerformanceComparison('loading', 'Loading performance comparison...');
+    clearTradingLog('Loading orders...');
+    const chartUrl = `${API_BASE}/api/backtest/${encodeURIComponent(selectedRun.run_id)}/chart-data?t=${Date.now()}`;
+
+    const chartRequest = API.get(chartUrl).then((payload) => {
+        if (!isCurrentBacktestSurfaceRequest(token)) return;
+        backtestChartData = payload;
+        initializeCharts();
+    }).catch((error) => {
+        if (!isCurrentBacktestSurfaceRequest(token)) return;
+        backtestChartData = null;
+        if (chartInstance) {
+            chartInstance.destroy();
+            chartInstance = null;
+        }
+        const notice = document.getElementById('chartBaselineNotice');
+        if (notice) notice.hidden = true;
+        renderPerformanceLegend({ columns: [] });
+        setPerformanceComparisonState(
+            'error',
+            'Performance comparison is unavailable. Reload to retry.',
+        );
+        console.warn('Could not load performance comparison:', error.message);
+    });
+
+    const logRequest = loadTradingLogForRun(selectedRun.run_id, {
+        isCurrent: () => isCurrentBacktestSurfaceRequest(token),
+    });
+    await Promise.allSettled([chartRequest, logRequest]);
+}
+
 // Find the DJIA / buy-and-hold runs that belong to a given run: same session,
 // same date window, created closest in time to the run (baselines are written
 // seconds apart from the agent run).
@@ -9400,16 +9449,8 @@ async function loadData() {
                 baselineRun: selectedBuyholdRun,
             });
 
-            const chartUrl = `${API_BASE}/api/backtest/${encodeURIComponent(selectedRun.run_id)}/chart-data?t=${Date.now()}`;
-            backtestChartData = await API.get(chartUrl);
-            // Another click may have switched to the live run while we awaited.
-            if (liveBacktestChartActive || isViewingLiveBacktest(runningId)) {
-                return;
-            }
-            console.log('Loaded backtest chart data:', backtestChartData);
-
-            initializeCharts();
-            await loadTradingLogForRun(selectedRun.run_id);
+            if (isViewingLiveBacktest(runningId)) return;
+            await loadHistoricalBacktestSurfaces(selectedRun);
         }
         
     } catch (error) {
