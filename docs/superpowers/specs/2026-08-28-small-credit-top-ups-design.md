@@ -1,7 +1,7 @@
 # Small Credit Top-Ups Design
 
-**Date:** 2026-08-28  
-**Status:** Approved for planning  
+**Date:** 2026-08-28
+**Status:** Approved for planning
 **PR:** #410 (`feature/default-user-credits`)
 
 ## Goal
