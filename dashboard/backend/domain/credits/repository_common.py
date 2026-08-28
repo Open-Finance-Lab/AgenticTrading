@@ -105,7 +105,7 @@ def encode_activity_cursor(
 
     if not isinstance(created_at, str) or not created_at or len(created_at) > 64:
         raise ValueError("invalid activity cursor")
-    if source_kind not in {"ledger", "llm_usage"}:
+    if source_kind not in {"ledger", "llm_usage", "promotion"}:
         raise ValueError("invalid activity cursor")
     try:
         source_id = _positive_integer(source_id, "source_id")
@@ -150,7 +150,7 @@ def decode_activity_cursor(cursor: str | int) -> tuple[str, str, int] | int:
         not isinstance(created_at, str)
         or not created_at
         or len(created_at) > 64
-        or source_kind not in {"ledger", "llm_usage"}
+        or source_kind not in {"ledger", "llm_usage", "promotion"}
         or isinstance(source_id, bool)
         or not isinstance(source_id, int)
         or source_id <= 0

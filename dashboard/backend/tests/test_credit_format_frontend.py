@@ -74,7 +74,7 @@ def test_credit_formatter_rejects_missing_float_and_overprecision_values():
 def test_credit_formatter_loads_before_every_consumer():
     formatter_at = APP_HTML.index('src="js/credit-format.js?v=1"')
     for asset in (
-        'src="js/credits.js?v=5"',
+        'src="js/credits.js?v=7"',
         'src="js/admin-credits.js?v=6"',
         'src="js/admin-analytics.js?v=2"',
     ):
@@ -82,6 +82,6 @@ def test_credit_formatter_loads_before_every_consumer():
 
 
 def test_static_credit_package_amounts_use_six_decimals():
-    for amount in ("5.000000", "10.000000", "20.000000", "50.000000"):
+    for amount in ("0.500000", "1.000000", "2.000000", "5.000000"):
         assert f">{amount} Credits</span>" in APP_HTML
     assert "$1 = 1.000000 Credits" in APP_HTML

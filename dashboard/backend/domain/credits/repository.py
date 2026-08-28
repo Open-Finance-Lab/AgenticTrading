@@ -212,6 +212,25 @@ CREATE TABLE IF NOT EXISTS credit_grant_pool_ledger_entries (
 """
 
 
+_PROMOTION_GRANT_DDL = """
+CREATE TABLE IF NOT EXISTS credit_promotion_grants (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    campaign_key TEXT NOT NULL CHECK (length(trim(campaign_key)) > 0),
+    amount_micro INTEGER NOT NULL CHECK (amount_micro > 0),
+    operation_id TEXT NOT NULL UNIQUE CHECK (length(trim(operation_id)) > 0),
+    idempotency_key TEXT NOT NULL UNIQUE
+        CHECK (length(trim(idempotency_key)) > 0),
+    request_digest TEXT NOT NULL CHECK (length(trim(request_digest)) > 0),
+    source TEXT NOT NULL CHECK (length(trim(source)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    created_at TEXT NOT NULL,
+    UNIQUE (campaign_key, user_id),
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+)
+"""
+
+
 def _dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row is not None else None
 
@@ -342,6 +361,7 @@ class CreditsStore:
             self._migrate_credit_ledger_in_transaction(conn)
             self._create_llm_billing_schema_in_transaction(conn)
             self._create_grant_pool_schema_in_transaction(conn)
+            self._create_promotion_grant_schema_in_transaction(conn)
 
     @staticmethod
     def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -577,6 +597,24 @@ class CreditsStore:
             (_utcnow_iso(),),
         )
 
+    @classmethod
+    def _create_promotion_grant_schema_in_transaction(
+        cls, conn: sqlite3.Connection
+    ) -> None:
+        conn.execute(_PROMOTION_GRANT_DDL)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_credit_promotion_grants_user_id
+            ON credit_promotion_grants(user_id, id DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_credit_promotion_grants_campaign_user
+            ON credit_promotion_grants(campaign_key, user_id)
+            """
+        )
+
     @staticmethod
     def _begin(conn: sqlite3.Connection) -> None:
         conn.execute("BEGIN IMMEDIATE")
@@ -632,6 +670,16 @@ class CreditsStore:
         ).fetchone()
         grant_micro = int(row["grant_committed_micro"])
         purchased_micro = int(row["purchased_committed_micro"])
+        if through_entry_id is None:
+            promotion = conn.execute(
+                """
+                SELECT COALESCE(SUM(amount_micro), 0) AS grant_micro
+                FROM credit_promotion_grants
+                WHERE user_id = ?
+                """,
+                (user_id,),
+            ).fetchone()
+            grant_micro += int(promotion["grant_micro"])
         reserved_grant_micro = 0
         reserved_purchased_micro = 0
         if through_entry_id is None:
@@ -705,6 +753,16 @@ class CreditsStore:
                 unique_ids,
             ).fetchall()
 
+            promotion_rows = conn.execute(
+                f"""
+                SELECT user_id, COALESCE(SUM(amount_micro), 0) AS grant_micro
+                FROM credit_promotion_grants
+                WHERE user_id IN ({placeholders})
+                GROUP BY user_id
+                """,
+                unique_ids,
+            ).fetchall()
+
             usage_rows = conn.execute(
                 f"""
                 SELECT
@@ -739,6 +797,10 @@ class CreditsStore:
             )
             for row in rows
         }
+        for row in promotion_rows:
+            user_id = int(row["user_id"])
+            grant, purchased = amounts.get(user_id, (0, 0))
+            amounts[user_id] = (grant + int(row["grant_micro"]), purchased)
         usage_amounts = {
             int(row["user_id"]): (
                 int(row["grant_usage_micro"]),
@@ -775,6 +837,85 @@ class CreditsStore:
 
     def get_balance_micro(self, user_id: int) -> int:
         return self.get_balance_projection(user_id)["total_available_micro"]
+
+    def list_user_ids(self) -> list[int]:
+        """Return account IDs for an idempotent promotion backfill."""
+        with self._get_connection() as conn:
+            rows = conn.execute("SELECT id FROM users ORDER BY id").fetchall()
+        return [int(row["id"]) for row in rows]
+
+    def grant_promotion_credits(
+        self,
+        *,
+        user_id: int,
+        campaign_key: str,
+        amount_micro: int,
+        operation_id: str,
+        idempotency_key: str,
+        request_digest: str,
+        source: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Post one system promotion grant, safely replayable by its key."""
+        _positive_integer(user_id, "user_id")
+        _required_text(campaign_key, "campaign_key", max_length=120)
+        _positive_integer(amount_micro, "amount_micro")
+        _required_text(operation_id, "operation_id")
+        _required_text(idempotency_key, "idempotency_key")
+        _required_text(request_digest, "request_digest")
+        _required_text(source, "source", max_length=120)
+        _required_text(reason, "reason", max_length=500)
+        with self._get_connection() as conn:
+            self._begin(conn)
+            self._ensure_account_in_transaction(conn, user_id)
+            existing = conn.execute(
+                """
+                SELECT * FROM credit_promotion_grants
+                WHERE idempotency_key = ? OR operation_id = ?
+                """,
+                (idempotency_key, operation_id),
+            ).fetchone()
+            if existing is not None:
+                if (
+                    existing["user_id"] != user_id
+                    or existing["campaign_key"] != campaign_key
+                    or int(existing["amount_micro"]) != amount_micro
+                    or existing["operation_id"] != operation_id
+                    or existing["idempotency_key"] != idempotency_key
+                    or existing["request_digest"] != request_digest
+                    or existing["source"] != source
+                    or existing["reason"] != reason
+                ):
+                    raise IdempotencyConflictError(
+                        "Promotion idempotency key conflicts with an existing grant"
+                    )
+                return {"created": False, "grant": dict(existing)}
+            conn.execute(
+                """
+                INSERT INTO credit_promotion_grants (
+                    user_id, campaign_key, amount_micro, operation_id,
+                    idempotency_key, request_digest, source, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    user_id,
+                    campaign_key,
+                    amount_micro,
+                    operation_id,
+                    idempotency_key,
+                    request_digest,
+                    source,
+                    reason,
+                    _utcnow_iso(),
+                ),
+            )
+            row = conn.execute(
+                """
+                SELECT * FROM credit_promotion_grants WHERE idempotency_key = ?
+                """,
+                (idempotency_key,),
+            ).fetchone()
+            return {"created": True, "grant": dict(row)}
 
     @staticmethod
     def _llm_reservation_result_in_transaction(
@@ -1633,7 +1774,7 @@ class CreditsStore:
                     boundary = (str(legacy["created_at"]), "ledger", decoded)
                 else:
                     boundary = decoded
-            params: list[Any] = [user_id, user_id]
+            params: list[Any] = [user_id, user_id, user_id]
             cursor_sql = ""
             if boundary is not None:
                 created_at, source_kind, source_id = boundary
@@ -1686,10 +1827,31 @@ class CreditsStore:
                     WHERE user_id = ?
                     GROUP BY user_id, run_id
                 ),
+                promotion_activity AS (
+                    SELECT id AS source_id, 'promotion' AS source_kind,
+                           user_id, 'grant' AS bucket,
+                           'system_promotion_grant' AS entry_type,
+                           amount_micro,
+                           NULL AS payment_order_id,
+                           NULL AS refund_request_id,
+                           NULL AS stripe_event_id,
+                           'promotion:' || operation_id AS operation_key,
+                           operation_id, idempotency_key,
+                           request_digest, NULL AS actor_user_id,
+                           source, reason, 'promotion' AS reference_type,
+                           campaign_key AS reference_id, created_at,
+                           NULL AS reservation_id, NULL AS run_id,
+                           NULL AS call_index, NULL AS model_call_count,
+                           NULL AS evidence_json
+                    FROM credit_promotion_grants
+                    WHERE user_id = ?
+                ),
                 activity AS (
                     SELECT * FROM historical_activity
                     UNION ALL
                     SELECT * FROM llm_activity
+                    UNION ALL
+                    SELECT * FROM promotion_activity
                 )
                 SELECT * FROM activity
                 {cursor_sql}

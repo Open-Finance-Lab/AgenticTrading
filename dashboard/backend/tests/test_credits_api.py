@@ -114,11 +114,11 @@ def _checkout(client, token, *, request_id="11111111-1111-4111-8111-111111111111
     return client.post(
         "/api/credits/checkout-sessions",
         headers=_auth(token),
-        json={"client_request_id": request_id, "package_id": "usd_10"},
+        json={"client_request_id": request_id, "package_id": "usd_5"},
     )
 
 
-def _paid_checkout_event(checkout: dict, *, amount=1000, event_id="evt_paid"):
+def _paid_checkout_event(checkout: dict, *, amount=500, event_id="evt_paid"):
     return StripeWebhookEvent(
         event_id=event_id,
         event_type="checkout.session.completed",
@@ -135,7 +135,7 @@ def _paid_checkout_event(checkout: dict, *, amount=1000, event_id="evt_paid"):
             "metadata": {
                 "atl_order_id": checkout["order_id"],
                 "atl_user_reference": "1",
-                "atl_credits_micro": "10000000",
+                "atl_credits_micro": "5000000",
             },
         },
     )
@@ -194,8 +194,8 @@ def test_balance_ledger_and_order_return_only_public_fields(billing_api):
     assert checkout_response.status_code == 200
     assert checkout_response.json()["test_mode"] is True
     assert paid.status_code == 200
-    assert paid.json()["result"]["balance_micro"] == 10_000_000
-    assert ledger.json()["items"][0]["amount_micro"] == 10_000_000
+    assert paid.json()["result"]["balance_micro"] == 5_000_000
+    assert ledger.json()["items"][0]["amount_micro"] == 5_000_000
     assert ledger.json()["items"][0]["bucket"] == "purchased"
     assert ledger.json()["items"][0]["source"] == "stripe"
     assert ledger.json()["items"][0]["reason"] == "Stripe checkout purchase."
@@ -288,16 +288,41 @@ def test_checkout_input_is_server_allowlisted_and_idempotent(billing_api):
             "custom_amount_usd_cents": 500.0,
         },
     )
+    too_small = billing_api.client.post(
+        "/api/credits/checkout-sessions",
+        headers=_auth(token),
+        json={
+            "client_request_id": "44444444-4444-4444-8444-444444444444",
+            "custom_amount_usd_cents": 49,
+        },
+    )
+    too_large = billing_api.client.post(
+        "/api/credits/checkout-sessions",
+        headers=_auth(token),
+        json={
+            "client_request_id": "55555555-5555-4555-8555-555555555555",
+            "custom_amount_usd_cents": 501,
+        },
+    )
+    retired = billing_api.client.post(
+        "/api/credits/checkout-sessions",
+        headers=_auth(token),
+        json={
+            "client_request_id": "66666666-6666-4666-8666-666666666666",
+            "package_id": "usd_10",
+        },
+    )
     first = _checkout(billing_api.client, token)
     retried = _checkout(billing_api.client, token)
 
     assert tampered.status_code == float_amount.status_code == 422
+    assert too_small.status_code == too_large.status_code == retired.status_code == 422
     assert first.status_code == retried.status_code == 200
     assert first.json() == retried.json()
     first_call, second_call = billing_api.gateway.checkout_calls[-2:]
     assert first_call["idempotency_key"] == second_call["idempotency_key"]
-    assert first_call["amount_usd_cents"] == 1000
-    assert first_call["credits_micro"] == 10_000_000
+    assert first_call["amount_usd_cents"] == 500
+    assert first_call["credits_micro"] == 5_000_000
 
 
 def test_forged_or_tampered_webhook_never_changes_balance(billing_api):
@@ -330,7 +355,7 @@ def test_duplicate_webhook_returns_fast_success_without_double_credit(billing_ap
 
     assert first.status_code == duplicate.status_code == 200
     assert duplicate.json()["result"]["outcome"] == "duplicate"
-    assert billing_api.store.get_balance_micro(1) == 10_000_000
+    assert billing_api.store.get_balance_micro(1) == 5_000_000
 
 
 def test_other_users_order_is_hidden_as_not_found(billing_api):
@@ -371,7 +396,7 @@ def test_admin_gate_and_refund_flow(billing_api):
     )
 
     assert listed.status_code == 200
-    assert listed.json()["items"][0]["refundable_usd_cents"] == 1000
+    assert listed.json()["items"][0]["refundable_usd_cents"] == 500
     assert "stripe_payment_intent_id" not in str(listed.json())
     assert refund.status_code == 200
     assert refund.json()["refund"]["amount_usd_cents"] == 400

@@ -32,11 +32,43 @@ def temp_user_store():
 @pytest.fixture
 def client(temp_user_store, monkeypatch):
     from dashboard.backend import users
+    from dashboard.backend.api import auth
+    from dashboard.backend.domain.credits.repository import CreditsStore
+    from dashboard.backend.domain.credits.service import CreditsService
 
     monkeypatch.setattr(users, "user_store", temp_user_store)
+    monkeypatch.setattr(
+        auth,
+        "credits_service",
+        CreditsService(store=CreditsStore(temp_user_store.db_path)),
+    )
     # The process-global auth limiters are reset by conftest's autouse
     # _reset_shared_scale_state, which pytest runs before this fixture.
     return TestClient(app)
+
+
+def test_signup_and_login_keep_one_welcome_credit_grant(client):
+    from dashboard.backend.api import auth
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "welcome@example.com",
+            "display_name": "Welcome",
+            "password": "securepass1",
+        },
+    )
+    assert signup.status_code == 200
+    user_id = signup.json()["user"]["id"]
+    assert auth.credits_service.get_balance(user_id).display_credits == "1.500000"
+
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "welcome@example.com", "password": "securepass1"},
+    )
+    assert login.status_code == 200
+    activity = auth.credits_service.list_ledger(user_id, limit=10, cursor=None)
+    assert len(activity["items"]) == 1
 
 
 def test_api_health(client):
