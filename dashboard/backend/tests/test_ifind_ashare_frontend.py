@@ -306,6 +306,7 @@ def test_historical_run_config_reads_delay_summary_from_linked_buyhold(js):
 
 
 def test_ifind_chart_does_not_render_us_index_series(js):
+    assert "BacktestComparison.buildModel" in js
     assert re.search(r"filterIfindChartSeries\s*\(", js)
     assert "DJIA index" in js
     assert "Nasdaq-100" in js

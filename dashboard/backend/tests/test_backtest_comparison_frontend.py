@@ -9,6 +9,13 @@ from pathlib import Path
 
 import pytest
 
+from dashboard.backend.tests._frontend_source import (
+    APP_HTML,
+    APP_JS,
+    STYLES,
+    fn_body,
+)
+
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "frontend" / "js" / "backtest-comparison.js"
@@ -146,3 +153,55 @@ def test_exact_raw_ties_mark_every_tied_series_best():
     )
     assert best["totalReturn"] == ["agent", "djia"]
     assert best["maxDrawdown"] == ["agent", "djia"]
+
+
+def test_comparison_script_and_semantic_table_ship_before_app():
+    helper = '<script src="js/backtest-comparison.js?v=1" defer></script>'
+    app = '<script src="app.js?v=117" defer></script>'
+    assert 'href="styles.css?v=126"' in APP_HTML
+    assert APP_HTML.index(helper) < APP_HTML.index(app)
+    for element_id in (
+        "performanceLegend",
+        "performanceComparison",
+        "performanceComparisonHead",
+        "performanceComparisonBody",
+        "performanceComparisonStatus",
+    ):
+        assert f'id="{element_id}"' in APP_HTML
+    assert 'aria-describedby="performanceComparisonCaption"' in APP_HTML
+    assert 'aria-details="performanceComparison"' in APP_HTML
+    assert 'role="img"' in APP_HTML
+
+
+def test_chart_uses_canonical_model_and_dom_legend():
+    body = fn_body("function initializeCharts()")
+    assert "BacktestComparison.buildModel" in body
+    assert "renderPerformanceComparison" in body
+    assert "renderPerformanceLegend" in body
+    assert "comparisonKey" in body
+    assert "display: false" in body
+
+
+def test_renderers_create_semantic_headers_and_native_legend_buttons():
+    comparison = fn_body("function renderPerformanceComparison(")
+    legend = fn_body("function renderPerformanceLegend(")
+    assert ".scope = 'col'" in comparison
+    assert ".scope = 'row'" in comparison
+    assert "Best" in comparison
+    assert "document.createElement('button')" in legend
+    assert "button.type = 'button'" in legend
+    assert "aria-pressed" in legend
+    assert "setDatasetVisibility" in legend
+
+
+def test_comparison_states_and_focus_styles_ship():
+    assert ".performance-comparison" in STYLES
+    assert ".performance-legend-button:focus-visible" in STYLES
+    assert ".performance-comparison-scroll:focus-visible" in STYLES
+    assert 'data-metric="final-value"' not in APP_HTML
+    for removed in (
+        "loadPerformanceMetrics",
+        "displayPerformanceMetrics",
+        "displayNoMetrics",
+    ):
+        assert removed not in APP_JS

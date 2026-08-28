@@ -1888,7 +1888,6 @@ async function onBacktestAgentSelectChange() {
   localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
   if (currentMode === 'backtest') {
     await loadData();
-    loadPerformanceMetrics();
   }
 }
 
@@ -5209,135 +5208,151 @@ function updateMarketsOpenStatus() {
 window.updateMarketsOpenStatus = updateMarketsOpenStatus;
 window.isUsEquityMarketOpen = isUsEquityMarketOpen;
 
-/**
- * Load performance metrics from latest backtest run
- */
-async function loadPerformanceMetrics() {
-    try {
-        if (liveBacktestChartActive) {
-            displayNoMetrics();
-            return;
-        }
-        // Mirror the chart: show metrics for the selected run. window.SELECTED_RUN
-        // is set by loadData; resolve from session runs when called standalone.
-        let metrics = window.SELECTED_RUN || null;
+function formatComparisonMetric(metric, value, currency = 'USD') {
+    if (!Number.isFinite(value)) return '—';
+    if (metric.kind === 'currency') {
+        return new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency,
+            maximumFractionDigits: 0,
+        }).format(value);
+    }
+    if (metric.kind === 'percent') {
+        return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+    }
+    return value.toFixed(2);
+}
 
-        if (!metrics) {
-            try {
-                const sessionRuns = await API.get(`${API_BASE}/api/backtest/runs?t=${Date.now()}`);
-                metrics = resolveSelectedRun(sessionRuns);
-            } catch (e) {
-                console.warn('Could not load session runs for metrics');
+function createComparisonDelta(value, label) {
+    if (!Number.isFinite(value)) return null;
+    const delta = document.createElement('span');
+    const state = value > 0 ? 'is-positive' : value < 0 ? 'is-negative' : 'is-neutral';
+    const sign = value > 0 ? '+' : value < 0 ? '-' : '';
+    delta.className = `performance-delta ${state}`;
+    delta.textContent = `${label} ${sign}${Math.abs(value).toFixed(2)}pp`;
+    return delta;
+}
+
+function setPerformanceComparisonState(state, message = '') {
+    const region = document.getElementById('performanceComparison');
+    const status = document.getElementById('performanceComparisonStatus');
+    if (!region || !status) return;
+    region.dataset.state = state;
+    status.textContent = message;
+}
+
+function clearPerformanceComparison(state = 'empty', message = '') {
+    document.getElementById('performanceComparisonHead')?.replaceChildren();
+    document.getElementById('performanceComparisonBody')?.replaceChildren();
+    renderPerformanceLegend({ columns: [] });
+    setPerformanceComparisonState(state, message);
+}
+
+function renderPerformanceComparison(payload, run) {
+    const head = document.getElementById('performanceComparisonHead');
+    const body = document.getElementById('performanceComparisonBody');
+    if (!head || !body || !window.BacktestComparison) return;
+
+    const model = window.BacktestComparison.buildModel(payload, run);
+    const currency = run?.reporting_currency
+        || run?.metadata?.reporting_currency
+        || 'USD';
+    const headerRow = document.createElement('tr');
+    const metricHeader = document.createElement('th');
+    metricHeader.scope = 'col';
+    metricHeader.textContent = 'Metric';
+    headerRow.appendChild(metricHeader);
+
+    for (const column of model.columns) {
+        const header = document.createElement('th');
+        header.scope = 'col';
+        header.dataset.seriesKey = column.key;
+        const swatch = document.createElement('span');
+        swatch.className = 'performance-series-swatch';
+        swatch.style.backgroundColor = column.color;
+        swatch.setAttribute('aria-hidden', 'true');
+        header.append(swatch, document.createTextNode(column.label));
+        headerRow.appendChild(header);
+    }
+    head.replaceChildren(headerRow);
+
+    const rows = window.BacktestComparison.METRICS.map((metric) => {
+        const row = document.createElement('tr');
+        const rowHeader = document.createElement('th');
+        rowHeader.scope = 'row';
+        rowHeader.textContent = metric.label;
+        row.appendChild(rowHeader);
+
+        for (const column of model.columns) {
+            const cell = document.createElement('td');
+            const value = column.metrics[metric.key];
+            cell.dataset.seriesKey = column.key;
+            const formatted = document.createElement('span');
+            formatted.className = 'performance-metric-value';
+            formatted.textContent = formatComparisonMetric(metric, value, currency);
+            cell.appendChild(formatted);
+
+            if (model.bestByMetric[metric.key].includes(column.key)) {
+                cell.classList.add('performance-best');
+                const best = document.createElement('span');
+                best.className = 'performance-best-label';
+                best.textContent = 'Best';
+                cell.appendChild(best);
             }
-        }
 
-        if (!metrics) {
-            metrics = await API.get(`${API_BASE}/runs/latest/metrics?t=${Date.now()}`);
+            if (metric.key === 'totalReturn' && column.key === 'agent') {
+                const deltas = document.createElement('span');
+                deltas.className = 'performance-deltas';
+                for (const benchmark of model.columns.filter((item) => item.key !== 'agent')) {
+                    const delta = createComparisonDelta(
+                        model.agentDeltas[benchmark.key],
+                        benchmark.label,
+                    );
+                    if (delta) deltas.appendChild(delta);
+                }
+                cell.appendChild(deltas);
+            }
+            row.appendChild(cell);
         }
-
-        if (!metrics || !metrics.initial_equity) {
-            console.warn('Invalid metrics data:', metrics);
-            displayNoMetrics();
-            return;
-        }
-
-        displayPerformanceMetrics(metrics);
-        console.log('✅ Performance metrics loaded:', metrics);
-    } catch (error) {
-        console.warn('Error fetching performance metrics:', error.message);
-        displayNoMetrics();
-    }
-}
-
-/**
- * Display performance metrics in the summary panel
- */
-/**
- * Display performance metrics from backtest results.
- * 
- * Metric Formulas:
- * 1. Final Portfolio Value: last portfolio value in equity curve
- * 2. Cumulative Return: (final_value - initial_capital) / initial_capital * 100
- * 3. Max Drawdown: minimum drawdown = (value - running_peak) / running_peak * 100
- * 4. Sharpe Ratio: (mean(returns) / std(returns)) * sqrt(252*6.5)
- *    - Hourly data with 252 trading days/year and 6.5 hours/day
- */
-function displayPerformanceMetrics(metrics) {
-    console.log('displayPerformanceMetrics() called with:', metrics);
-    
-    // Calculate final value from initial equity and total return
-    const initialCapital = metrics.initial_equity || 1000;
-    let totalReturnPercent = metrics.total_return || 0;
-    if (Math.abs(totalReturnPercent) <= 1 && totalReturnPercent !== 0) {
-        totalReturnPercent = totalReturnPercent * 100;
-    }
-    const finalValue = metrics.final_equity || (initialCapital * (1 + totalReturnPercent / 100));
-    
-    // Update Final Value
-    const finalValueEl = document.querySelector('[data-metric="final-value"]');
-    if (finalValueEl) {
-        finalValueEl.textContent = '$' + finalValue.toLocaleString('en-US', {
-            minimumFractionDigits: 0,
-            maximumFractionDigits: 0
-        });
-        finalValueEl.className = 'metric-value ' + (totalReturnPercent >= 0 ? 'positive' : 'negative');
-        console.log(`  → Updated Final Value: $${finalValue.toFixed(0)}`);
-    }
-    
-    // Update Cumulative Return (renamed from Total Return)
-    const returnEl = document.querySelector('[data-metric="total-return"]');
-    if (returnEl) {
-        const returnSign = totalReturnPercent >= 0 ? '+' : '';
-        const returnText = returnSign + totalReturnPercent.toFixed(2) + '%';
-        returnEl.textContent = returnText;
-        returnEl.className = 'metric-value ' + (totalReturnPercent >= 0 ? 'positive' : 'negative');
-        console.log(`  → Updated Cumulative Return: ${returnText}`);
-    }
-    
-    // Update Max Drawdown
-    const drawdownEl = document.querySelector('[data-metric="max-drawdown"]');
-    if (drawdownEl) {
-        let maxDrawdown = metrics.max_drawdown || 0;
-        if (Math.abs(maxDrawdown) <= 1 && maxDrawdown !== 0) {
-            maxDrawdown = maxDrawdown * 100;
-        }
-        const drawdownText = maxDrawdown.toFixed(2) + '%';
-        drawdownEl.textContent = drawdownText;
-        drawdownEl.className = 'metric-value ' + (maxDrawdown >= 0 ? 'positive' : 'negative');
-        console.log(`  → Updated Max Drawdown: ${drawdownText}`);
-    }
-    
-    // Update Sharpe Ratio
-    // Note: Calculated using hourly data with annualization factor sqrt(252*6.5)
-    const sharpeEl = document.querySelector('[data-metric="sharpe"]');
-    if (sharpeEl) {
-        const sharpe = metrics.sharpe_ratio || 0;
-        const sharpeText = sharpe.toFixed(2);
-        sharpeEl.textContent = sharpeText;
-        sharpeEl.className = 'metric-value';
-        console.log(`  → Updated Sharpe Ratio: ${sharpeText}`);
-        // Tooltip already set in HTML with title attribute
-    }
-}
-
-/**
- * Display placeholder when no metrics available
- */
-function displayNoMetrics() {
-    const elements = [
-        '[data-metric="final-value"]',
-        '[data-metric="total-return"]',
-        '[data-metric="max-drawdown"]',
-        '[data-metric="sharpe"]'
-    ];
-    
-    elements.forEach(selector => {
-        const el = document.querySelector(selector);
-        if (el) {
-            el.textContent = '--';
-            el.className = 'metric-value';
-        }
+        return row;
     });
+    body.replaceChildren(...rows);
+
+    const missing = model.columns.filter((column) => !column.available);
+    const message = missing.length
+        ? `${missing.map((column) => column.label).join(', ')} unavailable for this run.`
+        : '';
+    setPerformanceComparisonState(missing.length ? 'partial' : 'ready', message);
+    return model;
+}
+
+function renderPerformanceLegend(model, { disabled = false } = {}) {
+    const host = document.getElementById('performanceLegend');
+    if (!host) return;
+    const available = (model?.columns || []).filter((column) => column.available);
+    const buttons = available.map((column, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'performance-legend-button';
+        button.dataset.datasetIndex = String(index);
+        button.setAttribute('aria-pressed', 'true');
+        button.disabled = disabled;
+
+        const swatch = document.createElement('span');
+        swatch.className = 'performance-series-swatch';
+        swatch.style.backgroundColor = column.color;
+        swatch.setAttribute('aria-hidden', 'true');
+        button.append(swatch, document.createTextNode(column.label));
+        button.addEventListener('click', () => {
+            if (!chartInstance) return;
+            const visible = button.getAttribute('aria-pressed') === 'true';
+            chartInstance.setDatasetVisibility(index, !visible);
+            button.setAttribute('aria-pressed', String(!visible));
+            chartInstance.update();
+        });
+        return button;
+    });
+    host.replaceChildren(...buttons);
 }
 
 const MAG7_TICKER_SYMBOLS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'META'];
@@ -6427,16 +6442,7 @@ function getPerformanceChartOptions(timestampMeta) {
         },
         plugins: {
             legend: {
-                display: true,
-                labels: {
-                    color: '#e5e7eb',
-                    font: { size: 12, weight: '600' },
-                    padding: 15,
-                    usePointStyle: true,
-                    pointStyle: 'line',
-                    boxWidth: 12,
-                    boxHeight: 2,
-                }
+                display: false,
             },
             tooltip: {
                 enabled: true,
@@ -6532,6 +6538,18 @@ function initLiveBacktestChart() {
         },
         options: getPerformanceChartOptions(liveBacktestChartMeta),
     });
+    renderPerformanceLegend({
+        columns: [{
+            key: 'agent',
+            label: 'Your Agent',
+            color: '#4FC3F7',
+            available: true,
+        }],
+    }, { disabled: true });
+    setPerformanceComparisonState(
+        'live',
+        'Benchmark metrics will appear when this run finishes.',
+    );
 }
 
 /** Clear history chart/metrics/log and pin the view to a soon-to-start live run. */
@@ -6543,7 +6561,10 @@ function prepareLiveBacktestView(launchConfig = null) {
     localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
     const runSelect = document.getElementById('backtestRunSelect');
     if (runSelect) runSelect.value = '';
-    displayNoMetrics();
+    clearPerformanceComparison(
+        'live',
+        'Benchmark metrics will appear when this run finishes.',
+    );
     clearTradingLog('Backtest running… orders will appear here.');
     initLiveBacktestChart();
     renderBacktestRunConfig(null, { running: true, launchConfig });
@@ -6578,7 +6599,10 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
         runSelect.value = runId;
         runSelect.hidden = false;
     }
-    displayNoMetrics();
+    clearPerformanceComparison(
+        'live',
+        'Benchmark metrics will appear when this run finishes.',
+    );
     if (!alreadyLive) {
         initLiveBacktestChart();
     }
@@ -6625,7 +6649,7 @@ function showBacktestLaunchFailure(message, launchConfig, runKey = null) {
     liveBacktestLaunchPending = false;
     liveBacktestLaunchError = true;
     renderBacktestRunConfig(null, { launchConfig, statusLabel: 'Failed' });
-    displayNoMetrics();
+    clearPerformanceComparison('error', 'Backtest did not start.');
     clearTradingLog('Backtest did not start.');
     showBacktestRunProgress(true, { isError: true });
     updateBacktestRunProgress({ elapsedSeconds: 0, message });
@@ -6857,7 +6881,6 @@ function ensureBacktestPolling() {
                         localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
                     }
                     await loadData();
-                    await loadPerformanceMetrics();
                     setTimeout(() => showBacktestRunProgress(false), 2500);
                 } else {
                     showBacktestRunProgress(false);
@@ -8654,7 +8677,6 @@ function showPlaygroundPanel(tab) {
         populateBacktestAgentSelect();
         if (!allAgents.length) loadAgents();
         loadData();
-        loadPerformanceMetrics();
     } else if (tab === 'paper') {
         currentMode = 'paper';
         loadPaperTradingData();
@@ -9345,7 +9367,12 @@ async function loadData() {
                 console.warn('No backtest runs for this session');
                 comparisonData = null;
                 backtestChartData = null;
-                displayNoMetrics();
+                clearPerformanceComparison(
+                    'empty',
+                    runningId
+                        ? 'Select the Running run to watch live progress.'
+                        : 'No completed backtests yet.',
+                );
                 clearTradingLog(
                     runningId
                         ? 'Select the Running run to watch live progress.'
@@ -9382,7 +9409,6 @@ async function loadData() {
             console.log('Loaded backtest chart data:', backtestChartData);
 
             initializeCharts();
-            displayPerformanceMetrics(selectedRun);
             await loadTradingLogForRun(selectedRun.run_id);
         }
         
@@ -9422,14 +9448,20 @@ function initializeCharts() {
         const ctx = perfCtx.getContext('2d');
         const { timestamps, x_labels: xLabels, series } = backtestChartData;
         const visibleSeries = filterIfindChartSeries(series);
-
-        const datasets = visibleSeries.map((entry) => ({
-            label: entry.label,
-            data: entry.values,
-            borderColor: entry.color,
+        const comparisonPayload = { ...backtestChartData, series: visibleSeries };
+        const model = window.BacktestComparison.buildModel(
+            comparisonPayload,
+            window.SELECTED_RUN,
+        );
+        const chartColumns = model.columns.filter((column) => column.available);
+        const datasets = chartColumns.map((column) => ({
+            label: column.label,
+            comparisonKey: column.key,
+            data: column.values,
+            borderColor: column.color,
             backgroundColor: 'transparent',
             borderWidth: 2.5,
-            borderDash: entry.dashed ? [6, 4] : [],
+            borderDash: column.dashed ? [6, 4] : [],
             tension: 0,
             fill: false,
             pointRadius: 0,
@@ -9451,16 +9483,7 @@ function initializeCharts() {
                 },
                 plugins: {
                     legend: {
-                        display: true,
-                        labels: {
-                            color: '#e5e7eb',
-                            font: { size: 12, weight: '600' },
-                            padding: 15,
-                            usePointStyle: true,
-                            pointStyle: 'line',
-                            boxWidth: 12,
-                            boxHeight: 2,
-                        }
+                        display: false,
                     },
                     tooltip: {
                         enabled: true,
@@ -9531,8 +9554,10 @@ function initializeCharts() {
             }
         });
 
+        renderPerformanceComparison(comparisonPayload, window.SELECTED_RUN);
+        renderPerformanceLegend(model);
         liveBacktestChartActive = false;
-        console.log('✅ Chart initialized -', series.map((s) => s.label).join(', '));
+        console.log('✅ Chart initialized -', chartColumns.map((column) => column.label).join(', '));
     }
 }
 
