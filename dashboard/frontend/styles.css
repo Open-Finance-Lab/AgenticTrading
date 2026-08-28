@@ -8964,6 +8964,19 @@ html[data-nav-page="home"] #homeView .dashboard-bottom-grid .home-module--market
     flex: 1;
 }
 
+.agent-card--status .agent-card-identity {
+    cursor: pointer;
+    border-radius: 8px;
+}
+.agent-card--status .agent-card-identity:hover .agent-name,
+.agent-card--status .agent-card-identity:focus-visible .agent-name {
+    color: var(--home-accent-cyan, #22d3ee);
+}
+.agent-card--status .agent-card-identity:focus-visible {
+    outline: 2px solid var(--home-accent-cyan, #22d3ee);
+    outline-offset: 2px;
+}
+
 .agent-card-icon {
     flex: 0 0 auto;
     display: inline-flex;
@@ -9884,6 +9897,20 @@ body.agent-editor-open {
     outline: none;
     border-color: rgba(34, 211, 238, 0.5);
     box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.12);
+}
+
+.agent-editor-name-input--bound,
+.agent-editor-name-input:read-only {
+    border-color: transparent;
+    background: transparent;
+    padding-left: 0;
+    cursor: default;
+}
+
+.agent-editor-name-input--bound:focus,
+.agent-editor-name-input:read-only:focus {
+    border-color: transparent;
+    box-shadow: none;
 }
 
 .agent-editor-description {

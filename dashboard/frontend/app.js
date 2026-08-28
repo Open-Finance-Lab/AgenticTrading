@@ -209,7 +209,27 @@ function setDefaultAgentId(agentId) {
 }
 
 const DEFAULT_AGENT_PROVISION_GUARD_PREFIX = 'default-agent-provisioned:';
+const STARTER_AGENTS = [
+  {
+    name: 'DeepSeek V4 Pro',
+    model_name: 'deepseek/deepseek-v4-pro',
+    description: 'A DeepSeek V4 Pro starter — open it to edit the trading instruction and run a backtest.',
+  },
+  {
+    name: 'GPT-5.5',
+    model_name: 'openai/gpt-5.5',
+    description: 'A GPT-5.5 starter — open it to edit the trading instruction and run a backtest.',
+  },
+  {
+    name: 'Claude Sonnet 4.6',
+    model_name: 'anthropic/claude-sonnet-4-6',
+    description: 'A Claude Sonnet 4.6 starter — open it to edit the trading instruction and run a backtest.',
+  },
+];
 const DEFAULT_FOUNDATION_MODEL = 'deepseek/deepseek-v4-pro';
+const DEFAULT_STARTER_AGENT_NAME = 'DeepSeek V4 Pro';
+const DEFAULT_STARTER_AGENT_DESCRIPTION =
+  'A DeepSeek V4 Pro starter — open it to edit the trading instruction and run a backtest.';
 const SIMPLE_INSTRUCTION_PRESET_KEY = 'simple_instruction';
 const SIMPLE_INSTRUCTION_OUTPUT_FORMAT =
   'JSON: { "orders": [{ "symbol": "...", "side": "buy|sell|hold", "qty": number, "order_type": "market|limit", "limit_price": number|null, "reason": "..." }] }';
@@ -230,10 +250,16 @@ window.DEFAULT_STARTER_INSTRUCTION = DEFAULT_STARTER_INSTRUCTION;
 function defaultAgentProvisionGuardKey() {
   // Prefer the signed-in account so a brand-new user on a browser that already
   // provisioned (or deleted) a guest starter still gets their own default.
-  // Guests keep the browser-scoped key so logout→login claim can find it.
+  // Include created_at: local SQLite (and Render's ephemeral disk) recycle
+  // user ids, so `u:1` from a wiped DB would skip provisioning for the next
+  // account that lands on id 1. Guests keep the browser-scoped key so
+  // logout→login claim can find it.
   const user = typeof getStoredAuthUser === 'function' ? getStoredAuthUser() : null;
   if (user?.id != null) {
-    return `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}u:${user.id}`;
+    const created = String(user.created_at || '').trim();
+    return created
+      ? `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}u:${user.id}:${created}`
+      : `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}u:${user.id}`;
   }
   return `${DEFAULT_AGENT_PROVISION_GUARD_PREFIX}b:${window.BROWSER_OWNER_ID || 'anon'}`;
 }
@@ -478,14 +504,15 @@ const AGENT_GRID_PAGE_SIZE = 5;
 const LEGACY_RUNTIME_MARKET = { ai_hedge_fund: 'us_stocks' };
 
 /** Category slug -> market display name. The single place these strings are
- * written: the Stocks shelf's market chips, the Community category chips, the
- * agent-card submeta and the Configure picker all read this map, so renaming a
- * market is one edit. Key order is chip order and mirrors the AgentCategory
- * Literal's declaration order in dashboard/backend/domain/agents/taxonomy.py.
+ * written: the Prompted Models shelf's market chips, the Community category
+ * chips, the agent-card submeta and the Configure picker all read this map, so
+ * renaming a market is one edit. Key order is chip order and mirrors the
+ * AgentCategory Literal's declaration order in
+ * dashboard/backend/domain/agents/taxonomy.py.
  *
- * Markets, not asset classes: My Agents shelves by what an agent trades, and
- * Stocks is the only asset class the engine can backtest, so both entries here
- * live under it. */
+ * Markets, not asset classes: Prompted Models still filters by what an agent
+ * trades, and equities are the only asset class the engine can backtest, so
+ * both entries here live under that shelf. */
 const MARKET_LABELS = {
   us_stocks: 'U.S.',
   cn_ashares: 'China A-Share',
@@ -548,8 +575,10 @@ function populateSupportedModelSelects() {
 // renderAgentCategories' "some grid is missing" guard, silently aborting the
 // entire My Agents render. Their order is their order in app.html.
 const AGENT_SHELVES = [
-  { key: 'stocks', title: 'Stocks',
-    match: (a) => agentShelfKey(a) === 'stocks' },
+  { key: 'prompted', title: 'Prompted Models',
+    match: (a) => agentShelfKey(a) === 'prompted' },
+  { key: 'open', title: 'Open Agents',
+    match: (a) => agentShelfKey(a) === 'open' },
   { key: 'external', title: 'For Developers: Connected Agents',
     match: (a) => agentShelfKey(a) === 'external' },
 ];
@@ -557,29 +586,34 @@ const AGENT_SHELVES = [
 /** The single shelf an agent renders under. Exactly one value per agent, so no
  * agent can be double-counted or dropped off every shelf.
  *
- * Stocks is the only asset class the backtest engine supports (every entry in
- * the backend's _MARKET_PROFILES is equities), so every built-in lands there
- * regardless of category, and connected agents split off by `agent_type`. The
- * market an agent trades is a separate axis -- see agentMarketKey. */
+ * Built-ins split on how they decide: a prompt-and-model pipeline lands on
+ * Prompted Models; a hosted runtime (AI Hedge Fund today) lands on Open
+ * Agents. Connected agents split off by `agent_type`. The market an agent
+ * trades is a separate axis -- see agentMarketKey.
+ *
+ * runtime_type is always present and truthy (server-defaulted to 'pipeline'),
+ * so the hosted check MUST be an inequality against 'pipeline', never a
+ * truthiness test. */
 function agentShelfKey(agent) {
   if (!agent || agent.agent_type !== 'builtin') return 'external';
-  return 'stocks';
+  if ((agent.runtime_type || 'pipeline') !== 'pipeline') return 'open';
+  return 'prompted';
 }
 
 /** Market a built-in agent trades, or '' when the platform genuinely doesn't
  * know -- a NULL/blank category, or a slug from a newer or older backend.
  *
- * '' is not a bug and must never hide the agent: those agents stay on Stocks
- * under the All chip and are excluded only by an explicit market filter, which
- * is the honest outcome when the market is unknown. */
+ * '' is not a bug and must never hide the agent: those agents stay on
+ * Prompted Models under the All chip and are excluded only by an explicit
+ * market filter, which is the honest outcome when the market is unknown. */
 function agentMarketKey(agent) {
   const slug = String(agent?.category || '').trim().toLowerCase();
   if (MARKET_LABELS[slug]) return slug;
   return LEGACY_RUNTIME_MARKET[String(agent?.runtime_type || '').trim().toLowerCase()] || '';
 }
 
-/** 'all' or one of MARKET_LABELS' keys. Narrows the Stocks shelf's grid only --
- * never its count pill, which reports what the shelf holds. */
+/** 'all' or one of MARKET_LABELS' keys. Narrows the Prompted Models shelf's
+ * grid only -- never its count pill, which reports what the shelf holds. */
 let agentMarketFilter = 'all';
 
 /** 'us_stocks' -> 'UsStocks' -- app.html's per-shelf element id suffix (agentsGrid<Suffix> etc). */
@@ -786,6 +820,8 @@ function formatAgentModelLabel(modelName) {
     'claude-sonnet-4.6': 'Claude Sonnet 4.6',
     'gpt-5.5': 'GPT-5.5',
     'openai/gpt-5.5': 'GPT-5.5',
+    'deepseek/deepseek-v4-pro': 'DeepSeek V4 Pro',
+    'deepseek-v4-pro': 'DeepSeek V4 Pro',
     'local-model': 'Local model',
     'rule-based': 'Rule-based',
     'rule-based-demo': 'Rule-based',
@@ -802,6 +838,30 @@ function formatAgentModelLabel(modelName) {
   label = label.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   label = label.replace(/\b(\d)\s+(\d)\b/g, '$1.$2');
   return label;
+}
+
+function catalogModelLabels() {
+  return new Set([
+    ...SUPPORTED_MODELS.map((model) => model.label),
+    ...STARTER_AGENTS.map((spec) => spec.name),
+  ]);
+}
+
+/** Card/editor title for a prompted-model agent.
+
+ * If the stored name is already a catalog model label (or empty), it is bound
+ * to the current model — so a Claude card cannot keep showing "DeepSeek V4 Pro"
+ * after the model field moved. Custom titles ("My dip buyer") stay as stored.
+ */
+function agentDisplayName(agent) {
+  const stored = String(agent?.name || '').trim();
+  if ((agent?.agent_type || '') !== 'builtin') return stored || 'Agent';
+  if ((agent?.runtime_type || 'pipeline') !== 'pipeline') return stored || 'Agent';
+  const modelLabel = formatAgentModelLabel(agent?.model_name);
+  if (!stored || stored === modelLabel || catalogModelLabels().has(stored)) {
+    return modelLabel;
+  }
+  return stored;
 }
 
 function agentRobotIcon() {
@@ -1415,7 +1475,7 @@ function renderAgentCards(grid, agents, categoryKey) {
     card.setAttribute('data-agent-id', agent.agent_id);
     const model = formatAgentModelLabel(agent.model_name);
     const type = agentTypeLabel(agent);
-    // Under the All chip the Stocks shelf mixes markets, so the card has to
+    // Under the All chip Prompted Models mixes markets, so the card has to
     // say which. Omitted rather than guessed when agentMarketKey returns ''.
     const market = MARKET_LABELS[agentMarketKey(agent)];
     const submeta = `${model} · ${type}${market ? ` · ${market}` : ''}`;
@@ -1427,7 +1487,7 @@ function renderAgentCards(grid, agents, categoryKey) {
         <div class="agent-card-identity">
           ${agentRobotIcon()}
           <div class="agent-card-identity-text">
-            <h3 class="agent-name">${escapeHtml(agent.name)}${agent.agent_id === defaultId ? ' <span class="agent-default-badge">Default</span>' : ''}</h3>
+            <h3 class="agent-name">${escapeHtml(agentDisplayName(agent))}${agent.agent_id === defaultId ? ' <span class="agent-default-badge">Default</span>' : ''}</h3>
             <p class="agent-card-submeta" title="${escapeHtml(submeta)}">${escapeHtml(submeta)}</p>
           </div>
         </div>
@@ -1436,6 +1496,23 @@ function renderAgentCards(grid, agents, categoryKey) {
       ${running ? renderAgentRunningBody(agent, running) : renderAgentCardBody(agent, statusBadge.key)}
       ${running ? renderAgentRunningActions(agent) : renderAgentCardActions(agent, statusBadge.key)}
     `;
+    const identity = card.querySelector('.agent-card-identity');
+    if (identity) {
+      identity.setAttribute('role', 'button');
+      identity.setAttribute('tabindex', '0');
+      identity.setAttribute('title', 'Open to edit instructions');
+      const openEditor = (event) => {
+        event.preventDefault();
+        if (!window.AgentEditor) return;
+        navigateToPage('playground', { playgroundTab: 'agents' });
+        showPlaygroundPanel('agents');
+        window.AgentEditor.open(agent);
+      };
+      identity.addEventListener('click', openEditor);
+      identity.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' || event.key === ' ') openEditor(event);
+      });
+    }
     grid.appendChild(card);
   });
 
@@ -1543,23 +1620,28 @@ function renderAgentCards(grid, agents, categoryKey) {
   });
 }
 
-// Empty-state HTML for the Stocks shelf. Three cases, deliberately worded
-// apart: a live search hiding everything, a market chip with nothing on it yet,
-// and a genuinely empty shelf. Collapsing them would tell a searching or
-// filtering user they own no agents. Stocks is also the onboarding surface (it
-// inherited that role from the retired Prompting LLMs shelf), so the true-empty
+// Empty-state HTML for the Prompted Models shelf. Three cases, deliberately
+// worded apart: a live search hiding everything, a market chip with nothing on
+// it yet, and a genuinely empty shelf. Collapsing them would tell a searching
+// or filtering user they own no agents. Prompted Models is the onboarding
+// surface (the auto-provisioned DeepSeek card lands here), so the true-empty
 // case keeps the create-your-first voice rather than the Community-upsell voice
-// the old market shelves used.
+// used by Open Agents.
 //
 // External renders a placeholder CARD instead (renderExternalPlaceholderCard),
 // so it has no entry here.
-function stocksEmptyHtml({ searching, marketFilter }) {
+function promptedEmptyHtml({ searching, marketFilter }) {
   if (searching) return 'No agents match your search.';
   if (marketFilter !== 'all') {
     const label = escapeHtml(MARKET_LABELS[marketFilter] || '');
     return `No ${label} agents yet. Add a ready-made ${label} strategy from ${communityShelfButtonHtml(marketFilter)}.`;
   }
   return `You don't have any agents yet. Create one and test your first trading idea, or browse ready-made strategies in ${communityShelfButtonHtml('all')}.`;
+}
+
+function openAgentsEmptyHtml({ searching }) {
+  if (searching) return 'No agents match your search.';
+  return `No open agents yet. Add a ready-made strategy like AI Hedge Fund from ${communityShelfButtonHtml('all')}.`;
 }
 
 // A real <button>, not an <a href="#">: this is the primary path off an empty
@@ -1574,9 +1656,9 @@ function communityShelfButtonHtml(category) {
   return `<button type="button" class="agents-empty-community-btn" data-community-category="${escapeHtml(category)}">Community</button>`;
 }
 
-/** The Stocks shelf's market filter row: 'All' plus one chip per MARKET_LABELS
- * entry, reusing the Community chip classes so the same taxonomy looks the same
- * on both surfaces.
+/** The Prompted Models shelf's market filter row: 'All' plus one chip per
+ * MARKET_LABELS entry, reusing the Community chip classes so the same taxonomy
+ * looks the same on both surfaces.
  *
  * Built once, then only toggled. This runs from renderAgentCategories, which is
  * bound to the search box's `input` event -- rebuilding innerHTML per keystroke
@@ -1649,7 +1731,7 @@ function renderAgentCategories(agents) {
     }
 
     let matched = pinDefaultFirst(agents.filter(shelf.match));
-    if (shelf.key === 'stocks' && agentMarketFilter !== 'all') {
+    if (shelf.key === 'prompted' && agentMarketFilter !== 'all') {
       // agentMarketKey returns '' for a NULL/blank/unknown category, so those
       // agents match no chip and appear under All only -- visible, but never
       // filed under a market the platform can't actually vouch for.
@@ -1675,7 +1757,9 @@ function renderAgentCategories(agents) {
     if (!emptyEl) return;
     emptyEl.hidden = matched.length > 0;
     if (matched.length === 0) {
-      emptyEl.innerHTML = stocksEmptyHtml({ searching, marketFilter: agentMarketFilter });
+      emptyEl.innerHTML = shelf.key === 'open'
+        ? openAgentsEmptyHtml({ searching })
+        : promptedEmptyHtml({ searching, marketFilter: agentMarketFilter });
     }
   });
 }
@@ -1759,7 +1843,7 @@ function populateBacktestAgentSelect() {
     .map((agent) => {
       const type = agent.agent_type === 'builtin' ? 'Built-in' : 'External';
       const model = agent.model_name || 'local-model';
-      const label = `${agent.name} · ${model} · ${type}`;
+      const label = `${agentDisplayName(agent)} · ${model} · ${type}`;
       return `<option value="${escapeHtml(agent.agent_id)}">${escapeHtml(label)}</option>`;
     })
     .join('');
@@ -1891,41 +1975,44 @@ async function onBacktestAgentSelectChange() {
   }
 }
 
-// First-visit onboarding: a brand-new owner gets one real Foundation agent so
-// the row is never empty. The guard key means "we provisioned once for this
-// identity" — deleting the agent must NOT resurrect it.
+// First-visit onboarding: a brand-new owner gets the Prompted Models starters
+// (DeepSeek V4 Pro, GPT-5.5, Claude Sonnet 4.6). The guard key means "we
+// provisioned the set for this identity" — deleting every starter must NOT
+// resurrect them. Missing models in a non-empty list are still filled so an
+// account that only received the original DeepSeek card gets the other two.
 let defaultAgentProvisionInFlight = null;
+
+function stampDefaultAgentProvisionGuard(agentId) {
+  try {
+    const guardKey = defaultAgentProvisionGuardKey();
+    if (!localStorage.getItem(guardKey)) {
+      localStorage.setItem(guardKey, agentId || '1');
+    }
+  } catch (e) {
+    /* storage unavailable — delete-guard simply won't persist */
+  }
+}
 
 async function ensureDefaultFoundationAgent(agents) {
   if (isDemoMode()) return false;
   const builtins = agents.filter((a) => a.agent_type === 'builtin');
-  if (builtins.length) {
+  const present = new Set(builtins.map((a) => String(a.model_name || '')));
+  const missing = STARTER_AGENTS.filter((spec) => !present.has(spec.model_name));
+  if (!missing.length) {
     // A builtin visible only via the unclaimed-browser-session fallback (#235)
     // is not proof claim-account actually landed — owner_user_id is still null
     // server-side. Stamping the guard against it would permanently mark this
-    // identity "onboarded" for an agent it may never end up owning. Still skip
-    // provisioning either way (never worth creating a duplicate starter), but
-    // only persist the guard once ownership is confirmed.
+    // identity "onboarded" for an agent it may never end up owning.
     const user = typeof getStoredAuthUser === 'function' ? getStoredAuthUser() : null;
     const owned = user?.id != null
       ? builtins.find((a) => a.owner_user_id === user.id)
       : builtins[0];
-    if (owned) {
-      try {
-        const guardKey = defaultAgentProvisionGuardKey();
-        if (!localStorage.getItem(guardKey)) {
-          localStorage.setItem(guardKey, owned.agent_id);
-        }
-      } catch (e) {
-        /* storage unavailable — delete-guard simply won't persist */
-      }
-    }
+    if (owned) stampDefaultAgentProvisionGuard(owned.agent_id);
     return false;
   }
-  const guardKey = defaultAgentProvisionGuardKey();
-  if (hasDefaultAgentProvisionGuard()) return false;
+  if (!builtins.length && hasDefaultAgentProvisionGuard()) return false;
   if (defaultAgentProvisionInFlight) {
-    // Another loadAgents is already creating the starter — wait for it so a
+    // Another loadAgents is already creating starters — wait for it so a
     // signup race does not skip provisioning and leave My Agents empty.
     try {
       return await defaultAgentProvisionInFlight;
@@ -1934,36 +2021,68 @@ async function ensureDefaultFoundationAgent(agents) {
     }
   }
   defaultAgentProvisionInFlight = (async () => {
-    try {
-      const data = await API.post(`${API_BASE}/api/v1/agents`, {
-        name: 'My Trading Agent',
-        model_name: DEFAULT_FOUNDATION_MODEL,
-        agent_type: 'builtin',
-        description: 'Your starter agent — configure it and run a backtest.',
-        cash_allocation: DEFAULT_AGENT_CASH_ALLOCATION,
-      });
-      const agent = data?.agent;
-      if (!agent?.agent_id) return false;
-      localStorage.setItem(guardKey, agent.agent_id);
-      // The starter instruction is seeded server-side by AgentService.create_agent
-      // for every builtin agent. It used to be a follow-up PATCH from here, which
-      // failed silently in prod for months (PATCH was missing from the CORS
-      // allow_methods, so the preflight 400'd) and left every default agent with
-      // an empty pipeline. Seeding in the same call that creates the row means it
-      // cannot half-succeed.
-      if (!getDefaultAgentId()) setDefaultAgentId(agent.agent_id);
-      return true;
-    } catch (error) {
-      // Non-fatal: the row falls back to its empty state with the Add Agent CTA.
-      console.warn('Default agent provisioning skipped:', error.message);
-      return false;
+    let createdAny = false;
+    let firstId = null;
+    for (const spec of missing) {
+      try {
+        const data = await API.post(`${API_BASE}/api/v1/agents`, {
+          name: spec.name,
+          model_name: spec.model_name,
+          agent_type: 'builtin',
+          description: spec.description,
+          cash_allocation: DEFAULT_AGENT_CASH_ALLOCATION,
+        });
+        const agent = data?.agent;
+        if (!agent?.agent_id) continue;
+        createdAny = true;
+        firstId = firstId || agent.agent_id;
+        // The starter instruction is seeded server-side by AgentService.create_agent
+        // for every builtin agent. It used to be a follow-up PATCH from here, which
+        // failed silently in prod for months (PATCH was missing from the CORS
+        // allow_methods, so the preflight 400'd) and left every default agent with
+        // an empty pipeline. Seeding in the same call that creates the row means it
+        // cannot half-succeed.
+      } catch (error) {
+        // Non-fatal: the row falls back to its empty state with the Add Agent CTA.
+        console.warn('Default agent provisioning skipped:', error.message);
+      }
     }
+    if (createdAny) {
+      stampDefaultAgentProvisionGuard(firstId);
+      if (!getDefaultAgentId()) setDefaultAgentId(firstId);
+    }
+    return createdAny;
   })();
   try {
     return await defaultAgentProvisionInFlight;
   } finally {
     defaultAgentProvisionInFlight = null;
   }
+}
+
+async function alignStarterAgentNames(agents) {
+  // Persist the card-title binding: a Claude starter whose stored name is
+  // still "DeepSeek V4 Pro" (model changed, or a copy) is rewritten so the
+  // editor and the grid cannot disagree after the next fetch.
+  if (isDemoMode() || !Array.isArray(agents) || !agents.length) return false;
+  let changed = false;
+  for (const agent of agents) {
+    if ((agent.agent_type || '') !== 'builtin') continue;
+    if ((agent.runtime_type || 'pipeline') !== 'pipeline') continue;
+    const nextName = agentDisplayName(agent);
+    if (!nextName || nextName === String(agent.name || '').trim()) continue;
+    try {
+      await API.patch(
+        `${API_BASE}/api/v1/agents/${encodeURIComponent(agent.agent_id)}`,
+        { name: nextName },
+      );
+      agent.name = nextName;
+      changed = true;
+    } catch (error) {
+      console.warn('Starter name align skipped:', error.message);
+    }
+  }
+  return changed;
 }
 
 // Auth boot gate: nav goes live before the boot's auth awaits, so a My Agents
@@ -2046,6 +2165,7 @@ async function loadAgentsNow() {
         console.warn('Refresh after default-agent provisioning failed:', refreshError.message);
       }
     }
+    await alignStarterAgentNames(agents);
 
     allAgents = agents;
     applyAgentFilters();
@@ -2081,8 +2201,8 @@ async function loadAgentsNow() {
 let marketplaceTemplates = [];
 let marketplaceCloneInFlight = false;
 let marketplaceLoadInFlight = null;
-/** 'all' or one of MARKET_LABELS' keys. Set by the chip row and by the Stocks
- * shelf's empty-state Community button (via navigateToPage's options). */
+/** 'all' or one of MARKET_LABELS' keys. Set by the chip row and by the Prompted
+ * Models shelf's empty-state Community button (via navigateToPage's options). */
 let marketplaceCategoryFilter = 'all';
 
 /** 'all' or one of MODEL_VENDORS' keys. ANDs with marketplaceCategoryFilter. */
@@ -2173,7 +2293,7 @@ function setMarketplaceVendorFilter(vendorKey) {
 /** Chip row above the marketplace grid: 'All' plus one chip per market, built
  * from MARKET_LABELS rather than a second hardcoded list. Built from the label
  * map rather than AGENT_SHELVES because Community filters templates by
- * *market*, and there is now one Stocks shelf holding both markets -- the shelf
+ * *market*, and Prompted Models holds both markets -- the shelf
  * list and the chip list are different things. */
 function renderMarketplaceCategoryChips() {
   const container = document.getElementById('marketplaceCategoryChips');
@@ -2232,7 +2352,7 @@ function renderMarketplaceVendorChips() {
 }
 
 /** Empty-state copy. Three cases, deliberately worded apart -- the same concern
- * stocksEmptyHtml records for My Agents.
+ * promptedEmptyHtml records for My Agents.
  *
  * A typed query wins over the facet case: when a search is what emptied the
  * grid, offering "Clear filters" sends the user to fix the wrong thing. */

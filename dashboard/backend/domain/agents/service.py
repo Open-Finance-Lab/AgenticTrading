@@ -19,7 +19,10 @@ from typing import Any, Dict, List, Optional, Tuple
 from dashboard.backend.domain.agents.repository import agent_store, _UNSET
 from dashboard.backend.domain.agents import auth_cache
 from dashboard.backend.domain.agents.credential_store import agent_credential_store
-from dashboard.backend.domain.agents.defaults import default_starter_pipeline
+from dashboard.backend.domain.agents.defaults import (
+    STARTER_AGENTS,
+    default_starter_pipeline,
+)
 from dashboard.backend.domain.agents.taxonomy import coerce_category, normalize_category
 from dashboard.backend.domain.agents.runtime import (
     DEFAULT_RUNTIME_TYPE,
@@ -441,6 +444,87 @@ class AgentService:
                 agent_id=agent["agent_id"],
             )
         return agent
+
+    def provision_starter_agents(
+        self,
+        *,
+        owner_user_id: int,
+        owner_browser_session: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Create the Prompted Models starter cards for a brand-new account.
+
+        Called from signup so the first My Agents paint cannot be skipped by a
+        stale browser ``localStorage`` guard (user ids recycle on local SQLite
+        and on Render's ephemeral disk). Idempotent on ``model_name``: an
+        account that already has DeepSeek still receives GPT-5.5 and Claude.
+        Fail-open per card: signup must still succeed if one write fails.
+        """
+        from dashboard.backend.domain.backtesting.constants import (
+            DEFAULT_AGENT_CASH_ALLOCATION,
+        )
+        from dashboard.backend.domain.portfolios.service import portfolio_service
+
+        owned = list(self.agents.list_agents(owner_user_id=int(owner_user_id)))
+        by_model = {str(agent.get("model_name") or ""): agent for agent in owned}
+        created: List[Dict[str, Any]] = []
+        for spec in STARTER_AGENTS:
+            model_name = spec["model_name"]
+            existing_agent = by_model.get(model_name)
+            if existing_agent:
+                if existing_agent.get("name") != spec["name"]:
+                    try:
+                        updated = self.agents.update_agent(
+                            existing_agent["agent_id"], name=spec["name"]
+                        )
+                        if updated:
+                            by_model[model_name] = updated
+                    except Exception as exc:
+                        print(
+                            f"[agents] ERROR starter rename failed for "
+                            f"user={owner_user_id} model={model_name}: {exc}"
+                        )
+                continue
+            try:
+                portfolio_service.ensure_cash_for_new_agent(
+                    int(owner_user_id), float(DEFAULT_AGENT_CASH_ALLOCATION)
+                )
+                agent = self.create_agent(
+                    name=spec["name"],
+                    model_name=model_name,
+                    owner_user_id=int(owner_user_id),
+                    owner_browser_session=owner_browser_session,
+                    agent_type="builtin",
+                    description=spec["description"],
+                    cash_allocation=float(DEFAULT_AGENT_CASH_ALLOCATION),
+                )
+                created.append(agent)
+                by_model[model_name] = agent
+            except Exception as exc:
+                print(
+                    f"[agents] ERROR starter provision failed for "
+                    f"user={owner_user_id} model={model_name}: {exc}"
+                )
+        try:
+            portfolio_service.get_or_create_portfolio(int(owner_user_id))
+        except Exception as exc:
+            print(
+                f"[agents] ERROR starter portfolio reconcile failed "
+                f"for user={owner_user_id}: {exc}"
+            )
+        return created
+
+    def provision_starter_agent(
+        self,
+        *,
+        owner_user_id: int,
+        owner_browser_session: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """First starter only — prefer ``provision_starter_agents``."""
+        created = self.provision_starter_agents(
+            owner_user_id=owner_user_id,
+            owner_browser_session=owner_browser_session,
+        )
+        return created[0] if created else None
 
     def _create_builtin_copy(
         self,

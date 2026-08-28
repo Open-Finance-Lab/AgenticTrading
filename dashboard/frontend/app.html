@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=128">
+    <link rel="stylesheet" href="styles.css?v=130">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -961,21 +961,21 @@
                     </div>
                 </div>
                 <div id="agentsCategories">
-                    <section class="agents-category" data-category="stocks">
+                    <section class="agents-category" data-category="prompted">
                         <div class="agents-category-head">
                             <div class="agents-category-heading">
                                 <span class="agents-category-icon" aria-hidden="true">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
                                 </span>
-                                <h3 class="agents-category-title">Stocks</h3>
-                                <span id="agentsCountStocks" class="agents-category-count" hidden></span>
+                                <h3 class="agents-category-title">Prompted Models</h3>
+                                <span id="agentsCountPrompted" class="agents-category-count" hidden></span>
                             </div>
-                            <p class="agents-category-sub">Trade U.S. blue-chip and Chinese A-share stocks, tested hour by hour on real market data.</p>
+                            <p class="agents-category-sub">Write a trading instruction for an AI model and backtest it on market data.</p>
                             <!-- Filled by renderAgentMarketChips(); the chips ride
                                  #agentsCategories' delegated click handler. -->
                             <div id="agentsMarketChips" class="marketplace-category-chips agents-market-chips" role="group" aria-label="Filter by market"></div>
                         </div>
-                        <div id="agentsGridStocks" class="agents-grid">
+                        <div id="agentsGridPrompted" class="agents-grid">
                             <!-- Loading skeletons: visible pre-JS and while the first
                                  agents fetch runs. No removal code needed — every render
                                  path overwrites this grid's innerHTML (pinned by
@@ -984,8 +984,25 @@
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                             <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
                         </div>
-                        <div id="agentsGridFooterStocks" class="agents-grid-footer" hidden></div>
-                        <p id="agentsEmptyStocks" class="control-helper" hidden>You don't have any agents yet. Create one and test your first trading idea.</p>
+                        <div id="agentsGridFooterPrompted" class="agents-grid-footer" hidden></div>
+                        <p id="agentsEmptyPrompted" class="control-helper" hidden>You don't have any agents yet. Create one and test your first trading idea.</p>
+                    </section>
+                    <section class="agents-category" data-category="open">
+                        <div class="agents-category-head">
+                            <div class="agents-category-heading">
+                                <span class="agents-category-icon" aria-hidden="true">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 2 7l10 5 10-5-10-5Z"/><path d="m2 17 10 5 10-5"/><path d="m2 12 10 5 10-5"/></svg>
+                                </span>
+                                <h3 class="agents-category-title">Open Agents</h3>
+                                <span id="agentsCountOpen" class="agents-category-count" hidden></span>
+                            </div>
+                            <p class="agents-category-sub">Open-source trading agents like AI Hedge Fund. Add them from Community, then customize and backtest.</p>
+                        </div>
+                        <div id="agentsGridOpen" class="agents-grid">
+                            <div class="section-card agent-card agent-card--skeleton" aria-hidden="true"></div>
+                        </div>
+                        <div id="agentsGridFooterOpen" class="agents-grid-footer" hidden></div>
+                        <p id="agentsEmptyOpen" class="control-helper" hidden>No open agents yet. Add a ready-made strategy like AI Hedge Fund from Community.</p>
                     </section>
                     <!-- Locked shelves. Crypto is a display-only price ticker
                          (quotes.py, never wired to the engine) and futures exist
@@ -2461,9 +2478,9 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=119" defer></script>
+    <script src="app.js?v=123" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
-    <script src="js/agent-editor.js?v=28" defer></script>
+    <script src="js/agent-editor.js?v=30" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
     <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>

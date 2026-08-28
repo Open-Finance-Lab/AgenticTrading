@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
+from dashboard.backend.domain.agents.defaults import STARTER_AGENTS
 from dashboard.backend.users import UserStore
 
 def _session_token(client) -> str:
@@ -94,6 +95,18 @@ def test_signup_login_me_logout_flow(client):
     assert "password_hash" not in signup_data["user"]
     assert "token" not in signup_data
     assert _session_token(client)  # signup set the session cookie
+
+    listed = client.get("/api/v1/agents")
+    assert listed.status_code == 200
+    listed_by_model = {
+        a.get("model_name"): a for a in listed.json()["agents"]
+    }
+    for spec in STARTER_AGENTS:
+        starter = listed_by_model.get(spec["model_name"])
+        assert starter, f"signup must provision {spec['name']}"
+        assert starter["name"] == spec["name"]
+        assert starter["agent_type"] == "builtin"
+        assert starter["pipeline"], "starter must be usable without Configure"
 
     duplicate = client.post(
         "/api/auth/signup",
