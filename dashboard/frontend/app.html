@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=126">
+    <link rel="stylesheet" href="styles.css?v=128">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -436,6 +436,12 @@
                         id="runBacktestBillingHint"
                         class="control-helper"
                     ></p>
+                    <button
+                        id="runBacktestApiKeysBtn"
+                        class="auth-btn auth-btn-secondary run-backtest-api-keys"
+                        type="button"
+                        hidden
+                    >Go to API Keys</button>
                 </div>
 
                 <div class="control-group">
@@ -1915,7 +1921,7 @@
                         <div class="credits-section-head">
                             <div>
                                 <p class="credits-section-kicker">API Keys</p>
-                                <h3 id="creditsApiKeysHeading">Connect your model providers</h3>
+                                <h3 id="creditsApiKeysHeading" tabindex="-1">Connect your model providers</h3>
                             </div>
                             <span class="credits-rate">Encrypted vault</span>
                         </div>
@@ -1928,14 +1934,73 @@
                                         <option value="">Loading providers…</option>
                                     </select>
                                 </label>
+                                <div id="creditsApiKeyGuide" class="credits-key-guide" hidden>
+                                    <ol id="creditsApiKeyGuideSteps" class="credits-key-guide-steps" aria-label="API key setup steps">
+                                        <li class="credits-key-guide-step">
+                                            <div class="credits-key-guide-head">
+                                                <span class="credits-key-guide-number" aria-hidden="true">1</span>
+                                                <div>
+                                                    <h4>Open official API key page</h4>
+                                                    <p id="creditsApiKeyGuideProvider" aria-live="polite">Open the selected provider's official key page.</p>
+                                                </div>
+                                            </div>
+                                            <a
+                                                id="creditsApiKeyOfficialLink"
+                                                class="auth-btn auth-btn-secondary credits-key-guide-link"
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                            >
+                                                <span>Open official API key page</span>
+                                                <svg aria-hidden="true"><use href="#icon-external-link"/></svg>
+                                            </a>
+                                            <svg class="credits-key-guide-arrow" aria-hidden="true"><use href="#icon-arrow-right"/></svg>
+                                        </li>
+                                        <li class="credits-key-guide-step">
+                                            <div class="credits-key-guide-head">
+                                                <span class="credits-key-guide-number" aria-hidden="true">2</span>
+                                                <div>
+                                                    <h4>Create and copy the key</h4>
+                                                    <p>Sign in there, create a key, then copy it once.</p>
+                                                </div>
+                                            </div>
+                                            <div class="credits-key-guide-illustration" aria-hidden="true">
+                                                <span class="credits-key-guide-window-bar"></span>
+                                                <span class="credits-key-guide-create">Create API key</span>
+                                                <span class="credits-key-guide-masked">sk-...7K2</span>
+                                                <span class="credits-key-guide-copy">Copy</span>
+                                            </div>
+                                            <svg class="credits-key-guide-arrow" aria-hidden="true"><use href="#icon-arrow-right"/></svg>
+                                        </li>
+                                        <li class="credits-key-guide-step">
+                                            <div class="credits-key-guide-head">
+                                                <span class="credits-key-guide-number" aria-hidden="true">3</span>
+                                                <div>
+                                                    <h4>Return here and paste it below</h4>
+                                                    <p>Use the real ATL fields below, then save and verify.</p>
+                                                </div>
+                                            </div>
+                                            <div class="credits-key-guide-paste" aria-hidden="true">
+                                                <span>API key</span>
+                                                <span class="credits-key-guide-input">Paste key here</span>
+                                                <span class="credits-key-guide-verify">Save and verify</span>
+                                            </div>
+                                        </li>
+                                    </ol>
+                                    <p id="creditsApiKeyGuideFallback" class="credits-key-guide-fallback" hidden>
+                                        ATL does not have an official setup link for this provider. Contact the administrator who enabled it.
+                                    </p>
+                                </div>
                                 <label class="credits-key-field" for="creditsApiKeyLabel">
                                     <span>Name</span>
                                     <input id="creditsApiKeyLabel" type="text" maxlength="80" autocomplete="off" placeholder="Research" required>
                                 </label>
                                 <label class="credits-key-field" for="creditsApiKeySecret">
                                     <span>API key</span>
-                                    <input id="creditsApiKeySecret" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" required>
+                                    <input id="creditsApiKeySecret" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" aria-describedby="creditsApiKeyTroubleshooting" required>
                                 </label>
+                                <p id="creditsApiKeyTroubleshooting" class="credits-key-troubleshooting" hidden>
+                                    Check that the full key was copied and is active. Some providers also require billing or account credits before API calls can run.
+                                </p>
                                 <label class="credits-key-default">
                                     <input id="creditsApiKeyDefault" type="checkbox">
                                     <span>Make this the verified default</span>
@@ -2396,11 +2461,11 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=117" defer></script>
+    <script src="app.js?v=119" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=28" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>
-    <script src="js/credits.js?v=7" defer></script>
+    <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
     <script src="js/admin-credits.js?v=6" defer></script>
     <script src="js/admin-analytics.js?v=2" defer></script>

@@ -4950,6 +4950,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // Setup run backtest modal
     document.getElementById('runBacktestModalClose')?.addEventListener('click', closeRunBacktestModal);
     document.getElementById('runBacktestModalBackdrop')?.addEventListener('click', closeRunBacktestModal);
+    document.getElementById('runBacktestApiKeysBtn')?.addEventListener('click', goToApiKeys);
     document.getElementById('runBacktestModalSubmit')?.addEventListener('click', () => {
         runBacktest();
     });
@@ -7479,6 +7480,7 @@ function setRunBacktestBillingMode(
     billingMode,
     { providerId = '', modelId = '' } = {},
 ) {
+    setRunBacktestApiKeysRecovery(false);
     const supported = new Set(['byok', 'platform_credits']);
     const providers = supported.has(billingMode)
         ? availableRunBacktestProviders(billingMode)
@@ -7517,8 +7519,17 @@ function setRunBacktestBillingMode(
     }
 }
 
-function setRunBacktestExecutionUnavailable(message) {
+function setRunBacktestApiKeysRecovery(visible) {
+    const button = document.getElementById('runBacktestApiKeysBtn');
+    if (button) button.hidden = !visible;
+}
+
+function setRunBacktestExecutionUnavailable(
+    message,
+    { showApiKeysRecovery = false } = {},
+) {
     runBacktestBillingMode = null;
+    setRunBacktestApiKeysRecovery(showApiKeysRecovery);
     clearSelectOptions(document.getElementById('runBacktestProviderSelect'));
     const modelSelect = document.getElementById('modelSelect');
     clearSelectOptions(modelSelect);
@@ -7618,6 +7629,7 @@ async function loadRunBacktestExecutionOptions(agent) {
 
     setRunBacktestExecutionUnavailable(
         'Add and verify a default API key, or ask an administrator to enable a platform provider.',
+        { showApiKeysRecovery: true },
     );
 }
 
@@ -7951,6 +7963,7 @@ function renderBacktestRunConfig(
 function closeRunBacktestModal() {
     const modal = document.getElementById('runBacktestModal');
     if (modal) modal.hidden = true;
+    setRunBacktestApiKeysRecovery(false);
     runBacktestModalAgent = null;
     runBacktestExecutionOptions = [];
     runBacktestBillingMode = null;
@@ -7986,6 +7999,7 @@ async function openRunBacktestModal(agent) {
     runBacktestExecutionOptions = [];
     runBacktestBillingMode = null;
     runBacktestOptionsReady = false;
+    setRunBacktestApiKeysRecovery(false);
     const isHostedRuntime = (agent.runtime_type || 'pipeline') !== 'pipeline';
     populateBacktestAgentSelect();
     const select = document.getElementById('backtestAgentSelect');
@@ -8056,6 +8070,13 @@ async function openRunBacktestModal(agent) {
 
 window.openRunBacktestModal = openRunBacktestModal;
 window.closeRunBacktestModal = closeRunBacktestModal;
+
+function goToApiKeys() {
+    clearPendingByokBacktest();
+    closeRunBacktestModal();
+    navigateToPage('credits');
+    window.CreditsPage?.openApiKeys({ focus: true });
+}
 
 async function runBacktest() {
     // Get dates from form

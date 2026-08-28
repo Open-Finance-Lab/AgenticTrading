@@ -74,7 +74,7 @@ def test_credit_formatter_rejects_missing_float_and_overprecision_values():
 def test_credit_formatter_loads_before_every_consumer():
     formatter_at = APP_HTML.index('src="js/credit-format.js?v=1"')
     for asset in (
-        'src="js/credits.js?v=7"',
+        'src="js/credits.js?v=8"',
         'src="js/admin-credits.js?v=6"',
         'src="js/admin-analytics.js?v=2"',
     ):

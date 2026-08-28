@@ -11,6 +11,24 @@
   ) ? window.location.origin : '';
   const PENDING_BYOK_STORAGE_KEY = 'atlPendingByokBacktest';
   const PENDING_BYOK_TTL_MS = 10 * 60 * 1000;
+  const OFFICIAL_API_KEY_PAGES = Object.freeze({
+    openai: Object.freeze({
+      displayName: 'OpenAI',
+      url: 'https://platform.openai.com/api-keys',
+    }),
+    openrouter: Object.freeze({
+      displayName: 'OpenRouter',
+      url: 'https://openrouter.ai/keys',
+    }),
+    anthropic: Object.freeze({
+      displayName: 'Anthropic',
+      url: 'https://platform.claude.com/settings/keys',
+    }),
+    gemini: Object.freeze({
+      displayName: 'Google Gemini',
+      url: 'https://aistudio.google.com/apikey',
+    }),
+  });
 
   const state = {
     initialized: false,
@@ -25,6 +43,7 @@
     providers: [],
     credentials: [],
     executionOptions: [],
+    focusApiKeysOnReady: false,
   };
 
   function element(id) {
@@ -41,6 +60,11 @@
     target.classList.toggle('is-error', tone === 'error');
     target.classList.toggle('is-success', tone === 'success');
     target.classList.toggle('is-pending', tone === 'pending');
+  }
+
+  function setApiKeyTroubleshooting(visible) {
+    const help = element('creditsApiKeyTroubleshooting');
+    if (help) help.hidden = !visible;
   }
 
   function formatUsdCents(cents) {
@@ -87,7 +111,7 @@
     button.appendChild(icon);
   }
 
-  function setCreditsTab(tab) {
+  function setCreditsTab(tab, { reload = true } = {}) {
     const allowed = new Set(['overview', 'api-keys', 'activity']);
     const next = tab === 'top-up' ? 'overview' : (allowed.has(tab) ? tab : 'overview');
     state.activeTab = next;
@@ -100,18 +124,41 @@
     document.querySelectorAll('[data-credits-panel]').forEach((panel) => {
       panel.hidden = panel.dataset.creditsPanel !== next;
     });
-    if (next === 'api-keys' && state.user) loadApiKeys();
+    if (reload && next === 'api-keys' && state.user) loadApiKeys();
+  }
+
+  function focusApiKeysEntry() {
+    const provider = element('creditsApiKeyProvider');
+    const heading = element('creditsApiKeysHeading');
+    const target = provider && !provider.disabled ? provider : heading;
+    state.focusApiKeysOnReady = false;
+    window.requestAnimationFrame(() => target?.focus());
+  }
+
+  function openApiKeys({ focus = false } = {}) {
+    setCreditsTab('api-keys', { reload: false });
+    if (!focus) return;
+    state.focusApiKeysOnReady = true;
+    if (state.providers.length || element('creditsApiKeyProvider')?.disabled) {
+      focusApiKeysEntry();
+    }
   }
 
   function renderProviderOptions() {
     const select = element('creditsApiKeyProvider');
-    if (!select) return;
+    if (!select) {
+      renderProviderGuide();
+      if (state.focusApiKeysOnReady) focusApiKeysEntry();
+      return;
+    }
     const current = select.value;
     clearChildren(select);
     if (!state.providers.length) {
       select.appendChild(textNode('option', '', 'No approved providers available'));
       select.value = '';
       select.disabled = true;
+      renderProviderGuide();
+      if (state.focusApiKeysOnReady) focusApiKeysEntry();
       return;
     }
     select.disabled = false;
@@ -124,10 +171,47 @@
     if (state.providers.some((provider) => provider.provider_id === current)) {
       select.value = current;
     }
+    renderProviderGuide();
+    if (state.focusApiKeysOnReady) focusApiKeysEntry();
   }
 
   function providerDisplayName(providerId) {
     return state.providers.find((provider) => provider.provider_id === providerId)?.display_name || providerId;
+  }
+
+  function renderProviderGuide() {
+    const guide = element('creditsApiKeyGuide');
+    const steps = element('creditsApiKeyGuideSteps');
+    const fallback = element('creditsApiKeyGuideFallback');
+    const officialLink = element('creditsApiKeyOfficialLink');
+    const providerCopy = element('creditsApiKeyGuideProvider');
+    const providerId = element('creditsApiKeyProvider')?.value || '';
+    const selectedProvider = state.providers.find(
+      (provider) => provider.provider_id === providerId,
+    ) || null;
+    const officialPage = OFFICIAL_API_KEY_PAGES[providerId] || null;
+
+    if (!guide || !steps || !fallback || !officialLink || !providerCopy) return;
+    guide.hidden = !selectedProvider;
+    steps.hidden = !officialPage;
+    fallback.hidden = Boolean(officialPage);
+    officialLink.removeAttribute('href');
+    officialLink.removeAttribute('aria-label');
+
+    if (!selectedProvider || !officialPage) return;
+    officialLink.href = officialPage.url;
+    officialLink.setAttribute(
+      'aria-label',
+      `Open ${officialPage.displayName} official API key page in a new tab`,
+    );
+    providerCopy.textContent = (
+      `Continue on ${officialPage.displayName}, then return to ATL.`
+    );
+  }
+
+  function onApiKeyProviderChange() {
+    setApiKeyTroubleshooting(false);
+    renderProviderGuide();
   }
 
   function credentialStatusLabel(status) {
@@ -330,6 +414,7 @@
     const defaultInput = element('creditsApiKeyDefault');
     const save = element('creditsApiKeySave');
     const secret = secretInput?.value || '';
+    setApiKeyTroubleshooting(false);
     if (!provider || !labelInput?.value.trim() || !secret) {
       setStatus(element('creditsApiKeyStatus'), 'Choose a provider, name the key, and enter the key once.', 'error');
       if (secretInput) secretInput.value = '';
@@ -348,6 +433,7 @@
         }),
       });
       const status = data.credential?.status;
+      setApiKeyTroubleshooting(status !== 'verified');
       setStatus(
         element('creditsApiKeyStatus'),
         status === 'verified' ? 'Key saved and verified.' : 'Key saved. Verification can be retried from the list.',
@@ -357,6 +443,7 @@
       if (defaultInput) defaultInput.checked = false;
       await loadApiKeys();
     } catch (error) {
+      setApiKeyTroubleshooting(true);
       setStatus(element('creditsApiKeyStatus'), error.message || 'The key could not be saved.', 'error');
     } finally {
       // The full secret exists only for this submit lifecycle and is never put
@@ -398,7 +485,9 @@
       state.executionOptions = [];
       const secretInput = element('creditsApiKeySecret');
       if (secretInput) secretInput.value = '';
+      setApiKeyTroubleshooting(false);
       renderProviderOptions();
+      renderProviderGuide();
       renderApiKeys([]);
     } else if (!wasSignedIn && state.initialized && document.documentElement.dataset.navPage === 'credits') {
       loadBalanceAndLedger();
@@ -758,6 +847,7 @@
     document.querySelectorAll('[data-credits-tab]').forEach((button) => {
       button.addEventListener('click', () => setCreditsTab(button.dataset.creditsTab));
     });
+    element('creditsApiKeyProvider')?.addEventListener('change', onApiKeyProviderChange);
     element('creditsApiKeyForm')?.addEventListener('submit', saveApiKey);
   }
 
@@ -775,5 +865,5 @@
     inspectCheckoutReturn();
   }
 
-  window.CreditsPage = { onEnter, syncAuth };
+  window.CreditsPage = { onEnter, syncAuth, openApiKeys };
 })();
