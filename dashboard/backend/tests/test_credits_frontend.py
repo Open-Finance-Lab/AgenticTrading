@@ -100,13 +100,17 @@ def test_balance_copy_describes_platform_and_byok_lanes():
     assert ">Available balance<" not in APP_HTML
 
 
-def test_activity_renders_negative_model_usage_with_safe_context():
+def test_activity_renders_one_backtest_usage_summary_with_safe_context():
     source = CREDITS_JS_PATH.read_text(encoding="utf-8")
-    assert "entry.entry_type === 'llm_usage'" in source
-    assert "'Model usage'" in source
+    assert "entry.entry_type === 'backtest_usage'" in source
+    assert "'Backtest usage'" in source
+    assert "entry.model_call_count" in source
+    assert "'Multiple providers'" in source
+    assert "'Multiple models'" in source
     assert "entry.provider_id" in source
     assert "entry.model_id" in source
     assert "String(entry.run_id).slice(0, 12)" in source
+    assert "entry.call_index" not in source
 
 
 def test_activity_names_the_automatic_welcome_grant():

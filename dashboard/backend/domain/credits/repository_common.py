@@ -6,7 +6,7 @@ import base64
 import binascii
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from datetime import datetime, timezone
 
 
@@ -159,37 +159,83 @@ def decode_activity_cursor(cursor: str | int) -> tuple[str, str, int] | int:
     return created_at, source_kind, source_id
 
 
-def normalize_activity_item(value: Mapping[str, object]) -> dict[str, object]:
+def summarize_activity_evidence(values: Iterable[object]) -> dict[str, object]:
+    """Reduce private per-call evidence to safe run-level display fields."""
+
+    providers: set[str] = set()
+    models: set[str] = set()
+    billing_sources: set[str] = set()
+    provider_unknown = False
+    model_unknown = False
+    billing_unknown = False
+    for raw in values:
+        try:
+            evidence = json.loads(raw) if isinstance(raw, str) else {}
+        except json.JSONDecodeError:
+            evidence = {}
+        if not isinstance(evidence, dict):
+            evidence = {}
+        snapshot = evidence.get("pricing_snapshot")
+        if not isinstance(snapshot, dict):
+            snapshot = {}
+        provider = snapshot.get("provider_id")
+        model = snapshot.get("model_id")
+        billing = evidence.get("billing_source")
+        if isinstance(provider, str) and provider.strip():
+            providers.add(provider)
+        else:
+            provider_unknown = True
+        if isinstance(model, str) and model.strip():
+            models.add(model)
+        else:
+            model_unknown = True
+        if isinstance(billing, str) and billing.strip():
+            billing_sources.add(billing)
+        else:
+            billing_unknown = True
+
+    return {
+        "provider_id": (
+            next(iter(providers))
+            if len(providers) == 1 and not provider_unknown
+            else None
+        ),
+        "model_id": (
+            next(iter(models)) if len(models) == 1 and not model_unknown else None
+        ),
+        "billing_source": (
+            next(iter(billing_sources))
+            if len(billing_sources) == 1 and not billing_unknown
+            else None
+        ),
+        "provider_mixed": len(providers) > 1,
+        "model_mixed": len(models) > 1,
+    }
+
+
+def normalize_activity_item(
+    value: Mapping[str, object],
+    *,
+    evidence_json_values: Iterable[object] = (),
+) -> dict[str, object]:
     """Return one public-safe activity row and discard raw billing evidence."""
 
     item = dict(value)
-    evidence_json = item.pop("evidence_json", None)
+    item.pop("evidence_json", None)
     item["id"] = int(item.pop("source_id"))
     item["amount_micro"] = int(item["amount_micro"])
-    if item.get("call_index") is not None:
-        item["call_index"] = int(item["call_index"])
     if item.get("source_kind") != "llm_usage":
+        item.pop("model_call_count", None)
         return item
     item.update(
         {
-            "entry_type": "llm_usage",
+            "entry_type": "backtest_usage",
             "source": "llm_execution",
-            "reason": "Model usage.",
+            "reason": "Backtest usage.",
+            "model_call_count": int(item["model_call_count"]),
+            **summarize_activity_evidence(evidence_json_values),
         }
     )
-    try:
-        evidence = json.loads(evidence_json) if isinstance(evidence_json, str) else {}
-    except json.JSONDecodeError:
-        evidence = {}
-    if not isinstance(evidence, dict):
-        evidence = {}
-    snapshot = evidence.get("pricing_snapshot")
-    if not isinstance(snapshot, dict):
-        snapshot = {}
-    for field, raw in (
-        ("provider_id", snapshot.get("provider_id")),
-        ("model_id", snapshot.get("model_id")),
-        ("billing_source", evidence.get("billing_source")),
-    ):
-        item[field] = raw if isinstance(raw, str) and raw.strip() else None
+    item.pop("reservation_id", None)
+    item.pop("call_index", None)
     return item

@@ -91,6 +91,39 @@ def _pay_order(
     return result
 
 
+def _settle_activity_call(
+    store: CreditsStore,
+    *,
+    user_id: int = 1,
+    run_id: str,
+    call_index: int,
+    actual_micro: int,
+    provider_id: str = "openrouter",
+    model_id: str = "anthropic/claude-haiku-4-5",
+):
+    reservation_id = f"activity:{user_id}:{run_id}:{call_index}"
+    reservation = store.reserve_llm_credits(
+        reservation_id=reservation_id,
+        user_id=user_id,
+        run_id=run_id,
+        call_index=call_index,
+        reserved_micro=actual_micro,
+        operation_key=f"reserve:{reservation_id}",
+        request_digest=f"{user_id}{call_index}".ljust(64, "a")[:64],
+    )
+    return store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=actual_micro,
+        evidence={
+            "billing_source": "platform_credits",
+            "pricing_snapshot": {
+                "provider_id": provider_id,
+                "model_id": model_id,
+            },
+        },
+    )
+
+
 def test_schema_is_created_and_new_account_balance_is_zero(tmp_path):
     store = _store(tmp_path)
 
@@ -412,7 +445,7 @@ def test_ledger_is_cursor_paginated_and_exposes_no_mutation_method(tmp_path):
     assert not hasattr(store, "delete_ledger_entry")
 
 
-def test_activity_merges_two_bucket_llm_usage_with_opaque_cursor(tmp_path):
+def test_activity_aggregates_settled_calls_and_buckets_by_run(tmp_path):
     store = _store(tmp_path)
     grant_common = {
         "pool_id": "default",
@@ -420,7 +453,7 @@ def test_activity_merges_two_bucket_llm_usage_with_opaque_cursor(tmp_path):
         "source": "test",
     }
     store.fund_grant_pool(
-        amount_micro=1_000_000,
+        amount_micro=500,
         operation_id="activity-fund",
         idempotency_key="activity-fund-key",
         request_digest="activity-fund-digest",
@@ -429,7 +462,7 @@ def test_activity_merges_two_bucket_llm_usage_with_opaque_cursor(tmp_path):
     )
     store.assign_grant(
         user_id=1,
-        amount_micro=1_000_000,
+        amount_micro=500,
         operation_id="activity-assign",
         idempotency_key="activity-assign-key",
         request_digest="activity-assign-digest",
@@ -438,57 +471,153 @@ def test_activity_merges_two_bucket_llm_usage_with_opaque_cursor(tmp_path):
     )
     _pending_order(store)
     _pay_order(store)
-    reservation = store.reserve_llm_credits(
-        reservation_id="activity-reservation",
-        user_id=1,
-        run_id="run-activity-evidence",
-        call_index=3,
-        reserved_micro=1_500_000,
-        operation_key="activity-reserve",
-        request_digest="e" * 64,
+    _settle_activity_call(
+        store, run_id="run-aggregate", call_index=0, actual_micro=600
     )
-    store.settle_llm_credits(
-        reservation["reservation_id"],
-        actual_micro=1_500_000,
-        evidence={
-            "billing_source": "platform_credits",
-            "pricing_snapshot": {
-                "provider_id": "openrouter",
-                "model_id": "openai/gpt-5.5",
-            },
-            "provider_cost_credits_micro": 1_500_000,
-            "debited_credits_micro": 1_500_000,
-            "api_key": "must-not-leak",
-        },
+    _settle_activity_call(
+        store, run_id="run-aggregate", call_index=1, actual_micro=684
     )
 
-    first = store.list_ledger_entries(1, limit=1)
-    all_items = list(first["items"])
-    cursor = first["next_cursor"]
-    assert isinstance(cursor, str) and not cursor.isdecimal()
-    while cursor:
+    items = store.list_ledger_entries(1, limit=50)["items"]
+    usage = [item for item in items if item["entry_type"] == "backtest_usage"]
+
+    assert len(usage) == 1
+    assert usage[0]["amount_micro"] == -1_284
+    assert usage[0]["model_call_count"] == 2
+    assert usage[0]["run_id"] == "run-aggregate"
+    assert usage[0]["provider_id"] == "openrouter"
+    assert usage[0]["model_id"] == "anthropic/claude-haiku-4-5"
+    assert usage[0]["provider_mixed"] is False
+    assert usage[0]["model_mixed"] is False
+    assert usage[0]["billing_source"] == "platform_credits"
+    assert "reservation_id" not in usage[0]
+    assert "call_index" not in usage[0]
+    assert "evidence_json" not in usage[0]
+    with store._get_connection() as conn:
+        row_count = conn.execute(
+            "SELECT COUNT(*) FROM credit_llm_usage_entries WHERE run_id = ?",
+            ("run-aggregate",),
+        ).fetchone()[0]
+    assert row_count == 3
+
+
+def test_activity_summarizes_mixed_and_malformed_evidence(tmp_path):
+    store = _store(tmp_path)
+    _pending_order(store)
+    _pay_order(store)
+    _settle_activity_call(
+        store,
+        run_id="run-mixed",
+        call_index=0,
+        actual_micro=100,
+        provider_id="openrouter",
+        model_id="model-a",
+    )
+    _settle_activity_call(
+        store,
+        run_id="run-mixed",
+        call_index=1,
+        actual_micro=200,
+        provider_id="openai",
+        model_id="model-b",
+    )
+    _settle_activity_call(
+        store,
+        run_id="run-unknown",
+        call_index=0,
+        actual_micro=300,
+    )
+    with store._get_connection() as conn:
+        conn.execute(
+            "UPDATE credit_llm_usage_entries SET evidence_json = ? WHERE run_id = ?",
+            ("not-json", "run-unknown"),
+        )
+
+    items = store.list_ledger_entries(1, limit=50)["items"]
+    mixed = next(item for item in items if item.get("run_id") == "run-mixed")
+    unknown = next(item for item in items if item.get("run_id") == "run-unknown")
+
+    assert mixed["provider_id"] is None
+    assert mixed["model_id"] is None
+    assert mixed["provider_mixed"] is True
+    assert mixed["model_mixed"] is True
+    assert unknown["amount_micro"] == -300
+    assert unknown["provider_id"] is None
+    assert unknown["model_id"] is None
+    assert unknown["provider_mixed"] is False
+    assert unknown["model_mixed"] is False
+
+
+def test_activity_paginates_whole_runs_and_isolates_equal_run_ids(tmp_path):
+    store = _store(tmp_path)
+    _pending_order(store)
+    _pay_order(store)
+    _pending_order(
+        store,
+        order_id="ord_other",
+        user_id=3,
+        client_request_id="33333333-3333-4333-8333-333333333333",
+    )
+    _pay_order(store, order_id="ord_other", event_id="evt_paid_other")
+    for call_index, amount in enumerate((101, 102, 103)):
+        _settle_activity_call(
+            store,
+            user_id=1,
+            run_id="run-shared",
+            call_index=call_index,
+            actual_micro=amount,
+        )
+    _settle_activity_call(
+        store,
+        user_id=3,
+        run_id="run-shared",
+        call_index=0,
+        actual_micro=900,
+    )
+
+    pages = []
+    cursor = None
+    while True:
         page = store.list_ledger_entries(1, limit=1, cursor=cursor)
-        all_items.extend(page["items"])
+        pages.extend(page["items"])
         cursor = page["next_cursor"]
+        if cursor is None:
+            break
 
-    identities = [(item["source_kind"], item["id"]) for item in all_items]
-    assert len(identities) == len(set(identities))
-    usage = next(item for item in all_items if item["entry_type"] == "llm_usage")
-    assert usage["amount_micro"] == -1_500_000
-    assert usage["run_id"] == "run-activity-evidence"
-    assert usage["provider_id"] == "openrouter"
-    assert usage["model_id"] == "openai/gpt-5.5"
-    assert usage["billing_source"] == "platform_credits"
-    assert "evidence_json" not in usage
-    assert "must-not-leak" not in str(usage)
-
-    purchase = next(item for item in all_items if item["entry_type"] == "purchase")
-    legacy_page = store.list_ledger_entries(
-        1,
-        limit=10,
-        cursor=purchase["id"],
+    user_one = [item for item in pages if item.get("run_id") == "run-shared"]
+    user_three = store.list_ledger_entries(3, limit=50)["items"]
+    user_three_usage = next(
+        item for item in user_three if item.get("run_id") == "run-shared"
     )
-    assert isinstance(legacy_page["items"], list)
+    assert len(user_one) == 1
+    assert user_one[0]["amount_micro"] == -306
+    assert user_one[0]["model_call_count"] == 3
+    assert user_three_usage["amount_micro"] == -900
+    assert user_three_usage["model_call_count"] == 1
+
+
+def test_activity_omits_released_run_without_settled_usage(tmp_path):
+    store = _store(tmp_path)
+    _pending_order(store)
+    _pay_order(store)
+    reservation = store.reserve_llm_credits(
+        reservation_id="activity-released",
+        user_id=1,
+        run_id="run-released-without-charge",
+        call_index=0,
+        reserved_micro=1_000,
+        operation_key="activity-released-reserve",
+        request_digest="r" * 64,
+    )
+    store.release_llm_credits(
+        reservation["reservation_id"],
+        reason="synthetic provider failure",
+    )
+
+    items = store.list_ledger_entries(1, limit=50)["items"]
+    assert all(
+        item.get("run_id") != "run-released-without-charge" for item in items
+    )
 
 
 def test_partial_refund_posts_negative_entry_and_updates_refundable_amount(tmp_path):

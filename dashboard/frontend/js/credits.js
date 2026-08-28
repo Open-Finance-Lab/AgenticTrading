@@ -2,6 +2,7 @@
 (function () {
   'use strict';
 
+  const { formatCredits } = window.CreditFormat;
   const MAX_ORDER_POLLS = 8;
   const ORDER_POLL_DELAYS_MS = [0, 1000, 1500, 2500, 4000, 6000, 8000, 10000];
   const TERMINAL_ORDER_STATUSES = new Set(['paid', 'partially_refunded', 'refunded']);
@@ -40,15 +41,6 @@
     target.classList.toggle('is-error', tone === 'error');
     target.classList.toggle('is-success', tone === 'success');
     target.classList.toggle('is-pending', tone === 'pending');
-  }
-
-  function formatCreditDisplay(value, digits = 2) {
-    const match = /^(-?)(\d+)(?:\.(\d{1,6}))?$/.exec(String(value ?? ''));
-    if (!match) return '—';
-    const sign = match[1];
-    const whole = match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-    const fraction = (match[3] || '').padEnd(6, '0').slice(0, digits);
-    return `${sign}${whole}${digits ? `.${fraction}` : ''}`;
   }
 
   function formatUsdCents(cents) {
@@ -426,7 +418,7 @@
 
   function renderBalance(balance) {
     state.balanceMicro = Number.isSafeInteger(balance.balance_micro) ? balance.balance_micro : 0;
-    element('creditsBalance').textContent = `${formatCreditDisplay(balance.display_credits)} Credits`;
+    element('creditsBalance').textContent = `${formatCredits(balance.display_credits)} Credits`;
     const accountStatus = element('creditsAccountStatus');
     const restricted = balance.account_status !== 'active';
     if (restricted) {
@@ -452,17 +444,26 @@
 
       const meta = document.createElement('div');
       meta.className = 'credits-ledger-meta';
-      const isUsage = entry.entry_type === 'llm_usage';
+      const isUsage = entry.entry_type === 'backtest_usage';
       const isWelcomeGrant = entry.entry_type === 'system_promotion_grant';
       const isNegative = isUsage || entry.entry_type === 'refund';
       const title = isUsage
-        ? 'Model usage'
+        ? 'Backtest usage'
         : (entry.entry_type === 'refund'
           ? 'Refund'
           : (isWelcomeGrant ? 'Welcome Credits' : 'Credit purchase'));
       meta.appendChild(textNode('strong', '', title));
+      const callCount = Number.isSafeInteger(entry.model_call_count)
+        && entry.model_call_count > 0
+        ? `${entry.model_call_count} model call${entry.model_call_count === 1 ? '' : 's'}`
+        : null;
       const usageDetail = isUsage
-        ? [entry.provider_id, entry.model_id, entry.run_id ? `run ${String(entry.run_id).slice(0, 12)}` : null]
+        ? [
+          entry.provider_mixed ? 'Multiple providers' : entry.provider_id,
+          entry.model_mixed ? 'Multiple models' : entry.model_id,
+          callCount,
+          entry.run_id ? `run ${String(entry.run_id).slice(0, 12)}` : null,
+        ]
           .filter(Boolean)
           .join(' · ')
         : null;
@@ -472,7 +473,7 @@
         [usageDetail, formatTimestamp(entry.created_at)].filter(Boolean).join(' · '),
       ));
 
-      const formatted = formatCreditDisplay(entry.display_credits);
+      const formatted = formatCredits(entry.display_credits);
       const amount = textNode(
         'span',
         `credits-ledger-amount ${isNegative ? 'is-negative' : 'is-positive'}`,
