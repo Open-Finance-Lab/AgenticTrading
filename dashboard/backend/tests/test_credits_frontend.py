@@ -17,12 +17,28 @@ def test_credits_page_is_reachable_from_the_account_menu():
     assert "navigateToPage('credits')" in APP_JS
 
 
-def test_credits_page_ships_test_mode_and_purchase_controls():
+def test_credits_page_ships_small_purchase_controls():
     assert 'id="creditsTestModeBadge"' in APP_HTML
     assert 'id="creditsBalance"' in APP_HTML
-    assert 'data-credit-package="usd_5"' in APP_HTML
-    assert 'data-credit-package="usd_50"' in APP_HTML
+    expected_packages = {
+        'data-credit-package="usd_0_50" data-credit-cents="50"',
+        'data-credit-package="usd_1" data-credit-cents="100"',
+        'data-credit-package="usd_2" data-credit-cents="200"',
+        'data-credit-package="usd_5" data-credit-cents="500"',
+    }
+    assert all(package in APP_HTML for package in expected_packages)
+    assert 'data-credit-package="usd_10"' not in APP_HTML
+    assert 'data-credit-package="usd_20"' not in APP_HTML
+    assert 'data-credit-package="usd_50"' not in APP_HTML
+    package_grid_start = APP_HTML.index('<div id="creditsPackageGrid"')
+    package_grid_end = APP_HTML.index('</div>', package_grid_start)
+    package_grid = APP_HTML[package_grid_start:package_grid_end]
+    assert package_grid.count('aria-checked="true"') == 1
+    assert 'aria-checked="true" data-credit-package="usd_1"' in package_grid
     assert 'id="creditsCustomAmount"' in APP_HTML
+    assert 'id="creditsCustomAmount" type="number"' in APP_HTML
+    assert 'min="0.50" max="5.00" step="0.01"' in APP_HTML
+    assert 'Minimum $0.50, maximum $5.00.' in APP_HTML
     assert 'id="creditsPurchaseBtn"' in APP_HTML
     assert 'id="creditsLedgerList"' in APP_HTML
 
@@ -45,6 +61,14 @@ def test_credits_client_keeps_stripe_authoritative():
     assert "/api/credits/orders/" in source
     assert "Payment confirmation pending" in source
     assert "checkout.session_id" not in source
+
+
+def test_credits_client_enforces_the_small_custom_range():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+
+    assert "value: 'usd_1'" in source
+    assert "cents < 50 || cents > 500" in source
+    assert "Enter a custom amount from $0.50 through $5.00." in source
 
 
 def test_credits_api_values_never_enter_inner_html():

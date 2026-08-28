@@ -1893,18 +1893,18 @@
                         <span class="credits-rate">$1 = 1 Credit</span>
                     </div>
                     <div id="creditsPackageGrid" class="credits-package-grid" role="radiogroup" aria-label="Credit package">
+                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_0_50" data-credit-cents="50"><strong>$0.50</strong><span>0.5 Credits</span></button>
+                        <button class="credits-package-btn is-selected" type="button" role="radio" aria-checked="true" data-credit-package="usd_1" data-credit-cents="100"><strong>$1</strong><span>1 Credit</span></button>
+                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_2" data-credit-cents="200"><strong>$2</strong><span>2 Credits</span></button>
                         <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_5" data-credit-cents="500"><strong>$5</strong><span>5 Credits</span></button>
-                        <button class="credits-package-btn is-selected" type="button" role="radio" aria-checked="true" data-credit-package="usd_10" data-credit-cents="1000"><strong>$10</strong><span>10 Credits</span></button>
-                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_20" data-credit-cents="2000"><strong>$20</strong><span>20 Credits</span></button>
-                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_50" data-credit-cents="5000"><strong>$50</strong><span>50 Credits</span></button>
                     </div>
                     <div class="credits-custom-row">
                         <label for="creditsCustomAmount">Custom amount</label>
                         <div class="credits-money-input">
                             <span aria-hidden="true">$</span>
-                            <input id="creditsCustomAmount" inputmode="decimal" autocomplete="off" placeholder="5.00–200.00" aria-describedby="creditsCustomHint">
+                            <input id="creditsCustomAmount" type="number" min="0.50" max="5.00" step="0.01" inputmode="decimal" autocomplete="off" placeholder="0.50-5.00" aria-describedby="creditsCustomHint">
                         </div>
-                        <p id="creditsCustomHint">Minimum $5, maximum $200.</p>
+                        <p id="creditsCustomHint">Minimum $0.50, maximum $5.00.</p>
                     </div>
                     <button id="creditsPurchaseBtn" class="auth-btn auth-btn-primary credits-purchase-btn" type="button">
                         <svg aria-hidden="true"><use href="#icon-wallet"/></svg>
@@ -2402,7 +2402,7 @@
     <script src="app.js?v=116" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=28" defer></script>
-    <script src="js/credits.js?v=5" defer></script>
+    <script src="js/credits.js?v=6" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
     <script src="js/admin-credits.js?v=5" defer></script>
     <script src="js/admin-analytics.js?v=1" defer></script>
