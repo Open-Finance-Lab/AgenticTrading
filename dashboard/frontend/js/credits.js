@@ -1,4 +1,4 @@
-/** Credits & Billing page. Stripe webhooks remain the only source of balance changes. */
+/** Credits & Billing page. Server ledgers remain the only source of balance changes. */
 (function () {
   'use strict';
 
@@ -14,7 +14,7 @@
   const state = {
     initialized: false,
     user: null,
-    selection: { kind: 'package', value: 'usd_10' },
+    selection: { kind: 'package', value: 'usd_1' },
     pendingPurchase: null,
     pendingRefund: null,
     selectedAdminOrder: null,
@@ -453,10 +453,13 @@
       const meta = document.createElement('div');
       meta.className = 'credits-ledger-meta';
       const isUsage = entry.entry_type === 'llm_usage';
+      const isWelcomeGrant = entry.entry_type === 'system_promotion_grant';
       const isNegative = isUsage || entry.entry_type === 'refund';
       const title = isUsage
         ? 'Model usage'
-        : (entry.entry_type === 'refund' ? 'Refund' : 'Credit purchase');
+        : (entry.entry_type === 'refund'
+          ? 'Refund'
+          : (isWelcomeGrant ? 'Welcome Credits' : 'Credit purchase'));
       meta.appendChild(textNode('strong', '', title));
       const usageDetail = isUsage
         ? [entry.provider_id, entry.model_id, entry.run_id ? `run ${String(entry.run_id).slice(0, 12)}` : null]
@@ -519,8 +522,8 @@
       return { package_id: state.selection.value };
     }
     const cents = parseUsdCents(element('creditsCustomAmount')?.value);
-    if (cents === null || cents < 500 || cents > 20000) {
-      throw new Error('Enter a custom amount from $5.00 through $200.00.');
+    if (cents === null || cents < 50 || cents > 500) {
+      throw new Error('Enter a custom amount from $0.50 through $5.00.');
     }
     return { custom_amount_usd_cents: cents };
   }
