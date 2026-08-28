@@ -1274,11 +1274,21 @@
                 </section>
             </div>
 
-            <!-- Trading Log Section -->
-            <div class="section-card">
-                <div class="section-header">
-                    <h2>Trading Log</h2>
+        </section>
+
+        <!-- Right Panel: run-scoped Trading Log -->
+        <aside class="right-panel">
+            <section class="section-card trading-log-card" aria-labelledby="tradingLogTitle">
+                <div class="section-header trading-log-header">
+                    <div>
+                        <h2 id="tradingLogTitle">Trading Log</h2>
+                        <p class="trading-log-summary">
+                            <span id="tradingLogCount">0 orders</span>
+                            <span id="tradingLogStatusSummary"></span>
+                        </p>
+                    </div>
                     <div class="log-controls">
+                        <label class="sr-only" for="tradingLogFilter">Filter Trading Log orders</label>
                         <select class="filter-select" id="tradingLogFilter">
                             <option value="all">All Orders</option>
                             <option value="buy">Buys Only</option>
@@ -1287,32 +1297,11 @@
                     </div>
                 </div>
 
-                <div class="trading-log-scroll">
-                    <table class="decision-table trading-log-table">
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Action</th>
-                                <th>Company / Asset</th>
-                                <th>Quantity</th>
-                                <th>Price</th>
-                                <th>Total Value</th>
-                                <th>Status</th>
-                                <th>Reason</th>
-                            </tr>
-                        </thead>
-                        <tbody id="tradingLogBody">
-                            <tr>
-                                <td colspan="8" class="trading-log-empty">Run a backtest to see orders here.</td>
-                            </tr>
-                        </tbody>
-                    </table>
+                <div id="tradingLogFeed" class="trading-log-scroll" role="list" tabindex="0" aria-label="Trading Log orders">
+                    <p class="trading-log-empty">Run a backtest to see orders here.</p>
                 </div>
-            </div>
-        </section>
-
-        <!-- Right rail is populated by the run-scoped Trading Log. -->
-        <aside class="right-panel"></aside>
+            </section>
+        </aside>
     </div>
 
     <!-- Paper Trading View (Playground / Paper Trading) -->

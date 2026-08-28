@@ -58,14 +58,23 @@ def _run_node(lines):
     return json.loads(result.stdout)
 
 
-def test_trading_log_markup_uses_order_language_and_eight_columns():
+def test_trading_log_markup_is_an_accessible_right_rail_feed():
     html = _APP_HTML.read_text(encoding="utf-8")
 
     assert "All Orders" in html
     assert "All Trades" not in html
-    assert "<th>Status</th>" in html
-    assert "<th>Reason</th>" in html
-    assert 'colspan="8"' in html
+    assert 'id="tradingLogFeed"' in html
+    assert 'role="list"' in html
+    assert 'tabindex="0"' in html
+    assert 'aria-label="Trading Log orders"' in html
+    assert 'id="tradingLogCount"' in html
+    assert 'id="tradingLogStatusSummary"' in html
+    assert 'class="trading-log-table"' not in html
+    center_end = html.index('</section>', html.index('class="center-panel"'))
+    log_at = html.index('id="tradingLogFeed"')
+    right_at = html.index('class="right-panel"')
+    assert right_at < log_at
+    assert log_at > center_end
 
 
 def _merge_harness(source: str):
@@ -161,7 +170,11 @@ def test_truncation_is_derived_from_either_signal():
 def _render_harness(source: str):
     return [
         "const tbody = { innerHTML: '' };",
-        "const document = { getElementById: () => tbody };",
+        "const tradingLogCount = { textContent: '' };",
+        "const tradingLogStatusSummary = { textContent: '' };",
+        "const document = { getElementById: (id) => ({",
+        "  tradingLogFeed: tbody, tradingLogCount, tradingLogStatusSummary,",
+        "}[id] || tbody) };",
         "const IFIND_ASHARE_UNIVERSES = { demo: { assets: [",
         "  { symbol: '600519.SH', name: 'Kweichow Moutai' },",
         "] } };",
@@ -178,6 +191,7 @@ def _render_harness(source: str):
         _extract_function(source, "renderOrderCostAudit"),
         _extract_function(source, "renderMarketRuleAudit"),
         _extract_function(source, "formatTradeTimestamp"),
+        _extract_function(source, "renderTradingLogSummary"),
         _extract_function(source, "paintTradingLog"),
         _extract_function(source, "renderTradingLog"),
     ]
@@ -203,7 +217,7 @@ def test_rendered_rejection_has_safe_reason_zero_fill_and_english_company():
     assert "0 / 50 shares" in known
     assert "REJECTED" in known
     assert "Invalid lot size" in known
-    assert ">$250.00<" in known
+    assert "$250.00" in known
     assert ">--<" in known
     assert "<img" not in result["unknown"]
     assert "Order not executed" in result["unknown"]
@@ -249,6 +263,23 @@ def test_rendered_partial_uses_actual_value_and_side_filter():
     assert "$2,000.00" in result
     assert "T+1 frozen" in result
     assert "Apple Inc." not in result
+
+
+def test_rendering_updates_order_count_and_status_summary():
+    source = _APP_JS.read_text(encoding="utf-8")
+    result = _run_node(_render_harness(source) + [
+        "renderTradingLog([",
+        " { symbol: 'AAPL', side: 'BUY', requested_shares: 1, executed_shares: 1,",
+        "   price: 10, executed_value: 10, status: 'filled', reason: '' },",
+        " { symbol: 'MSFT', side: 'BUY', requested_shares: 2, executed_shares: 1,",
+        "   price: 20, executed_value: 20, status: 'partial', reason: '' },",
+        " { symbol: '600519.SH', side: 'SELL', requested_shares: 100, executed_shares: 0,",
+        "   price: 200, executed_value: 0, status: 'rejected', reason: 'invalid_lot_size' },",
+        "]);",
+        "console.log(JSON.stringify({ count: tradingLogCount.textContent, summary: tradingLogStatusSummary.textContent }));",
+    ])
+
+    assert result == {"count": "3 orders", "summary": "1 filled · 1 partial · 1 rejected"}
 
 
 def test_capped_sample_says_so_instead_of_ending_early():

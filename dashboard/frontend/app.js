@@ -7204,8 +7204,8 @@ function formatTradeTimestamp(ts) {
  * every quantity and dropping the currency audit the moment a user filters.
  */
 function paintTradingLog(normalizedRecords, options) {
-    const tbody = document.getElementById('tradingLogBody');
-    if (!tbody) return;
+    const feed = document.getElementById('tradingLogFeed');
+    if (!feed) return;
     options = options || {};
     const emptyMessage = options.emptyMessage || 'No orders yet.';
 
@@ -7216,12 +7216,14 @@ function paintTradingLog(normalizedRecords, options) {
         filtered = normalizedRecords.filter((trade) => trade.side === 'SELL');
     }
 
+    renderTradingLogSummary(filtered);
+
     if (filtered.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="trading-log-empty">${escapeHtml(emptyMessage)}</td></tr>`;
+        feed.innerHTML = `<p class="trading-log-empty">${escapeHtml(emptyMessage)}</p>`;
         return;
     }
 
-    tbody.innerHTML = filtered.map((order) => {
+    feed.innerHTML = filtered.map((order) => {
         const actionClass = order.side === 'SELL' ? 'action-sell' : 'action-buy';
         const actionLabel = order.side === 'SELL' ? 'SELL' : 'BUY';
         const statusLabel = order.status.toUpperCase();
@@ -7245,16 +7247,24 @@ function paintTradingLog(normalizedRecords, options) {
         const repeatNote = order.repeatCount > 1
             ? `<div class="trading-log-native">×${order.repeatCount} that day</div>`
             : '';
-        return `<tr>
-            <td>${escapeHtml(formatTradeTimestamp(order.timestamp))}</td>
-            <td><span class="${actionClass}">${actionLabel}</span></td>
-            <td><div class="trading-log-asset"><strong>${escapeHtml(order.symbol)}</strong>${assetName ? `<small>${escapeHtml(assetName)}</small>` : ''}</div></td>
-            <td class="trading-log-quantity">${escapeHtml(quantity)}</td>
-            <td>$${order.price.toFixed(2)}${priceAudit}</td>
-            <td class="trading-log-value">${order.executedShares > 0 ? `${formatTradingMoney(order.value, '$')}${valueAudit}${costAudit}` : '--'}</td>
-            <td><span class="order-status order-status-${order.status}" title="Order status: ${statusLabel}" aria-label="Order status: ${statusLabel}">${statusLabel}</span></td>
-            <td class="trading-log-reason">${escapeHtml(reason)}${marketRuleAudit}${repeatNote}</td>
-        </tr>`;
+        return `<article class="trading-log-event" role="listitem">
+            <div class="trading-log-event-head">
+                <span class="trading-log-action ${actionClass}">${actionLabel}</span>
+                <div class="trading-log-asset">
+                    <strong>${escapeHtml(order.symbol)}</strong>
+                    ${assetName ? `<small>${escapeHtml(assetName)}</small>` : ''}
+                    <time datetime="${escapeHtml(order.timestamp || '')}">${escapeHtml(formatTradeTimestamp(order.timestamp))}</time>
+                </div>
+                <span class="order-status order-status-${order.status}" aria-label="Order status: ${statusLabel}">${statusLabel}</span>
+            </div>
+            <div class="trading-log-event-meta">
+                <span><small>Filled / requested</small>${escapeHtml(quantity)}</span>
+                <span><small>Execution price</small>$${order.price.toFixed(2)}${priceAudit}</span>
+                <span><small>Filled value</small>${order.executedShares > 0 ? `${formatTradingMoney(order.value, '$')}${valueAudit}` : '--'}</span>
+            </div>
+            ${costAudit}
+            <p class="trading-log-reason"><span class="trading-log-reason-label">Reason</span>${escapeHtml(reason)}${marketRuleAudit}${repeatNote}</p>
+        </article>`;
     }).join('');
 
     // Never let a capped list read like a complete one. The server bounds the
@@ -7265,7 +7275,24 @@ function paintTradingLog(normalizedRecords, options) {
         const note = `${truncated.toLocaleString('en-US')} more unfilled `
             + `${truncated === 1 ? 'order is' : 'orders are'} not shown `
             + '(audit sample capped).';
-        tbody.innerHTML += `<tr><td colspan="8" class="trading-log-empty">${escapeHtml(note)}</td></tr>`;
+        feed.innerHTML += `<p class="trading-log-empty trading-log-truncation">${escapeHtml(note)}</p>`;
+    }
+}
+
+function renderTradingLogSummary(filtered) {
+    const countEl = document.getElementById('tradingLogCount');
+    const summaryEl = document.getElementById('tradingLogStatusSummary');
+    const records = Array.isArray(filtered) ? filtered : [];
+    const count = records.length;
+    if (countEl) countEl.textContent = `${count.toLocaleString('en-US')} ${count === 1 ? 'order' : 'orders'}`;
+    if (summaryEl) {
+        const counts = records.reduce((summary, order) => {
+            if (order.status === 'filled') summary.filled += 1;
+            else if (order.status === 'partial') summary.partial += 1;
+            else if (order.status === 'rejected') summary.rejected += 1;
+            return summary;
+        }, { filled: 0, partial: 0, rejected: 0 });
+        summaryEl.textContent = `${counts.filled} filled · ${counts.partial} partial · ${counts.rejected} rejected`;
     }
 }
 
