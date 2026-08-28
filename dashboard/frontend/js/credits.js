@@ -42,6 +42,7 @@
     providers: [],
     credentials: [],
     executionOptions: [],
+    focusApiKeysOnReady: false,
   };
 
   function element(id) {
@@ -118,7 +119,7 @@
     button.appendChild(icon);
   }
 
-  function setCreditsTab(tab) {
+  function setCreditsTab(tab, { reload = true } = {}) {
     const allowed = new Set(['overview', 'api-keys', 'activity']);
     const next = tab === 'top-up' ? 'overview' : (allowed.has(tab) ? tab : 'overview');
     state.activeTab = next;
@@ -131,13 +132,31 @@
     document.querySelectorAll('[data-credits-panel]').forEach((panel) => {
       panel.hidden = panel.dataset.creditsPanel !== next;
     });
-    if (next === 'api-keys' && state.user) loadApiKeys();
+    if (reload && next === 'api-keys' && state.user) loadApiKeys();
+  }
+
+  function focusApiKeysEntry() {
+    const provider = element('creditsApiKeyProvider');
+    const heading = element('creditsApiKeysHeading');
+    const target = provider && !provider.disabled ? provider : heading;
+    state.focusApiKeysOnReady = false;
+    window.requestAnimationFrame(() => target?.focus());
+  }
+
+  function openApiKeys({ focus = false } = {}) {
+    setCreditsTab('api-keys', { reload: false });
+    if (!focus) return;
+    state.focusApiKeysOnReady = true;
+    if (state.providers.length || element('creditsApiKeyProvider')?.disabled) {
+      focusApiKeysEntry();
+    }
   }
 
   function renderProviderOptions() {
     const select = element('creditsApiKeyProvider');
     if (!select) {
       renderProviderGuide();
+      if (state.focusApiKeysOnReady) focusApiKeysEntry();
       return;
     }
     const current = select.value;
@@ -147,6 +166,7 @@
       select.value = '';
       select.disabled = true;
       renderProviderGuide();
+      if (state.focusApiKeysOnReady) focusApiKeysEntry();
       return;
     }
     select.disabled = false;
@@ -160,6 +180,7 @@
       select.value = current;
     }
     renderProviderGuide();
+    if (state.focusApiKeysOnReady) focusApiKeysEntry();
   }
 
   function providerDisplayName(providerId) {
@@ -840,5 +861,5 @@
     inspectCheckoutReturn();
   }
 
-  window.CreditsPage = { onEnter, syncAuth };
+  window.CreditsPage = { onEnter, syncAuth, openApiKeys };
 })();

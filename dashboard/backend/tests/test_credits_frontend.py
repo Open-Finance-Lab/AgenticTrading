@@ -254,3 +254,12 @@ def test_quick_start_state_never_contains_a_secret():
     assert "api_key" not in body
     assert "key_last_four" not in body
     assert "credential_id" not in body
+
+
+def test_credits_module_exposes_api_keys_focus_handoff():
+    assert "focusApiKeysOnReady: false" in CREDITS_JS
+    assert "function openApiKeys({ focus = false } = {})" in CREDITS_JS
+    assert "setCreditsTab('api-keys', { reload: false })" in CREDITS_JS
+    assert "window.CreditsPage = { onEnter, syncAuth, openApiKeys }" in CREDITS_JS
+    assert "state.focusApiKeysOnReady" in CREDITS_JS
+    assert "creditsApiKeysHeading" in CREDITS_JS

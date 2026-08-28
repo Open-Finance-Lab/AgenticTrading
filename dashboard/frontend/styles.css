@@ -5019,6 +5019,10 @@ a.header-brand:hover .title-section h1 {
     color: #67e8f9;
 }
 
+.run-backtest-api-keys {
+    margin-top: 8px;
+}
+
 /*
  * Pin the primary CTA. The panel's content runs ~1080px tall, so on a 1440x900
  * screen the "▶ Run Backtest" button rendered at y=1045 -- 145px past the fold
