@@ -38,6 +38,12 @@ from dashboard.backend.domain.credits.stripe_gateway import (
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 
 
+DEFAULT_SIGNUP_CREDIT_CAMPAIGN = "default_signup_credits_v1"
+DEFAULT_SIGNUP_CREDITS_MICRO = 1_500_000
+DEFAULT_SIGNUP_CREDIT_SOURCE = "system_promotion"
+DEFAULT_SIGNUP_CREDIT_REASON = "Automatic welcome Credits."
+
+
 class CreditsServiceError(RuntimeError):
     """A sanitized, expected billing-domain failure."""
 
@@ -128,6 +134,41 @@ class CreditsService:
             account_status=account["status"],
             billing_available=(True if config is None else bool(config.ready)),
         )
+
+    def grant_default_signup_credits(self, user_id: int) -> bool:
+        """Give one account this campaign's welcome grant exactly once."""
+        user_id = int(user_id)
+        parts = {
+            "campaign_key": DEFAULT_SIGNUP_CREDIT_CAMPAIGN,
+            "user_id": user_id,
+            "amount_micro": DEFAULT_SIGNUP_CREDITS_MICRO,
+            "source": DEFAULT_SIGNUP_CREDIT_SOURCE,
+            "reason": DEFAULT_SIGNUP_CREDIT_REASON,
+        }
+        result = self.store.grant_promotion_credits(
+            **parts,
+            operation_id=_operation_id(
+                "promotion", DEFAULT_SIGNUP_CREDIT_CAMPAIGN, user_id
+            ),
+            idempotency_key=(
+                f"promotion:{DEFAULT_SIGNUP_CREDIT_CAMPAIGN}:user:{user_id}"
+            ),
+            request_digest=_canonical_digest(parts),
+        )
+        return bool(result["created"])
+
+    def backfill_default_signup_credits(self) -> dict[str, int]:
+        """Replay the welcome campaign across every durable user account."""
+        user_ids = self.store.list_user_ids()
+        report = {"total": len(user_ids), "granted": 0, "existing": 0, "failed": 0}
+        for user_id in user_ids:
+            try:
+                created = self.grant_default_signup_credits(user_id)
+            except Exception:  # noqa: BLE001 - continue so one row cannot block all
+                report["failed"] += 1
+            else:
+                report["granted" if created else "existing"] += 1
+        return report
 
     @staticmethod
     def _month_start_iso() -> str:

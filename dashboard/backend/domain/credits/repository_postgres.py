@@ -223,6 +223,27 @@ CREATE TABLE IF NOT EXISTS credit_grant_pool_ledger_entries (
 CREATE INDEX IF NOT EXISTS idx_credit_grant_pool_ledger_pool_id
 ON credit_grant_pool_ledger_entries(pool_id, id DESC);
 
+CREATE TABLE IF NOT EXISTS credit_promotion_grants (
+    id BIGSERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    campaign_key TEXT NOT NULL CHECK (length(trim(campaign_key)) > 0),
+    amount_micro BIGINT NOT NULL CHECK (amount_micro > 0),
+    operation_id TEXT NOT NULL UNIQUE CHECK (length(trim(operation_id)) > 0),
+    idempotency_key TEXT NOT NULL UNIQUE
+        CHECK (length(trim(idempotency_key)) > 0),
+    request_digest TEXT NOT NULL CHECK (length(trim(request_digest)) > 0),
+    source TEXT NOT NULL CHECK (length(trim(source)) > 0),
+    reason TEXT NOT NULL CHECK (length(trim(reason)) > 0),
+    created_at TEXT NOT NULL,
+    UNIQUE (campaign_key, user_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_credit_promotion_grants_user_id
+ON credit_promotion_grants(user_id, id DESC);
+
+CREATE INDEX IF NOT EXISTS idx_credit_promotion_grants_campaign_user
+ON credit_promotion_grants(campaign_key, user_id);
+
 CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     reservation_id TEXT PRIMARY KEY CHECK (length(trim(reservation_id)) > 0),
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -544,6 +565,16 @@ class PostgresCreditsStore:
                 rows = cur.fetchall()
                 cur.execute(
                     """
+                    SELECT user_id, COALESCE(SUM(amount_micro), 0) AS grant_micro
+                    FROM credit_promotion_grants
+                    WHERE user_id = ANY(%s)
+                    GROUP BY user_id
+                    """,
+                    (unique_ids,),
+                )
+                promotion_rows = cur.fetchall()
+                cur.execute(
+                    """
                     SELECT
                         user_id,
                         COALESCE(SUM(CASE WHEN bucket = 'grant' THEN amount_micro ELSE 0 END), 0)
@@ -578,6 +609,10 @@ class PostgresCreditsStore:
             )
             for row in rows
         }
+        for row in promotion_rows:
+            user_id = int(row["user_id"])
+            grant, purchased = amounts.get(user_id, (0, 0))
+            amounts[user_id] = (grant + int(row["grant_micro"]), purchased)
         usage_amounts = {
             int(row["user_id"]): (
                 int(row["grant_usage_micro"]),
@@ -610,6 +645,93 @@ class PostgresCreditsStore:
 
     def get_balance_micro(self, user_id: int) -> int:
         return self.get_balance_projection(user_id)["total_available_micro"]
+
+    def list_user_ids(self) -> list[int]:
+        """Return account IDs for an idempotent promotion backfill."""
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT id FROM users ORDER BY id")
+                rows = cur.fetchall()
+        return [int(row["id"]) for row in rows]
+
+    def grant_promotion_credits(
+        self,
+        *,
+        user_id: int,
+        campaign_key: str,
+        amount_micro: int,
+        operation_id: str,
+        idempotency_key: str,
+        request_digest: str,
+        source: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        """Post one system promotion grant, safely replayable by its key."""
+        _positive_integer(user_id, "user_id")
+        _required_text(campaign_key, "campaign_key", max_length=120)
+        _positive_integer(amount_micro, "amount_micro")
+        _required_text(operation_id, "operation_id")
+        _required_text(idempotency_key, "idempotency_key")
+        _required_text(request_digest, "request_digest")
+        _required_text(source, "source", max_length=120)
+        _required_text(reason, "reason", max_length=500)
+        with self._get_connection() as conn:
+            with conn.cursor() as cur:
+                self._ensure_account_in_transaction(cur, user_id)
+                for lock_key in sorted(
+                    {
+                        f"promotion-idempotency:{idempotency_key}",
+                        f"promotion-operation:{operation_id}",
+                    }
+                ):
+                    cur.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext(%s))", (lock_key,)
+                    )
+                cur.execute(
+                    """
+                    SELECT * FROM credit_promotion_grants
+                    WHERE idempotency_key = %s OR operation_id = %s
+                    FOR UPDATE
+                    """,
+                    (idempotency_key, operation_id),
+                )
+                existing = cur.fetchone()
+                if existing is not None:
+                    if (
+                        existing["user_id"] != user_id
+                        or existing["campaign_key"] != campaign_key
+                        or int(existing["amount_micro"]) != amount_micro
+                        or existing["operation_id"] != operation_id
+                        or existing["idempotency_key"] != idempotency_key
+                        or existing["request_digest"] != request_digest
+                        or existing["source"] != source
+                        or existing["reason"] != reason
+                    ):
+                        raise IdempotencyConflictError(
+                            "Promotion idempotency key conflicts with an existing grant"
+                        )
+                    return {"created": False, "grant": dict(existing)}
+                cur.execute(
+                    """
+                    INSERT INTO credit_promotion_grants (
+                        user_id, campaign_key, amount_micro, operation_id,
+                        idempotency_key, request_digest, source, reason, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING *
+                    """,
+                    (
+                        user_id,
+                        campaign_key,
+                        amount_micro,
+                        operation_id,
+                        idempotency_key,
+                        request_digest,
+                        source,
+                        reason,
+                        _utcnow_iso(),
+                    ),
+                )
+                return {"created": True, "grant": dict(cur.fetchone())}
 
     @staticmethod
     def _llm_reservation_result(cur, reservation) -> dict[str, Any]:
@@ -1274,6 +1396,16 @@ class PostgresCreditsStore:
         if through_entry_id is None:
             cur.execute(
                 """
+                SELECT COALESCE(SUM(amount_micro), 0) AS grant_micro
+                FROM credit_promotion_grants
+                WHERE user_id = %s
+                """,
+                (user_id,),
+            )
+            promotion = cur.fetchone()
+            grant_micro += int(promotion["grant_micro"])
+            cur.execute(
+                """
                 SELECT
                     COALESCE(SUM(CASE WHEN bucket = 'grant' THEN amount_micro ELSE 0 END), 0)
                         AS grant_usage_micro,
@@ -1432,7 +1564,7 @@ class PostgresCreditsStore:
                         boundary = (str(legacy["created_at"]), "ledger", decoded)
                     else:
                         boundary = decoded
-                params: list[Any] = [user_id, user_id]
+                params: list[Any] = [user_id, user_id, user_id]
                 cursor_sql = ""
                 if boundary is not None:
                     created_at, source_kind, source_id = boundary
@@ -1457,14 +1589,16 @@ class PostgresCreditsStore:
                                source, reason, reference_type, reference_id,
                                created_at,
                                NULL::TEXT AS reservation_id, NULL::TEXT AS run_id,
-                               NULL::BIGINT AS call_index, NULL::TEXT AS evidence_json
+                               NULL::BIGINT AS call_index,
+                               NULL::BIGINT AS model_call_count,
+                               NULL::TEXT AS evidence_json
                         FROM credit_ledger_entries
                         WHERE user_id = %s
                     ),
                     llm_activity AS (
                         SELECT MAX(id) AS source_id, 'llm_usage' AS source_kind,
                                user_id, NULL::TEXT AS bucket,
-                               'llm_usage' AS entry_type,
+                               'backtest_usage' AS entry_type,
                                SUM(amount_micro) AS amount_micro,
                                NULL::TEXT AS payment_order_id,
                                NULL::TEXT AS refund_request_id,
@@ -1474,20 +1608,46 @@ class PostgresCreditsStore:
                                NULL::TEXT AS idempotency_key,
                                NULL::TEXT AS request_digest,
                                NULL::INTEGER AS actor_user_id,
-                               'llm_execution' AS source, 'Model usage.' AS reason,
+                               'llm_execution' AS source,
+                               'Backtest usage.' AS reason,
                                NULL::TEXT AS reference_type,
                                NULL::TEXT AS reference_id,
-                               created_at, reservation_id, run_id, call_index,
-                               evidence_json
+                               MAX(created_at) AS created_at,
+                               NULL::TEXT AS reservation_id, run_id,
+                               NULL::BIGINT AS call_index,
+                               COUNT(DISTINCT call_index) AS model_call_count,
+                               NULL::TEXT AS evidence_json
                         FROM credit_llm_usage_entries
                         WHERE user_id = %s
-                        GROUP BY user_id, reservation_id, run_id, call_index,
-                                 evidence_json, created_at
+                        GROUP BY user_id, run_id
+                    ),
+                    promotion_activity AS (
+                        SELECT id AS source_id, 'promotion' AS source_kind,
+                               user_id, 'grant'::TEXT AS bucket,
+                               'system_promotion_grant' AS entry_type,
+                               amount_micro,
+                               NULL::TEXT AS payment_order_id,
+                               NULL::TEXT AS refund_request_id,
+                               NULL::TEXT AS stripe_event_id,
+                               'promotion:' || operation_id AS operation_key,
+                               operation_id, idempotency_key, request_digest,
+                               NULL::INTEGER AS actor_user_id,
+                               source, reason, 'promotion'::TEXT AS reference_type,
+                               campaign_key AS reference_id, created_at,
+                               NULL::TEXT AS reservation_id,
+                               NULL::TEXT AS run_id,
+                               NULL::BIGINT AS call_index,
+                               NULL::BIGINT AS model_call_count,
+                               NULL::TEXT AS evidence_json
+                        FROM credit_promotion_grants
+                        WHERE user_id = %s
                     ),
                     activity AS (
                         SELECT * FROM historical_activity
                         UNION ALL
                         SELECT * FROM llm_activity
+                        UNION ALL
+                        SELECT * FROM promotion_activity
                     )
                     SELECT * FROM activity
                     {cursor_sql}
@@ -1497,8 +1657,39 @@ class PostgresCreditsStore:
                     params,
                 )
                 rows = cur.fetchall()
+                selected_rows = rows[:page_size]
+                run_ids = list(
+                    dict.fromkeys(
+                        str(row["run_id"])
+                        for row in selected_rows
+                        if row["source_kind"] == "llm_usage"
+                        and row["run_id"] is not None
+                    )
+                )
+                evidence_by_run: dict[str, list[object]] = {
+                    run_id: [] for run_id in run_ids
+                }
+                if run_ids:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT run_id, evidence_json
+                        FROM credit_llm_usage_entries
+                        WHERE user_id = %s AND run_id = ANY(%s)
+                        """,
+                        (user_id, run_ids),
+                    )
+                    for evidence_row in cur.fetchall():
+                        evidence_by_run[str(evidence_row["run_id"])].append(
+                            evidence_row["evidence_json"]
+                        )
         has_more = len(rows) > page_size
-        items = [normalize_activity_item(dict(row)) for row in rows[:page_size]]
+        items = [
+            normalize_activity_item(
+                dict(row),
+                evidence_json_values=evidence_by_run.get(str(row["run_id"]), ()),
+            )
+            for row in selected_rows
+        ]
         return {
             "items": items,
             "next_cursor": (

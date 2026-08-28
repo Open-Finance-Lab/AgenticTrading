@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 from pathlib import Path
+import asyncio
 import os
 
 import dashboard.backend.database as _database
@@ -167,6 +168,20 @@ async def startup_event():
     else:
         print("⚠️ ANTHROPIC_API_KEY not set - LLM trading disabled")
     print("📊 Paper Trading: Baselines initialized on startup...")
+
+    try:
+        from dashboard.backend.domain.credits.service import credits_service
+
+        report = await asyncio.to_thread(
+            credits_service.backfill_default_signup_credits
+        )
+        print(
+            "[credits] welcome campaign "
+            f"total={report['total']} granted={report['granted']} "
+            f"existing={report['existing']} failed={report['failed']}"
+        )
+    except Exception:  # noqa: BLE001 - startup must keep serving for a retry
+        print("WARNING: credits.welcome_backfill_failed")
     
     # Initialize paper trading baselines (non-blocking)
     import threading

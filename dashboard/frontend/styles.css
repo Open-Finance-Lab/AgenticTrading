@@ -5294,7 +5294,7 @@ a.header-brand:hover .title-section h1 {
 }
 
 .account-view {
-    max-width: 560px;
+    max-width: 1180px;
 }
 
 .account-card {
@@ -9947,7 +9947,180 @@ body.agent-editor-open {
     color: #f87171;
 }
 
-/* Account page — password + avatar sections */
+/* Account page — identity summary + settings workspace */
+.account-view #accountSignedIn {
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+}
+
+.account-view .account-workspace {
+    display: grid;
+    grid-template-columns: minmax(220px, 0.72fr) minmax(0, 1.7fr);
+    gap: 20px;
+    align-items: start;
+}
+
+.account-view .account-identity {
+    position: sticky;
+    top: 88px;
+    min-width: 0;
+    padding: 24px;
+    border: 1px solid rgba(103, 232, 249, 0.22);
+    border-radius: 12px;
+    background: linear-gradient(145deg, rgba(18, 33, 62, 0.98), rgba(11, 20, 40, 0.98));
+    box-shadow: 0 18px 38px rgba(2, 8, 23, 0.22);
+}
+
+.account-view .account-identity-avatar-wrap {
+    display: flex;
+    align-items: flex-end;
+    gap: 12px;
+    margin-bottom: 24px;
+}
+
+.account-view .auth-avatar--large {
+    width: 72px;
+    height: 72px;
+    border: 2px solid rgba(103, 232, 249, 0.45);
+    font-size: 26px;
+    box-shadow: 0 0 0 5px rgba(34, 211, 238, 0.06);
+}
+
+.account-view .account-profile-status {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    padding: 3px 9px;
+    border: 1px solid rgba(52, 211, 153, 0.28);
+    border-radius: 999px;
+    background: rgba(16, 185, 129, 0.08);
+    color: #6ee7b7;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.account-view .account-profile-status::before {
+    width: 6px;
+    height: 6px;
+    margin-right: 6px;
+    border-radius: 50%;
+    background: #34d399;
+    content: "";
+}
+
+.account-view .account-section-kicker {
+    margin: 0 0 7px;
+    color: #67e8f9;
+    font-size: 10px;
+    font-weight: 800;
+    text-transform: uppercase;
+}
+
+.account-view .account-identity-name {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 24px;
+    font-weight: 750;
+    line-height: 1.2;
+    overflow-wrap: anywhere;
+}
+
+.account-view .account-identity-email {
+    margin: 6px 0 22px;
+    color: var(--text-secondary);
+    font-size: 13px;
+    overflow-wrap: anywhere;
+}
+
+.account-view .account-identity-facts {
+    margin: 0;
+    border-top: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.account-view .account-identity-facts > div {
+    display: grid;
+    grid-template-columns: minmax(88px, 0.8fr) minmax(0, 1.2fr);
+    gap: 12px;
+    padding: 12px 0;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.account-view .account-identity-facts dt,
+.account-view .account-identity-facts dd {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.45;
+}
+
+.account-view .account-identity-facts dt {
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.account-view .account-identity-facts dd {
+    color: var(--text-primary);
+    font-weight: 700;
+    text-align: right;
+    overflow-wrap: anywhere;
+}
+
+.account-view .account-identity-actions {
+    margin-top: 20px;
+}
+
+.account-view .account-identity-actions .auth-btn {
+    width: 100%;
+}
+
+.account-view .account-settings-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+    min-width: 0;
+}
+
+.account-view .account-settings-grid > .account-section {
+    min-width: 0;
+    margin-top: 0;
+    padding: 18px;
+    border: 1px solid rgba(148, 163, 184, 0.16);
+    border-radius: 10px;
+    background: rgba(17, 29, 54, 0.82);
+}
+
+.account-view .account-settings-grid > .account-section:nth-child(3),
+.account-view .account-settings-grid > .account-section:nth-child(4) {
+    grid-column: span 2;
+}
+
+.account-view .account-section-title {
+    margin-bottom: 14px;
+    padding-bottom: 11px;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.13);
+    font-size: 14px;
+}
+
+.account-view .account-password-form {
+    max-width: none;
+}
+
+.account-view .account-avatar-row,
+.account-view .account-avatar-actions {
+    width: 100%;
+}
+
+.account-view .account-avatar-actions .auth-btn:first-of-type {
+    flex: 1;
+}
+
+.account-view .auth-field input:focus-visible,
+.account-view .auth-btn:focus-visible {
+    outline: 2px solid #67e8f9;
+    outline-offset: 2px;
+}
+
 .account-section {
     margin-top: 16px;
     padding-top: 14px;
@@ -10022,6 +10195,45 @@ body.agent-editor-open {
 .account-avatar-actions {
     display: flex;
     gap: 8px;
+}
+
+@media (max-width: 860px) {
+    .account-view .account-workspace,
+    .account-view .account-settings-grid {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .account-view .account-identity {
+        position: static;
+    }
+
+    .account-view .account-settings-grid > .account-section:nth-child(3),
+    .account-view .account-settings-grid > .account-section:nth-child(4) {
+        grid-column: auto;
+    }
+}
+
+@media (max-width: 540px) {
+    .account-view .account-identity,
+    .account-view .account-settings-grid > .account-section {
+        padding: 16px;
+    }
+
+    .account-view .account-identity-avatar-wrap {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .account-view .account-avatar-actions,
+    .account-view .account-email-actions {
+        grid-template-columns: minmax(0, 1fr);
+        flex-direction: column;
+    }
+
+    .account-view .account-avatar-actions .auth-btn,
+    .account-view .account-email-actions .auth-btn {
+        width: 100%;
+    }
 }
 
 /* My Agents — asset-class shelves. A real panel, not loose prose: these sections

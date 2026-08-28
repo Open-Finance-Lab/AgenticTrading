@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=126">
+    <link rel="stylesheet" href="styles.css?v=127">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -1757,90 +1757,109 @@
             </div>
         </div>
         <div id="accountSignedIn" class="account-card" hidden>
-            <div class="account-row">
-                <span class="account-label">Display name</span>
-                <span id="accountDisplayName" class="account-value">—</span>
-            </div>
-            <div class="account-row">
-                <span class="account-label">Email</span>
-                <span id="accountEmail" class="account-value">—</span>
-            </div>
-            <div class="account-section">
-                <h3 class="account-section-title">Display name</h3>
-                <form id="accountDisplayNameForm" class="auth-form account-password-form">
-                    <label class="auth-field">
-                        <span>Display name</span>
-                        <input id="displayNameInput" type="text" maxlength="100" autocomplete="nickname" required>
-                    </label>
-                    <p id="displayNameError" class="auth-error" hidden></p>
-                    <p id="displayNameSuccess" class="account-success" hidden>Display name updated.</p>
-                    <button class="auth-btn auth-btn-primary" type="submit">Save name</button>
-                </form>
-            </div>
-            <div class="account-section">
-                <h3 class="account-section-title">Change email address</h3>
-                <form id="accountEmailForm" class="auth-form account-password-form">
-                    <div id="emailChangeIdle">
-                        <label class="auth-field">
-                            <span>New email address</span>
-                            <input id="newEmailInput" type="email" maxlength="254" autocomplete="email">
-                        </label>
-                        <label class="auth-field">
-                            <span>Current password</span>
-                            <input id="emailChangePasswordInput" type="password" autocomplete="current-password">
-                        </label>
-                        <p class="account-hint">You can change your email address once every 7 days.</p>
+            <div class="account-workspace">
+                <aside class="account-identity" aria-labelledby="accountIdentityHeading">
+                    <div class="account-identity-avatar-wrap">
+                        <span id="accountAvatarPreview" class="auth-avatar auth-avatar--large" aria-hidden="true"></span>
+                        <span id="accountProfileStatus" class="account-profile-status" role="status">Signed in</span>
                     </div>
-                    <div id="emailChangeCodeStep" hidden>
-                        <p id="emailChangeStepCopy" class="account-hint"></p>
-                        <label class="auth-field">
-                            <span>Confirmation code</span>
-                            <input id="emailChangeCodeInput" type="text" maxlength="6" autocomplete="one-time-code">
-                        </label>
+                    <p class="account-section-kicker">Account identity</p>
+                    <h3 id="accountIdentityHeading" class="account-identity-name">—</h3>
+                    <p id="accountIdentityEmail" class="account-identity-email">—</p>
+                    <dl class="account-identity-facts">
+                        <div>
+                            <dt>Display name</dt>
+                            <dd id="accountDisplayName">—</dd>
+                        </div>
+                        <div>
+                            <dt>Email</dt>
+                            <dd id="accountEmail">—</dd>
+                        </div>
+                        <div>
+                            <dt>Role</dt>
+                            <dd id="accountRole">Member</dd>
+                        </div>
+                    </dl>
+                    <div class="account-identity-actions">
+                        <button id="authLogoutBtn" class="auth-btn auth-btn-danger" type="button">Log out</button>
                     </div>
-                    <p id="emailChangeError" class="auth-error" hidden></p>
-                    <p id="emailChangeSuccess" class="account-success" hidden>Email address updated. Other devices were signed out.</p>
-                    <div class="account-email-actions">
-                        <button id="emailChangeSubmitBtn" class="auth-btn auth-btn-primary" type="submit">Send code</button>
-                        <button id="emailChangeCancelBtn" class="auth-btn auth-btn-secondary" type="button" hidden>Cancel</button>
-                    </div>
-                </form>
-            </div>
-            <div class="account-section">
-                <h3 class="account-section-title">Profile photo</h3>
-                <div class="account-avatar-row">
-                    <span id="accountAvatarPreview" class="auth-avatar auth-avatar--large" aria-hidden="true"></span>
-                    <div class="account-avatar-actions">
-                        <input id="avatarFileInput" type="file" accept="image/jpeg,image/png,image/webp" hidden>
-                        <button id="avatarUploadBtn" class="auth-btn auth-btn-secondary" type="button">Upload photo</button>
-                        <button id="avatarRemoveBtn" class="auth-btn auth-btn-secondary" type="button" hidden>Remove</button>
-                    </div>
+                </aside>
+
+                <div class="account-settings-grid">
+                    <section class="account-section" aria-labelledby="accountDisplayNameHeading">
+                        <h3 id="accountDisplayNameHeading" class="account-section-title">Display name</h3>
+                        <form id="accountDisplayNameForm" class="auth-form account-password-form">
+                            <label class="auth-field">
+                                <span>Display name</span>
+                                <input id="displayNameInput" type="text" maxlength="100" autocomplete="nickname" required>
+                            </label>
+                            <p id="displayNameError" class="auth-error" hidden></p>
+                            <p id="displayNameSuccess" class="account-success" hidden>Display name updated.</p>
+                            <button class="auth-btn auth-btn-primary" type="submit">Save name</button>
+                        </form>
+                    </section>
+                    <section class="account-section" aria-labelledby="accountPhotoHeading">
+                        <h3 id="accountPhotoHeading" class="account-section-title">Profile photo</h3>
+                        <div class="account-avatar-row">
+                            <div class="account-avatar-actions">
+                                <input id="avatarFileInput" type="file" accept="image/jpeg,image/png,image/webp" hidden>
+                                <button id="avatarUploadBtn" class="auth-btn auth-btn-secondary" type="button">Upload photo</button>
+                                <button id="avatarRemoveBtn" class="auth-btn auth-btn-secondary" type="button" hidden>Remove</button>
+                            </div>
+                        </div>
+                        <p id="avatarError" class="auth-error" hidden></p>
+                    </section>
+                    <section class="account-section" aria-labelledby="accountEmailHeading">
+                        <h3 id="accountEmailHeading" class="account-section-title">Change email address</h3>
+                        <form id="accountEmailForm" class="auth-form account-password-form">
+                            <div id="emailChangeIdle">
+                                <label class="auth-field">
+                                    <span>New email address</span>
+                                    <input id="newEmailInput" type="email" maxlength="254" autocomplete="email">
+                                </label>
+                                <label class="auth-field">
+                                    <span>Current password</span>
+                                    <input id="emailChangePasswordInput" type="password" autocomplete="current-password">
+                                </label>
+                                <p class="account-hint">You can change your email address once every 7 days.</p>
+                            </div>
+                            <div id="emailChangeCodeStep" hidden>
+                                <p id="emailChangeStepCopy" class="account-hint"></p>
+                                <label class="auth-field">
+                                    <span>Confirmation code</span>
+                                    <input id="emailChangeCodeInput" type="text" maxlength="6" autocomplete="one-time-code">
+                                </label>
+                            </div>
+                            <p id="emailChangeError" class="auth-error" hidden></p>
+                            <p id="emailChangeSuccess" class="account-success" hidden>Email address updated. Other devices were signed out.</p>
+                            <div class="account-email-actions">
+                                <button id="emailChangeSubmitBtn" class="auth-btn auth-btn-primary" type="submit">Send code</button>
+                                <button id="emailChangeCancelBtn" class="auth-btn auth-btn-secondary" type="button" hidden>Cancel</button>
+                            </div>
+                        </form>
+                    </section>
+                    <section class="account-section" aria-labelledby="accountPasswordHeading">
+                        <h3 id="accountPasswordHeading" class="account-section-title">Change password</h3>
+                        <form id="changePasswordForm" class="auth-form account-password-form">
+                            <label class="auth-field">
+                                <span>Current password</span>
+                                <input id="currentPasswordInput" type="password" autocomplete="current-password" required>
+                            </label>
+                            <label class="auth-field">
+                                <span>New password</span>
+                                <input id="newPasswordInput" type="password" autocomplete="new-password" required>
+                            </label>
+                            <label class="auth-field">
+                                <span>Confirm new password</span>
+                                <input id="confirmPasswordInput" type="password" autocomplete="new-password" required>
+                            </label>
+                            <ul id="passwordPolicyHints" class="password-policy-hints" hidden></ul>
+                            <p id="changePasswordError" class="auth-error" hidden></p>
+                            <p id="changePasswordSuccess" class="account-success" hidden>Password updated. Other devices were signed out.</p>
+                            <button class="auth-btn auth-btn-primary" type="submit">Update password</button>
+                        </form>
+                    </section>
                 </div>
-                <p id="avatarError" class="auth-error" hidden></p>
-            </div>
-            <div class="account-section">
-                <h3 class="account-section-title">Change password</h3>
-                <form id="changePasswordForm" class="auth-form account-password-form">
-                    <label class="auth-field">
-                        <span>Current password</span>
-                        <input id="currentPasswordInput" type="password" autocomplete="current-password" required>
-                    </label>
-                    <label class="auth-field">
-                        <span>New password</span>
-                        <input id="newPasswordInput" type="password" autocomplete="new-password" required>
-                    </label>
-                    <label class="auth-field">
-                        <span>Confirm new password</span>
-                        <input id="confirmPasswordInput" type="password" autocomplete="new-password" required>
-                    </label>
-                    <ul id="passwordPolicyHints" class="password-policy-hints" hidden></ul>
-                    <p id="changePasswordError" class="auth-error" hidden></p>
-                    <p id="changePasswordSuccess" class="account-success" hidden>Password updated. Other devices were signed out.</p>
-                    <button class="auth-btn auth-btn-primary" type="submit">Update password</button>
-                </form>
-            </div>
-            <div class="account-section account-actions">
-                <button id="authLogoutBtn" class="auth-btn auth-btn-danger" type="button">Log out</button>
             </div>
         </div>
         <div id="accountSignedOut" class="account-card account-card--empty" hidden>
@@ -1896,21 +1915,21 @@
                             <p class="credits-section-kicker">Top up</p>
                             <h3 id="creditsPurchaseHeading">Choose an amount</h3>
                         </div>
-                        <span class="credits-rate">$1 = 1 Credit</span>
+                        <span class="credits-rate">$1 = 1.000000 Credits</span>
                     </div>
                     <div id="creditsPackageGrid" class="credits-package-grid" role="radiogroup" aria-label="Credit package">
-                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_5" data-credit-cents="500"><strong>$5</strong><span>5 Credits</span></button>
-                        <button class="credits-package-btn is-selected" type="button" role="radio" aria-checked="true" data-credit-package="usd_10" data-credit-cents="1000"><strong>$10</strong><span>10 Credits</span></button>
-                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_20" data-credit-cents="2000"><strong>$20</strong><span>20 Credits</span></button>
-                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_50" data-credit-cents="5000"><strong>$50</strong><span>50 Credits</span></button>
+                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_0_50" data-credit-cents="50"><strong>$0.50</strong><span>0.500000 Credits</span></button>
+                        <button class="credits-package-btn is-selected" type="button" role="radio" aria-checked="true" data-credit-package="usd_1" data-credit-cents="100"><strong>$1</strong><span>1.000000 Credits</span></button>
+                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_2" data-credit-cents="200"><strong>$2</strong><span>2.000000 Credits</span></button>
+                        <button class="credits-package-btn" type="button" role="radio" aria-checked="false" data-credit-package="usd_5" data-credit-cents="500"><strong>$5</strong><span>5.000000 Credits</span></button>
                     </div>
                     <div class="credits-custom-row">
                         <label for="creditsCustomAmount">Custom amount</label>
                         <div class="credits-money-input">
                             <span aria-hidden="true">$</span>
-                            <input id="creditsCustomAmount" inputmode="decimal" autocomplete="off" placeholder="5.00–200.00" aria-describedby="creditsCustomHint">
+                            <input id="creditsCustomAmount" type="number" min="0.50" max="5.00" step="0.01" inputmode="decimal" autocomplete="off" placeholder="0.50-5.00" aria-describedby="creditsCustomHint">
                         </div>
-                        <p id="creditsCustomHint">Minimum $5, maximum $200.</p>
+                        <p id="creditsCustomHint">Minimum $0.50, maximum $5.00.</p>
                     </div>
                     <button id="creditsPurchaseBtn" class="auth-btn auth-btn-primary credits-purchase-btn" type="button">
                         <svg aria-hidden="true"><use href="#icon-wallet"/></svg>
@@ -2464,13 +2483,14 @@
     <script src="market-events/MarketEventCard.js" defer></script>
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
-    <script src="app.js?v=117" defer></script>
+    <script src="app.js?v=118" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=28" defer></script>
-    <script src="js/credits.js?v=5" defer></script>
+    <script src="js/credit-format.js?v=1" defer></script>
+    <script src="js/credits.js?v=8" defer></script>
     <script src="js/admin-model-providers.js?v=1" defer></script>
-    <script src="js/admin-credits.js?v=5" defer></script>
-    <script src="js/admin-analytics.js?v=1" defer></script>
+    <script src="js/admin-credits.js?v=6" defer></script>
+    <script src="js/admin-analytics.js?v=2" defer></script>
     <script src="js/admin-tabs.js?v=3" defer></script>
     <script src="js/leaderboard.js?v=32" defer></script>
     <script src="home-page.js?v=50" defer></script>

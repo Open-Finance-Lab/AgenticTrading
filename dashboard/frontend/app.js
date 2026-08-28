@@ -3237,6 +3237,9 @@ function updateAccountPage() {
   const signedOut = document.getElementById('accountSignedOut');
   const nameEl = document.getElementById('accountDisplayName');
   const emailEl = document.getElementById('accountEmail');
+  const identityName = document.getElementById('accountIdentityHeading');
+  const identityEmail = document.getElementById('accountIdentityEmail');
+  const roleEl = document.getElementById('accountRole');
   if (!signedIn || !signedOut) return;
 
   if (user) {
@@ -3244,6 +3247,9 @@ function updateAccountPage() {
     signedOut.hidden = true;
     if (nameEl) nameEl.textContent = user.display_name || '—';
     if (emailEl) emailEl.textContent = user.email || '—';
+    if (identityName) identityName.textContent = user.display_name || '—';
+    if (identityEmail) identityEmail.textContent = user.email || '—';
+    if (roleEl) roleEl.textContent = user.role === 'admin' ? 'Administrator' : 'Member';
     const nameInput = document.getElementById('displayNameInput');
     // Skip while focused so a re-render mid-edit does not stomp what is typed.
     if (nameInput && document.activeElement !== nameInput) {
