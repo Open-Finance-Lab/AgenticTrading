@@ -23,6 +23,10 @@ def test_series_kind_and_colors_match_playground():
     assert series_color("agent_123", "Agent") == PLAYGROUND_SERIES_COLORS["agent"]
     assert series_color("idx1", "DJIA index") == "#F5C04A"
     assert series_color("idx2", "Nasdaq-100") == "#9AA4B2"
+    assert series_color("buyhold_1", "buy-and-hold") == "#34D399"
+    assert series_color("buyhold_1", "buy-and-hold") != series_color(
+        "idx2", "Nasdaq-100"
+    )
 
 
 def test_format_playground_timestamp():
