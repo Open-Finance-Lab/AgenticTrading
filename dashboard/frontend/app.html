@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=125">
+    <link rel="stylesheet" href="styles.css?v=126">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -1253,18 +1253,42 @@
                     reached. Your agent's curve is complete; reload to retry the benchmarks.
                 </p>
 
-                <!-- Chart with integrated legend -->
+                <div id="performanceLegend" class="performance-legend" role="group" aria-label="Chart series visibility"></div>
+
                 <div class="chart-container">
-                    <canvas id="performanceChart"></canvas>
+                    <canvas id="performanceChart" role="img" aria-label="Portfolio value comparison chart" aria-describedby="performanceComparisonCaption" aria-details="performanceComparison"></canvas>
                 </div>
 
+                <section id="performanceComparison" class="performance-comparison" aria-labelledby="performanceComparisonTitle">
+                    <div class="performance-comparison-header">
+                        <h3 id="performanceComparisonTitle">Performance comparison</h3>
+                        <p id="performanceComparisonCaption">Same capital, date range, and sampling interval.</p>
+                    </div>
+                    <div class="performance-comparison-scroll" tabindex="0" aria-label="Performance comparison table">
+                        <table>
+                            <thead id="performanceComparisonHead"></thead>
+                            <tbody id="performanceComparisonBody"></tbody>
+                        </table>
+                    </div>
+                    <p id="performanceComparisonStatus" class="performance-comparison-status" role="status" aria-live="polite"></p>
+                </section>
             </div>
 
-            <!-- Trading Log Section -->
-            <div class="section-card">
-                <div class="section-header">
-                    <h2>Trading Log</h2>
+        </section>
+
+        <!-- Right Panel: run-scoped Trading Log -->
+        <aside class="right-panel">
+            <section class="section-card trading-log-card" aria-labelledby="tradingLogTitle">
+                <div class="section-header trading-log-header">
+                    <div>
+                        <h2 id="tradingLogTitle">Trading Log</h2>
+                        <p class="trading-log-summary">
+                            <span id="tradingLogCount">0 orders</span>
+                            <span id="tradingLogStatusSummary"></span>
+                        </p>
+                    </div>
                     <div class="log-controls">
+                        <label class="sr-only" for="tradingLogFilter">Filter Trading Log orders</label>
                         <select class="filter-select" id="tradingLogFilter">
                             <option value="all">All Orders</option>
                             <option value="buy">Buys Only</option>
@@ -1273,57 +1297,10 @@
                     </div>
                 </div>
 
-                <div class="trading-log-scroll">
-                    <table class="decision-table trading-log-table">
-                        <thead>
-                            <tr>
-                                <th>Time</th>
-                                <th>Action</th>
-                                <th>Company / Asset</th>
-                                <th>Quantity</th>
-                                <th>Price</th>
-                                <th>Total Value</th>
-                                <th>Status</th>
-                                <th>Reason</th>
-                            </tr>
-                        </thead>
-                        <tbody id="tradingLogBody">
-                            <tr>
-                                <td colspan="8" class="trading-log-empty">Run a backtest to see orders here.</td>
-                            </tr>
-                        </tbody>
-                    </table>
+                <div id="tradingLogFeed" class="trading-log-scroll" role="list" tabindex="0" aria-label="Trading Log orders">
+                    <p class="trading-log-empty">Run a backtest to see orders here.</p>
                 </div>
-            </div>
-        </section>
-
-        <!-- Right Panel: Metrics -->
-        <aside class="right-panel">
-            <!-- Trading Performance Summary -->
-            <div class="section-card compact">
-                <h3 class="section-title">Trading Performance Summary</h3>
-                
-                <div class="metric-row">
-                    <span class="metric-label">Final Value</span>
-                    <span class="metric-value" data-metric="final-value">--</span>
-                </div>
-                <div class="metric-row">
-                    <span class="metric-label">Cumulative Return</span>
-                    <span class="metric-value" data-metric="total-return">--</span>
-                </div>
-                <div class="metric-row">
-                    <span class="metric-label">Max Drawdown</span>
-                    <span class="metric-value" data-metric="max-drawdown">--</span>
-                </div>
-                <div class="metric-row">
-                    <span class="metric-label">Sharpe Ratio</span>
-                    <span class="metric-value" data-metric="sharpe" title="Risk-adjusted return, annualized from hourly results.">--</span>
-                </div>
-                
-            </div>
-
-
-
+            </section>
         </aside>
     </div>
 
@@ -2418,7 +2395,8 @@
     <script src="market-events/MarketEventCard.js" defer></script>
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
-    <script src="app.js?v=116" defer></script>
+    <script src="js/backtest-comparison.js?v=1" defer></script>
+    <script src="app.js?v=117" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=28" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>

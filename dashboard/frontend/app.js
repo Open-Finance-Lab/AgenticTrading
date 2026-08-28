@@ -1888,7 +1888,6 @@ async function onBacktestAgentSelectChange() {
   localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
   if (currentMode === 'backtest') {
     await loadData();
-    loadPerformanceMetrics();
   }
 }
 
@@ -4919,6 +4918,7 @@ let userHasNavigated = false;
 let allRuns = [];
 let comparisonData = null;
 let backtestChartData = null;
+let backtestSurfaceRequestSeq = 0;
 let defaultConfig = null;
 
 // Initialize on page load
@@ -5209,135 +5209,151 @@ function updateMarketsOpenStatus() {
 window.updateMarketsOpenStatus = updateMarketsOpenStatus;
 window.isUsEquityMarketOpen = isUsEquityMarketOpen;
 
-/**
- * Load performance metrics from latest backtest run
- */
-async function loadPerformanceMetrics() {
-    try {
-        if (liveBacktestChartActive) {
-            displayNoMetrics();
-            return;
-        }
-        // Mirror the chart: show metrics for the selected run. window.SELECTED_RUN
-        // is set by loadData; resolve from session runs when called standalone.
-        let metrics = window.SELECTED_RUN || null;
+function formatComparisonMetric(metric, value, currency = 'USD') {
+    if (!Number.isFinite(value)) return '—';
+    if (metric.kind === 'currency') {
+        return new Intl.NumberFormat('en-US', {
+            style: 'currency',
+            currency,
+            maximumFractionDigits: 0,
+        }).format(value);
+    }
+    if (metric.kind === 'percent') {
+        return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`;
+    }
+    return value.toFixed(2);
+}
 
-        if (!metrics) {
-            try {
-                const sessionRuns = await API.get(`${API_BASE}/api/backtest/runs?t=${Date.now()}`);
-                metrics = resolveSelectedRun(sessionRuns);
-            } catch (e) {
-                console.warn('Could not load session runs for metrics');
+function createComparisonDelta(value, label) {
+    if (!Number.isFinite(value)) return null;
+    const delta = document.createElement('span');
+    const state = value > 0 ? 'is-positive' : value < 0 ? 'is-negative' : 'is-neutral';
+    const sign = value > 0 ? '+' : value < 0 ? '-' : '';
+    delta.className = `performance-delta ${state}`;
+    delta.textContent = `${label} ${sign}${Math.abs(value).toFixed(2)}pp`;
+    return delta;
+}
+
+function setPerformanceComparisonState(state, message = '') {
+    const region = document.getElementById('performanceComparison');
+    const status = document.getElementById('performanceComparisonStatus');
+    if (!region || !status) return;
+    region.dataset.state = state;
+    status.textContent = message;
+}
+
+function clearPerformanceComparison(state = 'empty', message = '') {
+    document.getElementById('performanceComparisonHead')?.replaceChildren();
+    document.getElementById('performanceComparisonBody')?.replaceChildren();
+    renderPerformanceLegend({ columns: [] });
+    setPerformanceComparisonState(state, message);
+}
+
+function renderPerformanceComparison(payload, run) {
+    const head = document.getElementById('performanceComparisonHead');
+    const body = document.getElementById('performanceComparisonBody');
+    if (!head || !body || !window.BacktestComparison) return;
+
+    const model = window.BacktestComparison.buildModel(payload, run);
+    const currency = run?.reporting_currency
+        || run?.metadata?.reporting_currency
+        || 'USD';
+    const headerRow = document.createElement('tr');
+    const metricHeader = document.createElement('th');
+    metricHeader.scope = 'col';
+    metricHeader.textContent = 'Metric';
+    headerRow.appendChild(metricHeader);
+
+    for (const column of model.columns) {
+        const header = document.createElement('th');
+        header.scope = 'col';
+        header.dataset.seriesKey = column.key;
+        const swatch = document.createElement('span');
+        swatch.className = 'performance-series-swatch';
+        swatch.style.backgroundColor = column.color;
+        swatch.setAttribute('aria-hidden', 'true');
+        header.append(swatch, document.createTextNode(column.label));
+        headerRow.appendChild(header);
+    }
+    head.replaceChildren(headerRow);
+
+    const rows = window.BacktestComparison.METRICS.map((metric) => {
+        const row = document.createElement('tr');
+        const rowHeader = document.createElement('th');
+        rowHeader.scope = 'row';
+        rowHeader.textContent = metric.label;
+        row.appendChild(rowHeader);
+
+        for (const column of model.columns) {
+            const cell = document.createElement('td');
+            const value = column.metrics[metric.key];
+            cell.dataset.seriesKey = column.key;
+            const formatted = document.createElement('span');
+            formatted.className = 'performance-metric-value';
+            formatted.textContent = formatComparisonMetric(metric, value, currency);
+            cell.appendChild(formatted);
+
+            if (model.bestByMetric[metric.key].includes(column.key)) {
+                cell.classList.add('performance-best');
+                const best = document.createElement('span');
+                best.className = 'performance-best-label';
+                best.textContent = 'Best';
+                cell.appendChild(best);
             }
-        }
 
-        if (!metrics) {
-            metrics = await API.get(`${API_BASE}/runs/latest/metrics?t=${Date.now()}`);
+            if (metric.key === 'totalReturn' && column.key === 'agent') {
+                const deltas = document.createElement('span');
+                deltas.className = 'performance-deltas';
+                for (const benchmark of model.columns.filter((item) => item.key !== 'agent')) {
+                    const delta = createComparisonDelta(
+                        model.agentDeltas[benchmark.key],
+                        benchmark.label,
+                    );
+                    if (delta) deltas.appendChild(delta);
+                }
+                cell.appendChild(deltas);
+            }
+            row.appendChild(cell);
         }
-
-        if (!metrics || !metrics.initial_equity) {
-            console.warn('Invalid metrics data:', metrics);
-            displayNoMetrics();
-            return;
-        }
-
-        displayPerformanceMetrics(metrics);
-        console.log('✅ Performance metrics loaded:', metrics);
-    } catch (error) {
-        console.warn('Error fetching performance metrics:', error.message);
-        displayNoMetrics();
-    }
-}
-
-/**
- * Display performance metrics in the summary panel
- */
-/**
- * Display performance metrics from backtest results.
- * 
- * Metric Formulas:
- * 1. Final Portfolio Value: last portfolio value in equity curve
- * 2. Cumulative Return: (final_value - initial_capital) / initial_capital * 100
- * 3. Max Drawdown: minimum drawdown = (value - running_peak) / running_peak * 100
- * 4. Sharpe Ratio: (mean(returns) / std(returns)) * sqrt(252*6.5)
- *    - Hourly data with 252 trading days/year and 6.5 hours/day
- */
-function displayPerformanceMetrics(metrics) {
-    console.log('displayPerformanceMetrics() called with:', metrics);
-    
-    // Calculate final value from initial equity and total return
-    const initialCapital = metrics.initial_equity || 1000;
-    let totalReturnPercent = metrics.total_return || 0;
-    if (Math.abs(totalReturnPercent) <= 1 && totalReturnPercent !== 0) {
-        totalReturnPercent = totalReturnPercent * 100;
-    }
-    const finalValue = metrics.final_equity || (initialCapital * (1 + totalReturnPercent / 100));
-    
-    // Update Final Value
-    const finalValueEl = document.querySelector('[data-metric="final-value"]');
-    if (finalValueEl) {
-        finalValueEl.textContent = '$' + finalValue.toLocaleString('en-US', {
-            minimumFractionDigits: 0,
-            maximumFractionDigits: 0
-        });
-        finalValueEl.className = 'metric-value ' + (totalReturnPercent >= 0 ? 'positive' : 'negative');
-        console.log(`  → Updated Final Value: $${finalValue.toFixed(0)}`);
-    }
-    
-    // Update Cumulative Return (renamed from Total Return)
-    const returnEl = document.querySelector('[data-metric="total-return"]');
-    if (returnEl) {
-        const returnSign = totalReturnPercent >= 0 ? '+' : '';
-        const returnText = returnSign + totalReturnPercent.toFixed(2) + '%';
-        returnEl.textContent = returnText;
-        returnEl.className = 'metric-value ' + (totalReturnPercent >= 0 ? 'positive' : 'negative');
-        console.log(`  → Updated Cumulative Return: ${returnText}`);
-    }
-    
-    // Update Max Drawdown
-    const drawdownEl = document.querySelector('[data-metric="max-drawdown"]');
-    if (drawdownEl) {
-        let maxDrawdown = metrics.max_drawdown || 0;
-        if (Math.abs(maxDrawdown) <= 1 && maxDrawdown !== 0) {
-            maxDrawdown = maxDrawdown * 100;
-        }
-        const drawdownText = maxDrawdown.toFixed(2) + '%';
-        drawdownEl.textContent = drawdownText;
-        drawdownEl.className = 'metric-value ' + (maxDrawdown >= 0 ? 'positive' : 'negative');
-        console.log(`  → Updated Max Drawdown: ${drawdownText}`);
-    }
-    
-    // Update Sharpe Ratio
-    // Note: Calculated using hourly data with annualization factor sqrt(252*6.5)
-    const sharpeEl = document.querySelector('[data-metric="sharpe"]');
-    if (sharpeEl) {
-        const sharpe = metrics.sharpe_ratio || 0;
-        const sharpeText = sharpe.toFixed(2);
-        sharpeEl.textContent = sharpeText;
-        sharpeEl.className = 'metric-value';
-        console.log(`  → Updated Sharpe Ratio: ${sharpeText}`);
-        // Tooltip already set in HTML with title attribute
-    }
-}
-
-/**
- * Display placeholder when no metrics available
- */
-function displayNoMetrics() {
-    const elements = [
-        '[data-metric="final-value"]',
-        '[data-metric="total-return"]',
-        '[data-metric="max-drawdown"]',
-        '[data-metric="sharpe"]'
-    ];
-    
-    elements.forEach(selector => {
-        const el = document.querySelector(selector);
-        if (el) {
-            el.textContent = '--';
-            el.className = 'metric-value';
-        }
+        return row;
     });
+    body.replaceChildren(...rows);
+
+    const missing = model.columns.filter((column) => !column.available);
+    const message = missing.length
+        ? `${missing.map((column) => column.label).join(', ')} unavailable for this run.`
+        : '';
+    setPerformanceComparisonState(missing.length ? 'partial' : 'ready', message);
+    return model;
+}
+
+function renderPerformanceLegend(model, { disabled = false } = {}) {
+    const host = document.getElementById('performanceLegend');
+    if (!host) return;
+    const available = (model?.columns || []).filter((column) => column.available);
+    const buttons = available.map((column, index) => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'performance-legend-button';
+        button.dataset.datasetIndex = String(index);
+        button.setAttribute('aria-pressed', 'true');
+        button.disabled = disabled;
+
+        const swatch = document.createElement('span');
+        swatch.className = 'performance-series-swatch';
+        swatch.style.backgroundColor = column.color;
+        swatch.setAttribute('aria-hidden', 'true');
+        button.append(swatch, document.createTextNode(column.label));
+        button.addEventListener('click', () => {
+            if (!chartInstance) return;
+            const visible = button.getAttribute('aria-pressed') === 'true';
+            chartInstance.setDatasetVisibility(index, !visible);
+            button.setAttribute('aria-pressed', String(!visible));
+            chartInstance.update();
+        });
+        return button;
+    });
+    host.replaceChildren(...buttons);
 }
 
 const MAG7_TICKER_SYMBOLS = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'META'];
@@ -6427,16 +6443,7 @@ function getPerformanceChartOptions(timestampMeta) {
         },
         plugins: {
             legend: {
-                display: true,
-                labels: {
-                    color: '#e5e7eb',
-                    font: { size: 12, weight: '600' },
-                    padding: 15,
-                    usePointStyle: true,
-                    pointStyle: 'line',
-                    boxWidth: 12,
-                    boxHeight: 2,
-                }
+                display: false,
             },
             tooltip: {
                 enabled: true,
@@ -6532,10 +6539,23 @@ function initLiveBacktestChart() {
         },
         options: getPerformanceChartOptions(liveBacktestChartMeta),
     });
+    renderPerformanceLegend({
+        columns: [{
+            key: 'agent',
+            label: 'Your Agent',
+            color: '#4FC3F7',
+            available: true,
+        }],
+    }, { disabled: true });
+    setPerformanceComparisonState(
+        'live',
+        'Benchmark metrics will appear when this run finishes.',
+    );
 }
 
 /** Clear history chart/metrics/log and pin the view to a soon-to-start live run. */
 function prepareLiveBacktestView(launchConfig = null) {
+    backtestSurfaceRequestSeq += 1;
     liveBacktestChartActive = true;
     liveBacktestRunId = null;
     liveBacktestLaunchPending = true;
@@ -6543,7 +6563,10 @@ function prepareLiveBacktestView(launchConfig = null) {
     localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
     const runSelect = document.getElementById('backtestRunSelect');
     if (runSelect) runSelect.value = '';
-    displayNoMetrics();
+    clearPerformanceComparison(
+        'live',
+        'Benchmark metrics will appear when this run finishes.',
+    );
     clearTradingLog('Backtest running… orders will appear here.');
     initLiveBacktestChart();
     renderBacktestRunConfig(null, { running: true, launchConfig });
@@ -6553,6 +6576,7 @@ function prepareLiveBacktestView(launchConfig = null) {
 /** Switch the Backtest surface onto an in-flight run (chart + log + config). */
 function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
     if (!runId) return;
+    backtestSurfaceRequestSeq += 1;
     liveBacktestLaunchPending = false;
     liveBacktestLaunchError = false;
     const alreadyLive =
@@ -6578,7 +6602,10 @@ function attachToLiveBacktest(runId, progress = null, launchConfig = null) {
         runSelect.value = runId;
         runSelect.hidden = false;
     }
-    displayNoMetrics();
+    clearPerformanceComparison(
+        'live',
+        'Benchmark metrics will appear when this run finishes.',
+    );
     if (!alreadyLive) {
         initLiveBacktestChart();
     }
@@ -6620,12 +6647,13 @@ function showBacktestLaunchFailure(message, launchConfig, runKey = null) {
         clearAgentBacktestRunning(runKey);
         applyAgentFilters(false);
     }
+    backtestSurfaceRequestSeq += 1;
     liveBacktestChartActive = false;
     liveBacktestRunId = null;
     liveBacktestLaunchPending = false;
     liveBacktestLaunchError = true;
     renderBacktestRunConfig(null, { launchConfig, statusLabel: 'Failed' });
-    displayNoMetrics();
+    clearPerformanceComparison('error', 'Backtest did not start.');
     clearTradingLog('Backtest did not start.');
     showBacktestRunProgress(true, { isError: true });
     updateBacktestRunProgress({ elapsedSeconds: 0, message });
@@ -6857,7 +6885,6 @@ function ensureBacktestPolling() {
                         localStorage.removeItem(SELECTED_BACKTEST_RUN_KEY);
                     }
                     await loadData();
-                    await loadPerformanceMetrics();
                     setTimeout(() => showBacktestRunProgress(false), 2500);
                 } else {
                     showBacktestRunProgress(false);
@@ -7177,8 +7204,8 @@ function formatTradeTimestamp(ts) {
  * every quantity and dropping the currency audit the moment a user filters.
  */
 function paintTradingLog(normalizedRecords, options) {
-    const tbody = document.getElementById('tradingLogBody');
-    if (!tbody) return;
+    const feed = document.getElementById('tradingLogFeed');
+    if (!feed) return;
     options = options || {};
     const emptyMessage = options.emptyMessage || 'No orders yet.';
 
@@ -7189,12 +7216,14 @@ function paintTradingLog(normalizedRecords, options) {
         filtered = normalizedRecords.filter((trade) => trade.side === 'SELL');
     }
 
+    renderTradingLogSummary(filtered);
+
     if (filtered.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="8" class="trading-log-empty">${escapeHtml(emptyMessage)}</td></tr>`;
+        feed.innerHTML = `<p class="trading-log-empty">${escapeHtml(emptyMessage)}</p>`;
         return;
     }
 
-    tbody.innerHTML = filtered.map((order) => {
+    feed.innerHTML = filtered.map((order) => {
         const actionClass = order.side === 'SELL' ? 'action-sell' : 'action-buy';
         const actionLabel = order.side === 'SELL' ? 'SELL' : 'BUY';
         const statusLabel = order.status.toUpperCase();
@@ -7218,16 +7247,24 @@ function paintTradingLog(normalizedRecords, options) {
         const repeatNote = order.repeatCount > 1
             ? `<div class="trading-log-native">×${order.repeatCount} that day</div>`
             : '';
-        return `<tr>
-            <td>${escapeHtml(formatTradeTimestamp(order.timestamp))}</td>
-            <td><span class="${actionClass}">${actionLabel}</span></td>
-            <td><div class="trading-log-asset"><strong>${escapeHtml(order.symbol)}</strong>${assetName ? `<small>${escapeHtml(assetName)}</small>` : ''}</div></td>
-            <td class="trading-log-quantity">${escapeHtml(quantity)}</td>
-            <td>$${order.price.toFixed(2)}${priceAudit}</td>
-            <td class="trading-log-value">${order.executedShares > 0 ? `${formatTradingMoney(order.value, '$')}${valueAudit}${costAudit}` : '--'}</td>
-            <td><span class="order-status order-status-${order.status}" title="Order status: ${statusLabel}" aria-label="Order status: ${statusLabel}">${statusLabel}</span></td>
-            <td class="trading-log-reason">${escapeHtml(reason)}${marketRuleAudit}${repeatNote}</td>
-        </tr>`;
+        return `<article class="trading-log-event" role="listitem">
+            <div class="trading-log-event-head">
+                <span class="trading-log-action ${actionClass}">${actionLabel}</span>
+                <div class="trading-log-asset">
+                    <strong>${escapeHtml(order.symbol)}</strong>
+                    ${assetName ? `<small>${escapeHtml(assetName)}</small>` : ''}
+                    <time datetime="${escapeHtml(order.timestamp || '')}">${escapeHtml(formatTradeTimestamp(order.timestamp))}</time>
+                </div>
+                <span class="order-status order-status-${order.status}" aria-label="Order status: ${statusLabel}">${statusLabel}</span>
+            </div>
+            <div class="trading-log-event-meta">
+                <span><small>Filled / requested</small>${escapeHtml(quantity)}</span>
+                <span><small>Execution price</small>$${order.price.toFixed(2)}${priceAudit}</span>
+                <span><small>Filled value</small>${order.executedShares > 0 ? `${formatTradingMoney(order.value, '$')}${valueAudit}` : '--'}</span>
+            </div>
+            ${costAudit}
+            <p class="trading-log-reason"><span class="trading-log-reason-label">Reason</span>${escapeHtml(reason)}${marketRuleAudit}${repeatNote}</p>
+        </article>`;
     }).join('');
 
     // Never let a capped list read like a complete one. The server bounds the
@@ -7238,7 +7275,24 @@ function paintTradingLog(normalizedRecords, options) {
         const note = `${truncated.toLocaleString('en-US')} more unfilled `
             + `${truncated === 1 ? 'order is' : 'orders are'} not shown `
             + '(audit sample capped).';
-        tbody.innerHTML += `<tr><td colspan="8" class="trading-log-empty">${escapeHtml(note)}</td></tr>`;
+        feed.innerHTML += `<p class="trading-log-empty trading-log-truncation">${escapeHtml(note)}</p>`;
+    }
+}
+
+function renderTradingLogSummary(filtered) {
+    const countEl = document.getElementById('tradingLogCount');
+    const summaryEl = document.getElementById('tradingLogStatusSummary');
+    const records = Array.isArray(filtered) ? filtered : [];
+    const count = records.length;
+    if (countEl) countEl.textContent = `${count.toLocaleString('en-US')} ${count === 1 ? 'order' : 'orders'}`;
+    if (summaryEl) {
+        const counts = records.reduce((summary, order) => {
+            if (order.status === 'filled') summary.filled += 1;
+            else if (order.status === 'partial') summary.partial += 1;
+            else if (order.status === 'rejected') summary.rejected += 1;
+            return summary;
+        }, { filled: 0, partial: 0, rejected: 0 });
+        summaryEl.textContent = `${counts.filled} filled · ${counts.partial} partial · ${counts.rejected} rejected`;
     }
 }
 
@@ -7266,18 +7320,20 @@ function updateLiveTradingLog(progress) {
     });
 }
 
-async function loadTradingLogForRun(runId) {
+async function loadTradingLogForRun(runId, { isCurrent = () => true } = {}) {
     if (!runId) {
-        clearTradingLog('Run a backtest to see orders here.');
+        if (isCurrent()) clearTradingLog('Run a backtest to see orders here.');
         return;
     }
     try {
         const data = await API.get(`${API_BASE}/runs/${encodeURIComponent(runId)}/trades?t=${Date.now()}`);
+        if (!isCurrent()) return;
         renderTradingLog(resolveTradingLogRecords(data), {
             emptyMessage: 'No orders were submitted by the selected strategy.',
             truncatedCount: resolveTradingLogTruncation(data),
         });
     } catch (error) {
+        if (!isCurrent()) return;
         console.warn('Could not load orders:', error.message);
         clearTradingLog('Order log unavailable for this run.');
     }
@@ -8654,7 +8710,6 @@ function showPlaygroundPanel(tab) {
         populateBacktestAgentSelect();
         if (!allAgents.length) loadAgents();
         loadData();
-        loadPerformanceMetrics();
     } else if (tab === 'paper') {
         currentMode = 'paper';
         loadPaperTradingData();
@@ -9256,6 +9311,49 @@ function resolveSelectedRun(sessionRuns) {
     return latestRun(realRuns);
 }
 
+function beginBacktestSurfaceRequest(runId) {
+    return { seq: ++backtestSurfaceRequestSeq, runId };
+}
+
+function isCurrentBacktestSurfaceRequest(token) {
+    return token?.seq === backtestSurfaceRequestSeq
+        && token.runId === window.SELECTED_RUN?.run_id
+        && !liveBacktestChartActive;
+}
+
+async function loadHistoricalBacktestSurfaces(selectedRun) {
+    const token = beginBacktestSurfaceRequest(selectedRun.run_id);
+    clearPerformanceComparison('loading', 'Loading performance comparison...');
+    clearTradingLog('Loading orders...');
+    const chartUrl = `${API_BASE}/api/backtest/${encodeURIComponent(selectedRun.run_id)}/chart-data?t=${Date.now()}`;
+
+    const chartRequest = API.get(chartUrl).then((payload) => {
+        if (!isCurrentBacktestSurfaceRequest(token)) return;
+        backtestChartData = payload;
+        initializeCharts();
+    }).catch((error) => {
+        if (!isCurrentBacktestSurfaceRequest(token)) return;
+        backtestChartData = null;
+        if (chartInstance) {
+            chartInstance.destroy();
+            chartInstance = null;
+        }
+        const notice = document.getElementById('chartBaselineNotice');
+        if (notice) notice.hidden = true;
+        renderPerformanceLegend({ columns: [] });
+        setPerformanceComparisonState(
+            'error',
+            'Performance comparison is unavailable. Reload to retry.',
+        );
+        console.warn('Could not load performance comparison:', error.message);
+    });
+
+    const logRequest = loadTradingLogForRun(selectedRun.run_id, {
+        isCurrent: () => isCurrentBacktestSurfaceRequest(token),
+    });
+    await Promise.allSettled([chartRequest, logRequest]);
+}
+
 // Find the DJIA / buy-and-hold runs that belong to a given run: same session,
 // same date window, created closest in time to the run (baselines are written
 // seconds apart from the agent run).
@@ -9345,7 +9443,12 @@ async function loadData() {
                 console.warn('No backtest runs for this session');
                 comparisonData = null;
                 backtestChartData = null;
-                displayNoMetrics();
+                clearPerformanceComparison(
+                    'empty',
+                    runningId
+                        ? 'Select the Running run to watch live progress.'
+                        : 'No completed backtests yet.',
+                );
                 clearTradingLog(
                     runningId
                         ? 'Select the Running run to watch live progress.'
@@ -9373,17 +9476,8 @@ async function loadData() {
                 baselineRun: selectedBuyholdRun,
             });
 
-            const chartUrl = `${API_BASE}/api/backtest/${encodeURIComponent(selectedRun.run_id)}/chart-data?t=${Date.now()}`;
-            backtestChartData = await API.get(chartUrl);
-            // Another click may have switched to the live run while we awaited.
-            if (liveBacktestChartActive || isViewingLiveBacktest(runningId)) {
-                return;
-            }
-            console.log('Loaded backtest chart data:', backtestChartData);
-
-            initializeCharts();
-            displayPerformanceMetrics(selectedRun);
-            await loadTradingLogForRun(selectedRun.run_id);
+            if (isViewingLiveBacktest(runningId)) return;
+            await loadHistoricalBacktestSurfaces(selectedRun);
         }
         
     } catch (error) {
@@ -9422,14 +9516,20 @@ function initializeCharts() {
         const ctx = perfCtx.getContext('2d');
         const { timestamps, x_labels: xLabels, series } = backtestChartData;
         const visibleSeries = filterIfindChartSeries(series);
-
-        const datasets = visibleSeries.map((entry) => ({
-            label: entry.label,
-            data: entry.values,
-            borderColor: entry.color,
+        const comparisonPayload = { ...backtestChartData, series: visibleSeries };
+        const model = window.BacktestComparison.buildModel(
+            comparisonPayload,
+            window.SELECTED_RUN,
+        );
+        const chartColumns = model.columns.filter((column) => column.available);
+        const datasets = chartColumns.map((column) => ({
+            label: column.label,
+            comparisonKey: column.key,
+            data: column.values,
+            borderColor: column.color,
             backgroundColor: 'transparent',
             borderWidth: 2.5,
-            borderDash: entry.dashed ? [6, 4] : [],
+            borderDash: column.dashed ? [6, 4] : [],
             tension: 0,
             fill: false,
             pointRadius: 0,
@@ -9451,16 +9551,7 @@ function initializeCharts() {
                 },
                 plugins: {
                     legend: {
-                        display: true,
-                        labels: {
-                            color: '#e5e7eb',
-                            font: { size: 12, weight: '600' },
-                            padding: 15,
-                            usePointStyle: true,
-                            pointStyle: 'line',
-                            boxWidth: 12,
-                            boxHeight: 2,
-                        }
+                        display: false,
                     },
                     tooltip: {
                         enabled: true,
@@ -9531,8 +9622,10 @@ function initializeCharts() {
             }
         });
 
+        renderPerformanceComparison(comparisonPayload, window.SELECTED_RUN);
+        renderPerformanceLegend(model);
         liveBacktestChartActive = false;
-        console.log('✅ Chart initialized -', series.map((s) => s.label).join(', '));
+        console.log('✅ Chart initialized -', chartColumns.map((column) => column.label).join(', '));
     }
 }
 
