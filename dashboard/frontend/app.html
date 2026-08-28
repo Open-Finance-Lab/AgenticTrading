@@ -1994,8 +1994,11 @@
                                 </label>
                                 <label class="credits-key-field" for="creditsApiKeySecret">
                                     <span>API key</span>
-                                    <input id="creditsApiKeySecret" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" required>
+                                    <input id="creditsApiKeySecret" type="password" maxlength="4096" autocomplete="new-password" spellcheck="false" aria-describedby="creditsApiKeyTroubleshooting" required>
                                 </label>
+                                <p id="creditsApiKeyTroubleshooting" class="credits-key-troubleshooting" hidden>
+                                    Check that the full key was copied and is active. Some providers also require billing or account credits before API calls can run.
+                                </p>
                                 <label class="credits-key-default">
                                     <input id="creditsApiKeyDefault" type="checkbox">
                                     <span>Make this the verified default</span>

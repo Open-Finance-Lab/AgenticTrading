@@ -150,7 +150,7 @@ def test_api_key_guide_uses_only_the_exact_official_provider_allowlist():
     render = _credits_function("renderProviderGuide")
     assert "approved_base_url" not in render
     assert "adapter_type" not in render
-    assert "creditsApiKeyProvider')?.addEventListener('change', renderProviderGuide)" in CREDITS_JS
+    assert "creditsApiKeyProvider')?.addEventListener('change', onApiKeyProviderChange)" in CREDITS_JS
 
 
 def test_custom_provider_guide_never_guesses_an_external_destination():
@@ -169,6 +169,25 @@ def test_official_provider_link_keeps_button_layout():
     link_styles = STYLES[start:end]
     assert "display: inline-flex;" in link_styles
     assert "width: 100%;" in link_styles
+
+
+def test_api_key_troubleshooting_is_failure_only_and_field_associated():
+    assert 'id="creditsApiKeyTroubleshooting"' in APP_HTML
+    assert 'aria-describedby="creditsApiKeyTroubleshooting"' in APP_HTML
+    assert 'id="creditsApiKeyTroubleshooting" class="credits-key-troubleshooting" hidden' in APP_HTML
+    assert 'Some providers also require billing or account credits' in APP_HTML
+    assert "function setApiKeyTroubleshooting(visible)" in CREDITS_JS
+    assert "setApiKeyTroubleshooting(status !== 'verified')" in CREDITS_JS
+    assert "setApiKeyTroubleshooting(true)" in CREDITS_JS
+    assert "setApiKeyTroubleshooting(false)" in CREDITS_JS
+
+
+def test_api_key_troubleshooting_does_not_add_billing_to_the_primary_steps():
+    guide_start = APP_HTML.index('id="creditsApiKeyGuide"')
+    help_start = APP_HTML.index('id="creditsApiKeyTroubleshooting"')
+    guide = APP_HTML[guide_start:help_start]
+    assert "billing" not in guide.lower()
+    assert "account credits" not in guide.lower()
 
 
 def test_api_keys_is_the_primary_credits_tab():

@@ -60,6 +60,11 @@
     target.classList.toggle('is-pending', tone === 'pending');
   }
 
+  function setApiKeyTroubleshooting(visible) {
+    const help = element('creditsApiKeyTroubleshooting');
+    if (help) help.hidden = !visible;
+  }
+
   function formatCreditDisplay(value, digits = 2) {
     const match = /^(-?)(\d+)(?:\.(\d{1,6}))?$/.exec(String(value ?? ''));
     if (!match) return '—';
@@ -189,6 +194,11 @@
     providerCopy.textContent = (
       `Continue on ${officialPage.displayName}, then return to ATL.`
     );
+  }
+
+  function onApiKeyProviderChange() {
+    setApiKeyTroubleshooting(false);
+    renderProviderGuide();
   }
 
   function credentialStatusLabel(status) {
@@ -391,6 +401,7 @@
     const defaultInput = element('creditsApiKeyDefault');
     const save = element('creditsApiKeySave');
     const secret = secretInput?.value || '';
+    setApiKeyTroubleshooting(false);
     if (!provider || !labelInput?.value.trim() || !secret) {
       setStatus(element('creditsApiKeyStatus'), 'Choose a provider, name the key, and enter the key once.', 'error');
       if (secretInput) secretInput.value = '';
@@ -409,6 +420,7 @@
         }),
       });
       const status = data.credential?.status;
+      setApiKeyTroubleshooting(status !== 'verified');
       setStatus(
         element('creditsApiKeyStatus'),
         status === 'verified' ? 'Key saved and verified.' : 'Key saved. Verification can be retried from the list.',
@@ -418,6 +430,7 @@
       if (defaultInput) defaultInput.checked = false;
       await loadApiKeys();
     } catch (error) {
+      setApiKeyTroubleshooting(true);
       setStatus(element('creditsApiKeyStatus'), error.message || 'The key could not be saved.', 'error');
     } finally {
       // The full secret exists only for this submit lifecycle and is never put
@@ -459,6 +472,7 @@
       state.executionOptions = [];
       const secretInput = element('creditsApiKeySecret');
       if (secretInput) secretInput.value = '';
+      setApiKeyTroubleshooting(false);
       renderProviderOptions();
       renderProviderGuide();
       renderApiKeys([]);
@@ -808,7 +822,7 @@
     document.querySelectorAll('[data-credits-tab]').forEach((button) => {
       button.addEventListener('click', () => setCreditsTab(button.dataset.creditsTab));
     });
-    element('creditsApiKeyProvider')?.addEventListener('change', renderProviderGuide);
+    element('creditsApiKeyProvider')?.addEventListener('change', onApiKeyProviderChange);
     element('creditsApiKeyForm')?.addEventListener('submit', saveApiKey);
   }
 

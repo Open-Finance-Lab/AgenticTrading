@@ -11094,6 +11094,13 @@ body.agent-editor-open {
     line-height: 1.5;
 }
 
+.credits-key-troubleshooting {
+    margin: -4px 0 0;
+    color: #fbbf24;
+    font-size: 11px;
+    line-height: 1.45;
+}
+
 .credits-key-field {
     display: grid;
     gap: 7px;
