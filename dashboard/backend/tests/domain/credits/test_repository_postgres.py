@@ -494,6 +494,49 @@ def test_postgres_batch_projection_and_activity_pagination(pg_credits_store):
 
 
 @pg_only
+def test_postgres_activity_aggregates_calls_before_pagination(pg_credits_store):
+    store = pg_credits_store
+    _pending_order(store)
+    _pay_order(store)
+    for call_index, amount in enumerate((137, 1_147)):
+        reservation_id = f"pg-activity:{call_index}"
+        reservation = store.reserve_llm_credits(
+            reservation_id=reservation_id,
+            user_id=1,
+            run_id="run-pg-activity",
+            call_index=call_index,
+            reserved_micro=amount,
+            operation_key=f"reserve:{reservation_id}",
+            request_digest=str(call_index).ljust(64, "b"),
+        )
+        store.settle_llm_credits(
+            reservation["reservation_id"],
+            actual_micro=amount,
+            evidence={
+                "billing_source": "platform_credits",
+                "pricing_snapshot": {
+                    "provider_id": "openrouter",
+                    "model_id": "anthropic/claude-haiku-4-5",
+                },
+            },
+        )
+
+    first = store.list_ledger_entries(1, limit=1)
+    second = store.list_ledger_entries(1, limit=1, cursor=first["next_cursor"])
+    usage = next(
+        item
+        for item in [*first["items"], *second["items"]]
+        if item["entry_type"] == "backtest_usage"
+    )
+
+    assert usage["amount_micro"] == -1_284
+    assert usage["model_call_count"] == 2
+    assert usage["provider_id"] == "openrouter"
+    assert usage["model_id"] == "anthropic/claude-haiku-4-5"
+    assert first["items"][0]["id"] != second["items"][0]["id"]
+
+
+@pg_only
 def test_postgres_grant_pair_rolls_back_on_second_insert_failure(
     pg_credits_store, monkeypatch
 ):

@@ -1457,14 +1457,16 @@ class PostgresCreditsStore:
                                source, reason, reference_type, reference_id,
                                created_at,
                                NULL::TEXT AS reservation_id, NULL::TEXT AS run_id,
-                               NULL::BIGINT AS call_index, NULL::TEXT AS evidence_json
+                               NULL::BIGINT AS call_index,
+                               NULL::BIGINT AS model_call_count,
+                               NULL::TEXT AS evidence_json
                         FROM credit_ledger_entries
                         WHERE user_id = %s
                     ),
                     llm_activity AS (
                         SELECT MAX(id) AS source_id, 'llm_usage' AS source_kind,
                                user_id, NULL::TEXT AS bucket,
-                               'llm_usage' AS entry_type,
+                               'backtest_usage' AS entry_type,
                                SUM(amount_micro) AS amount_micro,
                                NULL::TEXT AS payment_order_id,
                                NULL::TEXT AS refund_request_id,
@@ -1474,15 +1476,18 @@ class PostgresCreditsStore:
                                NULL::TEXT AS idempotency_key,
                                NULL::TEXT AS request_digest,
                                NULL::INTEGER AS actor_user_id,
-                               'llm_execution' AS source, 'Model usage.' AS reason,
+                               'llm_execution' AS source,
+                               'Backtest usage.' AS reason,
                                NULL::TEXT AS reference_type,
                                NULL::TEXT AS reference_id,
-                               created_at, reservation_id, run_id, call_index,
-                               evidence_json
+                               MAX(created_at) AS created_at,
+                               NULL::TEXT AS reservation_id, run_id,
+                               NULL::BIGINT AS call_index,
+                               COUNT(DISTINCT call_index) AS model_call_count,
+                               NULL::TEXT AS evidence_json
                         FROM credit_llm_usage_entries
                         WHERE user_id = %s
-                        GROUP BY user_id, reservation_id, run_id, call_index,
-                                 evidence_json, created_at
+                        GROUP BY user_id, run_id
                     ),
                     activity AS (
                         SELECT * FROM historical_activity
@@ -1497,8 +1502,39 @@ class PostgresCreditsStore:
                     params,
                 )
                 rows = cur.fetchall()
+                selected_rows = rows[:page_size]
+                run_ids = list(
+                    dict.fromkeys(
+                        str(row["run_id"])
+                        for row in selected_rows
+                        if row["source_kind"] == "llm_usage"
+                        and row["run_id"] is not None
+                    )
+                )
+                evidence_by_run: dict[str, list[object]] = {
+                    run_id: [] for run_id in run_ids
+                }
+                if run_ids:
+                    cur.execute(
+                        """
+                        SELECT DISTINCT run_id, evidence_json
+                        FROM credit_llm_usage_entries
+                        WHERE user_id = %s AND run_id = ANY(%s)
+                        """,
+                        (user_id, run_ids),
+                    )
+                    for evidence_row in cur.fetchall():
+                        evidence_by_run[str(evidence_row["run_id"])].append(
+                            evidence_row["evidence_json"]
+                        )
         has_more = len(rows) > page_size
-        items = [normalize_activity_item(dict(row)) for row in rows[:page_size]]
+        items = [
+            normalize_activity_item(
+                dict(row),
+                evidence_json_values=evidence_by_run.get(str(row["run_id"]), ()),
+            )
+            for row in selected_rows
+        ]
         return {
             "items": items,
             "next_cursor": (
