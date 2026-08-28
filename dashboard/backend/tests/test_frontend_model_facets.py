@@ -487,9 +487,11 @@ const closedHasBadge = closedHtml.includes('marketplace-licence-badge');
 // Strip only the exact badge span (proves it was actually there) and
 // normalise only the one known-legitimate difference (the model label) --
 // a blanket strip would hide any other marker instead of catching it.
+// replaceAll: the label is in both the submeta title attribute and the
+// visible text; String.replace(string) would only hit the first.
 const openWithoutBadge = openHtml.split(BADGE).join('')
-  .replace('Powered by DeepSeek', 'POWERED_BY_MODEL');
-const closedNormalized = closedHtml.replace('Powered by Claude', 'POWERED_BY_MODEL');
+  .replaceAll('Powered by DeepSeek', 'POWERED_BY_MODEL');
+const closedNormalized = closedHtml.replaceAll('Powered by Claude', 'POWERED_BY_MODEL');
 
 console.log(JSON.stringify({{
   openHasBadge,
