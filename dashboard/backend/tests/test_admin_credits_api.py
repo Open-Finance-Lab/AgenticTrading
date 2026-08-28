@@ -203,3 +203,20 @@ def test_admin_user_search_composes_identity_with_bucket_projection(
             },
         }
     ]
+
+
+def test_admin_user_list_defaults_to_25_accounts_per_page(live_admin_credits_api):
+    admin = _signup(live_admin_credits_api.client, "page-admin@example.com")
+    for index in range(25):
+        _signup(live_admin_credits_api.client, f"page-user-{index}@example.com")
+    live_admin_credits_api.users.apply_admin_patch(admin["id"], role="admin")
+    _login(live_admin_credits_api.client, "page-admin@example.com")
+
+    response = live_admin_credits_api.client.get("/api/admin/credits/users")
+
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload["limit"] == 25
+    assert payload["offset"] == 0
+    assert payload["total"] == 26
+    assert len(payload["users"]) == 25

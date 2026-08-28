@@ -75,6 +75,11 @@ def test_admin_grant_client_uses_server_api_and_never_persists_secrets():
     assert "innerHTML" not in ADMIN_JS
 
 
+def test_admin_grant_client_defaults_to_short_user_pages():
+    assert "ADMIN_CREDITS_USERS_PAGE_SIZE = 25" in ADMIN_JS
+    assert "usersLimit: ADMIN_CREDITS_USERS_PAGE_SIZE" in ADMIN_JS
+
+
 def test_admin_grant_console_is_wired_to_auth_navigation_and_refresh():
     assert "window.AdminCredits.syncAuth(user)" in APP_JS
     assert APP_JS.count("window.AdminCredits.onEnter()") >= 2
