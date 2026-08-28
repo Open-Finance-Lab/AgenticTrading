@@ -1,7 +1,8 @@
 # Backtest Credit Activity Precision and Aggregation Design
 
-**Date:** 2026-08-28  
-**Status:** Approved  
+**Date:** 2026-08-28
+
+**Status:** Approved
 **Scope:** Exact ATL Credit display and run-level Credits activity
 
 ## Goal
