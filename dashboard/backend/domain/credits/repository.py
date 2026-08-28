@@ -1661,28 +1661,30 @@ class CreditsStore:
                            request_digest, actor_user_id, source, reason,
                            reference_type, reference_id, created_at,
                            NULL AS reservation_id, NULL AS run_id,
-                           NULL AS call_index, NULL AS evidence_json
+                           NULL AS call_index, NULL AS model_call_count,
+                           NULL AS evidence_json
                     FROM credit_ledger_entries
                     WHERE user_id = ?
                 ),
                 llm_activity AS (
                     SELECT MAX(id) AS source_id, 'llm_usage' AS source_kind,
                            user_id, NULL AS bucket,
-                           'llm_usage' AS entry_type,
+                           'backtest_usage' AS entry_type,
                            SUM(amount_micro) AS amount_micro,
                            NULL AS payment_order_id,
                            NULL AS refund_request_id, NULL AS stripe_event_id,
                            NULL AS operation_key, NULL AS operation_id,
                            NULL AS idempotency_key, NULL AS request_digest,
                            NULL AS actor_user_id, 'llm_execution' AS source,
-                           'Model usage.' AS reason,
+                           'Backtest usage.' AS reason,
                            NULL AS reference_type, NULL AS reference_id,
-                           created_at,
-                           reservation_id, run_id, call_index, evidence_json
+                           MAX(created_at) AS created_at,
+                           NULL AS reservation_id, run_id, NULL AS call_index,
+                           COUNT(DISTINCT call_index) AS model_call_count,
+                           NULL AS evidence_json
                     FROM credit_llm_usage_entries
                     WHERE user_id = ?
-                    GROUP BY user_id, reservation_id, run_id, call_index,
-                             evidence_json, created_at
+                    GROUP BY user_id, run_id
                 ),
                 activity AS (
                     SELECT * FROM historical_activity
@@ -1696,8 +1698,40 @@ class CreditsStore:
                 """,
                 params,
             ).fetchall()
+            selected_rows = rows[:page_size]
+            run_ids = list(
+                dict.fromkeys(
+                    str(row["run_id"])
+                    for row in selected_rows
+                    if row["source_kind"] == "llm_usage"
+                    and row["run_id"] is not None
+                )
+            )
+            evidence_by_run: dict[str, list[object]] = {
+                run_id: [] for run_id in run_ids
+            }
+            if run_ids:
+                placeholders = ", ".join("?" for _ in run_ids)
+                evidence_rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT run_id, evidence_json
+                    FROM credit_llm_usage_entries
+                    WHERE user_id = ? AND run_id IN ({placeholders})
+                    """,
+                    [user_id, *run_ids],
+                ).fetchall()
+                for evidence_row in evidence_rows:
+                    evidence_by_run[str(evidence_row["run_id"])].append(
+                        evidence_row["evidence_json"]
+                    )
         has_more = len(rows) > page_size
-        items = [normalize_activity_item(dict(row)) for row in rows[:page_size]]
+        items = [
+            normalize_activity_item(
+                dict(row),
+                evidence_json_values=evidence_by_run.get(str(row["run_id"]), ()),
+            )
+            for row in selected_rows
+        ]
         return {
             "items": items,
             "next_cursor": (
