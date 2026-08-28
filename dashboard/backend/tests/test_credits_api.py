@@ -206,47 +206,58 @@ def test_balance_ledger_and_order_return_only_public_fields(billing_api):
     assert "checkout_session_id" not in serialized
 
 
-def test_credit_activity_exposes_safe_aggregated_llm_usage(billing_api):
+def test_credit_activity_exposes_safe_aggregated_backtest_usage(billing_api):
     token = _signup(billing_api.client, "usage-api@example.com")
     checkout = _checkout(billing_api.client, token).json()["checkout"]
     billing_api.gateway.event = _paid_checkout_event(checkout)
     assert _deliver_webhook(billing_api).status_code == 200
-    reservation = billing_api.store.reserve_llm_credits(
-        reservation_id="api-usage-reservation",
-        user_id=1,
-        run_id="run-api-usage",
-        call_index=0,
-        reserved_micro=1_000_000,
-        operation_key="api-usage-reserve",
-        request_digest="f" * 64,
-    )
-    billing_api.store.settle_llm_credits(
-        reservation["reservation_id"],
-        actual_micro=1_000_000,
-        evidence={
-            "billing_source": "platform_credits",
-            "pricing_snapshot": {
-                "provider_id": "openrouter",
-                "model_id": "openai/gpt-5.5",
+    for call_index, amount in enumerate((137, 1_147)):
+        reservation_id = f"api-usage-reservation-{call_index}"
+        reservation = billing_api.store.reserve_llm_credits(
+            reservation_id=reservation_id,
+            user_id=1,
+            run_id="run-api-usage",
+            call_index=call_index,
+            reserved_micro=amount,
+            operation_key=f"api-usage-reserve-{call_index}",
+            request_digest=str(call_index).ljust(64, "f"),
+        )
+        billing_api.store.settle_llm_credits(
+            reservation["reservation_id"],
+            actual_micro=amount,
+            evidence={
+                "billing_source": "platform_credits",
+                "pricing_snapshot": {
+                    "provider_id": "openrouter",
+                    "model_id": "anthropic/claude-haiku-4-5",
+                },
+                "api_key": "synthetic-secret-must-not-leak",
             },
-            "api_key": "raw-provider-secret",
-        },
-    )
+        )
 
     response = billing_api.client.get(
         "/api/credits/ledger?limit=1",
         headers=_auth(token),
     )
     body = response.json()
+    usage = body["items"][0]
 
     assert response.status_code == 200
-    assert body["items"][0]["entry_type"] == "llm_usage"
-    assert body["items"][0]["amount_micro"] == -1_000_000
-    assert body["items"][0]["provider_id"] == "openrouter"
-    assert body["items"][0]["model_id"] == "openai/gpt-5.5"
+    assert usage["entry_type"] == "backtest_usage"
+    assert usage["amount_micro"] == -1_284
+    assert usage["display_credits"] == "-0.001284"
+    assert usage["run_id"] == "run-api-usage"
+    assert usage["model_call_count"] == 2
+    assert usage["provider_id"] == "openrouter"
+    assert usage["model_id"] == "anthropic/claude-haiku-4-5"
+    assert usage["provider_mixed"] is False
+    assert usage["model_mixed"] is False
+    assert usage["billing_source"] == "platform_credits"
+    assert "reservation_id" not in usage
+    assert "call_index" not in usage
     assert isinstance(body["next_cursor"], str)
     assert "evidence_json" not in str(body)
-    assert "raw-provider-secret" not in str(body)
+    assert "synthetic-secret-must-not-leak" not in str(body)
 
     second = billing_api.client.get(
         "/api/credits/ledger",
