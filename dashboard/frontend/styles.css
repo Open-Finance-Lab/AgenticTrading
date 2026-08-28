@@ -1759,6 +1759,406 @@ a.header-brand:hover .title-section h1 {
     height: 380px;
 }
 
+.performance-legend {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-height: 32px;
+    margin-bottom: 4px;
+}
+
+.performance-legend-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 32px;
+    padding: 4px 8px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0;
+    cursor: pointer;
+}
+
+.performance-legend-button:hover:not(:disabled) {
+    border-color: var(--border-color);
+    background: var(--bg-hover);
+}
+
+.performance-legend-button[aria-pressed="false"] {
+    color: var(--text-muted);
+    opacity: 0.72;
+}
+
+.performance-legend-button[aria-pressed="false"] .performance-series-swatch {
+    filter: grayscale(1);
+}
+
+.performance-legend-button:disabled {
+    cursor: default;
+}
+
+.performance-legend-button:focus-visible,
+.performance-comparison-scroll:focus-visible {
+    outline: 2px solid var(--info-color);
+    outline-offset: 2px;
+}
+
+.performance-series-swatch {
+    display: inline-block;
+    flex: 0 0 auto;
+    width: 14px;
+    height: 3px;
+    border-radius: 2px;
+}
+
+.performance-comparison {
+    margin: 10px -14px -14px;
+    border-top: 1px solid var(--border-color);
+    background: rgba(8, 18, 40, 0.28);
+}
+
+.performance-comparison-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px 9px;
+}
+
+.section-card .performance-comparison-header h3 {
+    margin: 0;
+    color: var(--text-primary);
+    font-size: 12px;
+    letter-spacing: 0;
+}
+
+.performance-comparison-header p {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 10px;
+    line-height: 1.4;
+    text-align: right;
+}
+
+.performance-comparison-scroll {
+    max-width: 100%;
+    overflow-x: auto;
+    overscroll-behavior-inline: contain;
+}
+
+.performance-comparison table {
+    width: 100%;
+    min-width: 680px;
+    border-collapse: collapse;
+    table-layout: fixed;
+    font-variant-numeric: tabular-nums;
+}
+
+.performance-comparison th,
+.performance-comparison td {
+    padding: 10px 12px;
+    border-top: 1px solid var(--border-color);
+    text-align: right;
+    vertical-align: top;
+}
+
+.performance-comparison thead th {
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.performance-comparison th:first-child {
+    width: 132px;
+    text-align: left;
+}
+
+.performance-comparison tbody th {
+    color: var(--text-secondary);
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.performance-comparison td {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.performance-comparison [data-series-key="agent"] {
+    background: rgba(0, 191, 255, 0.06);
+}
+
+.performance-metric-value {
+    white-space: nowrap;
+}
+
+.performance-best {
+    color: var(--success-color);
+}
+
+.performance-best-label {
+    display: block;
+    margin-top: 3px;
+    color: var(--success-color);
+    font-family: var(--font-base);
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0;
+    text-transform: uppercase;
+}
+
+.performance-deltas {
+    display: flex;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 3px 6px;
+    margin-top: 5px;
+}
+
+.performance-delta {
+    font-family: var(--font-base);
+    font-size: 9px;
+    line-height: 1.35;
+    white-space: nowrap;
+}
+
+.performance-delta.is-positive {
+    color: var(--success-color);
+}
+
+.performance-delta.is-negative {
+    color: var(--danger-color);
+}
+
+.performance-delta.is-neutral {
+    color: var(--text-muted);
+}
+
+.performance-comparison-status {
+    margin: 0;
+    padding: 8px 14px 10px;
+    border-top: 1px solid var(--border-color);
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.4;
+}
+
+.performance-comparison-status:empty {
+    display: none;
+}
+
+.performance-comparison[data-state="partial"] .performance-comparison-status,
+.performance-comparison[data-state="error"] .performance-comparison-status {
+    color: var(--warning-color);
+}
+
+@media (max-width: 600px) {
+    .chart-container {
+        height: 320px;
+        min-height: 320px;
+    }
+
+    .performance-comparison-header {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 3px;
+    }
+
+    .performance-comparison-header p {
+        text-align: left;
+    }
+}
+
+/* Backtest Trading Log: a dense, independently scrolling activity feed. */
+.playground-backtest-panel .right-panel {
+    min-width: 0;
+}
+
+.trading-log-card {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    min-width: 0;
+    max-height: 720px;
+    padding: 0;
+    overflow: hidden;
+}
+
+.trading-log-header {
+    margin: 0;
+    padding: 14px;
+}
+
+.trading-log-header h2 {
+    margin-bottom: 0;
+}
+
+.trading-log-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    margin-top: 5px;
+    color: var(--text-muted);
+    font-size: 10px;
+    line-height: 1.35;
+}
+
+.trading-log-scroll {
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    border-top: 1px solid var(--border-color);
+    border-radius: 0;
+    background: rgba(8, 18, 40, 0.18);
+}
+
+.trading-log-scroll:focus-visible {
+    outline: 2px solid var(--info-color);
+    outline-offset: -2px;
+}
+
+.trading-log-event {
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.trading-log-event:last-child {
+    border-bottom: 0;
+}
+
+.trading-log-event-head {
+    display: grid;
+    grid-template-columns: max-content minmax(0, 1fr) max-content;
+    gap: 8px;
+    align-items: start;
+}
+
+.trading-log-action {
+    display: inline-flex;
+    align-items: center;
+    min-height: 20px;
+    padding: 2px 6px;
+    border: 1px solid currentColor;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.2px;
+    line-height: 1;
+}
+
+.trading-log-asset {
+    display: grid;
+    gap: 2px;
+    min-width: 0;
+}
+
+.trading-log-asset strong {
+    overflow-wrap: anywhere;
+    font-size: 11px;
+    line-height: 1.2;
+}
+
+.trading-log-asset small,
+.trading-log-asset time {
+    color: var(--text-secondary);
+    font-size: 10px;
+    line-height: 1.3;
+}
+
+.trading-log-event-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    margin: 9px 0 0;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-variant-numeric: tabular-nums;
+}
+
+.trading-log-event-meta > span {
+    display: grid;
+    gap: 2px;
+    min-width: 78px;
+}
+
+.trading-log-event-meta small {
+    color: var(--text-muted);
+    font-family: var(--font-base);
+    font-size: 9px;
+}
+
+.trading-log-event .trading-log-reason {
+    margin: 9px 0 0;
+    color: var(--text-primary);
+    font-size: 10px;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+}
+
+.trading-log-reason-label {
+    display: block;
+    margin-bottom: 2px;
+    color: var(--text-muted);
+    font-size: 9px;
+    font-weight: 700;
+    text-transform: uppercase;
+}
+
+.trading-log-event .trading-log-costs,
+.trading-log-event .trading-log-native-costs {
+    margin-top: 8px;
+}
+
+.trading-log-empty {
+    margin: 0;
+    padding: 18px 14px;
+    color: var(--text-secondary);
+    font-size: 11px;
+    line-height: 1.45;
+    text-align: center;
+}
+
+@media (min-width: 1280px) {
+    .playground-backtest-panel.main-container {
+        grid-template-columns: minmax(220px, 250px) minmax(620px, 1fr) minmax(320px, 360px);
+    }
+}
+
+@media (max-width: 1279px) {
+    .playground-backtest-panel.main-container {
+        grid-template-columns: 1fr;
+    }
+
+    .playground-backtest-panel .right-panel {
+        display: flex;
+    }
+
+    .trading-log-card {
+        max-height: 560px;
+    }
+}
+
+@media (max-width: 600px) {
+    .trading-log-card {
+        max-height: none;
+    }
+
+    .trading-log-scroll {
+        overflow-y: visible;
+    }
+
+    .trading-log-event-meta {
+        gap: 8px;
+    }
+}
+
 .chart-legend {
     display: grid;
     grid-template-columns: repeat(2, 1fr);
@@ -2366,6 +2766,51 @@ a.header-brand:hover .title-section h1 {
 @media (prefers-reduced-motion: reduce) {
     .market-event-card--fade-in {
         animation: none;
+    }
+}
+
+/* Final Backtest feed overrides stay scoped so legacy decision-table rules
+   cannot reintroduce a wide table or page-level overflow. */
+.playground-backtest-panel .trading-log-card {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr);
+    min-width: 0;
+    max-height: 720px;
+    padding: 0;
+    overflow: hidden;
+}
+
+.playground-backtest-panel .trading-log-scroll {
+    min-height: 0;
+    max-height: none;
+    overflow-y: auto;
+    overflow-x: hidden;
+    border-top: 1px solid var(--border-color);
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 0;
+}
+
+.playground-backtest-panel .trading-log-empty {
+    margin: 0;
+    padding: 18px 14px;
+    text-align: center;
+}
+
+@media (max-width: 1279px) {
+    .playground-backtest-panel .trading-log-card {
+        max-height: 560px;
+    }
+}
+
+@media (max-width: 600px) {
+    .playground-backtest-panel .trading-log-card {
+        max-height: none;
+    }
+
+    .playground-backtest-panel .trading-log-scroll {
+        overflow-y: visible;
     }
 }
 

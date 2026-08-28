@@ -2170,7 +2170,8 @@ def get_backtest_chart_data(run_id: str, request: Request):
     """Chart-ready equity series for the Playground backtest page.
 
     Uses the same DJIA index + Nasdaq-100 baselines and gapless market-hour
-    x-axis as ``/runs/{run_id}/plot.png`` (Discord chart).
+    x-axis as ``/runs/{run_id}/plot.png`` (Discord chart), plus the paired
+    stored Buy & Hold curve when one exists.
     """
     session_id = get_session_id_from_request(request)
     run = db.get_run_with_session(run_id, session_id)
@@ -2198,11 +2199,7 @@ def get_backtest_chart_data(run_id: str, request: Request):
             initial_capital=initial_capital,
             agent_curve=agent_curve,
             card_name=card_name,
-            stored_baselines=(
-                _stored_buyhold_baseline(run)
-                if not profile.index_baseline_enabled
-                else []
-            ),
+            stored_baselines=_stored_buyhold_baseline(run),
             include_market_indexes=profile.index_baseline_enabled,
             market_timezone=profile.timezone,
         )

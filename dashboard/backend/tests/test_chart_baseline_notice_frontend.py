@@ -24,6 +24,7 @@ def test_initialize_charts_reads_the_flag_and_toggles_the_notice():
     body = fn_body("function initializeCharts()")
     assert "chartBaselineNotice" in body
     assert "index_baselines_ok" in body
+    assert "renderPerformanceComparison" in body
     # `!== false`, not falsy: a payload from an older backend omits the key
     # entirely, and `!payload.index_baselines_ok` would show the warning on
     # every healthy chart served during a frontend/backend deploy skew.

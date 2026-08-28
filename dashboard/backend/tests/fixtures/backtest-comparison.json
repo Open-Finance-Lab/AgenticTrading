@@ -1,0 +1,64 @@
+{
+  "run": {
+    "run_id": "agent-fixture",
+    "data_source": "alpaca",
+    "baseline_buyhold_run_id": "buyhold-fixture",
+    "reporting_currency": "USD"
+  },
+  "chart": {
+    "agent_run_id": "agent-fixture",
+    "timestamps": [
+      "2026-05-04T14:30:00Z",
+      "2026-05-04T15:30:00Z",
+      "2026-05-04T16:30:00Z",
+      "2026-05-04T17:30:00Z"
+    ],
+    "x_labels": ["2026-05-04", "", "", ""],
+    "index_baselines_ok": true,
+    "series": [
+      {
+        "run_id": "index:^NDX",
+        "label": "Nasdaq-100",
+        "values": [1000, 1020, 1010, 1060],
+        "color": "#9AA4B2",
+        "dashed": true
+      },
+      {
+        "run_id": "buyhold-fixture",
+        "label": "buy-and-hold",
+        "values": [1000, 1008, 1014, 1024],
+        "color": "#34D399",
+        "dashed": true
+      },
+      {
+        "run_id": "agent-fixture",
+        "label": "Agent 33",
+        "values": [1000, 1010, 995, 1017.4],
+        "color": "#4FC3F7",
+        "dashed": false
+      },
+      {
+        "run_id": "index:^DJI",
+        "label": "DJIA index",
+        "values": [1000, 1005, 1002, 1011.1],
+        "color": "#F5C04A",
+        "dashed": true
+      }
+    ]
+  },
+  "trades": {
+    "trades": [
+      {
+        "timestamp": "2026-05-04T15:30:00Z",
+        "symbol": "AAPL",
+        "side": "BUY",
+        "quantity": 1,
+        "price": 277.33,
+        "value": 277.33,
+        "reason": "Momentum entry"
+      }
+    ],
+    "order_events": [],
+    "order_events_truncated": 0
+  }
+}
