@@ -482,6 +482,44 @@ def _create_pipeline_response(
     return client.messages.create(**request)
 
 
+def _looks_like_truncated_json(response_text: str) -> bool:
+    """Detect a long, structurally incomplete JSON response.
+
+    Provider adapters already classify an empty response as ``response_invalid``.
+    A response cut off by the output ceiling is different: it contains text, so
+    it reaches the parser, but its object/array delimiters never close. Keep the
+    retry narrow so short malformed responses and valid-but-unsupported business
+    envelopes are not retried.
+    """
+    text = str(response_text or "").strip()
+    text = text.replace("```json", "").replace("```", "").strip()
+    if len(text) < 512 or not text.startswith("{"):
+        return False
+
+    stack: list[str] = []
+    in_string = False
+    escaped = False
+    matching = {"}": "{", "]": "["}
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            stack.append(char)
+        elif char in "]}":
+            if not stack or stack[-1] != matching[char]:
+                return False
+            stack.pop()
+    return bool(stack)
+
+
 def run_pipeline_decision(
     client,
     *,
@@ -520,6 +558,7 @@ def run_pipeline_decision(
         label = step.get("label") or f"Step {index + 1}"
         print(f"\n🔗 Pipeline step {index + 1}/{len(decision_steps)}: {label}")
 
+        retried = False
         try:
             response = _create_pipeline_response(
                 client,
@@ -536,6 +575,7 @@ def run_pipeline_decision(
                     prompt=prompt,
                     reasoning_effort="none",
                 )
+                retried = True
             except TypeError as retry_error:
                 # Older client/test doubles may reject only the optional
                 # keyword. Keep the original safe category in that case, but
@@ -548,7 +588,33 @@ def run_pipeline_decision(
         total_in += in_delta
         total_out += out_delta
 
-        parsed = parse_llm_response(extract_response_text(response))
+        response_text = extract_response_text(response)
+        parsed = parse_llm_response(response_text)
+        if parsed is None and not retried:
+            if _looks_like_truncated_json(response_text):
+                print(
+                    "   ⚠️  Pipeline response appears truncated; "
+                    "retrying once with reasoning disabled"
+                )
+                try:
+                    response = _create_pipeline_response(
+                        client,
+                        model=request_model,
+                        prompt=prompt,
+                        reasoning_effort="none",
+                    )
+                except TypeError as retry_error:
+                    if "reasoning_effort" in str(retry_error):
+                        raise LLMExecutionError(
+                            ExecutionErrorCategory.RESPONSE_INVALID
+                        ) from retry_error
+                    raise
+                retried = True
+                llm_calls += 1
+                in_delta, out_delta = extract_token_usage(response)
+                total_in += in_delta
+                total_out += out_delta
+                parsed = parse_llm_response(extract_response_text(response))
         if parsed is None:
             print(f"   ❌ Pipeline step {index + 1} returned unparseable JSON")
             return None, (total_in, total_out), llm_calls, prior_outputs

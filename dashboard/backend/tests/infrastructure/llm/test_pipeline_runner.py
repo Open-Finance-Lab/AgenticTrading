@@ -222,7 +222,10 @@ def test_run_pipeline_decision_retries_response_invalid_once():
     assert len(client.messages.calls) == 2
     assert "reasoning_effort" not in client.messages.calls[0]
     assert client.messages.calls[1]["reasoning_effort"] == "none"
-    assert client.messages.calls[0]["messages"] == client.messages.calls[1]["messages"]
+    assert (
+        client.messages.calls[0]["messages"]
+        == client.messages.calls[1]["messages"]
+    )
 
 
 def test_run_pipeline_decision_reraises_after_one_failed_retry():
@@ -242,6 +245,48 @@ def test_run_pipeline_decision_reraises_after_one_failed_retry():
 
     assert error.value.category is ExecutionErrorCategory.RESPONSE_INVALID
     assert len(client.messages.calls) == 2
+
+
+def test_run_pipeline_decision_retries_truncated_json_once():
+    truncated = '{"orders": [{"symbol": "AAPL", "side": "buy", "reason": "' + (
+        "x" * 560
+    )
+    client = _PipelineClient(
+        [
+            _PipelineResponse(truncated, input_tokens=13, output_tokens=2000),
+            _PipelineResponse('{"orders": []}', input_tokens=11, output_tokens=4),
+        ]
+    )
+
+    decision, usage, calls, _steps = run_pipeline_decision(
+        client,
+        pipeline=_PIPELINE,
+        market_snapshot={"top_signals": {}},
+        model="google/gemini-3.1-pro-preview",
+    )
+
+    assert decision == {"actions": []}
+    assert usage == (24, 2004)
+    assert calls == 2
+    assert len(client.messages.calls) == 2
+    assert "reasoning_effort" not in client.messages.calls[0]
+    assert client.messages.calls[1]["reasoning_effort"] == "none"
+    assert client.messages.calls[0]["messages"] == client.messages.calls[1]["messages"]
+
+
+def test_run_pipeline_decision_does_not_retry_short_malformed_json():
+    client = _PipelineClient([_PipelineResponse("{\"orders\": [", output_tokens=12)])
+
+    decision, usage, calls, _steps = run_pipeline_decision(
+        client,
+        pipeline=_PIPELINE,
+        market_snapshot={"top_signals": {}},
+    )
+
+    assert decision is None
+    assert usage == (7, 12)
+    assert calls == 1
+    assert len(client.messages.calls) == 1
 
 
 def test_run_pipeline_decision_preserves_response_invalid_for_legacy_client():
