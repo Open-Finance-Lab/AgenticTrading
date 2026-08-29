@@ -321,6 +321,28 @@ def test_strict_llm_accepts_empty_actions_as_model_hold():
     assert pm.llm_decisions == 1
 
 
+def test_strict_pipeline_accepts_empty_orders_as_model_hold():
+    pm = CanonicalPortfolioManager(100000)
+    client = _FakeClient(_FakeResp('{"orders": []}', _FakeUsage(3, 2)))
+
+    result = pm.make_trading_decision_with_llm(
+        _llm_state(),
+        client,
+        pipeline=[
+            {
+                "label": "Trading instruction",
+                "prompt": "Return the orders for this bar.",
+                "outputFormat": '{"orders": []}',
+            }
+        ],
+        strict_llm=True,
+    )
+
+    assert result == {"actions": []}
+    assert pm.llm_calls == 1
+    assert pm.llm_decisions == 1
+
+
 @pytest.mark.parametrize(
     "action",
     [

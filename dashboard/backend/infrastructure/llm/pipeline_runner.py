@@ -147,64 +147,95 @@ def pipeline_output_to_decision(parsed: Dict[str, Any]) -> Optional[Dict[str, An
     if not isinstance(parsed, dict):
         return None
 
+    saw_empty_envelope = False
+    saw_unusable_nonempty_envelope = False
+
     actions = parsed.get("actions")
-    if isinstance(actions, list) and actions:
-        return {"actions": actions}
+    if isinstance(actions, list):
+        if actions:
+            return {"actions": actions}
+        saw_empty_envelope = True
 
     orders = parsed.get("orders")
-    if isinstance(orders, list) and orders:
-        normalized = []
-        for order in orders:
-            if not isinstance(order, dict):
-                continue
-            side = str(order.get("side") or order.get("action") or "hold").lower()
-            if side not in ("buy", "sell", "hold"):
-                side = "hold"
-            qty = order.get("qty", order.get("quantity", order.get("position_size", 0)))
-            try:
-                position_size = int(qty)
-            except (TypeError, ValueError):
-                position_size = 0
-            normalized.append(
-                {
-                    "action": side,
-                    "symbol": order.get("symbol"),
-                    "confidence": float(order.get("confidence", 0.75) or 0.75),
-                    "reasoning": order.get("reason") or order.get("rationale") or "",
-                    "position_size": position_size,
-                    "stop_loss_price": order.get("stop_loss_price"),
-                    "take_profit_price": order.get("take_profit_price"),
-                }
-            )
-        if normalized:
-            return {"actions": normalized}
+    if isinstance(orders, list):
+        if not orders:
+            saw_empty_envelope = True
+        else:
+            normalized = []
+            for order in orders:
+                if not isinstance(order, dict):
+                    continue
+                side = str(order.get("side") or order.get("action") or "hold").lower()
+                if side not in ("buy", "sell", "hold"):
+                    side = "hold"
+                qty = order.get(
+                    "qty", order.get("quantity", order.get("position_size", 0))
+                )
+                try:
+                    position_size = int(qty)
+                except (TypeError, ValueError):
+                    position_size = 0
+                normalized.append(
+                    {
+                        "action": side,
+                        "symbol": order.get("symbol"),
+                        "confidence": float(order.get("confidence", 0.75) or 0.75),
+                        "reasoning": order.get("reason")
+                        or order.get("rationale")
+                        or "",
+                        "position_size": position_size,
+                        "stop_loss_price": order.get("stop_loss_price"),
+                        "take_profit_price": order.get("take_profit_price"),
+                    }
+                )
+            if normalized:
+                return {"actions": normalized}
+            saw_unusable_nonempty_envelope = True
 
     risk_actions = parsed.get("risk_actions")
-    if isinstance(risk_actions, list) and risk_actions:
-        normalized = []
-        for risk in risk_actions:
-            if not isinstance(risk, dict):
-                continue
-            action_type = str(risk.get("action") or "hold").lower()
-            if action_type in ("stop_loss", "take_profit", "trail"):
-                side = "sell"
-            elif action_type == "hold":
-                side = "hold"
-            else:
-                side = action_type if action_type in ("buy", "sell", "hold") else "hold"
-            size_pct = float(risk.get("size_pct", 1.0) or 1.0)
-            normalized.append(
-                {
-                    "action": side,
-                    "symbol": risk.get("symbol"),
-                    "confidence": 0.8,
-                    "reasoning": risk.get("reason") or risk.get("rationale") or action_type,
-                    "position_size": max(1, int(round(size_pct * 100))) if side == "sell" else 0,
-                }
-            )
-        if normalized:
-            return {"actions": normalized}
+    if isinstance(risk_actions, list):
+        if not risk_actions:
+            saw_empty_envelope = True
+        else:
+            normalized = []
+            for risk in risk_actions:
+                if not isinstance(risk, dict):
+                    continue
+                action_type = str(risk.get("action") or "hold").lower()
+                if action_type in ("stop_loss", "take_profit", "trail"):
+                    side = "sell"
+                elif action_type == "hold":
+                    side = "hold"
+                else:
+                    side = (
+                        action_type
+                        if action_type in ("buy", "sell", "hold")
+                        else "hold"
+                    )
+                size_pct = float(risk.get("size_pct", 1.0) or 1.0)
+                normalized.append(
+                    {
+                        "action": side,
+                        "symbol": risk.get("symbol"),
+                        "confidence": 0.8,
+                        "reasoning": risk.get("reason")
+                        or risk.get("rationale")
+                        or action_type,
+                        "position_size": (
+                            max(1, int(round(size_pct * 100)))
+                            if side == "sell"
+                            else 0
+                        ),
+                    }
+                )
+            if normalized:
+                return {"actions": normalized}
+            saw_unusable_nonempty_envelope = True
 
+    if saw_unusable_nonempty_envelope:
+        return None
+    if saw_empty_envelope:
+        return {"actions": []}
     return None
 
 
