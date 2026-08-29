@@ -4,7 +4,7 @@ My Agents used to split agents into two buckets: "Foundation Agents" (whose
 subtitle called the product "A prompting game", the #1 trust-killer in every
 persona walkthrough) and "External Agents". Asset-class shelves (Stocks /
 Crypto / Futures) replaced that, then this task split the live Stocks row into
-**Prompted Models** (pipeline / instruction agents) and **Open Agents** (hosted
+**LLMs** (pipeline / instruction agents) and **Open Agents** (hosted
 runtimes such as AI Hedge Fund), keeping the locked Crypto/Futures rows and
 the developer Connected Agents shelf. None of this is enforceable at runtime
 -- app.html has no JS test harness -- so, per this suite's frontend convention
@@ -32,7 +32,7 @@ _HTML = _strip_html_comments(APP_HTML)
 
 _LIVE_SHELVES = [
     (
-        "Prompted Models",
+        "LLMs",
         "Write a trading instruction for an AI model and backtest it on market data.",
     ),
     (
@@ -60,6 +60,7 @@ _LOCKED_SHELVES = [
 
 _RETIRED_SECTION_HEADERS = (
     "Prompting LLMs",
+    "Prompted Models",
     "U.S. Stock Trading",
     "China A-Share Trading",
     "Stocks",
@@ -196,6 +197,8 @@ def test_agent_shelves_config_holds_only_the_live_shelves():
     config = js_const("AGENT_SHELVES")
     for key in ("prompted", "open", "external"):
         assert f"key: '{key}'" in config, key
+    assert "title: 'LLMs'" in config
+    assert "title: 'Prompted Models'" not in config
     for absent in ("stocks", "crypto", "futures", "prompting_llms", "us_stocks", "cn_ashares"):
         assert f"key: '{absent}'" not in config, absent
 
@@ -230,15 +233,18 @@ def test_market_labels_is_the_only_declaration_of_the_market_names():
     assert not re.search(r"(?<![A-Z_])SHELF_LABELS", _strip_js_comments(APP_JS))
 
 
-def test_card_submeta_carries_the_decision_axis_the_retired_shelf_used_to():
-    """"Prompting LLMs" is gone as a section, so the how-does-it-decide axis it
-    carried moves onto the card. 'Built-in'/'External' named the plumbing;
-    'Hosted AI'/'Your own code' names what the user actually gets.
+def test_my_agents_card_submeta_drops_duplicate_model_and_hosted_ai():
+    """The card <h3> already names the model. Repeating it on the submeta
+    line with 'Hosted AI' was noise. Market stays when known -- the All chip
+    still mixes U.S. and China A-Share on this shelf.
     """
-    body = _strip_js_comments(fn_body("function agentTypeLabel("))
-    assert "'Hosted AI'" in body
-    assert "'Your own code'" in body
-    assert "'Built-in'" not in body
+    body = _strip_js_comments(fn_body("function renderAgentCards("))
+    assert "agentTypeLabel" not in body
+    assert "Hosted AI" not in body
+    assert "Your own code" not in body
+    assert "formatAgentModelLabel(agent.model_name)" not in body
+    assert "MARKET_LABELS[agentMarketKey(agent)]" in body
+    assert "function agentTypeLabel(" not in APP_JS
 
 
 def test_render_marketplace_category_chips_is_built_from_the_shared_label_map():

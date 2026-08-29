@@ -575,7 +575,7 @@ function populateSupportedModelSelects() {
 // renderAgentCategories' "some grid is missing" guard, silently aborting the
 // entire My Agents render. Their order is their order in app.html.
 const AGENT_SHELVES = [
-  { key: 'prompted', title: 'Prompted Models',
+  { key: 'prompted', title: 'LLMs',
     match: (a) => agentShelfKey(a) === 'prompted' },
   { key: 'open', title: 'Open Agents',
     match: (a) => agentShelfKey(a) === 'open' },
@@ -799,14 +799,6 @@ function renderAgentSparkline(agent, positive = true, metrics = {}) {
   const values = resolveAgentSparklineValues(agent, metrics);
   const seed = agent?.agent_id || agent?.name || 'spark';
   return renderAgentSparklineFromValues(values, positive, seed);
-}
-
-/** How the agent decides, shown on the card submeta. This is the axis the
- * retired "Prompting LLMs" section used to carry: the platform runs hosted
- * models for built-ins, while a connected agent runs the user's own program.
- * 'Built-in'/'External' named the plumbing; these name what the user gets. */
-function agentTypeLabel(agent) {
-  return agent.agent_type === 'builtin' ? 'Hosted AI' : 'Your own code';
 }
 
 /** Human-readable model label from provider paths like anthropic/claude-haiku-4-5. */
@@ -1473,12 +1465,10 @@ function renderAgentCards(grid, agents, categoryKey) {
     const card = document.createElement('div');
     card.className = `section-card agent-card agent-card--status agent-card--${statusBadge.key}${isBuiltin ? ' agent-card-builtin' : ''}`;
     card.setAttribute('data-agent-id', agent.agent_id);
-    const model = formatAgentModelLabel(agent.model_name);
-    const type = agentTypeLabel(agent);
-    // Under the All chip Prompted Models mixes markets, so the card has to
-    // say which. Omitted rather than guessed when agentMarketKey returns ''.
+    // Title already names the model. Decision-type copy repeated it. Under
+    // the All chip this shelf still mixes markets, so keep that when known.
     const market = MARKET_LABELS[agentMarketKey(agent)];
-    const submeta = `${model} · ${type}${market ? ` · ${market}` : ''}`;
+    const submeta = market || '';
     const running = getAgentBacktestRunning(agent.agent_id);
     if (running) card.classList.add('agent-card--running');
 
@@ -1488,7 +1478,7 @@ function renderAgentCards(grid, agents, categoryKey) {
           ${agentRobotIcon()}
           <div class="agent-card-identity-text">
             <h3 class="agent-name">${escapeHtml(agentDisplayName(agent))}${agent.agent_id === defaultId ? ' <span class="agent-default-badge">Default</span>' : ''}</h3>
-            <p class="agent-card-submeta" title="${escapeHtml(submeta)}">${escapeHtml(submeta)}</p>
+            ${submeta ? `<p class="agent-card-submeta" title="${escapeHtml(submeta)}">${escapeHtml(submeta)}</p>` : ''}
           </div>
         </div>
         <span class="status-badge ${statusBadge.className}"><span class="status-badge-dot" aria-hidden="true"></span>${statusBadge.label}</span>
