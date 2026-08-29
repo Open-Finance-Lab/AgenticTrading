@@ -38,7 +38,12 @@ def _provider(provider_id: str, adapter_type: str, base_url: str) -> ProviderRec
     )
 
 
-def _request(provider_id: str, model_id: str) -> LLMExecutionRequest:
+def _request(
+    provider_id: str,
+    model_id: str,
+    *,
+    reasoning_effort: str | None = None,
+) -> LLMExecutionRequest:
     return LLMExecutionRequest(
         user_id=7,
         run_id="run-model-route",
@@ -48,6 +53,7 @@ def _request(provider_id: str, model_id: str) -> LLMExecutionRequest:
         model_id=model_id,
         messages=(LLMMessage(role="user", content="Return one word."),),
         usage_policy=UsagePolicy(max_output_tokens=16),
+        reasoning_effort=reasoning_effort,
     )
 
 
@@ -132,6 +138,39 @@ def test_openrouter_keeps_provider_qualified_model(monkeypatch):
 
     assert captured["model"] == "openai/gpt-5.5"
     assert result.model_id == "openai/gpt-5.5"
+
+
+def test_openrouter_reasoning_none_disables_reasoning(monkeypatch):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return _openai_response("qwen/qwen3.7-plus")
+
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(
+        openai_module,
+        "build_safe_http_client",
+        lambda *_args, **_kwargs: _Closable(),
+    )
+    adapter = openai_module.OpenRouterAdapter(client_factory=lambda **_kwargs: client)
+
+    adapter.complete(
+        _request(
+            "openrouter",
+            "qwen/qwen3.7-plus",
+            reasoning_effort="none",
+        ),
+        _credential("openrouter"),
+        _provider("openrouter", "openrouter", "https://openrouter.ai/api/v1"),
+    )
+
+    assert captured["extra_body"] == {
+        "reasoning": {"effort": "none", "enabled": False, "exclude": True}
+    }
 
 
 def test_anthropic_uses_native_model_and_keeps_canonical_result(monkeypatch):

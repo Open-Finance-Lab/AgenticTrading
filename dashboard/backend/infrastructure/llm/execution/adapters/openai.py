@@ -111,8 +111,18 @@ class OpenAIExecutionAdapter:
                 "openrouter",
                 "openai_compatible",
             }:
+                effort = request.reasoning_effort.strip().lower()
+                reasoning = {"effort": request.reasoning_effort}
+                if provider.adapter_type == "openrouter" and effort in {
+                    "none",
+                    "off",
+                    "false",
+                    "0",
+                    "disabled",
+                }:
+                    reasoning.update({"enabled": False, "exclude": True})
                 kwargs["extra_body"] = {
-                    "reasoning": {"effort": request.reasoning_effort}
+                    "reasoning": reasoning,
                 }
             response = client.chat.completions.create(**kwargs)
             text = _response_text(response)
