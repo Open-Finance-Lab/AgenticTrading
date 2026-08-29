@@ -2,12 +2,15 @@
 (function () {
   'use strict';
 
+  const { formatCredits, formatCreditsMicro } = window.CreditFormat;
+  const ADMIN_CREDITS_USERS_PAGE_SIZE = 25;
+
   const state = {
     initialized: false,
     users: [],
     usersOffset: 0,
     usersTotal: 0,
-    usersLimit: 100,
+    usersLimit: ADMIN_CREDITS_USERS_PAGE_SIZE,
     usersRequestSeq: 0,
     activityCursor: null,
     activityItems: [],
@@ -74,12 +77,6 @@
     return Number(negative ? -micro : micro);
   }
 
-  function formatCredits(value) {
-    const text = String(value ?? '0.000000');
-    if (/^-?\d+(?:\.\d+)?$/.test(text)) return text;
-    return '0.000000';
-  }
-
   function formatTime(value) {
     const date = new Date(value);
     if (!value || Number.isNaN(date.getTime())) return 'Unknown time';
@@ -129,16 +126,22 @@
 
   function renderPool(pool) {
     if (!pool) return;
-    const availableText = formatCredits(pool.display_pool_available_credits);
-    const allocatedText = formatCredits(pool.display_allocated_to_users_credits);
-    const available = Number.parseFloat(availableText);
-    const allocated = Number.parseFloat(allocatedText);
-    const safeAvailable = Number.isFinite(available) && available > 0 ? available : 0;
-    const safeAllocated = Number.isFinite(allocated) && allocated > 0 ? allocated : 0;
-    const total = safeAvailable + safeAllocated;
-    const totalText = formatCredits(total.toFixed(6));
-    const availableRatio = total > 0 ? safeAvailable / total : 0;
-    const allocatedRatio = total > 0 ? safeAllocated / total : 0;
+    const availableMicro = pool.pool_available_micro;
+    const allocatedMicro = pool.allocated_to_users_micro;
+    const validAvailable = Number.isSafeInteger(availableMicro);
+    const validAllocated = Number.isSafeInteger(allocatedMicro);
+    const totalMicro = validAvailable && validAllocated
+      && Number.isSafeInteger(availableMicro + allocatedMicro)
+      ? availableMicro + allocatedMicro
+      : null;
+    const availableText = formatCreditsMicro(availableMicro);
+    const allocatedText = formatCreditsMicro(allocatedMicro);
+    const totalText = formatCreditsMicro(totalMicro);
+    const chartAvailable = validAvailable && availableMicro > 0 ? availableMicro : 0;
+    const chartAllocated = validAllocated && allocatedMicro > 0 ? allocatedMicro : 0;
+    const chartTotal = chartAvailable + chartAllocated;
+    const availableRatio = chartTotal > 0 ? chartAvailable / chartTotal : 0;
+    const allocatedRatio = chartTotal > 0 ? chartAllocated / chartTotal : 0;
     const allocatedLength = setPoolRingSegment('adminCreditsPoolRingAllocated', allocatedRatio);
     setPoolRingSegment('adminCreditsPoolRingAvailable', availableRatio, -allocatedLength);
     element('adminCreditsPoolTotal').textContent = totalText;
@@ -403,7 +406,7 @@
       return;
     }
     state.pendingGrantReason = { user, amountInput, amountMicro };
-    element('adminGrantReasonSummary').textContent = `${userName(user)} · ${amountInput.value.trim()} Credits`;
+    element('adminGrantReasonSummary').textContent = `${userName(user)} · ${formatCreditsMicro(amountMicro)} Credits`;
     element('adminGrantReasonStatus').textContent = '';
     reasonInput.value = DEFAULT_ASSIGN_REASON;
     if (!dialog.open) dialog.showModal();

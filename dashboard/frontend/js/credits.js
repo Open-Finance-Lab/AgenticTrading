@@ -1,7 +1,8 @@
-/** Credits & Billing page. Stripe webhooks remain the only source of balance changes. */
+/** Credits & Billing page. Server ledgers remain the only source of balance changes. */
 (function () {
   'use strict';
 
+  const { formatCredits } = window.CreditFormat;
   const MAX_ORDER_POLLS = 8;
   const ORDER_POLL_DELAYS_MS = [0, 1000, 1500, 2500, 4000, 6000, 8000, 10000];
   const TERMINAL_ORDER_STATUSES = new Set(['paid', 'partially_refunded', 'refunded']);
@@ -10,11 +11,29 @@
   ) ? window.location.origin : '';
   const PENDING_BYOK_STORAGE_KEY = 'atlPendingByokBacktest';
   const PENDING_BYOK_TTL_MS = 10 * 60 * 1000;
+  const OFFICIAL_API_KEY_PAGES = Object.freeze({
+    openai: Object.freeze({
+      displayName: 'OpenAI',
+      url: 'https://platform.openai.com/api-keys',
+    }),
+    openrouter: Object.freeze({
+      displayName: 'OpenRouter',
+      url: 'https://openrouter.ai/keys',
+    }),
+    anthropic: Object.freeze({
+      displayName: 'Anthropic',
+      url: 'https://platform.claude.com/settings/keys',
+    }),
+    gemini: Object.freeze({
+      displayName: 'Google Gemini',
+      url: 'https://aistudio.google.com/apikey',
+    }),
+  });
 
   const state = {
     initialized: false,
     user: null,
-    selection: { kind: 'package', value: 'usd_10' },
+    selection: { kind: 'package', value: 'usd_1' },
     pendingPurchase: null,
     pendingRefund: null,
     selectedAdminOrder: null,
@@ -24,6 +43,7 @@
     providers: [],
     credentials: [],
     executionOptions: [],
+    focusApiKeysOnReady: false,
   };
 
   function element(id) {
@@ -42,13 +62,9 @@
     target.classList.toggle('is-pending', tone === 'pending');
   }
 
-  function formatCreditDisplay(value, digits = 2) {
-    const match = /^(-?)(\d+)(?:\.(\d{1,6}))?$/.exec(String(value ?? ''));
-    if (!match) return '—';
-    const sign = match[1];
-    const whole = match[2].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-    const fraction = (match[3] || '').padEnd(6, '0').slice(0, digits);
-    return `${sign}${whole}${digits ? `.${fraction}` : ''}`;
+  function setApiKeyTroubleshooting(visible) {
+    const help = element('creditsApiKeyTroubleshooting');
+    if (help) help.hidden = !visible;
   }
 
   function formatUsdCents(cents) {
@@ -95,7 +111,7 @@
     button.appendChild(icon);
   }
 
-  function setCreditsTab(tab) {
+  function setCreditsTab(tab, { reload = true } = {}) {
     const allowed = new Set(['overview', 'api-keys', 'activity']);
     const next = tab === 'top-up' ? 'overview' : (allowed.has(tab) ? tab : 'overview');
     state.activeTab = next;
@@ -108,18 +124,41 @@
     document.querySelectorAll('[data-credits-panel]').forEach((panel) => {
       panel.hidden = panel.dataset.creditsPanel !== next;
     });
-    if (next === 'api-keys' && state.user) loadApiKeys();
+    if (reload && next === 'api-keys' && state.user) loadApiKeys();
+  }
+
+  function focusApiKeysEntry() {
+    const provider = element('creditsApiKeyProvider');
+    const heading = element('creditsApiKeysHeading');
+    const target = provider && !provider.disabled ? provider : heading;
+    state.focusApiKeysOnReady = false;
+    window.requestAnimationFrame(() => target?.focus());
+  }
+
+  function openApiKeys({ focus = false } = {}) {
+    setCreditsTab('api-keys', { reload: false });
+    if (!focus) return;
+    state.focusApiKeysOnReady = true;
+    if (state.providers.length || element('creditsApiKeyProvider')?.disabled) {
+      focusApiKeysEntry();
+    }
   }
 
   function renderProviderOptions() {
     const select = element('creditsApiKeyProvider');
-    if (!select) return;
+    if (!select) {
+      renderProviderGuide();
+      if (state.focusApiKeysOnReady) focusApiKeysEntry();
+      return;
+    }
     const current = select.value;
     clearChildren(select);
     if (!state.providers.length) {
       select.appendChild(textNode('option', '', 'No approved providers available'));
       select.value = '';
       select.disabled = true;
+      renderProviderGuide();
+      if (state.focusApiKeysOnReady) focusApiKeysEntry();
       return;
     }
     select.disabled = false;
@@ -132,10 +171,47 @@
     if (state.providers.some((provider) => provider.provider_id === current)) {
       select.value = current;
     }
+    renderProviderGuide();
+    if (state.focusApiKeysOnReady) focusApiKeysEntry();
   }
 
   function providerDisplayName(providerId) {
     return state.providers.find((provider) => provider.provider_id === providerId)?.display_name || providerId;
+  }
+
+  function renderProviderGuide() {
+    const guide = element('creditsApiKeyGuide');
+    const steps = element('creditsApiKeyGuideSteps');
+    const fallback = element('creditsApiKeyGuideFallback');
+    const officialLink = element('creditsApiKeyOfficialLink');
+    const providerCopy = element('creditsApiKeyGuideProvider');
+    const providerId = element('creditsApiKeyProvider')?.value || '';
+    const selectedProvider = state.providers.find(
+      (provider) => provider.provider_id === providerId,
+    ) || null;
+    const officialPage = OFFICIAL_API_KEY_PAGES[providerId] || null;
+
+    if (!guide || !steps || !fallback || !officialLink || !providerCopy) return;
+    guide.hidden = !selectedProvider;
+    steps.hidden = !officialPage;
+    fallback.hidden = Boolean(officialPage);
+    officialLink.removeAttribute('href');
+    officialLink.removeAttribute('aria-label');
+
+    if (!selectedProvider || !officialPage) return;
+    officialLink.href = officialPage.url;
+    officialLink.setAttribute(
+      'aria-label',
+      `Open ${officialPage.displayName} official API key page in a new tab`,
+    );
+    providerCopy.textContent = (
+      `Continue on ${officialPage.displayName}, then return to ATL.`
+    );
+  }
+
+  function onApiKeyProviderChange() {
+    setApiKeyTroubleshooting(false);
+    renderProviderGuide();
   }
 
   function credentialStatusLabel(status) {
@@ -338,6 +414,7 @@
     const defaultInput = element('creditsApiKeyDefault');
     const save = element('creditsApiKeySave');
     const secret = secretInput?.value || '';
+    setApiKeyTroubleshooting(false);
     if (!provider || !labelInput?.value.trim() || !secret) {
       setStatus(element('creditsApiKeyStatus'), 'Choose a provider, name the key, and enter the key once.', 'error');
       if (secretInput) secretInput.value = '';
@@ -356,6 +433,7 @@
         }),
       });
       const status = data.credential?.status;
+      setApiKeyTroubleshooting(status !== 'verified');
       setStatus(
         element('creditsApiKeyStatus'),
         status === 'verified' ? 'Key saved and verified.' : 'Key saved. Verification can be retried from the list.',
@@ -365,6 +443,7 @@
       if (defaultInput) defaultInput.checked = false;
       await loadApiKeys();
     } catch (error) {
+      setApiKeyTroubleshooting(true);
       setStatus(element('creditsApiKeyStatus'), error.message || 'The key could not be saved.', 'error');
     } finally {
       // The full secret exists only for this submit lifecycle and is never put
@@ -406,7 +485,9 @@
       state.executionOptions = [];
       const secretInput = element('creditsApiKeySecret');
       if (secretInput) secretInput.value = '';
+      setApiKeyTroubleshooting(false);
       renderProviderOptions();
+      renderProviderGuide();
       renderApiKeys([]);
     } else if (!wasSignedIn && state.initialized && document.documentElement.dataset.navPage === 'credits') {
       loadBalanceAndLedger();
@@ -426,7 +507,7 @@
 
   function renderBalance(balance) {
     state.balanceMicro = Number.isSafeInteger(balance.balance_micro) ? balance.balance_micro : 0;
-    element('creditsBalance').textContent = `${formatCreditDisplay(balance.display_credits)} Credits`;
+    element('creditsBalance').textContent = `${formatCredits(balance.display_credits)} Credits`;
     const accountStatus = element('creditsAccountStatus');
     const restricted = balance.account_status !== 'active';
     if (restricted) {
@@ -452,14 +533,26 @@
 
       const meta = document.createElement('div');
       meta.className = 'credits-ledger-meta';
-      const isUsage = entry.entry_type === 'llm_usage';
+      const isUsage = entry.entry_type === 'backtest_usage';
+      const isWelcomeGrant = entry.entry_type === 'system_promotion_grant';
       const isNegative = isUsage || entry.entry_type === 'refund';
       const title = isUsage
-        ? 'Model usage'
-        : (entry.entry_type === 'refund' ? 'Refund' : 'Credit purchase');
+        ? 'Backtest usage'
+        : (entry.entry_type === 'refund'
+          ? 'Refund'
+          : (isWelcomeGrant ? 'Welcome Credits' : 'Credit purchase'));
       meta.appendChild(textNode('strong', '', title));
+      const callCount = Number.isSafeInteger(entry.model_call_count)
+        && entry.model_call_count > 0
+        ? `${entry.model_call_count} model call${entry.model_call_count === 1 ? '' : 's'}`
+        : null;
       const usageDetail = isUsage
-        ? [entry.provider_id, entry.model_id, entry.run_id ? `run ${String(entry.run_id).slice(0, 12)}` : null]
+        ? [
+          entry.provider_mixed ? 'Multiple providers' : entry.provider_id,
+          entry.model_mixed ? 'Multiple models' : entry.model_id,
+          callCount,
+          entry.run_id ? `run ${String(entry.run_id).slice(0, 12)}` : null,
+        ]
           .filter(Boolean)
           .join(' · ')
         : null;
@@ -469,7 +562,7 @@
         [usageDetail, formatTimestamp(entry.created_at)].filter(Boolean).join(' · '),
       ));
 
-      const formatted = formatCreditDisplay(entry.display_credits);
+      const formatted = formatCredits(entry.display_credits);
       const amount = textNode(
         'span',
         `credits-ledger-amount ${isNegative ? 'is-negative' : 'is-positive'}`,
@@ -519,8 +612,8 @@
       return { package_id: state.selection.value };
     }
     const cents = parseUsdCents(element('creditsCustomAmount')?.value);
-    if (cents === null || cents < 500 || cents > 20000) {
-      throw new Error('Enter a custom amount from $5.00 through $200.00.');
+    if (cents === null || cents < 50 || cents > 500) {
+      throw new Error('Enter a custom amount from $0.50 through $5.00.');
     }
     return { custom_amount_usd_cents: cents };
   }
@@ -754,6 +847,7 @@
     document.querySelectorAll('[data-credits-tab]').forEach((button) => {
       button.addEventListener('click', () => setCreditsTab(button.dataset.creditsTab));
     });
+    element('creditsApiKeyProvider')?.addEventListener('change', onApiKeyProviderChange);
     element('creditsApiKeyForm')?.addEventListener('submit', saveApiKey);
   }
 
@@ -771,5 +865,5 @@
     inspectCheckoutReturn();
   }
 
-  window.CreditsPage = { onEnter, syncAuth };
+  window.CreditsPage = { onEnter, syncAuth, openApiKeys };
 })();

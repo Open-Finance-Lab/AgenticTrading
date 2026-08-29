@@ -17,7 +17,7 @@ PLAYGROUND_SERIES_COLORS = {
     "djia": "#F5C04A",
     "djia-index": "#F5C04A",
     "nasdaq-100": "#9AA4B2",
-    "buy-and-hold": "#9AA4B2",
+    "buy-and-hold": "#34D399",
 }
 
 PLAYGROUND_THEME = {

@@ -25,8 +25,9 @@ def test_backtest_result_has_no_fabricated_performance_drivers():
     assert "view-more-btn" not in html
 
 
-def test_real_result_metrics_are_preserved():
+def test_real_result_comparison_is_preserved():
     html = _APP_HTML.read_text(encoding="utf-8")
-    # The genuine, data-driven metrics must survive the cleanup.
-    for metric in ("max-drawdown", "sharpe"):
-        assert f'data-metric="{metric}"' in html
+    # The genuine, data-driven result surface must survive the cleanup.
+    assert 'id="performanceComparison"' in html
+    assert 'id="performanceComparisonBody"' in html
+    assert 'src="js/backtest-comparison.js?v=1"' in html

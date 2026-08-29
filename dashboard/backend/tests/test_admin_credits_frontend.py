@@ -67,12 +67,18 @@ def test_admin_grant_client_uses_server_api_and_never_persists_secrets():
     assert "parseSignedCreditsMicro" in ADMIN_JS
     assert "source: 'admin-console'" in ADMIN_JS
     assert "Math.abs(signedAmountMicro)" in ADMIN_JS
-    assert "display_pool_available_credits" in ADMIN_JS
-    assert "display_allocated_to_users_credits" in ADMIN_JS
+    assert "pool.pool_available_micro" in ADMIN_JS
+    assert "pool.allocated_to_users_micro" in ADMIN_JS
+    assert "formatCreditsMicro" in ADMIN_JS
     assert "strokeDasharray" in ADMIN_JS
     assert "localStorage" not in ADMIN_JS
     assert "api_key" not in ADMIN_JS
     assert "innerHTML" not in ADMIN_JS
+
+
+def test_admin_grant_client_defaults_to_short_user_pages():
+    assert "ADMIN_CREDITS_USERS_PAGE_SIZE = 25" in ADMIN_JS
+    assert "usersLimit: ADMIN_CREDITS_USERS_PAGE_SIZE" in ADMIN_JS
 
 
 def test_admin_grant_console_is_wired_to_auth_navigation_and_refresh():
@@ -111,5 +117,5 @@ def test_admin_tabs_have_four_tabs_in_usage_order_and_legacy_alias():
 
 
 def test_admin_visual_assets_use_fresh_cache_versions():
-    assert 'js/admin-credits.js?v=5' in APP_HTML
+    assert 'js/admin-credits.js?v=6' in APP_HTML
     assert 'js/admin-tabs.js?v=3' in APP_HTML

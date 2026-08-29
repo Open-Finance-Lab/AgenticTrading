@@ -92,14 +92,15 @@ def _public_ledger_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "payment_order_id": entry["payment_order_id"],
         "created_at": entry["created_at"],
     }
-    if entry.get("entry_type") == "llm_usage":
+    if entry.get("entry_type") == "backtest_usage":
         result.update(
             {
-                "reservation_id": entry.get("reservation_id"),
                 "run_id": entry.get("run_id"),
-                "call_index": entry.get("call_index"),
+                "model_call_count": entry.get("model_call_count"),
                 "provider_id": entry.get("provider_id"),
                 "model_id": entry.get("model_id"),
+                "provider_mixed": bool(entry.get("provider_mixed")),
+                "model_mixed": bool(entry.get("model_mixed")),
                 "billing_source": entry.get("billing_source"),
             }
         )

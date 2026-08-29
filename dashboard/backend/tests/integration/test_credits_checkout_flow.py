@@ -172,11 +172,11 @@ def _checkout(flow, token, *, request_id="11111111-1111-4111-8111-111111111111")
     return flow.client.post(
         "/api/credits/checkout-sessions",
         headers=_auth(token),
-        json={"client_request_id": request_id, "package_id": "usd_10"},
+        json={"client_request_id": request_id, "package_id": "usd_5"},
     )
 
 
-def _checkout_object(checkout, user_id, *, amount=1000, payment_status="paid"):
+def _checkout_object(checkout, user_id, *, amount=500, payment_status="paid"):
     return {
         "id": checkout["checkout_session_id"],
         "object": "checkout.session",
@@ -188,7 +188,7 @@ def _checkout_object(checkout, user_id, *, amount=1000, payment_status="paid"):
         "metadata": {
             "atl_order_id": checkout["order_id"],
             "atl_user_reference": str(user_id),
-            "atl_credits_micro": "10000000",
+            "atl_credits_micro": "5000000",
         },
     }
 
@@ -231,7 +231,7 @@ def test_purchase_replay_refund_and_portfolio_cash_are_isolated(checkout_flow):
     )
     assert paid.status_code == replay.status_code == 200
     assert replay.json()["result"]["outcome"] == "duplicate"
-    assert flow.credits.get_balance_micro(buyer["id"]) == 10_000_000
+    assert flow.credits.get_balance_micro(buyer["id"]) == 5_000_000
 
     refund_response = flow.client.post(
         "/api/admin/credits/refunds",
@@ -260,12 +260,12 @@ def test_purchase_replay_refund_and_portfolio_cash_are_isolated(checkout_flow):
         data_object=refund_object,
     )
     assert settled.status_code == 200, settled.text
-    assert settled.json()["result"]["balance_micro"] == 6_000_000
+    assert settled.json()["result"]["balance_micro"] == 1_000_000
 
     ledger = flow.client.get(
         "/api/credits/ledger", headers=_auth(buyer_token)
     ).json()["items"]
-    assert [entry["amount_micro"] for entry in ledger] == [-4_000_000, 10_000_000]
+    assert [entry["amount_micro"] for entry in ledger] == [-4_000_000, 5_000_000]
     portfolio_after = flow.client.get(
         "/api/v1/portfolio", headers=_auth(buyer_token)
     ).json()["portfolio"]
@@ -373,4 +373,4 @@ def test_checkout_timeout_refund_replay_and_over_refund_are_bounded(checkout_flo
     assert first_refund.json() == repeated_refund.json()
     assert flow.refunds.calls[0][1]["idempotency_key"] == flow.refunds.calls[1][1]["idempotency_key"]
     assert over_refund.status_code == 409
-    assert flow.credits.get_balance_micro(buyer["id"]) == 10_000_000
+    assert flow.credits.get_balance_micro(buyer["id"]) == 5_000_000

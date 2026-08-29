@@ -795,7 +795,7 @@
     // "" is a real, saveable choice, not a placeholder: the backend folds an
     // empty string to NULL, which un-shelves the agent. It is listed first so
     // an agent that has never been categorized shows its actual state.
-    const options = [['', 'Not set (shows under Prompting LLMs)']].concat(
+    const options = [['', 'Not set (visible under All)']].concat(
       Object.keys(labels).map((slug) => [slug, labels[slug]]),
     );
     select.innerHTML = '';
@@ -889,7 +889,9 @@
     const liveToggle = document.getElementById('agentEditorLiveTradingEnabled');
     const credentialInput = document.getElementById('agentEditorFinancialDatasetsKey');
     return {
-      name: nameInput ? nameInput.value.trim() : '',
+      name: nameFollowsModel(currentAgent)
+        ? selectedModelLabel()
+        : (nameInput ? nameInput.value.trim() : ''),
       description: descInput ? descInput.value.trim() : '',
       category,
       cash_allocation,
@@ -1041,6 +1043,55 @@
       select.insertBefore(opt, select.firstChild);
     }
     select.value = current;
+  }
+
+  function selectedModelLabel() {
+    const select = document.getElementById('agentEditorModelSelect');
+    const opt = select?.selectedOptions?.[0];
+    const fromOption = opt?.textContent?.trim();
+    if (fromOption) return fromOption;
+    const value = select?.value || currentAgent?.model_name || '';
+    if (typeof window.formatAgentModelLabel === 'function') {
+      return window.formatAgentModelLabel(value);
+    }
+    return value;
+  }
+
+  function catalogModelLabels() {
+    const select = document.getElementById('agentEditorModelSelect');
+    return new Set(
+      Array.from(select?.options || [])
+        .map((opt) => opt.textContent.trim())
+        .filter(Boolean),
+    );
+  }
+
+  function nameFollowsModel(agent) {
+    // Prompted-model cards whose title is already a model label stay locked to
+    // the dropdown: changing Model rewrites the name. Custom titles ("My dip
+    // buyer") stay editable. Hosted runtimes have no model picker.
+    if (isAiHedgeFundAgent(agent)) return false;
+    if ((agent?.agent_type || '') !== 'builtin') return false;
+    const name = String(agent?.name || '').trim();
+    if (!name) return true;
+    const label = selectedModelLabel();
+    if (name === label) return true;
+    return catalogModelLabels().has(name);
+  }
+
+  function syncBoundAgentName() {
+    const nameInput = document.getElementById('agentEditorNameInput');
+    if (!nameInput) return;
+    const bound = nameFollowsModel(currentAgent);
+    nameInput.readOnly = bound;
+    nameInput.tabIndex = bound ? -1 : 0;
+    nameInput.classList.toggle('agent-editor-name-input--bound', bound);
+    nameInput.setAttribute('aria-readonly', bound ? 'true' : 'false');
+    if (bound) {
+      const label = selectedModelLabel();
+      nameInput.value = label;
+      if (currentAgent) currentAgent.name = label;
+    }
   }
 
   function serializePipeline(steps) {
@@ -1234,6 +1285,7 @@
     fillHeader(agent);
     populateModelSelect(agent);
     configureEditorMode(agent);
+    syncBoundAgentName();
 
     const instructionEl = document.getElementById('agentEditorSimpleInstruction');
     const defaultText = document.getElementById('agentEditorDefaultInstructionText');
@@ -1263,7 +1315,11 @@
     // Baseline the stored state so the dirty badge only fires on real edits.
     captureSavedSnapshot();
 
-    document.getElementById('agentEditorNameInput')?.focus();
+    if (document.getElementById('agentEditorNameInput')?.readOnly) {
+      document.getElementById('agentEditorSimpleInstruction')?.focus();
+    } else {
+      document.getElementById('agentEditorNameInput')?.focus();
+    }
   }
 
   function close(force) {
@@ -1463,6 +1519,10 @@
     const body = document.getElementById('agentEditorView');
     body?.addEventListener('input', markDirtyFromInput);
     body?.addEventListener('change', markDirtyFromInput);
+    document.getElementById('agentEditorModelSelect')?.addEventListener('change', () => {
+      syncBoundAgentName();
+      markDirtyFromInput();
+    });
     document.querySelector('.agent-editor-body')?.addEventListener(
       'scroll',
       scheduleActiveAiHedgeFundTooltipPosition,

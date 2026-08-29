@@ -68,3 +68,28 @@ def test_legacy_saved_model_falls_back_to_a_one_run_execution_lane():
     _assert_contains(body, "Saved model is unavailable; this run will use")
     _assert_contains(body, "providerId: provider.provider_id")
     _assert_contains(body, "modelId: fallbackModel.model_id")
+
+
+def test_confirmed_empty_execution_inventory_offers_api_key_recovery():
+    _assert_contains(APP_HTML, 'id="runBacktestApiKeysBtn"')
+    _assert_contains(APP_HTML, '>Go to API Keys</button>')
+    body = _function_body("loadRunBacktestExecutionOptions")
+    _assert_contains(body, "showApiKeysRecovery: true")
+    assert body.index("catch (_error)") < body.index("showApiKeysRecovery: true")
+
+
+def test_execution_options_request_failure_does_not_diagnose_a_missing_key():
+    body = _function_body("loadRunBacktestExecutionOptions")
+    catch_start = body.index("catch (_error)")
+    catch_end = body.index("if (pending)", catch_start)
+    catch_body = body[catch_start:catch_end]
+    _assert_contains(catch_body, "Backtest execution options could not be loaded.")
+    assert "showApiKeysRecovery: true" not in catch_body
+
+
+def test_api_key_recovery_clears_pending_state_and_navigates_to_credits():
+    body = _function_body("goToApiKeys")
+    _assert_contains(body, "clearPendingByokBacktest()")
+    _assert_contains(body, "closeRunBacktestModal()")
+    _assert_contains(body, "navigateToPage('credits')")
+    _assert_contains(body, "window.CreditsPage?.openApiKeys({ focus: true })")

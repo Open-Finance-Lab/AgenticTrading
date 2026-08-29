@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from dashboard.backend.app import app
+from dashboard.backend.domain.agents.defaults import STARTER_AGENTS
 from dashboard.backend.users import UserStore
 
 def _session_token(client) -> str:
@@ -32,11 +33,43 @@ def temp_user_store():
 @pytest.fixture
 def client(temp_user_store, monkeypatch):
     from dashboard.backend import users
+    from dashboard.backend.api import auth
+    from dashboard.backend.domain.credits.repository import CreditsStore
+    from dashboard.backend.domain.credits.service import CreditsService
 
     monkeypatch.setattr(users, "user_store", temp_user_store)
+    monkeypatch.setattr(
+        auth,
+        "credits_service",
+        CreditsService(store=CreditsStore(temp_user_store.db_path)),
+    )
     # The process-global auth limiters are reset by conftest's autouse
     # _reset_shared_scale_state, which pytest runs before this fixture.
     return TestClient(app)
+
+
+def test_signup_and_login_keep_one_welcome_credit_grant(client):
+    from dashboard.backend.api import auth
+
+    signup = client.post(
+        "/api/auth/signup",
+        json={
+            "email": "welcome@example.com",
+            "display_name": "Welcome",
+            "password": "securepass1",
+        },
+    )
+    assert signup.status_code == 200
+    user_id = signup.json()["user"]["id"]
+    assert auth.credits_service.get_balance(user_id).display_credits == "1.500000"
+
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "welcome@example.com", "password": "securepass1"},
+    )
+    assert login.status_code == 200
+    activity = auth.credits_service.list_ledger(user_id, limit=10, cursor=None)
+    assert len(activity["items"]) == 1
 
 
 def test_api_health(client):
@@ -62,6 +95,18 @@ def test_signup_login_me_logout_flow(client):
     assert "password_hash" not in signup_data["user"]
     assert "token" not in signup_data
     assert _session_token(client)  # signup set the session cookie
+
+    listed = client.get("/api/v1/agents")
+    assert listed.status_code == 200
+    listed_by_model = {
+        a.get("model_name"): a for a in listed.json()["agents"]
+    }
+    for spec in STARTER_AGENTS:
+        starter = listed_by_model.get(spec["model_name"])
+        assert starter, f"signup must provision {spec['name']}"
+        assert starter["name"] == spec["name"]
+        assert starter["agent_type"] == "builtin"
+        assert starter["pipeline"], "starter must be usable without Configure"
 
     duplicate = client.post(
         "/api/auth/signup",

@@ -8,6 +8,17 @@ APP_HTML = (FRONTEND / "app.html").read_text(encoding="utf-8")
 APP_JS = (FRONTEND / "app.js").read_text(encoding="utf-8")
 STYLES = (FRONTEND / "styles.css").read_text(encoding="utf-8")
 CREDITS_JS_PATH = FRONTEND / "js" / "credits.js"
+CREDITS_JS = CREDITS_JS_PATH.read_text(encoding="utf-8")
+
+
+def _credits_function(name: str) -> str:
+    start = CREDITS_JS.index(f"  function {name}(")
+    boundaries = (
+        CREDITS_JS.find("\n  function ", start + 1),
+        CREDITS_JS.find("\n  async function ", start + 1),
+    )
+    end = min(boundary for boundary in boundaries if boundary >= 0)
+    return CREDITS_JS[start:end]
 
 
 def test_credits_page_is_reachable_from_the_account_menu():
@@ -17,12 +28,28 @@ def test_credits_page_is_reachable_from_the_account_menu():
     assert "navigateToPage('credits')" in APP_JS
 
 
-def test_credits_page_ships_test_mode_and_purchase_controls():
+def test_credits_page_ships_small_purchase_controls():
     assert 'id="creditsTestModeBadge"' in APP_HTML
     assert 'id="creditsBalance"' in APP_HTML
-    assert 'data-credit-package="usd_5"' in APP_HTML
-    assert 'data-credit-package="usd_50"' in APP_HTML
+    expected_packages = {
+        'data-credit-package="usd_0_50" data-credit-cents="50"',
+        'data-credit-package="usd_1" data-credit-cents="100"',
+        'data-credit-package="usd_2" data-credit-cents="200"',
+        'data-credit-package="usd_5" data-credit-cents="500"',
+    }
+    assert all(package in APP_HTML for package in expected_packages)
+    assert 'data-credit-package="usd_10"' not in APP_HTML
+    assert 'data-credit-package="usd_20"' not in APP_HTML
+    assert 'data-credit-package="usd_50"' not in APP_HTML
+    package_grid_start = APP_HTML.index('<div id="creditsPackageGrid"')
+    package_grid_end = APP_HTML.index('</div>', package_grid_start)
+    package_grid = APP_HTML[package_grid_start:package_grid_end]
+    assert package_grid.count('aria-checked="true"') == 1
+    assert 'aria-checked="true" data-credit-package="usd_1"' in package_grid
     assert 'id="creditsCustomAmount"' in APP_HTML
+    assert 'id="creditsCustomAmount" type="number"' in APP_HTML
+    assert 'min="0.50" max="5.00" step="0.01"' in APP_HTML
+    assert 'Minimum $0.50, maximum $5.00.' in APP_HTML
     assert 'id="creditsPurchaseBtn"' in APP_HTML
     assert 'id="creditsLedgerList"' in APP_HTML
 
@@ -45,6 +72,14 @@ def test_credits_client_keeps_stripe_authoritative():
     assert "/api/credits/orders/" in source
     assert "Payment confirmation pending" in source
     assert "checkout.session_id" not in source
+
+
+def test_credits_client_enforces_the_small_custom_range():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+
+    assert "value: 'usd_1'" in source
+    assert "cents < 50 || cents > 500" in source
+    assert "Enter a custom amount from $0.50 through $5.00." in source
 
 
 def test_credits_api_values_never_enter_inner_html():
@@ -76,13 +111,24 @@ def test_balance_copy_describes_platform_and_byok_lanes():
     assert ">Available balance<" not in APP_HTML
 
 
-def test_activity_renders_negative_model_usage_with_safe_context():
+def test_activity_renders_one_backtest_usage_summary_with_safe_context():
     source = CREDITS_JS_PATH.read_text(encoding="utf-8")
-    assert "entry.entry_type === 'llm_usage'" in source
-    assert "'Model usage'" in source
+    assert "entry.entry_type === 'backtest_usage'" in source
+    assert "'Backtest usage'" in source
+    assert "entry.model_call_count" in source
+    assert "'Multiple providers'" in source
+    assert "'Multiple models'" in source
     assert "entry.provider_id" in source
     assert "entry.model_id" in source
     assert "String(entry.run_id).slice(0, 12)" in source
+    assert "entry.call_index" not in source
+
+
+def test_activity_names_the_automatic_welcome_grant():
+    source = CREDITS_JS_PATH.read_text(encoding="utf-8")
+
+    assert "entry.entry_type === 'system_promotion_grant'" in source
+    assert "'Welcome Credits'" in source
 
 
 def test_refund_retry_reuses_its_request_id_only_while_unchanged():
@@ -109,6 +155,74 @@ def test_credits_billing_has_three_tabs_and_api_keys_surface():
     assert 'id="creditsApiKeyProvider"' in APP_HTML
     assert 'id="creditsApiKeySecret"' in APP_HTML
     assert 'id="creditsApiKeyList"' in APP_HTML
+
+
+def test_api_key_guide_has_three_semantic_steps_and_safe_external_link():
+    start = APP_HTML.index('id="creditsApiKeyGuide"')
+    end = APP_HTML.index('id="creditsApiKeyGuideFallback"', start)
+    guide = APP_HTML[start:end]
+    assert 'id="creditsApiKeyGuideSteps"' in guide
+    assert '<ol' in guide
+    assert guide.count('class="credits-key-guide-step"') == 3
+    assert 'id="creditsApiKeyOfficialLink"' in guide
+    assert 'target="_blank"' in guide
+    assert 'rel="noopener noreferrer"' in guide
+    assert 'Open official API key page' in guide
+    assert 'Create and copy the key' in guide
+    assert 'Return here and paste it below' in guide
+
+
+def test_api_key_guide_uses_only_the_exact_official_provider_allowlist():
+    expected = {
+        "openai": "https://platform.openai.com/api-keys",
+        "openrouter": "https://openrouter.ai/keys",
+        "anthropic": "https://platform.claude.com/settings/keys",
+        "gemini": "https://aistudio.google.com/apikey",
+    }
+    for provider_id, url in expected.items():
+        assert f"{provider_id}: Object.freeze({{" in CREDITS_JS
+        assert f"url: '{url}'" in CREDITS_JS
+    render = _credits_function("renderProviderGuide")
+    assert "approved_base_url" not in render
+    assert "adapter_type" not in render
+    assert "creditsApiKeyProvider')?.addEventListener('change', onApiKeyProviderChange)" in CREDITS_JS
+
+
+def test_custom_provider_guide_never_guesses_an_external_destination():
+    assert 'id="creditsApiKeyGuideFallback"' in APP_HTML
+    assert 'ATL does not have an official setup link for this provider.' in APP_HTML
+    assert "officialPage = OFFICIAL_API_KEY_PAGES[providerId] || null" in CREDITS_JS
+    assert "officialLink.removeAttribute('href')" in CREDITS_JS
+    assert "steps.hidden = !officialPage" in CREDITS_JS
+    assert "fallback.hidden = Boolean(officialPage)" in CREDITS_JS
+    assert ".credits-key-guide-steps[hidden]" in STYLES
+
+
+def test_official_provider_link_keeps_button_layout():
+    start = STYLES.index(".credits-key-guide-link {")
+    end = STYLES.index("}", start)
+    link_styles = STYLES[start:end]
+    assert "display: inline-flex;" in link_styles
+    assert "width: 100%;" in link_styles
+
+
+def test_api_key_troubleshooting_is_failure_only_and_field_associated():
+    assert 'id="creditsApiKeyTroubleshooting"' in APP_HTML
+    assert 'aria-describedby="creditsApiKeyTroubleshooting"' in APP_HTML
+    assert 'id="creditsApiKeyTroubleshooting" class="credits-key-troubleshooting" hidden' in APP_HTML
+    assert 'Some providers also require billing or account credits' in APP_HTML
+    assert "function setApiKeyTroubleshooting(visible)" in CREDITS_JS
+    assert "setApiKeyTroubleshooting(status !== 'verified')" in CREDITS_JS
+    assert "setApiKeyTroubleshooting(true)" in CREDITS_JS
+    assert "setApiKeyTroubleshooting(false)" in CREDITS_JS
+
+
+def test_api_key_troubleshooting_does_not_add_billing_to_the_primary_steps():
+    guide_start = APP_HTML.index('id="creditsApiKeyGuide"')
+    help_start = APP_HTML.index('id="creditsApiKeyTroubleshooting"')
+    guide = APP_HTML[guide_start:help_start]
+    assert "billing" not in guide.lower()
+    assert "account credits" not in guide.lower()
 
 
 def test_api_keys_is_the_primary_credits_tab():
@@ -175,3 +289,12 @@ def test_quick_start_state_never_contains_a_secret():
     assert "api_key" not in body
     assert "key_last_four" not in body
     assert "credential_id" not in body
+
+
+def test_credits_module_exposes_api_keys_focus_handoff():
+    assert "focusApiKeysOnReady: false" in CREDITS_JS
+    assert "function openApiKeys({ focus = false } = {})" in CREDITS_JS
+    assert "setCreditsTab('api-keys', { reload: false })" in CREDITS_JS
+    assert "window.CreditsPage = { onEnter, syncAuth, openApiKeys }" in CREDITS_JS
+    assert "state.focusApiKeysOnReady" in CREDITS_JS
+    assert "creditsApiKeysHeading" in CREDITS_JS

@@ -58,7 +58,7 @@ def test_checkout_reports_bad_billing_config_as_503_not_422(billing_api):
         headers=_auth(token),
         json={
             "client_request_id": "22222222-2222-4222-8222-222222222222",
-            "package_id": "usd_10",
+            "package_id": "usd_5",
         },
     )
 
@@ -195,7 +195,7 @@ def test_admin_can_reinstate_a_restricted_account(billing_api):
         headers=_auth(token),
         json={
             "client_request_id": "33333333-3333-4333-8333-333333333333",
-            "package_id": "usd_10",
+            "package_id": "usd_5",
         },
     )
     assert blocked.status_code == 403
@@ -211,7 +211,7 @@ def test_admin_can_reinstate_a_restricted_account(billing_api):
         headers=_auth(token),
         json={
             "client_request_id": "33333333-3333-4333-8333-333333333333",
-            "package_id": "usd_10",
+            "package_id": "usd_5",
         },
     )
     assert allowed.status_code == 200

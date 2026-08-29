@@ -28,6 +28,8 @@ from dashboard.backend.api.rate_limit import (
 )
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
+from dashboard.backend.domain.agents.service import agent_service
+from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
 from dashboard.backend.infrastructure.email import sender as email_sender
 from dashboard.backend import users as users_module
@@ -139,6 +141,14 @@ def _login_ip_key(request: Request) -> str:
 
 def _signup_ip_key(request: Request) -> str:
     return f"signup:{client_key(request)}"
+
+
+async def _ensure_welcome_credits(user_id: int, *, category: str) -> None:
+    """Best-effort grant; login and startup provide deterministic repair."""
+    try:
+        await asyncio.to_thread(credits_service.grant_default_signup_credits, user_id)
+    except Exception:  # noqa: BLE001 - never expose a store/DSN error here
+        print(f"WARNING: credits.welcome_grant_failed category={category}")
 
 
 def _app_redirect(query: dict[str, str]) -> RedirectResponse:
@@ -437,7 +447,15 @@ async def signup(payload: SignupRequest, request: Request):
             raise HTTPException(status_code=409, detail="Email is already registered") from exc
         raise
 
+    await _ensure_welcome_credits(user["id"], category="signup")
+
     token, entitlements = await asyncio.to_thread(_issue_session, user, request)
+    browser_session = (request.headers.get("x-browser-id") or "").strip() or None
+    await asyncio.to_thread(
+        agent_service.provision_starter_agents,
+        owner_user_id=user["id"],
+        owner_browser_session=browser_session,
+    )
     analytics_instrumentation.emit_account_event(
         event_name="account_signed_up",
         user_id=user["id"],
@@ -484,6 +502,7 @@ async def login(payload: LoginRequest, request: Request):
         print(f"auth.login_failed domain={_email_domain(payload.email)}")
         raise HTTPException(status_code=401, detail=LOGIN_FAILURE_DETAIL)
 
+    await _ensure_welcome_credits(user["id"], category="login")
     token, entitlements = await asyncio.to_thread(_issue_session, user, request)
     analytics_instrumentation.emit_account_event(
         event_name="authenticated_session_started",

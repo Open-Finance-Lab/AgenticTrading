@@ -21,11 +21,21 @@ import dashboard.backend.domain.portfolios.repository as portfolio_repo
 import dashboard.backend.domain.portfolios.service as portfolio_service_module
 import dashboard.backend.users as users_module
 from dashboard.backend.app import app
+from dashboard.backend.domain.agents.defaults import STARTER_AGENTS
 from dashboard.backend.domain.backtesting.constants import (
     DEFAULT_AGENT_CASH_ALLOCATION,
     DEFAULT_PORTFOLIO_EQUITY,
     MAX_AGENT_CASH_ALLOCATION,
 )
+
+# Signup mints one starter per STARTER_AGENTS entry, each funded at
+# DEFAULT_AGENT_CASH_ALLOCATION. Cash checks after _signup() subtract this,
+# or they describe an empty-account world that no longer exists.
+STARTER_ALLOCATED = len(STARTER_AGENTS) * float(DEFAULT_AGENT_CASH_ALLOCATION)
+
+
+def _cash_after_signup() -> float:
+    return float(DEFAULT_PORTFOLIO_EQUITY) - STARTER_ALLOCATED
 
 
 @pytest.fixture
@@ -79,7 +89,8 @@ def test_create_agent_debits_portfolio(client):
     headers = _auth(token)
 
     before = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
-    assert before["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY)
+    assert before["cash_available"] == _cash_after_signup()
+    assert before["allocated"] == STARTER_ALLOCATED
 
     created = client.post(
         "/api/v1/agents",
@@ -96,8 +107,8 @@ def test_create_agent_debits_portfolio(client):
     assert agent["cash_allocation"] == 2500
 
     after = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
-    assert after["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY) - 2500
-    assert after["allocated"] == 2500
+    assert after["cash_available"] == _cash_after_signup() - 2500
+    assert after["allocated"] == STARTER_ALLOCATED + 2500
 
 
 def test_allocate_and_reclaim_endpoints(client):
@@ -123,7 +134,7 @@ def test_allocate_and_reclaim_endpoints(client):
         json={"agent_id": agent_id, "amount": 1500},
     )
     assert alloc.status_code == 200, alloc.text
-    assert alloc.json()["portfolio"]["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY) - 1500
+    assert alloc.json()["portfolio"]["cash_available"] == _cash_after_signup() - 1500
     assert alloc.json()["agent"]["cash_allocation"] == 1500
 
     reclaim = client.post(
@@ -132,7 +143,7 @@ def test_allocate_and_reclaim_endpoints(client):
         json={"agent_id": agent_id, "amount": 500},
     )
     assert reclaim.status_code == 200, reclaim.text
-    assert reclaim.json()["portfolio"]["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY) - 1000
+    assert reclaim.json()["portfolio"]["cash_available"] == _cash_after_signup() - 1000
     assert reclaim.json()["agent"]["cash_allocation"] == 1000
 
 
@@ -140,8 +151,9 @@ def test_allocate_blocked_when_insufficient_cash(client):
     token, _ = _signup(client, email="poor@example.com")
     headers = _auth(token)
 
-    # Drain most of the $10k ledger with maxed sleeves ($3k each).
-    for i in range(3):
+    # Starters already hold $3k. Two more maxed sleeves leave $1k, so a $3k
+    # allocate is within the per-agent max but over remaining cash.
+    for i in range(2):
         filled = client.post(
             "/api/v1/agents",
             headers=headers,
@@ -187,7 +199,7 @@ def test_delete_agent_returns_funds(client):
     agent_id = created.json()["agent"]["agent_id"]
 
     mid = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
-    assert mid["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY) - float(
+    assert mid["cash_available"] == _cash_after_signup() - float(
         DEFAULT_AGENT_CASH_ALLOCATION
     )
 
@@ -196,8 +208,8 @@ def test_delete_agent_returns_funds(client):
     assert deleted.json()["reclaimed"] == float(DEFAULT_AGENT_CASH_ALLOCATION)
 
     after = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
-    assert after["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY)
-    assert after["allocated"] == 0.0
+    assert after["cash_available"] == _cash_after_signup()
+    assert after["allocated"] == STARTER_ALLOCATED
 
 
 def test_patch_cash_allocation_moves_ledger(client):
@@ -218,7 +230,7 @@ def test_patch_cash_allocation_moves_ledger(client):
     assert up.status_code == 200, up.text
     assert up.json()["agent"]["cash_allocation"] == 3000
     pf = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
-    assert pf["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY) - 3000
+    assert pf["cash_available"] == _cash_after_signup() - 3000
 
     down = client.patch(
         f"/api/v1/agents/{agent_id}",
@@ -227,7 +239,7 @@ def test_patch_cash_allocation_moves_ledger(client):
     )
     assert down.status_code == 200, down.text
     pf2 = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
-    assert pf2["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY) - 500
+    assert pf2["cash_available"] == _cash_after_signup() - 500
 
 
 # ---------------------------------------------------------------------------
@@ -259,8 +271,8 @@ def test_portfolio_reports_preexisting_sleeves_as_allocated(env):
 
     pf = client.get("/api/v1/portfolio", headers=_auth(token)).json()["portfolio"]
 
-    assert pf["allocated"] == 1000.0
-    assert pf["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY) - 1000.0
+    assert pf["allocated"] == STARTER_ALLOCATED + 1000.0
+    assert pf["cash_available"] == _cash_after_signup() - 1000.0
 
 
 def test_deleting_a_preexisting_agent_succeeds_and_restores_cash(env):
@@ -274,8 +286,8 @@ def test_deleting_a_preexisting_agent_succeeds_and_restores_cash(env):
     assert deleted.status_code == 200, deleted.text
     assert agent_store.get_agent(agent_id) is None
     after = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
-    assert after["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY)
-    assert after["allocated"] == 0.0
+    assert after["cash_available"] == _cash_after_signup()
+    assert after["allocated"] == STARTER_ALLOCATED
 
 
 def test_preexisting_agent_allocation_can_be_lowered(env):
@@ -291,7 +303,7 @@ def test_preexisting_agent_allocation_can_be_lowered(env):
     assert resp.status_code == 200, resp.text
     assert resp.json()["agent"]["cash_allocation"] == 400
     pf = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
-    assert pf["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY) - 400
+    assert pf["cash_available"] == _cash_after_signup() - 400
 
 
 def test_preexisting_sleeve_cannot_be_spent_twice(env):
@@ -366,7 +378,7 @@ def test_patch_failure_leaves_the_ledger_untouched(env):
 
     assert agent_store.get_agent(agent_id)["cash_allocation"] == 1000
     pf = client.get("/api/v1/portfolio", headers=headers).json()["portfolio"]
-    assert pf["cash_available"] == float(DEFAULT_PORTFOLIO_EQUITY) - 1000
+    assert pf["cash_available"] == _cash_after_signup() - 1000
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +443,7 @@ def test_reclaiming_more_than_the_sleeve_is_rejected(client):
     assert resp.status_code == 400, resp.text
     assert client.get("/api/v1/portfolio", headers=headers).json()["portfolio"][
         "cash_available"
-    ] == float(DEFAULT_PORTFOLIO_EQUITY) - 500
+    ] == _cash_after_signup() - 500
 
 
 def test_concurrent_allocations_cannot_overspend(env):
@@ -441,19 +453,18 @@ def test_concurrent_allocations_cannot_overspend(env):
     client, agent_store, _ = env
     token, user = _signup(client, email="race@example.com")
     headers = _auth(token)
-    # Drain $6k so only $4k remains: either cap-sized request below fits on
-    # its own, but the two together overspend — exactly the race window.
-    for i in range(2):
-        drained = client.post(
-            "/api/v1/agents",
-            headers=headers,
-            json={
-                "name": f"Drain{i}",
-                "model_name": "local-model",
-                "cash_allocation": float(MAX_AGENT_CASH_ALLOCATION),
-            },
-        )
-        assert drained.status_code == 200, drained.text
+    # Starters hold $3k. Drain one more max sleeve so $4k remains: either
+    # cap-sized request below fits on its own, but the two together overspend.
+    drained = client.post(
+        "/api/v1/agents",
+        headers=headers,
+        json={
+            "name": "Drain",
+            "model_name": "local-model",
+            "cash_allocation": float(MAX_AGENT_CASH_ALLOCATION),
+        },
+    )
+    assert drained.status_code == 200, drained.text
     agents = [
         client.post(
             "/api/v1/agents",
@@ -487,7 +498,7 @@ def test_concurrent_allocations_cannot_overspend(env):
         float(a["cash_allocation"] or 0)
         for a in agent_store.list_agents(owner_user_id=user["id"])
     )
-    assert total_sleeves == 3 * float(MAX_AGENT_CASH_ALLOCATION)
+    assert total_sleeves == STARTER_ALLOCATED + 2 * float(MAX_AGENT_CASH_ALLOCATION)
 
 
 def test_service_serialises_concurrent_allocations_for_one_user(env, monkeypatch):
@@ -512,12 +523,11 @@ def test_service_serialises_concurrent_allocations_for_one_user(env, monkeypatch
     client, agent_store, _ = env
     _, user = _signup(client, email="svc-race@example.com")
     uid = user["id"]
-    # Drain $6k so only $4k remains: either cap-sized allocation below fits on
-    # its own, but the two together overspend — exactly the race window.
-    for i in range(2):
-        _preexisting_agent(
-            agent_store, uid, float(MAX_AGENT_CASH_ALLOCATION), name=f"Drain{i}"
-        )
+    # Starters hold $3k. Drain one more max sleeve so $4k remains: either
+    # cap-sized allocation below fits on its own, but the two together overspend.
+    _preexisting_agent(
+        agent_store, uid, float(MAX_AGENT_CASH_ALLOCATION), name="Drain"
+    )
     agents = [
         _preexisting_agent(agent_store, uid, 0.0, name=f"Race{i}") for i in range(2)
     ]
@@ -556,5 +566,5 @@ def test_service_serialises_concurrent_allocations_for_one_user(env, monkeypatch
         for a in agent_store.list_agents(owner_user_id=uid)
     )
     assert len(rejected) == 1, f"expected one rejection, got {rejected}"
-    expected = 3 * float(MAX_AGENT_CASH_ALLOCATION)
+    expected = STARTER_ALLOCATED + 2 * float(MAX_AGENT_CASH_ALLOCATION)
     assert total == expected, f"over-allocated: {total} against a 10000 account"
