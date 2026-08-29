@@ -28,6 +28,7 @@ from dashboard.backend.api.rate_limit import (
 )
 from dashboard.backend.domain.brokers.repository import broker_store
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
+from dashboard.backend.domain.agents.service import agent_service
 from dashboard.backend.domain.credits.service import credits_service
 from dashboard.backend.infrastructure.brokers import pending_links, robinhood_oauth
 from dashboard.backend.infrastructure.email import sender as email_sender
@@ -449,6 +450,12 @@ async def signup(payload: SignupRequest, request: Request):
     await _ensure_welcome_credits(user["id"], category="signup")
 
     token, entitlements = await asyncio.to_thread(_issue_session, user, request)
+    browser_session = (request.headers.get("x-browser-id") or "").strip() or None
+    await asyncio.to_thread(
+        agent_service.provision_starter_agents,
+        owner_user_id=user["id"],
+        owner_browser_session=browser_session,
+    )
     analytics_instrumentation.emit_account_event(
         event_name="account_signed_up",
         user_id=user["id"],

@@ -31,6 +31,10 @@ from dashboard.backend.domain.agents.defaults import (
     DEFAULT_STARTER_INSTRUCTION,
     SIMPLE_INSTRUCTION_OUTPUT_FORMAT,
     SIMPLE_INSTRUCTION_PRESET_KEY,
+    STARTER_AGENT_DESCRIPTION,
+    STARTER_AGENT_MODEL,
+    STARTER_AGENT_NAME,
+    STARTER_AGENTS,
 )
 from dashboard.backend.tests._frontend_source import js_string_const
 
@@ -70,6 +74,64 @@ def _create(client, **overrides):
 # --------------------------------------------------------------------------
 # Server-side seeding
 # --------------------------------------------------------------------------
+
+
+def test_provision_starter_agents_creates_the_three_model_cards(client):
+    from dashboard.backend.domain.agents.service import agent_service
+
+    created = agent_service.provision_starter_agents(owner_user_id=42)
+    assert {a["model_name"] for a in created} == {s["model_name"] for s in STARTER_AGENTS}
+    by_model = {a["model_name"]: a for a in created}
+    for spec in STARTER_AGENTS:
+        agent = by_model[spec["model_name"]]
+        assert agent["name"] == spec["name"]
+        assert agent["agent_type"] == "builtin"
+        assert agent["description"] == spec["description"]
+        assert agent["pipeline"]
+
+
+def test_provision_starter_agents_is_idempotent_on_model_name(client):
+    from dashboard.backend.domain.agents.service import agent_service
+
+    first = agent_service.provision_starter_agents(owner_user_id=42)
+    second = agent_service.provision_starter_agents(owner_user_id=42)
+    assert len(first) == len(STARTER_AGENTS)
+    assert second == []
+
+
+def test_provision_renames_a_starter_whose_title_drifted_from_its_model(client):
+    """A Claude card stored under the DeepSeek title must be rewritten.
+
+    The grid title used to read `agent.name` while the subtitle read the
+    model, so a drifted row showed "DeepSeek V4 Pro" over "Claude Sonnet 4.6".
+    """
+    from dashboard.backend.domain.agents.service import agent_service
+
+    drifted = agent_service.create_agent(
+        name="DeepSeek V4 Pro",
+        model_name="anthropic/claude-sonnet-4-6",
+        owner_user_id=42,
+        owner_browser_session=None,
+        agent_type="builtin",
+    )
+    agent_service.provision_starter_agents(owner_user_id=42)
+    listed = agent_service.agents.list_agents(owner_user_id=42)
+    claude = next(
+        a for a in listed if a["model_name"] == "anthropic/claude-sonnet-4-6"
+    )
+    assert claude["agent_id"] == drifted["agent_id"]
+    assert claude["name"] == "Claude Sonnet 4.6"
+
+
+def test_provision_starter_agent_fail_open_does_not_raise(client, monkeypatch):
+    from dashboard.backend.domain.agents.service import agent_service
+
+    def boom(**_kwargs):
+        raise RuntimeError("store unavailable")
+
+    monkeypatch.setattr(agent_service, "create_agent", boom)
+    assert agent_service.provision_starter_agent(owner_user_id=1) is None
+    assert agent_service.provision_starter_agents(owner_user_id=1) == []
 
 
 def test_new_builtin_agent_is_seeded_with_the_starter_instruction(client):
@@ -192,6 +254,23 @@ def test_output_format_matches_the_frontend():
 
 def test_starter_instruction_matches_the_frontend():
     assert _js_const("DEFAULT_STARTER_INSTRUCTION") == DEFAULT_STARTER_INSTRUCTION
+
+
+def test_starter_agent_identity_matches_the_frontend():
+    assert _js_const("DEFAULT_STARTER_AGENT_NAME") == STARTER_AGENT_NAME
+    assert _js_const("DEFAULT_FOUNDATION_MODEL") == STARTER_AGENT_MODEL
+    assert _js_const("DEFAULT_STARTER_AGENT_DESCRIPTION") == STARTER_AGENT_DESCRIPTION
+
+
+def test_starter_agents_roster_matches_the_frontend():
+    from dashboard.backend.tests._frontend_source import js_const
+
+    decl = js_const("STARTER_AGENTS")
+    assert len(STARTER_AGENTS) == 3
+    for spec in STARTER_AGENTS:
+        assert spec["name"] in decl
+        assert spec["model_name"] in decl
+        assert spec["description"] in decl
 
 
 def test_the_editor_can_read_the_starter_instruction():

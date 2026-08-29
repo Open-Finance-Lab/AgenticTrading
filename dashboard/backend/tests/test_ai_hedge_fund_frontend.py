@@ -190,34 +190,32 @@ def test_marketplace_cta_is_unified_add_to_my_agents():
     assert "Copy to My Agents" not in _APP_JS
 
 
-def test_hosted_agents_are_not_given_a_runtime_flavoured_section():
-    """The hosted AI Hedge Fund agent shares a shelf with every other stock
-    strategy rather than getting a runtime-flavoured section of its own.
+def test_hosted_agents_land_on_the_open_agents_shelf():
+    """Hosted runtimes (AI Hedge Fund) render under Open Agents, not mixed
+    into Prompted Models. Shelves still resolve through one function, so no
+    predicate can double-count or drop an agent.
 
-    #309 briefly split My Agents on `runtime_type === 'ai_hedge_fund'` into an
-    "Open Agents" section. Rewritten 2026-08-05: the shelves are asset-class
-    based now (Stocks / Crypto / Futures / Connected Agents), so a hosted agent
-    lands on Stocks like everything else and its *market* -- a separate axis --
-    comes from `category`. The separation the runtime split was after still
-    holds, and it now generalizes: a hosted A-share agent shelves correctly and
-    files under the China A-Share chip, which the runtime test could not do.
+    runtime_type is always present and truthy (server-defaulted to 'pipeline'),
+    so the hosted check MUST be an inequality against 'pipeline'.
     """
     assert "Foundation Agents" not in _APP_HTML
-    assert "Open Agents" not in _APP_HTML
-    # The retired axes: "Prompting LLMs" was how-it-decides (now a card label),
-    # "U.S. Stock Trading" was geography (now a market chip).
+    assert ">Open Agents</h3>" in _APP_HTML
+    assert ">Prompted Models</h3>" in _APP_HTML
     assert ">Prompting LLMs</h3>" not in _APP_HTML
     assert ">U.S. Stock Trading</h3>" not in _APP_HTML
-    assert ">Stocks</h3>" in _APP_HTML
-    assert 'id="agentsGridStocks"' in _APP_HTML
+    assert ">Stocks</h3>" not in _APP_HTML
+    assert 'id="agentsGridOpen"' in _APP_HTML
+    assert 'id="agentsGridPrompted"' in _APP_HTML
 
-    # The runtime-keyed *sections* are gone: shelves resolve through one
-    # function, so no predicate can double-count or drop.
     assert "isOpenAgent" not in _APP_JS
-    assert "agentsGridOpen" not in _APP_JS
     assert "const AGENT_SHELVES = [" in _APP_JS
     assert "function agentShelfKey(agent)" in _APP_JS
-    assert "agentShelfKey(a) === 'stocks'" in _APP_JS
+    assert "agentShelfKey(a) === 'prompted'" in _APP_JS
+    assert "agentShelfKey(a) === 'open'" in _APP_JS
+    key_fn = _APP_JS.split("function agentShelfKey(agent)", 1)[1].split("\n}", 1)[0]
+    assert "!== 'pipeline'" in key_fn
+    assert "return 'open'" in key_fn
+    assert "return 'prompted'" in key_fn
 
 
 def test_uncategorized_hosted_agents_still_resolve_to_the_us_market():

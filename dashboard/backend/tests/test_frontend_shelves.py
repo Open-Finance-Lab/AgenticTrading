@@ -1,13 +1,13 @@
-"""Guards for the My Agents shelf sections (2026-08-05).
+"""Guards for the My Agents shelf sections (2026-08-05, updated 2026-08-28).
 
 My Agents used to split agents into two buckets: "Foundation Agents" (whose
 subtitle called the product "A prompting game", the #1 trust-killer in every
-persona walkthrough) and "External Agents". This task replaces both with four
-static shelf sections keyed to the backend category taxonomy
-(`dashboard.backend.domain.agents.taxonomy.AGENT_CATEGORIES`), plus the
-unchanged external bucket, and adds the canonical no-real-money sentence next
-to the capital controls. None of this is enforceable at runtime -- app.html
-has no JS test harness -- so, per this suite's frontend convention
+persona walkthrough) and "External Agents". Asset-class shelves (Stocks /
+Crypto / Futures) replaced that, then this task split the live Stocks row into
+**Prompted Models** (pipeline / instruction agents) and **Open Agents** (hosted
+runtimes such as AI Hedge Fund), keeping the locked Crypto/Futures rows and
+the developer Connected Agents shelf. None of this is enforceable at runtime
+-- app.html has no JS test harness -- so, per this suite's frontend convention
 (`_frontend_source`), these are asserted against the shipped source directly.
 """
 
@@ -32,8 +32,12 @@ _HTML = _strip_html_comments(APP_HTML)
 
 _LIVE_SHELVES = [
     (
-        "Stocks",
-        "Trade U.S. blue-chip and Chinese A-share stocks, tested hour by hour on real market data.",
+        "Prompted Models",
+        "Write a trading instruction for an AI model and backtest it on market data.",
+    ),
+    (
+        "Open Agents",
+        "Open-source trading agents like AI Hedge Fund. Add them from Community, then customize and backtest.",
     ),
     (
         "For Developers: Connected Agents",
@@ -58,6 +62,8 @@ _RETIRED_SECTION_HEADERS = (
     "Prompting LLMs",
     "U.S. Stock Trading",
     "China A-Share Trading",
+    "Stocks",
+    "Foundation Agents",
 )
 
 _CANONICAL_NO_REAL_MONEY_SENTENCE = (
@@ -65,9 +71,13 @@ _CANONICAL_NO_REAL_MONEY_SENTENCE = (
     "you explicitly connect a brokerage account and turn on live trading."
 )
 
-# Live shelf id suffix -> the AGENT_SHELVES key it corresponds to. Only these
-# two are addressed from JS; the locked rows have no ids at all.
-_SHELF_SUFFIX_TO_KEY = {"Stocks": "stocks", "External": "external"}
+# Live shelf id suffix -> the AGENT_SHELVES key it corresponds to. Locked rows
+# have no ids at all.
+_SHELF_SUFFIX_TO_KEY = {
+    "Prompted": "prompted",
+    "Open": "open",
+    "External": "external",
+}
 
 
 def test_live_shelf_headers_and_subtitles_are_present():
@@ -77,9 +87,8 @@ def test_live_shelf_headers_and_subtitles_are_present():
 
 
 def test_geographic_section_headers_are_retired():
-    """The taxonomy is asset class now. These three named the old axes -- two
-    geographic, one about how the agent decides -- and must not survive as
-    section headers anywhere on the page.
+    """These named the old axes -- geography, asset class, and how the agent
+    decides -- and must not survive as section headers anywhere on the page.
     """
     for header in _RETIRED_SECTION_HEADERS:
         assert f">{header}</h3>" not in _HTML, header
@@ -97,7 +106,7 @@ def test_canonical_no_real_money_sentence_is_present_verbatim():
     assert _CANONICAL_NO_REAL_MONEY_SENTENCE in _HTML
 
 
-def test_two_live_sections_with_distinct_shelf_ids():
+def test_live_sections_with_distinct_shelf_ids():
     """Each live shelf gets its own grid/footer/empty/count id so the render
     loop can address them uniformly: `agentsGrid<Shelf>` /
     `agentsGridFooter<Shelf>` / `agentsEmpty<Shelf>` / `agentsCount<Shelf>`,
@@ -115,7 +124,7 @@ def test_retired_shelf_ids_are_gone():
     """A leftover id would silently double-register an element the render loop
     no longer expects to find.
     """
-    for suffix in ("Builtin", "PromptingLlms", "UsStocks", "CnAshares"):
+    for suffix in ("Builtin", "PromptingLlms", "UsStocks", "CnAshares", "Stocks"):
         assert f'id="agentsGrid{suffix}"' not in _HTML, suffix
         assert f'id="agentsGridFooter{suffix}"' not in _HTML, suffix
         assert f'id="agentsEmpty{suffix}"' not in _HTML, suffix
@@ -143,15 +152,15 @@ def test_locked_shelves_are_rendered_inert_not_empty():
         assert "agentsEmpty" not in section, slug
 
 
-def test_market_chip_container_is_inside_the_stocks_shelf():
-    """The chips filter the Stocks shelf, and they ride #agentsCategories'
+def test_market_chip_container_is_inside_the_prompted_shelf():
+    """The chips filter Prompted Models, and they ride #agentsCategories'
     existing delegated click handler -- so they must live inside that container,
     not in the page toolbar above it.
     """
-    stocks_at = _HTML.index('data-category="stocks"')
-    stocks = _HTML[stocks_at : _HTML.index("</section>", stocks_at)]
-    assert 'id="agentsMarketChips"' in stocks
-    assert _HTML.index('id="agentsCategories"') < stocks_at
+    prompted_at = _HTML.index('data-category="prompted"')
+    prompted = _HTML[prompted_at : _HTML.index("</section>", prompted_at)]
+    assert 'id="agentsMarketChips"' in prompted
+    assert _HTML.index('id="agentsCategories"') < prompted_at
 
 
 # --- C3: shelf rendering (app.js) -------------------------------------------
@@ -176,7 +185,7 @@ def _strip_js_comments(source: str) -> str:
     return re.sub(r"//[^\n]*", "", re.sub(r"/\*.*?\*/", "", source, flags=re.DOTALL))
 
 
-def test_agent_shelves_config_holds_only_the_two_live_shelves():
+def test_agent_shelves_config_holds_only_the_live_shelves():
     """`AGENT_SHELVES` drives rendering, so it lists only shelves that have a
     grid to render into. Crypto and Futures are locked, inert rows in app.html
     with no grid/footer/empty element -- listing them here would force a
@@ -185,18 +194,31 @@ def test_agent_shelves_config_holds_only_the_two_live_shelves():
     whole My Agents render.
     """
     config = js_const("AGENT_SHELVES")
-    for key in ("stocks", "external"):
+    for key in ("prompted", "open", "external"):
         assert f"key: '{key}'" in config, key
-    for absent in ("crypto", "futures", "prompting_llms", "us_stocks", "cn_ashares"):
+    for absent in ("stocks", "crypto", "futures", "prompting_llms", "us_stocks", "cn_ashares"):
         assert f"key: '{absent}'" not in config, absent
 
 
+def test_agent_shelf_key_splits_prompted_from_open():
+    """Hosted runtimes (AI Hedge Fund) must not land on Prompted Models.
+    runtime_type is always truthy, so the hosted check must be an inequality
+    against 'pipeline', never a truthiness test.
+    """
+    body = _strip_js_comments(fn_body("function agentShelfKey("))
+    assert "return 'external'" in body
+    assert "return 'open'" in body
+    assert "return 'prompted'" in body
+    assert "!== 'pipeline'" in body
+    assert "return 'stocks'" not in body
+
+
 def test_market_labels_is_the_only_declaration_of_the_market_names():
-    """One map, four consumers: the Stocks market chips, the Community category
-    chips, the agent-card submeta, and the Configure picker. A second hand-typed
-    copy would let one surface drift from the others -- which is exactly what
-    the retired SHELF_LABELS existed to prevent, so its name must be gone too,
-    not merely unused.
+    """One map, four consumers: the Prompted Models market chips, the Community
+    category chips, the agent-card submeta, and the Configure picker. A second
+    hand-typed copy would let one surface drift from the others -- which is
+    exactly what the retired SHELF_LABELS existed to prevent, so its name must
+    be gone too, not merely unused.
     """
     decl = js_const("MARKET_LABELS")
     assert "us_stocks: 'U.S.'" in decl
@@ -222,10 +244,10 @@ def test_card_submeta_carries_the_decision_axis_the_retired_shelf_used_to():
 def test_render_marketplace_category_chips_is_built_from_the_shared_label_map():
     """The chip row is built from MARKET_LABELS rather than a second hardcoded
     list, plus an 'all' chip that isn't a category at all. It is no longer built
-    from AGENT_SHELVES: Community filters templates by *market*, and there is
-    now one Stocks shelf holding both markets, so the shelf list and the chip
+    from AGENT_SHELVES: Community filters templates by *market*, and
+    Prompted Models holds both markets, so the shelf list and the chip
     list are different things -- built from AGENT_SHELVES this row would emit a
-    single, meaningless "Stocks" chip that matches no template.
+    single, meaningless "Prompted Models" chip that matches no template.
     """
     body = _strip_js_comments(fn_body("function renderMarketplaceCategoryChips()"))
     assert "MARKET_LABELS" in body
@@ -266,13 +288,53 @@ def test_my_foundation_agent_display_name_is_gone():
     assert "My Foundation Agent" not in body
 
 
-def test_my_trading_agent_display_name_is_present():
-    """Display-name rename only -- `ensureDefaultFoundationAgent`'s function
+def test_default_agent_is_named_deepseek_v4_pro():
+    """Display-name only -- `ensureDefaultFoundationAgent`'s function
     name and the guard-key plumbing it calls are untouched (see the prefix
     pin below); only the string handed to the create-agent API call changes.
     """
     body = _strip_js_comments(fn_body("async function ensureDefaultFoundationAgent("))
-    assert "My Trading Agent" in body
+    assert "STARTER_AGENTS" in body
+    assert "My Trading Agent" not in body
+    assert "My Foundation Agent" not in body
+    assert js_string_const("DEFAULT_STARTER_AGENT_NAME") == "DeepSeek V4 Pro"
+
+
+def test_prompted_card_title_follows_the_model_when_name_is_a_catalog_label():
+    """The right-hand Claude card was stored as name=DeepSeek V4 Pro. The
+    subtitle (model) was right; the <h3> was not. Bound titles must come from
+    agentDisplayName, not the raw stored name.
+    """
+    body = _strip_js_comments(fn_body("function renderAgentCards("))
+    assert "agentDisplayName(agent)" in body
+    assert "escapeHtml(agent.name)" not in body
+    display = _strip_js_comments(fn_body("function agentDisplayName("))
+    assert "catalogModelLabels()" in display
+    assert "formatAgentModelLabel" in display
+    align = _strip_js_comments(fn_body("async function alignStarterAgentNames("))
+    assert "agentDisplayName(agent)" in align
+    assert "API.patch" in align
+
+
+def test_ensure_default_fills_missing_starter_models():
+    """An account that already has DeepSeek must still receive GPT-5.5 and
+    Claude — skipping on `builtins.length` left those cards missing after the
+    one-card era.
+    """
+    body = _strip_js_comments(fn_body("async function ensureDefaultFoundationAgent("))
+    assert "STARTER_AGENTS.filter" in body
+    assert "openai/gpt-5.5" in js_const("STARTER_AGENTS")
+    assert "anthropic/claude-sonnet-4-6" in js_const("STARTER_AGENTS")
+
+
+def test_signed_in_provision_guard_includes_account_created_at():
+    """User ids recycle on ephemeral SQLite. Keying only on `u:${id}` made a
+    brand-new account inherit the previous tenant's 'already provisioned'
+    stamp and skip the starter card.
+    """
+    body = _strip_js_comments(fn_body("function defaultAgentProvisionGuardKey("))
+    assert "user.created_at" in body
+    assert "u:${user.id}:${created}" in body
 
 
 def test_default_agent_provision_guard_prefix_is_byte_identical():
@@ -466,6 +528,7 @@ def test_market_chips_filter_the_grid_but_never_the_count_pill():
     body = _strip_js_comments(fn_body("function renderAgentCategories("))
     assert "allAgents.filter(shelf.match).length" in body
     assert "agentMarketKey(a) === agentMarketFilter" in body
+    assert "shelf.key === 'prompted'" in body
 
 
 def test_market_chip_selection_resets_pagination():
@@ -478,20 +541,40 @@ def test_market_chip_selection_resets_pagination():
     assert "applyAgentFilters()" in body
 
 
-def test_stocks_empty_state_distinguishes_search_chip_and_truly_empty():
+def test_prompted_empty_state_distinguishes_search_chip_and_truly_empty():
     """Three distinct cases, deliberately worded apart. Collapsing them would
     tell a user who is mid-search, or who clicked a market chip, that they own
-    no agents at all -- and Stocks is the onboarding surface now (it inherited
-    that role from the retired Prompting LLMs shelf), so its true-empty copy is
+    no agents at all -- and Prompted Models is the onboarding surface now (the
+    auto-provisioned DeepSeek card lands here), so its true-empty copy is
     the create-your-first voice, not the add-from-Community voice.
     """
-    body = _strip_js_comments(fn_body("function stocksEmptyHtml("))
+    body = _strip_js_comments(fn_body("function promptedEmptyHtml("))
     assert "No agents match your search." in body
     assert "You don't have any agents yet." in body
     assert "communityShelfButtonHtml" in body
 
 
-# --- shelf visual treatment (styles.css) ------------------------------------
+def test_open_agents_empty_state_points_at_community():
+    """Open Agents is the hosted-runtime shelf, so its empty copy should send
+    the user to Community (AI Hedge Fund) rather than the create-a-prompted-model
+    onboarding voice.
+    """
+    body = _strip_js_comments(fn_body("function openAgentsEmptyHtml("))
+    assert "No agents match your search." in body
+    assert "AI Hedge Fund" in body
+    assert "communityShelfButtonHtml" in body
+    assert "You don't have any agents yet." not in body
+
+
+def test_agent_card_identity_opens_the_editor():
+    """The card name is the 'click in to edit instructions' path, not only
+    the Configure button. Bound on the identity block so Run Backtest and the
+    overflow menu keep their own handlers.
+    """
+    body = _strip_js_comments(fn_body("function renderAgentCards("))
+    assert "querySelector('.agent-card-identity')" in body
+    assert "window.AgentEditor.open(agent)" in body
+    assert "Open to edit instructions" in body
 
 _STYLES_PATH = Path(__file__).resolve().parents[2] / "frontend" / "styles.css"
 _STYLES = re.sub(
@@ -557,3 +640,11 @@ def test_market_chips_reuse_the_community_chip_rules():
     """
     assert ".marketplace-category-chip {" in _STYLES
     assert not re.search(r"\.agents-market-chip\s*\{", _STYLES)
+
+
+def test_agent_card_identity_is_visibly_clickable():
+    """Clicking the name opens Configure; without a pointer cursor the
+    identity block looks like static chrome.
+    """
+    rule = _rule(".agent-card--status .agent-card-identity")
+    assert "cursor: pointer" in rule

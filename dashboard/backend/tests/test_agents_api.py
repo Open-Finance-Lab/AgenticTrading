@@ -10,6 +10,7 @@ from dashboard.backend.tests.auth_cookies_helpers import _cookie_session_token
 
 from dashboard.backend.app import app
 from dashboard.backend.domain.agents.credential_store import AgentCredentialStore
+from dashboard.backend.domain.agents.defaults import STARTER_AGENTS
 
 
 @pytest.fixture
@@ -309,8 +310,11 @@ def test_claim_account_links_browser_agents(client):
 
     listed = client.get("/api/v1/agents", headers={"Authorization": f"Bearer {token}"})
     assert listed.status_code == 200
-    assert len(listed.json()["agents"]) == 1
-    assert listed.json()["agents"][0]["agent_id"] == agent_id
+    listed_agents = listed.json()["agents"]
+    listed_ids = {a["agent_id"] for a in listed_agents}
+    assert agent_id in listed_ids
+    # Guest card plus the three signup starters.
+    assert len(listed_agents) == 1 + len(STARTER_AGENTS)
 
 
 def test_logout_list_hides_account_bound_agents(client):

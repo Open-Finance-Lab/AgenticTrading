@@ -35,6 +35,40 @@ DEFAULT_STARTER_INSTRUCTION = (
     "everything into one stock."
 )
 
+def starter_agent_description(name: str) -> str:
+    """Card copy for a pre-created prompted-model starter."""
+    return (
+        f"A {name} starter — open it to edit the trading instruction "
+        "and run a backtest."
+    )
+
+
+# Pre-created Prompted Models cards for a brand-new account. Mirrored in
+# ``dashboard/frontend/app.js`` (guest fallback POST). Signup provisions
+# server-side so a stale browser localStorage guard cannot skip the set.
+STARTER_AGENTS: tuple[Dict[str, str], ...] = (
+    {
+        "name": "DeepSeek V4 Pro",
+        "model_name": "deepseek/deepseek-v4-pro",
+        "description": starter_agent_description("DeepSeek V4 Pro"),
+    },
+    {
+        "name": "GPT-5.5",
+        "model_name": "openai/gpt-5.5",
+        "description": starter_agent_description("GPT-5.5"),
+    },
+    {
+        "name": "Claude Sonnet 4.6",
+        "model_name": "anthropic/claude-sonnet-4-6",
+        "description": starter_agent_description("Claude Sonnet 4.6"),
+    },
+)
+
+# First-card aliases: tests and the original single-starter call sites.
+STARTER_AGENT_NAME = STARTER_AGENTS[0]["name"]
+STARTER_AGENT_MODEL = STARTER_AGENTS[0]["model_name"]
+STARTER_AGENT_DESCRIPTION = STARTER_AGENTS[0]["description"]
+
 
 def default_starter_pipeline() -> List[Dict[str, Any]]:
     """The one-step pipeline a new built-in agent starts with."""
