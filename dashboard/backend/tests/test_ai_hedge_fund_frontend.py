@@ -192,7 +192,7 @@ def test_marketplace_cta_is_unified_add_to_my_agents():
 
 def test_hosted_agents_land_on_the_open_agents_shelf():
     """Hosted runtimes (AI Hedge Fund) render under Open Agents, not mixed
-    into Prompted Models. Shelves still resolve through one function, so no
+    into LLMs. Shelves still resolve through one function, so no
     predicate can double-count or drop an agent.
 
     runtime_type is always present and truthy (server-defaulted to 'pipeline'),
@@ -200,7 +200,7 @@ def test_hosted_agents_land_on_the_open_agents_shelf():
     """
     assert "Foundation Agents" not in _APP_HTML
     assert ">Open Agents</h3>" in _APP_HTML
-    assert ">Prompted Models</h3>" in _APP_HTML
+    assert ">LLMs</h3>" in _APP_HTML
     assert ">Prompting LLMs</h3>" not in _APP_HTML
     assert ">U.S. Stock Trading</h3>" not in _APP_HTML
     assert ">Stocks</h3>" not in _APP_HTML

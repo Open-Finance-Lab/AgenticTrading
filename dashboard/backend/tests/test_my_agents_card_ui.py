@@ -192,7 +192,8 @@ def test_submeta_stays_one_line_so_cards_in_a_row_align():
 
 
 def test_agent_card_submeta_exposes_full_line_on_hover():
-    """Ellipsis hides the tail; title keeps the full model · type · market."""
+    """When a market label is shown, title keeps the full string past ellipsis."""
     render = _extract_function(_APP_JS, "renderAgentCards")
     assert 'class="agent-card-submeta" title="' in render
     assert "overflow-wrap: anywhere" not in render
+    assert "Hosted AI" not in render
