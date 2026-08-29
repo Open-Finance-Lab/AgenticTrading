@@ -2,6 +2,8 @@
 
 from datetime import datetime
 
+import pytest
+
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     apply_prompt_patches,
     is_last_bar_of_trading_day,
@@ -15,6 +17,7 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
 
 def test_pipeline_output_to_decision_orders():
     parsed = {
+        "actions": [],
         "orders": [
             {"symbol": "AAPL", "side": "buy", "qty": 10, "reason": "momentum"},
             {"symbol": "MSFT", "side": "hold", "qty": 0},
@@ -41,6 +44,56 @@ def test_pipeline_output_to_decision_actions_passthrough():
     }
     decision = pipeline_output_to_decision(parsed)
     assert decision == parsed
+
+
+def test_pipeline_output_to_decision_risk_actions():
+    decision = pipeline_output_to_decision(
+        {
+            "risk_actions": [
+                {
+                    "symbol": "AAPL",
+                    "action": "stop_loss",
+                    "size_pct": 0.5,
+                    "reason": "risk limit",
+                }
+            ]
+        }
+    )
+
+    assert decision is not None
+    assert decision["actions"] == [
+        {
+            "action": "sell",
+            "symbol": "AAPL",
+            "confidence": 0.8,
+            "reasoning": "risk limit",
+            "position_size": 50,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "parsed",
+    [{"actions": []}, {"orders": []}, {"risk_actions": []}],
+)
+def test_pipeline_output_to_decision_empty_envelope_is_hold(parsed):
+    assert pipeline_output_to_decision(parsed) == {"actions": []}
+
+
+@pytest.mark.parametrize(
+    "parsed",
+    [
+        None,
+        {},
+        {"orders": None},
+        {"orders": "not-a-list"},
+        {"orders": ["not-an-order"]},
+        {"actions": [], "orders": ["not-an-order"]},
+        {"orders": [], "risk_actions": ["not-a-risk-action"]},
+    ],
+)
+def test_pipeline_output_to_decision_rejects_invalid_payload(parsed):
+    assert pipeline_output_to_decision(parsed) is None
 
 
 def test_build_step_prompt_includes_upstream_outputs():
