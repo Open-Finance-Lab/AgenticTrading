@@ -1,4 +1,4 @@
-"""Guards for the Agent Marketplace living on the Community page.
+"""Guards for the Agent Supermarket living on the Community page.
 
 The marketplace moved out of Playground (where it was a subtab) and became a
 section of Community. Nothing about that move is enforceable at runtime -- the
@@ -130,9 +130,9 @@ def test_community_page_header_matches_the_nav_button():
     assert title, "#communityView has no page title"
     assert title.group(1).strip() == label
 
-    # The marketplace is a section *within* that page, so it must not also claim
+    # The supermarket is a section *within* that page, so it must not also claim
     # the page-level heading.
-    assert 'class="marketplace-section-title">Agent Marketplace<' in view
+    assert 'class="marketplace-section-title">Agent Supermarket<' in view
     assert view.count('class="page-title"') == 1
 
 

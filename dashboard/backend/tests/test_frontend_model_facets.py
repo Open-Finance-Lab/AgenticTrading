@@ -487,6 +487,8 @@ const closedHasBadge = closedHtml.includes('marketplace-licence-badge');
 // Strip only the exact badge span (proves it was actually there) and
 // normalise only the one known-legitimate difference (the model label) --
 // a blanket strip would hide any other marker instead of catching it.
+// Global replace: the label is in both the submeta title attribute and the
+// visible text; String.replace(string) would only hit the first.
 const openWithoutBadge = openHtml.split(BADGE).join('')
   .split('Powered by DeepSeek').join('POWERED_BY_MODEL');
 const closedNormalized = closedHtml

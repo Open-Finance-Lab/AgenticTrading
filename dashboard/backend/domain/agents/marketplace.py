@@ -1,4 +1,4 @@
-"""Open agent templates for the Agent Marketplace.
+"""Open agent templates for the Agent Supermarket.
 
 Templates are defined in ``dashboard/config/marketplace.json`` so baseline open
 agents can be added without schema migrations. The listing is public; cloning

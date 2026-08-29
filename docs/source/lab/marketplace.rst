@@ -1,11 +1,11 @@
-Agent Marketplace
+Agent Supermarket
 =================
 
-The **Agent Marketplace** is a catalog of ready-made agent templates. Add one to
+The **Agent Supermarket** is a catalog of ready-made agent templates. Add one to
 **My Agents** (see :ref:`my-agents-sections`), then edit, backtest, or run it
 like any agent you built yourself.
 
-Open the dashboard, go to **Community**, and use the **Agent Marketplace**.
+Open the dashboard, go to **Community**, and use the **Agent Supermarket**.
 Browsing needs no account.
 
 
