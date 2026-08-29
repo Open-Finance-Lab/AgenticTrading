@@ -23,6 +23,10 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     extract_token_usage,
     parse_llm_response,
 )
+from dashboard.backend.infrastructure.llm.execution.errors import (
+    ExecutionErrorCategory,
+    LLMExecutionError,
+)
 
 POST_TRADE_PRESET_KEY = "post_trade_analysis"
 
@@ -459,6 +463,25 @@ def recombine_pipeline(
     return list(decision_steps or []) + list(post_trade_steps or [])
 
 
+def _create_pipeline_response(
+    client,
+    *,
+    model: str,
+    prompt: str,
+    reasoning_effort: Optional[str] = None,
+):
+    """Create one pipeline request, optionally overriding model reasoning."""
+    request = {
+        "model": model,
+        "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "system": PIPELINE_SYSTEM_PROMPT,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if reasoning_effort is not None:
+        request["reasoning_effort"] = reasoning_effort
+    return client.messages.create(**request)
+
+
 def run_pipeline_decision(
     client,
     *,
@@ -480,6 +503,7 @@ def run_pipeline_decision(
     total_out = 0
     llm_calls = 0
     last_parsed: Optional[Dict[str, Any]] = None
+    request_model = model or LLM_MODEL_NAME
 
     for index, step in enumerate(decision_steps):
         if not isinstance(step, dict):
@@ -496,12 +520,29 @@ def run_pipeline_decision(
         label = step.get("label") or f"Step {index + 1}"
         print(f"\n🔗 Pipeline step {index + 1}/{len(decision_steps)}: {label}")
 
-        response = client.messages.create(
-            model=model or LLM_MODEL_NAME,
-            max_tokens=DEFAULT_MAX_OUTPUT_TOKENS,
-            system=PIPELINE_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": prompt}],
-        )
+        try:
+            response = _create_pipeline_response(
+                client,
+                model=request_model,
+                prompt=prompt,
+            )
+        except LLMExecutionError as first_error:
+            if first_error.category is not ExecutionErrorCategory.RESPONSE_INVALID:
+                raise
+            try:
+                response = _create_pipeline_response(
+                    client,
+                    model=request_model,
+                    prompt=prompt,
+                    reasoning_effort="none",
+                )
+            except TypeError as retry_error:
+                # Older client/test doubles may reject only the optional
+                # keyword. Keep the original safe category in that case, but
+                # preserve unrelated client TypeErrors for diagnostics.
+                if "reasoning_effort" in str(retry_error):
+                    raise first_error from retry_error
+                raise
         llm_calls += 1
         in_delta, out_delta = extract_token_usage(response)
         total_in += in_delta
