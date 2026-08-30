@@ -42,7 +42,12 @@ import matplotlib
 matplotlib.use("Agg")
 
 from dashboard.backend.database import db, DB_PATH
-from dashboard.backend.paths import DASHBOARD_DIR, REPO_ROOT, SCRIPTS_DIR
+from dashboard.backend.paths import (
+    DASHBOARD_DIR,
+    REPO_ROOT,
+    SCRIPTS_DIR,
+    resolve_python_exe,
+)
 from dashboard.backend.middleware import get_session_id_from_request
 from dashboard.backend.infrastructure.market_data.provider import (
     ALPACA,
@@ -867,7 +872,6 @@ def run_backtest_background(
     baseline_pipeline = _normalized_pipeline(pipeline) or _agent_pipeline_snapshot(agent_id)
     try:
         import subprocess
-        import sys
         import tempfile
 
         profile = get_market_profile(data_source, universe)
@@ -902,22 +906,17 @@ def run_backtest_background(
         script_path = SCRIPTS_DIR / "backtest_hourly_agent.py"
         db_path = DB_PATH
         venv_dir = REPO_ROOT / ".venv"
-        
+
         # Determine the Python executable to use (from venv if available).
         # Windows venvs put the interpreter at Scripts\python.exe, not
         # bin/python3 -- check both layouts rather than assuming Unix.
-        if venv_dir.exists():
-            win_py = venv_dir / "Scripts" / "python.exe"
-            unix_py = venv_dir / "bin" / "python3"
-            if win_py.exists():
-                python_exe = str(win_py)
-            elif unix_py.exists():
-                python_exe = str(unix_py)
-            else:
-                python_exe = sys.executable
+        python_exe = resolve_python_exe(venv_dir)
+        venv_has_interpreter = (venv_dir / "Scripts" / "python.exe").exists() or (
+            venv_dir / "bin" / "python3"
+        ).exists()
+        if venv_has_interpreter:
             print(f"🐍 Using venv Python: {python_exe}", flush=True)
         else:
-            python_exe = sys.executable
             print(f"🐍 Using system Python: {python_exe}", flush=True)
         
         # Check database directory

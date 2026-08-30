@@ -31,7 +31,7 @@ from dashboard.backend.infrastructure.llm.validator import (
     parse_actions_payload,
 )
 from dashboard.backend.infrastructure.llm.providers import openrouter
-from dashboard.backend.paths import REPO_ROOT
+from dashboard.backend.paths import REPO_ROOT, resolve_env_path
 
 DEFAULT_MODEL_NAME = openrouter.DEFAULT_MODEL
 DEFAULT_MODEL_PROVIDER = "OpenRouter"
@@ -100,8 +100,7 @@ class AiHedgeFundOutputError(AiHedgeFundRuntimeError):
 
 
 def _resolve_path(value: str) -> Path:
-    path = Path(value).expanduser()
-    return path if path.is_absolute() else REPO_ROOT / path
+    return resolve_env_path(value, base=REPO_ROOT)
 
 
 def resolve_step_timeout_seconds(

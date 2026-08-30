@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 from typing import List, Dict, Optional, Any
 
-from dashboard.backend.paths import DEFAULT_DB_PATH, REPO_ROOT
+from dashboard.backend.paths import DEFAULT_DB_PATH, REPO_ROOT, resolve_env_path
 from dashboard.backend.db_url import describe_database_url
 
 # Use persistent disk path if set (Render), otherwise local dashboard storage path.
@@ -22,9 +22,7 @@ from dashboard.backend.db_url import describe_database_url
 # wrong database nested at dashboard/dashboard/....
 _env_db_path = os.getenv("DATABASE_PATH")
 if _env_db_path:
-    DB_PATH = Path(_env_db_path)
-    if not DB_PATH.is_absolute():
-        DB_PATH = (REPO_ROOT / DB_PATH).resolve()
+    DB_PATH = resolve_env_path(_env_db_path, base=REPO_ROOT)
 else:
     DB_PATH = DEFAULT_DB_PATH
 
