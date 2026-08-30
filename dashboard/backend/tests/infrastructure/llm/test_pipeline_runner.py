@@ -26,8 +26,12 @@ from dashboard.backend.infrastructure.llm.pipeline_runner import (
 
 
 class _PipelineResponse:
-    def __init__(self, text, input_tokens=7, output_tokens=3, stop_reason=None):
-        self.content = [SimpleNamespace(type="text", text=text)]
+    def __init__(
+        self, text, input_tokens=7, output_tokens=3, stop_reason=None, content=None
+    ):
+        if content is None:
+            content = [SimpleNamespace(type="text", text=text)]
+        self.content = content
         self.usage = SimpleNamespace(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -40,8 +44,12 @@ class _ThinkingOnlyResponse(_PipelineResponse):
     """A reasoning model that spent the whole reply on a thinking block."""
 
     def __init__(self, input_tokens=5, output_tokens=7):
-        super().__init__("", input_tokens=input_tokens, output_tokens=output_tokens)
-        self.content = [SimpleNamespace(type="thinking", thinking="...")]
+        super().__init__(
+            "",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            content=[SimpleNamespace(type="thinking", thinking="...")],
+        )
 
 
 def _truncated_json(pad: int = 560) -> str:
