@@ -278,6 +278,34 @@ def test_run_pipeline_decision_retries_truncated_json_once():
     assert client.messages.calls[0]["messages"] == client.messages.calls[1]["messages"]
 
 
+def test_run_pipeline_decision_retries_short_reasoning_truncation_once():
+    """A reasoning-heavy response can be truncated below the old 512-char floor."""
+    truncated = (
+        '{"orders": [{"symbol": "BA", "side": "hold", "qty": 2, '
+        '"order_type": "market", "limit_price": null, "reason": "Experi'
+    )
+    assert len(truncated) >= 64
+    client = _PipelineClient(
+        [
+            _PipelineResponse(truncated, input_tokens=13, output_tokens=2000),
+            _PipelineResponse('{"orders": []}', input_tokens=11, output_tokens=4),
+        ]
+    )
+
+    decision, usage, calls, _steps = run_pipeline_decision(
+        client,
+        pipeline=_PIPELINE,
+        market_snapshot={"top_signals": {}},
+        model="qwen/qwen3.7-plus",
+    )
+
+    assert decision == {"actions": []}
+    assert usage == (24, 2004)
+    assert calls == 2
+    assert len(client.messages.calls) == 2
+    assert client.messages.calls[1]["max_tokens"] == RECOVERY_MAX_OUTPUT_TOKENS
+
+
 def test_run_pipeline_decision_does_not_retry_short_malformed_json():
     client = _PipelineClient([_PipelineResponse("{\"orders\": [", output_tokens=12)])
 

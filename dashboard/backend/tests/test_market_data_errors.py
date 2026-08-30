@@ -70,3 +70,25 @@ def test_cli_entrypoints_translate_the_error_to_an_exit_code():
         assert "MarketDataUnavailableError" in source, (
             f"{name} must translate MarketDataUnavailableError to an exit code"
         )
+
+
+def test_backtest_cli_closes_pools_at_exit(monkeypatch):
+    """Short-lived backtest CLIs must return pooled workers before exit."""
+    from pathlib import Path
+
+    from dashboard.backend import db_pool
+    from dashboard.scripts import backtest_hourly_agent
+
+    calls = []
+    monkeypatch.setattr(db_pool, "close_all_pools", lambda: calls.append(True))
+
+    backtest_hourly_agent._close_pools()
+
+    assert calls == [True]
+
+    scripts_dir = Path(__file__).resolve().parents[2] / "scripts"
+    custom_source = (scripts_dir / "backtest_custom_algo.py").read_text(
+        encoding="utf-8"
+    )
+    assert "def _close_pools" in custom_source
+    assert "_close_pools()" in custom_source

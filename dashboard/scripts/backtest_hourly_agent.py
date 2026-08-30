@@ -526,15 +526,27 @@ def main():
     print(f"\n📊 Dashboard: python3 dashboard/backend/app.py → http://localhost:8000")
 
 
+def _close_pools() -> None:
+    """Close shared Postgres pools before this short-lived CLI exits."""
+    # Avoid importing psycopg on paths that never selected a Postgres store.
+    # The registry is already loaded when a pooled store was used.
+    pool_module = sys.modules.get("dashboard.backend.db_pool")
+    if pool_module is not None:
+        pool_module.close_all_pools()
+
+
 if __name__ == "__main__":
     # Reached through the module alias bound at the top rather than a second
     # `from` import of the same module: importing one module both ways in one
     # file is its own CodeQL finding (py/import-and-import-from), and the alias
     # already exists.
     try:
-        main()
-    except _alpaca_bars.MarketDataUnavailableError as exc:
-        # Library code raises (so server threads can catch it); the CLI
-        # boundary is where the process exit belongs.
-        print(f"❌ {exc}")
-        sys.exit(1)
+        try:
+            main()
+        except _alpaca_bars.MarketDataUnavailableError as exc:
+            # Library code raises (so server threads can catch it); the CLI
+            # boundary is where the process exit belongs.
+            print(f"❌ {exc}")
+            sys.exit(1)
+    finally:
+        _close_pools()
