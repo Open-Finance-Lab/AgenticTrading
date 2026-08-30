@@ -582,6 +582,13 @@ def test_execute_enabled_is_read_per_call(monkeypatch):
     assert live_service.execute_enabled() is False
 
 
+def test_execute_enabled_accepts_on(monkeypatch):
+    """Aligns with alpaca_live_service.execute_enabled()'s truthy set, and with
+    leaderboard/service.py's kill-switch parsing, which also accepts 'on'."""
+    monkeypatch.setenv("ROBINHOOD_EXECUTE", "on")
+    assert live_service.execute_enabled() is True
+
+
 def test_live_run_applies_the_current_cap(monkeypatch):
     """The cap that reaches the risk gate is the one set *now*."""
     client = FakeMCPClient(price=100.0)

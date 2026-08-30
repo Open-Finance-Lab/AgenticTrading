@@ -21,6 +21,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from dashboard.backend.api.v2.models import validate_actions
+from dashboard.backend.execution import _live_common
 from dashboard.backend.infrastructure.brokers.alpaca_live import (
     AlpacaLiveCredentialsError,
     AlpacaLiveTradingClient,
@@ -75,41 +77,27 @@ def max_order_usd() -> float:
 
 
 def _utcnow_iso() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    return _live_common.utcnow_iso()
 
 
 def _audit_sync(event: str, payload: Dict[str, Any]) -> None:
     """Append one audit record. Never raises — an unwritable audit dir must not
     abort a live run mid-flight."""
-    try:
-        AUDIT_DIR.mkdir(parents=True, exist_ok=True)
-        record = {"ts": _utcnow_iso(), "event": event, **payload}
-        day = datetime.now(timezone.utc).strftime("%Y%m%d")
-        path = AUDIT_DIR / f"audit_{day}.jsonl"
-        with path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record, default=str) + "\n")
-    except Exception:
-        logger.exception("Alpaca live audit write failed for event %s", event)
+    _live_common.audit_sync(AUDIT_DIR, logger, "Alpaca live", event, payload)
 
 
 async def _audit(event: str, payload: Dict[str, Any]) -> None:
-    await asyncio.to_thread(_audit_sync, event, payload)
+    await _live_common.audit(AUDIT_DIR, logger, "Alpaca live", event, payload)
 
 
 def _floor_quantity(qty: float) -> float:
     """Floor to 4 decimal places. Rounding *down* matters: round-half-up could
     push the resulting notional back above the USD cap that produced it."""
-    try:
-        value = float(qty)
-    except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(value) or value <= 0:
-        return 0.0
-    return math.floor(value * 10000.0) / 10000.0
+    return _live_common.floor_quantity(qty)
 
 
 def _rejection(order: Dict[str, Any], reason: str, detail: str) -> Dict[str, Any]:
-    return {"order": order, "reason": reason, "detail": detail}
+    return _live_common.rejection(order, reason, detail)
 
 
 def risk_gate_orders(
@@ -308,8 +296,12 @@ async def _execute_live_run(
         await _audit("decision_failed", {"run_id": run_id, "error": str(exc)[:200]})
         raise
 
-    actions = llm_result.get("actions") or []
-    await _audit("decision", {"run_id": run_id, "actions": actions})
+    raw_actions = llm_result.get("actions") or []
+    actions, rejected_actions = validate_actions(raw_actions)
+    await _audit(
+        "decision_validated",
+        {"run_id": run_id, "actions": actions, "rejected": rejected_actions},
+    )
 
     cap_usd = max_order_usd()
     orders, rejections = risk_gate_orders(_actions_to_orders(actions), prices, holdings, cap_usd)
@@ -317,7 +309,8 @@ async def _execute_live_run(
         await _audit("orders_rejected", {"run_id": run_id, "max_order_usd": cap_usd, "rejections": rejections})
 
     executions: List[Dict[str, Any]] = []
-    should_execute = execute_enabled() and not dry_run
+    execute_flag = execute_enabled()
+    should_execute = execute_flag and not dry_run
 
     for order in orders:
         if not should_execute:
@@ -341,11 +334,12 @@ async def _execute_live_run(
     return {
         "run_id": run_id,
         "status": "completed",
-        "dry_run": dry_run or not execute_enabled(),
-        "execute_enabled": execute_enabled(),
+        "dry_run": not should_execute,
+        "execute_enabled": execute_flag,
         "max_order_usd": cap_usd,
         "account": account,
         "decision": {"actions": actions},
+        "rejected_actions": rejected_actions,
         "orders_reviewed": orders,
         "rejected_orders": rejections,
         "executions": executions,

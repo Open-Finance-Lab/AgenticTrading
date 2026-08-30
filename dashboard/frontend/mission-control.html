@@ -16,7 +16,7 @@
   .mc-pill { display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 100px; font-size: 12px; font-weight: 500; border: 1px solid var(--border-color); }
   .mc-pill.armed { background: rgba(255, 65, 65, 0.12); color: var(--danger-color); border-color: rgba(255, 65, 65, 0.3); }
   .mc-pill.safe { background: rgba(0, 200, 81, 0.1); color: var(--success-color); border-color: rgba(0, 200, 81, 0.3); }
-  .mc-pill.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: inline-block; }
+  .mc-pill.dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; display: inline-block; padding: 0; border: 0; }
   .mc-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
   @media (max-width: 900px) { .mc-columns { grid-template-columns: 1fr; } }
   .mc-column-label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; margin: 0 0 12px; padding-bottom: 8px; border-bottom: 2px solid; }
@@ -78,6 +78,13 @@
 </div>
 
 <script>
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
 function money(v) {
   if (v === null || v === undefined) return '—';
   return '$' + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -97,7 +104,7 @@ function renderWallet(container, snapshot, kind) {
       ? 'Set <code>ALPACA_LIVE_API_KEY</code> / <code>ALPACA_LIVE_SECRET_KEY</code> in <code>dashboard/.env</code> to connect a real account.'
       : 'Set <code>ALPACA_API_KEY</code> / <code>ALPACA_SECRET_KEY</code> in <code>dashboard/.env</code> to connect a paper account.';
     container.innerHTML = '<p class="mc-not-configured">Not connected. ' + hint + '</p>' +
-      (snapshot.error ? '<p class="mc-error">' + snapshot.error + '</p>' : '');
+      (snapshot.error ? '<p class="mc-error">' + escapeHtml(snapshot.error) + '</p>' : '');
     return;
   }
   const a = snapshot.account;
@@ -123,7 +130,7 @@ function renderHoldings(container, snapshot) {
   positions.sort((a, b) => (b.market_value || 0) - (a.market_value || 0));
   let rows = positions.map(p =>
     '<tr>' +
-      '<td>' + p.symbol + '</td>' +
+      '<td>' + escapeHtml(p.symbol) + '</td>' +
       '<td>' + Number(p.qty).toLocaleString(undefined, { maximumFractionDigits: 4 }) + '</td>' +
       '<td>' + money(p.current_price) + '</td>' +
       '<td>' + money(p.market_value) + '</td>' +
@@ -152,7 +159,12 @@ function renderStatusRow(data) {
 
 async function loadOverview() {
   try {
-    const res = await fetch('/api/v1/mission-control/overview');
+    const res = await fetch('/api/v1/mission-control/overview', { credentials: 'include' });
+    if (res.status === 401 || res.status === 403) {
+      document.getElementById('mcStatusRow').innerHTML =
+        '<span class="mc-error">Sign in as an admin to view Mission Control.</span>';
+      return;
+    }
     const data = await res.json();
     renderStatusRow(data);
     renderWallet(document.getElementById('mcRealWallet'), data.live, 'live');
@@ -161,7 +173,7 @@ async function loadOverview() {
     renderHoldings(document.getElementById('mcPaperHoldings'), data.paper);
     document.getElementById('mcTimestamp').textContent = 'Updated ' + new Date(data.timestamp).toLocaleTimeString();
   } catch (e) {
-    document.getElementById('mcStatusRow').innerHTML = '<span class="mc-error">Failed to load: ' + e + '</span>';
+    document.getElementById('mcStatusRow').innerHTML = '<span class="mc-error">Failed to load: ' + escapeHtml(e) + '</span>';
   }
 }
 

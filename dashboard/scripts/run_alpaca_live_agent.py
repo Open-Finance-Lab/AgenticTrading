@@ -21,10 +21,19 @@ import argparse
 import asyncio
 import json
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
+
+DASHBOARD_DIR = Path(__file__).resolve().parent.parent
 
 from _bootstrap import ensure_repo_root
 
 ensure_repo_root()
+
+# Load secrets (ALPACA_LIVE_API_KEY, etc.) from dashboard/.env then repo root .env.
+load_dotenv(DASHBOARD_DIR / ".env")
+load_dotenv(DASHBOARD_DIR.parent / ".env")
 
 from dashboard.backend.execution import alpaca_live_service as svc  # noqa: E402
 

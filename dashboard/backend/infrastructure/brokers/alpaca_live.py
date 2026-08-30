@@ -18,9 +18,11 @@ from typing import Any, Dict, List, Optional
 from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import OrderSide, TimeInForce
 from alpaca.trading.requests import MarketOrderRequest
+from alpaca.data.enums import DataFeed
 from alpaca.data.historical import StockHistoricalDataClient
 from alpaca.data.requests import StockLatestQuoteRequest
 
+from dashboard.backend.infrastructure.market_data.alpaca_bars import resolve_alpaca_data_feed
 from dashboard.backend.paths import CREDENTIALS_DIR
 
 
@@ -129,13 +131,16 @@ class AlpacaLiveTradingClient:
             return []
 
     def get_quotes(self, symbols: List[str]) -> Dict[str, float]:
-        """Return ``{symbol: last_trade_price}`` for the given symbols. Missing or
-        unpriceable symbols are simply absent from the result — callers must treat
-        an absent symbol as "no usable quote", never as price 0."""
+        """Return ``{symbol: ask_price or bid_price}`` for the given symbols. Missing
+        or unpriceable symbols are simply absent from the result — callers must
+        treat an absent symbol as "no usable quote", never as price 0."""
         if not symbols:
             return {}
+        # Resolved (and validated) outside the try/except below: an unsupported
+        # ALPACA_DATA_FEED must raise loudly, not be swallowed as "no quotes".
+        feed = resolve_alpaca_data_feed(DataFeed)
         try:
-            request = StockLatestQuoteRequest(symbol_or_symbols=symbols)
+            request = StockLatestQuoteRequest(symbol_or_symbols=symbols, feed=feed)
             quotes = self._data.get_stock_latest_quote(request)
         except Exception as e:
             print(f"Exception in AlpacaLiveTradingClient.get_quotes: {e}")
@@ -152,7 +157,13 @@ class AlpacaLiveTradingClient:
         """Submit a live market order. Callers must have already run this order
         through the risk gate in ``alpaca_live_service`` — this method performs
         no clamping or sizing of its own."""
-        order_side = OrderSide.BUY if side.lower() == "buy" else OrderSide.SELL
+        side_lower = side.lower()
+        if side_lower == "buy":
+            order_side = OrderSide.BUY
+        elif side_lower == "sell":
+            order_side = OrderSide.SELL
+        else:
+            raise ValueError(f"Unknown order side {side!r}; expected 'buy' or 'sell'.")
         request = MarketOrderRequest(
             symbol=symbol,
             qty=qty,
@@ -173,5 +184,8 @@ class AlpacaLiveTradingClient:
                 "qty": str(order.qty),
                 "side": str(order.side),
                 "submitted_at": str(order.submitted_at),
+                "filled_qty": str(order.filled_qty) if order.filled_qty is not None else None,
+                "filled_avg_price": str(order.filled_avg_price) if order.filled_avg_price is not None else None,
+                "filled_at": str(order.filled_at) if order.filled_at is not None else None,
             },
         )

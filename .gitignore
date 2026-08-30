@@ -245,6 +245,7 @@ FinAgents/agent_pools/backtest_agent/qlib_data/
 # Local Alpaca credentials (use credentials/alpaca.json.example as template)
 credentials/*
 !credentials/alpaca.json.example
+!credentials/alpaca_live.json.example
 !credentials/README.md
 
 # claude-mem auto-generates per-folder recall stubs named CLAUDE.md in every

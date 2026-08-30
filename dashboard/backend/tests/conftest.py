@@ -2,16 +2,15 @@
 
 Phase 0.5 — Isolate the test database.
 
-The backend resolves its SQLite path at *import time*::
-
-    # database.py
-    DB_PATH = Path(os.getenv("DATABASE_PATH", str(DEFAULT_DB_PATH)))
-    ...
-    db = BacktestDatabase()  # built once, against DB_PATH
-
-and every store/repository reads ``DB_PATH`` / ``DEFAULT_DB_PATH`` from that same
-module. So pointing ``DATABASE_PATH`` at a fresh temporary file *before any
-backend module is imported* isolates the entire data layer in one place.
+The backend resolves its SQLite path at *import time*: ``database.py`` reads
+``DATABASE_PATH`` from the environment and, if set, resolves it with
+``paths.resolve_env_path`` (expands ``~``, joins a relative value onto the
+repo root, resolves once); otherwise it falls back to ``DEFAULT_DB_PATH``.
+``db = BacktestDatabase()`` is then built once against that resolved
+``DB_PATH``, and every store/repository reads ``DB_PATH`` / ``DEFAULT_DB_PATH``
+from that same module. So pointing ``DATABASE_PATH`` at a fresh temporary file
+*before any backend module is imported* isolates the entire data layer in one
+place.
 
 This module is imported by pytest before the test modules in this directory, so
 setting the environment variable here (at import time, not in a fixture)
@@ -90,6 +89,14 @@ os.environ.pop("MAX_LEGACY_ACTIVE_PER_SESSION", None)
 os.environ.pop("MAX_LEGACY_ACTIVE_GLOBAL", None)
 os.environ.pop("ALPACA_HTTP_TIMEOUT_SECONDS", None)
 os.environ.pop("ALPACA_HTTP_CONNECT_TIMEOUT_SECONDS", None)
+# Real-money Alpaca live-trading credentials/gates: an ambient value in the
+# developer's shell must never make a test suite run reach for a live broker
+# or think execution is armed. Same rationale as every other money/security
+# var stripped in this file.
+os.environ.pop("ALPACA_LIVE_API_KEY", None)
+os.environ.pop("ALPACA_LIVE_SECRET_KEY", None)
+os.environ.pop("ALPACA_LIVE_EXECUTE", None)
+os.environ.pop("ALPACA_MAX_ORDER_USD", None)
 os.environ.pop("LEGACY_SESSION_RETENTION_SECONDS", None)
 # Read once at import into users.DEFAULT_MAX_CONCURRENT_BACKTESTS, which every
 # entitlement default and every per-account cap test resolves through.
