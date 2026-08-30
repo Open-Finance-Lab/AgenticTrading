@@ -421,7 +421,7 @@ def execute_algo(
         "end_date": end,
         "message": (
             f"Real backtest started ({start} → {end}). "
-            "Uses Alpaca hourly bars + Claude hourly decisions; usually takes 3–10 minutes."
+            "Uses Alpaca hourly bars + Claude hourly decisions; multi-step runs can take several minutes."
         ),
     }
 

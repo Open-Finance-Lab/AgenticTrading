@@ -1156,14 +1156,12 @@ def run_backtest_background(
         print("✋ Backtest background thread finished", flush=True)
 
 
-# The backtest subprocess budget. 30 minutes is right for a pipeline run, whose
-# per-step LLM call is seconds long. A hosted run instead spends one *upstream
-# subprocess* per trading day, each allowed AI_HEDGE_FUND_TIMEOUT_SECONDS -- so
-# a fixed parent cap silently becomes the binding constraint (1800s over ~21
-# decision days is ~85s per step, not the 300s configured) and kills the child
-# mid-run with no partial results. Size the parent from the same per-step number
-# the runtime reads, so the inner timeout is what fires.
-PIPELINE_SUBPROCESS_TIMEOUT_SECONDS = 1800
+# The dashboard pipeline parent has a bounded 60-minute wall-clock budget. A
+# hosted run instead spends one *upstream subprocess* per trading day, each
+# allowed AI_HEDGE_FUND_TIMEOUT_SECONDS, and is sized dynamically below.
+# Hosted runtimes below retain their own per-decision sizing; this fixed value
+# only applies to the normal pipeline subprocess.
+PIPELINE_SUBPROCESS_TIMEOUT_SECONDS = 3600
 # Data load, baseline generation and persistence sit outside the decision loop.
 SUBPROCESS_TIMEOUT_OVERHEAD_SECONDS = 600
 # Ceiling, so a long date range cannot pin a worker thread indefinitely.

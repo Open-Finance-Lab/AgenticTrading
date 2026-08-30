@@ -571,15 +571,33 @@ def test_run_panel_prefers_step_percent_over_the_elapsed_guess():
 
 def test_run_panel_falls_back_to_the_elapsed_guess():
     panel = _run_panel("{elapsedSeconds: 60, message: 'x'}")
-    assert panel["width"] == "10%"  # 60 / 600
+    assert panel["width"] == "2%"  # 60 / 3600
 
 
-def _resolve_entry(map_js: str, live_run_id: str, progress_js: str, agent: str) -> dict:
+def test_frontend_backtest_observation_window_is_sixty_minutes():
+    assert (
+        _node(
+            js_const("BACKTEST_POLL_MAX_SECONDS")
+            + "console.log(JSON.stringify(BACKTEST_POLL_MAX_SECONDS));"
+        )
+        == 3600
+    )
+
+
+def _resolve_entry(
+    map_js: str,
+    live_run_id: str,
+    progress_js: str,
+    agent: str,
+    now_ms: int | None = None,
+) -> dict:
     """Run the real getAgentBacktestRunning against a stubbed running map."""
+    clock = f"Date.now = () => {now_ms};" if now_ms is not None else ""
     script = "\n".join(
         [
             js_const("BACKTEST_POLL_MAX_SECONDS"),
             f"const MAP = {map_js};",
+            clock,
             "function readRunningBacktests() { return MAP; }",
             "function clearAgentBacktestRunning(id) { delete MAP[id]; }",
             f"let liveBacktestRunId = {live_run_id};",
@@ -587,6 +605,23 @@ def _resolve_entry(map_js: str, live_run_id: str, progress_js: str, agent: str) 
             "const liveBacktestProgressByRunId = Object.create(null);",
             fn_body("function getAgentBacktestRunning("),
             f"console.log(JSON.stringify(getAgentBacktestRunning('{agent}')));",
+        ]
+    )
+    return _node(script)
+
+
+def _list_entries(map_js: str, now_ms: int) -> dict:
+    """Run the real listRunningBacktests helper with a deterministic clock."""
+    script = "\n".join(
+        [
+            js_const("BACKTEST_POLL_MAX_SECONDS"),
+            f"const MAP = {map_js};",
+            f"Date.now = () => {now_ms};",
+            "function readRunningBacktests() { return MAP; }",
+            "function writeRunningBacktests(value) { WRITTEN = value; }",
+            "let WRITTEN = null;",
+            fn_body("function listRunningBacktests("),
+            "console.log(JSON.stringify({runs: listRunningBacktests(), map: MAP, written: WRITTEN}));",
         ]
     )
     return _node(script)
@@ -627,6 +662,40 @@ def test_progress_is_withheld_when_no_run_is_identified():
     assert entry.get("step") is None
 
 
+def test_running_entry_is_retained_until_the_sixty_minute_ceiling():
+    entry = _resolve_entry(
+        "{'agent-A': {runId: 'run-1', startedAt: 0}}",
+        "'run-1'",
+        "null",
+        "agent-A",
+        now_ms=3_599_000,
+    )
+    assert entry["runId"] == "run-1"
+    assert entry["elapsedSeconds"] == 3599
+
+
+def test_running_entry_is_cleared_after_the_sixty_minute_ceiling():
+    entry = _resolve_entry(
+        "{'agent-A': {runId: 'run-1', startedAt: 0}}",
+        "'run-1'",
+        "null",
+        "agent-A",
+        now_ms=3_600_001,
+    )
+    assert entry is None
+
+
+def test_running_list_sweeps_only_entries_past_the_ceiling():
+    result = _list_entries(
+        "{'keep': {runId: 'run-keep', startedAt: 1},"
+        " 'drop': {runId: 'run-drop', startedAt: -1}}",
+        now_ms=3_600_000,
+    )
+    assert [run["runId"] for run in result["runs"]] == ["run-keep"]
+    assert "drop" not in result["map"]
+    assert result["written"] is not None
+
+
 def test_progress_store_is_written_before_the_card_repaints():
     """Same poll response, two surfaces. refreshRunningAgentCards() reads
     per-run progress via getAgentBacktestRunning; the Backtest panel is
@@ -665,10 +734,10 @@ def test_timeout_branch_clears_the_running_map_and_the_progress_store():
     """The leak that makes one run render another run's numbers.
 
     Progress is stored per live_run_id. The finished path clears that entry;
-    the 10-minute timeout branch must wipe the whole map so an orphaned card
+    the 60-minute timeout branch must wipe the whole map so an orphaned card
     cannot pick up the NEXT run's step/percent.
 
-    Guarded by source slice rather than execution: reaching the branch takes 600
+    Guarded by source slice rather than execution: reaching the branch takes 3600
     poll ticks. Scoped to the branch itself, because both statements also appear
     in the finished branch a few lines above -- a whole-function search would
     pass with the timeout branch completely untouched.

@@ -9,6 +9,7 @@
 
 import inspect
 import json
+import subprocess
 import time
 import uuid
 from datetime import datetime
@@ -25,6 +26,9 @@ from dashboard.backend.domain.model_providers.execution_catalog import (
     UnsupportedExecutionModel,
 )
 import dashboard.backend.api.routers.backtests as bt
+
+
+_REAL_RUN_BACKTEST_BACKGROUND = bt.run_backtest_background
 
 
 # ===========================================================================
@@ -801,9 +805,8 @@ def test_ai_hedge_fund_backtest_rejects_run_when_runtime_not_installed(
 def test_hosted_backtest_timeout_covers_every_decision_step():
     """The parent timeout must not be the binding constraint on a hosted run.
 
-    A fixed 1800s cap over a month of trading days leaves ~85s per step while
-    the runtime is configured for 300s, so the parent kills the child mid-run
-    and discards every completed step.
+    A fixed 3600s cap gives a month-long run enough room for its decision steps
+    while keeping a bounded parent process lifetime.
     """
     step_seconds = bt.resolve_step_timeout_seconds()
     decision_days = bt._estimated_decision_days("2026-01-01", "2026-01-31")
@@ -815,10 +818,11 @@ def test_hosted_backtest_timeout_covers_every_decision_step():
     assert hosted >= step_seconds * decision_days
     assert hosted > bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
 
-    # Pipeline runs keep their established budget exactly.
+    # Pipeline runs use the shared 60-minute budget exactly.
+    assert bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS == 3600
     assert (
         bt._backtest_subprocess_timeout("pipeline", "2026-01-01", "2026-01-31")
-        == bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+        == 3600
     )
 
 
@@ -834,6 +838,63 @@ def test_hosted_backtest_timeout_is_capped_and_never_below_pipeline():
         bt._backtest_subprocess_timeout("ai_hedge_fund", "not-a-date", "also-bad")
         == bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
     )
+
+
+def test_pipeline_timeout_finalizes_execution_and_slot_once(monkeypatch):
+    """A parent timeout keeps the existing single-owner cleanup path."""
+    run_id = "agent_timeout_cleanup"
+    session_id = str(uuid.uuid4())
+    assert (
+        bt._try_acquire_backtest_slot(
+            live_run_id=run_id,
+            session_id=session_id,
+            user_id=None,
+        )
+        is None
+    )
+
+    subprocess_calls = []
+    finalized_slots = []
+    finalized_execution_runs = []
+
+    def fake_run(cmd, **kwargs):
+        subprocess_calls.append({"cmd": cmd, **kwargs})
+        raise subprocess.TimeoutExpired(cmd, kwargs["timeout"])
+
+    class FakeExecutionService:
+        def __init__(self, **_kwargs):
+            pass
+
+        def finalize_run(self, execution_run_id):
+            finalized_execution_runs.append(execution_run_id)
+
+    real_finalize_slot = bt._finalize_slot
+
+    def spy_finalize_slot(live_run_id, *, error, runs_count):
+        finalized_slots.append((live_run_id, runs_count))
+        return real_finalize_slot(live_run_id, error=error, runs_count=runs_count)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(bt, "LLMExecutionService", FakeExecutionService)
+    monkeypatch.setattr(bt, "get_model_provider_service", lambda: object())
+    monkeypatch.setattr(bt, "_finalize_slot", spy_finalize_slot)
+    monkeypatch.setattr(bt, "run_backtest_background", _REAL_RUN_BACKTEST_BACKGROUND)
+
+    bt.run_backtest_background(
+        start_date="2026-01-01",
+        end_date="2026-01-02",
+        session_id=session_id,
+        live_run_id=run_id,
+        decision_source="rule_based",
+        execution_handoff_payload="opaque-test-handoff",
+    )
+
+    assert len(subprocess_calls) == 1
+    assert subprocess_calls[0]["timeout"] == 3600
+    assert finalized_slots == [(run_id, 0)]
+    assert finalized_execution_runs == [run_id]
+    assert run_id not in bt._active_slots
+    assert bt._recent_slots[run_id]["running"] is False
 
 
 def test_ai_hedge_fund_requires_openrouter_not_direct_openai(client, monkeypatch):

@@ -17,7 +17,7 @@ const SELECTED_BACKTEST_RUN_KEY = 'selected-backtest-run-id';
 // literal (no build step to share this constant across the landing/app split).
 const NAV_STATE_KEY = 'nav-state';
 const DISCORD_SERVER_URL = 'https://discord.gg/9HnQ6XDG98';
-const BACKTEST_POLL_MAX_SECONDS = 600; // 10 minutes at 1-second polling intervals
+const BACKTEST_POLL_MAX_SECONDS = 3600; // 60 minutes at 1-second polling intervals
 
 function initSession() {
   // Stable browser identity — never changes when switching agents.
@@ -7024,7 +7024,7 @@ function ensureBacktestPolling() {
                     showBacktestRunProgress(true, { isError: true });
                     updateBacktestRunProgress({
                         elapsedSeconds: maxAttempts,
-                        message: 'Timed out after 10 minutes. The backtest may still be running in the background.',
+                        message: 'Timed out after 60 minutes. The backtest may still be running in the background.',
                     });
                 }
                 liveBacktestChartActive = false;
@@ -8466,7 +8466,7 @@ async function runBacktest() {
 async function pollBacktestStatus(btn) {
     ensureBacktestPolling();
     // Legacy callers awaited this; keep a lightweight wait until the poller stops
-    // or the run leaves "running" (max ~10 min).
+    // or the run leaves "running" (max ~60 min).
     const maxAttempts = BACKTEST_POLL_MAX_SECONDS;
     for (let i = 0; i < maxAttempts; i += 1) {
         if (!backtestPollTimer) {
