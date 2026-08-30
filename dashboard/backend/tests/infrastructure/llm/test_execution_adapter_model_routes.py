@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
+
 import dashboard.backend.infrastructure.llm.execution.adapters.anthropic as anthropic_module
 import dashboard.backend.infrastructure.llm.execution.adapters.gemini as gemini_module
 import dashboard.backend.infrastructure.llm.execution.adapters.openai as openai_module
@@ -57,13 +59,12 @@ def _request(
     )
 
 
-def _openai_response(model: str):
+def _openai_response(model: str, finish_reason: str | None = None):
+    choice = SimpleNamespace(message=SimpleNamespace(content="ok"))
+    if finish_reason is not None:
+        choice.finish_reason = finish_reason
     return SimpleNamespace(
-        choices=[
-            SimpleNamespace(
-                message=SimpleNamespace(content="ok"),
-            )
-        ],
+        choices=[choice],
         usage=SimpleNamespace(prompt_tokens=2, completion_tokens=1),
         model=model,
     )
@@ -260,3 +261,119 @@ def test_gemini_uses_native_model_in_endpoint_and_keeps_canonical_result(
         "/models/gemini-3.1-pro-preview:generateContent"
     )
     assert result.model_id == "google/gemini-3.1-pro-preview"
+
+
+def _openai_client(create):
+    return SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+        close=lambda: None,
+    )
+
+
+@pytest.mark.parametrize(
+    ("finish_reason", "expected"),
+    [("length", "max_tokens"), ("stop", "stop"), (None, None)],
+)
+def test_openai_reports_normalised_finish_reason(monkeypatch, finish_reason, expected):
+    monkeypatch.setattr(
+        openai_module,
+        "build_safe_http_client",
+        lambda *_args, **_kwargs: _Closable(),
+    )
+    client = _openai_client(lambda **_kwargs: _openai_response("gpt-5.5", finish_reason))
+    adapter = openai_module.OpenAIAdapter(client_factory=lambda **_kwargs: client)
+
+    result = adapter.complete(
+        _request("openai", "openai/gpt-5.5"),
+        _credential("openai"),
+        _provider("openai", "openai", "https://api.openai.com/v1"),
+    )
+
+    assert result.finish_reason == expected
+
+
+def test_gemini_reports_max_tokens_finish_reason(monkeypatch):
+    class _Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "candidates": [
+                    {
+                        "content": {"parts": [{"text": "{\"orders\": ["}]},
+                        "finishReason": "MAX_TOKENS",
+                    }
+                ],
+                "usageMetadata": {"promptTokenCount": 2, "candidatesTokenCount": 1},
+            }
+
+    class _HTTPClient(_Closable):
+        def post(self, url, *, headers, json):
+            return _Response()
+
+    monkeypatch.setattr(
+        gemini_module,
+        "build_safe_http_client",
+        lambda *_args, **_kwargs: _HTTPClient(),
+    )
+
+    result = gemini_module.GeminiExecutionAdapter().complete(
+        _request("gemini", "google/gemini-3.1-pro-preview"),
+        _credential("gemini"),
+        _provider("gemini", "gemini", "https://generativelanguage.googleapis.com/v1beta"),
+    )
+
+    assert result.finish_reason == "max_tokens"
+
+
+@pytest.mark.parametrize(
+    ("stop_reason", "expected"),
+    [("max_tokens", "max_tokens"), ("end_turn", "end_turn"), (None, None)],
+)
+def test_anthropic_reports_normalised_stop_reason(monkeypatch, stop_reason, expected):
+    def create(**_kwargs):
+        return SimpleNamespace(
+            content=[SimpleNamespace(type="text", text="ok")],
+            usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+            model="claude-sonnet-4-6",
+            stop_reason=stop_reason,
+        )
+
+    client = SimpleNamespace(
+        messages=SimpleNamespace(create=create),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(
+        anthropic_module,
+        "build_safe_http_client",
+        lambda *_args, **_kwargs: _Closable(),
+    )
+    adapter = anthropic_module.AnthropicExecutionAdapter(
+        client_factory=lambda **_kwargs: client,
+    )
+
+    result = adapter.complete(
+        _request("anthropic", "anthropic/claude-sonnet-4-6"),
+        _credential("anthropic"),
+        _provider("anthropic", "anthropic", "https://api.anthropic.com"),
+    )
+
+    assert result.finish_reason == expected
+
+
+def test_normalize_finish_reason_folds_vendor_spellings_and_stays_bounded():
+    from dashboard.backend.infrastructure.llm.execution.adapters.base import (
+        normalize_finish_reason,
+    )
+
+    assert normalize_finish_reason("length") == "max_tokens"
+    assert normalize_finish_reason("MAX_TOKENS") == "max_tokens"
+    assert normalize_finish_reason(" max_tokens ") == "max_tokens"
+    assert normalize_finish_reason("STOP") == "stop"
+    assert normalize_finish_reason("") is None
+    assert normalize_finish_reason(None) is None
+    assert normalize_finish_reason(3) is None
+    # An OpenAI-compatible provider may put anything here; it must never
+    # exceed the result model's bound and fail a successful call.
+    assert len(normalize_finish_reason("x" * 80)) == 32

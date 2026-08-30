@@ -33,12 +33,45 @@ class CredentialMaterial(Protocol):
     secret: str
 
 
+# Provider spellings of "the reply stopped at the output ceiling", folded to
+# one value so callers above the adapters never see the vendor vocabulary.
+_OUTPUT_CEILING_FINISH_REASONS = frozenset({"length", "max_tokens"})
+FINISH_REASON_MAX_TOKENS = "max_tokens"
+# ``LLMExecutionResult.finish_reason`` is bounded; an OpenAI-compatible
+# provider may put anything in this field, and a long value must not turn a
+# successful call into ``response_invalid`` when the result model rejects it.
+_FINISH_REASON_MAX_LENGTH = 32
+
+
+def normalize_finish_reason(value: Any) -> str | None:
+    """Fold a provider stop/finish reason into a lowercase, vendor-neutral tag.
+
+    ``length`` (OpenAI / OpenRouter), ``MAX_TOKENS`` (Gemini) and
+    ``max_tokens`` (Anthropic) all become ``"max_tokens"``; any other string is
+    passed through lowercased (and clamped to the result model's length bound)
+    so it stays inspectable; anything else is ``None``.
+    """
+    if not isinstance(value, str):
+        return None
+    reason = value.strip().lower()
+    if not reason:
+        return None
+    if reason in _OUTPUT_CEILING_FINISH_REASONS:
+        return FINISH_REASON_MAX_TOKENS
+    return reason[:_FINISH_REASON_MAX_LENGTH]
+
+
 @dataclass(frozen=True)
 class AdapterResponse:
     text: str
     model_id: str
     usage: LLMUsage | None
     provider_cost_usd: float | None = None
+    # Why the provider stopped generating, via ``normalize_finish_reason``.
+    # ``"max_tokens"`` is the one value callers act on: the reply was cut at
+    # the output ceiling, so an unparseable body is a truncation, not a
+    # malformed answer. ``None`` when the provider reported nothing.
+    finish_reason: str | None = None
 
 
 class ProviderExecutionError(LLMExecutionError):
@@ -51,7 +84,8 @@ class ProviderExecutionAdapter(Protocol):
         request: LLMExecutionRequest,
         credential: CredentialMaterial,
         provider: ProviderRecord,
-    ) -> AdapterResponse: ...
+    ) -> AdapterResponse:
+        """Run one completion against ``provider`` and return its normalised reply."""
 
 
 def value_at(value: Any, name: str, default: Any = None) -> Any:
@@ -132,6 +166,7 @@ ClientFactory = Callable[..., Any]
 
 
 __all__ = [
+    "FINISH_REASON_MAX_TOKENS",
     "AdapterResponse",
     "ClientFactory",
     "CredentialMaterial",
@@ -139,6 +174,7 @@ __all__ = [
     "ProviderExecutionError",
     "build_safe_http_client",
     "map_provider_error",
+    "normalize_finish_reason",
     "optional_nonnegative_float",
     "usage_from_fields",
     "value_at",

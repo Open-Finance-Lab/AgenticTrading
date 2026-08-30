@@ -1,8 +1,40 @@
 # OpenRouter Empty Response Recovery Design
 
 **Date:** 2026-08-29
-**Status:** Proposed
+**Status:** Shipped (PR #420), amended by PRs #421, #422 and the #421 review
+follow-ups — see *Amendments* below; the sections after it describe the
+original design.
 **Scope:** Recover platform-credits backtests when OpenRouter returns no text
+
+## Amendments (what actually shipped)
+
+- **The recovery lever is a larger output budget, not disabled reasoning.**
+  PR #421's follow-up commit and PR #422 replaced `reasoning_effort="none"`
+  with re-sending the identical request at
+  `max_tokens=RECOVERY_MAX_OUTPUT_TOKENS` (`max(LLM_MAX_OUTPUT_TOKENS, 4096)`)
+  with reasoning preserved. Every adapter honours `max_tokens`; the native
+  Gemini/Anthropic/OpenAI adapters had silently dropped `reasoning_effort`, so
+  on those routes the earlier lever was a byte-identical second request.
+- **A second trigger: a truncated first reply.** Besides `response_invalid`,
+  a first reply that parses to nothing *and* was cut at the output ceiling
+  earns the same single recovery attempt. Truncation is decided by the
+  provider's own signal first — the normalised `stop_reason`/`finish_reason`
+  (`max_tokens`, threaded from every adapter through `LLMExecutionResult`
+  to the compatibility client's response) or `output_tokens` reaching the
+  request's ceiling — and only then by the structural scan
+  (`_looks_like_truncated_json`: an unclosed decision envelope of ≥64 chars,
+  fences and preamble tolerated).
+- **One recovery attempt per step, whichever trigger fires.** Both triggers
+  send the same request, so a still-unusable recovery reply has nothing
+  different left to ask for.
+- **A failed truncation retry degrades; it does not raise.** The first reply
+  was a real, billed call, so a retry the provider rejects as
+  `response_invalid`, or that returns no text block, leaves the step at the
+  first attempt's `None` and returns the usage already recorded — the caller
+  side-effects those deltas into `llm_calls` (the billing counter) only from
+  a normal return. Other error categories still propagate. The
+  `response_invalid`-first path keeps its original contract: a second
+  `response_invalid` re-raises.
 
 ## Incident
 

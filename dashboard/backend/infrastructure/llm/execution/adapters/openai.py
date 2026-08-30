@@ -18,6 +18,7 @@ from .base import (
     ProviderExecutionError,
     build_safe_http_client,
     map_provider_error,
+    normalize_finish_reason,
     optional_nonnegative_float,
     usage_from_fields,
     value_at,
@@ -32,9 +33,13 @@ def _default_client_factory(**kwargs: Any) -> Any:
     return OpenAI(**kwargs)
 
 
-def _response_text(response: Any) -> str:
+def _first_choice(response: Any) -> Any:
     choices = value_at(response, "choices", ())
-    first = choices[0] if choices else None
+    return choices[0] if choices else None
+
+
+def _response_text(response: Any) -> str:
+    first = _first_choice(response)
     message = value_at(first, "message")
     content = value_at(message, "content")
     if isinstance(content, str):
@@ -137,6 +142,9 @@ class OpenAIExecutionAdapter:
                 model_id=request.model_id,
                 usage=usage,
                 provider_cost_usd=provider_cost_usd,
+                finish_reason=normalize_finish_reason(
+                    value_at(_first_choice(response), "finish_reason")
+                ),
             )
         except ProviderExecutionError:
             raise
