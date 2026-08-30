@@ -17,6 +17,7 @@ from .base import (
     ProviderExecutionError,
     build_safe_http_client,
     map_provider_error,
+    normalize_finish_reason,
     optional_nonnegative_float,
     usage_from_fields,
     value_at,
@@ -102,6 +103,9 @@ class GeminiExecutionAdapter:
                 usage=usage,
                 provider_cost_usd=optional_nonnegative_float(
                     value_at(data, "cost")
+                ),
+                finish_reason=normalize_finish_reason(
+                    value_at(first, "finishReason")
                 ),
             )
         except ProviderExecutionError:

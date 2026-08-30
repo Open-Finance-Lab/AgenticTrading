@@ -18,6 +18,7 @@ from .base import (
     ProviderExecutionError,
     build_safe_http_client,
     map_provider_error,
+    normalize_finish_reason,
     optional_nonnegative_float,
     usage_from_fields,
     value_at,
@@ -98,6 +99,9 @@ class AnthropicExecutionAdapter:
                 usage=normalized_usage,
                 provider_cost_usd=optional_nonnegative_float(
                     value_at(response, "cost", value_at(usage, "cost"))
+                ),
+                finish_reason=normalize_finish_reason(
+                    value_at(response, "stop_reason")
                 ),
             )
         except ProviderExecutionError:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
-from typing import Any
 
 from dashboard.backend.domain.credits.models import LLMSettlementResult
 from dashboard.backend.domain.credits.service import CreditsService
@@ -127,6 +126,7 @@ class LLMExecutionService:
                     usage=usage,
                     billing=billing,
                     text=response.text,
+                    finish_reason=response.finish_reason,
                 )
             else:
                 result = self._execute_platform(
@@ -286,6 +286,7 @@ class LLMExecutionService:
                 usage=usage,
                 billing=billing,
                 text=response.text,
+                finish_reason=response.finish_reason,
             )
         except LLMExecutionError as exc:
             self._release_after_failure(reservation_id, exc.category)
@@ -435,6 +436,7 @@ class LLMExecutionService:
         usage: LLMUsage,
         billing: BillingEvidence,
         text: str,
+        finish_reason: str | None = None,
     ) -> LLMExecutionResult:
         try:
             return LLMExecutionResult(
@@ -445,6 +447,7 @@ class LLMExecutionService:
                 credential_key_last_four=credential.key_last_four,
                 usage=usage,
                 billing=billing,
+                finish_reason=finish_reason,
             )
         except Exception as exc:  # noqa: BLE001 - preserve the fixed public contract
             raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID) from exc

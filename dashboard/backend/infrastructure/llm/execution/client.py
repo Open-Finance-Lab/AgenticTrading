@@ -140,6 +140,10 @@ class AnthropicCompatibleExecutionClient:
                 input_tokens=result.usage.input_tokens,
                 output_tokens=result.usage.output_tokens,
             ),
+            # Same attribute the raw Anthropic SDK exposes, so callers can
+            # tell a reply cut at the output ceiling from a malformed one
+            # without knowing which client built the response.
+            stop_reason=getattr(result, "finish_reason", None),
         )
 
     def execution_summary(self) -> LLMRunEvidence | None:

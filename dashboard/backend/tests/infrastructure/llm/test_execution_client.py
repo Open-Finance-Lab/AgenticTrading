@@ -45,6 +45,7 @@ def _result(
     estimated_cost_usd=0.009,
     debited_micro=9_000,
     outstanding_micro=0,
+    finish_reason=None,
 ):
     snapshot = PricingSnapshot(
         provider_id="openrouter",
@@ -76,6 +77,7 @@ def _result(
             debited_credits_micro=debited_micro,
             outstanding_credits_micro=outstanding_micro,
         ),
+        finish_reason=finish_reason,
     )
 
 
@@ -112,6 +114,7 @@ def test_client_preserves_compatibility_response_and_aggregates_evidence():
     assert response.model == "openai/gpt-5.5"
     assert response.usage.input_tokens == 10
     assert response.usage.output_tokens == 5
+    assert response.stop_reason is None
     assert [request.call_index for request in service.requests] == [0, 1]
     assert summary.billing_mode is BillingMode.PLATFORM_CREDITS
     assert summary.provider_id == "openrouter"
@@ -155,3 +158,15 @@ def test_byok_summary_does_not_report_missing_usage_as_zero():
     assert summary.estimated_cost_usd is None
     assert summary.outcome == "unavailable"
 
+
+
+def test_client_exposes_provider_stop_reason_like_the_sdk():
+    service = _FakeExecutionService([_result(finish_reason="max_tokens")])
+    client = AnthropicCompatibleExecutionClient(
+        execution_service=service,
+        handoff=_handoff(),
+    )
+
+    response = _create(client)
+
+    assert response.stop_reason == "max_tokens"

@@ -151,6 +151,9 @@ class LLMExecutionResult(BaseModel):
     credential_key_last_four: str | None = Field(default=None, min_length=4, max_length=4)
     usage: LLMUsage
     billing: BillingEvidence
+    # Normalised provider stop reason (``"max_tokens"`` when the reply was cut
+    # at the output ceiling); ``None`` when the provider reported none.
+    finish_reason: str | None = Field(default=None, max_length=32)
 
 
 class LLMRunEvidence(BaseModel):

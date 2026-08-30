@@ -336,9 +336,12 @@ def parse_llm_response(llm_response: str) -> Optional[Dict]:
                     close_count = json_str_fixed.count('}')
                     if open_count != close_count:
                         print(f"   Bracket mismatch: {open_count} open, {close_count} close")
-                        # Remove extra closing brackets from the end
+                        # Remove extra closing brackets from the end. Drop one
+                        # ``}`` per pass: the old form re-appended the brace it
+                        # had just cut, so the counts never changed and this
+                        # loop spun forever on a reply with one stray ``}``.
                         while json_str_fixed.count('}') > json_str_fixed.count('{'):
-                            json_str_fixed = json_str_fixed.rsplit('}', 1)[0] + '}'
+                            json_str_fixed = json_str_fixed.rsplit('}', 1)[0]
                         print(f"   Removed extra closing brackets")
 
                     decision = json.loads(json_str_fixed)

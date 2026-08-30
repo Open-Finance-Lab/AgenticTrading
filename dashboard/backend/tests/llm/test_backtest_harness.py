@@ -8,6 +8,7 @@ external service is ever called.
 """
 
 import json
+import threading
 from datetime import datetime
 
 from dashboard.backend.domain.backtesting import (
@@ -795,3 +796,22 @@ def test_llm_nonfinite_position_size_skipped_safely(capsys):
         _portfolio_state(), _FakeClient(_FakeResponse(resp_text, _FakeUsage(1, 1))))
     assert out["actions"] == []
     assert "unparseable position_size" in capsys.readouterr().out
+
+
+def test_parse_llm_response_trims_a_stray_closing_brace_without_hanging():
+    # One extra ``}`` used to spin the bracket-trim loop forever: it cut the
+    # last brace and re-appended it, so the counts never changed. Run it on a
+    # thread so a regression fails the test instead of hanging the suite.
+    outcome = {}
+
+    def parse():
+        outcome["decision"] = harness.parse_llm_response(
+            '{"actions": [{"symbol": "AAPL", "action": "buy"}]}}'
+        )
+
+    worker = threading.Thread(target=parse, daemon=True)
+    worker.start()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive(), "parse_llm_response did not terminate"
+    assert outcome["decision"] == {"actions": [{"symbol": "AAPL", "action": "buy"}]}

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from dashboard.backend.infrastructure.llm.backtest_harness import (
@@ -474,9 +475,8 @@ def _create_pipeline_response(
     model: str,
     prompt: str,
     max_tokens: Optional[int] = None,
-    reasoning_effort: Optional[str] = None,
 ):
-    """Create one pipeline request with optional recovery overrides."""
+    """Create one pipeline request, optionally with a recovery output budget."""
     request = {
         "model": model,
         "max_tokens": (
@@ -487,30 +487,121 @@ def _create_pipeline_response(
         "system": PIPELINE_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": prompt}],
     }
-    if reasoning_effort is not None:
-        request["reasoning_effort"] = reasoning_effort
     return client.messages.create(**request)
 
 
-def _looks_like_truncated_json(response_text: str) -> bool:
-    """Detect a long, structurally incomplete JSON response.
+def _retry_with_recovery_budget(client, *, model: str, prompt: str):
+    """Second attempt for a step whose first attempt was unusable.
 
-    Provider adapters already classify an empty response as ``response_invalid``.
-    A response cut off by the output ceiling is different: it contains text, so
-    it reaches the parser, but its object/array delimiters never close. Keep the
-    retry narrow so short malformed responses and valid-but-unsupported business
-    envelopes are not retried.
+    The same request, reasoning preserved, with the output ceiling raised to
+    ``RECOVERY_MAX_OUTPUT_TOKENS`` so a reasoning-heavy model has room for
+    both its thinking and the final JSON. Both recovery paths send exactly
+    this, which is why a step never gets a third attempt: a reply that is
+    still unusable after it has nothing different left to ask for.
     """
-    text = str(response_text or "").strip()
-    text = text.replace("```json", "").replace("```", "").strip()
-    # Reasoning can consume most of the provider output budget, leaving a
-    # surprisingly short JSON prefix (the production failure was ~170 chars).
-    # Keep a small floor to avoid retrying a bare ``{"orders": [`` typo, while
-    # requiring a known decision envelope so unrelated malformed JSON is not
-    # treated as a truncation.
-    if len(text) < 64 or not text.startswith("{"):
+    return _create_pipeline_response(
+        client,
+        model=model,
+        prompt=prompt,
+        max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+    )
+
+
+class _StepUsage:
+    """Calls and token deltas for the responses a pipeline actually received.
+
+    Only responses that came back are recorded — an attempt that raised was
+    released by the execution service and never billed.
+    """
+
+    __slots__ = ("calls", "input_tokens", "output_tokens")
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    def record(self, response) -> int:
+        """Count one received response; returns its output-token delta."""
+        self.calls += 1
+        in_delta, out_delta = extract_token_usage(response)
+        self.input_tokens += in_delta
+        self.output_tokens += out_delta
+        return out_delta
+
+    @property
+    def totals(self) -> Tuple[int, int]:
+        return self.input_tokens, self.output_tokens
+
+
+# Provider-neutral spellings of "the reply stopped because it hit the output
+# ceiling": Anthropic ``stop_reason``, OpenAI/OpenRouter ``finish_reason`` and
+# Gemini ``finishReason`` (the execution adapters normalise the last two).
+_OUTPUT_CEILING_STOP_REASONS = frozenset({"max_tokens", "length"})
+
+# Below this many characters a structurally unclosed reply is treated as an
+# ordinary malformed answer rather than a truncation, so short garbage does
+# not buy a second billed call. Reasoning can consume most of the output
+# budget and leave a surprisingly short JSON prefix (a production failure was
+# ~170 chars), so the floor is small; it only applies to the structural
+# fallback — a provider-reported stop reason or an output-token count at the
+# ceiling fires regardless of length (and of script: CJK output reaches the
+# ceiling at a fraction of these characters).
+_TRUNCATION_MIN_CHARS = 64
+
+# A structurally unclosed reply is only worth a retry when it had started the
+# decision envelope, so unrelated malformed JSON is not treated as a truncation.
+_DECISION_ENVELOPE_KEYS = ("actions", "orders", "risk_actions")
+
+_CODE_FENCE = re.compile(r"```(?:json)?", re.IGNORECASE)
+# The first brace that actually opens an object. A ``{`` inside a prose
+# preamble ("Analysis {see below") would otherwise count as an unclosed
+# delimiter and buy a retry for a reply that is complete.
+_OBJECT_START = re.compile(r'\{\s*"')
+
+
+def _hit_output_ceiling(response, output_tokens: int, max_tokens: int) -> bool:
+    """True when the provider itself says the reply stopped at ``max_tokens``.
+
+    Prefers the explicit stop/finish reason where the response carries one
+    (the raw Anthropic SDK and the execution client both expose
+    ``stop_reason``); falls back to the reported output-token count reaching
+    the ceiling the request asked for. Either signal is exact where the
+    structural scan below is a guess.
+    """
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason is None:
+        stop_reason = getattr(response, "finish_reason", None)
+    if isinstance(stop_reason, str):
+        if stop_reason.strip().lower() in _OUTPUT_CEILING_STOP_REASONS:
+            return True
+    return output_tokens >= max_tokens
+
+
+def _looks_like_truncated_json(response_text: str) -> bool:
+    """Structural fallback: a decision object whose delimiters never close.
+
+    Provider adapters already classify an empty response as
+    ``response_invalid``, and ``_hit_output_ceiling`` covers every response
+    that reports its own stop reason or usage. This scan is for the rest: a
+    reply that reaches the parser with text, begins a decision envelope, and
+    stops before the delimiters close. It tolerates exactly what
+    ``parse_llm_response`` tolerates — code fences of any case and prose
+    before the object — so a truncation the parser would have seen is not
+    hidden from the retry by its preamble; the scan starts at the first
+    ``{"`` so a brace *inside* that preamble is not mistaken for the object.
+    A *mismatched* closer (``}`` closing a ``[``) is a malformed reply, not a
+    cut-off one, and is deliberately not retried; neither is a short unclosed
+    fragment or one that never named a decision key.
+    """
+    text = _CODE_FENCE.sub("", response_text)
+    opener = _OBJECT_START.search(text)
+    if opener is None:
         return False
-    if not any(f'"{key}"' in text for key in ("actions", "orders", "risk_actions")):
+    text = text[opener.start():].strip()
+    if len(text) < _TRUNCATION_MIN_CHARS:
+        return False
+    if not any(f'"{key}"' in text for key in _DECISION_ENVELOPE_KEYS):
         return False
 
     stack: list[str] = []
@@ -537,6 +628,30 @@ def _looks_like_truncated_json(response_text: str) -> bool:
     return bool(stack)
 
 
+def _truncation_reason(response, output_tokens: int, response_text: str) -> Optional[str]:
+    """Why an unparseable first reply is worth one more attempt, or ``None``."""
+    if _hit_output_ceiling(response, output_tokens, DEFAULT_MAX_OUTPUT_TOKENS):
+        return "stopped at the output ceiling"
+    if _looks_like_truncated_json(response_text):
+        return "is structurally incomplete"
+    return None
+
+
+def _response_text_or_none(response) -> Optional[str]:
+    """Text of a response, or ``None`` when it carries no text block.
+
+    A reasoning model can spend the whole reply on a thinking block; that is
+    an unparseable reply, not a fault, so it must not raise past the usage
+    the step has already recorded for it.
+    """
+    try:
+        return extract_response_text(response)
+    except AttributeError as exc:
+        if "No text content" not in str(exc):
+            raise
+        return None
+
+
 def run_pipeline_decision(
     client,
     *,
@@ -548,22 +663,35 @@ def run_pipeline_decision(
 
     Post-trade steps are ignored here. Returns
     ``(decision_dict_or_none, (input_tokens, output_tokens), llm_calls, step_outputs)``.
+
+    Each step gets at most **one** second attempt (``_retry_with_recovery_budget``),
+    and only when the first attempt was unusable: the provider rejected it as
+    ``response_invalid``, or it came back unparseable *and* truncated (see
+    ``_truncation_reason``). A reply with no text block at all is unparseable
+    by definition: it is retried when the provider reports the ceiling, and
+    otherwise ends the step cleanly with its usage intact. The two triggers
+    share that single budget on
+    purpose — the recovery attempt is the same request either way, so a
+    truncated recovery reply has nothing different left to send. A truncation
+    retry that fails in a way the provider would also have classified as an
+    unusable reply degrades to the first attempt's outcome (``None`` for this
+    step) rather than raising an error the provider never produced, so the
+    usage already recorded for the step — a real, billed call — is returned to
+    the caller instead of being lost with the exception.
     """
     decision_steps, _post_trade_steps = split_pipeline(pipeline)
     if not decision_steps:
         return None, (0, 0), 0, []
 
     prior_outputs: List[Dict[str, Any]] = []
-    total_in = 0
-    total_out = 0
-    llm_calls = 0
+    usage = _StepUsage()
     last_parsed: Optional[Dict[str, Any]] = None
     request_model = model or LLM_MODEL_NAME
 
     for index, step in enumerate(decision_steps):
         if not isinstance(step, dict):
             print(f"   ⚠️  Pipeline step {index + 1} is invalid; aborting pipeline")
-            return None, (total_in, total_out), llm_calls, prior_outputs
+            return None, usage.totals, usage.calls, prior_outputs
 
         prompt = _build_step_prompt(
             step_index=index,
@@ -589,41 +717,48 @@ def run_pipeline_decision(
                 "   ⚠️  Empty model response; retrying with reasoning preserved "
                 f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
             )
-            response = _create_pipeline_response(
-                client,
-                model=request_model,
-                prompt=prompt,
-                max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+            response = _retry_with_recovery_budget(
+                client, model=request_model, prompt=prompt
             )
             retried = True
-        llm_calls += 1
-        in_delta, out_delta = extract_token_usage(response)
-        total_in += in_delta
-        total_out += out_delta
+        out_delta = usage.record(response)
 
-        response_text = extract_response_text(response)
-        parsed = parse_llm_response(response_text)
+        response_text = _response_text_or_none(response)
+        if response_text is None:
+            print("   ⚠️  Pipeline response carried no text block")
+            parsed = None
+        else:
+            parsed = parse_llm_response(response_text)
+        reason = None
         if parsed is None and not retried:
-            if _looks_like_truncated_json(response_text):
-                print(
-                    "   ⚠️  Pipeline response appears truncated; "
-                    "retrying once with reasoning preserved and a larger output budget"
+            reason = _truncation_reason(response, out_delta, response_text or "")
+        if reason is not None:
+            print(
+                f"   ⚠️  Pipeline response {reason}; retrying once with reasoning "
+                f"preserved and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
+            )
+            retry_response = None
+            try:
+                retry_response = _retry_with_recovery_budget(
+                    client, model=request_model, prompt=prompt
                 )
-                response = _create_pipeline_response(
-                    client,
-                    model=request_model,
-                    prompt=prompt,
-                    max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
-                )
-                retried = True
-                llm_calls += 1
-                in_delta, out_delta = extract_token_usage(response)
-                total_in += in_delta
-                total_out += out_delta
-                parsed = parse_llm_response(extract_response_text(response))
+            except LLMExecutionError as retry_error:
+                # An empty second reply is the same class of outcome as the
+                # truncated first one; anything else is an infrastructure
+                # failure the first attempt would have raised too.
+                if retry_error.category is not ExecutionErrorCategory.RESPONSE_INVALID:
+                    raise
+                print("   ⚠️  Retry returned no usable response; keeping the first attempt")
+            if retry_response is not None:
+                usage.record(retry_response)
+                retry_text = _response_text_or_none(retry_response)
+                if retry_text is None:
+                    print("   ⚠️  Retry returned no text block; keeping the first attempt")
+                else:
+                    parsed = parse_llm_response(retry_text)
         if parsed is None:
             print(f"   ❌ Pipeline step {index + 1} returned unparseable JSON")
-            return None, (total_in, total_out), llm_calls, prior_outputs
+            return None, usage.totals, usage.calls, prior_outputs
 
         prior_outputs.append(
             {
@@ -639,6 +774,6 @@ def run_pipeline_decision(
     decision = pipeline_output_to_decision(last_parsed or {})
     if decision is None:
         print("   ❌ Final pipeline output could not be converted to trading actions")
-        return None, (total_in, total_out), llm_calls, prior_outputs
+        return None, usage.totals, usage.calls, prior_outputs
 
-    return decision, (total_in, total_out), llm_calls, prior_outputs
+    return decision, usage.totals, usage.calls, prior_outputs
