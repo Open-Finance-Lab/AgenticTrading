@@ -1,9 +1,9 @@
 # OpenRouter Empty Response Recovery Design
 
 **Date:** 2026-08-29
-**Status:** Shipped (PR #420), amended by PRs #421, #422 and the #421 review
-follow-ups — see *Amendments* below; the sections after it describe the
-original design.
+**Status:** Shipped (PR #420), amended by PRs #421, #422, the #421 review
+follow-ups (#423, #425) and the non-pipeline recovery follow-up — see
+*Amendments* below; the sections after it describe the original design.
 **Scope:** Recover platform-credits backtests when OpenRouter returns no text
 
 ## Amendments (what actually shipped)
@@ -35,6 +35,15 @@ original design.
   a normal return. Other error categories still propagate. The
   `response_invalid`-first path keeps its original contract: a second
   `response_invalid` re-raises.
+- **The non-pipeline path recovers too.** The single-call route in
+  `PortfolioManager.make_trading_decision_with_llm` — the one the leaderboard
+  `llm_agent` drives, which never runs a pipeline — originally had no
+  truncation recovery at all: a reply cut at the ceiling parsed to `None`
+  and the step ended as a billed call with no H6 decision. It now applies the
+  same two signals through the shared `pipeline_runner.truncation_reason`
+  and spends the same single budget; that budget is also what the final
+  rescue call for a run of no-text replies uses, so a truncated rescue reply
+  does not buy a sixth call.
 
 ## Incident
 

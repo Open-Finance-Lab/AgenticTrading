@@ -56,7 +56,9 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
     RECOVERY_MAX_OUTPUT_TOKENS,
+    response_text_or_none,
     run_pipeline_decision,
+    truncation_reason,
 )
 
 
@@ -477,6 +479,13 @@ class PortfolioManager:
                 # not tank H6 coverage on intermittent empty responses.
                 llm_response = None
                 no_text_retries = 4
+                # One recovery budget (``RECOVERY_MAX_OUTPUT_TOKENS``) per
+                # step, spent by whichever unusable reply claims it first: the
+                # final rescue call below, or the truncation retry after the
+                # parse. A reply still unusable at that budget has nothing
+                # different left to ask for.
+                recovery_spent = False
+                output_delta = 0
                 for attempt in range(no_text_retries + 1):
                     if attempt == no_text_retries:
                         # Final rescue: preserve the provider's reasoning mode,
@@ -485,6 +494,7 @@ class PortfolioManager:
                             "   ⚠️  Final rescue call with reasoning preserved "
                             f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
                         )
+                        recovery_spent = True
                         response = _request_trading_decision(
                             llm_client,
                             prompt=prompt,
@@ -501,13 +511,7 @@ class PortfolioManager:
                             temperature=temperature,
                             market_context=market_context,
                         )
-                    try:
-                        input_delta, output_delta = _extract_token_usage(response)
-                        self.input_tokens += input_delta
-                        self.output_tokens += output_delta
-                        self.llm_calls += 1
-                    except Exception as usage_err:
-                        print(f"   ⚠️  Could not read token usage: {usage_err}")
+                    output_delta = self._record_llm_usage(response)
                     try:
                         llm_response = _extract_response_text(response)
                         break
@@ -526,6 +530,38 @@ class PortfolioManager:
                 # STEP 3: Parse and validate LLM response
                 # ================================================================
                 decision = _parse_llm_response(llm_response)
+                if decision is None and not recovery_spent:
+                    # The same single recovery attempt the pipeline path makes:
+                    # a reply the provider cut at the output ceiling, or one
+                    # that opened the decision envelope and never closed it,
+                    # gets the same request once more with room for reasoning
+                    # plus the JSON. Without it the leaderboard ``llm_agent`` —
+                    # which never runs a pipeline — turned every over-long
+                    # reasoning burst into a billed step with no H6 decision.
+                    reason = truncation_reason(response, output_delta, llm_response)
+                    if reason is not None:
+                        print(
+                            f"   ⚠️  LLM response {reason}; retrying once with "
+                            "reasoning preserved and "
+                            f"max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
+                        )
+                        retry_response = _request_trading_decision(
+                            llm_client,
+                            prompt=prompt,
+                            model=model,
+                            max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+                            temperature=temperature,
+                            market_context=market_context,
+                        )
+                        self._record_llm_usage(retry_response)
+                        retry_text = response_text_or_none(retry_response)
+                        if retry_text is None:
+                            print(
+                                "   ⚠️  Retry returned no text block; "
+                                "keeping the first attempt"
+                            )
+                        else:
+                            decision = _parse_llm_response(retry_text)
                 if decision is None:
                     if strict_llm:
                         raise LLMDecisionError(
@@ -737,6 +773,22 @@ class PortfolioManager:
             print(f"\n❌ LLM decision error: {e}")
             print(f"   Falling back to rule-based logic\n")
             return self.make_trading_decision(portfolio_state)
+
+    def _record_llm_usage(self, response) -> int:
+        """Bill one received response; returns its output-token delta.
+
+        A response whose usage cannot be read is logged and not counted as a
+        call — ``llm_calls`` is "billed API calls (any response with usage)".
+        """
+        try:
+            input_delta, output_delta = _extract_token_usage(response)
+        except Exception as usage_err:
+            print(f"   ⚠️  Could not read token usage: {usage_err}")
+            return 0
+        self.input_tokens += input_delta
+        self.output_tokens += output_delta
+        self.llm_calls += 1
+        return output_delta
 
     def strict_llm_fallback_budget(self) -> int:
         """How many unusable model responses this strict run may absorb."""

@@ -628,8 +628,13 @@ def _looks_like_truncated_json(response_text: str) -> bool:
     return bool(stack)
 
 
-def _truncation_reason(response, output_tokens: int, response_text: str) -> Optional[str]:
-    """Why an unparseable first reply is worth one more attempt, or ``None``."""
+def truncation_reason(response, output_tokens: int, response_text: str) -> Optional[str]:
+    """Why an unparseable first reply is worth one more attempt, or ``None``.
+
+    Shared with the non-pipeline decision path in
+    ``domain/backtesting/portfolio_manager.py``, which spends the same single
+    recovery budget on the same two signals.
+    """
     if _hit_output_ceiling(response, output_tokens, DEFAULT_MAX_OUTPUT_TOKENS):
         return "stopped at the output ceiling"
     if _looks_like_truncated_json(response_text):
@@ -637,7 +642,7 @@ def _truncation_reason(response, output_tokens: int, response_text: str) -> Opti
     return None
 
 
-def _response_text_or_none(response) -> Optional[str]:
+def response_text_or_none(response) -> Optional[str]:
     """Text of a response, or ``None`` when it carries no text block.
 
     A reasoning model can spend the whole reply on a thinking block; that is
@@ -667,7 +672,7 @@ def run_pipeline_decision(
     Each step gets at most **one** second attempt (``_retry_with_recovery_budget``),
     and only when the first attempt was unusable: the provider rejected it as
     ``response_invalid``, or it came back unparseable *and* truncated (see
-    ``_truncation_reason``). A reply with no text block at all is unparseable
+    ``truncation_reason``). A reply with no text block at all is unparseable
     by definition: it is retried when the provider reports the ceiling, and
     otherwise ends the step cleanly with its usage intact. The two triggers
     share that single budget on
@@ -723,7 +728,7 @@ def run_pipeline_decision(
             retried = True
         out_delta = usage.record(response)
 
-        response_text = _response_text_or_none(response)
+        response_text = response_text_or_none(response)
         if response_text is None:
             print("   ⚠️  Pipeline response carried no text block")
             parsed = None
@@ -731,7 +736,7 @@ def run_pipeline_decision(
             parsed = parse_llm_response(response_text)
         reason = None
         if parsed is None and not retried:
-            reason = _truncation_reason(response, out_delta, response_text or "")
+            reason = truncation_reason(response, out_delta, response_text or "")
         if reason is not None:
             print(
                 f"   ⚠️  Pipeline response {reason}; retrying once with reasoning "
@@ -751,7 +756,7 @@ def run_pipeline_decision(
                 print("   ⚠️  Retry returned no usable response; keeping the first attempt")
             if retry_response is not None:
                 usage.record(retry_response)
-                retry_text = _response_text_or_none(retry_response)
+                retry_text = response_text_or_none(retry_response)
                 if retry_text is None:
                     print("   ⚠️  Retry returned no text block; keeping the first attempt")
                 else:
