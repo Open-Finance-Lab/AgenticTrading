@@ -197,7 +197,12 @@ def test_credential_storage_note_is_plain_language():
 
 
 def test_backtest_hint_uses_strategy_and_limit():
-    assert "Multi-step strategies can take several minutes (limit: 10 minutes)." in _HTML
+    assert "Multi-step strategies can take several minutes (limit: 60 minutes)." in _HTML
+    assert "Multi-step strategies can take several minutes (limit: 10 minutes)." not in _HTML
+    assert "Chat with Claude; backtests use Alpaca historical data and multi-step runs can take several minutes." in _HTML
+    assert "about 3–10 minutes" not in _HTML
+    assert "Timed out after 60 minutes." in _JS
+    assert "Timed out after 10 minutes." not in _JS
     assert "Multi-step agent pipelines" not in _HTML
 
 
