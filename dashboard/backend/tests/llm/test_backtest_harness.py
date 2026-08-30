@@ -11,6 +11,8 @@ import json
 import threading
 from datetime import datetime
 
+import pytest
+
 from dashboard.backend.domain.backtesting import (
     portfolio_manager as portfolio_manager_module,
 )
@@ -815,3 +817,26 @@ def test_parse_llm_response_trims_a_stray_closing_brace_without_hanging():
 
     assert not worker.is_alive(), "parse_llm_response did not terminate"
     assert outcome["decision"] == {"actions": [{"symbol": "AAPL", "action": "buy"}]}
+
+
+@pytest.mark.parametrize(
+    "reason_json, reason",
+    [
+        ('"close}"', "close}"),
+        ('"say \\"}\\" now"', 'say "}" now'),
+    ],
+    ids=["brace-in-string", "brace-after-escaped-quote"],
+)
+def test_parse_llm_response_keeps_closing_braces_inside_string_values(reason_json, reason):
+    # The bracket-trim repair used to count every ``}`` in the text, so a brace
+    # inside a string value made it strip a real closer along with the stray
+    # one and a parseable decision came back as None.
+    response = (
+        '{"actions": [{"symbol": "AAPL", "action": "buy", "reason": '
+        + reason_json
+        + "}]}}"
+    )
+
+    assert harness.parse_llm_response(response) == {
+        "actions": [{"symbol": "AAPL", "action": "buy", "reason": reason}]
+    }

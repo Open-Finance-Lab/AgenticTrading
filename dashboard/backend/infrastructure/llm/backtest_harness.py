@@ -27,7 +27,7 @@ import is optional and there is no import-time network or credential access).
 
 import json
 import os
-from typing import Dict, Optional
+from typing import Dict, Iterator, Optional, Tuple
 
 from dashboard.backend.infrastructure.llm.decision_parsing import fix_json_formatting
 from dashboard.backend.infrastructure.llm.providers import (
@@ -267,6 +267,48 @@ def extract_token_usage(response):
     )
 
 
+def _structural_braces(text: str) -> Iterator[Tuple[int, str]]:
+    """Yield ``(index, brace)`` for each ``{`` / ``}`` outside a string literal.
+
+    Tracks JSON string boundaries, including backslash-escaped quotes, so a
+    brace inside a ``reason`` value counts as data rather than structure.
+    """
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{}":
+            yield index, char
+
+
+def _structural_brace_counts(text: str) -> Tuple[int, int]:
+    """``(open, close)`` counts of the braces that are actually structure."""
+    braces = [brace for _, brace in _structural_braces(text)]
+    open_count = braces.count("{")
+    return open_count, len(braces) - open_count
+
+
+def _trim_extra_closing_braces(text: str) -> str:
+    """Cut at the last structural ``}`` until closers no longer outnumber openers.
+
+    Each pass removes at least one closer, so the loop always terminates.
+    """
+    while True:
+        braces = list(_structural_braces(text))
+        closers = [index for index, brace in braces if brace == "}"]
+        if len(closers) <= len(braces) - len(closers):
+            return text
+        text = text[: closers[-1]]
+
+
 def parse_llm_response(llm_response: str) -> Optional[Dict]:
     """Parse the LLM response into a decision dict, or ``None`` on failure.
 
@@ -331,17 +373,18 @@ def parse_llm_response(llm_response: str) -> Optional[Dict]:
                 # Try one more aggressive fix
                 print(f"\n   Attempting second fix attempt (validate structure)...")
                 try:
-                    # Count opening vs closing brackets
-                    open_count = json_str_fixed.count('{')
-                    close_count = json_str_fixed.count('}')
+                    # Count opening vs closing braces outside string values:
+                    # ``str.count`` also saw a ``}`` inside a "reason", and
+                    # the trim below then stripped a real closer with the
+                    # stray one, turning a parseable decision into None.
+                    open_count, close_count = _structural_brace_counts(json_str_fixed)
                     if open_count != close_count:
                         print(f"   Bracket mismatch: {open_count} open, {close_count} close")
-                        # Remove extra closing brackets from the end. Drop one
-                        # ``}`` per pass: the old form re-appended the brace it
-                        # had just cut, so the counts never changed and this
-                        # loop spun forever on a reply with one stray ``}``.
-                        while json_str_fixed.count('}') > json_str_fixed.count('{'):
-                            json_str_fixed = json_str_fixed.rsplit('}', 1)[0]
+                        # Remove extra closing braces from the end, one per
+                        # pass. (An older form re-appended the brace it had
+                        # just cut, so the counts never changed and the loop
+                        # spun forever on a reply with one stray ``}``.)
+                        json_str_fixed = _trim_extra_closing_braces(json_str_fixed)
                         print(f"   Removed extra closing brackets")
 
                     decision = json.loads(json_str_fixed)
