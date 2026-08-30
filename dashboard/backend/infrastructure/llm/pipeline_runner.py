@@ -42,6 +42,11 @@ No markdown, no code fences, no explanatory text outside the JSON.
 Only revise prompts for the listed decision steps. Never invent trades or prices
 beyond the episode context."""
 
+# Keep normal calls at the configured ceiling, but give a recovery attempt room
+# for both reasoning tokens and the final JSON. This is intentionally scoped to
+# retries so reasoning stays enabled without doubling every successful call.
+RECOVERY_MAX_OUTPUT_TOKENS = max(DEFAULT_MAX_OUTPUT_TOKENS, 4096)
+
 
 def is_post_trade_step(step: Any) -> bool:
     return isinstance(step, dict) and step.get("presetKey") == POST_TRADE_PRESET_KEY
@@ -468,12 +473,17 @@ def _create_pipeline_response(
     *,
     model: str,
     prompt: str,
+    max_tokens: Optional[int] = None,
     reasoning_effort: Optional[str] = None,
 ):
-    """Create one pipeline request, optionally overriding model reasoning."""
+    """Create one pipeline request with optional recovery overrides."""
     request = {
         "model": model,
-        "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "max_tokens": (
+            DEFAULT_MAX_OUTPUT_TOKENS
+            if max_tokens is None
+            else max_tokens
+        ),
         "system": PIPELINE_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -568,21 +578,17 @@ def run_pipeline_decision(
         except LLMExecutionError as first_error:
             if first_error.category is not ExecutionErrorCategory.RESPONSE_INVALID:
                 raise
-            try:
-                response = _create_pipeline_response(
-                    client,
-                    model=request_model,
-                    prompt=prompt,
-                    reasoning_effort="none",
-                )
-                retried = True
-            except TypeError as retry_error:
-                # Older client/test doubles may reject only the optional
-                # keyword. Keep the original safe category in that case, but
-                # preserve unrelated client TypeErrors for diagnostics.
-                if "reasoning_effort" in str(retry_error):
-                    raise first_error from retry_error
-                raise
+            print(
+                "   ⚠️  Empty model response; retrying with reasoning preserved "
+                f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
+            )
+            response = _create_pipeline_response(
+                client,
+                model=request_model,
+                prompt=prompt,
+                max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+            )
+            retried = True
         llm_calls += 1
         in_delta, out_delta = extract_token_usage(response)
         total_in += in_delta
@@ -594,21 +600,14 @@ def run_pipeline_decision(
             if _looks_like_truncated_json(response_text):
                 print(
                     "   ⚠️  Pipeline response appears truncated; "
-                    "retrying once with reasoning disabled"
+                    "retrying once with reasoning preserved and a larger output budget"
                 )
-                try:
-                    response = _create_pipeline_response(
-                        client,
-                        model=request_model,
-                        prompt=prompt,
-                        reasoning_effort="none",
-                    )
-                except TypeError as retry_error:
-                    if "reasoning_effort" in str(retry_error):
-                        raise LLMExecutionError(
-                            ExecutionErrorCategory.RESPONSE_INVALID
-                        ) from retry_error
-                    raise
+                response = _create_pipeline_response(
+                    client,
+                    model=request_model,
+                    prompt=prompt,
+                    max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+                )
                 retried = True
                 llm_calls += 1
                 in_delta, out_delta = extract_token_usage(response)

@@ -10,6 +10,7 @@ from dashboard.backend.infrastructure.llm.execution.errors import (
     LLMExecutionError,
 )
 from dashboard.backend.infrastructure.llm.pipeline_runner import (
+    RECOVERY_MAX_OUTPUT_TOKENS,
     apply_prompt_patches,
     is_last_bar_of_trading_day,
     pipeline_output_to_decision,
@@ -201,7 +202,7 @@ def test_apply_prompt_patches_by_id_and_skips_post_trade():
     assert decision[0]["prompt"] == "old gather"  # deepcopy, original untouched
 
 
-def test_run_pipeline_decision_retries_response_invalid_once():
+def test_run_pipeline_decision_retries_response_invalid_with_reasoning_preserved():
     client = _PipelineClient(
         [
             LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID),
@@ -221,7 +222,9 @@ def test_run_pipeline_decision_retries_response_invalid_once():
     assert calls == 1
     assert len(client.messages.calls) == 2
     assert "reasoning_effort" not in client.messages.calls[0]
-    assert client.messages.calls[1]["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in client.messages.calls[1]
+    assert client.messages.calls[0]["max_tokens"] < RECOVERY_MAX_OUTPUT_TOKENS
+    assert client.messages.calls[1]["max_tokens"] == RECOVERY_MAX_OUTPUT_TOKENS
     assert (
         client.messages.calls[0]["messages"]
         == client.messages.calls[1]["messages"]
@@ -270,7 +273,8 @@ def test_run_pipeline_decision_retries_truncated_json_once():
     assert calls == 2
     assert len(client.messages.calls) == 2
     assert "reasoning_effort" not in client.messages.calls[0]
-    assert client.messages.calls[1]["reasoning_effort"] == "none"
+    assert "reasoning_effort" not in client.messages.calls[1]
+    assert client.messages.calls[1]["max_tokens"] == RECOVERY_MAX_OUTPUT_TOKENS
     assert client.messages.calls[0]["messages"] == client.messages.calls[1]["messages"]
 
 
@@ -289,17 +293,13 @@ def test_run_pipeline_decision_does_not_retry_short_malformed_json():
     assert len(client.messages.calls) == 1
 
 
-def test_run_pipeline_decision_preserves_response_invalid_for_legacy_client():
+def test_run_pipeline_decision_preserves_response_invalid_after_retry():
     class _LegacyMessages:
         def __init__(self):
             self.calls = []
 
         def create(self, **kwargs):
             self.calls.append(kwargs)
-            if "reasoning_effort" in kwargs:
-                raise TypeError(
-                    "create() got an unexpected keyword argument 'reasoning_effort'"
-                )
             raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
 
     client = SimpleNamespace(messages=_LegacyMessages())
@@ -322,7 +322,7 @@ def test_run_pipeline_decision_propagates_unrelated_retry_type_error():
 
         def create(self, **kwargs):
             self.calls.append(kwargs)
-            if "reasoning_effort" not in kwargs:
+            if kwargs["max_tokens"] != RECOVERY_MAX_OUTPUT_TOKENS:
                 raise LLMExecutionError(ExecutionErrorCategory.RESPONSE_INVALID)
             raise TypeError("client serialization failed")
 

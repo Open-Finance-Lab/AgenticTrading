@@ -24,7 +24,6 @@ This module is domain-level orchestration: it must NOT import dashboard scripts,
 
 import json
 import math
-import os
 from datetime import datetime, timedelta
 from types import MappingProxyType
 from typing import Dict, List, Mapping, Optional
@@ -55,7 +54,10 @@ from dashboard.backend.infrastructure.llm.backtest_harness import (
     parse_llm_response as _parse_llm_response,
     request_trading_decision as _request_trading_decision,
 )
-from dashboard.backend.infrastructure.llm.pipeline_runner import run_pipeline_decision
+from dashboard.backend.infrastructure.llm.pipeline_runner import (
+    RECOVERY_MAX_OUTPUT_TOKENS,
+    run_pipeline_decision,
+)
 
 
 class LLMDecisionError(RuntimeError):
@@ -477,26 +479,20 @@ class PortfolioManager:
                 no_text_retries = 4
                 for attempt in range(no_text_retries + 1):
                     if attempt == no_text_retries:
-                        # Final rescue: force reasoning off for this one call.
+                        # Final rescue: preserve the provider's reasoning mode,
+                        # but give the model more room for reasoning plus JSON.
                         print(
-                            "   ⚠️  Final rescue call with reasoning disabled "
-                            "to obtain JSON text"
+                            "   ⚠️  Final rescue call with reasoning preserved "
+                            f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
                         )
-                        prev_effort = os.environ.get("OPENROUTER_REASONING_EFFORT")
-                        os.environ["OPENROUTER_REASONING_EFFORT"] = "none"
-                        try:
-                            response = _request_trading_decision(
-                                llm_client,
-                                prompt=prompt,
-                                model=model,
-                                temperature=temperature,
-                                market_context=market_context,
-                            )
-                        finally:
-                            if prev_effort is None:
-                                os.environ.pop("OPENROUTER_REASONING_EFFORT", None)
-                            else:
-                                os.environ["OPENROUTER_REASONING_EFFORT"] = prev_effort
+                        response = _request_trading_decision(
+                            llm_client,
+                            prompt=prompt,
+                            model=model,
+                            max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+                            temperature=temperature,
+                            market_context=market_context,
+                        )
                     else:
                         response = _request_trading_decision(
                             llm_client,
