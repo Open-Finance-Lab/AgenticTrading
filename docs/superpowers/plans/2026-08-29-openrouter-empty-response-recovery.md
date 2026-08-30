@@ -1,10 +1,10 @@
-# OpenRouter Empty Response Recovery Implementation Plan
+# OpenRouter Response Recovery Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Recover one empty OpenRouter reasoning response per pipeline step with a single reasoning-disabled retry, while preserving fail-closed behavior and existing credit settlement.
+**Goal:** Recover one empty or truncated model response per pipeline step with a single larger-output retry that preserves the provider's reasoning mode, while preserving fail-closed behavior and existing credit settlement.
 
-**Architecture:** Keep response classification in the OpenAI-compatible execution adapter. Add a small request helper in the sequential pipeline runner; the first call uses the current client defaults, and only a `response_invalid` execution error triggers a second call with `reasoning_effort="none"`. Parsing, decision normalization, portfolio behavior, and billing remain in their existing layers.
+**Architecture:** Keep response classification in the OpenAI-compatible execution adapter. Add a small request helper in the sequential pipeline runner; the first call uses the current client defaults, and an empty or structurally truncated response triggers one retry with `max_tokens` raised to the recovery ceiling. The retry does not override reasoning, so the provider's configured/default reasoning remains active. Parsing, decision normalization, portfolio behavior, and billing remain in their existing layers.
 
 **Tech Stack:** Python 3.12, Pydantic execution models, Anthropic-shaped client protocol, pytest, existing OpenRouter/OpenAI-compatible adapter.
 
@@ -12,16 +12,16 @@
 
 ## Global Constraints
 
-- Preserve the selected provider, model, prompt, max-output-token limit, billing mode, and run identity for both attempts.
-- Retry at most once per pipeline step and only for `response_invalid`.
-- The recovery attempt explicitly passes `reasoning_effort="none"`.
+- Preserve the selected provider, model, prompt, billing mode, and run identity for both attempts; a recovery attempt may raise only its output-token ceiling.
+- Retry at most once per pipeline step for `response_invalid` or a detected truncated JSON response.
+- The recovery attempt preserves the provider's reasoning configuration and raises only the output-token ceiling.
 - Credentials, provider errors, timeouts, billing/usage failures, and invalid business JSON are not retried.
 - Each attempt uses the existing independent reservation/release lifecycle and a unique `call_index`.
 - Do not log response bodies, reasoning text, API keys, or provider headers.
 - Do not change frontend state, Render memory, worker concurrency, deployment settings, database schema, pricing, or credit policy.
 - Use deterministic fake clients and responses; no network calls or real credentials.
 
-### Task 1: Make OpenRouter reasoning-disabled requests explicit
+### Task 1: Keep explicit OpenRouter reasoning controls provider-safe
 
 **Files:**
 - Modify: `dashboard/backend/infrastructure/llm/execution/adapters/openai.py:108-118`
@@ -97,7 +97,7 @@ if request.reasoning_effort and provider.adapter_type in {
     kwargs["extra_body"] = {"reasoning": reasoning}
 ```
 
-This keeps normal configured effort values unchanged and prevents the explicit recovery override from being ignored by OpenRouter models.
+This keeps normal configured effort values unchanged and makes an explicitly requested reasoning override provider-safe. Automatic recovery does not use this override; it preserves reasoning and changes only the output ceiling.
 
 - [ ] **Step 4: Run the adapter route tests**
 
@@ -113,7 +113,7 @@ Expected: PASS, including the existing OpenAI, OpenRouter, Anthropic, and Gemini
 
 ```bash
 git add dashboard/backend/infrastructure/llm/execution/adapters/openai.py dashboard/backend/tests/infrastructure/llm/test_execution_adapter_model_routes.py
-git commit -m "fix: disable OpenRouter reasoning for recovery calls"
+git commit -m "fix: preserve OpenRouter reasoning controls"
 ```
 
 ### Task 2: Specify pipeline recovery behavior with deterministic tests
@@ -267,14 +267,14 @@ python -m pytest dashboard/backend/tests/infrastructure/llm/test_pipeline_runner
 
 Expected: the existing normalization tests pass, while the new retry tests fail because `run_pipeline_decision()` currently performs only one unguarded model call.
 
-### Task 3: Implement the bounded `response_invalid` retry
+### Task 3: Implement bounded response recovery with reasoning preserved
 
 **Files:**
 - Modify: `dashboard/backend/infrastructure/llm/pipeline_runner.py:15-24,462-531`
 
 **Interfaces:**
 - Consumes: existing `client.messages.create()` Anthropic-shaped protocol and `ExecutionErrorCategory.RESPONSE_INVALID`.
-- Produces: unchanged `run_pipeline_decision()` return type, with at most one retry request carrying `reasoning_effort="none"`.
+- Produces: unchanged `run_pipeline_decision()` return type, with at most one retry request carrying the recovery `max_tokens` ceiling and no reasoning override.
 
 - [ ] **Step 1: Add the execution-error imports and a private request helper**
 
@@ -286,11 +286,16 @@ def _create_pipeline_response(
     *,
     model: str,
     prompt: str,
+    max_tokens: Optional[int] = None,
     reasoning_effort: Optional[str] = None,
 ):
     request = {
         "model": model,
-        "max_tokens": DEFAULT_MAX_OUTPUT_TOKENS,
+        "max_tokens": (
+            DEFAULT_MAX_OUTPUT_TOKENS
+            if max_tokens is None
+            else max_tokens
+        ),
         "system": PIPELINE_SYSTEM_PROMPT,
         "messages": [{"role": "user", "content": prompt}],
     }
@@ -304,27 +309,25 @@ def _create_pipeline_response(
 Inside `run_pipeline_decision()`, resolve `resolved_model = model or LLM_MODEL_NAME`, then use:
 
 ```python
-try:
-    response = _create_pipeline_response(
-        client,
-        model=resolved_model,
-        prompt=prompt,
-    )
-except LLMExecutionError as first_error:
-    if first_error.category != ExecutionErrorCategory.RESPONSE_INVALID:
-        raise
-    print("   ⚠️  Empty model response; retrying once with reasoning disabled")
     try:
         response = _create_pipeline_response(
             client,
             model=resolved_model,
             prompt=prompt,
-            reasoning_effort="none",
         )
-    except TypeError:
-        # Preserve the original safe category for legacy clients that reject
-        # the optional retry kwarg instead of exposing an SDK TypeError.
-        raise first_error
+    except LLMExecutionError as first_error:
+        if first_error.category != ExecutionErrorCategory.RESPONSE_INVALID:
+            raise
+        print(
+            "   ⚠️  Empty model response; retrying with reasoning preserved "
+            f"and max_tokens={RECOVERY_MAX_OUTPUT_TOKENS}"
+        )
+        response = _create_pipeline_response(
+            client,
+            model=resolved_model,
+            prompt=prompt,
+            max_tokens=RECOVERY_MAX_OUTPUT_TOKENS,
+        )
 ```
 
 Keep `llm_calls += 1`, usage extraction, parsing, and normalization immediately after this block. This means failed attempts do not become successful billable calls, while a successful retry follows the existing accounting path.

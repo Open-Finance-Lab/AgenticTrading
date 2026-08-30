@@ -375,6 +375,48 @@ def test_portfolio_forwards_temperature_to_no_text_retry(monkeypatch):
     assert [call["temperature"] for call in captured] == [0, 0]
 
 
+def test_portfolio_final_no_text_retry_preserves_reasoning_and_increases_budget(
+    monkeypatch,
+):
+    captured = []
+    extract_attempts = 0
+    response_text = json.dumps({"actions": [
+        {"symbol": "AAPL", "action": "hold", "confidence": 0.9,
+         "reasoning": "strong", "position_size": 0},
+    ]})
+
+    def _fake_request(client, **kwargs):
+        captured.append(kwargs)
+        return _FakeResponse(response_text, usage=_FakeUsage(10, 5))
+
+    def _fake_extract(response):
+        nonlocal extract_attempts
+        extract_attempts += 1
+        if extract_attempts <= 4:
+            raise AttributeError("No text content block in response")
+        return response_text
+
+    monkeypatch.setattr(
+        portfolio_manager_module,
+        "_request_trading_decision",
+        _fake_request,
+    )
+    monkeypatch.setattr(
+        portfolio_manager_module,
+        "_extract_response_text",
+        _fake_extract,
+    )
+
+    pm = bha.PortfolioManager(100000)
+    pm.make_trading_decision_with_llm(_portfolio_state(), object())
+
+    assert len(captured) == 5
+    assert all("max_tokens" not in call for call in captured[:4])
+    assert captured[-1]["max_tokens"] == (
+        portfolio_manager_module.RECOVERY_MAX_OUTPUT_TOKENS
+    )
+
+
 def test_no_json_response_returns_empty_actions():
     pm = bha.PortfolioManager(100000)
     client = _FakeClient(_FakeResponse("totally not json", usage=_FakeUsage(10, 5)))
