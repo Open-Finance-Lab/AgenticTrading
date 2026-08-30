@@ -503,7 +503,14 @@ def _looks_like_truncated_json(response_text: str) -> bool:
     """
     text = str(response_text or "").strip()
     text = text.replace("```json", "").replace("```", "").strip()
-    if len(text) < 512 or not text.startswith("{"):
+    # Reasoning can consume most of the provider output budget, leaving a
+    # surprisingly short JSON prefix (the production failure was ~170 chars).
+    # Keep a small floor to avoid retrying a bare ``{"orders": [`` typo, while
+    # requiring a known decision envelope so unrelated malformed JSON is not
+    # treated as a truncation.
+    if len(text) < 64 or not text.startswith("{"):
+        return False
+    if not any(f'"{key}"' in text for key in ("actions", "orders", "risk_actions")):
         return False
 
     stack: list[str] = []

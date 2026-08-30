@@ -433,14 +433,24 @@ def main() -> int:
     return 0
 
 
+def _close_pools() -> None:
+    """Close shared Postgres pools before this short-lived CLI exits."""
+    pool_module = sys.modules.get("dashboard.backend.db_pool")
+    if pool_module is not None:
+        pool_module.close_all_pools()
+
+
 if __name__ == "__main__":
     from dashboard.backend.infrastructure.market_data.alpaca_bars import (
         MarketDataUnavailableError,
     )
 
     try:
-        sys.exit(main())
-    except MarketDataUnavailableError as exc:
-        # Library code raises; the CLI boundary owns the process exit.
-        print(f"ERROR: {exc}")
-        sys.exit(1)
+        try:
+            sys.exit(main())
+        except MarketDataUnavailableError as exc:
+            # Library code raises; the CLI boundary owns the process exit.
+            print(f"ERROR: {exc}")
+            sys.exit(1)
+    finally:
+        _close_pools()
