@@ -163,6 +163,8 @@ def test_execute_algo_writes_config_and_forwards(monkeypatch, tmp_path):
     assert out["team_name"] == "My Team"
     assert out["start_date"] == "2026-05-04"
     assert out["end_date"] == "2026-05-12"
+    assert "multi-step runs can take several minutes" in out["message"]
+    assert "3–10 minutes" not in out["message"]
     assert captured.get("started") is True
 
     # Config file is written into the isolated CONFIG_DIR with forwarded values.
