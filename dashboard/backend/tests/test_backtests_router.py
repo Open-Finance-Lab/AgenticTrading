@@ -801,9 +801,8 @@ def test_ai_hedge_fund_backtest_rejects_run_when_runtime_not_installed(
 def test_hosted_backtest_timeout_covers_every_decision_step():
     """The parent timeout must not be the binding constraint on a hosted run.
 
-    A fixed 1800s cap over a month of trading days leaves ~85s per step while
-    the runtime is configured for 300s, so the parent kills the child mid-run
-    and discards every completed step.
+    A fixed 3600s cap gives a month-long run enough room for its decision steps
+    while keeping a bounded parent process lifetime.
     """
     step_seconds = bt.resolve_step_timeout_seconds()
     decision_days = bt._estimated_decision_days("2026-01-01", "2026-01-31")
@@ -815,10 +814,11 @@ def test_hosted_backtest_timeout_covers_every_decision_step():
     assert hosted >= step_seconds * decision_days
     assert hosted > bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
 
-    # Pipeline runs keep their established budget exactly.
+    # Pipeline runs use the shared 60-minute budget exactly.
+    assert bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS == 3600
     assert (
         bt._backtest_subprocess_timeout("pipeline", "2026-01-01", "2026-01-31")
-        == bt.PIPELINE_SUBPROCESS_TIMEOUT_SECONDS
+        == 3600
     )
 
 
