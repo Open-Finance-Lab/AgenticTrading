@@ -72,13 +72,17 @@ def available_window(history: DailyHistory, desired: int) -> int:
     return max(0, min(desired, len(history)))
 
 
-def _resample_field(bars_by_symbol: Dict[str, pd.DataFrame], field: str, how: str) -> pd.DataFrame:
-    cols: Dict[str, pd.Series] = {}
-    for sym, df in bars_by_symbol.items():
-        if df is None or df.empty or field not in df.columns:
-            continue
-        grouped = df[field].groupby(df.index.map(timestamp_date))
-        cols[sym] = getattr(grouped, how)()
+# (field, groupby aggregation) pairs that make up one daily OHLCV row.
+_DAILY_FIELDS = (
+    ("close", "last"),
+    ("open", "first"),
+    ("high", "max"),
+    ("low", "min"),
+    ("volume", "sum"),
+)
+
+
+def _wide_frame(cols: Dict[str, pd.Series]) -> pd.DataFrame:
     if not cols:
         return pd.DataFrame()
     frame = pd.DataFrame(cols).sort_index()
@@ -87,14 +91,21 @@ def _resample_field(bars_by_symbol: Dict[str, pd.DataFrame], field: str, how: st
 
 
 def daily_history(bars_by_symbol: Dict[str, pd.DataFrame]) -> DailyHistory:
-    """Resample hourly bars_by_symbol to one daily OHLCV row per symbol."""
-    return DailyHistory(
-        close=_resample_field(bars_by_symbol, "close", "last"),
-        open=_resample_field(bars_by_symbol, "open", "first"),
-        high=_resample_field(bars_by_symbol, "high", "max"),
-        low=_resample_field(bars_by_symbol, "low", "min"),
-        volume=_resample_field(bars_by_symbol, "volume", "sum"),
-    )
+    """Resample hourly bars_by_symbol to one daily OHLCV row per symbol.
+
+    The ET calendar-date key (a per-timestamp tz conversion) is computed once
+    per symbol and shared by all five fields.
+    """
+    cols: Dict[str, Dict[str, pd.Series]] = {field: {} for field, _ in _DAILY_FIELDS}
+    for sym, df in bars_by_symbol.items():
+        if df is None or df.empty:
+            continue
+        day_keys = df.index.map(timestamp_date)
+        for field, how in _DAILY_FIELDS:
+            if field not in df.columns:
+                continue
+            cols[field][sym] = getattr(df[field].groupby(day_keys), how)()
+    return DailyHistory(**{field: _wide_frame(cols[field]) for field, _ in _DAILY_FIELDS})
 
 
 def make_entry_exit_weight_fn(
@@ -138,12 +149,16 @@ def run_daily_signal_strategy(
     initial_capital: float,
     weight_fn: WeightFn,
     rebalance_every_days: int = 1,
-    lot_size: Optional[float] = None,
+    history: Optional[DailyHistory] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Returns (equity_curve, n_trades). `n_trades` counts genuine buy/sell
-    share-count changes, not every day's mark-to-market."""
+    share-count changes, not every day's mark-to-market.
+
+    `history` is ``daily_history(bars_by_symbol)``; pass it when the strategy
+    has already built one (e.g. to precompute indicators over the full series)
+    so the bars are not resampled twice. Built here when omitted."""
     symbols = list(bars_by_symbol.keys())
-    history_full = daily_history(bars_by_symbol)
+    history_full = history if history is not None else daily_history(bars_by_symbol)
     if history_full.close.empty:
         return [], 0
 
@@ -163,6 +178,7 @@ def run_daily_signal_strategy(
 
     for ts in contest_ts:
         cur_date = timestamp_date(ts)
+        prices = {s: price_cache.get(s, {}).get(ts) for s in symbols}
         if cur_date != last_date:
             last_date = cur_date
             day_index += 1
@@ -170,7 +186,6 @@ def run_daily_signal_strategy(
                 history = history_full.before(cur_date)
                 weights = weight_fn(history, cur_date, day_index) or {}
 
-                prices = {s: price_cache.get(s, {}).get(ts) for s in symbols}
                 port_val = cash + sum(
                     shares[s] * prices[s] for s in symbols if prices.get(s) is not None
                 )
@@ -181,14 +196,7 @@ def run_daily_signal_strategy(
                     if not p or p <= 0 or w <= 0:
                         target[s] = 0.0
                         continue
-                    dollars = w * port_val
-                    if lot_size:
-                        dollars = round(dollars / lot_size) * lot_size
-                    target[s] = dollars
-                total_target = sum(target.values())
-                if lot_size and total_target > port_val > 0:
-                    scale = port_val / total_target
-                    target = {s: round(v * scale / lot_size) * lot_size for s, v in target.items()}
+                    target[s] = w * port_val
 
                 new_cash = port_val
                 for s in symbols:
@@ -202,9 +210,8 @@ def run_daily_signal_strategy(
                     new_cash -= new_sh * p
                 cash = new_cash
 
-        prices_now = {s: price_cache.get(s, {}).get(ts) for s in symbols}
         positions_value = sum(
-            shares[s] * prices_now[s] for s in symbols if prices_now.get(s) is not None
+            shares[s] * prices[s] for s in symbols if prices.get(s) is not None
         )
         curve.append(
             {

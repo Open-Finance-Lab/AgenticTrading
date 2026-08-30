@@ -6,32 +6,29 @@ and ADX confirms a real trend (>25) -- three signals confirming a fresh
 uptrend simultaneously; sells on the mirrored bearish combination. Fully
 generic trend/momentum confirmation stack, portable without modification.
 
-Lookback: needs ~25 days for ADX/EMA to stabilize; below that, holds
-whatever is already held and takes no new positions.
+Lookback: needs ~28 days for ADX to produce its first value (two chained
+14-day Wilder smoothings); below that, holds whatever is already held and
+takes no new positions.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
+import numpy as np
 import pandas as pd
 
-from dashboard.backend.infrastructure.llm.validator import DJIA_30
-
 from .base import BaselineStrategy
+from ._common import subset_bars
 from ._indicators import adx, ema, rsi
-from ._signal_engine import DailyHistory, make_entry_exit_weight_fn, run_daily_signal_strategy
+from ._signal_engine import DailyHistory, daily_history, make_entry_exit_weight_fn, run_daily_signal_strategy
 
 _MAX_POSITIONS = 8
-_MIN_HISTORY = 25
+_MIN_HISTORY = 27  # entry/exit need one row more than this for the crossover
 
 
 class HlhbStrategy(BaselineStrategy):
     key = "hlhb"
-
-    def required_symbols(self) -> List[str]:
-        symbols = self.config.get("symbols")
-        return list(symbols) if symbols else list(DJIA_30)
 
     def run(
         self,
@@ -41,51 +38,62 @@ class HlhbStrategy(BaselineStrategy):
         initial_capital: float,
     ) -> List[Dict[str, Any]]:
         symbols = self.required_symbols()
-        bars_subset = {s: bars_by_symbol[s] for s in symbols if s in bars_by_symbol}
+        bars_subset = subset_bars(bars_by_symbol, symbols)
         if not bars_subset:
             return []
 
-        def _series(history: DailyHistory, sym: str):
-            close = history.close[sym].dropna().to_frame()
-            high = history.high[sym].reindex(close.index).to_frame()
-            low = history.low[sym].reindex(close.index).to_frame()
-            rsi14 = rsi(close, 14)
-            ema5 = ema(close, 5)
-            ema10 = ema(close, 10)
-            adx14, _, _ = adx(high, low, close, 14)
-            return rsi14, ema5, ema10, adx14
+        # Indicators are computed once per symbol over the full daily series and
+        # read back at the position of the last row of the (strictly-before-today)
+        # history the engine hands entry/exit. rsi/ema/adx are causal (ewm), so
+        # position i of the full series equals the last value of the same
+        # indicator computed on the first i+1 rows alone -- no look-ahead.
+        history_full = daily_history(bars_subset)
+        cache: Dict[str, Tuple[np.ndarray, ...]] = {}
+
+        def _series(sym: str) -> Tuple[np.ndarray, ...]:
+            if sym not in cache:
+                close = history_full.close[sym].dropna().to_frame()
+                high = history_full.high[sym].reindex(close.index).to_frame()
+                low = history_full.low[sym].reindex(close.index).to_frame()
+                adx14, _, _ = adx(high, low, close, 14)
+                cache[sym] = tuple(
+                    frame.iloc[:, 0].to_numpy()
+                    for frame in (rsi(close, 14), ema(close, 5), ema(close, 10), adx14)
+                )
+            return cache[sym]
+
+        def _last_row(history: DailyHistory, sym: str) -> int:
+            """Position, in the full series, of the last daily row in `history`."""
+            return int(history.close[sym].count()) - 1
 
         def entry(history: DailyHistory, sym: str) -> bool:
-            close = history.close[sym].dropna()
-            if len(close) < _MIN_HISTORY + 1:
+            i = _last_row(history, sym)
+            if i < _MIN_HISTORY:
                 return False
-            rsi14, ema5, ema10, adx14 = _series(history, sym)
+            rsi14, ema5, ema10, adx14 = _series(sym)
             return bool(
-                rsi14.iloc[-1, 0] > 50
-                and rsi14.iloc[-2, 0] <= 50
-                and ema5.iloc[-1, 0] > ema10.iloc[-1, 0]
-                and adx14.iloc[-1, 0] > 25
+                rsi14[i] > 50
+                and rsi14[i - 1] <= 50
+                and ema5[i] > ema10[i]
+                and adx14[i] > 25
             )
 
         def exit_(history: DailyHistory, sym: str) -> bool:
-            close = history.close[sym].dropna()
-            if len(close) < _MIN_HISTORY + 1:
+            i = _last_row(history, sym)
+            if i < _MIN_HISTORY:
                 return False
-            rsi14, ema5, ema10, adx14 = _series(history, sym)
+            rsi14, ema5, ema10, adx14 = _series(sym)
             return bool(
-                rsi14.iloc[-1, 0] < 50
-                and rsi14.iloc[-2, 0] >= 50
-                and ema5.iloc[-1, 0] < ema10.iloc[-1, 0]
-                and adx14.iloc[-1, 0] > 25
+                rsi14[i] < 50
+                and rsi14[i - 1] >= 50
+                and ema5[i] < ema10[i]
+                and adx14[i] > 25
             )
 
         weight_fn = make_entry_exit_weight_fn(entry, exit_, symbols, _MAX_POSITIONS, _MIN_HISTORY)
         curve, n_trades = run_daily_signal_strategy(
             bars_subset, start_date, end_date, initial_capital, weight_fn,
-            rebalance_every_days=1,
+            rebalance_every_days=1, history=history_full,
         )
         self._num_trades = n_trades
         return curve
-
-    def num_trades(self) -> int:
-        return getattr(self, "_num_trades", 0)

@@ -18,9 +18,8 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
-from dashboard.backend.infrastructure.llm.validator import DJIA_30
-
 from .base import BaselineStrategy
+from ._common import subset_bars
 from ._signal_engine import DailyHistory, run_daily_signal_strategy
 
 _TOP_N = 10
@@ -32,10 +31,6 @@ _REBALANCE_DAYS = 21
 class ShortTermReversalStrategy(BaselineStrategy):
     key = "short_term_reversal"
 
-    def required_symbols(self) -> List[str]:
-        symbols = self.config.get("symbols")
-        return list(symbols) if symbols else list(DJIA_30)
-
     def run(
         self,
         bars_by_symbol: Dict[str, pd.DataFrame],
@@ -44,7 +39,7 @@ class ShortTermReversalStrategy(BaselineStrategy):
         initial_capital: float,
     ) -> List[Dict[str, Any]]:
         symbols = self.required_symbols()
-        bars_subset = {s: bars_by_symbol[s] for s in symbols if s in bars_by_symbol}
+        bars_subset = subset_bars(bars_by_symbol, symbols)
         if not bars_subset:
             return []
 
@@ -66,6 +61,3 @@ class ShortTermReversalStrategy(BaselineStrategy):
         )
         self._num_trades = n_trades
         return curve
-
-    def num_trades(self) -> int:
-        return getattr(self, "_num_trades", 0)

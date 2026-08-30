@@ -17,9 +17,8 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
-from dashboard.backend.infrastructure.llm.validator import DJIA_30
-
 from .base import BaselineStrategy
+from ._common import subset_bars
 from ._signal_engine import DailyHistory, run_daily_signal_strategy
 
 _TOP_N = 5
@@ -31,10 +30,6 @@ _REBALANCE_DAYS = 21
 class VolatilityEffectStrategy(BaselineStrategy):
     key = "volatility_effect"
 
-    def required_symbols(self) -> List[str]:
-        symbols = self.config.get("symbols")
-        return list(symbols) if symbols else list(DJIA_30)
-
     def run(
         self,
         bars_by_symbol: Dict[str, pd.DataFrame],
@@ -43,7 +38,7 @@ class VolatilityEffectStrategy(BaselineStrategy):
         initial_capital: float,
     ) -> List[Dict[str, Any]]:
         symbols = self.required_symbols()
-        bars_subset = {s: bars_by_symbol[s] for s in symbols if s in bars_by_symbol}
+        bars_subset = subset_bars(bars_by_symbol, symbols)
         if not bars_subset:
             return []
 
@@ -52,7 +47,10 @@ class VolatilityEffectStrategy(BaselineStrategy):
             if n < _MIN_HISTORY:
                 return {}
             lookback = min(_DESIRED_LOOKBACK_DAYS, n)
-            returns = history.close.pct_change().iloc[-lookback:]
+            # fill_method=None: a missing close must not be padded into a 0%
+            # return day (pandas' default pads), which would understate that
+            # symbol's volatility and rank it as "low-vol" for having a gap.
+            returns = history.close.pct_change(fill_method=None).iloc[-lookback:]
             vol = returns.std().dropna()
             bottom = vol.sort_values().head(_TOP_N)
             if bottom.empty:
@@ -65,6 +63,3 @@ class VolatilityEffectStrategy(BaselineStrategy):
         )
         self._num_trades = n_trades
         return curve
-
-    def num_trades(self) -> int:
-        return getattr(self, "_num_trades", 0)

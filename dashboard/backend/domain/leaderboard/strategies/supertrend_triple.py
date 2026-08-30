@@ -16,32 +16,21 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import numpy as np
 import pandas as pd
 
-from dashboard.backend.infrastructure.llm.validator import DJIA_30
-
 from .base import BaselineStrategy
+from ._common import subset_bars
 from ._indicators import supertrend_single
-from ._signal_engine import DailyHistory, make_entry_exit_weight_fn, run_daily_signal_strategy
+from ._signal_engine import DailyHistory, daily_history, make_entry_exit_weight_fn, run_daily_signal_strategy
 
 _MAX_POSITIONS = 8
 _MIN_HISTORY = 20
 _VARIANTS = [(7, 3.0), (10, 3.0), (14, 4.0)]
 
 
-def _all_trends(history: DailyHistory, sym: str) -> List[str]:
-    close = history.close[sym].dropna()
-    high = history.high[sym].reindex(close.index)
-    low = history.low[sym].reindex(close.index)
-    return [supertrend_single(high, low, close, period, mult).iloc[-1] for period, mult in _VARIANTS]
-
-
 class SupertrendTripleStrategy(BaselineStrategy):
     key = "supertrend_triple"
-
-    def required_symbols(self) -> List[str]:
-        symbols = self.config.get("symbols")
-        return list(symbols) if symbols else list(DJIA_30)
 
     def run(
         self,
@@ -51,27 +40,50 @@ class SupertrendTripleStrategy(BaselineStrategy):
         initial_capital: float,
     ) -> List[Dict[str, Any]]:
         symbols = self.required_symbols()
-        bars_subset = {s: bars_by_symbol[s] for s in symbols if s in bars_by_symbol}
+        bars_subset = subset_bars(bars_by_symbol, symbols)
         if not bars_subset:
             return []
+
+        # The three trend series are computed once per symbol over the full daily
+        # series and read back at the position of the last row of the
+        # (strictly-before-today) history the engine hands entry/exit. Supertrend
+        # is a forward recursion over ATR (itself an ewm), so position i of the
+        # full series equals the last value computed on the first i+1 rows alone
+        # -- no look-ahead.
+        history_full = daily_history(bars_subset)
+        cache: Dict[str, List[np.ndarray]] = {}
+
+        def _all_trends(sym: str) -> List[np.ndarray]:
+            if sym not in cache:
+                close = history_full.close[sym].dropna()
+                high = history_full.high[sym].reindex(close.index)
+                low = history_full.low[sym].reindex(close.index)
+                cache[sym] = [
+                    supertrend_single(high, low, close, period, mult).to_numpy()
+                    for period, mult in _VARIANTS
+                ]
+            return cache[sym]
+
+        def _last_row(history: DailyHistory, sym: str) -> int:
+            """Position, in the full series, of the last daily row in `history`."""
+            return int(history.close[sym].count()) - 1
 
         def entry(history: DailyHistory, sym: str) -> bool:
             if len(history) < _MIN_HISTORY:
                 return False
-            return all(t == "up" for t in _all_trends(history, sym))
+            i = _last_row(history, sym)
+            return i >= 0 and all(trend[i] == "up" for trend in _all_trends(sym))
 
         def exit_(history: DailyHistory, sym: str) -> bool:
             if len(history) < _MIN_HISTORY:
                 return False
-            return all(t == "down" for t in _all_trends(history, sym))
+            i = _last_row(history, sym)
+            return i >= 0 and all(trend[i] == "down" for trend in _all_trends(sym))
 
         weight_fn = make_entry_exit_weight_fn(entry, exit_, symbols, _MAX_POSITIONS, _MIN_HISTORY)
         curve, n_trades = run_daily_signal_strategy(
             bars_subset, start_date, end_date, initial_capital, weight_fn,
-            rebalance_every_days=1,
+            rebalance_every_days=1, history=history_full,
         )
         self._num_trades = n_trades
         return curve
-
-    def num_trades(self) -> int:
-        return getattr(self, "_num_trades", 0)

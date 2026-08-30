@@ -46,6 +46,9 @@ class TurnOfMonthStrategy(BaselineStrategy):
         df = bars_by_symbol.get(symbol)
         if df is None or df.empty:
             return []
+        # Scalar reads below (df.loc[ts, "open"] / "close") would come back as
+        # a Series on a duplicated bar timestamp; keep the last bar per stamp.
+        df = df[~df.index.duplicated(keep="last")].sort_index()
 
         all_ts = market_timestamps({symbol: df})
         contest_ts = timestamps_in_contest(all_ts, start_date, end_date)
@@ -59,8 +62,12 @@ class TurnOfMonthStrategy(BaselineStrategy):
             first_of_day.setdefault(d, ts)
             last_of_day[d] = ts
         unique_dates = sorted(first_of_day.keys())
+        # A date is a month-end only when the next sampled date is in a later
+        # month. The last sampled date is never one on that evidence alone: the
+        # contest window usually ends mid-month, and treating its final day as
+        # a month-end bought SPY on the last day of every contest.
         is_last_of_month = {
-            d: (i == len(unique_dates) - 1 or unique_dates[i + 1].month != d.month)
+            d: (i + 1 < len(unique_dates) and unique_dates[i + 1].month != d.month)
             for i, d in enumerate(unique_dates)
         }
 
@@ -81,7 +88,9 @@ class TurnOfMonthStrategy(BaselineStrategy):
                         shares = cash / buy_price
                         cash = 0.0
                         n_trades += 1
-                    hold_days_left = _HOLD_TRADING_DAYS
+                        # Only a real fill starts the hold; a skipped buy must
+                        # not block the next candidate day with a phantom hold.
+                        hold_days_left = _HOLD_TRADING_DAYS
                 elif hold_days_left > 0:
                     hold_days_left -= 1
                     if hold_days_left == 0 and shares > 0:
@@ -104,6 +113,3 @@ class TurnOfMonthStrategy(BaselineStrategy):
 
         self._num_trades = n_trades
         return curve
-
-    def num_trades(self) -> int:
-        return getattr(self, "_num_trades", 0)

@@ -45,6 +45,9 @@ class OvernightAnomalyStrategy(BaselineStrategy):
         df = bars_by_symbol.get(symbol)
         if df is None or df.empty:
             return []
+        # Scalar reads below (df.loc[ts, "open"] / "close") would come back as
+        # a Series on a duplicated bar timestamp; keep the last bar per stamp.
+        df = df[~df.index.duplicated(keep="last")].sort_index()
 
         all_ts = market_timestamps({symbol: df})
         contest_ts = timestamps_in_contest(all_ts, start_date, end_date)
@@ -91,6 +94,3 @@ class OvernightAnomalyStrategy(BaselineStrategy):
 
         self._num_trades = n_trades
         return curve
-
-    def num_trades(self) -> int:
-        return getattr(self, "_num_trades", 0)

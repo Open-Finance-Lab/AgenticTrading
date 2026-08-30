@@ -7,8 +7,12 @@ uptrend-confirmed dip); sells on the mirror-image condition at the upper
 band. Pure generic technical-analysis logic (Bollinger/RSI/EMA), portable
 from freqtrade's crypto pairs to equities without modification.
 
-Lookback: needs ~50 days for the slower EMA; below that, holds whatever is
-already held and takes no new positions.
+Lookback: wants 50 days for the slower EMA, but the leaderboard's reference
+buffer plus contest window is ~44 trading days, so a hard 50-day floor would
+never trade. The slow EMA's span is capped at the history actually available
+(see ``_signal_engine``'s lookback caveat); the 20-day Bollinger window is the
+real floor, below which the strategy holds whatever it holds and takes no new
+positions.
 """
 
 from __future__ import annotations
@@ -17,22 +21,25 @@ from typing import Any, Dict, List
 
 import pandas as pd
 
-from dashboard.backend.infrastructure.llm.validator import DJIA_30
-
 from .base import BaselineStrategy
+from ._common import subset_bars
 from ._indicators import bollinger, ema, rsi
 from ._signal_engine import DailyHistory, make_entry_exit_weight_fn, run_daily_signal_strategy
 
 _MAX_POSITIONS = 8
-_MIN_HISTORY = 50
+_SLOW_EMA_DAYS = 50
+_MIN_HISTORY = 20  # the Bollinger window; the slow EMA degrades down to this
+
+
+def _slow_ema_span(close: pd.Series) -> int:
+    """The slow EMA's span capped at this symbol's own non-NaN daily rows (not the
+    union frame's length -- ``ema`` sets ``min_periods=span``, so a span above
+    the row count is all-NaN and every comparison against it is False)."""
+    return min(_SLOW_EMA_DAYS, len(close))
 
 
 class BandtasticStrategy(BaselineStrategy):
     key = "bandtastic"
-
-    def required_symbols(self) -> List[str]:
-        symbols = self.config.get("symbols")
-        return list(symbols) if symbols else list(DJIA_30)
 
     def run(
         self,
@@ -42,7 +49,7 @@ class BandtasticStrategy(BaselineStrategy):
         initial_capital: float,
     ) -> List[Dict[str, Any]]:
         symbols = self.required_symbols()
-        bars_subset = {s: bars_by_symbol[s] for s in symbols if s in bars_by_symbol}
+        bars_subset = subset_bars(bars_by_symbol, symbols)
         if not bars_subset:
             return []
 
@@ -53,7 +60,7 @@ class BandtasticStrategy(BaselineStrategy):
             _, _, bb_lower, _ = bollinger(close.to_frame(), 20, 2.0)
             rsi14 = rsi(close.to_frame(), 14)
             ema10 = ema(close.to_frame(), 10)
-            ema50 = ema(close.to_frame(), 50)
+            ema50 = ema(close.to_frame(), _slow_ema_span(close))
             return bool(
                 close.iloc[-1] < bb_lower.iloc[-1, 0]
                 and rsi14.iloc[-1, 0] < 52
@@ -67,7 +74,7 @@ class BandtasticStrategy(BaselineStrategy):
             bb_upper, _, _, _ = bollinger(close.to_frame(), 20, 2.0)
             rsi14 = rsi(close.to_frame(), 14)
             ema10 = ema(close.to_frame(), 10)
-            ema50 = ema(close.to_frame(), 50)
+            ema50 = ema(close.to_frame(), _slow_ema_span(close))
             return bool(
                 close.iloc[-1] > bb_upper.iloc[-1, 0]
                 and rsi14.iloc[-1, 0] > 57
@@ -81,6 +88,3 @@ class BandtasticStrategy(BaselineStrategy):
         )
         self._num_trades = n_trades
         return curve
-
-    def num_trades(self) -> int:
-        return getattr(self, "_num_trades", 0)

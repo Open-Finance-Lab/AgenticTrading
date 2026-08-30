@@ -17,7 +17,10 @@ def rsi(close: pd.DataFrame, period: int = 14) -> pd.DataFrame:
     avg_gain = gain.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
     avg_loss = loss.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
     rs = avg_gain / avg_loss.replace(0, np.nan)
-    return 100 - 100 / (1 + rs)
+    # No down moves in the window is RSI 100 (Wilder), not NaN -- a NaN here
+    # would make every threshold comparison False in exactly the strongest-
+    # momentum case. Warm-up rows keep their NaN (avg_loss is NaN there).
+    return (100 - 100 / (1 + rs)).mask(avg_loss == 0, 100.0)
 
 
 def ema(series: pd.DataFrame, span: int) -> pd.DataFrame:
@@ -61,7 +64,11 @@ def adx(high: pd.DataFrame, low: pd.DataFrame, close: pd.DataFrame, period: int 
     atr_ = tr.ewm(alpha=1 / period, adjust=False, min_periods=period).mean()
     plus_di = 100 * plus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr_
     minus_di = 100 * minus_dm.ewm(alpha=1 / period, adjust=False, min_periods=period).mean() / atr_
-    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+    # A flat stretch (no directional movement) is DX 0, not 0/0 = NaN: the NaN
+    # would otherwise be smoothed into ADX and keep the ">25" gate False long
+    # after prices started moving again. Warm-up rows keep their NaN.
+    denom = plus_di + minus_di
+    dx = (100 * (plus_di - minus_di).abs() / denom).where(denom != 0, 0.0)
     return dx.ewm(alpha=1 / period, adjust=False, min_periods=period).mean(), plus_di, minus_di
 
 
@@ -100,7 +107,9 @@ def supertrend_single(high: pd.Series, low: pd.Series, close: pd.Series, period:
 
 
 def zscore_row(row: pd.Series) -> pd.Series:
+    """Cross-sectional z-score; a degenerate row (zero spread, or too few
+    finite values for a spread) is neutral zeros, never NaN."""
     m, s = row.mean(), row.std()
     if not s or np.isnan(s):
-        return row * 0
+        return pd.Series(0.0, index=row.index)
     return (row - m) / s
