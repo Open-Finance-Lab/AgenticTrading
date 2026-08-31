@@ -16,6 +16,7 @@ from pydantic import (
 
 
 CreditPackageId = Literal["usd_0_50", "usd_1", "usd_2", "usd_5"]
+RestrictionReason = Literal["llm_overage", "refund_reconciliation"]
 
 FIXED_PACKAGES_USD_CENTS: dict[str, int] = {
     "usd_0_50": 50,
@@ -213,6 +214,8 @@ class BalanceResult(BaseModel):
     spending_enabled: Literal[False] = False
     account_status: str
     billing_available: bool
+    restriction_reason: RestrictionReason | None = None
+    outstanding_credits_micro: StrictInt = Field(default=0, ge=0)
 
     @model_validator(mode="before")
     @classmethod
@@ -291,6 +294,15 @@ class GrantPoolSummary(BaseModel):
         return self
 
 
+class CreditRecoveryResult(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    recovered_micro: StrictInt = Field(ge=0)
+    outstanding_micro: StrictInt = Field(ge=0)
+    account_status: str
+    restriction_reason: RestrictionReason | None = None
+
+
 class GrantMutationResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -306,6 +318,7 @@ class GrantMutationResult(BaseModel):
     user_balance: BalanceProjection | None = None
     pool_ledger_entry_id: StrictInt | None = None
     user_ledger_entry_id: StrictInt | None = None
+    recovery: CreditRecoveryResult | None = None
 
 
 class CheckoutResult(BaseModel):
@@ -338,6 +351,8 @@ class WebhookResult(BaseModel):
     reason: str | None = None
     balance_micro: int | None = None
     account_restricted: bool = False
+    recovered_micro: int = 0
+    outstanding_micro: int = 0
 
 
 class LLMReservation(BaseModel):
@@ -351,6 +366,7 @@ class LLMReservation(BaseModel):
     settled_micro: StrictInt
     actual_micro: StrictInt = Field(default=0, ge=0)
     outstanding_micro: StrictInt = Field(default=0, ge=0)
+    outstanding_recovered_micro: StrictInt = Field(default=0, ge=0)
     status: Literal["open", "settled", "released"]
     created_at: str
     updated_at: str
@@ -367,6 +383,7 @@ class LLMSettlementResult(BaseModel):
     settled_micro: StrictInt
     actual_micro: StrictInt = Field(default=0, ge=0)
     outstanding_micro: StrictInt = Field(default=0, ge=0)
+    outstanding_recovered_micro: StrictInt = Field(default=0, ge=0)
     released_micro: StrictInt
     status: Literal["open", "settled", "released"]
     grant_debited_micro: StrictInt = 0

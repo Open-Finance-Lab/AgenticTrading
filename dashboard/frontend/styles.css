@@ -13199,6 +13199,30 @@ body.agent-editor-open {
     white-space: nowrap;
 }
 
+.admin-status-active,
+.admin-status-restricted {
+    display: block;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: capitalize;
+}
+
+.admin-status-active {
+    color: #86efac;
+}
+
+.admin-status-restricted {
+    color: #fda4af;
+}
+
+.admin-credits-status-detail {
+    display: block;
+    margin-top: 3px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    white-space: nowrap;
+}
+
 .admin-credits-role-select {
     width: 94px;
     min-width: 0;

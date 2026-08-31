@@ -304,3 +304,41 @@ def test_platform_execution_releases_reservation_when_usage_is_missing(
             ("env-platform-failed-run",),
         ).fetchone()[0]
     assert status == "released"
+
+
+@pytest.mark.parametrize(
+    ("reason", "expected"),
+    [
+        ("llm_overage", "Add at least 0.250000 Credits"),
+        ("refund_reconciliation", "payment refund review"),
+    ],
+)
+def test_restricted_account_execution_error_is_actionable(
+    tmp_path, monkeypatch, reason, expected
+):
+    adapter = FakeExecutionAdapter(LLMUsage(input_tokens=100, output_tokens=100))
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+    if reason == "llm_overage":
+        reservation = credits_store.reserve_llm_credits(
+            reservation_id="restricted-error-reservation",
+            user_id=USER_ID,
+            run_id="restricted-error-seed",
+            call_index=0,
+            reserved_micro=1_000_000,
+            operation_key="restricted-error-seed",
+            request_digest="r" * 64,
+        )
+        credits_store.settle_llm_credits(
+            reservation["reservation_id"],
+            actual_micro=1_250_000,
+            evidence={"provider_id": "openrouter", "model_id": MODEL_ID},
+        )
+    else:
+        credits_store.restrict_account(USER_ID, reason=reason)
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request(f"restricted-{reason}"))
+
+    assert exc_info.value.category is ExecutionErrorCategory.ACCOUNT_RESTRICTED
+    assert expected in exc_info.value.safe_message
+    assert "CreditAccountRestrictedStoreError" not in exc_info.value.safe_message

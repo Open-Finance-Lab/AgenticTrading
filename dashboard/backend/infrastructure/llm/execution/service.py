@@ -7,6 +7,9 @@ from collections.abc import Callable
 
 from dashboard.backend.domain.credits.models import LLMSettlementResult
 from dashboard.backend.domain.credits.service import CreditsService
+from dashboard.backend.domain.credits.repository_common import (
+    CreditAccountRestrictedStoreError,
+)
 from dashboard.backend.domain.analytics import instrumentation as analytics_instrumentation
 from dashboard.backend.domain.model_providers.models import ProviderRecord
 from dashboard.backend.domain.model_providers.service import (
@@ -169,6 +172,7 @@ class LLMExecutionService:
             ExecutionErrorCategory.PROVIDER_UNAVAILABLE: "provider_unavailable",
             ExecutionErrorCategory.PROVIDER_TIMEOUT: "provider_timeout",
             ExecutionErrorCategory.BILLING_FAILED: "credits_unavailable",
+            ExecutionErrorCategory.ACCOUNT_RESTRICTED: "account_restricted",
         }.get(category, "internal_error")
 
     @staticmethod
@@ -239,12 +243,24 @@ class LLMExecutionService:
         try:
             reserved_micro = _reservation_ceiling_micro(request, pricing_snapshot)
             if reserved_micro > 0:
-                reservation = self.credits.reserve_llm_credits(
-                    user_id=request.user_id,
-                    run_id=request.run_id,
-                    call_index=request.call_index,
-                    amount_micro=reserved_micro,
-                )
+                try:
+                    reservation = self.credits.reserve_llm_credits(
+                        user_id=request.user_id,
+                        run_id=request.run_id,
+                        call_index=request.call_index,
+                        amount_micro=reserved_micro,
+                    )
+                except CreditAccountRestrictedStoreError as exc:
+                    try:
+                        balance = self.credits.get_balance(request.user_id)
+                        reason = balance.restriction_reason
+                        outstanding_micro = balance.outstanding_credits_micro
+                    except Exception:  # noqa: BLE001 - keep the safe fallback
+                        reason = None
+                        outstanding_micro = 0
+                    raise LLMExecutionError.account_restricted(
+                        reason, outstanding_micro
+                    ) from exc
                 reservation_id = reservation.reservation_id
                 self._platform_runs.add(request.run_id)
                 if reservation.status != "open":
