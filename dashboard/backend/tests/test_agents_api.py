@@ -735,7 +735,7 @@ def test_marketplace_listing_and_clone(client):
     assert listing.status_code == 200
     templates = listing.json()["templates"]
     assert templates
-    assert any(t["template_id"] == "balanced-starter" for t in templates)
+    assert any(t["template_id"] == "claude-haiku-4-5" for t in templates)
     hedge_fund_card = next(
         t for t in templates if t["template_id"] == "ai-hedge-fund"
     )
@@ -751,13 +751,13 @@ def test_marketplace_listing_and_clone(client):
     browser_session = str(uuid.uuid4())
     headers = {"X-Session-Id": browser_session}
     cloned = client.post(
-        "/api/v1/agents/marketplace/balanced-starter/clone",
+        "/api/v1/agents/marketplace/claude-haiku-4-5/clone",
         json={},
         headers=headers,
     )
     assert cloned.status_code == 200
     agent = cloned.json()["agent"]
-    assert agent["name"] == "Balanced Starter"
+    assert agent["name"] == "Claude Haiku 4.5"
     assert agent["agent_type"] == "builtin"
     assert agent.get("pipeline")
     assert agent["pipeline"][0]["presetKey"] == "simple_instruction"
@@ -825,43 +825,33 @@ def test_marketplace_catalog_shape():
         )
 
     # "Pipeline" is banned product-copy vocabulary (glossary: pipeline ->
-    # "multi-step strategy"); the template_id stays "pipeline-analyst" since
-    # it's an API identifier baked into clone URLs, but the display name --
-    # the card's largest text -- must not carry the word.
+    # "multi-step strategy"). The hosted card and the competition-model cards
+    # must not put that word in the display name -- the card's largest text.
     names = {t["template_id"]: t["name"] for t in templates}
-    assert names["pipeline-analyst"] == "Three-Step Analyst"
-    assert "Pipeline Analyst" not in names.values()
+    assert names["ai-hedge-fund"] == "AI Hedge Fund"
+    assert "Pipeline" not in " ".join(names.values())
 
 
 def test_marketplace_listing_is_ordered_by_shelf_not_by_slug():
-    """Community cards group by market in *declaration* order, not slug order.
+    """Community cards group by supermarket shelf, LLMs then Open Agents.
 
-    The recategorization onto slugs quietly changed which card leads the page:
-    ``sorted`` on the raw value orders cn_ashares < us_stocks, so the A-share
-    template became card #1 on a U.S.-focused product. Nothing caught it because
-    no test asserted order. ``category_sort_rank`` keys on the AgentCategory
-    Literal's declaration order instead, which is also the order MARKET_LABELS
-    renders the market chips in, so the two surfaces agree.
+    Within a shelf the catalog's insertion order is preserved so the LLM
+    row can follow the leaderboard roster instead of alphabetical names.
     """
     import dashboard.backend.domain.agents.marketplace as marketplace_mod
-    from dashboard.backend.domain.agents.taxonomy import (
-        AGENT_CATEGORY_ORDER,
-        category_sort_rank,
-    )
 
     marketplace_mod.reload_marketplace_catalog()
     templates = marketplace_mod.list_marketplace_templates()
 
-    ranks = [category_sort_rank(t.get("category")) for t in templates]
-    assert ranks == sorted(ranks), "templates are not grouped in shelf order"
-
-    # The U.S. market leads; uncategorized templates never do.
-    assert templates[0]["category"] == AGENT_CATEGORY_ORDER[0] == "us_stocks"
-    assert templates[-1]["category"] == "cn_ashares"
-
-    # Within a shelf, still by name.
-    us_stocks = [t["name"] for t in templates if t["category"] == "us_stocks"]
-    assert us_stocks == sorted(us_stocks)
+    shelves = [t.get("shelf") for t in templates]
+    assert set(shelves) <= set(marketplace_mod.MARKETPLACE_SHELVES)
+    llms = [t for t in templates if t["shelf"] == "llms"]
+    opens = [t for t in templates if t["shelf"] == "open"]
+    assert llms, "the LLM shelf is empty"
+    assert opens, "the Open Agents shelf is empty"
+    assert templates[0]["shelf"] == "llms"
+    assert templates[-1]["shelf"] == "open"
+    assert [t["name"] for t in opens] == ["AI Hedge Fund"]
 
 
 def test_uncategorized_templates_sort_last_and_carry_no_fake_shelf():
@@ -1416,7 +1406,7 @@ def test_builtin_listing_echoes_category(client):
 def test_clone_honours_a_model_name_override(client):
     """Community's "Choose model" affordance clones a template onto another model."""
     cloned = client.post(
-        "/api/v1/agents/marketplace/balanced-starter/clone",
+        "/api/v1/agents/marketplace/claude-haiku-4-5/clone",
         json={"model_name": "deepseek/deepseek-v4-pro"},
         headers={"X-Session-Id": str(uuid.uuid4())},
     )
@@ -1429,7 +1419,7 @@ def test_clone_falls_back_to_the_template_model(client, blank):
     """Omitted or blank means "use the template's model", not "use empty"."""
     body = {} if blank is None else {"model_name": blank}
     cloned = client.post(
-        "/api/v1/agents/marketplace/balanced-starter/clone",
+        "/api/v1/agents/marketplace/claude-haiku-4-5/clone",
         json=body,
         headers={"X-Session-Id": str(uuid.uuid4())},
     )
@@ -1441,7 +1431,7 @@ def test_clone_does_not_validate_the_model_name(client):
     """No whitelist here: POST /agents and PATCH /agents/{id} don't have one either,
     and a Literal would drag in the openapi enum deploy gate #313 discharged."""
     cloned = client.post(
-        "/api/v1/agents/marketplace/balanced-starter/clone",
+        "/api/v1/agents/marketplace/claude-haiku-4-5/clone",
         json={"model_name": "some/unreleased-model"},
         headers={"X-Session-Id": str(uuid.uuid4())},
     )

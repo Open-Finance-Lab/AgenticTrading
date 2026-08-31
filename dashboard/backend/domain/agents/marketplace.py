@@ -1,8 +1,9 @@
 """Open agent templates for the Agent Supermarket.
 
-Templates are defined in ``dashboard/config/marketplace.json`` so baseline open
-agents can be added without schema migrations. The listing is public; cloning
-creates a user-owned built-in agent with the template's pipeline copied in.
+Templates are defined in ``dashboard/config/marketplace.json`` so competition
+models and hosted agents can be added without schema migrations. The listing
+is public; cloning creates a user-owned built-in agent with the template's
+pipeline copied in.
 """
 
 from __future__ import annotations
@@ -11,13 +12,28 @@ import json
 from functools import lru_cache
 from typing import Any, Dict, List, Optional
 
-from dashboard.backend.domain.agents.taxonomy import (
-    category_sort_rank,
-    normalize_category,
-)
+from dashboard.backend.domain.agents.taxonomy import normalize_category
 from dashboard.backend.paths import CONFIG_DIR
 
 _MARKETPLACE_PATH = CONFIG_DIR / "marketplace.json"
+
+# Community supermarket rows. Declared order is display order: LLMs first,
+# then Open Agents. Unknown / omitted values fall through ``_normalize_shelf``.
+MARKETPLACE_SHELVES = ("llms", "open")
+
+
+def _normalize_shelf(raw: Dict[str, Any]) -> str:
+    """Return ``llms`` or ``open``.
+
+    Explicit ``shelf`` on the catalog row wins. Otherwise a non-pipeline
+    runtime (today: AI Hedge Fund) is an open agent, so a future hosted
+    project does not have to remember the field to land on the right row.
+    """
+    explicit = str(raw.get("shelf") or "").strip().lower()
+    if explicit in MARKETPLACE_SHELVES:
+        return explicit
+    runtime_type = str(raw.get("runtime_type") or "pipeline")
+    return "open" if runtime_type != "pipeline" else "llms"
 
 
 def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
@@ -47,6 +63,8 @@ def _public_template(raw: Dict[str, Any]) -> Dict[str, Any]:
         "author": raw.get("author") or "Community",
         "runtime_type": runtime_type,
         "step_count": step_count,
+        "shelf": _normalize_shelf(raw),
+        "card_subtitle": str(raw.get("card_subtitle") or "").strip() or None,
         "mode": (
             "runtime"
             if runtime_type != "pipeline"
@@ -82,17 +100,19 @@ def _load_catalog() -> Dict[str, Dict[str, Any]]:
 
 
 def list_marketplace_templates() -> List[Dict[str, Any]]:
-    """Return public marketplace cards grouped by shelf, then sorted by name.
+    """Return public marketplace cards grouped by supermarket shelf.
 
-    Ordered by ``category_sort_rank`` rather than by the slug itself: the slugs
-    are not alphabetical in shelf order, so a plain ``sorted`` on the raw value
-    leads the Community listing with the A-share shelf. Uncategorized templates
-    sort last.
+    ``MARKETPLACE_SHELVES`` declaration order is the page order (LLMs, then
+    Open Agents). Within a shelf the catalog's insertion order is preserved
+    (stable sort) so Community can list models in the leaderboard roster
+    order without a second sort key.
     """
     items = [_public_template(raw) for raw in _load_catalog().values()]
     return sorted(
         items,
-        key=lambda t: (category_sort_rank(t.get("category")), str(t.get("name") or "")),
+        key=lambda t: MARKETPLACE_SHELVES.index(t["shelf"])
+        if t.get("shelf") in MARKETPLACE_SHELVES
+        else len(MARKETPLACE_SHELVES),
     )
 
 

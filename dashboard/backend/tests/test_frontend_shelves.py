@@ -382,7 +382,7 @@ def test_copy_to_my_agents_cta_is_gone():
     PR #253 made "Add to My Agents" canonical everywhere else, so this one
     holdout ternary must go, not gain a permanent sibling.
     """
-    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    body = _strip_js_comments(fn_body("function buildMarketplaceCardHtml"))
     assert "Copy to My Agents" not in body
 
 
@@ -392,7 +392,7 @@ def test_add_to_my_agents_cta_is_a_single_unconditional_string():
     apart again tomorrow. Assert the direct, unconditional assignment and
     that the now-dead branch variable is gone with it.
     """
-    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    body = _strip_js_comments(fn_body("function buildMarketplaceCardHtml"))
     assert "cloneLabel = 'Add to My Agents'" in body
     assert "isAiHedgeFundTemplate" not in body
 
@@ -405,7 +405,7 @@ def test_marketplace_submeta_never_renders_a_raw_category_or_model_slug():
     'anthropic/'/'nvidia/' prefix strings elsewhere in the function, so a
     whole-function check would false-positive on the table doing its job.
     """
-    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    body = _strip_js_comments(fn_body("function buildMarketplaceCardHtml"))
     submeta_line = next(line for line in body.splitlines() if "agent-card-submeta" in line)
     assert "template.category" not in submeta_line
     assert "template.model_name" not in submeta_line
@@ -413,9 +413,12 @@ def test_marketplace_submeta_never_renders_a_raw_category_or_model_slug():
 
 
 def test_fallback_description_copy_is_updated():
-    body = _strip_js_comments(fn_body(_MARKETPLACE_RENDER_FN))
+    """LLM tiles stay description-free. Open Agents may show catalog copy.
+    Old fallback strings must stay gone."""
+    body = _strip_js_comments(fn_body("function buildMarketplaceCardHtml"))
     assert "Open agent template." not in body
-    assert "No description provided yet." in body
+    assert "No description provided yet." not in body
+    assert "marketplace-card-description" in body
 
 
 def test_marketplace_category_chip_container_is_present_in_community_view():
@@ -458,7 +461,12 @@ def test_community_page_carries_the_no_real_money_sentence_once():
     the brief says "once per page").
     """
     community_html = _community_view_html()
-    assert community_html.count(_CANONICAL_NO_REAL_MONEY_SENTENCE) == 1
+    shortened = (
+        "Performance is based on simulated tests and may vary between runs. "
+        "Live trading requires an explicitly connected brokerage account."
+    )
+    assert community_html.count(shortened) == 1
+    assert _CANONICAL_NO_REAL_MONEY_SENTENCE not in community_html
 
 
 def _strip_js_comments_from(source: str) -> str:

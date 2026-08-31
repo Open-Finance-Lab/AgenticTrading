@@ -2191,6 +2191,24 @@ async function loadAgentsNow() {
 let marketplaceTemplates = [];
 let marketplaceCloneInFlight = false;
 let marketplaceLoadInFlight = null;
+/** null = contest board not fetched yet (card stats show a reserved loading
+ *  state). [] = fetched, including a failed fetch — never invent ranks. */
+let marketplaceLeaderboardEntries = null;
+let marketplaceLeaderboardLoadInFlight = null;
+/** Window / capital / field count from the same contest payload. */
+let marketplaceContestMeta = {
+  start_date: null,
+  end_date: null,
+  display_capital: null,
+  total_entries: null,
+};
+
+/** Community supermarket rows. Map-rendered; adding a shelf is a new entry
+ *  here plus ``shelf`` on the catalog row, not a one-off card layout. */
+const MARKETPLACE_SHELVES = [
+  { key: 'llms', title: 'LLMs', sub: 'LLMs tested on the ATL leaderboard' },
+  { key: 'open', title: 'Open Agents', sub: 'Open-source trading agents' },
+];
 /** 'all' or one of MARKET_LABELS' keys. Set by the chip row and by the Prompted
  * Models shelf's empty-state Community button (via navigateToPage's options). */
 let marketplaceCategoryFilter = 'all';
@@ -2216,16 +2234,16 @@ let marketplaceVendorFilter = 'all';
  * renderMarketplaceVendorChips), so listing a vendor here never ships an
  * empty chip. */
 const MODEL_VENDORS = [
-  { key: 'anthropic', prefix: 'anthropic/', label: 'Claude', licence: 'closed' },
-  { key: 'openai', prefix: 'openai/', label: 'GPT', licence: 'closed' },
-  { key: 'google', prefix: 'google/', label: 'Gemini', licence: 'closed' },
-  { key: 'deepseek', prefix: 'deepseek/', label: 'DeepSeek', licence: 'open' },
-  { key: 'qwen', prefix: 'qwen/', label: 'Qwen', licence: 'open' },
+  { key: 'anthropic', prefix: 'anthropic/', label: 'Claude', licence: 'closed', company: 'Anthropic' },
+  { key: 'openai', prefix: 'openai/', label: 'GPT', licence: 'closed', company: 'OpenAI' },
+  { key: 'google', prefix: 'google/', label: 'Gemini', licence: 'closed', company: 'Google' },
+  { key: 'deepseek', prefix: 'deepseek/', label: 'DeepSeek', licence: 'open', company: 'DeepSeek' },
+  { key: 'qwen', prefix: 'qwen/', label: 'Qwen', licence: 'open', company: 'Alibaba' },
   // "NVIDIA Nemotron", not "Nemotron": this label also feeds
   // formatModelProviderLabel, whose shipped output must not change.
-  { key: 'nvidia', prefix: 'nvidia/nemotron', label: 'NVIDIA Nemotron', licence: 'open' },
-  { key: 'meta', prefix: 'meta-llama/', label: 'Llama', licence: 'open' },
-  { key: 'xai', prefix: 'x-ai/', label: 'Grok', licence: 'closed' },
+  { key: 'nvidia', prefix: 'nvidia/nemotron', label: 'NVIDIA Nemotron', licence: 'open', company: 'NVIDIA' },
+  { key: 'meta', prefix: 'meta-llama/', label: 'Llama', licence: 'open', company: 'Meta' },
+  { key: 'xai', prefix: 'x-ai/', label: 'Grok', licence: 'closed', company: 'xAI' },
 ];
 
 /** Vendor key for a model slug, or '' when the platform genuinely doesn't know.
@@ -2254,6 +2272,14 @@ function formatModelProviderLabel(modelName) {
   const key = modelVendorKey(modelName);
   const vendor = MODEL_VENDORS.find((entry) => entry.key === key);
   return vendor ? `Powered by ${vendor.label}` : 'AI-powered';
+}
+
+/** Company name for a tile subtitle (Anthropic, NVIDIA). Distinct from
+ * formatModelProviderLabel, which is the older "Powered by Claude" line. */
+function formatModelCompanyLabel(modelName) {
+  const key = modelVendorKey(modelName);
+  const vendor = MODEL_VENDORS.find((entry) => entry.key === key);
+  return vendor ? (vendor.company || vendor.label) : '';
 }
 
 /** Select a Community category chip and re-render, without a route or API
@@ -2361,14 +2387,19 @@ function marketplaceEmptyHtml({ searching, categoryFilter, vendorFilter }) {
   return 'No templates match your search.';
 }
 
+function templateMarketplaceShelf(template) {
+  const explicit = String(template?.shelf || '').toLowerCase();
+  if (explicit === 'llms' || explicit === 'open') return explicit;
+  return (template?.mode === 'runtime' || template?.runtime_type === 'ai_hedge_fund')
+    ? 'open'
+    : 'llms';
+}
+
 function getFilteredMarketplaceTemplates() {
   const query = (document.getElementById('marketplaceSearchInput')?.value || '').trim().toLowerCase();
   let list = marketplaceTemplates.slice();
   if (marketplaceCategoryFilter !== 'all') {
     list = list.filter((template) => String(template.category || '').toLowerCase() === marketplaceCategoryFilter);
-  }
-  if (marketplaceVendorFilter !== 'all') {
-    list = list.filter((template) => modelVendorKey(template.model_name) === marketplaceVendorFilter);
   }
   if (query) {
     list = list.filter((template) => {
@@ -2377,6 +2408,7 @@ function getFilteredMarketplaceTemplates() {
         template.description,
         template.category,
         template.author,
+        template.card_subtitle,
         ...(template.tags || []),
         template.model_name,
       ]
@@ -2389,6 +2421,314 @@ function getFilteredMarketplaceTemplates() {
   return list;
 }
 
+function findMarketplaceLeaderboardEntry(template) {
+  const entries = marketplaceLeaderboardEntries;
+  if (!Array.isArray(entries)) return null;
+  const name = String(template?.name || '').trim().toLowerCase();
+  const id = String(template?.template_id || '').replace(/-/g, '_');
+  return entries.find((entry) => {
+    if (!entry || !entry.is_model) return false;
+    if (name && String(entry.model || '').trim().toLowerCase() === name) return true;
+    return Boolean(id) && String(entry.entry_id || '') === id;
+  }) || null;
+}
+
+/** Contest-board stats for a supermarket card.
+ *
+ * Wired to GET /api/v1/leaderboard?period=contest (same payload as the
+ * Competition Leaderboard, window 2026-04-15 → 2026-05-15). That payload
+ * has a single-window ``cumulative_return``, official ``rank``, and
+ * hourly ``equity_curve``. Do not invent values.
+ */
+const MARKETPLACE_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function applyMarketplaceLeaderboardPayload(data) {
+  const entries = Array.isArray(data?.entries) ? data.entries : [];
+  marketplaceLeaderboardEntries = entries;
+  marketplaceContestMeta = {
+    start_date: data?.window?.start_date || null,
+    end_date: data?.window?.end_date || null,
+    display_capital: data?.display_capital ?? null,
+    total_entries: Number(data?.total_entries) || entries.length || null,
+  };
+}
+
+function marketplaceBenchmarkEntry() {
+  const entries = marketplaceLeaderboardEntries;
+  if (!Array.isArray(entries)) return null;
+  return entries.find((entry) => (
+    entry?.entry_id === 'djia_index' || String(entry?.model || '').toUpperCase() === 'DJIA'
+  )) || null;
+}
+
+function downsampleMarketplaceCurve(curve, maxPoints = 48) {
+  if (!Array.isArray(curve) || curve.length <= maxPoints) return curve || [];
+  const out = [];
+  const last = curve.length - 1;
+  for (let i = 0; i < maxPoints; i += 1) {
+    out.push(curve[Math.round((i / (maxPoints - 1)) * last)]);
+  }
+  return out;
+}
+
+function marketplaceIndexedPctSeries(curve) {
+  // Cumulative return from the first equity point, in percent (0 = start).
+  if (!Array.isArray(curve) || curve.length < 2) return null;
+  const points = [];
+  for (const point of curve) {
+    const equity = Number(point?.equity);
+    if (!Number.isFinite(equity)) continue;
+    points.push({ t: point.timestamp, equity });
+  }
+  if (points.length < 2) return null;
+  const initial = points[0].equity;
+  if (!initial) return null;
+  return points.map((point) => ({ t: point.t, pct: ((point.equity / initial) - 1) * 100 }));
+}
+
+function formatMarketplaceMd(iso) {
+  const match = String(iso || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return '';
+  return `${MARKETPLACE_MONTHS[Number(match[2]) - 1]} ${Number(match[3])}`;
+}
+
+function formatMarketplaceWindowRange(start, end) {
+  const from = formatMarketplaceMd(start);
+  const to = formatMarketplaceMd(end);
+  if (from && to) return `${from}–${to}`;
+  return from || to || '';
+}
+
+function formatMarketplaceCapital(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '';
+  if (n >= 1000 && n % 1000 === 0) return `$${(n / 1000).toFixed(0)}K`;
+  return `$${Math.round(n).toLocaleString('en-US')}`;
+}
+
+function marketplaceNicePctTicks(min, max) {
+  const lo = Math.min(0, Math.floor(min / 5) * 5);
+  const hi = Math.max(0, Math.ceil(max / 5) * 5);
+  const ticks = [];
+  for (let v = lo; v <= hi; v += 5) ticks.push(v);
+  if (ticks.length < 2) ticks.push(lo + 5);
+  return ticks;
+}
+
+function marketplaceLinePath(series, xOf, yOf) {
+  return series.map((point, i) => {
+    const cmd = i === 0 ? 'M' : 'L';
+    return `${cmd}${xOf(i).toFixed(1)},${yOf(point.pct).toFixed(1)}`;
+  }).join(' ');
+}
+
+/** Agent vs DJIA comparison chart from real contest equity_curve points. */
+function buildMarketplaceCompareChartHtml(agentCurve, benchmarkCurve, { positive = true, modelName = 'Model' } = {}) {
+  const agent = marketplaceIndexedPctSeries(downsampleMarketplaceCurve(agentCurve));
+  if (!agent) return '';
+  const bench = marketplaceIndexedPctSeries(downsampleMarketplaceCurve(benchmarkCurve));
+  const agentColor = positive ? '#4ade80' : '#f87171';
+  const benchColor = '#94a3b8';
+  const pcts = agent.map((p) => p.pct).concat(bench ? bench.map((p) => p.pct) : []);
+  const ticks = marketplaceNicePctTicks(Math.min(...pcts), Math.max(...pcts));
+  const yMin = ticks[0];
+  const yMax = ticks[ticks.length - 1];
+  const yRange = yMax - yMin || 1;
+  const w = 220;
+  const left = 32;
+  const right = 6;
+  const top = 6;
+  const plotBottom = 78;
+  const plotW = w - left - right;
+  const plotH = plotBottom - top;
+  const n = agent.length;
+  const xOf = (i) => left + (n <= 1 ? 0 : (i / (n - 1)) * plotW);
+  const yOf = (pct) => top + (1 - (pct - yMin) / yRange) * plotH;
+  const xTicks = [0, Math.round((n - 1) / 2), n - 1].filter((v, i, arr) => arr.indexOf(v) === i);
+  const yLines = ticks.map((tick) => {
+    const y = yOf(tick);
+    return `<line x1="${left}" y1="${y.toFixed(1)}" x2="${w - right}" y2="${y.toFixed(1)}" stroke="rgba(148,163,184,0.18)" stroke-width="1"/>
+            <text x="${left - 4}" y="${(y + 3).toFixed(1)}" text-anchor="end" class="mp-chart-tick">${tick}%</text>`;
+  }).join('');
+  const xLabels = xTicks.map((i) => {
+    const raw = String(agent[i]?.t || '');
+    const label = formatMarketplaceMd(raw.slice(0, 10));
+    if (!label) return '';
+    return `<text x="${xOf(i).toFixed(1)}" y="${plotBottom + 12}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}" class="mp-chart-tick">${escapeHtml(label)}</text>`;
+  }).join('');
+  const agentPath = marketplaceLinePath(agent, xOf, yOf);
+  const benchPath = bench && bench.length >= 2 ? marketplaceLinePath(bench, xOf, yOf) : '';
+  return `
+      <div class="mp-compare-chart" aria-hidden="true">
+        <svg viewBox="0 0 ${w} ${plotBottom + 16}" preserveAspectRatio="xMidYMid meet" width="100%" height="96">
+          ${yLines}
+          ${benchPath ? `<path d="${benchPath}" fill="none" stroke="${benchColor}" stroke-width="1.4" stroke-dasharray="4 3" stroke-linecap="round" stroke-linejoin="round"/>` : ''}
+          <path d="${agentPath}" fill="none" stroke="${agentColor}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+          ${xLabels}
+        </svg>
+        <p class="mp-compare-legend">
+          <span class="mp-compare-legend-item"><i class="mp-compare-swatch mp-compare-swatch--agent" style="background:${agentColor}"></i>${escapeHtml(modelName)}</span>
+          ${benchPath ? '<span class="mp-compare-legend-item"><i class="mp-compare-swatch mp-compare-swatch--djia"></i>DJIA</span>' : ''}
+        </p>
+      </div>`;
+}
+
+function marketplacePerformanceFor(template) {
+  const loading = marketplaceLeaderboardEntries === null;
+  const meta = marketplaceContestMeta || {};
+  const empty = {
+    leaderboardRank: null,
+    contestReturn: null,
+    agentCurve: null,
+    benchmarkCurve: null,
+    totalEntries: meta.total_entries || null,
+    startDate: meta.start_date || null,
+    endDate: meta.end_date || null,
+    displayCapital: meta.display_capital ?? null,
+    medianReturn: null,
+    positiveRuns: null,
+    totalRuns: null,
+    loading,
+  };
+  if (loading) return empty;
+  const entry = findMarketplaceLeaderboardEntry(template);
+  const benchmark = marketplaceBenchmarkEntry();
+  if (!entry) {
+    return {
+      ...empty,
+      loading: false,
+      benchmarkCurve: benchmark?.equity_curve || null,
+    };
+  }
+  const rank = Number(entry.rank);
+  const ret = entry.cumulative_return;
+  const contestReturn = ret == null || ret === '' ? null : Number(ret);
+  return {
+    ...empty,
+    loading: false,
+    leaderboardRank: Number.isFinite(rank) ? rank : null,
+    contestReturn: Number.isFinite(contestReturn) ? contestReturn : null,
+    agentCurve: entry.equity_curve || null,
+    benchmarkCurve: benchmark?.equity_curve || null,
+  };
+}
+
+function compareMarketplaceTemplatesByRank(a, b) {
+  const ra = marketplacePerformanceFor(a).leaderboardRank;
+  const rb = marketplacePerformanceFor(b).leaderboardRank;
+  if (ra == null && rb == null) return 0;
+  if (ra == null) return 1;
+  if (rb == null) return -1;
+  return ra - rb;
+}
+
+function formatMarketplaceReturnPct(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const pct = n * 100;
+  const abs = Math.abs(pct).toFixed(1);
+  return `${pct > 0 ? '+' : pct < 0 ? '-' : ''}${abs}%`;
+}
+
+function marketplaceRepoLabel(template) {
+  if (!template?.repo_url) return '';
+  try {
+    const path = new URL(template.repo_url).pathname.replace(/^\/+|\/+$/g, '');
+    return path || template.author || 'GitHub';
+  } catch {
+    return template.author || 'GitHub';
+  }
+}
+
+/** Compact leaderboard-first card. Shared by both supermarket shelves. */
+function buildMarketplaceCardHtml(template) {
+  const stats = marketplacePerformanceFor(template);
+  const isOpen = templateMarketplaceShelf(template) === 'open';
+  const cloneLabel = 'Add to My Agents';
+  const categoryLabel = MARKET_LABELS[String(template.category || '').toLowerCase()] || '';
+  const companyLabel = formatModelCompanyLabel(template.model_name);
+  const submeta = isOpen
+    ? (template.card_subtitle || 'Open-source trading agent')
+    : [companyLabel, categoryLabel].filter(Boolean).join(' · ');
+  const returnPositive = Number(stats.contestReturn) >= 0;
+  const formattedReturn = formatMarketplaceReturnPct(stats.contestReturn);
+  const returnValue = (!stats.loading && formattedReturn) ? formattedReturn : '—';
+  const returnClass = (!stats.loading && formattedReturn)
+    ? (returnPositive ? 'return-positive' : 'return-negative')
+    : 'mp-stat-value--muted';
+
+  const rankBadge = (!isOpen && stats.leaderboardRank != null && stats.totalEntries)
+    ? `<span class="mp-rank-badge">
+            <svg class="ui-icon mp-rank-badge-icon" aria-hidden="true"><use href="#icon-trophy"></use></svg>
+            #${stats.leaderboardRank} of ${stats.totalEntries}
+          </span>`
+    : (isOpen ? '<span class="marketplace-mode-chip">Open Source</span>' : '');
+
+  const chartHtml = !isOpen
+    ? buildMarketplaceCompareChartHtml(stats.agentCurve, stats.benchmarkCurve, {
+        positive: returnPositive,
+        modelName: template.name,
+      })
+    : '';
+
+  const windowLabel = formatMarketplaceWindowRange(stats.startDate, stats.endDate);
+  const capitalLabel = formatMarketplaceCapital(stats.displayCapital);
+  const metaParts = ['DJIA 30', windowLabel, capitalLabel].filter(Boolean);
+  const contestMeta = !isOpen && metaParts.length
+    ? `<p class="mp-contest-meta">
+            <svg class="ui-icon mp-contest-meta-icon" aria-hidden="true"><use href="#icon-chart"></use></svg>
+            <span>${escapeHtml(metaParts.join(' · '))}</span>
+          </p>`
+    : '';
+
+  const competitionHtml = !isOpen
+    ? `<div class="mp-competition">
+        <p class="mp-competition-kicker">Competition result</p>
+        <div class="mp-competition-body">
+          <div class="mp-total-return">
+            <span class="mp-total-return-value ${returnClass}">${escapeHtml(returnValue)}</span>
+            <span class="mp-total-return-label">Return</span>
+          </div>
+          ${chartHtml}
+        </div>
+      </div>
+      ${contestMeta}`
+    : '';
+
+  const description = isOpen ? String(template.description || '').trim() : '';
+  const descriptionHtml = description
+    ? `<p class="marketplace-card-description">${escapeHtml(description)}</p>`
+    : '';
+
+  const repoLabel = marketplaceRepoLabel(template);
+  const identityExtra = isOpen && template.repo_url
+    ? `<a class="marketplace-repo-btn" href="${escapeHtml(template.repo_url)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(repoLabel)} on GitHub">
+            <svg class="ui-icon marketplace-repo-icon" aria-hidden="true"><use href="#icon-github"></use></svg>
+            <span>${escapeHtml(repoLabel)}</span>
+          </a>`
+    : '';
+
+  return `
+    <div class="section-card agent-card marketplace-card${isOpen ? ' marketplace-card--open' : ' marketplace-card--llm'}">
+      <div class="agent-card-top">
+        <div class="agent-card-identity">
+          ${agentRobotIcon()}
+          <div class="agent-card-identity-text">
+            <h3 class="agent-name">${escapeHtml(template.name)}</h3>
+            <p class="agent-card-submeta" title="${escapeHtml(submeta)}">${escapeHtml(submeta)}</p>
+          </div>
+        </div>
+        ${rankBadge}
+      </div>
+      ${competitionHtml}
+      ${descriptionHtml}
+      ${identityExtra}
+      <div class="agent-card-actions agent-card-actions--status">
+        <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
+      </div>
+    </div>`;
+}
+
 function renderMarketplaceGrid() {
   const grid = document.getElementById('marketplaceGrid');
   const emptyEl = document.getElementById('marketplaceEmptyState');
@@ -2396,18 +2736,18 @@ function renderMarketplaceGrid() {
   if (!grid) return;
 
   renderMarketplaceCategoryChips();
-  renderMarketplaceVendorChips();
   if (errorEl) errorEl.hidden = true;
   const templates = getFilteredMarketplaceTemplates();
-  grid.innerHTML = '';
+  const searching = Boolean((document.getElementById('marketplaceSearchInput')?.value || '').trim());
 
   if (!templates.length) {
+    grid.innerHTML = '';
     // Keep it hidden before the first load, so it doesn't flash while
     // marketplaceTemplates is still empty.
     if (emptyEl) {
       emptyEl.hidden = marketplaceTemplates.length === 0;
       emptyEl.innerHTML = marketplaceEmptyHtml({
-        searching: Boolean((document.getElementById('marketplaceSearchInput')?.value || '').trim()),
+        searching,
         categoryFilter: marketplaceCategoryFilter,
         vendorFilter: marketplaceVendorFilter,
       });
@@ -2421,73 +2761,32 @@ function renderMarketplaceGrid() {
   }
   if (emptyEl) emptyEl.hidden = true;
 
+  const byShelf = Object.fromEntries(MARKETPLACE_SHELVES.map((shelf) => [shelf.key, []]));
   templates.forEach((template) => {
-    const card = document.createElement('div');
-    card.className = 'section-card agent-card marketplace-card';
-    const modeLabel = template.mode === 'runtime'
-      ? 'Hosted'
-      : (template.mode === 'pipeline' ? 'Multi-step strategy' : 'Simple instruction');
-    const cloneLabel = 'Add to My Agents';
-    const categoryLabel = MARKET_LABELS[String(template.category || '').toLowerCase()] || 'General';
-    const modelLabel = formatModelProviderLabel(template.model_name);
-    // Open weights get a badge; closed models get nothing. Licence comes from
-    // MODEL_VENDORS so it cannot drift from the vendor it describes.
-    const licenceBadge = modelVendorLicence(template.model_name) === 'open'
-      ? '<span class="marketplace-licence-badge">Open-source model</span>'
-      : '';
-    const tags = (template.tags || [])
-      .slice(0, 3)
-      .map((tag) => `<span class="marketplace-tag">${escapeHtml(tag)}</span>`)
-      .join('');
-    const repoLabel = (() => {
-      if (!template.repo_url) return '';
-      try {
-        const path = new URL(template.repo_url).pathname.replace(/^\/+|\/+$/g, '');
-        return path || template.author || 'GitHub';
-      } catch {
-        return template.author || 'GitHub';
-      }
-    })();
-    const authorMeta = template.repo_url
-      ? `<a class="marketplace-repo-btn" href="${escapeHtml(template.repo_url)}" target="_blank" rel="noopener noreferrer" aria-label="Open ${escapeHtml(repoLabel)} on GitHub">
-            <svg class="ui-icon marketplace-repo-icon" aria-hidden="true"><use href="#icon-github"></use></svg>
-            <span>${escapeHtml(repoLabel)}</span>
-          </a>`
-      : `<span>By ${escapeHtml(template.author || 'Community')}</span>`;
-    card.innerHTML = `
-      <div class="agent-card-top">
-        <div class="agent-card-identity">
-          ${agentRobotIcon()}
-          <div class="agent-card-identity-text">
-            <h3 class="agent-name">${escapeHtml(template.name)}</h3>
-            <p class="agent-card-submeta" title="${escapeHtml(`${modelLabel} · ${categoryLabel}`)}">${escapeHtml(modelLabel)} · ${escapeHtml(categoryLabel)}</p>
-          </div>
-        </div>
-        <span class="marketplace-mode-chip">${escapeHtml(modeLabel)}</span>
-      </div>
-      <div class="marketplace-card-body">
-        <p class="marketplace-card-description">${escapeHtml(template.description || 'No description provided yet.')}</p>
-        <div class="marketplace-card-meta">
-          ${authorMeta}
-          ${template.step_count ? `<span>${template.step_count} step${template.step_count === 1 ? '' : 's'}</span>` : ''}
-        </div>
-        ${(licenceBadge || tags) ? `<div class="marketplace-tag-row">${licenceBadge}${tags}</div>` : ''}
-      </div>
-      <div class="agent-card-actions agent-card-actions--status">
-        <div class="marketplace-clone-split">
-          <button class="agent-card-cta marketplace-clone-btn" type="button" data-template-id="${escapeHtml(template.template_id)}">${cloneLabel}</button>
-          ${template.runtime_type === 'pipeline' ? `
-          <button class="agent-card-cta marketplace-clone-model-btn" type="button" data-template-id="${escapeHtml(template.template_id)}" aria-haspopup="true" aria-expanded="false" aria-label="Choose model — add this template on a different model">Choose model ▾</button>
-          <div class="marketplace-model-menu" hidden>
-            ${SUPPORTED_MODELS.map((model) => `<button type="button" class="agent-menu-item marketplace-model-option" data-template-id="${escapeHtml(template.template_id)}" data-model-slug="${escapeHtml(model.slug)}"${normalizeBacktestModelId(model.slug) === normalizeBacktestModelId(template.model_name) ? ' aria-current="true"' : ''}>${escapeHtml(model.label)}</button>`).join('')}
-          </div>` : ''}
-        </div>
-      </div>`;
-    grid.appendChild(card);
+    const key = templateMarketplaceShelf(template);
+    if (byShelf[key]) byShelf[key].push(template);
+    else byShelf.llms.push(template);
   });
 
+  grid.innerHTML = MARKETPLACE_SHELVES.map((shelf) => {
+    const cards = byShelf[shelf.key] || [];
+    if (!cards.length) return '';
+    return `
+      <section class="marketplace-shelf" data-marketplace-shelf="${escapeHtml(shelf.key)}">
+        <div class="marketplace-shelf-head">
+          <h3 class="marketplace-shelf-title">${escapeHtml(shelf.title)}</h3>
+          <p class="marketplace-shelf-sub">${escapeHtml(shelf.sub)}</p>
+        </div>
+        <div class="marketplace-shelf-grid">
+          ${(shelf.key === 'llms' ? cards.slice().sort(compareMarketplaceTemplatesByRank) : cards)
+            .map((template) => buildMarketplaceCardHtml(template)).join('')}
+        </div>
+      </section>`;
+  }).join('');
+
   grid.querySelectorAll('.marketplace-clone-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', async (event) => {
+      event.stopPropagation();
       const templateId = btn.dataset.templateId;
       const template = marketplaceTemplates.find((item) => item.template_id === templateId);
       if (!template || marketplaceCloneInFlight) return;
@@ -2503,37 +2802,6 @@ function renderMarketplaceGrid() {
         marketplaceCloneInFlight = false;
         btn.disabled = false;
         btn.textContent = prevLabel;
-      }
-    });
-  });
-
-  grid.querySelectorAll('.marketplace-clone-model-btn').forEach((btn) => {
-    btn.addEventListener('click', (event) => {
-      event.stopPropagation();
-      const menu = btn.parentElement?.querySelector('.marketplace-model-menu');
-      if (!menu) return;
-      const opening = menu.hidden;
-      // Close every other card's menu first: two open menus overlap.
-      grid.querySelectorAll('.marketplace-model-menu').forEach((el) => { el.hidden = true; });
-      grid.querySelectorAll('.marketplace-clone-model-btn').forEach((el) => el.setAttribute('aria-expanded', 'false'));
-      menu.hidden = !opening;
-      btn.setAttribute('aria-expanded', String(opening));
-    });
-  });
-
-  grid.querySelectorAll('.marketplace-model-option').forEach((option) => {
-    option.addEventListener('click', async () => {
-      const template = marketplaceTemplates.find((item) => item.template_id === option.dataset.templateId);
-      if (!template || marketplaceCloneInFlight) return;
-      marketplaceCloneInFlight = true;
-      option.disabled = true;
-      try {
-        await cloneMarketplaceTemplate(template, option.dataset.modelSlug);
-      } catch (error) {
-        alert(error.message || `Couldn't add this template. Please try again.`);
-      } finally {
-        marketplaceCloneInFlight = false;
-        option.disabled = false;
       }
     });
   });
@@ -2558,7 +2826,31 @@ function renderMarketplaceError() {
  * skip the network entirely. A failure clears the cache, so the next visit
  * retries rather than showing the error forever.
  */
+async function loadMarketplaceLeaderboard() {
+  if (marketplaceLeaderboardEntries !== null) return;
+  if (typeof leaderboardPayload !== 'undefined' && Array.isArray(leaderboardPayload?.entries)) {
+    applyMarketplaceLeaderboardPayload(leaderboardPayload);
+    renderMarketplaceGrid();
+    return;
+  }
+  if (marketplaceLeaderboardLoadInFlight) return marketplaceLeaderboardLoadInFlight;
+  marketplaceLeaderboardLoadInFlight = (async () => {
+    try {
+      const data = await API.get(`${API_BASE}/api/v1/leaderboard?period=contest`);
+      applyMarketplaceLeaderboardPayload(data);
+    } catch (error) {
+      console.warn('Marketplace leaderboard stats failed:', error.message);
+      applyMarketplaceLeaderboardPayload({ entries: [] });
+    } finally {
+      marketplaceLeaderboardLoadInFlight = null;
+      renderMarketplaceGrid();
+    }
+  })();
+  return marketplaceLeaderboardLoadInFlight;
+}
+
 async function loadMarketplace() {
+  loadMarketplaceLeaderboard();
   if (marketplaceTemplates.length) {
     renderMarketplaceGrid();
     return;

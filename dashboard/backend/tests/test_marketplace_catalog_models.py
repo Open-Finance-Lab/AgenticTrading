@@ -21,29 +21,87 @@ _CATALOG = json.loads(
 
 _SUPPORTED_SLUGS = set(re.findall(r"slug:\s*'([^']+)'", js_const("SUPPORTED_MODELS")))
 
-_EXPECTED_NEW = {
-    "contrarian-dip-buyer": ("openai/gpt-5.5", "us_stocks"),
-    "sector-rotator": ("google/gemini-3.1-pro-preview", "us_stocks"),
-    "volatility-guard": ("deepseek/deepseek-v4-pro", "us_stocks"),
-    "ashare-momentum-t1": ("qwen/qwen3.7-plus", "cn_ashares"),
+# Nemotron is on the Competition Leaderboard via OpenRouter but is not in
+# SUPPORTED_MODELS (the user-facing picker). The supermarket still ships a
+# card for it so the catalog matches the board.
+_LEADERBOARD_ONLY_SLUGS = {"nvidia/nemotron-3-nano-30b-a3b"}
+
+_EXPECTED_MODELS = {
+    "claude-haiku-4-5": ("anthropic/claude-haiku-4-5", "us_stocks"),
+    "claude-sonnet-4-6": ("anthropic/claude-sonnet-4-6", "us_stocks"),
+    "gpt-5-5": ("openai/gpt-5.5", "us_stocks"),
+    "gemini-3-1-pro": ("google/gemini-3.1-pro-preview", "us_stocks"),
+    "deepseek-v4-pro": ("deepseek/deepseek-v4-pro", "us_stocks"),
+    "qwen3-7-plus": ("qwen/qwen3.7-plus", "us_stocks"),
+    "nemotron-3-nano-30b": ("nvidia/nemotron-3-nano-30b-a3b", "us_stocks"),
 }
+
+_LEADERBOARD = json.loads(
+    (Path(__file__).resolve().parents[3] / "dashboard/config/leaderboard.json").read_text(
+        encoding="utf-8"
+    )
+)
 
 
 @pytest.mark.parametrize("template", _CATALOG, ids=lambda t: t["template_id"])
 def test_every_template_runs_a_supported_or_hosted_model(template):
     if template.get("runtime_type"):
         return  # hosted runtime: its model is not user-selectable
-    assert template["model_name"] in _SUPPORTED_SLUGS, (
+    assert template["model_name"] in (_SUPPORTED_SLUGS | _LEADERBOARD_ONLY_SLUGS), (
         f"{template['template_id']} runs {template['model_name']!r}, "
-        "which is not in SUPPORTED_MODELS"
+        "which is not in SUPPORTED_MODELS or the leaderboard"
     )
 
 
-@pytest.mark.parametrize("template_id,expected", sorted(_EXPECTED_NEW.items()))
-def test_new_templates_are_present_with_their_pairings(template_id, expected):
+@pytest.mark.parametrize("template_id,expected", sorted(_EXPECTED_MODELS.items()))
+def test_leaderboard_model_cards_are_present_with_their_pairings(template_id, expected):
     found = next((t for t in _CATALOG if t["template_id"] == template_id), None)
     assert found is not None, f"{template_id} missing from marketplace.json"
     assert (found["model_name"], found["category"]) == expected
+
+
+def test_every_leaderboard_llm_has_a_supermarket_card():
+    """The supermarket model cards are the board's llm_agent roster, by name.
+
+    A new competition model that ships on the board without a card (or a card
+    that outlives its board entry) is otherwise invisible until someone notices.
+    AI Hedge Fund is a hosted runtime, not a board entry, and is excluded.
+    """
+    board_names = {
+        entry["name"]
+        for entry in _LEADERBOARD["strategies"]
+        if entry.get("strategy") == "llm_agent"
+    }
+    catalog_names = {
+        template["name"]
+        for template in _CATALOG
+        if template["template_id"] != "ai-hedge-fund"
+    }
+    assert catalog_names == board_names
+
+
+def test_retired_strategy_templates_are_gone():
+    retired = {
+        "balanced-starter",
+        "momentum-scout",
+        "pipeline-analyst",
+        "blue-chip-steady",
+        "even-split-dow",
+        "ashare-steady-t1",
+        "contrarian-dip-buyer",
+        "sector-rotator",
+        "volatility-guard",
+        "ashare-momentum-t1",
+    }
+    present = {template["template_id"] for template in _CATALOG}
+    assert not (retired & present)
+
+
+def test_catalog_rows_declare_a_supermarket_shelf():
+    shelves = {template["template_id"]: template.get("shelf") for template in _CATALOG}
+    assert shelves["ai-hedge-fund"] == "open"
+    for template_id in _EXPECTED_MODELS:
+        assert shelves[template_id] == "llms", template_id
 
 
 def test_catalog_covers_every_pickable_vendor():

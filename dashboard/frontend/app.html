@@ -1727,17 +1727,16 @@
             <div class="marketplace-section-head">
                 <div>
                     <h3 class="marketplace-section-title">Agent Supermarket</h3>
-                    <p class="marketplace-section-sub">Browse open agent templates and add them to My Agents to customize and backtest.</p>
+                    <p class="marketplace-section-sub">Discover models and open agents tested by the Agentic Trading Lab community. Add one to your workspace and test it yourself.</p>
                 </div>
                 <div class="agent-toolbar-search marketplace-search">
                     <svg class="agent-toolbar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
                     <input id="marketplaceSearchInput" type="search" placeholder="Search templates..." aria-label="Search marketplace templates">
                 </div>
             </div>
-            <p class="control-helper">Every test here uses simulated money. Real money is involved only if you explicitly connect a brokerage account and turn on live trading.</p>
+            <p class="control-helper">Performance is based on simulated tests and may vary between runs. Live trading requires an explicitly connected brokerage account.</p>
             <div id="marketplaceCategoryChips" class="marketplace-category-chips" role="group" aria-label="Filter templates by market"></div>
-            <div id="marketplaceVendorChips" class="marketplace-category-chips marketplace-vendor-chips" role="group" aria-label="Filter templates by AI model"></div>
-            <div id="marketplaceGrid" class="agents-grid marketplace-grid"></div>
+            <div id="marketplaceGrid" class="marketplace-shelves"></div>
             <p id="marketplaceEmptyState" class="control-helper" hidden></p>
             <p id="marketplaceErrorState" class="control-helper" hidden style="color:#f87171;">Couldn't load the marketplace. Check your connection and try again.</p>
         </div>
