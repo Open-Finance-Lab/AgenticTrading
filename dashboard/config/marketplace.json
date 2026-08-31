@@ -49,7 +49,7 @@
       "shelf": "llms",
       "name": "DeepSeek V4 Pro",
       "model_name": "deepseek/deepseek-v4-pro",
-      "description": "The Competition Leaderboard's DeepSeek V4 Pro agent \u2014 the only model that has beaten the passive baselines on that board. Same long-only DJIA hourly backtest; add it and edit the instruction to try this model yourself.",
+      "description": "The Competition Leaderboard's DeepSeek V4 Pro agent \u2014 the only model that beat the passive baselines in the April 2026 contest window. Same long-only DJIA hourly backtest; add it and edit the instruction to try this model yourself.",
       "category": "us_stocks",
       "tags": [
         "competition model",
@@ -89,7 +89,7 @@
       ]
     },
     {
-      "template_id": "gemini-3-1-pro",
+      "template_id": "gemini-3-1-pro-preview",
       "shelf": "llms",
       "name": "Gemini 3.1 Pro Preview",
       "model_name": "google/gemini-3.1-pro-preview",

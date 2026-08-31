@@ -2191,8 +2191,9 @@ async function loadAgentsNow() {
 let marketplaceTemplates = [];
 let marketplaceCloneInFlight = false;
 let marketplaceLoadInFlight = null;
-/** null = contest board not fetched yet (card stats show a reserved loading
- *  state). [] = fetched, including a failed fetch — never invent ranks. */
+/** null = contest board not fetched yet, or the last fetch failed (the next
+ *  Community visit retries). [] = fetched and genuinely empty — never
+ *  invent ranks. */
 let marketplaceLeaderboardEntries = null;
 let marketplaceLeaderboardLoadInFlight = null;
 /** Window / capital / field count from the same contest payload. */
@@ -2213,34 +2214,25 @@ const MARKETPLACE_SHELVES = [
  * Models shelf's empty-state Community button (via navigateToPage's options). */
 let marketplaceCategoryFilter = 'all';
 
-/** 'all' or one of MODEL_VENDORS' keys. ANDs with marketplaceCategoryFilter. */
-let marketplaceVendorFilter = 'all';
 
 /** The model-vendor axis: who makes a model, and how it is licensed.
  *
- * Promoted from a submeta label lookup into the source of truth for the whole
- * axis -- Community's vendor chips, the open-source badge and the card submeta
- * all derive from this one table, so a badge cannot drift from the vendor it
- * describes. A wrong badge is a factual claim about someone else's product.
+ * Single source of truth for vendor identity: `company` feeds the LLM tile
+ * submeta (formatModelCompanyLabel), `key`/`label`/`licence` are pinned by the
+ * facet tests. Nothing renders `licence` since the open-source badge retired
+ * with the vendor chip row (PR #427); it stays as vendor metadata because a
+ * wrong entry is a factual claim about someone else's product.
  *
  * Matched by PREFIX, not exact slug, so a new model version under a known
- * vendor needs no entry here. Declaration order is chip order, mirroring how
- * MARKET_LABELS' key order mirrors the AgentCategory Literal.
- *
- * All eight are listed even though only six are pickable: a card whose model
- * matches nothing renders as the generic "AI-powered" with no chip and no
- * badge, which is invisible until someone notices. The chip ROW is still
- * derived from what the loaded catalog actually contains (see
- * renderMarketplaceVendorChips), so listing a vendor here never ships an
- * empty chip. */
+ * vendor needs no entry here. */
 const MODEL_VENDORS = [
   { key: 'anthropic', prefix: 'anthropic/', label: 'Claude', licence: 'closed', company: 'Anthropic' },
   { key: 'openai', prefix: 'openai/', label: 'GPT', licence: 'closed', company: 'OpenAI' },
   { key: 'google', prefix: 'google/', label: 'Gemini', licence: 'closed', company: 'Google' },
   { key: 'deepseek', prefix: 'deepseek/', label: 'DeepSeek', licence: 'open', company: 'DeepSeek' },
   { key: 'qwen', prefix: 'qwen/', label: 'Qwen', licence: 'open', company: 'Alibaba' },
-  // "NVIDIA Nemotron", not "Nemotron": this label also feeds
-  // formatModelProviderLabel, whose shipped output must not change.
+  // "NVIDIA Nemotron", not "Nemotron": EXPECTED_VENDORS pins this label,
+  // and `company` carries the tile-subtitle name.
   { key: 'nvidia', prefix: 'nvidia/nemotron', label: 'NVIDIA Nemotron', licence: 'open', company: 'NVIDIA' },
   { key: 'meta', prefix: 'meta-llama/', label: 'Llama', licence: 'open', company: 'Meta' },
   { key: 'xai', prefix: 'x-ai/', label: 'Grok', licence: 'closed', company: 'xAI' },
@@ -2268,14 +2260,7 @@ function modelVendorLicence(modelName) {
   return (MODEL_VENDORS.find((vendor) => vendor.key === key) || {}).licence || '';
 }
 
-function formatModelProviderLabel(modelName) {
-  const key = modelVendorKey(modelName);
-  const vendor = MODEL_VENDORS.find((entry) => entry.key === key);
-  return vendor ? `Powered by ${vendor.label}` : 'AI-powered';
-}
-
-/** Company name for a tile subtitle (Anthropic, NVIDIA). Distinct from
- * formatModelProviderLabel, which is the older "Powered by Claude" line. */
+/** Company name for a tile subtitle (Anthropic, NVIDIA). */
 function formatModelCompanyLabel(modelName) {
   const key = modelVendorKey(modelName);
   const vendor = MODEL_VENDORS.find((entry) => entry.key === key);
@@ -2294,15 +2279,6 @@ function formatModelCompanyLabel(modelName) {
  * rather than filtering to a chip that doesn't exist. */
 function setMarketplaceCategoryFilter(category) {
   marketplaceCategoryFilter = MARKET_LABELS[category] ? category : 'all';
-  renderMarketplaceGrid();
-}
-
-/** Select a vendor chip and re-render. Mirrors setMarketplaceCategoryFilter,
- * including the reset-to-'all' fallback for an unrecognized key. */
-function setMarketplaceVendorFilter(vendorKey) {
-  marketplaceVendorFilter = MODEL_VENDORS.some((vendor) => vendor.key === vendorKey)
-    ? vendorKey
-    : 'all';
   renderMarketplaceGrid();
 }
 
@@ -2334,55 +2310,14 @@ function renderMarketplaceCategoryChips() {
   });
 }
 
-/** Second chip row: 'All' plus one chip per vendor PRESENT IN THE CATALOG.
- *
- * Deliberately asymmetric with the market row, which is hardcoded from
- * MARKET_LABELS: markets are a closed, backend-validated enum, vendors are
- * open-ended. Hardcoding all of MODEL_VENDORS would ship chips that can never
- * match anything. Order still comes from MODEL_VENDORS, not from catalog order,
- * so the row does not reshuffle when a template is added. */
-function renderMarketplaceVendorChips() {
-  const container = document.getElementById('marketplaceVendorChips');
-  if (!container) return;
-  const present = new Set(marketplaceTemplates.map((t) => modelVendorKey(t.model_name)));
-  const chips = [
-    { key: 'all', label: 'All models' },
-    ...MODEL_VENDORS.filter((vendor) => present.has(vendor.key)).map((vendor) => ({
-      key: vendor.key,
-      label: vendor.label,
-    })),
-  ];
-  // Build once, then only toggle state -- same reason as the market row: this
-  // runs from renderMarketplaceGrid, which is bound to the search box's `input`.
-  const existing = container.querySelectorAll('[data-marketplace-vendor]');
-  if (existing.length !== chips.length) {
-    container.innerHTML = chips
-      .map((chip) => `<button type="button" class="marketplace-category-chip" data-marketplace-vendor="${escapeHtml(chip.key)}" aria-pressed="false">${escapeHtml(chip.label)}</button>`)
-      .join('');
-  }
-  container.querySelectorAll('[data-marketplace-vendor]').forEach((button) => {
-    const active = button.dataset.marketplaceVendor === marketplaceVendorFilter;
-    button.classList.toggle('active', active);
-    button.setAttribute('aria-pressed', String(active));
-  });
-}
-
-/** Empty-state copy. Three cases, deliberately worded apart -- the same concern
- * promptedEmptyHtml records for My Agents.
- *
- * A typed query wins over the facet case: when a search is what emptied the
- * grid, offering "Clear filters" sends the user to fix the wrong thing. */
-function marketplaceEmptyHtml({ searching, categoryFilter, vendorFilter }) {
+/** Empty-state copy. Two cases, deliberately worded apart -- the same concern
+ * promptedEmptyHtml records for My Agents. A typed query wins over the market
+ * chip: when a search is what emptied the grid, "No X templates yet" would
+ * send the user to fix the wrong thing. */
+function marketplaceEmptyHtml({ searching, categoryFilter }) {
   if (searching) return 'No templates match your search.';
-  if (categoryFilter !== 'all' && vendorFilter !== 'all') {
-    return `No templates match both filters. <button type="button" class="marketplace-clear-filters">Clear filters</button>`;
-  }
   if (categoryFilter !== 'all') {
     return `No ${escapeHtml(MARKET_LABELS[categoryFilter] || '')} templates yet.`;
-  }
-  if (vendorFilter !== 'all') {
-    const vendor = MODEL_VENDORS.find((entry) => entry.key === vendorFilter);
-    return `No ${escapeHtml(vendor?.label || '')} templates yet.`;
   }
   return 'No templates match your search.';
 }
@@ -2390,9 +2325,9 @@ function marketplaceEmptyHtml({ searching, categoryFilter, vendorFilter }) {
 function templateMarketplaceShelf(template) {
   const explicit = String(template?.shelf || '').toLowerCase();
   if (explicit === 'llms' || explicit === 'open') return explicit;
-  return (template?.mode === 'runtime' || template?.runtime_type === 'ai_hedge_fund')
-    ? 'open'
-    : 'llms';
+  // Mirrors the backend's _normalize_shelf fallback: any hosted runtime is an
+  // open agent, with no per-runtime special case to remember.
+  return template?.mode === 'runtime' ? 'open' : 'llms';
 }
 
 function getFilteredMarketplaceTemplates() {
@@ -2542,7 +2477,11 @@ function buildMarketplaceCompareChartHtml(agentCurve, benchmarkCurve, { positive
   const plotW = w - left - right;
   const plotH = plotBottom - top;
   const n = agent.length;
-  const xOf = (i) => left + (n <= 1 ? 0 : (i / (n - 1)) * plotW);
+  // Each series is scaled by ITS OWN length: the two curves are downsampled
+  // independently, and plotting the benchmark against the agent's point count
+  // draws it past the plot edge (or squashed) whenever the lengths differ.
+  const xAt = (i, len) => left + (len <= 1 ? 0 : (i / (len - 1)) * plotW);
+  const xOf = (i) => xAt(i, n);
   const yOf = (pct) => top + (1 - (pct - yMin) / yRange) * plotH;
   const xTicks = [0, Math.round((n - 1) / 2), n - 1].filter((v, i, arr) => arr.indexOf(v) === i);
   const yLines = ticks.map((tick) => {
@@ -2557,7 +2496,9 @@ function buildMarketplaceCompareChartHtml(agentCurve, benchmarkCurve, { positive
     return `<text x="${xOf(i).toFixed(1)}" y="${plotBottom + 12}" text-anchor="${i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle'}" class="mp-chart-tick">${escapeHtml(label)}</text>`;
   }).join('');
   const agentPath = marketplaceLinePath(agent, xOf, yOf);
-  const benchPath = bench && bench.length >= 2 ? marketplaceLinePath(bench, xOf, yOf) : '';
+  const benchPath = bench && bench.length >= 2
+    ? marketplaceLinePath(bench, (i) => xAt(i, bench.length), yOf)
+    : '';
   return `
       <div class="mp-compare-chart" aria-hidden="true">
         <svg viewBox="0 0 ${w} ${plotBottom + 16}" preserveAspectRatio="xMidYMid meet" width="100%" height="96">
@@ -2585,9 +2526,6 @@ function marketplacePerformanceFor(template) {
     startDate: meta.start_date || null,
     endDate: meta.end_date || null,
     displayCapital: meta.display_capital ?? null,
-    medianReturn: null,
-    positiveRuns: null,
-    totalRuns: null,
     loading,
   };
   if (loading) return empty;
@@ -2623,9 +2561,14 @@ function compareMarketplaceTemplatesByRank(a, b) {
 }
 
 function formatMarketplaceReturnPct(value) {
+  // null/'' is "no data", not 0%: Number(null) is 0, which Number.isFinite
+  // accepts, so without this guard a missing return renders as a green "0.0%".
+  if (value == null || value === '') return null;
   const n = Number(value);
   if (!Number.isFinite(n)) return null;
-  const pct = n * 100;
+  // Round to one decimal BEFORE choosing the sign, so -0.04% shows as "0.0%"
+  // rather than "-0.0%".
+  const pct = Math.round(n * 1000) / 10;
   const abs = Math.abs(pct).toFixed(1);
   return `${pct > 0 ? '+' : pct < 0 ? '-' : ''}${abs}%`;
 }
@@ -2749,12 +2692,6 @@ function renderMarketplaceGrid() {
       emptyEl.innerHTML = marketplaceEmptyHtml({
         searching,
         categoryFilter: marketplaceCategoryFilter,
-        vendorFilter: marketplaceVendorFilter,
-      });
-      emptyEl.querySelector('.marketplace-clear-filters')?.addEventListener('click', () => {
-        marketplaceCategoryFilter = 'all';
-        marketplaceVendorFilter = 'all';
-        renderMarketplaceGrid();
       });
     }
     return;
@@ -2816,19 +2753,21 @@ function renderMarketplaceError() {
   if (errorEl) errorEl.hidden = false;
 }
 
-/**
- * Fetch the template catalog, at most once per page load.
+/** Fetch the contest-board stats behind the LLM cards, at most once.
  *
- * Community is a top-level page now, so this runs on every nav click, every
- * Back/Forward and the initial boot -- where it used to run once, when the
- * Playground marketplace subtab was opened. The catalog is static config the
- * server already caches in-process, so repeat visits repaint from memory and
- * skip the network entirely. A failure clears the cache, so the next visit
- * retries rather than showing the error forever.
+ * Reuses the Leaderboard tab's already-loaded payload only when it is the
+ * CONTEST board: js/leaderboard.js writes the same `leaderboardPayload` global
+ * for period=live, which mirrors contest today but is expected to diverge once
+ * the season engine ships. A failed fetch resets the cache to null so the next
+ * Community visit retries instead of pinning blank stats for the session.
  */
 async function loadMarketplaceLeaderboard() {
   if (marketplaceLeaderboardEntries !== null) return;
-  if (typeof leaderboardPayload !== 'undefined' && Array.isArray(leaderboardPayload?.entries)) {
+  if (
+    typeof leaderboardPayload !== 'undefined'
+    && leaderboardPayload?.period === 'contest'
+    && Array.isArray(leaderboardPayload.entries)
+  ) {
     applyMarketplaceLeaderboardPayload(leaderboardPayload);
     renderMarketplaceGrid();
     return;
@@ -2840,7 +2779,7 @@ async function loadMarketplaceLeaderboard() {
       applyMarketplaceLeaderboardPayload(data);
     } catch (error) {
       console.warn('Marketplace leaderboard stats failed:', error.message);
-      applyMarketplaceLeaderboardPayload({ entries: [] });
+      marketplaceLeaderboardEntries = null;
     } finally {
       marketplaceLeaderboardLoadInFlight = null;
       renderMarketplaceGrid();
@@ -2849,6 +2788,16 @@ async function loadMarketplaceLeaderboard() {
   return marketplaceLeaderboardLoadInFlight;
 }
 
+/**
+ * Fetch the template catalog, at most once per page load.
+ *
+ * Community is a top-level page now, so this runs on every nav click, every
+ * Back/Forward and the initial boot -- where it used to run once, when the
+ * Playground marketplace subtab was opened. The catalog is static config the
+ * server already caches in-process, so repeat visits repaint from memory and
+ * skip the network entirely. A failure clears the cache, so the next visit
+ * retries rather than showing the error forever.
+ */
 async function loadMarketplace() {
   loadMarketplaceLeaderboard();
   if (marketplaceTemplates.length) {
@@ -9300,11 +9249,6 @@ function navigateToPage(page, options = {}) {
             // set on one visit would leak into the next, unrelated visit made
             // through the plain nav tab, the most common entry path.
             marketplaceCategoryFilter = MARKET_LABELS[options.communityCategory] ? options.communityCategory : 'all';
-            // The vendor chip resets for the same reason, and nothing rides in
-            // via options: a vendor left selected on one visit would AND with an
-            // incoming category and strand the empty-shelf deep links on an
-            // empty grid.
-            marketplaceVendorFilter = 'all';
             if (communityView) communityView.style.display = 'block';
             loadMarketplace();
         } else if (page === 'account') {
@@ -9452,11 +9396,6 @@ function initNavigation() {
       const chipBtn = event.target.closest('[data-marketplace-category]');
       if (!chipBtn) return;
       setMarketplaceCategoryFilter(chipBtn.dataset.marketplaceCategory);
-    });
-    document.getElementById('marketplaceVendorChips')?.addEventListener('click', (event) => {
-        const chip = event.target.closest('[data-marketplace-vendor]');
-        if (!chip) return;
-        setMarketplaceVendorFilter(chip.dataset.marketplaceVendor);
     });
     document.getElementById('agentsCategories')?.addEventListener('click', (event) => {
       const marketChip = event.target.closest('[data-agent-market]');

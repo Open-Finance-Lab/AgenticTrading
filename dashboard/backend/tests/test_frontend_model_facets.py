@@ -1,10 +1,10 @@
-"""Guards for the Community model-vendor facet.
+"""Guards for the Community model-vendor table.
 
 The vendor axis is a pure derivation from `model_name` -- no column, no
-migration. MODEL_VENDORS is its single source of truth: chip order, display
-label and open/closed licence all come from one table, so a badge cannot drift
-from the vendor it describes. A wrong badge is a factual claim about someone
-else's product.
+migration. MODEL_VENDORS is its single source of truth: the pinned key/label
+rows, the LLM tile's company submeta and the (currently unrendered) licence
+metadata all come from one table, so an entry cannot drift from the vendor it
+describes. A wrong entry is a factual claim about someone else's product.
 """
 
 import json
@@ -90,35 +90,6 @@ def test_supported_model_vendor_fields_agree_with_the_vendor_table():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_provider_label_output_is_unchanged():
-    """These six strings ship on cards today. The refactor must not touch them."""
-    script = f"""
-{js_const("MODEL_VENDORS")}
-{fn_body("function modelVendorKey")}
-{fn_body("function formatModelProviderLabel")}
-const cases = ['anthropic/claude-haiku-4-5', 'nvidia/nemotron-3-nano-30b-a3b',
-               'deepseek/deepseek-v4-pro', 'openai/gpt-5.5',
-               'google/gemini-3.1-pro-preview', 'qwen/qwen3.7-plus',
-               'totally/unknown', ''];
-console.log(JSON.stringify(cases.map(formatModelProviderLabel)));
-"""
-    result = subprocess.run(
-        ["node", "-e", script], capture_output=True, text=True, timeout=30
-    )
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == [
-        "Powered by Claude",
-        "Powered by NVIDIA Nemotron",
-        "Powered by DeepSeek",
-        "Powered by GPT",
-        "Powered by Gemini",
-        "Powered by Qwen",
-        "AI-powered",
-        "AI-powered",
-    ]
-
-
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_unknown_vendor_resolves_to_empty_string():
     """Same contract as agentMarketKey: unknown stays visible under All and is
     excluded only by an explicit chip -- never hidden, never defaulted."""
@@ -151,28 +122,26 @@ def test_vendor_chip_container_exists_in_the_community_view():
     assert 'id="marketplaceCategoryChips"' in community
 
 
-def test_vendor_chips_are_derived_not_hardcoded():
-    """Chips come from MODEL_VENDORS intersected with the loaded catalog, so a
-    vendor with no templates never ships an empty chip."""
-    body = fn_body("function renderMarketplaceVendorChips")
-    assert "MODEL_VENDORS" in body
-    assert "marketplaceTemplates" in body
-    for literal in ("'anthropic'", "'openai'", "'deepseek'", "'qwen'"):
-        assert literal not in body, f"{literal} hardcoded in the chip builder"
+def test_vendor_chip_machinery_is_fully_gone():
+    """The chip row's container left app.html with this redesign; the renderer,
+    its filter state and the both-filters empty state must not outlive it as
+    silent no-ops."""
+    for remnant in (
+        "renderMarketplaceVendorChips",
+        "marketplaceVendorFilter",
+        "setMarketplaceVendorFilter",
+        "marketplace-clear-filters",
+    ):
+        assert remnant not in APP_JS, remnant
 
 
-def test_vendor_chips_are_built_once_then_toggled():
-    """renderMarketplaceGrid runs on every search keystroke; rebuilding innerHTML
-    per keystroke would blow away the focused chip."""
-    body = fn_body("function renderMarketplaceVendorChips")
-    assert "existing.length !== chips.length" in body
-
-
-def test_three_empty_states_stay_distinguishable():
+def test_empty_states_stay_distinguishable():
+    """Search-empty vs market-empty keep distinct copy (the vendor chips are
+    gone, and the old both-filters branch went with them)."""
     body = fn_body("function marketplaceEmptyHtml")
     assert "No templates match your search." in body
-    assert "No templates match both filters" in body
-    assert "marketplace-clear-filters" in body
+    assert "templates yet." in body
+    assert "vendorFilter" not in body
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -180,13 +149,11 @@ def test_empty_state_precedence():
     script = f"""
 function escapeHtml(s) {{ return String(s); }}
 const MARKET_LABELS = {{ us_stocks: 'U.S.', cn_ashares: 'China A-Share' }};
-{js_const("MODEL_VENDORS")}
 {fn_body("function marketplaceEmptyHtml")}
 const out = [
-  marketplaceEmptyHtml({{searching: true, categoryFilter: 'us_stocks', vendorFilter: 'qwen'}}),
-  marketplaceEmptyHtml({{searching: false, categoryFilter: 'us_stocks', vendorFilter: 'qwen'}}),
-  marketplaceEmptyHtml({{searching: false, categoryFilter: 'us_stocks', vendorFilter: 'all'}}),
-  marketplaceEmptyHtml({{searching: false, categoryFilter: 'all', vendorFilter: 'all'}}),
+  marketplaceEmptyHtml({{searching: true, categoryFilter: 'us_stocks'}}),
+  marketplaceEmptyHtml({{searching: false, categoryFilter: 'us_stocks'}}),
+  marketplaceEmptyHtml({{searching: false, categoryFilter: 'all'}}),
 ];
 console.log(JSON.stringify(out));
 """
@@ -194,11 +161,10 @@ console.log(JSON.stringify(out));
         ["node", "-e", script], capture_output=True, text=True, timeout=30
     )
     assert result.returncode == 0, result.stderr
-    search_empty, both, one_chip, none_at_all = json.loads(result.stdout)
-    # A typed query wins: clearing the chips would not bring anything back.
+    search_empty, market_only, none_at_all = json.loads(result.stdout)
+    # A typed query wins: clearing the chip would not bring anything back.
     assert search_empty == "No templates match your search."
-    assert "both filters" in both and "marketplace-clear-filters" in both
-    assert "U.S." in one_chip and "both filters" not in one_chip
+    assert "U.S." in market_only and market_only.endswith("templates yet.")
     assert none_at_all == "No templates match your search."
 
 
@@ -262,66 +228,6 @@ console.log(JSON.stringify(results));
     assert set(data["marketAll"]) == {"t1", "t2", "t3", "t4", "t5"}
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_shipped_vendor_chip_order_follows_model_vendors_not_catalog_order():
-    """Lifts the REAL renderMarketplaceVendorChips against a synthetic DOM and a
-    catalog whose insertion order is deliberately scrambled relative to
-    MODEL_VENDORS. test_vendor_chips_are_derived_not_hardcoded only substring
-    -checks the function's source text, so it never actually executes this and
-    can't tell catalog order from MODEL_VENDORS order."""
-    script = f"""
-function escapeHtml(s) {{ return String(s); }}
-{js_const("MODEL_VENDORS")}
-{fn_body("function modelVendorKey")}
-
-function makeContainer() {{
-  let buttons = [];
-  return {{
-    querySelectorAll() {{ return buttons; }},
-    set innerHTML(html) {{
-      buttons = [];
-      const re = /data-marketplace-vendor="([^"]*)"/g;
-      let m;
-      while ((m = re.exec(html))) {{
-        buttons.push({{
-          dataset: {{ marketplaceVendor: m[1] }},
-          classList: {{ toggle() {{}} }},
-          setAttribute() {{}},
-        }});
-      }}
-    }},
-  }};
-}}
-const container = makeContainer();
-const document = {{ getElementById: (id) => (id === 'marketplaceVendorChips' ? container : null) }};
-
-// MODEL_VENDORS order is anthropic, openai, google, deepseek, qwen, nvidia,
-// meta, xai. This catalog is inserted qwen, anthropic, deepseek -- scrambled
-// on purpose -- plus one unknown-vendor template and no openai template.
-const marketplaceTemplates = [
-  {{ template_id: 'a', model_name: 'qwen/qwen3.7-plus' }},
-  {{ template_id: 'b', model_name: 'anthropic/claude-haiku-4-5' }},
-  {{ template_id: 'c', model_name: 'deepseek/deepseek-v4-pro' }},
-  {{ template_id: 'd', model_name: 'totally/unknown' }},
-];
-let marketplaceVendorFilter = 'all';
-
-{fn_body("function renderMarketplaceVendorChips")}
-renderMarketplaceVendorChips();
-
-console.log(JSON.stringify(container.querySelectorAll().map((b) => b.dataset.marketplaceVendor)));
-"""
-    result = subprocess.run(
-        ["node", "-e", script], capture_output=True, text=True, timeout=30
-    )
-    assert result.returncode == 0, result.stderr
-    keys = json.loads(result.stdout)
-    # 'openai' has no template so it must not get a chip; order must follow
-    # MODEL_VENDORS (anthropic, deepseek, qwen), not the catalog's insertion
-    # order (qwen, anthropic, deepseek).
-    assert keys == ["all", "anthropic", "deepseek", "qwen"]
-
-
 def test_only_open_weight_models_get_a_badge():
     """LLM tiles no longer claim licence. Open Agents use an explicit
     Open Source mark; closed models get nothing."""
@@ -331,12 +237,6 @@ def test_only_open_weight_models_get_a_badge():
     assert ">Open</span>" not in card
     assert "Closed-source" not in APP_JS
     assert "Proprietary" not in APP_JS
-
-
-def test_licence_badge_has_a_style_rule():
-    from dashboard.backend.tests._frontend_source import css_blocks
-
-    assert css_blocks(".marketplace-licence-badge"), "badge has no styles.css rule"
 
 
 _CARD_HELPERS = f"""
@@ -775,28 +675,18 @@ def test_duplicate_does_not_start_a_backtest():
         assert forbidden not in body
 
 
-def test_entering_community_resets_the_vendor_filter():
-    """A vendor left selected on one visit must not leak into the next.
+def test_entering_community_resets_the_category_filter():
+    """A chip left selected on one visit must not leak into the next.
 
-    `marketplaceCategoryFilter` already resets here, under a comment explaining
-    exactly this hazard. The vendor filter was added later and initially did not,
-    so returning to Community via the nav tab stayed filtered -- and the My Agents
-    empty-shelf deep link (which rides in with a category) then ANDed against the
-    stale vendor and landed the user on an empty grid.
-
-    Scoped to the `page === 'community'` branch on purpose: a reset anywhere else
-    in the function would not fix the leak, so it must not satisfy this guard.
+    Scoped to the `page === 'community'` branch on purpose: a reset anywhere
+    else in the function would not fix the leak, so it must not satisfy this
+    guard. (The vendor filter that used to reset here left with the chip row.)
     """
     body = fn_body("function navigateToPage")
     start = body.index("page === 'community'")
     branch = body[start : body.index("page === 'account'", start)]
     assert re.search(r"marketplaceCategoryFilter\s*=", branch), (
         "the category reset vanished from the community branch"
-    )
-    assert re.search(r"marketplaceVendorFilter\s*=\s*'all'", branch), (
-        "entering Community must reset marketplaceVendorFilter to 'all'; "
-        "without it the vendor chip leaks across visits and strands the "
-        "empty-shelf deep links on an empty grid"
     )
 
 

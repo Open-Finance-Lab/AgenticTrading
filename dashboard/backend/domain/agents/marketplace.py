@@ -108,12 +108,9 @@ def list_marketplace_templates() -> List[Dict[str, Any]]:
     order without a second sort key.
     """
     items = [_public_template(raw) for raw in _load_catalog().values()]
-    return sorted(
-        items,
-        key=lambda t: MARKETPLACE_SHELVES.index(t["shelf"])
-        if t.get("shelf") in MARKETPLACE_SHELVES
-        else len(MARKETPLACE_SHELVES),
-    )
+    # _public_template always sets "shelf" via _normalize_shelf, which only
+    # returns members of MARKETPLACE_SHELVES -- no fallback branch needed.
+    return sorted(items, key=lambda t: MARKETPLACE_SHELVES.index(t["shelf"]))
 
 
 def get_marketplace_template(template_id: str) -> Optional[Dict[str, Any]]:
