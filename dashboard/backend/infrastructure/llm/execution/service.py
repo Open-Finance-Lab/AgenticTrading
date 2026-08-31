@@ -281,16 +281,15 @@ class LLMExecutionService:
 
             if reservation_id is not None:
                 actual_micro = billing.provider_cost_credits_micro
+                settlement = self._settle(
+                    reservation_id, billing, actual_micro=actual_micro
+                )
                 billing = billing.model_copy(
                     update={
-                        "debited_credits_micro": min(actual_micro, reserved_micro),
-                        "outstanding_credits_micro": max(
-                            actual_micro - reserved_micro,
-                            0,
-                        ),
+                        "debited_credits_micro": settlement.settled_micro,
+                        "outstanding_credits_micro": settlement.outstanding_micro,
                     }
                 )
-                self._settle(reservation_id, billing, actual_micro=actual_micro)
             elif billing.provider_cost_credits_micro > 0:
                 # A zero-priced snapshot must not become a paid call after the
                 # fact; there is no held balance from which to settle it.
@@ -412,7 +411,7 @@ class LLMExecutionService:
         billing: BillingEvidence,
         *,
         actual_micro: int,
-    ) -> None:
+    ) -> LLMSettlementResult:
         try:
             settlement = self.credits.settle_llm_credits(
                 reservation_id,
@@ -423,11 +422,10 @@ class LLMExecutionService:
             raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED) from exc
         if (
             settlement.status != "settled"
-            or settlement.settled_micro != billing.debited_credits_micro
             or settlement.actual_micro != actual_micro
-            or settlement.outstanding_micro != billing.outstanding_credits_micro
         ):
             raise LLMExecutionError(ExecutionErrorCategory.BILLING_FAILED)
+        return settlement
 
     def _release_after_failure(
         self,

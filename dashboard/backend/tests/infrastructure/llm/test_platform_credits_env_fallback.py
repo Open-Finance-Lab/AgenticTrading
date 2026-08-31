@@ -194,6 +194,24 @@ def test_platform_execution_uses_env_key_and_debits_grant_before_purchased(
     assert balance["purchased_available_micro"] == 900_000
 
 
+def test_platform_execution_settles_covered_reservation_overage(
+    tmp_path, monkeypatch
+):
+    adapter = FakeExecutionAdapter(LLMUsage(input_tokens=100, output_tokens=600))
+    service, credits_store = _execution_service(tmp_path, monkeypatch, adapter)
+
+    result = service.execute(_request("env-platform-covered-overage"))
+
+    assert result.billing.provider_cost_credits_micro == 700_000
+    assert result.billing.debited_credits_micro == 700_000
+    assert result.billing.outstanding_credits_micro == 0
+    assert credits_store.get_account_billing_state(USER_ID) == {
+        "account_status": "active",
+        "restriction_reason": None,
+        "outstanding_credits_micro": 0,
+    }
+
+
 def test_platform_execution_emits_bucketed_resource_evidence(
     tmp_path,
     monkeypatch,
@@ -309,7 +327,7 @@ def test_platform_execution_releases_reservation_when_usage_is_missing(
 @pytest.mark.parametrize(
     ("reason", "expected"),
     [
-        ("llm_overage", "Add at least 0.250000 Credits"),
+        ("llm_overage", "Add at least 0.150000 Credits"),
         ("refund_reconciliation", "payment refund review"),
     ],
 )

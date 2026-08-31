@@ -33,6 +33,37 @@ from dashboard.backend.domain.credits.repository_common import (
 )
 
 
+_SETTLEMENT_OUTCOME_EVIDENCE_KEYS = {
+    "debited_credits_micro",
+    "outstanding_credits_micro",
+}
+
+
+def _evidence_json(evidence: dict[str, Any]) -> str:
+    return json.dumps(
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def _evidence_identity_json(evidence_json: str) -> str:
+    try:
+        payload = json.loads(evidence_json)
+    except (TypeError, ValueError):
+        return evidence_json
+    if not isinstance(payload, dict):
+        return evidence_json
+    payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in _SETTLEMENT_OUTCOME_EVIDENCE_KEYS
+    }
+    return _evidence_json(payload)
+
+
 _CREDIT_LEDGER_DDL = """
 CREATE TABLE credit_ledger_entries (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -136,7 +167,6 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     updated_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
-    CHECK (settled_micro <= reserved_micro),
     UNIQUE (user_id, run_id, call_index)
 )
 """
@@ -494,6 +524,7 @@ class CreditsStore:
             WHERE status = 'settled' AND actual_micro = 0
             """
         )
+        cls._migrate_llm_reservation_constraint_in_transaction(conn)
         conn.execute(_LLM_USAGE_LEDGER_DDL)
         conn.execute(
             """
@@ -513,6 +544,66 @@ class CreditsStore:
             ON credit_llm_usage_entries(user_id, id DESC)
             """
         )
+
+    @classmethod
+    def _migrate_llm_reservation_constraint_in_transaction(
+        cls, conn: sqlite3.Connection
+    ) -> None:
+        """Rebuild legacy SQLite reservations that capped settled debits."""
+
+        # Some maintenance/CLI entry points instantiate the Credits store
+        # before the account database has created its users table. The legacy
+        # table can remain in place safely; the migration will run on the next
+        # normal application initialization once its parent table exists.
+        if not cls._table_columns(conn, "users"):
+            return
+
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'credit_llm_reservations'"
+        ).fetchone()
+        table_sql = "".join(str(row["sql"] or "").lower().split()) if row else ""
+        if "settled_micro<=reserved_micro" not in table_sql:
+            return
+
+        usage_exists = bool(cls._table_columns(conn, "credit_llm_usage_entries"))
+        if usage_exists:
+            conn.execute(
+                "CREATE TABLE credit_llm_usage_entries_migration_backup AS "
+                "SELECT * FROM credit_llm_usage_entries"
+            )
+            conn.execute("DROP TABLE credit_llm_usage_entries")
+
+        conn.execute(
+            "ALTER TABLE credit_llm_reservations "
+            "RENAME TO credit_llm_reservations_migration_legacy"
+        )
+        conn.execute(_LLM_RESERVATION_DDL)
+        columns = (
+            "reservation_id, user_id, run_id, call_index, reserved_micro, "
+            "reserved_grant_micro, reserved_purchased_micro, settled_micro, "
+            "actual_micro, outstanding_micro, outstanding_recovered_micro, status, "
+            "operation_key, request_digest, evidence_json, failure_reason, "
+            "created_at, updated_at"
+        )
+        conn.execute(
+            f"INSERT INTO credit_llm_reservations ({columns}) "
+            f"SELECT {columns} FROM credit_llm_reservations_migration_legacy"
+        )
+        conn.execute("DROP TABLE credit_llm_reservations_migration_legacy")
+
+        if usage_exists:
+            conn.execute(_LLM_USAGE_LEDGER_DDL)
+            usage_columns = (
+                "id, user_id, reservation_id, run_id, call_index, bucket, "
+                "amount_micro, operation_key, evidence_json, created_at"
+            )
+            conn.execute(
+                f"INSERT INTO credit_llm_usage_entries ({usage_columns}) "
+                f"SELECT {usage_columns} "
+                "FROM credit_llm_usage_entries_migration_backup"
+            )
+            conn.execute("DROP TABLE credit_llm_usage_entries_migration_backup")
 
     @classmethod
     def _create_grant_pool_schema_in_transaction(
@@ -991,8 +1082,8 @@ class CreditsStore:
         )
         row = dict(reservation)
         row.update(
-            released_micro=(
-                int(row["reserved_micro"]) - int(row["settled_micro"])
+            released_micro=max(
+                int(row["reserved_micro"]) - int(row["settled_micro"]), 0
             ),
             outstanding_recovered_micro=int(
                 row["outstanding_recovered_micro"] or 0
@@ -1116,13 +1207,7 @@ class CreditsStore:
             or actual_micro < 0
         ):
             raise ValueError("actual_micro must be a non-negative integer")
-        evidence_json = json.dumps(
-            evidence,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-            allow_nan=False,
-        )
+        evidence_json = _evidence_json(evidence)
         with self._get_connection() as conn:
             self._begin(conn)
             reservation = conn.execute(
@@ -1134,7 +1219,10 @@ class CreditsStore:
             if reservation["status"] == "settled":
                 if (
                     int(reservation["actual_micro"]) != actual_micro
-                    or reservation["evidence_json"] != evidence_json
+                    or _evidence_identity_json(
+                        str(reservation["evidence_json"] or "")
+                    )
+                    != _evidence_identity_json(evidence_json)
                 ):
                     raise LLMReservationConflictError(
                         "settlement replay has different input"
@@ -1147,16 +1235,39 @@ class CreditsStore:
                     "released reservation cannot be settled"
                 )
             reserved_micro = int(reservation["reserved_micro"])
-            debit_micro = min(actual_micro, reserved_micro)
+            excess_micro = max(actual_micro - reserved_micro, 0)
+            supplementary_grant = 0
+            supplementary_purchased = 0
+            if excess_micro > 0:
+                projection = self._balance_projection_in_transaction(
+                    conn, int(reservation["user_id"])
+                )
+                supplementary_grant = min(
+                    excess_micro,
+                    max(int(projection["grant_available_micro"]), 0),
+                )
+                supplementary_purchased = min(
+                    excess_micro - supplementary_grant,
+                    max(int(projection["purchased_available_micro"]), 0),
+                )
+            supplementary_micro = supplementary_grant + supplementary_purchased
+            debit_micro = min(actual_micro, reserved_micro) + supplementary_micro
             outstanding_micro = actual_micro - debit_micro
             grant_debit = min(
-                debit_micro, int(reservation["reserved_grant_micro"])
+                min(actual_micro, reserved_micro),
+                int(reservation["reserved_grant_micro"]),
             )
-            purchased_debit = debit_micro - grant_debit
+            purchased_debit = min(actual_micro, reserved_micro) - grant_debit
             now = _utcnow_iso()
-            for bucket, amount in (
-                ("grant", grant_debit),
-                ("purchased", purchased_debit),
+            evidence_payload = dict(evidence)
+            evidence_payload["debited_credits_micro"] = debit_micro
+            evidence_payload["outstanding_credits_micro"] = outstanding_micro
+            settled_evidence_json = _evidence_json(evidence_payload)
+            for bucket, amount, suffix in (
+                ("grant", grant_debit, "grant"),
+                ("purchased", purchased_debit, "purchased"),
+                ("grant", supplementary_grant, "overage:grant"),
+                ("purchased", supplementary_purchased, "overage:purchased"),
             ):
                 if amount <= 0:
                     continue
@@ -1176,8 +1287,8 @@ class CreditsStore:
                         reservation["call_index"],
                         bucket,
                         -amount,
-                        f"{reservation['operation_key']}:{bucket}",
-                        evidence_json,
+                        f"{reservation['operation_key']}:{suffix}",
+                        settled_evidence_json,
                         now,
                     ),
                 )
@@ -1193,7 +1304,7 @@ class CreditsStore:
                     debit_micro,
                     actual_micro,
                     outstanding_micro,
-                    evidence_json,
+                    settled_evidence_json,
                     now,
                     reservation_id,
                 ),

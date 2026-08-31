@@ -58,6 +58,18 @@ def test_postgres_schema_declares_the_welcome_promotion_ledger():
     assert "UNIQUE (campaign_key, user_id)" in ddl
 
 
+def test_postgres_schema_allows_settlement_overage_and_migrates_legacy_check():
+    assert "settled_micro <= reserved_micro" not in pg_module.CREDITS_POSTGRES_DDL
+    assert (
+        "DROP CONSTRAINT IF EXISTS credit_llm_reservations_settled_micro_check"
+        in pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    )
+    assert (
+        "credit_llm_reservations_settled_micro_nonnegative_check"
+        in pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    )
+
+
 def test_build_credits_store_picks_postgres_from_users_url(monkeypatch, capsys):
     created = {}
 
@@ -404,7 +416,13 @@ def _pending_order(
     )
 
 
-def _pay_order(store, *, order_id: str = "ord_10", event_id: str = "evt_paid"):
+def _pay_order(
+    store,
+    *,
+    order_id: str = "ord_10",
+    event_id: str = "evt_paid",
+    cents: int = 1000,
+):
     return store.settle_paid_checkout(
         event_id=event_id,
         event_type="checkout.session.completed",
@@ -415,7 +433,7 @@ def _pay_order(store, *, order_id: str = "ord_10", event_id: str = "evt_paid"):
         checkout_session_id=f"cs_test_{order_id}",
         payment_intent_id=f"pi_test_{order_id}",
         currency="usd",
-        amount_usd_cents=1000,
+        amount_usd_cents=cents,
     )
 
 
@@ -430,6 +448,63 @@ def _grant_args(operation: str, *, amount_micro: int) -> dict[str, object]:
         "source": "postgres_contract",
         "reason": f"Postgres contract operation {operation}.",
     }
+
+
+@pg_only
+def test_postgres_llm_overage_uses_unreserved_balance(pg_credits_store):
+    store = pg_credits_store
+    _pending_order(store, cents=110)
+    _pay_order(store, cents=110)
+    reservation = store.reserve_llm_credits(
+        reservation_id="pg-partial-overage",
+        user_id=1,
+        run_id="pg-partial-overage-run",
+        call_index=0,
+        reserved_micro=1_000_000,
+        operation_key="pg-partial-overage-operation",
+        request_digest="p" * 64,
+    )
+
+    settled = store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_250_000,
+        evidence={"provider_id": "openrouter", "model_id": "qwen/qwen3"},
+    )
+
+    assert settled["settled_micro"] == 1_100_000
+    assert settled["outstanding_micro"] == 150_000
+    assert settled["purchased_debited_micro"] == 1_100_000
+    assert store.get_account_billing_state(1)["account_status"] == "restricted"
+
+
+@pg_only
+def test_postgres_llm_overage_uses_grant_before_restricting(pg_credits_store):
+    store = pg_credits_store
+    store.fund_grant_pool(**_grant_args("covered_fund", amount_micro=2_000_000))
+    store.assign_grant(
+        user_id=1,
+        **_grant_args("covered_assign", amount_micro=2_000_000),
+    )
+    reservation = store.reserve_llm_credits(
+        reservation_id="pg-covered-overage",
+        user_id=1,
+        run_id="pg-covered-overage-run",
+        call_index=0,
+        reserved_micro=1_000_000,
+        operation_key="pg-covered-overage-operation",
+        request_digest="q" * 64,
+    )
+
+    settled = store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_250_000,
+        evidence={"provider_id": "openrouter", "model_id": "qwen/qwen3"},
+    )
+
+    assert settled["settled_micro"] == 1_250_000
+    assert settled["outstanding_micro"] == 0
+    assert settled["grant_debited_micro"] == 1_250_000
+    assert store.get_account_billing_state(1)["account_status"] == "active"
 
 
 @pg_only

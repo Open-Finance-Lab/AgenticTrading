@@ -29,6 +29,37 @@ from dashboard.backend.domain.credits.repository_common import (
 )
 
 
+_SETTLEMENT_OUTCOME_EVIDENCE_KEYS = {
+    "debited_credits_micro",
+    "outstanding_credits_micro",
+}
+
+
+def _evidence_json(evidence: dict[str, Any]) -> str:
+    return json.dumps(
+        evidence,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+
+
+def _evidence_identity_json(evidence_json: str) -> str:
+    try:
+        payload = json.loads(evidence_json)
+    except (TypeError, ValueError):
+        return evidence_json
+    if not isinstance(payload, dict):
+        return evidence_json
+    payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in _SETTLEMENT_OUTCOME_EVIDENCE_KEYS
+    }
+    return _evidence_json(payload)
+
+
 # Kept as literal DDL so the SQLite/Postgres parity guard can compare the
 # authoritative table and column contracts without requiring a live database.
 CREDITS_POSTGRES_DDL = """
@@ -269,7 +300,6 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
-    CHECK (settled_micro <= reserved_micro),
     UNIQUE (user_id, run_id, call_index)
 );
 
@@ -329,6 +359,13 @@ ADD COLUMN IF NOT EXISTS restriction_reason TEXT;
 UPDATE credit_llm_reservations
 SET actual_micro = settled_micro
 WHERE status = 'settled' AND actual_micro = 0;
+ALTER TABLE credit_llm_reservations
+DROP CONSTRAINT IF EXISTS credit_llm_reservations_settled_micro_check;
+ALTER TABLE credit_llm_reservations
+DROP CONSTRAINT IF EXISTS credit_llm_reservations_settled_micro_nonnegative_check;
+ALTER TABLE credit_llm_reservations
+ADD CONSTRAINT credit_llm_reservations_settled_micro_nonnegative_check
+CHECK (settled_micro >= 0);
 
 ALTER TABLE credit_grant_pool_ledger_entries
 ADD COLUMN IF NOT EXISTS pool_name_snapshot TEXT;
@@ -791,7 +828,9 @@ class PostgresCreditsStore:
         entries = cur.fetchall()
         row = dict(reservation)
         row.update(
-            released_micro=int(row["reserved_micro"]) - int(row["settled_micro"]),
+            released_micro=max(
+                int(row["reserved_micro"]) - int(row["settled_micro"]), 0
+            ),
             outstanding_recovered_micro=int(
                 row.get("outstanding_recovered_micro") or 0
             ),
@@ -867,26 +906,75 @@ class PostgresCreditsStore:
         reservation_id = _required_text(reservation_id, "reservation_id", max_length=160)
         if not isinstance(actual_micro, int) or isinstance(actual_micro, bool) or actual_micro < 0:
             raise ValueError("actual_micro must be a non-negative integer")
-        evidence_json = json.dumps(evidence, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+        evidence_json = _evidence_json(evidence)
         with self._get_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute("SELECT * FROM credit_llm_reservations WHERE reservation_id = %s FOR UPDATE", (reservation_id,))
+                cur.execute(
+                    "SELECT user_id FROM credit_llm_reservations "
+                    "WHERE reservation_id = %s",
+                    (reservation_id,),
+                )
+                owner = cur.fetchone()
+                if not owner:
+                    raise LLMReservationConflictError("reservation was not found")
+                self._ensure_account_in_transaction(cur, int(owner["user_id"]))
+                cur.execute(
+                    "SELECT status FROM credit_accounts WHERE user_id = %s FOR UPDATE",
+                    (owner["user_id"],),
+                )
+                cur.execute(
+                    "SELECT * FROM credit_llm_reservations "
+                    "WHERE reservation_id = %s FOR UPDATE",
+                    (reservation_id,),
+                )
                 reservation = cur.fetchone()
                 if not reservation:
                     raise LLMReservationConflictError("reservation was not found")
                 if reservation["status"] == "settled":
-                    if int(reservation["actual_micro"]) != actual_micro or reservation["evidence_json"] != evidence_json:
+                    if (
+                        int(reservation["actual_micro"]) != actual_micro
+                        or _evidence_identity_json(
+                            str(reservation["evidence_json"] or "")
+                        )
+                        != _evidence_identity_json(evidence_json)
+                    ):
                         raise LLMReservationConflictError("settlement replay has different input")
                     return self._llm_reservation_result(cur, reservation)
                 if reservation["status"] != "open":
                     raise LLMReservationConflictError("released reservation cannot be settled")
                 reserved_micro = int(reservation["reserved_micro"])
-                debit_micro = min(actual_micro, reserved_micro)
+                excess_micro = max(actual_micro - reserved_micro, 0)
+                supplementary_grant = 0
+                supplementary_purchased = 0
+                if excess_micro > 0:
+                    projection = self._balance_projection_in_transaction(
+                        cur, int(reservation["user_id"])
+                    )
+                    supplementary_grant = min(
+                        excess_micro,
+                        max(int(projection["grant_available_micro"]), 0),
+                    )
+                    supplementary_purchased = min(
+                        excess_micro - supplementary_grant,
+                        max(int(projection["purchased_available_micro"]), 0),
+                    )
+                supplementary_micro = supplementary_grant + supplementary_purchased
+                debit_micro = min(actual_micro, reserved_micro) + supplementary_micro
                 outstanding_micro = actual_micro - debit_micro
-                grant_debit = min(debit_micro, int(reservation["reserved_grant_micro"]))
-                purchased_debit = debit_micro - grant_debit
+                hold_debit = min(actual_micro, reserved_micro)
+                grant_debit = min(hold_debit, int(reservation["reserved_grant_micro"]))
+                purchased_debit = hold_debit - grant_debit
                 now = _utcnow_iso()
-                for bucket, amount in (("grant", grant_debit), ("purchased", purchased_debit)):
+                evidence_payload = dict(evidence)
+                evidence_payload["debited_credits_micro"] = debit_micro
+                evidence_payload["outstanding_credits_micro"] = outstanding_micro
+                settled_evidence_json = _evidence_json(evidence_payload)
+                for bucket, amount, suffix in (
+                    ("grant", grant_debit, "grant"),
+                    ("purchased", purchased_debit, "purchased"),
+                    ("grant", supplementary_grant, "overage:grant"),
+                    ("purchased", supplementary_purchased, "overage:purchased"),
+                ):
                     if amount <= 0:
                         continue
                     cur.execute(
@@ -897,11 +985,11 @@ class PostgresCreditsStore:
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         (reservation["user_id"], reservation_id, reservation["run_id"], reservation["call_index"], bucket,
-                         -amount, f"{reservation['operation_key']}:{bucket}", evidence_json, now),
+                         -amount, f"{reservation['operation_key']}:{suffix}", settled_evidence_json, now),
                     )
                 cur.execute(
                     "UPDATE credit_llm_reservations SET settled_micro = %s, actual_micro = %s, outstanding_micro = %s, status = 'settled', evidence_json = %s, failure_reason = NULL, updated_at = %s WHERE reservation_id = %s RETURNING *",
-                    (debit_micro, actual_micro, outstanding_micro, evidence_json, now, reservation_id),
+                    (debit_micro, actual_micro, outstanding_micro, settled_evidence_json, now, reservation_id),
                 )
                 settled = cur.fetchone()
                 if outstanding_micro > 0:

@@ -183,7 +183,7 @@ def _refund_event(
 
 def test_checkout_pays_model_overage_and_restores_account(tmp_path):
     service, gateway = _service(tmp_path)
-    first = _checkout(service)
+    first = _checkout(service, cents=110)
     _pay(service, gateway, first)
     reservation = service.reserve_llm_credits(
         user_id=1,
@@ -199,7 +199,7 @@ def test_checkout_pays_model_overage_and_restores_account(tmp_path):
     blocked = service.get_balance(1)
     assert blocked.account_status == "restricted"
     assert blocked.restriction_reason == "llm_overage"
-    assert blocked.outstanding_credits_micro == 250_000
+    assert blocked.outstanding_credits_micro == 150_000
 
     recovery = _checkout(
         service,
@@ -210,7 +210,7 @@ def test_checkout_pays_model_overage_and_restores_account(tmp_path):
     paid = service.handle_webhook(b"recovery", "valid")
 
     assert paid.outcome == "processed"
-    assert paid.recovered_micro == 250_000
+    assert paid.recovered_micro == 150_000
     restored = service.get_balance(1)
     assert restored.account_status == "active"
     assert restored.restriction_reason is None

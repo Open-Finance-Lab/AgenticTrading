@@ -30,11 +30,11 @@
 - Produces reservation tables that allow `settled_micro` to include supplementary debits.
 - Preserves all existing columns, foreign keys, indexes, and historical rows.
 
-- [ ] **Step 1: Write failing migration tests** for a legacy SQLite reservation table and a PostgreSQL migration SQL assertion; assert the obsolete `settled_micro <= reserved_micro` constraint is absent and existing rows survive.
-- [ ] **Step 2: Run the focused tests** with `pytest -q dashboard/backend/tests/domain/credits/test_repository.py dashboard/backend/tests/domain/credits/test_repository_postgres.py`; confirm the new migration assertions fail before implementation.
-- [ ] **Step 3: Implement the schema migration**: use a SQLite table rebuild when the legacy reservation SQL contains the upper-bound check, and add PostgreSQL `DROP CONSTRAINT IF EXISTS` plus a non-negative replacement constraint.
-- [ ] **Step 4: Re-run the focused migration tests** and confirm they pass.
-- [ ] **Step 5: Commit** with `git commit -m "fix(credits): allow settlement debits above reservations"`.
+- [x] **Step 1: Write failing migration tests** for a legacy SQLite reservation table and a PostgreSQL migration SQL assertion; assert the obsolete `settled_micro <= reserved_micro` constraint is absent and existing rows survive.
+- [x] **Step 2: Run the focused tests** with `pytest -q dashboard/backend/tests/domain/credits/test_repository.py dashboard/backend/tests/domain/credits/test_repository_postgres.py`; confirm the new migration assertions fail before implementation.
+- [x] **Step 3: Implement the schema migration**: use a SQLite table rebuild when the legacy reservation SQL contains the upper-bound check, and add PostgreSQL `DROP CONSTRAINT IF EXISTS` plus a non-negative replacement constraint.
+- [x] **Step 4: Re-run the focused migration tests** and confirm they pass.
+- [x] **Step 5: Commit** the migration changes in the final PR commit.
 
 ### Task 2: Implement Atomic Supplementary Settlement
 
@@ -47,12 +47,12 @@
 **Interfaces:**
 - `CreditsStore.settle_llm_credits(...)` and `PostgresCreditsStore.settle_llm_credits(...)` continue returning reservation dictionaries with `settled_micro`, `actual_micro`, `outstanding_micro`, and per-bucket ledger IDs.
 
-- [ ] **Step 1: Add failing SQLite tests** for fully covered and partially covered overruns, asserting supplementary Grant-first debits, active versus restricted account status, and remaining outstanding amount.
-- [ ] **Step 2: Add matching PostgreSQL contract tests** using the existing `@pg_only` fixture.
-- [ ] **Step 3: Implement settlement allocation**: calculate `excess_micro`, read unreserved Grant/Purchased projection inside the transaction, insert uniquely keyed supplementary usage entries, set `settled_micro` to reservation debit plus supplementary debit, and restrict only for a positive remainder.
-- [ ] **Step 4: Preserve replay behavior** by returning the settled row without creating duplicate usage entries when the same evidence is submitted again.
-- [ ] **Step 5: Run SQLite and PostgreSQL-focused tests** and confirm all pass (PostgreSQL may skip locally when unavailable).
-- [ ] **Step 6: Commit** with `git commit -m "fix(credits): charge available balance for reservation overage"`.
+- [x] **Step 1: Add failing SQLite tests** for fully covered and partially covered overruns, asserting supplementary Grant-first debits, active versus restricted account status, and remaining outstanding amount.
+- [x] **Step 2: Add matching PostgreSQL contract tests** using the existing `@pg_only` fixture.
+- [x] **Step 3: Implement settlement allocation**: calculate `excess_micro`, read unreserved Grant/Purchased projection inside the transaction, insert uniquely keyed supplementary usage entries, set `settled_micro` to reservation debit plus supplementary debit, and restrict only for a positive remainder.
+- [x] **Step 4: Preserve replay behavior** by returning the settled row without creating duplicate usage entries when the same evidence is submitted again.
+- [x] **Step 5: Run SQLite and PostgreSQL-focused tests** and confirm all pass (PostgreSQL may skip locally when unavailable).
+- [x] **Step 6: Commit** the settlement changes in the final PR commit.
 
 ### Task 3: Wire Execution Billing Evidence and Regression Coverage
 
@@ -64,18 +64,18 @@
 **Interfaces:**
 - `LLMExecutionService._execute_platform` passes the actual provider cost to settlement and reports the store's full debit and outstanding values without changing safe error categories.
 
-- [ ] **Step 1: Add a failing execution-service regression** where actual provider cost exceeds the reservation but available Credits cover the difference; assert successful result and zero outstanding.
-- [ ] **Step 2: Update evidence mapping** so `debited_credits_micro` reflects the full amount charged after supplementary settlement while `outstanding_credits_micro` reflects only unpaid remainder.
-- [ ] **Step 3: Run the execution-focused tests** and confirm they pass.
-- [ ] **Step 4: Commit** with `git commit -m "test(llm): cover covered reservation overruns"`.
+- [x] **Step 1: Add a failing execution-service regression** where actual provider cost exceeds the reservation but available Credits cover the difference; assert successful result and zero outstanding.
+- [x] **Step 2: Update evidence mapping** so `debited_credits_micro` reflects the full amount charged after supplementary settlement while `outstanding_credits_micro` reflects only unpaid remainder.
+- [x] **Step 3: Run the execution-focused tests** and confirm they pass.
+- [x] **Step 4: Commit** the execution changes in the final PR commit.
 
 ### Task 4: Full Verification and Pull Request
 
 **Files:**
 - Verify all files changed in Tasks 1-3.
 
-- [ ] **Step 1: Run targeted regression suite**: `pytest -q dashboard/backend/tests/domain/credits dashboard/backend/tests/infrastructure/llm/test_platform_credits_env_fallback.py dashboard/backend/tests/infrastructure/llm/test_execution_client.py`.
-- [ ] **Step 2: Run static checks**: `python -m py_compile` on changed Python files, `git diff --check`, and repository JavaScript checks if frontend files are touched.
-- [ ] **Step 3: Inspect staged names and diff** for database files, secrets, `.superpowers/`, and `work/` before committing.
+- [x] **Step 1: Run targeted regression suite**: `pytest -q dashboard/backend/tests/domain/credits dashboard/backend/tests/infrastructure/llm/test_platform_credits_env_fallback.py dashboard/backend/tests/infrastructure/llm/test_execution_client.py`.
+- [x] **Step 2: Run static checks**: `python -m py_compile` on changed Python files, `git diff --check`, and repository JavaScript checks if frontend files are touched.
+- [x] **Step 3: Inspect staged names and diff** for database files, secrets, `.superpowers/`, and `work/` before committing.
 - [ ] **Step 4: Push branch** with `git push -u origin fix/credit-overage-settlement`.
 - [ ] **Step 5: Open PR** targeting `main` with title `fix(credits): charge available balance for reservation overage`, documenting test results and any local PostgreSQL skips.
