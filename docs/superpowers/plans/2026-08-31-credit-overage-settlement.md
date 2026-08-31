@@ -77,5 +77,5 @@
 - [x] **Step 1: Run targeted regression suite**: `pytest -q dashboard/backend/tests/domain/credits dashboard/backend/tests/infrastructure/llm/test_platform_credits_env_fallback.py dashboard/backend/tests/infrastructure/llm/test_execution_client.py`.
 - [x] **Step 2: Run static checks**: `python -m py_compile` on changed Python files, `git diff --check`, and repository JavaScript checks if frontend files are touched.
 - [x] **Step 3: Inspect staged names and diff** for database files, secrets, `.superpowers/`, and `work/` before committing.
-- [ ] **Step 4: Push branch** with `git push -u origin fix/credit-overage-settlement`.
-- [ ] **Step 5: Open PR** targeting `main` with title `fix(credits): charge available balance for reservation overage`, documenting test results and any local PostgreSQL skips.
+- [x] **Step 4: Push branch** with `git push -u origin fix/credit-overage-settlement`.
+- [x] **Step 5: Open PR** targeting `main` with title `fix(credits): charge available balance for reservation overage`, documenting test results and any local PostgreSQL skips.
