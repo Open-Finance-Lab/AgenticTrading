@@ -7,6 +7,11 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from dashboard.backend.infrastructure.llm.pricing import (
+    PRICING_SOURCE_VERSION,
+    price_for_model,
+)
+
 
 class BillingMode(StrEnum):
     PLATFORM_CREDITS = "platform_credits"
@@ -109,10 +114,8 @@ class PricingSnapshot(BaseModel):
         model_id: str,
         provider_id: str = "unknown",
         *,
-        source_version: str = "pricing-table-2026-08-24",
+        source_version: str = PRICING_SOURCE_VERSION,
     ) -> "PricingSnapshot":
-        from dashboard.backend.infrastructure.llm.token_cost import price_for_model
-
         input_price, output_price = price_for_model(model_id)
         return cls(
             provider_id=provider_id,

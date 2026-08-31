@@ -55,7 +55,7 @@ dashboard/
 │   └── infrastructure/
 │       ├── ai_hedge_fund/      # adapter, bridge: subprocess-isolated hosted-runtime bridge
 │       ├── brokers/            # alpaca_paper
-│       ├── llm/                # validator, prompts, token_cost, decision_parsing, backtest_harness
+│       ├── llm/                # validator, prompts, pricing, token_cost, decision_parsing, backtest_harness
 │       └── market_data/        # quotes, alpaca_bars
 ├── scripts/                    # thin entrypoints; _bootstrap.ensure_repo_root() is the ONLY sys.path mutation
 └── integrations/ (backend)     # discord_bot (import-safe, lazy token/client)
@@ -186,6 +186,7 @@ dashboard/
 │   │   └── llm/
 │   │       ├── validator.py           # (was llm_validator.py validation core)
 │   │       ├── prompts.py             # (was algo_prompt.py + prompt builders)
+│   │       ├── pricing.py             # price table leaf shared by token_cost + execution/models
 │   │       ├── token_cost.py
 │   │       ├── backtest_harness.py    # make_trading_decision_with_llm + Anthropic wiring
 │   │       └── decision_parsing.py    # fix_json_formatting + parsing
