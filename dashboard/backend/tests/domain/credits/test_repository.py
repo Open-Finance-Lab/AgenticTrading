@@ -181,9 +181,15 @@ def test_llm_overage_debits_the_hold_and_restricts_the_account(tmp_path):
     assert settled["actual_micro"] == 1_250_000
     assert settled["settled_micro"] == 1_000_000
     assert settled["outstanding_micro"] == 250_000
+    assert settled["outstanding_recovered_micro"] == 0
     assert settled["released_micro"] == 0
     assert store.get_balance_micro(1) == 9_000_000
     assert store.ensure_account(1)["status"] == "restricted"
+    assert store.get_account_billing_state(1) == {
+        "account_status": "restricted",
+        "restriction_reason": "llm_overage",
+        "outstanding_credits_micro": 250_000,
+    }
     assert store.settle_llm_credits(
         reservation["reservation_id"],
         actual_micro=1_250_000,
@@ -206,6 +212,77 @@ def test_llm_overage_debits_the_hold_and_restricts_the_account(tmp_path):
             operation_key="llm-reserve-blocked",
             request_digest="b" * 64,
         )
+
+
+def test_grant_recovers_llm_overage_and_reinstates_account(tmp_path):
+    store = _store(tmp_path)
+    _pending_order(store)
+    _pay_order(store)
+    reservation = store.reserve_llm_credits(
+        reservation_id="llm-res-recover",
+        user_id=1,
+        run_id="run-recover",
+        call_index=0,
+        reserved_micro=1_000_000,
+        operation_key="llm-reserve-recover",
+        request_digest="c" * 64,
+    )
+    store.settle_llm_credits(
+        reservation["reservation_id"],
+        actual_micro=1_250_000,
+        evidence={"provider_id": "openrouter", "model_id": "qwen/qwen3"},
+    )
+    store.fund_grant_pool(
+        pool_id="default",
+        amount_micro=250_000,
+        operation_id="fund-recovery",
+        idempotency_key="fund-recovery",
+        request_digest="d" * 64,
+        actor_user_id=2,
+        source="test",
+        reason="Fund recovery.",
+    )
+    assigned = store.assign_grant(
+        pool_id="default",
+        user_id=1,
+        amount_micro=250_000,
+        operation_id="assign-recovery",
+        idempotency_key="assign-recovery",
+        request_digest="e" * 64,
+        actor_user_id=2,
+        source="test",
+        reason="Recover overage.",
+    )
+
+    assert assigned["recovery"] == {
+        "recovered_micro": 250_000,
+        "outstanding_micro": 0,
+        "account_status": "active",
+        "restriction_reason": None,
+    }
+    replayed = store.assign_grant(
+        user_id=1,
+        pool_id="default",
+        amount_micro=250_000,
+        operation_id="assign-recovery",
+        idempotency_key="assign-recovery",
+        request_digest="e" * 64,
+        actor_user_id=2,
+        source="test",
+        reason="Recover overage.",
+    )
+    assert replayed == assigned
+    assert store.get_account_billing_state(1) == {
+        "account_status": "active",
+        "restriction_reason": None,
+        "outstanding_credits_micro": 0,
+    }
+    with store._get_connection() as conn:
+        row = conn.execute(
+            "SELECT outstanding_recovered_micro FROM credit_llm_reservations WHERE reservation_id = ?",
+            (reservation["reservation_id"],),
+        ).fetchone()
+    assert row["outstanding_recovered_micro"] == 250_000
 
 
 @pytest.mark.parametrize(

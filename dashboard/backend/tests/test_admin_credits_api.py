@@ -200,9 +200,34 @@ def test_admin_user_search_composes_identity_with_bucket_projection(
                 "display_grant_credits": "0.000000",
                 "display_purchased_credits": "0.000000",
                 "display_total_credits": "0.000000",
+                "account_status": "active",
+                "restriction_reason": None,
+                "outstanding_credits_micro": 0,
             },
         }
     ]
+
+
+def test_admin_user_list_exposes_restricted_account_recovery_state(
+    live_admin_credits_api,
+):
+    admin = _signup(live_admin_credits_api.client, "status-admin@example.com")
+    target = _signup(live_admin_credits_api.client, "status-target@example.com")
+    live_admin_credits_api.users.apply_admin_patch(admin["id"], role="admin")
+    live_admin_credits_api.credits.restrict_account(
+        target["id"], reason="refund_reconciliation"
+    )
+    _login(live_admin_credits_api.client, "status-admin@example.com")
+
+    response = live_admin_credits_api.client.get(
+        "/api/admin/credits/users", params={"query": "status-target"}
+    )
+
+    assert response.status_code == 200, response.text
+    balance = response.json()["users"][0]["balance"]
+    assert balance["account_status"] == "restricted"
+    assert balance["restriction_reason"] == "refund_reconciliation"
+    assert balance["outstanding_credits_micro"] == 0
 
 
 def test_admin_user_list_defaults_to_25_accounts_per_page(live_admin_credits_api):

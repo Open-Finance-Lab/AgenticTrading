@@ -84,7 +84,10 @@ def _raise_grant_http_error(exc: Exception) -> None:
     if isinstance(exc, CreditAccountRestrictedStoreError):
         raise HTTPException(
             status_code=422,
-            detail="The target account cannot receive Grant Credits.",
+            detail=(
+                "The target account is paused for payment refund review; "
+                "an administrator must reinstate it before assigning Credits."
+            ),
         ) from exc
     if isinstance(exc, ValueError):
         raise HTTPException(status_code=422, detail="Invalid Grant Credits request.") from exc
@@ -188,15 +191,39 @@ def list_grant_users(
     user_ids = [int(user["id"]) for user in identities]
     projections = credits_service.get_balance_projections(user_ids)
     users = []
+    state_reader = getattr(credits_service.store, "get_account_billing_state", None)
     for identity in identities:
         user_id = int(identity["id"])
+        balance = projections[user_id].model_dump()
+        account = (
+            state_reader(user_id)
+            if callable(state_reader)
+            else credits_service.get_balance(user_id)
+        )
+        balance.update(
+            account_status=(
+                account.get("account_status", "active")
+                if isinstance(account, dict)
+                else account.account_status
+            ),
+            restriction_reason=(
+                account.get("restriction_reason")
+                if isinstance(account, dict)
+                else account.restriction_reason
+            ),
+            outstanding_credits_micro=(
+                int(account.get("outstanding_credits_micro", 0) or 0)
+                if isinstance(account, dict)
+                else account.outstanding_credits_micro
+            ),
+        )
         users.append(
             {
                 "id": user_id,
                 "email": identity["email"],
                 "display_name": identity["display_name"],
                 "role": identity["role"],
-                "balance": projections[user_id].model_dump(),
+                "balance": balance,
             }
         )
     return {

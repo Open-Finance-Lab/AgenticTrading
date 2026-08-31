@@ -1057,7 +1057,14 @@ def test_purchase_and_duplicate_webhooks_post_once(pg_credits_store):
     duplicate_event = _pay_order(store)
     second_event = _pay_order(store, event_id="evt_paid_retry")
 
-    assert first == {"outcome": "processed", "balance_micro": 10_000_000}
+    assert first == {
+        "outcome": "processed",
+        "balance_micro": 10_000_000,
+        "recovered_micro": 0,
+        "outstanding_micro": 0,
+        "account_status": "active",
+        "restriction_reason": None,
+    }
     assert duplicate_event == {
         "outcome": "duplicate",
         "balance_micro": 10_000_000,

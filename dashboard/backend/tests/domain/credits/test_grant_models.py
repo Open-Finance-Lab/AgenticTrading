@@ -140,6 +140,8 @@ def test_balance_result_exposes_total_aliases_and_separate_credit_buckets():
         "spending_enabled": False,
         "account_status": "active",
         "billing_available": True,
+        "restriction_reason": None,
+        "outstanding_credits_micro": 0,
     }
     assert balance.balance_micro == balance.total_available_micro
     assert balance.display_credits == balance.display_total_credits
@@ -363,6 +365,7 @@ def test_grant_mutation_result_has_typed_evidence_and_is_frozen():
         "user_balance": projection.model_dump(),
         "pool_ledger_entry_id": 101,
         "user_ledger_entry_id": 202,
+        "recovery": None,
     }
     with pytest.raises(ValidationError, match="frozen"):
         result.amount_micro = 1

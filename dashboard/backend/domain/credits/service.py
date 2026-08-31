@@ -14,6 +14,7 @@ from dashboard.backend.domain.credits.models import (
     BalanceProjection,
     CheckoutRequest,
     CheckoutResult,
+    CreditRecoveryResult,
     GrantMutationResult,
     GrantPoolSummary,
     LLMReservation,
@@ -59,10 +60,21 @@ class PaymentOrderNotFoundError(CreditsServiceError):
 
 
 class AccountRestrictedError(CreditsServiceError):
-    def __init__(self):
+    def __init__(self, reason: str | None = None, outstanding_micro: int = 0):
+        if reason == "llm_overage":
+            amount = format_credits(max(int(outstanding_micro), 0))
+            message = (
+                "This account has an unpaid model-usage overage of "
+                f"{amount} Credits. Add Credits to restore access."
+            )
+        else:
+            message = (
+                "This account is paused for a payment refund review; "
+                "an administrator must restore access."
+            )
         super().__init__(
             "credit_account_restricted",
-            "This account cannot purchase Credits; contact an administrator",
+            message,
         )
 
 
@@ -122,6 +134,8 @@ class CreditsService:
     def get_balance(self, user_id: int) -> BalanceResult:
         account = self.store.ensure_account(user_id)
         projection = self._projection_model(self.store.get_balance_projection(user_id))
+        state_reader = getattr(self.store, "get_account_billing_state", None)
+        state = state_reader(user_id) if callable(state_reader) else account
         gateway = self.gateway
         if gateway is None:
             config = load_billing_config()
@@ -131,8 +145,12 @@ class CreditsService:
             balance_micro=projection.total_available_micro,
             display_credits=projection.display_total_credits,
             **projection.model_dump(),
-            account_status=account["status"],
+            account_status=state.get("account_status", account["status"]),
             billing_available=(True if config is None else bool(config.ready)),
+            restriction_reason=state.get("restriction_reason"),
+            outstanding_credits_micro=int(
+                state.get("outstanding_credits_micro", 0) or 0
+            ),
         )
 
     def grant_default_signup_credits(self, user_id: int) -> bool:
@@ -203,6 +221,9 @@ class CreditsService:
             settled_micro=int(value["settled_micro"]),
             actual_micro=int(value.get("actual_micro") or 0),
             outstanding_micro=int(value.get("outstanding_micro") or 0),
+            outstanding_recovered_micro=int(
+                value.get("outstanding_recovered_micro") or 0
+            ),
             status=str(value["status"]),
             created_at=str(value["created_at"]),
             updated_at=str(value["updated_at"]),
@@ -219,6 +240,9 @@ class CreditsService:
             settled_micro=int(value["settled_micro"]),
             actual_micro=int(value.get("actual_micro") or 0),
             outstanding_micro=int(value.get("outstanding_micro") or 0),
+            outstanding_recovered_micro=int(
+                value.get("outstanding_recovered_micro") or 0
+            ),
             released_micro=int(value["released_micro"]),
             status=str(value["status"]),
             grant_debited_micro=int(value.get("grant_debited_micro") or 0),
@@ -480,6 +504,11 @@ class CreditsService:
                 if entry.get("user_ledger_entry_id") is not None
                 else None
             ),
+            recovery=(
+                CreditRecoveryResult.model_validate(raw["recovery"])
+                if raw.get("recovery") is not None
+                else None
+            ),
         )
 
     def fund_grant_pool(self, *, admin_id: int, request: Any) -> GrantMutationResult:
@@ -536,6 +565,14 @@ class CreditsService:
 
     def reinstate_account(self, user_id: int) -> BalanceResult:
         """Admin remedy for an automatic restriction; returns the fresh balance."""
+        state_reader = getattr(self.store, "get_account_billing_state", None)
+        if callable(state_reader):
+            state = state_reader(user_id)
+            if state.get("restriction_reason") == "llm_overage":
+                raise CreditsServiceError(
+                    "credit_account_requires_recovery",
+                    "Model-usage overage must be settled with added Credits before reinstatement.",
+                )
         self.store.reinstate_account(user_id)
         return self.get_balance(user_id)
 
@@ -547,7 +584,13 @@ class CreditsService:
         # could still create Checkout Sessions with a plain fetch.
         account = self.store.ensure_account(user_id)
         if account["status"] == "restricted":
-            raise AccountRestrictedError()
+            state_reader = getattr(self.store, "get_account_billing_state", None)
+            state = state_reader(user_id) if callable(state_reader) else account
+            if state.get("restriction_reason") != "llm_overage":
+                raise AccountRestrictedError(
+                    state.get("restriction_reason"),
+                    int(state.get("outstanding_credits_micro", 0) or 0),
+                )
 
         amount = request.amount_usd_cents
         credits_micro = credits_micro_for_cents(amount)
@@ -834,6 +877,8 @@ class CreditsService:
             event_type=event.event_type,
             reason=result.get("reason"),
             balance_micro=result.get("balance_micro"),
+            recovered_micro=int(result.get("recovered_micro", 0) or 0),
+            outstanding_micro=int(result.get("outstanding_micro", 0) or 0),
         )
 
     def _handle_checkout_unpaid(self, event: StripeWebhookEvent) -> WebhookResult:

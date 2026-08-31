@@ -111,6 +111,14 @@ def test_balance_copy_describes_platform_and_byok_lanes():
     assert ">Available balance<" not in APP_HTML
 
 
+def test_balance_explains_recoverable_and_review_restrictions():
+    assert "restriction_reason" in CREDITS_JS
+    assert "llm_overage" in CREDITS_JS
+    assert "Add at least" in CREDITS_JS
+    assert "payment refund review" in CREDITS_JS
+    assert "outstanding_credits_micro" in CREDITS_JS
+
+
 def test_activity_renders_one_backtest_usage_summary_with_safe_context():
     source = CREDITS_JS_PATH.read_text(encoding="utf-8")
     assert "entry.entry_type === 'backtest_usage'" in source
