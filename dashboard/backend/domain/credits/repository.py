@@ -1122,6 +1122,7 @@ class CreditsStore:
 
         with self._get_connection() as conn:
             self._begin(conn)
+            self._migrate_llm_reservation_constraint_in_transaction(conn)
             existing = conn.execute(
                 """
                 SELECT * FROM credit_llm_reservations
@@ -1210,6 +1211,7 @@ class CreditsStore:
         evidence_json = _evidence_json(evidence)
         with self._get_connection() as conn:
             self._begin(conn)
+            self._migrate_llm_reservation_constraint_in_transaction(conn)
             reservation = conn.execute(
                 "SELECT * FROM credit_llm_reservations WHERE reservation_id = ?",
                 (reservation_id,),

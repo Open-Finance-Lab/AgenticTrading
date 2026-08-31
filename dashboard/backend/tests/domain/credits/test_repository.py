@@ -155,21 +155,6 @@ def test_sqlite_migrates_legacy_reservation_settlement_constraint(tmp_path):
     with sqlite3.connect(path) as conn:
         conn.execute(
             """
-            CREATE TABLE users (
-                id INTEGER PRIMARY KEY,
-                email TEXT NOT NULL UNIQUE,
-                display_name TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO users VALUES (1, 'legacy@example.com', 'Legacy', 'unused', 'user', '2026-08-01')"
-        )
-        conn.execute(
-            """
             CREATE TABLE credit_llm_reservations (
                 reservation_id TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
@@ -233,7 +218,31 @@ def test_sqlite_migrates_legacy_reservation_settlement_constraint(tmp_path):
             """
         )
 
+    # The Credits store can initialize before UserStore creates its parent
+    # table. The first pass must not fail or mark the migration complete.
     store = CreditsStore(path)
+
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE users (
+                id INTEGER PRIMARY KEY,
+                email TEXT NOT NULL UNIQUE,
+                display_name TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO users VALUES (1, 'legacy@example.com', 'Legacy', 'unused', 'user', '2026-08-01')"
+        )
+    settled = store.settle_llm_credits(
+        "legacy-reservation",
+        actual_micro=1_200,
+        evidence={"provider_id": "openrouter", "model_id": "qwen/qwen3"},
+    )
 
     with store._get_connection() as conn:
         schema = conn.execute(
@@ -245,14 +254,12 @@ def test_sqlite_migrates_legacy_reservation_settlement_constraint(tmp_path):
         usage = conn.execute(
             "SELECT operation_key, amount_micro FROM credit_llm_usage_entries"
         ).fetchone()
-        conn.execute(
-            "UPDATE credit_llm_reservations SET settled_micro = 1200 "
-            "WHERE reservation_id = 'legacy-reservation'"
-        )
 
     assert "settled_micro <= reserved_micro" not in "".join(schema.lower().split())
     assert tuple(row) == (1000, "legacy-operation")
     assert tuple(usage) == ("legacy-usage", -100)
+    assert settled["settled_micro"] == 1000
+    assert settled["outstanding_micro"] == 200
 
 
 def test_llm_overage_debits_the_hold_and_restricts_the_account(tmp_path):
