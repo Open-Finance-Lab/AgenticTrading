@@ -892,8 +892,8 @@ def test_activity_summarizes_mixed_and_malformed_evidence(tmp_path):
         run_id="run-mixed",
         call_index=1,
         actual_micro=200,
-        provider_id="openai",
-        model_id="model-b",
+        provider_id="commonstack",
+        model_id="model-a",
     )
     _settle_activity_call(
         store,
@@ -912,9 +912,9 @@ def test_activity_summarizes_mixed_and_malformed_evidence(tmp_path):
     unknown = next(item for item in items if item.get("run_id") == "run-unknown")
 
     assert mixed["provider_id"] is None
-    assert mixed["model_id"] is None
+    assert mixed["model_id"] == "model-a"
     assert mixed["provider_mixed"] is True
-    assert mixed["model_mixed"] is True
+    assert mixed["model_mixed"] is False
     assert unknown["amount_micro"] == -300
     assert unknown["provider_id"] is None
     assert unknown["model_id"] is None

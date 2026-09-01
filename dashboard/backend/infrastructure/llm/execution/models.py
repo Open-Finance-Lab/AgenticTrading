@@ -5,7 +5,11 @@ from __future__ import annotations
 from enum import StrEnum
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from dashboard.backend.domain.model_providers.repository_common import (
+    validate_provider_id,
+)
 
 from dashboard.backend.infrastructure.llm.pricing import (
     PRICING_SOURCE_VERSION,
@@ -171,6 +175,13 @@ class LLMRunEvidence(BaseModel):
 
     billing_mode: BillingMode
     provider_id: str = Field(min_length=2, max_length=64)
+    requested_provider_id: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=64,
+    )
+    provider_ids: tuple[str, ...] = ()
+    provider_mixed: bool = False
     model_id: str = Field(min_length=1, max_length=64)
     credential_id: str | None = Field(default=None, max_length=128)
     credential_key_last_four: str | None = Field(
@@ -188,6 +199,61 @@ class LLMRunEvidence(BaseModel):
     debited_credits_micro: int = Field(ge=0)
     outstanding_credits_micro: int = Field(ge=0)
     outcome: Literal["byok", "settled", "settled_overage", "unavailable"]
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_provider_attribution(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        provider_id = payload.get("provider_id")
+        if "requested_provider_id" not in payload:
+            payload["requested_provider_id"] = provider_id
+        if "provider_ids" not in payload:
+            payload["provider_ids"] = (
+                () if provider_id == "mixed" else (provider_id,)
+            )
+        if "provider_mixed" not in payload:
+            payload["provider_mixed"] = provider_id == "mixed"
+        return payload
+
+    @field_validator("provider_id", "requested_provider_id")
+    @classmethod
+    def validate_provider_identifier(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        try:
+            return validate_provider_id(value)
+        except Exception as exc:
+            raise ValueError("invalid provider id") from exc
+
+    @field_validator("provider_ids")
+    @classmethod
+    def validate_provider_ids(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        try:
+            cleaned = tuple(validate_provider_id(value) for value in values)
+        except Exception as exc:
+            raise ValueError("provider_ids contains an invalid provider id") from exc
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("provider_ids must be ordered and unique")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_provider_mix(self) -> "LLMRunEvidence":
+        if self.provider_mixed:
+            if self.provider_id != "mixed" or len(self.provider_ids) < 2:
+                raise ValueError("mixed provider evidence requires multiple providers")
+            if (
+                self.credential_id is not None
+                or self.credential_key_last_four is not None
+                or self.pricing_snapshot is not None
+            ):
+                raise ValueError(
+                    "mixed provider evidence cannot claim one credential or price"
+                )
+        elif self.provider_ids != (self.provider_id,):
+            raise ValueError("uniform provider evidence requires one matching provider")
+        return self
 
     @property
     def total_tokens(self) -> int:
