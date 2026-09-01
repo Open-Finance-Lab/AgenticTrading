@@ -359,6 +359,24 @@ ADD COLUMN IF NOT EXISTS restriction_reason TEXT;
 UPDATE credit_llm_reservations
 SET actual_micro = settled_micro
 WHERE status = 'settled' AND actual_micro = 0;
+DO $$
+DECLARE
+    legacy_constraint TEXT;
+BEGIN
+    FOR legacy_constraint IN
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'credit_llm_reservations'::regclass
+          AND contype = 'c'
+          AND pg_get_constraintdef(oid) ~* 'settled_micro\\s*<=\\s*reserved_micro'
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE credit_llm_reservations DROP CONSTRAINT %I',
+            legacy_constraint
+        );
+    END LOOP;
+END
+$$;
 ALTER TABLE credit_llm_reservations
 DROP CONSTRAINT IF EXISTS credit_llm_reservations_settled_micro_check;
 ALTER TABLE credit_llm_reservations

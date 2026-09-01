@@ -61,6 +61,11 @@ def test_postgres_schema_declares_the_welcome_promotion_ledger():
 def test_postgres_schema_allows_settlement_overage_and_migrates_legacy_check():
     assert "settled_micro <= reserved_micro" not in pg_module.CREDITS_POSTGRES_DDL
     assert (
+        "pg_get_constraintdef(oid)"
+        in pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    )
+    assert "legacy_constraint" in pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    assert (
         "DROP CONSTRAINT IF EXISTS credit_llm_reservations_settled_micro_check"
         in pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
     )
@@ -475,6 +480,70 @@ def test_postgres_llm_overage_uses_unreserved_balance(pg_credits_store):
     assert settled["outstanding_micro"] == 150_000
     assert settled["purchased_debited_micro"] == 1_100_000
     assert store.get_account_billing_state(1)["account_status"] == "restricted"
+
+
+@pg_only
+def test_postgres_migration_drops_legacy_unnamed_settlement_ceiling(pg_credits_store):
+    store = pg_credits_store
+    with psycopg.connect(store.database_url) as conn:
+        conn.execute(
+            "ALTER TABLE credit_llm_reservations "
+            "ADD CHECK (settled_micro <= reserved_micro)"
+        )
+
+    pg_module.PostgresCreditsStore(store.database_url)
+
+    with psycopg.connect(store.database_url, row_factory=dict_row) as conn:
+        constraints = conn.execute(
+            """
+            SELECT pg_get_constraintdef(oid) AS definition
+            FROM pg_constraint
+            WHERE conrelid = 'credit_llm_reservations'::regclass
+              AND contype = 'c'
+            """
+        ).fetchall()
+
+    assert not any(
+        "settled_micro <= reserved_micro" in str(row["definition"])
+        for row in constraints
+    )
+
+    with psycopg.connect(store.database_url) as conn:
+        conn.execute(
+            """
+            INSERT INTO credit_llm_reservations (
+                reservation_id, user_id, run_id, call_index, reserved_micro,
+                reserved_grant_micro, reserved_purchased_micro, settled_micro,
+                actual_micro, outstanding_micro, outstanding_recovered_micro,
+                status, operation_key, request_digest, created_at, updated_at
+            ) VALUES (
+                'pg-migrated-overage-reservation', 1, 'pg-migrated-overage-run', 0,
+                1000000, 1000000, 0, 0, 0, 0, 0, 'open',
+                'pg-migrated-overage-operation', repeat('m', 64),
+                '2026-09-01T00:00:00+00:00', '2026-09-01T00:00:00+00:00'
+            )
+            """
+        )
+        conn.execute(
+            """
+            UPDATE credit_llm_reservations
+            SET settled_micro = 1100000,
+                actual_micro = 1100000,
+                status = 'settled'
+            WHERE reservation_id = 'pg-migrated-overage-reservation'
+            """
+        )
+        settled = conn.execute(
+            """
+            SELECT settled_micro, actual_micro, outstanding_micro
+            FROM credit_llm_reservations
+            WHERE reservation_id = 'pg-migrated-overage-reservation'
+            """
+        ).fetchone()
+
+    assert int(settled[0]) == 1_100_000
+    assert int(settled[1]) == 1_100_000
+    assert int(settled[2]) == 0
 
 
 @pg_only
