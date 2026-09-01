@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS analytics_events (
     error_category TEXT CHECK (
         error_category IS NULL OR error_category IN (
             'credential_invalid', 'credential_missing', 'provider_timeout',
-            'provider_unavailable', 'credits_unavailable',
+            'provider_unavailable', 'provider_quota_exhausted',
+            'credits_unavailable',
             'model_not_allowed', 'internal_error'
         )
     ),
@@ -235,6 +236,46 @@ class AnalyticsStore:
     def _init_schema(self) -> None:
         with self._get_connection() as conn:
             conn.executescript(ANALYTICS_SQLITE_DDL)
+            self._migrate_error_category_constraint(conn)
+
+    @staticmethod
+    def _migrate_error_category_constraint(conn: sqlite3.Connection) -> None:
+        """Rebuild the events table when upgrading its closed category check."""
+
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'analytics_events'"
+        ).fetchone()
+        table_sql = str(row[0] or "").lower() if row else ""
+        if "provider_quota_exhausted" in table_sql:
+            return
+
+        # Index names are schema-global, so remove the old table's indexes
+        # before creating the replacement table and its indexes.
+        for index_name in (
+            "idx_analytics_events_user_time",
+            "idx_analytics_events_name_time",
+            "idx_analytics_events_session_time",
+            "idx_analytics_events_outcome_time",
+            "idx_analytics_events_error_time",
+        ):
+            conn.execute(f"DROP INDEX IF EXISTS {index_name}")
+        conn.execute(
+            "ALTER TABLE analytics_events "
+            "RENAME TO analytics_events_migration_legacy"
+        )
+        conn.executescript(ANALYTICS_SQLITE_DDL)
+        columns = (
+            "sequence, "
+            + ", ".join(_EVENT_COLUMNS)
+            + ", country_code, device_category, browser_family, "
+            "network_hash, properties_json"
+        )
+        conn.execute(
+            f"INSERT INTO analytics_events ({columns}) "
+            f"SELECT {columns} FROM analytics_events_migration_legacy"
+        )
+        conn.execute("DROP TABLE analytics_events_migration_legacy")
 
     @staticmethod
     def _existing_rows_for_event(

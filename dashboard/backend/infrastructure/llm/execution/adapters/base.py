@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import os
 from typing import Any, Callable, Protocol
 from urllib.parse import urlsplit
@@ -41,6 +42,26 @@ FINISH_REASON_MAX_TOKENS = "max_tokens"
 # provider may put anything in this field, and a long value must not turn a
 # successful call into ``response_invalid`` when the result model rejects it.
 _FINISH_REASON_MAX_LENGTH = 32
+
+_PROVIDER_ERROR_PAYLOAD_MAX_BYTES = 4096
+_QUOTA_ERROR_IDENTIFIERS = frozenset(
+    {
+        "in_flight_budget_exhausted",
+        "insufficient_quota",
+        "quota_exceeded",
+        "quota_exhausted",
+        "insufficient_balance",
+        "credit_balance_exhausted",
+    }
+)
+_QUOTA_ERROR_PHRASES = (
+    "insufficient balance",
+    "insufficient credits",
+    "quota exceeded",
+    "quota exhausted",
+    "exceeded your current quota",
+    "not enough credits",
+)
 
 
 def normalize_finish_reason(value: Any) -> str | None:
@@ -117,15 +138,74 @@ def usage_from_fields(input_tokens: Any, output_tokens: Any) -> LLMUsage | None:
     return LLMUsage(input_tokens=parsed_input, output_tokens=parsed_output)
 
 
+def _provider_status_codes(exc: Exception) -> tuple[int, ...]:
+    """Read provider statuses without trusting arbitrary exception text."""
+
+    statuses: list[int] = []
+    for value in (
+        getattr(exc, "status_code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+    ):
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int):
+            statuses.append(value)
+    return tuple(statuses)
+
+
+def _bounded_error_payload(exc: Exception) -> dict[str, Any]:
+    """Parse only a small structured provider error body, if one is present."""
+
+    response = getattr(exc, "response", None)
+    content = getattr(response, "content", b"")
+    if isinstance(content, str):
+        content = content.encode("utf-8", errors="ignore")
+    elif isinstance(content, bytearray):
+        content = bytes(content)
+    if not isinstance(content, bytes) or len(content) > _PROVIDER_ERROR_PAYLOAD_MAX_BYTES:
+        return {}
+    try:
+        parsed = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _structured_quota_signal(payload: dict[str, Any]) -> bool:
+    """Match allowlisted code/type/message fields only."""
+
+    identifiers: list[Any] = [payload.get("code"), payload.get("type")]
+    messages: list[Any] = [payload.get("message")]
+    error = payload.get("error")
+    if isinstance(error, dict):
+        identifiers.extend((error.get("code"), error.get("type")))
+        messages.append(error.get("message"))
+
+    for value in identifiers:
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip().lower()
+        if normalized in _QUOTA_ERROR_IDENTIFIERS:
+            return True
+    for value in messages:
+        if isinstance(value, str) and any(
+            phrase in value.strip().lower() for phrase in _QUOTA_ERROR_PHRASES
+        ):
+            return True
+    return False
+
+
 def map_provider_error(exc: Exception) -> ProviderExecutionError:
     if isinstance(exc, (TimeoutError, httpx.TimeoutException)) or "timeout" in type(exc).__name__.lower():
         return ProviderExecutionError(ExecutionErrorCategory.PROVIDER_TIMEOUT)
-    status_code = getattr(exc, "status_code", None)
-    if status_code in {401, 403}:
+    status_codes = _provider_status_codes(exc)
+    if any(status in {401, 403} for status in status_codes):
         return ProviderExecutionError(ExecutionErrorCategory.CREDENTIAL_INVALID)
-    response = getattr(exc, "response", None)
-    if getattr(response, "status_code", None) in {401, 403}:
-        return ProviderExecutionError(ExecutionErrorCategory.CREDENTIAL_INVALID)
+    if any(status == 402 for status in status_codes):
+        return ProviderExecutionError(ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED)
+    if not status_codes or any(400 <= status < 500 for status in status_codes):
+        if _structured_quota_signal(_bounded_error_payload(exc)):
+            return ProviderExecutionError(ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED)
     if isinstance(exc, (UnsafeProviderAddress, ProviderAddressResolutionError)):
         return ProviderExecutionError(ExecutionErrorCategory.PROVIDER_UNAVAILABLE)
     return ProviderExecutionError(ExecutionErrorCategory.PROVIDER_UNAVAILABLE)

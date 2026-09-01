@@ -16,6 +16,10 @@ from dashboard.backend.domain.analytics.models import (
     FrontendAnalyticsEvent,
     sanitize_server_properties,
 )
+from dashboard.backend.infrastructure.llm.execution.errors import (
+    ExecutionErrorCategory,
+    LLMExecutionError,
+)
 
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
@@ -181,3 +185,23 @@ def test_stored_event_accepts_safe_server_usage_metadata():
     )
     assert record.event_group == "resource"
     assert record.properties["cost_micro_usd"] == 123
+
+
+def test_quota_exhausted_error_message_is_fixed():
+    error = LLMExecutionError(ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED)
+    assert str(error) == "The selected model provider has insufficient balance or quota."
+
+
+def test_safe_error_accepts_provider_quota_exhausted():
+    record = AnalyticsEventRecord.model_validate(
+        _record_payload(
+            event_name="safe_error_recorded",
+            event_group="resource",
+            event_source="server",
+            session_id=None,
+            page_view=None,
+            source_event_id="safe-error:quota-test",
+            error_category="provider_quota_exhausted",
+        )
+    )
+    assert record.error_category == "provider_quota_exhausted"

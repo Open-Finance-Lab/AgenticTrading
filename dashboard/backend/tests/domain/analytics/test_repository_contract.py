@@ -14,7 +14,10 @@ from dashboard.backend.domain.analytics.query_service import (
     AnalyticsQueryService,
     AnalyticsUserFilters,
 )
-from dashboard.backend.domain.analytics.repository import AnalyticsStore
+from dashboard.backend.domain.analytics.repository import (
+    ANALYTICS_SQLITE_DDL,
+    AnalyticsStore,
+)
 from dashboard.backend.domain.analytics.repository_common import (
     AnalyticsIdempotencyConflictError,
     AnalyticsStoreError,
@@ -117,6 +120,20 @@ def assert_source_event_idempotency_contract(store, user_id):
     changed = replay.model_copy(update={"outcome": "failed"})
     with pytest.raises(AnalyticsIdempotencyConflictError):
         store.append_event(changed)
+
+
+def assert_error_category_contract(store, user_id):
+    event = event_record(
+        user_id,
+        event_name="safe_error_recorded",
+        event_group="resource",
+        event_source="server",
+        source_event_id="safe-error:quota-contract",
+        session_id=None,
+        page_view=None,
+        error_category="provider_quota_exhausted",
+    )
+    assert store.append_event(event).event.error_category == "provider_quota_exhausted"
 
 
 def assert_cursor_contract(store, user_id):
@@ -340,6 +357,41 @@ def test_sqlite_schema_contains_all_foundation_tables(sqlite_contract):
         "analytics_subject_settings",
         "admin_analytics_access_log",
     } <= names
+
+
+def test_sqlite_accepts_provider_quota_exhausted_category(sqlite_contract):
+    store, _admin_id, user_id = sqlite_contract
+    assert_error_category_contract(store, user_id)
+
+
+def test_sqlite_migrates_legacy_error_category_constraint(tmp_path):
+    db_path = tmp_path / "analytics-legacy.db"
+    users = UserStore(db_path=db_path)
+    user = users.create_user(
+        "legacy-analytics-user@example.test",
+        "Legacy Analytics User",
+        "SecurePass1!",
+    )
+    legacy_ddl = ANALYTICS_SQLITE_DDL.replace(
+        "'provider_unavailable', 'provider_quota_exhausted',\n            'credits_unavailable',",
+        "'provider_unavailable', 'credits_unavailable',",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(legacy_ddl)
+
+    store = AnalyticsStore(db_path=db_path)
+    event = event_record(
+        int(user["id"]),
+        event_id="10000000-0000-4000-8000-000000000005",
+        event_name="safe_error_recorded",
+        event_group="resource",
+        event_source="server",
+        source_event_id="safe-error:quota-migration",
+        session_id=None,
+        page_view=None,
+        error_category="provider_quota_exhausted",
+    )
+    assert store.append_event(event).created is True
 
 
 def test_sqlite_runs_shared_event_contracts(sqlite_contract):

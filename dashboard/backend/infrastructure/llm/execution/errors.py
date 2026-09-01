@@ -13,6 +13,7 @@ class ExecutionErrorCategory(StrEnum):
     RESPONSE_INVALID = "response_invalid"
     USAGE_UNAVAILABLE = "usage_unavailable"
     BILLING_FAILED = "billing_failed"
+    PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
     ACCOUNT_RESTRICTED = "account_restricted"
     WORKER_FAILED = "worker_failed"
 
@@ -25,6 +26,9 @@ _SAFE_MESSAGES = {
     ExecutionErrorCategory.RESPONSE_INVALID: "The model returned an invalid response.",
     ExecutionErrorCategory.USAGE_UNAVAILABLE: "The model did not return billable usage.",
     ExecutionErrorCategory.BILLING_FAILED: "Model usage billing could not be completed.",
+    ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED: (
+        "The selected model provider has insufficient balance or quota."
+    ),
     ExecutionErrorCategory.ACCOUNT_RESTRICTED: (
         "Your Credits account is paused. Add Credits to settle model usage "
         "or contact an administrator."
