@@ -91,6 +91,7 @@ def temp_postgres_store():
     store = users_postgres_module.PostgresUserStore(TEST_POSTGRES_URL)
     with store._get_connection() as conn:
         with conn.cursor() as cur:
+            cur.execute("DELETE FROM password_reset_requests")
             cur.execute("DELETE FROM email_change_requests")
             cur.execute("DELETE FROM auth_sessions")
             cur.execute("DELETE FROM users")
@@ -736,3 +737,63 @@ def test_store_twins_expose_the_same_public_surface():
     sqlite_methods = public_methods(users_module.UserStore)
     postgres_methods = public_methods(users_postgres_module.PostgresUserStore)
     assert sqlite_methods == postgres_methods
+
+
+@pg_only
+def test_password_reset_request_lifecycle_postgres(temp_postgres_store):
+    """Mirrors the SQLite twin's password-reset store cases (#187): supersede
+    leaves one active row, the used CAS has a single winner, and the
+    status-blind reads still see the whole log."""
+    import dashboard.backend.users as users_module
+    from dashboard.backend.verification_codes import hash_code
+
+    store = temp_postgres_store
+    user = store.create_user("reset-pg@example.com", "Reset PG", "securepass1")
+
+    row = store.create_password_reset_request(user["id"], hash_code("A"))
+    assert row["attempts"] == 0
+    assert store.get_active_password_reset(user["id"])["id"] == row["id"]
+    assert store.record_password_reset_attempt(row["id"]) == 1
+
+    newer = store.create_password_reset_request(user["id"], hash_code("B"))
+    active = store.get_active_password_reset(user["id"])
+    assert active["id"] == newer["id"]
+    assert active["code_hash"] == hash_code("B")
+
+    assert store.mark_password_reset_used(newer["id"]) is True
+    assert store.mark_password_reset_used(newer["id"]) is False
+    assert store.get_active_password_reset(user["id"]) is None
+
+    assert store.last_password_reset_request_at(user["id"]) is not None
+    day = users_module.format_stored_timestamp(
+        users_module._utcnow() - timedelta(days=1)
+    )
+    assert len(store.password_reset_request_times_since(user["id"], day)) == 2
+
+    store.cancel_password_reset(user["id"])
+    with store._get_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT used_at, cancelled_at FROM password_reset_requests WHERE id = %s",
+                (newer["id"],),
+            )
+            stored = cur.fetchone()
+    # cancel is scoped to still-active rows: the used row keeps its used_at.
+    assert stored["used_at"] is not None
+    assert stored["cancelled_at"] is None
+
+
+@pg_only
+def test_password_reset_attempt_cap_cancels_postgres(temp_postgres_store):
+    from dashboard.backend.users import PASSWORD_RESET_MAX_ATTEMPTS
+    from dashboard.backend.verification_codes import hash_code
+
+    store = temp_postgres_store
+    user = store.create_user("cap-pg@example.com", "Cap PG", "securepass1")
+    row = store.create_password_reset_request(user["id"], hash_code("A"))
+
+    for expected in range(1, PASSWORD_RESET_MAX_ATTEMPTS + 1):
+        assert store.record_password_reset_attempt(row["id"]) == expected
+    assert store.get_active_password_reset(user["id"]) is None
+    # The conditional UPDATE refuses to push past the cap.
+    assert store.record_password_reset_attempt(row["id"]) == PASSWORD_RESET_MAX_ATTEMPTS

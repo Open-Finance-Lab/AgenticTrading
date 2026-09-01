@@ -33,8 +33,17 @@ _SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 # ordinary return visit carries a dead session cookie (and possibly no CSRF
 # cookie). Gating these on double-submit would 403 the only endpoints that can
 # mint fresh cookies — an unrecoverable lockout. The Origin allowlist still
-# applies, and both endpoints authenticate by credentials, not by the session.
-_CSRF_EXEMPT_PATHS = frozenset({"/api/auth/login", "/api/auth/signup"})
+# applies, and all four endpoints authenticate by credentials, not by the
+# session. The two password-reset routes are the same class: unauthenticated
+# browser POSTs a user with a dead session cookie must still be able to make.
+_CSRF_EXEMPT_PATHS = frozenset(
+    {
+        "/api/auth/login",
+        "/api/auth/signup",
+        "/api/auth/forgot-password",
+        "/api/auth/reset-password",
+    }
+)
 
 
 def csrf_cookie_name() -> str:

@@ -2334,3 +2334,508 @@ def test_set_session_cookie_rejects_malformed_tokens():
     response = Response()
     set_session_cookie(response, "x" * 43)  # well-formed shape still works
     assert "set-cookie" in response.headers
+
+
+# --- Password reset (#187) ---------------------------------------------------
+
+
+def _reset_code_from(email_body):
+    """Pull the 6-character code out of a captured reset message body."""
+    import re
+
+    from dashboard.backend.verification_codes import CODE_ALPHABET
+
+    match = re.search(rf"reset code: ([{CODE_ALPHABET}]{{6}})", email_body)
+    assert match, f"no code found in: {email_body!r}"
+    return match.group(1)
+
+
+@pytest.fixture
+def reset_outbox(sent_emails, monkeypatch):
+    """sent_emails plus the Brevo config forgot-password checks up front.
+
+    The route 503s on email_configured() before any account work, and that
+    reads the env at call time -- the send itself stays the patched fake.
+    """
+    monkeypatch.setenv("BREVO_API_KEY", "test-key")
+    monkeypatch.setenv("ACCOUNT_EMAIL_FROM", "noreply@example.com")
+    return sent_emails
+
+
+def _widen_forgot_limiters(monkeypatch):
+    """Push the in-process forgot limiters out of the way so the DB-backed
+    cooldown / daily cap is what a test exercises."""
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    for name in ("_FORGOT_IP_LIMITER", "_FORGOT_EMAIL_LIMITER", "_FORGOT_GLOBAL_LIMITER"):
+        monkeypatch.setattr(
+            auth_api, name, FixedWindowRateLimiter(max_events=1000, window_seconds=60)
+        )
+
+
+def _request_reset(client, email):
+    response = client.post("/api/auth/forgot-password", json={"email": email})
+    assert response.status_code == 200, response.text
+    return response
+
+
+def _reset_password(client, email, code, new_password):
+    return client.post(
+        "/api/auth/reset-password",
+        json={"email": email, "code": code, "new_password": new_password},
+    )
+
+
+def _reset_row_count(store) -> int:
+    conn = store._get_connection()
+    row = conn.execute("SELECT COUNT(*) AS n FROM password_reset_requests").fetchone()
+    conn.close()
+    return int(row["n"])
+
+
+def _backdate_password_reset_rows(store, user_id, **columns):
+    assignments = ", ".join(f"{name} = ?" for name in columns)
+    conn = store._get_connection()
+    conn.execute(
+        f"UPDATE password_reset_requests SET {assignments} WHERE user_id = ?",  # noqa: S608
+        (*columns.values(), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_forgot_password_mails_a_code_to_a_known_account(client, reset_outbox):
+    _signup_and_token(client, email="resetme@example.com")
+
+    response = _request_reset(client, "resetme@example.com")
+
+    assert response.json() == {"status": "ok"}
+    assert len(reset_outbox) == 1
+    assert reset_outbox[0]["to"] == "resetme@example.com"
+    assert "reset code:" in reset_outbox[0]["body"]
+    assert "spam" not in reset_outbox[0]["subject"].lower()
+
+
+def test_forgot_password_is_enumeration_blind(client, reset_outbox, temp_user_store):
+    _signup_and_token(client, email="known-reset@example.com")
+
+    known = client.post(
+        "/api/auth/forgot-password", json={"email": "known-reset@example.com"}
+    )
+    unknown = client.post(
+        "/api/auth/forgot-password", json={"email": "nobody-reset@example.com"}
+    )
+
+    # Byte-identical: neither status nor body says whether the account exists.
+    assert known.status_code == unknown.status_code == 200
+    assert known.content == unknown.content
+    # The unknown address got no mail and wrote no row.
+    assert len(reset_outbox) == 1
+    assert _reset_row_count(temp_user_store) == 1
+
+
+def test_forgot_password_503s_when_brevo_is_unconfigured(client, monkeypatch, capsys):
+    monkeypatch.delenv("BREVO_API_KEY", raising=False)
+    monkeypatch.delenv("ACCOUNT_EMAIL_FROM", raising=False)
+    _signup_and_token(client, email="unconfigured@example.com")
+
+    known = client.post(
+        "/api/auth/forgot-password", json={"email": "unconfigured@example.com"}
+    )
+    unknown = client.post(
+        "/api/auth/forgot-password", json={"email": "ghost-unconfigured@example.com"}
+    )
+
+    # Fail-visible, and identically for known and unknown addresses: the 503
+    # is config-shaped information, not account-shaped.
+    assert known.status_code == unknown.status_code == 503
+    assert known.content == unknown.content
+    assert "BREVO_API_KEY" in capsys.readouterr().out
+
+
+def test_forgot_password_send_failure_persists_nothing(
+    client, reset_outbox, temp_user_store, capsys
+):
+    _signup_and_token(client, email="flaky-reset@example.com")
+    reset_outbox.fail_sends()
+
+    _request_reset(client, "flaky-reset@example.com")
+
+    # Send-before-persist: the failed send burned no cooldown.
+    assert _reset_row_count(temp_user_store) == 0
+    assert "send failed" in capsys.readouterr().out
+
+    reset_outbox.resume_sends()
+    _request_reset(client, "flaky-reset@example.com")
+    assert _reset_row_count(temp_user_store) == 1
+
+
+def test_forgot_password_cooldown_blocks_a_second_send(
+    client, reset_outbox, temp_user_store, capsys, monkeypatch
+):
+    _widen_forgot_limiters(monkeypatch)
+    _signup_and_token(client, email="cool-reset@example.com")
+
+    _request_reset(client, "cool-reset@example.com")
+    _request_reset(client, "cool-reset@example.com")  # still 200: silent skip
+
+    assert len(reset_outbox) == 1
+    assert "reason=cooldown" in capsys.readouterr().out
+
+    user = temp_user_store.get_user_by_email("cool-reset@example.com")
+    _backdate_password_reset_rows(
+        temp_user_store, user["id"], created_at=_stored_time(minutes=6)
+    )
+    _request_reset(client, "cool-reset@example.com")
+    assert len(reset_outbox) == 2
+
+
+def test_forgot_password_cooldown_is_status_blind(
+    client, reset_outbox, temp_user_store, capsys, monkeypatch
+):
+    # A cancelled row still gates the cooldown, so cancelling can never be
+    # used to mint codes faster.
+    _widen_forgot_limiters(monkeypatch)
+    _signup_and_token(client, email="cancelled-reset@example.com")
+    _request_reset(client, "cancelled-reset@example.com")
+    user = temp_user_store.get_user_by_email("cancelled-reset@example.com")
+    temp_user_store.cancel_password_reset(user["id"])
+
+    _request_reset(client, "cancelled-reset@example.com")
+
+    assert len(reset_outbox) == 1
+    assert "reason=cooldown" in capsys.readouterr().out
+
+
+def test_forgot_password_requests_are_capped_per_day(
+    client, reset_outbox, temp_user_store, capsys, monkeypatch
+):
+    from dashboard.backend.users import PASSWORD_RESET_MAX_REQUESTS_PER_DAY
+
+    _widen_forgot_limiters(monkeypatch)
+    _signup_and_token(client, email="capped-reset@example.com")
+    user = temp_user_store.get_user_by_email("capped-reset@example.com")
+
+    for _ in range(PASSWORD_RESET_MAX_REQUESTS_PER_DAY):
+        _request_reset(client, "capped-reset@example.com")
+        # Step past the 5-minute cooldown; every row stays inside the 24h window.
+        _backdate_password_reset_rows(
+            temp_user_store, user["id"], created_at=_stored_time(minutes=10)
+        )
+    assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_DAY
+
+    _request_reset(client, "capped-reset@example.com")
+
+    assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_DAY
+    assert "reason=daily_cap" in capsys.readouterr().out
+
+
+def test_forgot_password_global_send_budget(client, reset_outbox, monkeypatch, capsys):
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    monkeypatch.setattr(
+        auth_api,
+        "_FORGOT_GLOBAL_LIMITER",
+        FixedWindowRateLimiter(max_events=1, window_seconds=3600),
+    )
+    _signup_and_token(client, email="global-a@example.com")
+    _signup_and_token(client, email="global-b@example.com")
+
+    _request_reset(client, "global-a@example.com")
+    _request_reset(client, "global-b@example.com")  # over budget: 200, no mail
+
+    assert len(reset_outbox) == 1
+    assert "reason=global_cap" in capsys.readouterr().out
+
+
+def test_password_reset_happy_path(client, reset_outbox):
+    _signup_and_token(client, email="happy-reset@example.com")
+    _request_reset(client, "happy-reset@example.com")
+    code = _reset_code_from(reset_outbox[0]["body"])
+
+    done = _reset_password(client, "happy-reset@example.com", code, "fresh-sturdy-pw-3")
+
+    assert done.status_code == 200, done.text
+    assert done.json() == {"status": "ok"}
+    old = client.post(
+        "/api/auth/login",
+        json={"email": "happy-reset@example.com", "password": "orig-sturdy-pw-1"},
+    )
+    assert old.status_code == 401
+    new = client.post(
+        "/api/auth/login",
+        json={"email": "happy-reset@example.com", "password": "fresh-sturdy-pw-3"},
+    )
+    assert new.status_code == 200
+
+
+def test_reset_password_failures_are_uniform(client, reset_outbox):
+    _signup_and_token(client, email="uniform-reset@example.com")
+
+    # A real account with no active request vs an unknown account: one 400.
+    known = _reset_password(
+        client, "uniform-reset@example.com", "ABC234", "fresh-sturdy-pw-3"
+    )
+    unknown = _reset_password(
+        client, "ghost-uniform@example.com", "ABC234", "fresh-sturdy-pw-3"
+    )
+
+    assert known.status_code == unknown.status_code == 400
+    assert known.content == unknown.content
+    assert known.json()["detail"] == "Invalid or expired code."
+
+
+def test_reset_password_gives_up_after_five_wrong_codes(client, reset_outbox):
+    from dashboard.backend.users import PASSWORD_RESET_MAX_ATTEMPTS
+
+    _signup_and_token(client, email="attempts-reset@example.com")
+    _request_reset(client, "attempts-reset@example.com")
+    real = _reset_code_from(reset_outbox[0]["body"])
+    wrong = "ZZZZZZ" if real != "ZZZZZZ" else "YYYYYY"
+
+    for _ in range(PASSWORD_RESET_MAX_ATTEMPTS):
+        attempt = _reset_password(
+            client, "attempts-reset@example.com", wrong, "fresh-sturdy-pw-3"
+        )
+        assert attempt.status_code == 400
+
+    # The request cancelled itself at the cap: even the correct code is dead.
+    after = _reset_password(
+        client, "attempts-reset@example.com", real, "fresh-sturdy-pw-3"
+    )
+    assert after.status_code == 400
+    assert after.json()["detail"] == "Invalid or expired code."
+
+
+def test_reset_password_rejects_an_expired_code(client, reset_outbox, temp_user_store):
+    _signup_and_token(client, email="expired-reset@example.com")
+    _request_reset(client, "expired-reset@example.com")
+    code = _reset_code_from(reset_outbox[0]["body"])
+    user = temp_user_store.get_user_by_email("expired-reset@example.com")
+    _backdate_password_reset_rows(
+        temp_user_store, user["id"], expires_at=_stored_time(minutes=1)
+    )
+
+    response = _reset_password(
+        client, "expired-reset@example.com", code, "fresh-sturdy-pw-3"
+    )
+
+    # The store folds expiry into "no active row"; same generic 400.
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid or expired code."
+
+
+def test_reset_password_code_is_single_use(client, reset_outbox):
+    _signup_and_token(client, email="once-reset@example.com")
+    _request_reset(client, "once-reset@example.com")
+    code = _reset_code_from(reset_outbox[0]["body"])
+
+    first = _reset_password(client, "once-reset@example.com", code, "fresh-sturdy-pw-3")
+    second = _reset_password(client, "once-reset@example.com", code, "other-sturdy-pw-4")
+
+    assert first.status_code == 200
+    assert second.status_code == 400
+
+
+def test_reset_password_code_is_case_and_whitespace_insensitive(client, reset_outbox):
+    _signup_and_token(client, email="lower-reset@example.com")
+    _request_reset(client, "lower-reset@example.com")
+    code = _reset_code_from(reset_outbox[0]["body"])
+
+    response = _reset_password(
+        client, "lower-reset@example.com", f" {code.lower()} ", "fresh-sturdy-pw-3"
+    )
+
+    assert response.status_code == 200
+
+
+def test_reset_password_weak_new_password_keeps_the_code_alive(client, reset_outbox):
+    _signup_and_token(client, email="weakpw-reset@example.com")
+    _request_reset(client, "weakpw-reset@example.com")
+    code = _reset_code_from(reset_outbox[0]["body"])
+
+    weak = _reset_password(client, "weakpw-reset@example.com", code, "password1")
+
+    assert weak.status_code == 400
+    assert "too common" in weak.json()["detail"]
+
+    # The request row is untouched: the same still-valid code works with a
+    # better password.
+    retry = _reset_password(
+        client, "weakpw-reset@example.com", code, "fresh-sturdy-pw-3"
+    )
+    assert retry.status_code == 200
+
+
+def test_reset_revokes_all_sessions_and_cancels_email_change(client, reset_outbox):
+    token = _signup_and_token(client, email="hijacked@example.com")
+    headers = {"Authorization": f"Bearer {token}"}
+    _start_email_change(client, token)  # mail #0
+    _request_reset(client, "hijacked@example.com")  # mail #1
+    code = _reset_code_from(reset_outbox[1]["body"])
+
+    done = _reset_password(client, "hijacked@example.com", code, "fresh-sturdy-pw-3")
+    assert done.status_code == 200
+
+    # ALL sessions die -- the caller proved an inbox, not a login.
+    assert client.get("/api/auth/me", headers=headers).status_code == 401
+
+    # ...and the pending email change died with them (D7).
+    login = client.post(
+        "/api/auth/login",
+        json={"email": "hijacked@example.com", "password": "fresh-sturdy-pw-3"},
+    )
+    assert login.status_code == 200
+    fresh = _session_token(client)
+    status = client.get(
+        "/api/auth/email-change", headers={"Authorization": f"Bearer {fresh}"}
+    )
+    assert status.json()["pending"] is False
+
+
+def test_reset_revocation_failure_still_succeeds(
+    client, reset_outbox, monkeypatch, capsys
+):
+    _signup_and_token(client, email="besteffort-reset@example.com")
+    _request_reset(client, "besteffort-reset@example.com")
+    code = _reset_code_from(reset_outbox[0]["body"])
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("session store unavailable")
+
+    monkeypatch.setattr(UserStore, "delete_other_sessions", _boom)
+
+    done = _reset_password(
+        client, "besteffort-reset@example.com", code, "fresh-sturdy-pw-3"
+    )
+
+    # The durable write already landed; revocation failure is a WARNING, not a 500.
+    assert done.status_code == 200
+    new_login = client.post(
+        "/api/auth/login",
+        json={"email": "besteffort-reset@example.com", "password": "fresh-sturdy-pw-3"},
+    )
+    assert new_login.status_code == 200
+    assert "revocation failed" in capsys.readouterr().out
+
+
+def test_change_password_cancels_a_pending_reset_end_to_end(client, reset_outbox):
+    token = _signup_and_token(client, email="crossflow-reset@example.com")
+    _request_reset(client, "crossflow-reset@example.com")
+    code = _reset_code_from(reset_outbox[0]["body"])
+
+    changed = client.post(
+        "/api/auth/change-password",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"current_password": "orig-sturdy-pw-1", "new_password": "new-sturdy-pw-2"},
+    )
+    assert changed.status_code == 200
+
+    # Not merely that a cancel call fired: the code actually fails redemption.
+    stale = _reset_password(
+        client, "crossflow-reset@example.com", code, "fresh-sturdy-pw-3"
+    )
+    assert stale.status_code == 400
+
+
+def test_email_change_commit_cancels_a_pending_reset_end_to_end(client, reset_outbox):
+    token = _signup_and_token(client, email="movedaway@example.com")
+    _request_reset(client, "movedaway@example.com")
+    reset_code = _reset_code_from(reset_outbox[0]["body"])
+
+    _complete_email_change(client, token, reset_outbox, "newhome@example.com")
+
+    # The code was mailed to the OLD address; it must not survive the change,
+    # under either the old or the new login handle.
+    stale_old = _reset_password(
+        client, "movedaway@example.com", reset_code, "fresh-sturdy-pw-3"
+    )
+    stale_new = _reset_password(
+        client, "newhome@example.com", reset_code, "fresh-sturdy-pw-3"
+    )
+    assert stale_old.status_code == 400
+    assert stale_new.status_code == 400
+
+
+def test_forgot_password_ip_rate_limit_returns_429(client, monkeypatch):
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    monkeypatch.setenv("BREVO_API_KEY", "test-key")
+    monkeypatch.setenv("ACCOUNT_EMAIL_FROM", "noreply@example.com")
+    monkeypatch.setattr(
+        auth_api,
+        "_FORGOT_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=2, window_seconds=60),
+    )
+
+    for _ in range(2):
+        ok = client.post(
+            "/api/auth/forgot-password", json={"email": "rl-forgot@example.com"}
+        )
+        assert ok.status_code == 200
+    blocked = client.post(
+        "/api/auth/forgot-password", json={"email": "rl-forgot@example.com"}
+    )
+
+    assert blocked.status_code == 429
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 60
+
+
+def test_reset_password_ip_rate_limit_returns_429(client, monkeypatch):
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    monkeypatch.setattr(
+        auth_api,
+        "_RESET_IP_LIMITER",
+        FixedWindowRateLimiter(max_events=1, window_seconds=60),
+    )
+
+    first = _reset_password(client, "rl-reset@example.com", "ZZZZZZ", "fresh-sturdy-pw-3")
+    assert first.status_code == 400  # failure charged the budget
+    blocked = _reset_password(client, "rl-reset@example.com", "ZZZZZZ", "fresh-sturdy-pw-3")
+
+    assert blocked.status_code == 429
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 60
+
+
+def test_reset_password_per_email_limit_holds_across_client_keys(client, monkeypatch):
+    # Rotating X-Browser-Id buys a fresh per-client budget, so the per-email
+    # failure budget is the control that actually bounds code guessing; a dead
+    # per-email budget cannot pass this.
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    monkeypatch.setattr(
+        auth_api,
+        "_RESET_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=2, window_seconds=60),
+    )
+    _signup_and_token(client, email="hammered@example.com")
+
+    for i in range(2):
+        response = client.post(
+            "/api/auth/reset-password",
+            json={
+                "email": "hammered@example.com",
+                "code": "ZZZZZZ",
+                "new_password": "fresh-sturdy-pw-3",
+            },
+            headers={"X-Browser-Id": f"attacker-{i}"},
+        )
+        assert response.status_code == 400
+    blocked = client.post(
+        "/api/auth/reset-password",
+        json={
+            "email": "hammered@example.com",
+            "code": "ZZZZZZ",
+            "new_password": "fresh-sturdy-pw-3",
+        },
+        headers={"X-Browser-Id": "attacker-fresh"},
+    )
+
+    assert blocked.status_code == 429
+    assert 1 <= int(blocked.headers["Retry-After"]) <= 60

@@ -264,3 +264,136 @@ def test_update_email_rejects_an_address_another_account_owns(store, user):
 def test_update_email_rejects_a_missing_user(store):
     with pytest.raises(ValueError, match="user_not_found"):
         store.update_email(999_999, "ghost@example.com")
+
+
+# --- password_reset_requests (#187) -----------------------------------------
+
+
+def _backdate_password_reset(store, request_id, **columns) -> None:
+    assignments = ", ".join(f"{name} = ?" for name in columns)
+    conn = store._get_connection()
+    conn.execute(
+        f"UPDATE password_reset_requests SET {assignments} WHERE id = ?",  # noqa: S608
+        (*columns.values(), request_id),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_create_password_reset_request_leaves_exactly_one_active_row(store, user):
+    store.create_password_reset_request(user["id"], hash_code("A"))
+    newer = store.create_password_reset_request(user["id"], hash_code("B"))
+
+    active = store.get_active_password_reset(user["id"])
+    assert active["id"] == newer["id"]
+    assert active["code_hash"] == hash_code("B")
+    assert active["attempts"] == 0
+
+    # The superseded row survives (the cooldown reads it) but is inactive.
+    conn = store._get_connection()
+    rows = conn.execute(
+        """
+        SELECT code_hash, cancelled_at FROM password_reset_requests
+        WHERE user_id = ? ORDER BY id ASC
+        """,
+        (user["id"],),
+    ).fetchall()
+    conn.close()
+    assert len(rows) == 2
+    assert rows[0]["cancelled_at"] is not None
+    assert rows[1]["cancelled_at"] is None
+
+
+def test_get_active_password_reset_folds_expiry_into_no_active_row(store, user):
+    row = store.create_password_reset_request(user["id"], hash_code("A"))
+    _backdate_password_reset(store, row["id"], expires_at=_ago(minutes=1))
+
+    assert store.get_active_password_reset(user["id"]) is None
+    # ...while the status-blind cooldown read still sees the row.
+    assert store.last_password_reset_request_at(user["id"]) == row["created_at"]
+
+
+def test_record_password_reset_attempt_cancels_at_the_cap(store, user):
+    from dashboard.backend.users import PASSWORD_RESET_MAX_ATTEMPTS
+
+    row = store.create_password_reset_request(user["id"], hash_code("A"))
+
+    for expected in range(1, PASSWORD_RESET_MAX_ATTEMPTS):
+        assert store.record_password_reset_attempt(row["id"]) == expected
+        assert store.get_active_password_reset(user["id"]) is not None
+
+    assert store.record_password_reset_attempt(row["id"]) == PASSWORD_RESET_MAX_ATTEMPTS
+    assert store.get_active_password_reset(user["id"]) is None
+
+    # Further attempts never push past the cap.
+    assert store.record_password_reset_attempt(row["id"]) == PASSWORD_RESET_MAX_ATTEMPTS
+    conn = store._get_connection()
+    attempts = conn.execute(
+        "SELECT attempts FROM password_reset_requests WHERE id = ?", (row["id"],)
+    ).fetchone()["attempts"]
+    conn.close()
+    assert attempts == PASSWORD_RESET_MAX_ATTEMPTS
+
+
+def test_record_password_reset_attempt_cap_holds_under_concurrency(store, user):
+    import threading
+
+    from dashboard.backend.users import PASSWORD_RESET_MAX_ATTEMPTS
+
+    row = store.create_password_reset_request(user["id"], hash_code("A"))
+
+    def spin():
+        for _ in range(3):
+            store.record_password_reset_attempt(row["id"])
+
+    threads = [threading.Thread(target=spin) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    conn = store._get_connection()
+    attempts = conn.execute(
+        "SELECT attempts FROM password_reset_requests WHERE id = ?", (row["id"],)
+    ).fetchone()["attempts"]
+    conn.close()
+    # 12 racing attempts; the SQL predicate is what bounds the count.
+    assert attempts == PASSWORD_RESET_MAX_ATTEMPTS
+
+
+def test_mark_password_reset_used_is_a_single_winner_cas(store, user):
+    row = store.create_password_reset_request(user["id"], hash_code("A"))
+
+    assert store.mark_password_reset_used(row["id"]) is True
+    assert store.mark_password_reset_used(row["id"]) is False
+
+    assert store.get_active_password_reset(user["id"]) is None
+    assert store.last_password_reset_request_at(user["id"]) is not None
+
+
+def test_cancel_password_reset_leaves_a_used_row_alone(store, user):
+    row = store.create_password_reset_request(user["id"], hash_code("A"))
+    store.mark_password_reset_used(row["id"])
+
+    store.cancel_password_reset(user["id"])
+
+    conn = store._get_connection()
+    stored = conn.execute(
+        "SELECT used_at, cancelled_at FROM password_reset_requests WHERE id = ?",
+        (row["id"],),
+    ).fetchone()
+    conn.close()
+    assert stored["used_at"] is not None
+    assert stored["cancelled_at"] is None
+
+
+def test_password_reset_request_times_since_is_status_blind(store, user):
+    old = store.create_password_reset_request(user["id"], hash_code("A"))
+    _backdate_password_reset(store, old["id"], created_at=_ago(days=2))
+    store.create_password_reset_request(user["id"], hash_code("B"))
+
+    # The first row was superseded (cancelled); both still count.
+    assert len(store.password_reset_request_times_since(user["id"], _ago(days=7))) == 2
+    within_a_day = store.password_reset_request_times_since(user["id"], _ago(hours=24))
+    assert len(within_a_day) == 1
+    assert within_a_day == sorted(within_a_day)
