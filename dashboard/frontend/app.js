@@ -505,8 +505,9 @@ const LEGACY_RUNTIME_MARKET = { ai_hedge_fund: 'us_stocks' };
 
 /** Category slug -> market display name. The single place these strings are
  * written: the Prompted Models shelf's market chips, the Community category
- * chips, the agent-card submeta and the Configure picker all read this map, so
- * renaming a market is one edit. Key order is chip order and mirrors the
+ * chips (labels only -- that row also filters to markets present in the
+ * catalog), the agent-card submeta and the Configure picker all read this map,
+ * so renaming a market is one edit. Key order is chip order and mirrors the
  * AgentCategory Literal's declaration order in
  * dashboard/backend/domain/agents/taxonomy.py.
  *
@@ -2282,18 +2283,33 @@ function setMarketplaceCategoryFilter(category) {
   renderMarketplaceGrid();
 }
 
-/** Chip row above the marketplace grid: 'All' plus one chip per market, built
- * from MARKET_LABELS rather than a second hardcoded list. Built from the label
- * map rather than AGENT_SHELVES because Community filters templates by
- * *market*, and Prompted Models holds both markets -- the shelf
- * list and the chip list are different things. */
+/** Chip keys/labels for the Community market row. Pure so the catalog-filter
+ * contract can run under node: 'All' plus one chip per MARKET_LABELS key that
+ * the loaded catalog actually contains. Shipping every enum key put a China
+ * A-Share chip on a 100% us_stocks catalog -- a permanent empty state. Adding
+ * an A-share template brings the chip back; do not hardcode it. Order still
+ * comes from MARKET_LABELS so the row does not reshuffle with catalog order. */
+function marketplaceMarketChips(templates) {
+  const present = new Set(
+    (templates || []).map((t) => String(t.category || '').toLowerCase()),
+  );
+  return [
+    { key: 'all', label: 'All' },
+    ...Object.entries(MARKET_LABELS)
+      .filter(([key]) => present.has(key))
+      .map(([key, label]) => ({ key, label })),
+  ];
+}
+
+/** Chip row above the marketplace grid. Labels come from MARKET_LABELS;
+ * membership comes from the loaded catalog (see marketplaceMarketChips).
+ * Built from the label map rather than AGENT_SHELVES because Community
+ * filters templates by *market*, and Prompted Models holds both markets --
+ * the shelf list and the chip list are different things. */
 function renderMarketplaceCategoryChips() {
   const container = document.getElementById('marketplaceCategoryChips');
   if (!container) return;
-  const chips = [
-    { key: 'all', label: 'All' },
-    ...Object.entries(MARKET_LABELS).map(([key, label]) => ({ key, label })),
-  ];
+  const chips = marketplaceMarketChips(marketplaceTemplates);
   // Build once, then only toggle state. This runs from renderMarketplaceGrid,
   // which is bound to the search box's `input` event -- rebuilding innerHTML
   // per keystroke would blow away the focused chip on every character typed.

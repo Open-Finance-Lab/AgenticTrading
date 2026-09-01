@@ -151,3 +151,11 @@ def test_catalog_covers_every_pickable_vendor():
     """The facet is decorative if most of its chips are empty."""
     vendors = {t["model_name"].split("/", 1)[0] for t in _CATALOG}
     assert {"anthropic", "openai", "google", "deepseek", "qwen"} <= vendors
+
+
+def test_catalog_has_no_china_a_share_templates():
+    """Community chips are catalog-derived. A cn_ashares row would re-ship the
+    China A-Share supermarket chip this change took off; add the row when
+    A-share templates come back, don't add a hardcoded chip.
+    """
+    assert {t.get("category") for t in _CATALOG} == {"us_stocks"}

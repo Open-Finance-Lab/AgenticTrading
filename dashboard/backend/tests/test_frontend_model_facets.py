@@ -192,6 +192,36 @@ console.log(JSON.stringify([visible('all'), visible('qwen')]));
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_marketplace_market_chips_only_emit_markets_present_in_the_catalog():
+    """China A-Share must not ship as a permanent empty-state chip. Adding a
+    cn_ashares template is what brings the chip back; the helper must not
+    hardcode either market name."""
+    script = f"""
+const MARKET_LABELS = {{ us_stocks: 'U.S.', cn_ashares: 'China A-Share' }};
+{fn_body("function marketplaceMarketChips")}
+const keys = (templates) => marketplaceMarketChips(templates).map((c) => c.key);
+const labels = (templates) => marketplaceMarketChips(templates).map((c) => c.label);
+console.log(JSON.stringify({{
+  usOnly: keys([{{category: 'us_stocks'}}, {{category: 'us_stocks'}}]),
+  mixed: keys([{{category: 'cn_ashares'}}, {{category: 'us_stocks'}}]),
+  empty: keys([]),
+  unknown: keys([{{category: 'crypto'}}]),
+  usLabels: labels([{{category: 'us_stocks'}}]),
+}}));
+"""
+    result = subprocess.run(
+        ["node", "-e", script], capture_output=True, text=True, timeout=30
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data["usOnly"] == ["all", "us_stocks"]
+    assert data["mixed"] == ["all", "us_stocks", "cn_ashares"]
+    assert data["empty"] == ["all"]
+    assert data["unknown"] == ["all"]
+    assert data["usLabels"] == ["All", "U.S."]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_shipped_filter_ands_market_and_vendor_not_or():
     """Vendor chips are gone; the market filter still applies to both shelves."""
     script = f"""
