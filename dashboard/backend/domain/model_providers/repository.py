@@ -137,7 +137,7 @@ class ModelProviderStore:
                     provider_id, display_name, adapter_type, approved_base_url,
                     capabilities_json, byok_enabled, platform_enabled, status,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 1, ?, 'enabled', ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'enabled', ?, ?)
                 ON CONFLICT(provider_id) DO NOTHING
                 """,
                 (
@@ -146,6 +146,7 @@ class ModelProviderStore:
                     item["adapter_type"],
                     item["approved_base_url"],
                     serialize_capabilities(item["capabilities"]),
+                    int(bool(item.get("byok_enabled", True))),
                     int(bool(item.get("platform_enabled", False))),
                     now,
                     now,

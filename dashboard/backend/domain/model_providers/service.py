@@ -83,6 +83,7 @@ class CredentialResolutionError(LLMExecutionError):
 
 _ENVIRONMENT_PLATFORM_KEY_NAMES = {
     "openrouter": "OPENROUTER_API_KEY",
+    "commonstack": "COMMONSTACK_API_KEY",
 }
 
 
@@ -208,6 +209,9 @@ class ModelProviderService:
                     ),
                 )
             )
+        # Preserve the repository's existing order while keeping OpenRouter as
+        # the preferred platform lane before the CommonStack fallback.
+        options.sort(key=lambda option: option.provider_id == "commonstack")
         return options
 
     def get_platform_credential(

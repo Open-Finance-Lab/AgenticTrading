@@ -75,11 +75,21 @@ SUPPORTED_ADAPTER_TYPES: set[str] = {
 _PROVIDER_ID_PATTERN = re.compile(r"^[a-z0-9_]{2,64}$")
 
 
+COMMONSTACK_MODEL_ALLOWLIST = (
+    "openai/gpt-5.5",
+    "google/gemini-3.1-pro-preview",
+    "anthropic/claude-sonnet-4-6",
+    "deepseek/deepseek-v4-pro",
+    "qwen/qwen3.7-plus",
+)
+
+
 SEEDED_PROVIDERS = (
     {
         "provider_id": "openrouter",
         "display_name": "OpenRouter",
         "adapter_type": "openrouter",
+        "byok_enabled": True,
         "platform_enabled": True,
         "approved_base_url": "https://openrouter.ai/api/v1",
         "capabilities": ProviderCapabilities(
@@ -90,6 +100,25 @@ SEEDED_PROVIDERS = (
             reasoning_token_usage=True,
             reported_monetary_cost=True,
             supported_parameters=("temperature", "max_output_tokens", "reasoning_effort"),
+        ),
+    },
+    {
+        "provider_id": "commonstack",
+        "display_name": "CommonStack",
+        "adapter_type": "openai_compatible",
+        "approved_base_url": "https://api.commonstack.ai/v1",
+        "byok_enabled": False,
+        "platform_enabled": True,
+        "capabilities": ProviderCapabilities(
+            model_discovery=True,
+            system_messages=True,
+            reasoning=True,
+            supported_parameters=(
+                "temperature",
+                "max_output_tokens",
+                "reasoning_effort",
+            ),
+            model_allowlist=COMMONSTACK_MODEL_ALLOWLIST,
         ),
     },
     {
