@@ -9,7 +9,10 @@ import pytest
 from cryptography.fernet import Fernet
 
 from dashboard.backend.domain.brokers import repository as broker_repository
-from dashboard.backend.domain.model_providers.models import ProviderCapabilities
+from dashboard.backend.domain.model_providers.models import (
+    ProviderCapabilities,
+    ProviderRecord,
+)
 from dashboard.backend.domain.model_providers.execution_catalog import (
     UnsupportedExecutionModel,
     list_execution_model_routes,
@@ -80,7 +83,10 @@ def test_postgres_seeded_commonstack_is_platform_only_with_allowlisted_models(
         "qwen/qwen3.7-plus",
     )
 
-    assert [route.catalog_id for route in list_execution_model_routes(provider)] == [
+    provider_record = ProviderRecord.model_validate(provider)
+    assert [
+        route.catalog_id for route in list_execution_model_routes(provider_record)
+    ] == [
         "anthropic/claude-sonnet-4-6",
         "openai/gpt-5.5",
         "google/gemini-3.1-pro-preview",
@@ -88,7 +94,7 @@ def test_postgres_seeded_commonstack_is_platform_only_with_allowlisted_models(
         "qwen/qwen3.7-plus",
     ]
     with pytest.raises(UnsupportedExecutionModel):
-        resolve_execution_model_route(provider, "anthropic/claude-haiku-4-5")
+        resolve_execution_model_route(provider_record, "anthropic/claude-haiku-4-5")
 
 
 @pg_only
