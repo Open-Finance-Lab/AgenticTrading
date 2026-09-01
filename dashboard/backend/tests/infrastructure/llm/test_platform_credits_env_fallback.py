@@ -10,7 +10,10 @@ from dashboard.backend.domain.credits.repository import CreditsStore
 from dashboard.backend.domain.credits.service import CreditsService
 from dashboard.backend.domain.model_providers.repository import ModelProviderStore
 from dashboard.backend.domain.model_providers.service import ModelProviderService
-from dashboard.backend.infrastructure.llm.execution.adapters.base import AdapterResponse
+from dashboard.backend.infrastructure.llm.execution.adapters.base import (
+    AdapterResponse,
+    ProviderExecutionError,
+)
 from dashboard.backend.infrastructure.llm.execution.errors import (
     ExecutionErrorCategory,
     LLMExecutionError,
@@ -46,6 +49,19 @@ class FakeExecutionAdapter:
             model_id=request.model_id,
             usage=self.usage,
         )
+
+
+class ScriptedExecutionAdapter:
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.calls = []
+
+    def complete(self, request, credential, provider):
+        self.calls.append(request)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 def _seed_users(path) -> None:
@@ -151,7 +167,7 @@ def _request(run_id: str) -> LLMExecutionRequest:
     )
 
 
-def _execution_service(tmp_path, monkeypatch, adapter):
+def _execution_service(tmp_path, monkeypatch, adapter, *, adapters=None):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-execution-test-abcd")
     provider_store = ModelProviderStore(tmp_path / "providers.db")
     _enable_openrouter(provider_store)
@@ -160,18 +176,23 @@ def _execution_service(tmp_path, monkeypatch, adapter):
     credits_store = CreditsStore(credits_path)
     _seed_balances(credits_store)
     credits_service = CreditsService(store=credits_store)
-    snapshot = PricingSnapshot(
-        provider_id="openrouter",
-        model_id=MODEL_ID,
-        input_usd_per_million_tokens=1000.0,
-        output_usd_per_million_tokens=1000.0,
-        source_version="test-pricing",
-    )
+    def snapshot_for(model_id: str, provider_id: str) -> PricingSnapshot:
+        return PricingSnapshot(
+            provider_id=provider_id,
+            model_id=model_id,
+            input_usd_per_million_tokens=1000.0,
+            output_usd_per_million_tokens=1000.0,
+            source_version="test-pricing",
+        )
+
+    def resolve_adapter(provider):
+        return adapters[provider.provider_id] if adapters is not None else adapter
+
     service = LLMExecutionService(
         providers=ModelProviderService(store=provider_store),
         credits=credits_service,
-        adapter_resolver=lambda _provider: adapter,
-        pricing_snapshot_factory=lambda _model_id, _provider_id: snapshot,
+        adapter_resolver=resolve_adapter,
+        pricing_snapshot_factory=snapshot_for,
     )
     return service, credits_store
 
@@ -244,6 +265,241 @@ def test_platform_execution_emits_bucketed_resource_evidence(
         "cost_micro_usd": 200_000,
     }
     assert "sk-or-execution-test-abcd" not in repr(events)
+
+
+def test_platform_quota_error_retries_once_through_commonstack(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-failover-abcd")
+    primary_adapter = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError(
+                ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+            )
+        ]
+    )
+    fallback_adapter = ScriptedExecutionAdapter(
+        [
+            AdapterResponse(
+                text="BUY",
+                model_id="qwen/qwen3.7-plus",
+                usage=LLMUsage(input_tokens=40, output_tokens=20),
+                finish_reason="stop",
+            )
+        ]
+    )
+    service, credits_store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        primary_adapter,
+        adapters={
+            "openrouter": primary_adapter,
+            "commonstack": fallback_adapter,
+        },
+    )
+    assert service.providers.store.get_provider("commonstack")["platform_enabled"] is True
+    request = _request("failover-run").model_copy(
+        update={
+            "model_id": "qwen/qwen3.7-plus",
+            "reasoning_effort": "high",
+            "temperature": 0.2,
+        }
+    )
+
+    result = service.execute(request)
+
+    assert result.provider_id == "commonstack"
+    assert result.requested_provider_id == "openrouter"
+    assert [call.provider_id for call in primary_adapter.calls] == ["openrouter"]
+    assert [call.provider_id for call in fallback_adapter.calls] == ["commonstack"]
+    primary_request = primary_adapter.calls[0]
+    fallback_request = fallback_adapter.calls[0]
+    assert fallback_request.model_id == primary_request.model_id
+    assert fallback_request.system_message == primary_request.system_message
+    assert fallback_request.messages == primary_request.messages
+    assert fallback_request.usage_policy == primary_request.usage_policy
+    assert fallback_request.temperature == primary_request.temperature
+    assert fallback_request.reasoning_effort == primary_request.reasoning_effort
+    with credits_store._get_connection() as connection:
+        rows = connection.execute(
+            "SELECT attempt_index, provider_id, status "
+            "FROM credit_llm_reservations WHERE run_id = ? "
+            "ORDER BY attempt_index",
+            ("failover-run",),
+        ).fetchall()
+    assert [tuple(row) for row in rows] == [
+        (0, "openrouter", "released"),
+        (1, "commonstack", "settled"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "category",
+    [
+        ExecutionErrorCategory.PROVIDER_TIMEOUT,
+        ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
+        ExecutionErrorCategory.RESPONSE_INVALID,
+        ExecutionErrorCategory.USAGE_UNAVAILABLE,
+        ExecutionErrorCategory.CREDENTIAL_INVALID,
+        ExecutionErrorCategory.BILLING_FAILED,
+    ],
+)
+def test_non_quota_platform_failures_do_not_fail_over(
+    tmp_path, monkeypatch, category
+):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-unused-abcd")
+    primary = ScriptedExecutionAdapter([ProviderExecutionError(category)])
+    fallback = ScriptedExecutionAdapter([])
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        primary,
+        adapters={"openrouter": primary, "commonstack": fallback},
+    )
+
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request(f"no-failover-{category.value}"))
+
+    assert exc_info.value.category is category
+    assert fallback.calls == []
+
+
+def test_byok_quota_error_never_uses_platform_fallback(tmp_path, monkeypatch):
+    primary = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError(
+                ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+            )
+        ]
+    )
+    fallback = ScriptedExecutionAdapter([])
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        primary,
+        adapters={"openrouter": primary, "commonstack": fallback},
+    )
+    calls = []
+
+    def fail_once(request, **_kwargs):
+        calls.append(request.provider_id)
+        raise LLMExecutionError(ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED)
+
+    monkeypatch.setattr(service, "_execute_once", fail_once)
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(
+            _request("byok-no-fallback").model_copy(
+                update={"billing_mode": BillingMode.BYOK}
+            )
+        )
+    assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+    assert calls == ["openrouter"]
+    assert fallback.calls == []
+
+
+def test_fallback_failure_returns_commonstack_safe_category(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-timeout-abcd")
+    primary = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError(
+                ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+            )
+        ]
+    )
+    fallback = ScriptedExecutionAdapter(
+        [ProviderExecutionError(ExecutionErrorCategory.PROVIDER_TIMEOUT)]
+    )
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        primary,
+        adapters={"openrouter": primary, "commonstack": fallback},
+    )
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("dual-failure"))
+    assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_TIMEOUT
+    assert len(primary.calls) == 1
+    assert len(fallback.calls) == 1
+
+
+def test_missing_commonstack_route_preserves_primary_quota_error(
+    tmp_path, monkeypatch
+):
+    monkeypatch.delenv("COMMONSTACK_API_KEY", raising=False)
+    primary = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError(
+                ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+            )
+        ]
+    )
+    fallback = ScriptedExecutionAdapter([])
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        primary,
+        adapters={"openrouter": primary, "commonstack": fallback},
+    )
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("missing-fallback"))
+    assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+    assert fallback.calls == []
+
+
+def test_primary_release_failure_aborts_before_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-unused-abcd")
+    primary = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError(
+                ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+            )
+        ]
+    )
+    fallback = ScriptedExecutionAdapter([])
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        primary,
+        adapters={"openrouter": primary, "commonstack": fallback},
+    )
+
+    def fail_release(*_args, **_kwargs):
+        raise RuntimeError("synthetic release failure")
+
+    monkeypatch.setattr(service.credits, "release_llm_credits", fail_release)
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("release-failure"))
+    assert exc_info.value.category is ExecutionErrorCategory.BILLING_FAILED
+    assert fallback.calls == []
+
+
+def test_two_quota_failures_stop_after_commonstack(tmp_path, monkeypatch):
+    monkeypatch.setenv("COMMONSTACK_API_KEY", "cs-fake-double-quota-abcd")
+    primary = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError(
+                ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+            )
+        ]
+    )
+    fallback = ScriptedExecutionAdapter(
+        [
+            ProviderExecutionError(
+                ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+            )
+        ]
+    )
+    service, _store = _execution_service(
+        tmp_path,
+        monkeypatch,
+        primary,
+        adapters={"openrouter": primary, "commonstack": fallback},
+    )
+    with pytest.raises(LLMExecutionError) as exc_info:
+        service.execute(_request("double-quota"))
+    assert exc_info.value.category is ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
+    assert len(primary.calls) == 1
+    assert len(fallback.calls) == 1
 
 
 def test_byok_usage_reports_tokens_with_zero_atl_cost(monkeypatch):

@@ -149,6 +149,11 @@ class LLMExecutionResult(BaseModel):
 
     text: str = Field(min_length=1, max_length=120_000)
     provider_id: str = Field(min_length=2, max_length=64)
+    requested_provider_id: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=64,
+    )
     model_id: str = Field(min_length=1, max_length=64)
     credential_id: str | None = Field(default=None, max_length=128)
     credential_key_last_four: str | None = Field(default=None, min_length=4, max_length=4)

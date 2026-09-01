@@ -9,7 +9,10 @@ import pytest
 import dashboard.backend.infrastructure.llm.execution.adapters.anthropic as anthropic_module
 import dashboard.backend.infrastructure.llm.execution.adapters.gemini as gemini_module
 import dashboard.backend.infrastructure.llm.execution.adapters.openai as openai_module
-from dashboard.backend.domain.model_providers.models import ProviderRecord
+from dashboard.backend.domain.model_providers.models import (
+    ProviderCapabilities,
+    ProviderRecord,
+)
 from dashboard.backend.infrastructure.llm.execution.models import (
     LLMExecutionRequest,
     LLMMessage,
@@ -172,6 +175,55 @@ def test_openrouter_reasoning_none_disables_reasoning(monkeypatch):
     assert captured["extra_body"] == {
         "reasoning": {"effort": "none", "enabled": False, "exclude": True}
     }
+
+
+def test_commonstack_openai_compatible_route_preserves_reasoning_and_ceiling(
+    monkeypatch,
+):
+    captured = {}
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return _openai_response("qwen/qwen3.7-plus")
+
+    client = _openai_client(create)
+    monkeypatch.setattr(
+        openai_module,
+        "build_safe_http_client",
+        lambda *_args, **_kwargs: _Closable(),
+    )
+    adapter = openai_module.OpenAICompatibleAdapter(
+        client_factory=lambda **_kwargs: client,
+    )
+    provider = ProviderRecord(
+        provider_id="commonstack",
+        display_name="CommonStack",
+        adapter_type="openai_compatible",
+        approved_base_url="https://api.commonstack.ai/v1",
+        capabilities=ProviderCapabilities(
+            model_allowlist=("qwen/qwen3.7-plus",),
+            reasoning=True,
+        ),
+    )
+    request = LLMExecutionRequest(
+        user_id=7,
+        run_id="run-commonstack-route",
+        call_index=0,
+        billing_mode="platform_credits",
+        provider_id="commonstack",
+        model_id="qwen/qwen3.7-plus",
+        messages=(LLMMessage(role="user", content="Return one word."),),
+        usage_policy=UsagePolicy(max_output_tokens=4096),
+        temperature=0.2,
+        reasoning_effort="high",
+    )
+
+    adapter.complete(request, _credential("commonstack"), provider)
+
+    assert captured["model"] == "qwen/qwen3.7-plus"
+    assert captured["max_tokens"] == 4096
+    assert captured["temperature"] == 0.2
+    assert captured["extra_body"] == {"reasoning": {"effort": "high"}}
 
 
 def test_anthropic_uses_native_model_and_keeps_canonical_result(monkeypatch):
