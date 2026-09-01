@@ -7549,14 +7549,25 @@ function syncRunBacktestSubmitAvailability() {
     }
     const providerId = document.getElementById('runBacktestProviderSelect')?.value || '';
     const option = runBacktestExecutionOption(providerId);
+    const platformModelAvailable = availableRunBacktestProviders('platform_credits')
+        .some((provider) => Boolean(findRunBacktestExecutionModel(provider, modelId)));
+    const laneModelAvailable = runBacktestBillingMode === 'platform_credits'
+        ? platformModelAvailable
+        : runBacktestLaneAvailable(option, runBacktestBillingMode)
+            && Boolean(findRunBacktestExecutionModel(option, modelId));
     submit.disabled = !(
         runBacktestOptionsReady
         && runBacktestBillingMode
-        && providerId
         && modelId
         && modelId !== RULE_BASED_DECISION_SOURCE
-        && runBacktestLaneAvailable(option, runBacktestBillingMode)
-        && Boolean(findRunBacktestExecutionModel(option, modelId))
+        && laneModelAvailable
+        && (
+            runBacktestBillingMode === 'platform_credits'
+            || (
+                providerId
+                && runBacktestLaneAvailable(option, runBacktestBillingMode)
+            )
+        )
     );
 }
 
@@ -7565,17 +7576,28 @@ function syncRunBacktestModelOptions(preferredModelId = '') {
     const modelSelect = document.getElementById('modelSelect');
     if (!modelSelect) return;
     const previousRuleBased = modelSelect.value === RULE_BASED_DECISION_SOURCE;
+    const isPlatformCredits = runBacktestBillingMode === 'platform_credits';
     const option = runBacktestExecutionOption(providerSelect?.value || '');
+    const providers = isPlatformCredits
+        ? availableRunBacktestProviders('platform_credits')
+        : (option ? [option] : []);
     clearSelectOptions(modelSelect);
-    (option?.models || []).forEach((model) => {
+    const seenModels = new Set();
+    providers.flatMap((provider) => provider.models || []).forEach((model) => {
+        const normalizedId = normalizeBacktestModelId(model.model_id);
+        if (!normalizedId || seenModels.has(normalizedId)) return;
+        seenModels.add(normalizedId);
         const modelOption = document.createElement('option');
         modelOption.value = model.model_id;
         modelOption.textContent = model.label;
         modelSelect.appendChild(modelOption);
     });
-    const preferred = findRunBacktestExecutionModel(option, preferredModelId)
-        || findRunBacktestExecutionModel(option, runBacktestModalAgent?.model_name)
-        || option?.models?.[0]
+    const findModel = (modelId) => providers
+        .map((provider) => findRunBacktestExecutionModel(provider, modelId))
+        .find(Boolean) || null;
+    const preferred = findModel(preferredModelId)
+        || findModel(runBacktestModalAgent?.model_name)
+        || providers[0]?.models?.[0]
         || null;
     if (preferred) modelSelect.value = preferred.model_id;
     if (document.getElementById('marketDataSourceSelect')?.value === IFIND_ASHARE_SOURCE) {
@@ -7584,6 +7606,12 @@ function syncRunBacktestModelOptions(preferredModelId = '') {
     }
     syncBacktestModelFieldMode();
     syncRunBacktestSubmitAvailability();
+}
+
+function syncRunBacktestProviderVisibility() {
+    const control = document.getElementById('runBacktestProviderControl');
+    if (!control) return;
+    control.hidden = runBacktestBillingMode !== 'byok';
 }
 
 function setRunBacktestBillingMode(
@@ -7606,17 +7634,20 @@ function setRunBacktestBillingMode(
 
     const providerSelect = document.getElementById('runBacktestProviderSelect');
     clearSelectOptions(providerSelect);
-    providers.forEach((provider) => {
-        const option = document.createElement('option');
-        option.value = provider.provider_id;
-        option.textContent = provider.display_name;
-        providerSelect?.appendChild(option);
-    });
-    if (providerSelect && providers.length) {
+    if (billingMode === 'byok') {
+        providers.forEach((provider) => {
+            const option = document.createElement('option');
+            option.value = provider.provider_id;
+            option.textContent = provider.display_name;
+            providerSelect?.appendChild(option);
+        });
+    }
+    if (providerSelect && billingMode === 'byok' && providers.length) {
         providerSelect.value = providers.some(
             (provider) => provider.provider_id === providerId,
         ) ? providerId : providers[0].provider_id;
     }
+    syncRunBacktestProviderVisibility();
     syncRunBacktestModelOptions(modelId);
 
     const hint = document.getElementById('runBacktestBillingHint');
@@ -7624,7 +7655,7 @@ function setRunBacktestBillingMode(
         hint.textContent = runBacktestBillingMode === 'byok'
             ? 'Provider charges go directly to your API key. ATL Credits are not deducted.'
             : (runBacktestBillingMode === 'platform_credits'
-                ? 'ATL Credits are settled from actual model usage.'
+                ? 'ATL Credits automatically use OpenRouter first, then CommonStack if needed.'
                 : 'Choose an available AI billing method.');
     }
 }
@@ -7641,6 +7672,7 @@ function setRunBacktestExecutionUnavailable(
     runBacktestBillingMode = null;
     setRunBacktestApiKeysRecovery(showApiKeysRecovery);
     clearSelectOptions(document.getElementById('runBacktestProviderSelect'));
+    syncRunBacktestProviderVisibility();
     const modelSelect = document.getElementById('modelSelect');
     clearSelectOptions(modelSelect);
     if (
@@ -8279,22 +8311,29 @@ async function runBacktest() {
         && !isHostedRuntime
     ) {
         selectedBillingMode = runBacktestBillingMode;
-        selectedProviderId = (
-            document.getElementById('runBacktestProviderSelect')?.value || ''
-        );
+        if (selectedBillingMode === 'byok') {
+            selectedProviderId = (
+                document.getElementById('runBacktestProviderSelect')?.value || ''
+            );
+        }
         const providerOption = runBacktestExecutionOption(selectedProviderId);
+        const platformModelAvailable = availableRunBacktestProviders(
+            'platform_credits',
+        ).some((provider) => Boolean(findRunBacktestExecutionModel(provider, model)));
+        const modelAvailable = selectedBillingMode === 'platform_credits'
+            ? platformModelAvailable
+            : runBacktestLaneAvailable(providerOption, selectedBillingMode)
+                && Boolean(findRunBacktestExecutionModel(providerOption, model));
         if (
             !selectedBillingMode
-            || !selectedProviderId
             || !model
-            || !runBacktestLaneAvailable(
-                providerOption,
-                selectedBillingMode,
-            )
-            || !findRunBacktestExecutionModel(providerOption, model)
+            || !modelAvailable
+            || (selectedBillingMode === 'byok' && !selectedProviderId)
         ) {
             showModalError(
-                'Choose an AI billing method, provider, and model.',
+                selectedBillingMode === 'platform_credits'
+                    ? 'Choose an AI billing method and model.'
+                    : 'Choose an AI billing method, provider, and model.',
             );
             return;
         }
@@ -8344,7 +8383,9 @@ async function runBacktest() {
         timeframe: isIFind ? IFIND_ASHARE_TIMEFRAME : '60m',
         decisionSource,
         billingMode: isRuleBasedDecision ? null : selectedBillingMode,
-        providerId: isRuleBasedDecision ? null : selectedProviderId,
+        providerId: isRuleBasedDecision || selectedBillingMode === 'platform_credits'
+            ? null
+            : selectedProviderId,
         marketDataLabel: isIFind
             ? 'iFinD A-Share'
             : (isSimulation ? 'vn.py Simulation' : 'Alpaca'),
@@ -8421,10 +8462,12 @@ async function runBacktest() {
         ) {
             params.set('model', model);
             params.set('billing_mode', selectedBillingMode);
-            params.set('provider_id', selectedProviderId);
             payload.billing_mode = selectedBillingMode;
-            payload.provider_id = selectedProviderId;
             payload.model = model;
+            if (selectedBillingMode === 'byok') {
+                params.set('provider_id', selectedProviderId);
+                payload.provider_id = selectedProviderId;
+            }
         }
         if (activeAgent?.agent_id && !String(activeAgent.agent_id).startsWith('mock-')) {
             payload.agent_id = activeAgent.agent_id;

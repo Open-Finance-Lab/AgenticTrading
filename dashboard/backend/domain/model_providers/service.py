@@ -22,6 +22,7 @@ from .execution_catalog import (
     ExecutionModelRoute,
     list_execution_model_routes,
     resolve_execution_model_route,
+    UnsupportedExecutionModel,
 )
 from .models import (
     AdminPlatformCredentialPublic,
@@ -213,6 +214,48 @@ class ModelProviderService:
         # the preferred platform lane before the CommonStack fallback.
         options.sort(key=lambda option: option.provider_id == "commonstack")
         return options
+
+    def resolve_platform_execution_candidates(
+        self,
+        catalog_model_id: str,
+        preferred_provider_id: str | None = None,
+    ) -> tuple[str, ...]:
+        """Return compatible, credentialed platform providers in preference order."""
+
+        providers = {
+            str(raw["provider_id"]): ProviderRecord.model_validate(raw)
+            for raw in self.store.list_all_providers()
+            if raw.get("provider_id")
+        }
+        preferred = (
+            validate_provider_id(preferred_provider_id)
+            if preferred_provider_id and preferred_provider_id.strip()
+            else None
+        )
+        ordered_ids: list[str] = []
+        for provider_id in (preferred, "openrouter", "commonstack"):
+            if provider_id and provider_id not in ordered_ids:
+                ordered_ids.append(provider_id)
+        for provider_id in providers:
+            if provider_id not in ordered_ids:
+                ordered_ids.append(provider_id)
+
+        candidates: list[str] = []
+        for provider_id in ordered_ids:
+            provider = providers.get(provider_id)
+            if not provider or provider.status != "enabled" or not provider.platform_enabled:
+                continue
+            try:
+                self.preflight_execution_model(provider_id, catalog_model_id)
+                self.preflight_platform_credential(provider_id)
+            except (
+                ProviderNotFoundError,
+                CredentialResolutionError,
+                UnsupportedExecutionModel,
+            ):
+                continue
+            candidates.append(provider_id)
+        return tuple(candidates)
 
     def get_platform_credential(
         self, provider_id: str

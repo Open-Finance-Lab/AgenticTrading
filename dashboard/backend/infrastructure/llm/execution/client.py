@@ -113,6 +113,7 @@ class AnthropicCompatibleExecutionClient:
                 call_index=self._next_call_index,
                 billing_mode=self.handoff.billing_mode,
                 provider_id=self.handoff.provider_id,
+                provider_ids=self.handoff.provider_ids,
                 model_id=self.handoff.model_id,
                 system_message=system,
                 messages=messages,
