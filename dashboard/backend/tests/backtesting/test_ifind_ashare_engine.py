@@ -486,6 +486,12 @@ def test_ifind_engine_resolves_csi300_sample20_and_records_provenance(
 
     monkeypatch.setattr(engine_module, "create_market_data_provider", factory)
 
+    # The use_llm downgrade asserted below only fires with no LLM key in the
+    # environment; a developer's dashboard/.env leaks ANTHROPIC_API_KEY into
+    # os.environ whenever an earlier-collected test imports dashboard.backend.app.
+    for key in ("COMMONSTACK_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+
     backtester = HourlyBacktester(
         START,
         END,
