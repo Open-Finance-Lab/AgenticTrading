@@ -24,6 +24,7 @@ from dashboard.backend.tests.domain.analytics.test_repository_contract import (
     assert_pr2_query_contract,
     assert_source_event_idempotency_contract,
     assert_subject_and_access_contract,
+    assert_error_category_contract,
 )
 
 
@@ -154,6 +155,7 @@ def test_postgres_runs_shared_event_contracts(postgres_contract_store):
     store, _admin_id, user_id = postgres_contract_store
     assert_event_idempotency_contract(store, user_id)
     assert_source_event_idempotency_contract(store, user_id)
+    assert_error_category_contract(store, user_id)
 
 
 @pg_only

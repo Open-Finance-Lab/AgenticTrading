@@ -27,6 +27,9 @@ from dashboard.backend.domain.credits.repository_common import (
     _utcnow_iso,
     _validate_amount_pair,
 )
+from dashboard.backend.domain.model_providers.repository_common import (
+    validate_provider_id,
+)
 
 
 _SETTLEMENT_OUTCOME_EVIDENCE_KEYS = {
@@ -283,6 +286,8 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
     call_index INTEGER NOT NULL CHECK (call_index >= 0),
+    provider_id TEXT,
+    attempt_index INTEGER NOT NULL DEFAULT 0 CHECK (attempt_index >= 0),
     reserved_micro BIGINT NOT NULL CHECK (reserved_micro > 0),
     reserved_grant_micro BIGINT NOT NULL CHECK (reserved_grant_micro >= 0),
     reserved_purchased_micro BIGINT NOT NULL CHECK (reserved_purchased_micro >= 0),
@@ -300,14 +305,15 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
-    UNIQUE (user_id, run_id, call_index)
+    CONSTRAINT credit_llm_reservations_logical_attempt_key
+        UNIQUE (user_id, run_id, call_index, attempt_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_user_status
 ON credit_llm_reservations(user_id, status, created_at);
 
 CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
-ON credit_llm_reservations(run_id, status, call_index);
+ON credit_llm_reservations(run_id, status, call_index, attempt_index);
 
 CREATE TABLE IF NOT EXISTS credit_llm_usage_entries (
     id BIGSERIAL PRIMARY KEY,
@@ -354,6 +360,15 @@ ALTER TABLE credit_llm_reservations
 ADD COLUMN IF NOT EXISTS outstanding_micro BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE credit_llm_reservations
 ADD COLUMN IF NOT EXISTS outstanding_recovered_micro BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE credit_llm_reservations
+ADD COLUMN IF NOT EXISTS provider_id TEXT;
+ALTER TABLE credit_llm_reservations
+ADD COLUMN IF NOT EXISTS attempt_index INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE credit_llm_reservations
+DROP CONSTRAINT IF EXISTS credit_llm_reservations_attempt_index_check;
+ALTER TABLE credit_llm_reservations
+ADD CONSTRAINT credit_llm_reservations_attempt_index_check
+CHECK (attempt_index >= 0);
 ALTER TABLE credit_accounts
 ADD COLUMN IF NOT EXISTS restriction_reason TEXT;
 UPDATE credit_llm_reservations
@@ -384,6 +399,35 @@ DROP CONSTRAINT IF EXISTS credit_llm_reservations_settled_micro_nonnegative_chec
 ALTER TABLE credit_llm_reservations
 ADD CONSTRAINT credit_llm_reservations_settled_micro_nonnegative_check
 CHECK (settled_micro >= 0);
+DO $$
+DECLARE
+    legacy_constraint TEXT;
+BEGIN
+    FOR legacy_constraint IN
+        SELECT con.conname
+        FROM pg_constraint AS con
+        WHERE con.conrelid = 'credit_llm_reservations'::regclass
+          AND con.contype = 'u'
+          AND (
+              SELECT array_agg(att.attname ORDER BY key.ord)
+              FROM unnest(con.conkey) WITH ORDINALITY AS key(attnum, ord)
+              JOIN pg_attribute AS att
+                ON att.attrelid = con.conrelid
+               AND att.attnum = key.attnum
+          ) = ARRAY['user_id', 'run_id', 'call_index']::name[]
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE credit_llm_reservations DROP CONSTRAINT %I',
+            legacy_constraint
+        );
+    END LOOP;
+END
+$$;
+ALTER TABLE credit_llm_reservations
+DROP CONSTRAINT IF EXISTS credit_llm_reservations_logical_attempt_key;
+ALTER TABLE credit_llm_reservations
+ADD CONSTRAINT credit_llm_reservations_logical_attempt_key
+UNIQUE (user_id, run_id, call_index, attempt_index);
 
 ALTER TABLE credit_grant_pool_ledger_entries
 ADD COLUMN IF NOT EXISTS pool_name_snapshot TEXT;
@@ -859,7 +903,8 @@ class PostgresCreditsStore:
         return row
 
     def reserve_llm_credits(self, *, reservation_id: str, user_id: int, run_id: str,
-                            call_index: int, reserved_micro: int,
+                            call_index: int, attempt_index: int, provider_id: str,
+                            reserved_micro: int,
                             operation_key: str, request_digest: str) -> dict[str, Any]:
         reservation_id = _required_text(reservation_id, "reservation_id", max_length=160)
         run_id = _required_text(run_id, "run_id", max_length=128)
@@ -867,8 +912,11 @@ class PostgresCreditsStore:
         request_digest = _required_text(request_digest, "request_digest", max_length=128)
         _positive_integer(user_id, "user_id")
         _positive_integer(reserved_micro, "reserved_micro")
+        provider_id = validate_provider_id(provider_id)
         if not isinstance(call_index, int) or isinstance(call_index, bool) or call_index < 0:
             raise ValueError("call_index must be a non-negative integer")
+        if not isinstance(attempt_index, int) or isinstance(attempt_index, bool) or attempt_index < 0:
+            raise ValueError("attempt_index must be a non-negative integer")
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 self._ensure_account_in_transaction(cur, user_id)
@@ -877,8 +925,8 @@ class PostgresCreditsStore:
                     (operation_key,),
                 )
                 cur.execute(
-                    "SELECT * FROM credit_llm_reservations WHERE reservation_id = %s OR operation_key = %s OR (user_id = %s AND run_id = %s AND call_index = %s) FOR UPDATE",
-                    (reservation_id, operation_key, user_id, run_id, call_index),
+                    "SELECT * FROM credit_llm_reservations WHERE reservation_id = %s OR operation_key = %s OR (user_id = %s AND run_id = %s AND call_index = %s AND attempt_index = %s) FOR UPDATE",
+                    (reservation_id, operation_key, user_id, run_id, call_index, attempt_index),
                 )
                 existing = cur.fetchone()
                 if existing:
@@ -886,6 +934,8 @@ class PostgresCreditsStore:
                             or int(existing["user_id"]) != user_id
                             or existing["run_id"] != run_id
                             or int(existing["call_index"]) != call_index
+                            or int(existing["attempt_index"]) != attempt_index
+                            or existing["provider_id"] != provider_id
                             or int(existing["reserved_micro"]) != reserved_micro
                             or existing["operation_key"] != operation_key or existing["request_digest"] != request_digest):
                         raise LLMReservationConflictError("reservation key already represents different input")
@@ -908,14 +958,16 @@ class PostgresCreditsStore:
                 cur.execute(
                     """
                     INSERT INTO credit_llm_reservations (
-                        reservation_id, user_id, run_id, call_index,
+                        reservation_id, user_id, run_id, call_index, provider_id,
+                        attempt_index,
                         reserved_micro, reserved_grant_micro, reserved_purchased_micro,
                         operation_key, request_digest, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING *
                     """,
-                    (reservation_id, user_id, run_id, call_index, reserved_micro,
-                     reserved_grant, reserved_purchased, operation_key, request_digest, now, now),
+                    (reservation_id, user_id, run_id, call_index, provider_id,
+                     attempt_index, reserved_micro, reserved_grant, reserved_purchased,
+                     operation_key, request_digest, now, now),
                 )
                 return dict(cur.fetchone())
 
@@ -1247,7 +1299,7 @@ class PostgresCreditsStore:
         with self._get_connection() as conn:
             with conn.cursor() as cur:
                 cur.execute("UPDATE credit_llm_reservations SET status = 'released', failure_reason = %s, updated_at = %s WHERE run_id = %s AND status = 'open'", (reason, _utcnow_iso(), run_id))
-                cur.execute("SELECT * FROM credit_llm_reservations WHERE run_id = %s ORDER BY call_index", (run_id,))
+                cur.execute("SELECT * FROM credit_llm_reservations WHERE run_id = %s ORDER BY call_index, attempt_index, reservation_id", (run_id,))
                 return [self._llm_reservation_result(cur, row) for row in cur.fetchall()]
 
     def create_or_get_order(

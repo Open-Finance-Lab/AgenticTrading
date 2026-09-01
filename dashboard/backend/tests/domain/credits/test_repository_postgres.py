@@ -21,6 +21,7 @@ from dashboard.backend.domain.credits.repository_common import (
     GrantPoolInsufficientError,
     GrantReclaimExceedsAvailableError,
     IdempotencyConflictError,
+    LLMReservationConflictError,
 )
 from dashboard.backend.tests._postgres_testing import require_local_postgres_url
 from dashboard.backend.tests.domain.credits.test_grant_repository_contract import (
@@ -72,6 +73,18 @@ def test_postgres_schema_allows_settlement_overage_and_migrates_legacy_check():
     assert (
         "credit_llm_reservations_settled_micro_nonnegative_check"
         in pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    )
+
+
+def test_postgres_schema_tracks_provider_attempt_identity():
+    assert "provider_id TEXT" in pg_module.CREDITS_POSTGRES_DDL
+    assert "attempt_index INTEGER NOT NULL DEFAULT 0" in pg_module.CREDITS_POSTGRES_DDL
+    assert (
+        "credit_llm_reservations_logical_attempt_key"
+        in pg_module.CREDITS_POSTGRES_DDL
+    )
+    assert "ARRAY['user_id', 'run_id', 'call_index']::name[]" in (
+        pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
     )
 
 
@@ -465,6 +478,8 @@ def test_postgres_llm_overage_uses_unreserved_balance(pg_credits_store):
         user_id=1,
         run_id="pg-partial-overage-run",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         reserved_micro=1_000_000,
         operation_key="pg-partial-overage-operation",
         request_digest="p" * 64,
@@ -559,6 +574,8 @@ def test_postgres_llm_overage_uses_grant_before_restricting(pg_credits_store):
         user_id=1,
         run_id="pg-covered-overage-run",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         reserved_micro=1_000_000,
         operation_key="pg-covered-overage-operation",
         request_digest="q" * 64,
@@ -574,6 +591,51 @@ def test_postgres_llm_overage_uses_grant_before_restricting(pg_credits_store):
     assert settled["outstanding_micro"] == 0
     assert settled["grant_debited_micro"] == 1_250_000
     assert store.get_account_billing_state(1)["account_status"] == "active"
+
+
+@pg_only
+def test_postgres_provider_attempts_share_logical_call_after_release(pg_credits_store):
+    store = pg_credits_store
+    _pending_order(store, cents=100)
+    _pay_order(store, cents=100)
+    primary = store.reserve_llm_credits(
+        reservation_id="pg-attempt-primary",
+        user_id=1,
+        run_id="pg-attempt-run",
+        call_index=4,
+        attempt_index=0,
+        provider_id="openrouter",
+        reserved_micro=100_000,
+        operation_key="pg-attempt-primary-operation",
+        request_digest="a" * 64,
+    )
+    store.release_llm_credits(primary["reservation_id"], reason="provider_quota_exhausted")
+    fallback = store.reserve_llm_credits(
+        reservation_id="pg-attempt-fallback",
+        user_id=1,
+        run_id="pg-attempt-run",
+        call_index=4,
+        attempt_index=1,
+        provider_id="commonstack",
+        reserved_micro=100_000,
+        operation_key="pg-attempt-fallback-operation",
+        request_digest="c" * 64,
+    )
+    assert fallback["attempt_index"] == 1
+    assert fallback["provider_id"] == "commonstack"
+
+    with pytest.raises(LLMReservationConflictError):
+        store.reserve_llm_credits(
+            reservation_id="pg-attempt-fallback",
+            user_id=1,
+            run_id="pg-attempt-run",
+            call_index=4,
+            attempt_index=1,
+            provider_id="openrouter",
+            reserved_micro=100_000,
+            operation_key="pg-attempt-fallback-operation",
+            request_digest="c" * 64,
+        )
 
 
 @pg_only
@@ -659,6 +721,8 @@ def test_postgres_activity_aggregates_calls_before_pagination(pg_credits_store):
             user_id=1,
             run_id="run-pg-activity",
             call_index=call_index,
+            provider_id="openrouter",
+            attempt_index=0,
             reserved_micro=amount,
             operation_key=f"reserve:{reservation_id}",
             request_digest=str(call_index).ljust(64, "b"),

@@ -189,6 +189,8 @@ def test_checkout_pays_model_overage_and_restores_account(tmp_path):
         user_id=1,
         run_id="service-overage",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         amount_micro=1_000_000,
     )
     service.settle_llm_credits(

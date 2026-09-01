@@ -9,7 +9,15 @@ import pytest
 from cryptography.fernet import Fernet
 
 from dashboard.backend.domain.brokers import repository as broker_repository
-from dashboard.backend.domain.model_providers.models import ProviderCapabilities
+from dashboard.backend.domain.model_providers.models import (
+    ProviderCapabilities,
+    ProviderRecord,
+)
+from dashboard.backend.domain.model_providers.execution_catalog import (
+    UnsupportedExecutionModel,
+    list_execution_model_routes,
+    resolve_execution_model_route,
+)
 from dashboard.backend.domain.model_providers.repository_common import (
     CredentialConflictError,
     CredentialOwnershipError,
@@ -55,6 +63,38 @@ def postgres_store():
 def test_postgres_store_rejects_non_postgres_url_before_connecting():
     with pytest.raises(ValueError, match="postgresql://"):
         PostgresModelProviderStore("sqlite:///tmp/not-postgres.db")
+
+
+@pg_only
+def test_postgres_seeded_commonstack_is_platform_only_with_allowlisted_models(
+    postgres_store,
+):
+    provider = postgres_store.get_provider("commonstack")
+
+    assert provider["adapter_type"] == "openai_compatible"
+    assert provider["approved_base_url"] == "https://api.commonstack.ai/v1"
+    assert provider["byok_enabled"] is False
+    assert provider["platform_enabled"] is True
+    assert provider["capabilities"].model_allowlist == (
+        "openai/gpt-5.5",
+        "google/gemini-3.1-pro-preview",
+        "anthropic/claude-sonnet-4-6",
+        "deepseek/deepseek-v4-pro",
+        "qwen/qwen3.7-plus",
+    )
+
+    provider_record = ProviderRecord.model_validate(provider)
+    assert [
+        route.catalog_id for route in list_execution_model_routes(provider_record)
+    ] == [
+        "anthropic/claude-sonnet-4-6",
+        "openai/gpt-5.5",
+        "google/gemini-3.1-pro-preview",
+        "deepseek/deepseek-v4-pro",
+        "qwen/qwen3.7-plus",
+    ]
+    with pytest.raises(UnsupportedExecutionModel):
+        resolve_execution_model_route(provider_record, "anthropic/claude-haiku-4-5")
 
 
 @pg_only

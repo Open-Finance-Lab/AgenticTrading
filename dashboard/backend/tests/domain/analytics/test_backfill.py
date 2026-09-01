@@ -11,6 +11,7 @@ from dashboard.backend.domain.analytics.backfill import (
     AuthoritativeBackfillSource,
     BackfillCandidate,
     BackfillCollection,
+    _usage_candidate,
     backfill_analytics,
 )
 from dashboard.backend.domain.analytics.repository import AnalyticsStore
@@ -18,6 +19,40 @@ from dashboard.backend.domain.analytics.service import AnalyticsService
 
 
 NOW = datetime(2026, 8, 26, 12, 0, tzinfo=timezone.utc)
+
+
+def test_one_call_backfill_uses_actual_provider_after_failover():
+    candidate = _usage_candidate(
+        {
+            "run_id": "fallback-one-call",
+            "created_at": NOW.isoformat(),
+            "metadata": {
+                "llm_execution": {
+                    "billing_mode": "platform_credits",
+                    "requested_provider_id": "openrouter",
+                    "provider_id": "commonstack",
+                    "provider_ids": ["commonstack"],
+                    "provider_mixed": False,
+                    "model_id": "qwen/qwen3.7-plus",
+                    "call_count": 1,
+                    "input_tokens": 40,
+                    "output_tokens": 20,
+                    "usage_available": True,
+                    "provider_cost_usd": 0.001,
+                    "estimated_cost_usd": 0.001,
+                    "pricing_snapshot": None,
+                    "debited_credits_micro": 1_000,
+                    "outstanding_credits_micro": 0,
+                    "outcome": "settled",
+                }
+            },
+        },
+        user_id=1,
+    )
+
+    assert candidate is not None
+    assert candidate.provider_id == "commonstack"
+    assert candidate.model_id == "qwen/qwen3.7-plus"
 
 
 class StaticSource:

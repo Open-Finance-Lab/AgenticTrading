@@ -61,6 +61,7 @@ ALLOWED_ERROR_CATEGORIES = {
     "credential_missing",
     "provider_timeout",
     "provider_unavailable",
+    "provider_quota_exhausted",
     "credits_unavailable",
     "model_not_allowed",
     "internal_error",

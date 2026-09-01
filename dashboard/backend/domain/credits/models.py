@@ -362,6 +362,8 @@ class LLMReservation(BaseModel):
     user_id: StrictInt
     run_id: str
     call_index: StrictInt
+    provider_id: str | None = None
+    attempt_index: StrictInt = Field(default=0, ge=0)
     reserved_micro: StrictInt
     settled_micro: StrictInt
     actual_micro: StrictInt = Field(default=0, ge=0)
@@ -379,6 +381,8 @@ class LLMSettlementResult(BaseModel):
     reservation_id: str
     user_id: StrictInt
     run_id: str
+    provider_id: str | None = None
+    attempt_index: StrictInt = Field(default=0, ge=0)
     reserved_micro: StrictInt
     settled_micro: StrictInt
     actual_micro: StrictInt = Field(default=0, ge=0)

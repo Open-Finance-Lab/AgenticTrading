@@ -31,6 +31,9 @@ from dashboard.backend.domain.credits.repository_common import (
     _utcnow_iso,
     _validate_amount_pair,
 )
+from dashboard.backend.domain.model_providers.repository_common import (
+    validate_provider_id,
+)
 
 
 _SETTLEMENT_OUTCOME_EVIDENCE_KEYS = {
@@ -149,6 +152,8 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     user_id INTEGER NOT NULL,
     run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
     call_index INTEGER NOT NULL CHECK (call_index >= 0),
+    provider_id TEXT,
+    attempt_index INTEGER NOT NULL DEFAULT 0 CHECK (attempt_index >= 0),
     reserved_micro INTEGER NOT NULL CHECK (reserved_micro > 0),
     reserved_grant_micro INTEGER NOT NULL CHECK (reserved_grant_micro >= 0),
     reserved_purchased_micro INTEGER NOT NULL CHECK (reserved_purchased_micro >= 0),
@@ -167,7 +172,7 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
     updated_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
-    UNIQUE (user_id, run_id, call_index)
+    UNIQUE (user_id, run_id, call_index, attempt_index)
 )
 """
 
@@ -512,6 +517,16 @@ class CreditsStore:
                 "ADD COLUMN outstanding_recovered_micro INTEGER NOT NULL DEFAULT 0 "
                 "CHECK (outstanding_recovered_micro >= 0)"
             )
+        if "provider_id" not in reservation_columns:
+            conn.execute(
+                "ALTER TABLE credit_llm_reservations ADD COLUMN provider_id TEXT"
+            )
+        if "attempt_index" not in reservation_columns:
+            conn.execute(
+                "ALTER TABLE credit_llm_reservations "
+                "ADD COLUMN attempt_index INTEGER NOT NULL DEFAULT 0 "
+                "CHECK (attempt_index >= 0)"
+            )
         account_columns = cls._table_columns(conn, "credit_accounts")
         if "restriction_reason" not in account_columns:
             conn.execute(
@@ -535,7 +550,7 @@ class CreditsStore:
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
-            ON credit_llm_reservations(run_id, status, call_index)
+            ON credit_llm_reservations(run_id, status, call_index, attempt_index)
             """
         )
         conn.execute(
@@ -558,12 +573,19 @@ class CreditsStore:
         if not cls._table_columns(conn, "users"):
             return
 
+        reservation_columns = cls._table_columns(conn, "credit_llm_reservations")
         row = conn.execute(
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'credit_llm_reservations'"
         ).fetchone()
         table_sql = "".join(str(row["sql"] or "").lower().split()) if row else ""
-        if "settled_micro<=reserved_micro" not in table_sql:
+        needs_rebuild = (
+            "provider_id" not in reservation_columns
+            or "attempt_index" not in reservation_columns
+            or "unique(user_id,run_id,call_index)" in table_sql
+            or "settled_micro<=reserved_micro" in table_sql
+        )
+        if not needs_rebuild:
             return
 
         usage_exists = bool(cls._table_columns(conn, "credit_llm_usage_entries"))
@@ -580,7 +602,17 @@ class CreditsStore:
         )
         conn.execute(_LLM_RESERVATION_DDL)
         columns = (
-            "reservation_id, user_id, run_id, call_index, reserved_micro, "
+            "reservation_id, user_id, run_id, call_index, provider_id, "
+            "attempt_index, reserved_micro, reserved_grant_micro, "
+            "reserved_purchased_micro, settled_micro, actual_micro, "
+            "outstanding_micro, outstanding_recovered_micro, status, operation_key, "
+            "request_digest, evidence_json, failure_reason, created_at, updated_at"
+        )
+        provider_expression = "provider_id" if "provider_id" in reservation_columns else "NULL"
+        attempt_expression = "attempt_index" if "attempt_index" in reservation_columns else "0"
+        select_columns = (
+            "reservation_id, user_id, run_id, call_index, "
+            f"{provider_expression}, {attempt_expression}, reserved_micro, "
             "reserved_grant_micro, reserved_purchased_micro, settled_micro, "
             "actual_micro, outstanding_micro, outstanding_recovered_micro, status, "
             "operation_key, request_digest, evidence_json, failure_reason, "
@@ -588,7 +620,7 @@ class CreditsStore:
         )
         conn.execute(
             f"INSERT INTO credit_llm_reservations ({columns}) "
-            f"SELECT {columns} FROM credit_llm_reservations_migration_legacy"
+            f"SELECT {select_columns} FROM credit_llm_reservations_migration_legacy"
         )
         conn.execute("DROP TABLE credit_llm_reservations_migration_legacy")
 
@@ -1101,6 +1133,8 @@ class CreditsStore:
         user_id: int,
         run_id: str,
         call_index: int,
+        attempt_index: int,
+        provider_id: str,
         reserved_micro: int,
         operation_key: str,
         request_digest: str,
@@ -1119,6 +1153,9 @@ class CreditsStore:
         _positive_integer(reserved_micro, "reserved_micro")
         if isinstance(call_index, bool) or not isinstance(call_index, int) or call_index < 0:
             raise ValueError("call_index must be a non-negative integer")
+        if isinstance(attempt_index, bool) or not isinstance(attempt_index, int) or attempt_index < 0:
+            raise ValueError("attempt_index must be a non-negative integer")
+        provider_id = validate_provider_id(provider_id)
 
         with self._get_connection() as conn:
             self._begin(conn)
@@ -1127,9 +1164,9 @@ class CreditsStore:
                 """
                 SELECT * FROM credit_llm_reservations
                 WHERE reservation_id = ? OR operation_key = ?
-                   OR (user_id = ? AND run_id = ? AND call_index = ?)
+                   OR (user_id = ? AND run_id = ? AND call_index = ? AND attempt_index = ?)
                 """,
-                (reservation_id, operation_key, user_id, run_id, call_index),
+                (reservation_id, operation_key, user_id, run_id, call_index, attempt_index),
             ).fetchone()
             if existing:
                 if (
@@ -1137,6 +1174,8 @@ class CreditsStore:
                     or int(existing["user_id"]) != user_id
                     or existing["run_id"] != run_id
                     or int(existing["call_index"]) != call_index
+                    or int(existing["attempt_index"]) != attempt_index
+                    or existing["provider_id"] != provider_id
                     or int(existing["reserved_micro"]) != reserved_micro
                     or existing["operation_key"] != operation_key
                     or existing["request_digest"] != request_digest
@@ -1165,18 +1204,21 @@ class CreditsStore:
             conn.execute(
                 """
                 INSERT INTO credit_llm_reservations (
-                    reservation_id, user_id, run_id, call_index,
+                    reservation_id, user_id, run_id, call_index, provider_id,
+                    attempt_index,
                     reserved_micro, reserved_grant_micro,
                     reserved_purchased_micro, settled_micro, status,
                     operation_key, request_digest, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'open', ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'open', ?, ?, ?, ?)
                 """,
                 (
                     reservation_id,
                     user_id,
                     run_id,
                     call_index,
+                    provider_id,
+                    attempt_index,
                     reserved_micro,
                     reserved_grant,
                     reserved_purchased,
@@ -1596,7 +1638,7 @@ class CreditsStore:
             rows = conn.execute(
                 """
                 SELECT * FROM credit_llm_reservations
-                WHERE run_id = ? ORDER BY call_index
+                WHERE run_id = ? ORDER BY call_index, attempt_index, reservation_id
                 """,
                 (run_id,),
             ).fetchall()

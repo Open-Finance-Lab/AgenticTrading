@@ -559,24 +559,20 @@ def test_run_metadata_response_exposes_sanitized_llm_execution_evidence():
             "data_source": "alpaca",
             "llm_execution": {
                 "billing_mode": "platform_credits",
-                "provider_id": "openrouter",
+                "requested_provider_id": "openrouter",
+                "provider_id": "mixed",
+                "provider_ids": ["openrouter", "commonstack"],
+                "provider_mixed": True,
                 "model_id": "openai/gpt-5.5",
-                "credential_id": "credential-safe-id",
-                "credential_key_last_four": "1234",
+                "credential_id": None,
+                "credential_key_last_four": None,
                 "call_count": 2,
                 "input_tokens": 30,
                 "output_tokens": 13,
                 "usage_available": True,
                 "provider_cost_usd": 0.03,
                 "estimated_cost_usd": 0.028,
-                "pricing_snapshot": {
-                    "provider_id": "openrouter",
-                    "model_id": "openai/gpt-5.5",
-                    "input_usd_per_million_tokens": 5,
-                    "output_usd_per_million_tokens": 30,
-                    "currency": "USD",
-                    "source_version": "test-pricing-v1",
-                },
+                "pricing_snapshot": None,
                 "debited_credits_micro": 24_000,
                 "outstanding_credits_micro": 5_000,
                 "outcome": "settled_overage",
@@ -587,7 +583,14 @@ def test_run_metadata_response_exposes_sanitized_llm_execution_evidence():
 
     serialized = response.model_dump(mode="json")
     assert serialized["llm_execution"]["outcome"] == "settled_overage"
-    assert serialized["llm_execution"]["credential_key_last_four"] == "1234"
+    assert serialized["llm_execution"]["credential_key_last_four"] is None
+    assert serialized["llm_execution"]["requested_provider_id"] == "openrouter"
+    assert serialized["llm_execution"]["provider_id"] == "mixed"
+    assert serialized["llm_execution"]["provider_ids"] == [
+        "openrouter",
+        "commonstack",
+    ]
+    assert serialized["llm_execution"]["provider_mixed"] is True
     assert "raw-secret-must-not-leak" not in str(serialized)
     assert "provider_api_key" not in serialized["llm_execution"]
 
