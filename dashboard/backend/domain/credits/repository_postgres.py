@@ -312,9 +312,6 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
 CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_user_status
 ON credit_llm_reservations(user_id, status, created_at);
 
-CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
-ON credit_llm_reservations(run_id, status, call_index, attempt_index);
-
 CREATE TABLE IF NOT EXISTS credit_llm_usage_entries (
     id BIGSERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -369,6 +366,8 @@ DROP CONSTRAINT IF EXISTS credit_llm_reservations_attempt_index_check;
 ALTER TABLE credit_llm_reservations
 ADD CONSTRAINT credit_llm_reservations_attempt_index_check
 CHECK (attempt_index >= 0);
+CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
+ON credit_llm_reservations(run_id, status, call_index, attempt_index);
 ALTER TABLE credit_accounts
 ADD COLUMN IF NOT EXISTS restriction_reason TEXT;
 UPDATE credit_llm_reservations
