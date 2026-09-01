@@ -88,6 +88,18 @@ def test_postgres_schema_tracks_provider_attempt_identity():
     )
 
 
+def test_postgres_provider_attempt_index_is_created_after_its_column():
+    base_ddl = pg_module.CREDITS_POSTGRES_DDL
+    migration_ddl = pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+
+    assert "idx_credit_llm_reservations_run_status" not in base_ddl
+    add_column = migration_ddl.index(
+        "ADD COLUMN IF NOT EXISTS attempt_index INTEGER NOT NULL DEFAULT 0"
+    )
+    create_index = migration_ddl.index("idx_credit_llm_reservations_run_status")
+    assert add_column < create_index
+
+
 def test_build_credits_store_picks_postgres_from_users_url(monkeypatch, capsys):
     created = {}
 
@@ -210,6 +222,26 @@ CREATE TABLE stripe_webhook_events (
     outcome TEXT NOT NULL,
     reason TEXT,
     created_at TEXT NOT NULL
+);
+
+CREATE TABLE credit_llm_reservations (
+    reservation_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL,
+    call_index INTEGER NOT NULL,
+    reserved_micro BIGINT NOT NULL,
+    reserved_grant_micro BIGINT NOT NULL,
+    reserved_purchased_micro BIGINT NOT NULL,
+    settled_micro BIGINT NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'open',
+    operation_key TEXT NOT NULL UNIQUE,
+    request_digest TEXT NOT NULL,
+    evidence_json TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
+    UNIQUE (user_id, run_id, call_index)
 );
 
 CREATE TABLE credit_ledger_entries (
@@ -1040,6 +1072,67 @@ def test_postgres_migration_preserves_legacy_stripe_ledger(pg_legacy_credits_url
     assert reopened_pool["name"] == "Renamed Pool"
     assert reopened_pool["status"] == "disabled"
     assert reopened_pool_entries["count"] == 0
+
+
+@pg_only
+def test_postgres_migration_adds_attempt_index_before_dependent_index(
+    pg_legacy_credits_url,
+):
+    with psycopg.connect(pg_legacy_credits_url) as conn:
+        conn.execute(
+            """
+            INSERT INTO credit_llm_reservations (
+                reservation_id, user_id, run_id, call_index,
+                reserved_micro, reserved_grant_micro, reserved_purchased_micro,
+                operation_key, request_digest, created_at, updated_at
+            ) VALUES (
+                'legacy-reservation', 1, 'legacy-run', 0,
+                100, 100, 0, 'legacy-operation', 'legacy-digest',
+                '2026-08-01T00:00:00+00:00', '2026-08-01T00:00:00+00:00'
+            )
+            """
+        )
+
+    db_pool._reset_for_tests()
+    pg_module.PostgresCreditsStore(pg_legacy_credits_url)
+
+    with psycopg.connect(pg_legacy_credits_url, row_factory=dict_row) as conn:
+        columns = {
+            row["column_name"]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'credit_llm_reservations'
+                """
+            )
+        }
+        reservation = conn.execute(
+            """
+            SELECT attempt_index, provider_id
+            FROM credit_llm_reservations
+            WHERE reservation_id = 'legacy-reservation'
+            """
+        ).fetchone()
+        index_names = {
+            row["indexname"]
+            for row in conn.execute(
+                """
+                SELECT indexname
+                FROM pg_indexes
+                WHERE schemaname = current_schema()
+                  AND tablename = 'credit_llm_reservations'
+                """
+            )
+        }
+
+    assert {"attempt_index", "provider_id"} <= columns
+    assert reservation == {"attempt_index": 0, "provider_id": None}
+    assert "idx_credit_llm_reservations_run_status" in index_names
+
+    db_pool._reset_for_tests()
+    pg_module.PostgresCreditsStore(pg_legacy_credits_url)
 
 
 def _remove_postgres_grant_pool_snapshots(database_url: str) -> None:
