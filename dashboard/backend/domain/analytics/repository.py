@@ -242,6 +242,13 @@ class AnalyticsStore:
     def _migrate_error_category_constraint(conn: sqlite3.Connection) -> None:
         """Rebuild the events table when upgrading its closed category check."""
 
+        users_table = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'users'"
+        ).fetchone()
+        if users_table is None:
+            return
+
         row = conn.execute(
             "SELECT sql FROM sqlite_master "
             "WHERE type = 'table' AND name = 'analytics_events'"
@@ -300,6 +307,7 @@ class AnalyticsStore:
         placeholders = ", ".join("?" for _ in _EVENT_COLUMNS)
         columns = ", ".join(_EVENT_COLUMNS)
         with self._get_connection() as conn:
+            self._migrate_error_category_constraint(conn)
             try:
                 cursor = conn.execute(
                     f"INSERT INTO analytics_events ({columns}) VALUES ({placeholders})",

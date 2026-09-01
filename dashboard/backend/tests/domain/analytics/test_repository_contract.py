@@ -394,6 +394,36 @@ def test_sqlite_migrates_legacy_error_category_constraint(tmp_path):
     assert store.append_event(event).created is True
 
 
+def test_sqlite_defers_error_category_migration_until_users_table_exists(tmp_path):
+    db_path = tmp_path / "analytics-before-users.db"
+    legacy_ddl = ANALYTICS_SQLITE_DDL.replace(
+        "'provider_unavailable', 'provider_quota_exhausted',\n            'credits_unavailable',",
+        "'provider_unavailable', 'credits_unavailable',",
+    )
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(legacy_ddl)
+
+    store = AnalyticsStore(db_path=db_path)
+    user = UserStore(db_path=db_path).create_user(
+        "deferred-analytics-user@example.test",
+        "Deferred Analytics User",
+        "SecurePass1!",
+    )
+    event = event_record(
+        int(user["id"]),
+        event_id="10000000-0000-4000-8000-000000000006",
+        event_name="safe_error_recorded",
+        event_group="resource",
+        event_source="server",
+        source_event_id="safe-error:quota-deferred-migration",
+        session_id=None,
+        page_view=None,
+        error_category="provider_quota_exhausted",
+    )
+
+    assert store.append_event(event).created is True
+
+
 def test_sqlite_runs_shared_event_contracts(sqlite_contract):
     store, _admin_id, user_id = sqlite_contract
     assert_event_idempotency_contract(store, user_id)
