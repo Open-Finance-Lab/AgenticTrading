@@ -312,8 +312,10 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
 CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_user_status
 ON credit_llm_reservations(user_id, status, created_at);
 
-CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
-ON credit_llm_reservations(run_id, status, call_index, attempt_index);
+-- idx_credit_llm_reservations_run_status is created in
+-- CREDITS_POSTGRES_GRANT_MIGRATION_DDL *after* ADD COLUMN attempt_index.
+-- CREATE TABLE IF NOT EXISTS is a no-op on the deployed table, so indexing
+-- the new column here raises UndefinedColumn at import (Render #432).
 
 CREATE TABLE IF NOT EXISTS credit_llm_usage_entries (
     id BIGSERIAL PRIMARY KEY,
@@ -364,6 +366,9 @@ ALTER TABLE credit_llm_reservations
 ADD COLUMN IF NOT EXISTS provider_id TEXT;
 ALTER TABLE credit_llm_reservations
 ADD COLUMN IF NOT EXISTS attempt_index INTEGER NOT NULL DEFAULT 0;
+DROP INDEX IF EXISTS idx_credit_llm_reservations_run_status;
+CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
+ON credit_llm_reservations(run_id, status, call_index, attempt_index);
 ALTER TABLE credit_llm_reservations
 DROP CONSTRAINT IF EXISTS credit_llm_reservations_attempt_index_check;
 ALTER TABLE credit_llm_reservations

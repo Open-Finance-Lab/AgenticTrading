@@ -88,6 +88,29 @@ def test_postgres_schema_tracks_provider_attempt_identity():
     )
 
 
+def test_postgres_boot_ddl_indexes_attempt_index_only_after_add_column():
+    """CREATE TABLE IF NOT EXISTS no-ops on prod; indexing the new column
+    there is what killed the #432 Render boot (`UndefinedColumn: attempt_index`).
+    """
+    create_ddl = pg_module.CREDITS_POSTGRES_DDL
+    migration = pg_module.CREDITS_POSTGRES_GRANT_MIGRATION_DDL
+    add_column = "ADD COLUMN IF NOT EXISTS attempt_index INTEGER NOT NULL DEFAULT 0"
+    drop_index = "DROP INDEX IF EXISTS idx_credit_llm_reservations_run_status"
+    create_index = (
+        "CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status"
+    )
+
+    assert create_index not in create_ddl
+    assert add_column in migration
+    assert drop_index in migration
+    assert create_index in migration
+    assert "ON credit_llm_reservations(run_id, status, call_index, attempt_index)" in (
+        migration
+    )
+    assert migration.index(add_column) < migration.index(drop_index)
+    assert migration.index(drop_index) < migration.index(create_index)
+
+
 def test_build_credits_store_picks_postgres_from_users_url(monkeypatch, capsys):
     created = {}
 
@@ -226,6 +249,39 @@ CREATE TABLE credit_ledger_entries (
     operation_key TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL
 );
+"""
+
+
+# Prod reservation table as of PR #431 — exists, but has neither attempt_index
+# nor the four-column unique key. CREATE TABLE IF NOT EXISTS no-ops against it.
+PRE_FAILOVER_RESERVATION_DDL = """
+CREATE TABLE credit_llm_reservations (
+    reservation_id TEXT PRIMARY KEY CHECK (length(trim(reservation_id)) > 0),
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL CHECK (length(trim(run_id)) > 0),
+    call_index INTEGER NOT NULL CHECK (call_index >= 0),
+    reserved_micro BIGINT NOT NULL CHECK (reserved_micro > 0),
+    reserved_grant_micro BIGINT NOT NULL CHECK (reserved_grant_micro >= 0),
+    reserved_purchased_micro BIGINT NOT NULL CHECK (reserved_purchased_micro >= 0),
+    settled_micro BIGINT NOT NULL DEFAULT 0 CHECK (settled_micro >= 0),
+    actual_micro BIGINT NOT NULL DEFAULT 0 CHECK (actual_micro >= 0),
+    outstanding_micro BIGINT NOT NULL DEFAULT 0 CHECK (outstanding_micro >= 0),
+    outstanding_recovered_micro BIGINT NOT NULL DEFAULT 0
+        CHECK (outstanding_recovered_micro >= 0),
+    status TEXT NOT NULL DEFAULT 'open'
+        CHECK (status IN ('open', 'settled', 'released')),
+    operation_key TEXT NOT NULL UNIQUE CHECK (length(trim(operation_key)) > 0),
+    request_digest TEXT NOT NULL CHECK (length(trim(request_digest)) > 0),
+    evidence_json TEXT,
+    failure_reason TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (reserved_micro = reserved_grant_micro + reserved_purchased_micro),
+    UNIQUE (user_id, run_id, call_index)
+);
+
+CREATE INDEX idx_credit_llm_reservations_run_status
+ON credit_llm_reservations(run_id, status, call_index);
 """
 
 
@@ -403,6 +459,66 @@ def pg_legacy_credits_url():
                         ),
                     ],
                 )
+
+        yield scoped_url
+    finally:
+        db_pool._reset_for_tests()
+        with psycopg.connect(base_url) as conn:
+            conn.execute(
+                sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(
+                    sql.Identifier(schema)
+                )
+            )
+
+
+@pytest.fixture
+def pg_pre_failover_reservations_url():
+    base_url = require_local_postgres_url(TEST_POSTGRES_URL)
+    schema = f"credits_pre_failover_{uuid.uuid4().hex}"
+    with psycopg.connect(base_url) as conn:
+        conn.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema)))
+
+    scoped_url = _schema_url(base_url, schema)
+    try:
+        with psycopg.connect(scoped_url) as conn:
+            conn.execute(
+                """
+                CREATE TABLE users (
+                    id INTEGER PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO users (
+                    id, email, display_name, password_hash, role, created_at
+                ) VALUES (
+                    1, 'legacy@example.com', 'Legacy', 'unused', 'user',
+                    '2026-08-31T00:00:00+00:00'
+                )
+                """
+            )
+            conn.execute(PRE_FAILOVER_RESERVATION_DDL)
+            conn.execute(
+                """
+                INSERT INTO credit_llm_reservations (
+                    reservation_id, user_id, run_id, call_index, reserved_micro,
+                    reserved_grant_micro, reserved_purchased_micro, settled_micro,
+                    actual_micro, outstanding_micro, outstanding_recovered_micro,
+                    status, operation_key, request_digest, created_at, updated_at
+                ) VALUES (
+                    'pre-failover-reservation', 1, 'pre-failover-run', 0,
+                    1000000, 1000000, 0, 0, 0, 0, 0, 'open',
+                    'pre-failover-operation', repeat('p', 64),
+                    '2026-08-31T00:00:00+00:00', '2026-08-31T00:00:00+00:00'
+                )
+                """
+            )
 
         yield scoped_url
     finally:
@@ -1040,6 +1156,79 @@ def test_postgres_migration_preserves_legacy_stripe_ledger(pg_legacy_credits_url
     assert reopened_pool["name"] == "Renamed Pool"
     assert reopened_pool["status"] == "disabled"
     assert reopened_pool_entries["count"] == 0
+
+
+@pg_only
+def test_postgres_boot_migrates_pre_failover_reservation_table(
+    pg_pre_failover_reservations_url,
+):
+    """Reproduce the #432 Render crash: existing reservations, no attempt_index."""
+    pg_module.PostgresCreditsStore(pg_pre_failover_reservations_url)
+
+    with psycopg.connect(
+        pg_pre_failover_reservations_url, row_factory=dict_row
+    ) as conn:
+        columns = {
+            row["column_name"]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'credit_llm_reservations'
+                """
+            ).fetchall()
+        }
+        index_columns = [
+            row["attname"]
+            for row in conn.execute(
+                """
+                SELECT att.attname
+                FROM pg_class AS idx
+                JOIN pg_index AS i ON i.indexrelid = idx.oid
+                JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord)
+                  ON true
+                JOIN pg_attribute AS att
+                  ON att.attrelid = i.indrelid
+                 AND att.attnum = k.attnum
+                WHERE idx.relname = 'idx_credit_llm_reservations_run_status'
+                ORDER BY k.ord
+                """
+            ).fetchall()
+        ]
+        row = conn.execute(
+            """
+            SELECT attempt_index, provider_id
+            FROM credit_llm_reservations
+            WHERE reservation_id = 'pre-failover-reservation'
+            """
+        ).fetchone()
+        unique_key = conn.execute(
+            """
+            SELECT
+                (
+                    SELECT array_agg(att.attname ORDER BY key.ord)
+                    FROM unnest(con.conkey) WITH ORDINALITY AS key(attnum, ord)
+                    JOIN pg_attribute AS att
+                      ON att.attrelid = con.conrelid
+                     AND att.attnum = key.attnum
+                ) AS columns
+            FROM pg_constraint AS con
+            WHERE con.conrelid = 'credit_llm_reservations'::regclass
+              AND con.conname = 'credit_llm_reservations_logical_attempt_key'
+            """
+        ).fetchone()
+
+    assert "attempt_index" in columns
+    assert "provider_id" in columns
+    assert index_columns == ["run_id", "status", "call_index", "attempt_index"]
+    assert row == {"attempt_index": 0, "provider_id": None}
+    assert list(unique_key["columns"]) == [
+        "user_id",
+        "run_id",
+        "call_index",
+        "attempt_index",
+    ]
 
 
 def _remove_postgres_grant_pool_snapshots(database_url: str) -> None:
