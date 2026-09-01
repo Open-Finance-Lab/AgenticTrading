@@ -140,6 +140,8 @@ def test_welcome_grant_funds_platform_credit_reservations(tmp_path):
         user_id=1,
         run_id="welcome-credit-run",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         amount_micro=1_000_000,
     )
 
@@ -159,5 +161,7 @@ def test_restricted_account_receives_campaign_but_cannot_spend_it(tmp_path):
             user_id=1,
             run_id="restricted-run",
             call_index=0,
+            provider_id="openrouter",
+            attempt_index=0,
             amount_micro=1,
         )

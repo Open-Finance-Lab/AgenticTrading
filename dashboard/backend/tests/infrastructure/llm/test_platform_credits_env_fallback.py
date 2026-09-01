@@ -342,6 +342,8 @@ def test_restricted_account_execution_error_is_actionable(
             user_id=USER_ID,
             run_id="restricted-error-seed",
             call_index=0,
+            provider_id="openrouter",
+            attempt_index=0,
             reserved_micro=1_000_000,
             operation_key="restricted-error-seed",
             request_digest="r" * 64,

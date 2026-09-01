@@ -16,6 +16,9 @@ from dashboard.backend.domain.credits.repository_common import (
     CreditAccountRestrictedStoreError,
     LLMReservationConflictError,
 )
+from dashboard.backend.domain.model_providers.repository_common import (
+    ModelProviderStoreError,
+)
 
 
 def _store(tmp_path) -> CreditsStore:
@@ -107,6 +110,8 @@ def _settle_activity_call(
         user_id=user_id,
         run_id=run_id,
         call_index=call_index,
+        provider_id=provider_id,
+        attempt_index=0,
         reserved_micro=actual_micro,
         operation_key=f"reserve:{reservation_id}",
         request_digest=f"{user_id}{call_index}".ljust(64, "a")[:64],
@@ -249,17 +254,85 @@ def test_sqlite_migrates_legacy_reservation_settlement_constraint(tmp_path):
             "SELECT sql FROM sqlite_master WHERE name = 'credit_llm_reservations'"
         ).fetchone()[0]
         row = conn.execute(
-            "SELECT reserved_micro, operation_key FROM credit_llm_reservations"
+            "SELECT reserved_micro, operation_key, attempt_index, provider_id "
+            "FROM credit_llm_reservations"
         ).fetchone()
         usage = conn.execute(
             "SELECT operation_key, amount_micro FROM credit_llm_usage_entries"
         ).fetchone()
 
     assert "settled_micro <= reserved_micro" not in "".join(schema.lower().split())
-    assert tuple(row) == (1000, "legacy-operation")
+    assert tuple(row) == (1000, "legacy-operation", 0, None)
     assert tuple(usage) == ("legacy-usage", -100)
     assert settled["settled_micro"] == 1000
     assert settled["outstanding_micro"] == 200
+
+
+def test_provider_attempts_have_independent_reservations_for_one_logical_call(
+    tmp_path,
+):
+    store = _store(tmp_path)
+    _pending_order(store, amount_usd_cents=100, credits_micro=1_000_000)
+    _pay_order(store, amount_usd_cents=100)
+
+    primary = store.reserve_llm_credits(
+        reservation_id="attempt-primary",
+        user_id=1,
+        run_id="attempt-run",
+        call_index=3,
+        attempt_index=0,
+        provider_id="openrouter",
+        reserved_micro=100_000,
+        operation_key="attempt-primary-operation",
+        request_digest="a" * 64,
+    )
+    store.release_llm_credits(
+        primary["reservation_id"], reason="provider_quota_exhausted"
+    )
+    fallback = store.reserve_llm_credits(
+        reservation_id="attempt-fallback",
+        user_id=1,
+        run_id="attempt-run",
+        call_index=3,
+        attempt_index=1,
+        provider_id="commonstack",
+        reserved_micro=100_000,
+        operation_key="attempt-fallback-operation",
+        request_digest="b" * 64,
+    )
+
+    assert primary["attempt_index"] == 0
+    assert primary["provider_id"] == "openrouter"
+    assert fallback["attempt_index"] == 1
+    assert fallback["provider_id"] == "commonstack"
+
+
+def test_reservation_attempt_identity_is_validated_and_idempotent(tmp_path):
+    store = _store(tmp_path)
+    _pending_order(store, amount_usd_cents=100, credits_micro=1_000_000)
+    _pay_order(store, amount_usd_cents=100)
+    payload = {
+        "reservation_id": "attempt-validation",
+        "user_id": 1,
+        "run_id": "attempt-validation-run",
+        "call_index": 0,
+        "attempt_index": 0,
+        "provider_id": "openrouter",
+        "reserved_micro": 100_000,
+        "operation_key": "attempt-validation-operation",
+        "request_digest": "v" * 64,
+    }
+    store.reserve_llm_credits(**payload)
+    assert store.reserve_llm_credits(**payload)["attempt_index"] == 0
+
+    with pytest.raises(ValueError, match="attempt_index"):
+        store.reserve_llm_credits(**{**payload, "attempt_index": -1})
+    with pytest.raises(ModelProviderStoreError, match="provider id"):
+        store.reserve_llm_credits(**{**payload, "provider_id": " "})
+    with pytest.raises(LLMReservationConflictError, match="different input"):
+        store.reserve_llm_credits(**{**payload, "provider_id": "commonstack"})
+    with pytest.raises(LLMReservationConflictError, match="different input"):
+        store.reserve_llm_credits(**{**payload, "attempt_index": 1})
 
 
 def test_llm_overage_debits_the_hold_and_restricts_the_account(tmp_path):
@@ -271,6 +344,8 @@ def test_llm_overage_debits_the_hold_and_restricts_the_account(tmp_path):
         user_id=1,
         run_id="run-overage",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         reserved_micro=1_000_000,
         operation_key="llm-reserve-overage",
         request_digest="a" * 64,
@@ -322,6 +397,8 @@ def test_llm_overage_debits_the_hold_and_restricts_the_account(tmp_path):
             user_id=1,
             run_id="run-blocked",
             call_index=0,
+            provider_id="openrouter",
+            attempt_index=0,
             reserved_micro=1,
             operation_key="llm-reserve-blocked",
             request_digest="b" * 64,
@@ -356,6 +433,8 @@ def test_llm_overage_uses_unreserved_grant_before_restricting(tmp_path):
         user_id=1,
         run_id="run-covered-overage",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         reserved_micro=1_000_000,
         operation_key="llm-reserve-covered-overage",
         request_digest="h" * 64,
@@ -394,6 +473,8 @@ def test_llm_overage_does_not_spend_another_open_reservation(tmp_path):
         user_id=1,
         run_id="run-current",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         reserved_micro=1_000_000,
         operation_key="llm-reserve-current",
         request_digest="i" * 64,
@@ -403,6 +484,8 @@ def test_llm_overage_does_not_spend_another_open_reservation(tmp_path):
         user_id=1,
         run_id="run-protected",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         reserved_micro=500_000,
         operation_key="llm-reserve-protected",
         request_digest="j" * 64,
@@ -435,6 +518,8 @@ def test_grant_recovers_llm_overage_and_reinstates_account(tmp_path):
         user_id=1,
         run_id="run-recover",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         reserved_micro=1_000_000,
         operation_key="llm-reserve-recover",
         request_digest="c" * 64,
@@ -894,6 +979,8 @@ def test_activity_omits_released_run_without_settled_usage(tmp_path):
         user_id=1,
         run_id="run-released-without-charge",
         call_index=0,
+        provider_id="openrouter",
+        attempt_index=0,
         reserved_micro=1_000,
         operation_key="activity-released-reserve",
         request_digest="r" * 64,

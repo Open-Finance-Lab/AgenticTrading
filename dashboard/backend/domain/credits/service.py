@@ -30,6 +30,9 @@ from dashboard.backend.domain.credits.repository import (
     credits_store,
 )
 from dashboard.backend.domain.credits.repository_common import _canonical_digest
+from dashboard.backend.domain.model_providers.repository_common import (
+    validate_provider_id,
+)
 from dashboard.backend.domain.credits.stripe_gateway import (
     StripeGatewayDefinitiveError,
     StripeGatewayError,
@@ -217,6 +220,12 @@ class CreditsService:
             user_id=int(value["user_id"]),
             run_id=str(value["run_id"]),
             call_index=int(value["call_index"]),
+            provider_id=(
+                str(value["provider_id"])
+                if value.get("provider_id") is not None
+                else None
+            ),
+            attempt_index=int(value.get("attempt_index") or 0),
             reserved_micro=int(value["reserved_micro"]),
             settled_micro=int(value["settled_micro"]),
             actual_micro=int(value.get("actual_micro") or 0),
@@ -236,6 +245,12 @@ class CreditsService:
             reservation_id=str(value["reservation_id"]),
             user_id=int(value["user_id"]),
             run_id=str(value["run_id"]),
+            provider_id=(
+                str(value["provider_id"])
+                if value.get("provider_id") is not None
+                else None
+            ),
+            attempt_index=int(value.get("attempt_index") or 0),
             reserved_micro=int(value["reserved_micro"]),
             settled_micro=int(value["settled_micro"]),
             actual_micro=int(value.get("actual_micro") or 0),
@@ -289,30 +304,49 @@ class CreditsService:
         run_id: str,
         call_index: int,
         amount_micro: int,
+        provider_id: str,
+        attempt_index: int = 0,
         operation_key: str | None = None,
         request_digest: str | None = None,
     ) -> LLMReservation:
         """Temporarily hold a usage ceiling; no Credit debit occurs here."""
 
+        provider_id = validate_provider_id(provider_id)
+        if (
+            isinstance(attempt_index, bool)
+            or not isinstance(attempt_index, int)
+            or attempt_index < 0
+        ):
+            raise ValueError("attempt_index must be a non-negative integer")
         operation_key = operation_key or _operation_id(
-            "llm_reserve", user_id, run_id, call_index
+            "llm_reserve", user_id, run_id, call_index, attempt_index, provider_id
         )
         request_digest = request_digest or _canonical_digest(
             {
                 "user_id": int(user_id),
                 "run_id": run_id,
                 "call_index": call_index,
+                "attempt_index": attempt_index,
+                "provider_id": provider_id,
                 "amount_micro": amount_micro,
             }
         )
         reservation_id = _operation_id(
-            "llm_res", user_id, run_id, call_index, operation_key
+            "llm_res",
+            user_id,
+            run_id,
+            call_index,
+            attempt_index,
+            provider_id,
+            operation_key,
         )
         raw = self.store.reserve_llm_credits(
             reservation_id=reservation_id,
             user_id=int(user_id),
             run_id=str(run_id),
             call_index=int(call_index),
+            attempt_index=int(attempt_index),
+            provider_id=provider_id,
             reserved_micro=int(amount_micro),
             operation_key=operation_key,
             request_digest=request_digest,
