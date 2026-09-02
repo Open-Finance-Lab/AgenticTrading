@@ -785,15 +785,16 @@ def test_password_reset_request_lifecycle_postgres(temp_postgres_store):
 
 @pg_only
 def test_password_reset_attempt_cap_cancels_postgres(temp_postgres_store):
-    from dashboard.backend.users import PASSWORD_RESET_MAX_ATTEMPTS
+    import dashboard.backend.users as users_module
     from dashboard.backend.verification_codes import hash_code
 
     store = temp_postgres_store
     user = store.create_user("cap-pg@example.com", "Cap PG", "securepass1")
     row = store.create_password_reset_request(user["id"], hash_code("A"))
 
-    for expected in range(1, PASSWORD_RESET_MAX_ATTEMPTS + 1):
+    cap = users_module.PASSWORD_RESET_MAX_ATTEMPTS
+    for expected in range(1, cap + 1):
         assert store.record_password_reset_attempt(row["id"]) == expected
     assert store.get_active_password_reset(user["id"]) is None
     # The conditional UPDATE refuses to push past the cap.
-    assert store.record_password_reset_attempt(row["id"]) == PASSWORD_RESET_MAX_ATTEMPTS
+    assert store.record_password_reset_attempt(row["id"]) == cap

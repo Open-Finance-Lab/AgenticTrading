@@ -32,7 +32,7 @@ def _ago(**delta) -> str:
     return format_stored_timestamp(_utcnow() - timedelta(**delta))
 
 
-def _backdate_email_change(store, request_id, **columns) -> None:
+def _backdate_request(store, table, request_id, **columns) -> None:
     """Rewrite timestamp columns on one request row.
 
     The windows under test are hours and days wide, so the alternative is
@@ -42,11 +42,15 @@ def _backdate_email_change(store, request_id, **columns) -> None:
     assignments = ", ".join(f"{name} = ?" for name in columns)
     conn = store._get_connection()
     conn.execute(
-        f"UPDATE email_change_requests SET {assignments} WHERE id = ?",  # noqa: S608
+        f"UPDATE {table} SET {assignments} WHERE id = ?",  # noqa: S608
         (*columns.values(), request_id),
     )
     conn.commit()
     conn.close()
+
+
+def _backdate_email_change(store, request_id, **columns) -> None:
+    _backdate_request(store, "email_change_requests", request_id, **columns)
 
 
 @pytest.fixture
@@ -270,14 +274,7 @@ def test_update_email_rejects_a_missing_user(store):
 
 
 def _backdate_password_reset(store, request_id, **columns) -> None:
-    assignments = ", ".join(f"{name} = ?" for name in columns)
-    conn = store._get_connection()
-    conn.execute(
-        f"UPDATE password_reset_requests SET {assignments} WHERE id = ?",  # noqa: S608
-        (*columns.values(), request_id),
-    )
-    conn.commit()
-    conn.close()
+    _backdate_request(store, "password_reset_requests", request_id, **columns)
 
 
 def test_create_password_reset_request_leaves_exactly_one_active_row(store, user):

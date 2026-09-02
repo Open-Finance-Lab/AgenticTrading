@@ -32,6 +32,7 @@ from dashboard.backend.users import (
     PASSWORD_RESET_TTL_MINUTES,
     USER_COUNTS_SQL,
     VALID_ROLES,
+    _expiry_iso,
     _utcnow,
     _utcnow_iso,
     admin_user_rows_to_payloads,
@@ -459,11 +460,7 @@ class PostgresUserStore:
         return public_user(row)
 
     def _email_change_expiry(self) -> str:
-        return (
-            (_utcnow() + timedelta(minutes=EMAIL_CHANGE_TTL_MINUTES))
-            .replace(microsecond=0)
-            .isoformat()
-        )
+        return _expiry_iso(EMAIL_CHANGE_TTL_MINUTES)
 
     def create_email_change_request(
         self, user_id: int, new_email: str, code_hash: str
@@ -624,11 +621,7 @@ class PostgresUserStore:
         return [str(row["created_at"]) for row in rows]
 
     def _password_reset_expiry(self) -> str:
-        return (
-            (_utcnow() + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES))
-            .replace(microsecond=0)
-            .isoformat()
-        )
+        return _expiry_iso(PASSWORD_RESET_TTL_MINUTES)
 
     def create_password_reset_request(
         self, user_id: int, code_hash: str

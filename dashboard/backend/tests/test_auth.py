@@ -714,15 +714,19 @@ def sent_emails(monkeypatch):
     return outbox
 
 
-def _code_from(email_body):
-    """Pull the 6-character code out of a captured message body."""
+def _code_after(email_body, label):
+    """Pull the 6-character code following `label` out of a captured body."""
     import re
 
     from dashboard.backend.verification_codes import CODE_ALPHABET
 
-    match = re.search(rf"code is: ([{CODE_ALPHABET}]{{6}})", email_body)
+    match = re.search(rf"{label} ([{CODE_ALPHABET}]{{6}})", email_body)
     assert match, f"no code found in: {email_body!r}"
     return match.group(1)
+
+
+def _code_from(email_body):
+    return _code_after(email_body, "code is:")
 
 
 def test_email_change_request_mails_the_original_address(client, sent_emails):
@@ -847,7 +851,7 @@ def test_humanize_wait_always_rounds_up_to_a_whole_unit(seconds, expected):
     assert _humanize_wait(seconds) == expected
 
 
-def _backdate_email_change_rows(store, user_id, **columns):
+def _backdate_rows(store, table, user_id, **columns):
     """Age this user's request rows so a window-based limit can be exercised.
 
     The windows are a day and a week wide, so the alternative is a frozen clock.
@@ -855,11 +859,15 @@ def _backdate_email_change_rows(store, user_id, **columns):
     assignments = ", ".join(f"{name} = ?" for name in columns)
     conn = store._get_connection()
     conn.execute(
-        f"UPDATE email_change_requests SET {assignments} WHERE user_id = ?",  # noqa: S608
+        f"UPDATE {table} SET {assignments} WHERE user_id = ?",  # noqa: S608
         (*columns.values(), user_id),
     )
     conn.commit()
     conn.close()
+
+
+def _backdate_email_change_rows(store, user_id, **columns):
+    _backdate_rows(store, "email_change_requests", user_id, **columns)
 
 
 def _backdate_latest_email_change_row(store, user_id, **columns):
@@ -2340,14 +2348,7 @@ def test_set_session_cookie_rejects_malformed_tokens():
 
 
 def _reset_code_from(email_body):
-    """Pull the 6-character code out of a captured reset message body."""
-    import re
-
-    from dashboard.backend.verification_codes import CODE_ALPHABET
-
-    match = re.search(rf"reset code: ([{CODE_ALPHABET}]{{6}})", email_body)
-    assert match, f"no code found in: {email_body!r}"
-    return match.group(1)
+    return _code_after(email_body, "reset code:")
 
 
 @pytest.fixture
@@ -2395,14 +2396,7 @@ def _reset_row_count(store) -> int:
 
 
 def _backdate_password_reset_rows(store, user_id, **columns):
-    assignments = ", ".join(f"{name} = ?" for name in columns)
-    conn = store._get_connection()
-    conn.execute(
-        f"UPDATE password_reset_requests SET {assignments} WHERE user_id = ?",  # noqa: S608
-        (*columns.values(), user_id),
-    )
-    conn.commit()
-    conn.close()
+    _backdate_rows(store, "password_reset_requests", user_id, **columns)
 
 
 def test_forgot_password_mails_a_code_to_a_known_account(client, reset_outbox):

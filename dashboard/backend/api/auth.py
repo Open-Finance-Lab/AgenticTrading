@@ -649,35 +649,32 @@ def change_password(
     # make a retry hit "Current password is incorrect". So swallow + surface via
     # print() (logger output is invisible under the deployed config) and still
     # return ok. Revocation is defence-in-depth, not a hard guarantee.
-    try:
-        users_module.user_store.delete_other_sessions(
+    _d7_cleanup(
+        "change-password",
+        current_user["id"],
+        "other-session revocation",
+        lambda: users_module.user_store.delete_other_sessions(
             current_user["id"], keep_token=_session_token(request, authorization)
-        )
-    except Exception as exc:  # noqa: BLE001 -- password change already committed
-        print(
-            f"WARNING: change-password committed for user {current_user['id']} but "
-            f"other-session revocation failed: {exc!r}"
-        )
+        ),
+    )
     # D7: a user changing their password may be reacting to a compromise, so an
     # attacker's in-flight email change dies with it. Best-effort and next to
     # the session revocation above, so the whole "invalidate what the old
     # password could reach" policy sits in one place.
-    try:
-        users_module.user_store.cancel_email_change(current_user["id"])
-    except Exception as exc:  # noqa: BLE001 -- password change already committed
-        print(
-            f"WARNING: change-password committed for user {current_user['id']} but "
-            f"cancelling the pending email change failed: {exc!r}"
-        )
+    _d7_cleanup(
+        "change-password",
+        current_user["id"],
+        "cancelling the pending email change",
+        lambda: users_module.user_store.cancel_email_change(current_user["id"]),
+    )
     # Same D7 symmetry for the reset flow: a code already mailed out must not
     # survive the password it would replace being changed by its real owner.
-    try:
-        users_module.user_store.cancel_password_reset(current_user["id"])
-    except Exception as exc:  # noqa: BLE001 -- password change already committed
-        print(
-            f"WARNING: change-password committed for user {current_user['id']} but "
-            f"cancelling the pending password reset failed: {exc!r}"
-        )
+    _d7_cleanup(
+        "change-password",
+        current_user["id"],
+        "cancelling the pending password reset",
+        lambda: users_module.user_store.cancel_password_reset(current_user["id"]),
+    )
     return {"status": "ok"}
 
 
@@ -824,12 +821,9 @@ def _authorize_email_change(store, current_user: dict, payload: EmailChangeReque
     #    drain the platform's shared daily provider quota in a couple of hours,
     #    half of it aimed at a third party from our sending domain. This is what
     #    closes that; the window frees as the oldest request in it ages out.
-    window = timedelta(days=1)
-    recent = store.email_change_request_times_since(
-        user_id, format_stored_timestamp(datetime.now(timezone.utc) - window)
-    )
+    recent = store.email_change_request_times_since(user_id, _daily_window_start())
     if len(recent) >= users_module.EMAIL_CHANGE_MAX_REQUESTS_PER_DAY:
-        remaining = window.total_seconds() - _seconds_since(recent[0])
+        remaining = _DAILY_CAP_WINDOW.total_seconds() - _seconds_since(recent[0])
         raise _too_soon(
             "Too many email-change requests today. "
             f"Try again in {_humanize_wait(remaining)}.",
@@ -977,25 +971,44 @@ async def verify_email_change(
     # change, so other sessions end -- but the durable write already landed, so a
     # revocation failure is a WARNING, not a 500. ERROR is reserved for the mail
     # failures above, where the user genuinely gets nothing.
-    try:
-        store.delete_other_sessions(
+    _d7_cleanup(
+        "email change",
+        current_user["id"],
+        "other-session revocation",
+        lambda: store.delete_other_sessions(
             current_user["id"], keep_token=_session_token(request, authorization)
-        )
-    except Exception as exc:  # noqa: BLE001 -- email change already committed
-        print(
-            f"WARNING: email change committed for user {current_user['id']} but "
-            f"other-session revocation failed: {exc!r}"
-        )
+        ),
+    )
     # A reset code was mailed to the *old* address; it must not survive the
     # address changing (D7 symmetry with change-password above).
-    try:
-        store.cancel_password_reset(current_user["id"])
-    except Exception as exc:  # noqa: BLE001 -- email change already committed
-        print(
-            f"WARNING: email change committed for user {current_user['id']} but "
-            f"cancelling the pending password reset failed: {exc!r}"
-        )
+    _d7_cleanup(
+        "email change",
+        current_user["id"],
+        "cancelling the pending password reset",
+        lambda: store.cancel_password_reset(current_user["id"]),
+    )
     return {"status": "ok", "user": user}
+
+
+def _d7_cleanup(action: str, user_id, step: str, fn) -> None:
+    """One D7 best-effort invalidation, after a committed credential change.
+
+    The durable write already landed, so a failure here surfaces as a WARNING
+    print (logger output is invisible under the deployed config) and never as
+    a 500 that would misreport the committed change to the client.
+    """
+    try:
+        fn()
+    except Exception as exc:  # noqa: BLE001 -- the credential change already committed
+        print(f"WARNING: {action} committed for user {user_id} but {step} failed: {exc!r}")
+
+
+_DAILY_CAP_WINDOW = timedelta(days=1)
+
+
+def _daily_window_start() -> str:
+    """Stored-format start of the rolling daily request-cap window."""
+    return format_stored_timestamp(datetime.now(timezone.utc) - _DAILY_CAP_WINDOW)
 
 
 def _password_reset_body(code: str) -> str:
@@ -1040,11 +1053,8 @@ async def _deliver_password_reset_code(email: str) -> None:
     if last_at and _seconds_since(last_at) < users_module.PASSWORD_RESET_COOLDOWN_SECONDS:
         print(f"auth.reset_skipped reason=cooldown domain={domain}")
         return
-    window_start = format_stored_timestamp(
-        datetime.now(timezone.utc) - timedelta(days=1)
-    )
     recent = await asyncio.to_thread(
-        store.password_reset_request_times_since, user_id, window_start
+        store.password_reset_request_times_since, user_id, _daily_window_start()
     )
     if len(recent) >= users_module.PASSWORD_RESET_MAX_REQUESTS_PER_DAY:
         print(f"auth.reset_skipped reason=daily_cap domain={domain}")
@@ -1074,6 +1084,23 @@ async def _deliver_password_reset_code(email: str) -> None:
         store.create_password_reset_request, user_id, hash_code(code)
     )
     print(f"auth.reset_requested domain={domain}")
+
+
+async def _deliver_password_reset_code_task(email: str) -> None:
+    """Failure boundary for the background task.
+
+    It runs after the 200 already went out, so an uncaught store/send error
+    would otherwise vanish with no log line at all (the daily-leaderboard
+    background refresh wraps its body the same way). ERROR, not a skip line:
+    the caller was told ok and got nothing.
+    """
+    try:
+        await _deliver_password_reset_code(email)
+    except Exception as exc:  # noqa: BLE001 -- post-response; print is the only sink
+        print(
+            "ERROR: password reset delivery failed "
+            f"domain={_email_domain(email)}: {exc!r}"
+        )
 
 
 @router.post("/forgot-password")
@@ -1109,7 +1136,7 @@ async def forgot_password(
     # response so neither the body nor the latency says whether an account
     # exists. (TestClient runs background tasks before returning, so tests
     # stay deterministic.)
-    background_tasks.add_task(_deliver_password_reset_code, payload.email)
+    background_tasks.add_task(_deliver_password_reset_code_task, payload.email)
     return {"status": "ok"}
 
 
@@ -1172,20 +1199,18 @@ def reset_password(payload: ResetPasswordRequest, request: Request):
     # sessions die (there is no session to keep -- the caller proved an inbox,
     # not a login), and a pending email change dies with them. Failures are
     # WARNINGs, never a 500 that would misreport a committed change.
-    try:
-        store.delete_other_sessions(int(user["id"]), keep_token=None)
-    except Exception as exc:  # noqa: BLE001 -- password reset already committed
-        print(
-            f"WARNING: password reset committed for user {user['id']} but "
-            f"session revocation failed: {exc!r}"
-        )
-    try:
-        store.cancel_email_change(int(user["id"]))
-    except Exception as exc:  # noqa: BLE001 -- password reset already committed
-        print(
-            f"WARNING: password reset committed for user {user['id']} but "
-            f"cancelling the pending email change failed: {exc!r}"
-        )
+    _d7_cleanup(
+        "password reset",
+        user["id"],
+        "session revocation",
+        lambda: store.delete_other_sessions(int(user["id"]), keep_token=None),
+    )
+    _d7_cleanup(
+        "password reset",
+        user["id"],
+        "cancelling the pending email change",
+        lambda: store.cancel_email_change(int(user["id"])),
+    )
     print(f"auth.reset_completed domain={_email_domain(payload.email)}")
     # No auto-login: minting a session for an email-only proof would skip the
     # fresh-password check login performs.

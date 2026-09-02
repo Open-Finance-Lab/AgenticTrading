@@ -73,6 +73,13 @@ PASSWORD_RESET_COOLDOWN_SECONDS = 300
 PASSWORD_RESET_MAX_REQUESTS_PER_DAY = 5
 
 
+def _expiry_iso(minutes: int) -> str:
+    """Shared expiry stamp for the emailed-code request writers (email change
+    and password reset); microseconds dropped so the stored form stays
+    fixed-width for the string-comparison window reads."""
+    return (_utcnow() + timedelta(minutes=minutes)).replace(microsecond=0).isoformat()
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -1087,11 +1094,7 @@ class UserStore:
         return public_user(row)
 
     def _email_change_expiry(self) -> str:
-        return (
-            (_utcnow() + timedelta(minutes=EMAIL_CHANGE_TTL_MINUTES))
-            .replace(microsecond=0)
-            .isoformat()
-        )
+        return _expiry_iso(EMAIL_CHANGE_TTL_MINUTES)
 
     def create_email_change_request(
         self, user_id: int, new_email: str, code_hash: str
@@ -1303,11 +1306,7 @@ class UserStore:
         return [str(row["created_at"]) for row in rows]
 
     def _password_reset_expiry(self) -> str:
-        return (
-            (_utcnow() + timedelta(minutes=PASSWORD_RESET_TTL_MINUTES))
-            .replace(microsecond=0)
-            .isoformat()
-        )
+        return _expiry_iso(PASSWORD_RESET_TTL_MINUTES)
 
     def create_password_reset_request(
         self, user_id: int, code_hash: str
