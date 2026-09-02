@@ -65,12 +65,26 @@ EMAIL_CHANGE_COOLDOWN_SECONDS = 60
 EMAIL_CHANGE_MAX_REQUESTS_PER_DAY = 3
 EMAIL_CHANGE_MIN_INTERVAL_DAYS = 7
 # Password-reset flow (#187). Same code machinery as email-change, but the
-# requester is anonymous, so the cooldown and daily cap are the durable
-# backstop behind api/auth.py's in-process limiters (which reset on redeploy).
+# requester is anonymous, so these caps are the durable backstop behind
+# api/auth.py's in-process limiters (which reset on redeploy). The policy the
+# resend button advertises -- 60 s between codes, one send plus five resends
+# an hour, then an hour's wait -- is enforced VISIBLY by those limiters; the
+# numbers here only bite silently, across a restart.
+#
+# COOLDOWN is deliberately SHORTER than the visible 60 s gate. The limiter
+# stamps a request on arrival and the browser counts from the response, but
+# a row here is stamped only after the Brevo send returns -- so a durable
+# window equal to the visible one ends a send-latency later than the countdown
+# the user just sat through, and their first click after it would be swallowed
+# as a silent skip. See api/auth.py::_BACKSTOP_SKEW_SECONDS.
+#
+# PER_DAY is a mail-bomb bound on the victim's inbox, not the user-facing
+# limit: it must clear a full hour's worth or "wait an hour" would be false.
 PASSWORD_RESET_TTL_MINUTES = 15
 PASSWORD_RESET_MAX_ATTEMPTS = 5
-PASSWORD_RESET_COOLDOWN_SECONDS = 300
-PASSWORD_RESET_MAX_REQUESTS_PER_DAY = 5
+PASSWORD_RESET_COOLDOWN_SECONDS = 45
+PASSWORD_RESET_MAX_REQUESTS_PER_HOUR = 6   # 1 send + 5 resends
+PASSWORD_RESET_MAX_REQUESTS_PER_DAY = 12   # two full hourly windows
 
 
 def _expiry_iso(minutes: int) -> str:

@@ -476,3 +476,119 @@ Frontend source-shape (`test_frontend_account_page.py` idioms —
 - `docs/source/lab/accounts.rst`: add a "Reset your password" section after
   "Sign in and out" (link location, code delivery/expiry, spam-folder note,
   all-sessions sign-out effect).
+
+## Amendment — 2026-09-02: "Resend code", and the policy behind it
+
+Supersedes the "No resend code affordance in v1" non-goal above. Requested after
+the first prod test of the flow: a user waiting on a code has no way back but
+"Back to sign in" → "Forgot password?", and the shipped 5-minute cooldown made
+that a five-minute wait with nothing on screen saying so.
+
+### Policy (user-facing)
+
+- **60 seconds** between one code and the next.
+- **One send plus five resends an hour** per address, then **an hour's wait**
+  (the sixth code's hour, rolling).
+- Both are **visible**: a click inside the minute answers 429
+  `FORGOT_COOLDOWN_DETAIL` ("Please wait a minute before requesting another
+  code."), the seventh request in an hour answers 429 `FORGOT_RATE_LIMIT_DETAIL`
+  — each with `Retry-After`, which the browser counts down on the button.
+- The interpretation of "max retry of 5 times" is five *resends*; if it was
+  meant as five sends total, `PASSWORD_RESET_MAX_REQUESTS_PER_HOUR` (which also
+  sets `_FORGOT_EMAIL_LIMITER`'s default) is the one constant to change.
+
+### Backend
+
+- `_FORGOT_COOLDOWN_LIMITER = _build_limiter("AUTH_FORGOT_COOLDOWN", 1, 60)`,
+  keyed on the typed normalized address like `_FORGOT_EMAIL_LIMITER` — so it is
+  existence-blind and its 429 says nothing about accounts
+  (`test_forgot_password_cooldown_429_is_existence_blind`). Checked **before**
+  the hourly limiter, so a click refused by the cooldown never spends one of the
+  hour's six (`…cooldown_refusal_does_not_charge_the_hourly_budget`).
+- `_FORGOT_EMAIL_LIMITER`'s default is now
+  `PASSWORD_RESET_MAX_REQUESTS_PER_HOUR` (6) rather than a literal, so the
+  visible gate and the durable backstop cannot drift apart.
+- The 200 body becomes `{"status": "ok", "resend_after_seconds": <cooldown
+  window>}` — config-shaped and identical for every caller, so the
+  enumeration-blindness test keeps comparing bodies byte-for-byte. The number's
+  owner is the limiter's window (`AUTH_FORGOT_COOLDOWN_WINDOW_SECONDS`), not the
+  `users.py` constant, because the limiter is the gate the browser actually
+  hits. `AUTH_FORGOT_COOLDOWN_MAX=0` does not remove the cooldown, it makes it
+  silent (the durable backstop still skips); the body keeps reporting the window.
+- Durable backstops (`users.py`), which only bite silently and only across a
+  restart: `PASSWORD_RESET_COOLDOWN_SECONDS` 300 → **45**,
+  new `PASSWORD_RESET_MAX_REQUESTS_PER_HOUR = 6` (rolling hour, skewed — next
+  bullet; skip reason `hourly_cap`), `PASSWORD_RESET_MAX_REQUESTS_PER_DAY`
+  5 → **12**. The daily cap is a mail-bomb bound on the victim's inbox
+  (two full hourly windows), not the user-facing limit; it must clear a full
+  hour's worth or "wait an hour" would be false — and it *had* to move, because
+  at 5 the sixth request after the hour would have been a **silent** daily-cap
+  skip, the worst outcome available. Trade-off accepted: the per-victim bound
+  rises from 5/day to 12/day; Brevo-quota worst case is unchanged (the global
+  10/h limiter is what bounds that).
+
+### The three clocks (`_BACKSTOP_SKEW_SECONDS = 15`)
+
+The in-process limiters stamp a request on **arrival**; the browser's countdown
+starts at the **response** (earlier still — the 200 precedes all account work);
+a `password_reset_requests` row is stamped only after the Brevo send
+**returns** (lookup, two reads, a POST with a 10 s timeout). A durable window
+equal to its visible twin therefore ends a send-latency *after* the gate has
+reopened, and the click the countdown (or a 429's `Retry-After`) lines up would
+pass the limiter only to be swallowed by the silent backstop — charging the
+hour's budget for a code that never went out. The durable cooldown is 45 s
+against the visible 60, and `_HOURLY_CAP_WINDOW` is `1h − 15 s`, so in a single
+process the visible gate always decides; the backstops only bite across a
+restart, where the limiters are empty anyway. Pinned by
+`test_forgot_limiter_defaults_match_the_advertised_resend_policy`,
+`…durable_cooldown_sits_inside_the_visible_gate` and the ageing-out step of
+`…requests_are_capped_per_hour`.
+
+### Frontend
+
+- `#resetResendBtn` (`type="button"`, `.auth-link-btn`) inside `#resetCodeStep`
+  under the code input. Disabled with the label `Resend code (59s)` /
+  `Resend code (12 min)` while a countdown runs (`formatResendCountdown`:
+  seconds up to a minute, whole minutes rounded up above it — executed under
+  node by `test_frontend_resend_countdown.py`).
+- The countdown starts on the stage-1 send and on every resend, from the
+  server's `resend_after_seconds`; a 429 restarts it from `error.retryAfter`,
+  which `AuthAPI.request` now lifts from the `Retry-After` header (exposed
+  cross-origin already; the Vercel frontend is same-origin via rewrites anyway).
+- `resetEmail` — the address stage 1 submitted — is what the resend and the
+  stage-2 submit send; `#authEmail` is overwritten with it and made `readOnly`
+  on stage-1 success (an edit made in flight must not survive as the displayed
+  address), and unlocked by `resetPasswordResetForm`, which every exit path
+  already funnels through (mode switch, close, logout, deep link). This also
+  closes the post-merge finding "editable stage-2 email mismatches the
+  (email, code) pair".
+- Resend success clears `#authError` so a stale 429 banner never sits beside
+  fresh "sent" copy; the copy is "We sent a new code to …", the same claim
+  stage 1 already makes.
+- Cache busters: `app.js?v=126`, `styles.css?v=131` (the four exact-match
+  guards were bumped in the same commit).
+
+### Accepted gaps (added)
+
+- **After a restart, the caps are silent.** The in-process limiters are empty,
+  so the first requests after a redeploy answer 200 + "sent" and the durable
+  hourly/daily caps skip silently. Extension of the already-accepted daily-cap
+  behaviour; the resend button makes it more reachable, not different. A
+  synchronous durable check would need an account lookup before the 200 (a
+  timing and enumeration oracle), so it stays as is.
+- **A failed send still spends the minute.** The in-process cooldown is charged
+  on arrival; send-before-persist still keeps the *durable* cooldown clear, so a
+  provider failure costs the user 60 s of countdown, not five minutes.
+- **Global-budget enumeration (pre-existing).** `_FORGOT_GLOBAL_LIMITER` is
+  charged only for known accounts (unknown returns before the charge). With
+  two accounts of their own an attacker can fill nine of the ten hourly slots,
+  request a candidate address, then a tenth self-request: their own mail arrives
+  iff the candidate is unregistered — one bit per hour. Charging before the
+  lookup would let junk addresses drain the budget instead (a DoS), so the
+  trade-off stands; the shorter cooldown makes the filler sends faster but not
+  the bit rate. Mitigation if it ever matters: a second global limiter keyed on
+  the typed address regardless of existence.
+- **"We sent …" is a claim the server never verifies** (six 200-paths send
+  nothing). Unchanged from v1 and enumeration-safe by construction; hedged copy
+  ("If an account exists for …") is a copy decision for the user-facing docs
+  round, not this change.

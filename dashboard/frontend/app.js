@@ -3167,6 +3167,10 @@ const AuthAPI = {
       // The admin console reads the same field for 403: a refusal there means
       // the cached role is stale, not that the request was malformed.
       error.status = response.status;
+      // A 429 says how long in Retry-After (seconds); the reset flow's resend
+      // countdown runs off that number rather than guessing.
+      const retryAfter = Number(response.headers.get('retry-after'));
+      if (Number.isFinite(retryAfter) && retryAfter > 0) error.retryAfter = retryAfter;
       throw error;
     }
 
@@ -3995,6 +3999,15 @@ function maskEmailForDisplay(email) {
   return `${local.slice(0, keep)}•••@${domain}`;
 }
 
+// Label for the resend button's countdown: seconds up to a minute, whole
+// minutes (rounded up) above it -- the hourly 429's Retry-After can be
+// 3600, and "Resend code (3600s)" is not a label anyone should read. Never
+// "0": the button is still disabled while this shows.
+function formatResendCountdown(seconds) {
+  const s = Math.max(1, Math.ceil(Number(seconds) || 0));
+  return s <= 60 ? `${s}s` : `${Math.ceil(s / 60)} min`;
+}
+
 function initEmailChangeForm() {
   const form = document.getElementById('accountEmailForm');
   if (!form) return;
@@ -4623,23 +4636,91 @@ function initAuthUI(options = {}) {
   // Password-reset mode: two stages in one form, stage held in a closure
   // (the email-change pattern).
   let resetStage = 1;
+  // The address stage 1 actually submitted. The code was mailed for THIS
+  // value, so the resend and the stage-2 submit key on it, never on the live
+  // input -- which is locked for the rest of the flow (below).
+  let resetEmail = '';
+  let resendTimer = null;
   const resetCodeStep = document.getElementById('resetCodeStep');
   const resetSentCopy = document.getElementById('resetSentCopy');
   const resetCodeInput = document.getElementById('resetCodeInput');
   const resetNewPassword = document.getElementById('resetNewPassword');
   const resetHints = document.getElementById('resetPasswordHints');
+  const resetResendBtn = document.getElementById('resetResendBtn');
+  const emailInput = document.getElementById('authEmail');
+
+  const stopResendCountdown = () => {
+    if (resendTimer) clearInterval(resendTimer);
+    resendTimer = null;
+    if (resetResendBtn) {
+      resetResendBtn.disabled = false;
+      resetResendBtn.textContent = 'Resend code';
+    }
+  };
+
+  // Disable Resend for `seconds`, ticking the label down. The number is the
+  // server's (resend_after_seconds on a send, Retry-After on a 429), so the
+  // button re-enables when the gate actually reopens rather than on a guess.
+  const startResendCountdown = (seconds) => {
+    stopResendCountdown();
+    if (!resetResendBtn) return;
+    let remaining = Math.max(1, Math.ceil(Number(seconds) || 0));
+    const tick = () => {
+      if (remaining <= 0) {
+        stopResendCountdown();
+        return;
+      }
+      resetResendBtn.disabled = true;
+      resetResendBtn.textContent = `Resend code (${formatResendCountdown(remaining)})`;
+      remaining -= 1;
+    };
+    tick();
+    resendTimer = setInterval(tick, 1000);
+  };
 
   resetPasswordResetForm = () => {
     resetStage = 1;
+    resetEmail = '';
+    stopResendCountdown();
     if (resetCodeStep) resetCodeStep.hidden = true;
     if (resetSentCopy) resetSentCopy.textContent = '';
     if (resetCodeInput) resetCodeInput.value = '';
     if (resetNewPassword) resetNewPassword.value = '';
+    if (emailInput) emailInput.readOnly = false;
     renderPolicyHints(resetHints, []);
   };
 
   document.getElementById('authForgotPasswordBtn')?.addEventListener('click', () => {
     setAuthMode('reset');
+  });
+
+  resetResendBtn?.addEventListener('click', async () => {
+    if (resetStage !== 2 || !resetEmail) return;
+    const errorEl = document.getElementById('authError');
+    resetResendBtn.disabled = true;
+    try {
+      const data = await AuthAPI.requestPasswordReset(resetEmail);
+      // A stale rate-limit banner must not sit beside fresh "sent" copy.
+      if (errorEl) errorEl.hidden = true;
+      if (resetSentCopy) {
+        resetSentCopy.textContent = `We sent a new code to ${maskEmailForDisplay(resetEmail)} — it expires in 15 minutes. Check your spam folder too.`;
+      }
+      if (resetCodeInput) resetCodeInput.value = '';
+      startResendCountdown(data?.resend_after_seconds || 60);
+      resetCodeInput?.focus();
+    } catch (error) {
+      if (errorEl) {
+        errorEl.textContent = error.message;
+        errorEl.hidden = false;
+      }
+      if (error.status === 429) {
+        // The server said how long: the minute's cooldown, or the hour after
+        // the sixth code. Count it down rather than letting the user hammer.
+        startResendCountdown(error.retryAfter || 60);
+      } else {
+        resetResendBtn.disabled = false;
+      }
+    }
   });
 
   // The existing #authPassword hint listener is hard-gated to signup mode;
@@ -4681,14 +4762,23 @@ function initAuthUI(options = {}) {
       if (errorEl) errorEl.hidden = true;
       try {
         if (resetStage === 1) {
-          await AuthAPI.requestPasswordReset(email);
+          const data = await AuthAPI.requestPasswordReset(email);
           resetStage = 2;
+          resetEmail = email;
+          // Lock the field to the address the code went for. An edit made
+          // while the request was in flight must not survive as the shown
+          // address: resend and stage 2 both use resetEmail.
+          if (emailInput) {
+            emailInput.value = resetEmail;
+            emailInput.readOnly = true;
+          }
           if (resetSentCopy) {
             // textContent, never innerHTML: the address is user-typed.
             resetSentCopy.textContent = `We sent a 6-character code to ${maskEmailForDisplay(email)} — it expires in 15 minutes. Check your spam folder too.`;
           }
           if (resetCodeStep) resetCodeStep.hidden = false;
           submitBtn.textContent = 'Reset password';
+          startResendCountdown(data?.resend_after_seconds || 60);
           resetCodeInput?.focus();
         } else {
           const code = (resetCodeInput?.value || '').trim();
@@ -4700,13 +4790,13 @@ function initAuthUI(options = {}) {
             }
             return;
           }
-          await AuthAPI.resetPassword(email, code, newPassword);
+          await AuthAPI.resetPassword(resetEmail, code, newPassword);
+          const doneEmail = resetEmail;
           showAppToast('Password reset. Sign in with your new password.');
           setAuthMode('login');
           // setAuthMode reset the stage closure; re-prefill the email so the
           // user signs straight in with the password they just set.
-          const emailInput = document.getElementById('authEmail');
-          if (emailInput) emailInput.value = email;
+          if (emailInput) emailInput.value = doneEmail;
         }
       } catch (error) {
         if (errorEl) {

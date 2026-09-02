@@ -235,6 +235,7 @@ def _reset_shared_scale_state(monkeypatch):
     auth_api._SIGNUP_IP_LIMITER.reset()
     auth_api._SIGNUP_EMAIL_LIMITER.reset()
     auth_api._FORGOT_IP_LIMITER.reset()
+    auth_api._FORGOT_COOLDOWN_LIMITER.reset()
     auth_api._FORGOT_EMAIL_LIMITER.reset()
     auth_api._FORGOT_GLOBAL_LIMITER.reset()
     auth_api._RESET_IP_LIMITER.reset()

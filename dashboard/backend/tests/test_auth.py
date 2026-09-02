@@ -2369,7 +2369,12 @@ def _widen_forgot_limiters(monkeypatch):
     from dashboard.backend.api import auth as auth_api
     from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
 
-    for name in ("_FORGOT_IP_LIMITER", "_FORGOT_EMAIL_LIMITER", "_FORGOT_GLOBAL_LIMITER"):
+    for name in (
+        "_FORGOT_IP_LIMITER",
+        "_FORGOT_COOLDOWN_LIMITER",
+        "_FORGOT_EMAIL_LIMITER",
+        "_FORGOT_GLOBAL_LIMITER",
+    ):
         monkeypatch.setattr(
             auth_api, name, FixedWindowRateLimiter(max_events=1000, window_seconds=60)
         )
@@ -2399,12 +2404,26 @@ def _backdate_password_reset_rows(store, user_id, **columns):
     _backdate_rows(store, "password_reset_requests", user_id, **columns)
 
 
+def _backdate_oldest_password_reset_row(store, user_id, **columns):
+    """Age only the OLDEST request row -- the one whose window edge frees a
+    slot -- leaving the newer rows' timestamps alone."""
+    assignments = ", ".join(f"{name} = ?" for name in columns)
+    conn = store._get_connection()
+    conn.execute(
+        f"UPDATE password_reset_requests SET {assignments} "  # noqa: S608
+        "WHERE id = (SELECT MIN(id) FROM password_reset_requests WHERE user_id = ?)",
+        (*columns.values(), user_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def test_forgot_password_mails_a_code_to_a_known_account(client, reset_outbox):
     _signup_and_token(client, email="resetme@example.com")
 
     response = _request_reset(client, "resetme@example.com")
 
-    assert response.json() == {"status": "ok"}
+    assert response.json() == {"status": "ok", "resend_after_seconds": 60}
     assert len(reset_outbox) == 1
     assert reset_outbox[0]["to"] == "resetme@example.com"
     assert "reset code:" in reset_outbox[0]["body"]
@@ -2449,8 +2468,11 @@ def test_forgot_password_503s_when_brevo_is_unconfigured(client, monkeypatch, ca
 
 
 def test_forgot_password_send_failure_persists_nothing(
-    client, reset_outbox, temp_user_store, capsys
+    client, reset_outbox, temp_user_store, capsys, monkeypatch
 ):
+    # The in-process cooldown gate would 429 the immediate retry; this test
+    # is about the DURABLE cooldown, which the failed send must not burn.
+    _widen_forgot_limiters(monkeypatch)
     _signup_and_token(client, email="flaky-reset@example.com")
     reset_outbox.fail_sends()
 
@@ -2502,6 +2524,158 @@ def test_forgot_password_cooldown_is_status_blind(
     assert "reason=cooldown" in capsys.readouterr().out
 
 
+def test_forgot_limiter_defaults_match_the_advertised_resend_policy():
+    """The resend button advertises 60 s between codes, 1 send + 5 resends an
+    hour, then an hour's wait. Those numbers live in the in-process gates (the
+    visible 429s) and again in the durable backstops; pin both so they cannot
+    drift apart -- a backstop tighter than its gate is a silent skip."""
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.users import (
+        PASSWORD_RESET_COOLDOWN_SECONDS,
+        PASSWORD_RESET_MAX_REQUESTS_PER_DAY,
+        PASSWORD_RESET_MAX_REQUESTS_PER_HOUR,
+    )
+
+    assert auth_api._FORGOT_COOLDOWN_LIMITER.max_events == 1
+    assert auth_api._FORGOT_COOLDOWN_LIMITER.window_seconds == 60
+    assert auth_api._FORGOT_EMAIL_LIMITER.max_events == PASSWORD_RESET_MAX_REQUESTS_PER_HOUR == 6
+    assert auth_api._FORGOT_EMAIL_LIMITER.window_seconds == 3600
+    # Three clocks: the gate stamps request ARRIVAL, the row is stamped after
+    # the send returns, the browser counts from the response. The durable
+    # windows are shorter by the skew allowance so the first click after a
+    # countdown is decided by the visible gate, never swallowed by the backstop.
+    skew = auth_api._BACKSTOP_SKEW_SECONDS
+    assert 0 < skew < 60
+    assert PASSWORD_RESET_COOLDOWN_SECONDS + skew <= auth_api._FORGOT_COOLDOWN_LIMITER.window_seconds
+    assert auth_api._HOURLY_CAP_WINDOW.total_seconds() == 3600 - skew
+    # "Wait an hour" must be true: the daily backstop has to clear a full hour's
+    # worth, and it is a mail-bomb bound rather than the user-facing limit.
+    assert PASSWORD_RESET_MAX_REQUESTS_PER_HOUR < PASSWORD_RESET_MAX_REQUESTS_PER_DAY <= 12
+
+
+def test_forgot_password_reports_the_resend_cooldown(client, reset_outbox):
+    from dashboard.backend.api import auth as auth_api
+
+    _signup_and_token(client, email="resend-after@example.com")
+
+    known = _request_reset(client, "resend-after@example.com")
+    unknown = _request_reset(client, "nobody-resend-after@example.com")
+
+    # The countdown the browser runs has one owner: the visible gate's window.
+    assert known.json()["resend_after_seconds"] == int(
+        auth_api._FORGOT_COOLDOWN_LIMITER.window_seconds
+    )
+    # Config-shaped, so still byte-identical for an unknown address.
+    assert known.content == unknown.content
+
+
+def test_forgot_password_cooldown_429_is_existence_blind(client, reset_outbox):
+    from dashboard.backend.api import auth as auth_api
+
+    _signup_and_token(client, email="cool-known@example.com")
+
+    _request_reset(client, "cool-known@example.com")
+    known = client.post("/api/auth/forgot-password", json={"email": "cool-known@example.com"})
+    _request_reset(client, "cool-ghost@example.com")
+    unknown = client.post("/api/auth/forgot-password", json={"email": "cool-ghost@example.com"})
+
+    assert known.status_code == unknown.status_code == 429
+    assert known.content == unknown.content
+    assert known.json()["detail"] == auth_api.FORGOT_COOLDOWN_DETAIL
+    assert 1 <= int(known.headers["Retry-After"]) <= 60
+    # The refused request sent nothing and the accepted one sent exactly once.
+    assert len(reset_outbox) == 1
+
+
+def test_forgot_password_cooldown_refusal_does_not_charge_the_hourly_budget(
+    client, reset_outbox, monkeypatch
+):
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    _widen_forgot_limiters(monkeypatch)
+    hourly = FixedWindowRateLimiter(max_events=2, window_seconds=3600)
+    cooldown = FixedWindowRateLimiter(max_events=1, window_seconds=60)
+    monkeypatch.setattr(auth_api, "_FORGOT_EMAIL_LIMITER", hourly)
+    monkeypatch.setattr(auth_api, "_FORGOT_COOLDOWN_LIMITER", cooldown)
+
+    _request_reset(client, "budget@example.com")  # hourly 1/2
+    refused = client.post("/api/auth/forgot-password", json={"email": "budget@example.com"})
+    assert refused.status_code == 429
+    assert refused.json()["detail"] == auth_api.FORGOT_COOLDOWN_DETAIL
+
+    cooldown.reset()  # the minute passes
+    _request_reset(client, "budget@example.com")  # hourly 2/2 -- NOT 3/2
+    cooldown.reset()
+    capped = client.post("/api/auth/forgot-password", json={"email": "budget@example.com"})
+
+    assert capped.status_code == 429
+    assert capped.json()["detail"] == auth_api.FORGOT_RATE_LIMIT_DETAIL
+    assert int(capped.headers["Retry-After"]) > 60
+
+
+def test_forgot_password_durable_cooldown_sits_inside_the_visible_gate(
+    client, reset_outbox, temp_user_store, capsys, monkeypatch
+):
+    from dashboard.backend.users import PASSWORD_RESET_COOLDOWN_SECONDS
+
+    _widen_forgot_limiters(monkeypatch)
+    _signup_and_token(client, email="skew@example.com")
+    user = temp_user_store.get_user_by_email("skew@example.com")
+
+    _request_reset(client, "skew@example.com")
+    # A row just older than the durable cooldown (but younger than the 60 s the
+    # browser counted) still sends: the backstop must not bite first.
+    _backdate_password_reset_rows(
+        temp_user_store,
+        user["id"],
+        created_at=_stored_time(seconds=PASSWORD_RESET_COOLDOWN_SECONDS + 1),
+    )
+    _request_reset(client, "skew@example.com")
+    assert len(reset_outbox) == 2
+
+    _backdate_password_reset_rows(
+        temp_user_store,
+        user["id"],
+        created_at=_stored_time(seconds=PASSWORD_RESET_COOLDOWN_SECONDS - 5),
+    )
+    _request_reset(client, "skew@example.com")
+    assert len(reset_outbox) == 2
+    assert "reason=cooldown" in capsys.readouterr().out
+
+
+def test_forgot_password_requests_are_capped_per_hour(
+    client, reset_outbox, temp_user_store, capsys, monkeypatch
+):
+    from dashboard.backend.users import PASSWORD_RESET_MAX_REQUESTS_PER_HOUR
+
+    _widen_forgot_limiters(monkeypatch)
+    _signup_and_token(client, email="hourly@example.com")
+    user = temp_user_store.get_user_by_email("hourly@example.com")
+
+    for _ in range(PASSWORD_RESET_MAX_REQUESTS_PER_HOUR):
+        _request_reset(client, "hourly@example.com")
+        # Past the cooldown, inside the hour.
+        _backdate_password_reset_rows(
+            temp_user_store, user["id"], created_at=_stored_time(minutes=2)
+        )
+    assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_HOUR
+
+    _request_reset(client, "hourly@example.com")
+
+    assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_HOUR
+    assert "reason=hourly_cap" in capsys.readouterr().out
+
+    # The oldest send ageing out frees exactly one slot -- and the durable
+    # window releases it a little BEFORE the visible hour ends (skew), so the
+    # click the 429's Retry-After lines up is never swallowed.
+    _backdate_oldest_password_reset_row(
+        temp_user_store, user["id"], created_at=_stored_time(seconds=3600 - 5)
+    )
+    _request_reset(client, "hourly@example.com")
+    assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_HOUR + 1
+
+
 def test_forgot_password_requests_are_capped_per_day(
     client, reset_outbox, temp_user_store, capsys, monkeypatch
 ):
@@ -2513,9 +2687,9 @@ def test_forgot_password_requests_are_capped_per_day(
 
     for _ in range(PASSWORD_RESET_MAX_REQUESTS_PER_DAY):
         _request_reset(client, "capped-reset@example.com")
-        # Step past the 5-minute cooldown; every row stays inside the 24h window.
+        # Outside the hour, inside the 24h window.
         _backdate_password_reset_rows(
-            temp_user_store, user["id"], created_at=_stored_time(minutes=10)
+            temp_user_store, user["id"], created_at=_stored_time(hours=2)
         )
     assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_DAY
 
@@ -2765,13 +2939,15 @@ def test_forgot_password_ip_rate_limit_returns_429(client, monkeypatch):
         FixedWindowRateLimiter(max_events=2, window_seconds=60),
     )
 
-    for _ in range(2):
+    # A fresh address per request: the per-address cooldown must not be what
+    # fires, so only the client key is shared across the three.
+    for i in range(2):
         ok = client.post(
-            "/api/auth/forgot-password", json={"email": "rl-forgot@example.com"}
+            "/api/auth/forgot-password", json={"email": f"rl-forgot-{i}@example.com"}
         )
         assert ok.status_code == 200
     blocked = client.post(
-        "/api/auth/forgot-password", json={"email": "rl-forgot@example.com"}
+        "/api/auth/forgot-password", json={"email": "rl-forgot-2@example.com"}
     )
 
     assert blocked.status_code == 429

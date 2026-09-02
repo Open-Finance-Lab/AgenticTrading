@@ -54,6 +54,10 @@ RATE_LIMIT_DETAIL = "Too many login attempts; please try again later."
 # role: distinct copy per branch would be an account/state oracle.
 RESET_FAILURE_DETAIL = "Invalid or expired code."
 FORGOT_RATE_LIMIT_DETAIL = "Too many reset requests. Please wait before trying again."
+# The 60-second gate between one code and the next. Distinct copy from the
+# hourly budget above because the browser shows it verbatim while its resend
+# countdown runs, and "too many requests" after a single click reads as broken.
+FORGOT_COOLDOWN_DETAIL = "Please wait a minute before requesting another code."
 RESET_RATE_LIMIT_DETAIL = "Too many attempts. Please wait before trying again."
 
 
@@ -114,8 +118,20 @@ _SIGNUP_EMAIL_LIMITER = _build_limiter("AUTH_SIGNUP_EMAIL", 5, 3600)
 # limiter is the shared-Brevo-quota bound: an anonymous caller iterating known
 # addresses is the one genuinely new drain surface this flow opens, and
 # 10/hour caps the worst case under the provider's free-tier daily allowance.
+# The resend policy the login modal advertises, made VISIBLE (429 + Retry-After)
+# here and enforced durably by users.py's PASSWORD_RESET_* backstops:
+#   COOLDOWN  one request per 60 s per typed address -- the resend countdown;
+#   EMAIL     one send plus five resends an hour, then an hour's wait.
+# Checked in that order, so a click refused by the cooldown never spends one
+# of the hour's six. Both keys are the typed normalized address, so neither
+# 429 says anything about accounts. Setting AUTH_FORGOT_COOLDOWN_MAX=0 does
+# not remove the cooldown, it makes it silent (the durable backstop still
+# skips); the countdown the browser runs keeps reading this limiter's window.
 _FORGOT_IP_LIMITER = _build_limiter("AUTH_FORGOT_IP", 30, 3600)
-_FORGOT_EMAIL_LIMITER = _build_limiter("AUTH_FORGOT_EMAIL", 5, 3600)
+_FORGOT_COOLDOWN_LIMITER = _build_limiter("AUTH_FORGOT_COOLDOWN", 1, 60)
+_FORGOT_EMAIL_LIMITER = _build_limiter(
+    "AUTH_FORGOT_EMAIL", users_module.PASSWORD_RESET_MAX_REQUESTS_PER_HOUR, 3600
+)
 _FORGOT_GLOBAL_LIMITER = _build_limiter("AUTH_FORGOT_GLOBAL", 10, 3600)
 # reset-password mirrors login's check/record/allow split: the per-email
 # budget is the one keyed on the account under attack, so it is the control
@@ -1005,10 +1021,29 @@ def _d7_cleanup(action: str, user_id, step: str, fn) -> None:
 
 _DAILY_CAP_WINDOW = timedelta(days=1)
 
+# Three clocks measure the reset flow's windows from three instants: the
+# in-process limiters stamp a request on ARRIVAL, the browser's countdown
+# starts at the RESPONSE (earlier still, since the 200 precedes all account
+# work), and a password_reset_requests row is stamped only after the Brevo
+# send RETURNS -- lookup, two reads and a POST with a 10 s timeout later. A
+# durable window equal to its visible twin therefore ends after the gate has
+# already reopened, and the click the countdown (or a 429's Retry-After)
+# lines up would pass the limiter only to be swallowed by the silent backstop.
+# The durable windows are shortened by this allowance so that, in one
+# process, the visible gate is always the one that decides; the backstops
+# only bite across a restart, where the limiters are empty anyway.
+_BACKSTOP_SKEW_SECONDS = 15
+_HOURLY_CAP_WINDOW = timedelta(hours=1) - timedelta(seconds=_BACKSTOP_SKEW_SECONDS)
+
 
 def _daily_window_start() -> str:
     """Stored-format start of the rolling daily request-cap window."""
     return format_stored_timestamp(datetime.now(timezone.utc) - _DAILY_CAP_WINDOW)
+
+
+def _hourly_window_start() -> str:
+    """Stored-format start of the rolling hourly reset-cap window (skewed)."""
+    return format_stored_timestamp(datetime.now(timezone.utc) - _HOURLY_CAP_WINDOW)
 
 
 def _password_reset_body(code: str) -> str:
@@ -1053,10 +1088,16 @@ async def _deliver_password_reset_code(email: str) -> None:
     if last_at and _seconds_since(last_at) < users_module.PASSWORD_RESET_COOLDOWN_SECONDS:
         print(f"auth.reset_skipped reason=cooldown domain={domain}")
         return
-    recent = await asyncio.to_thread(
+    recent_hour = await asyncio.to_thread(
+        store.password_reset_request_times_since, user_id, _hourly_window_start()
+    )
+    if len(recent_hour) >= users_module.PASSWORD_RESET_MAX_REQUESTS_PER_HOUR:
+        print(f"auth.reset_skipped reason=hourly_cap domain={domain}")
+        return
+    recent_day = await asyncio.to_thread(
         store.password_reset_request_times_since, user_id, _daily_window_start()
     )
-    if len(recent) >= users_module.PASSWORD_RESET_MAX_REQUESTS_PER_DAY:
+    if len(recent_day) >= users_module.PASSWORD_RESET_MAX_REQUESTS_PER_DAY:
         print(f"auth.reset_skipped reason=daily_cap domain={domain}")
         return
 
@@ -1112,6 +1153,13 @@ async def forgot_password(
     ip_key = f"forgot:{client_key(request)}"
     if not _FORGOT_IP_LIMITER.allow(ip_key):
         raise _auth_rate_limited(_FORGOT_IP_LIMITER, ip_key, FORGOT_RATE_LIMIT_DETAIL)
+    # Cooldown before the hourly budget: a click inside the minute is refused
+    # without spending one of the hour's sends (see the limiter block).
+    cooldown_key = f"forgot:cooldown:{payload.email}"
+    if not _FORGOT_COOLDOWN_LIMITER.allow(cooldown_key):
+        raise _auth_rate_limited(
+            _FORGOT_COOLDOWN_LIMITER, cooldown_key, FORGOT_COOLDOWN_DETAIL
+        )
     email_key = f"forgot:email:{payload.email}"
     if not _FORGOT_EMAIL_LIMITER.allow(email_key):
         raise _auth_rate_limited(
@@ -1137,7 +1185,12 @@ async def forgot_password(
     # exists. (TestClient runs background tasks before returning, so tests
     # stay deterministic.)
     background_tasks.add_task(_deliver_password_reset_code_task, payload.email)
-    return {"status": "ok"}
+    # The browser's resend countdown has one owner: the visible gate's window.
+    # Config-shaped and identical for every caller, so still enumeration-blind.
+    return {
+        "status": "ok",
+        "resend_after_seconds": int(_FORGOT_COOLDOWN_LIMITER.window_seconds),
+    }
 
 
 @router.post("/reset-password")

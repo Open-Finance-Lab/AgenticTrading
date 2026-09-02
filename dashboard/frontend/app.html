@@ -13,7 +13,7 @@
          because every API call is a CORS request. -->
     <link rel="preconnect" href="https://agentictrading.onrender.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="styles.css?v=130">
+    <link rel="stylesheet" href="styles.css?v=131">
     <!-- defer: ~200KB that was render-blocking. Deferred scripts execute in
          document order (this one first, the body-end ones after), all before
          DOMContentLoaded, so Chart is defined before any chart renders. -->
@@ -295,6 +295,7 @@
                         <span>Reset code</span>
                         <input id="resetCodeInput" type="text" maxlength="6" autocomplete="one-time-code">
                     </label>
+                    <p class="auth-switch auth-resend"><button type="button" id="resetResendBtn" class="auth-link-btn">Resend code</button></p>
                     <label class="auth-field">
                         <span>New password</span>
                         <input id="resetNewPassword" type="password" autocomplete="new-password" minlength="8">
@@ -2493,7 +2494,7 @@
     <script src="market-events/MarketEventFeed.js" defer></script>
     <script src="js/portfolio.js?v=17" defer></script>
     <script src="js/backtest-comparison.js?v=1" defer></script>
-    <script src="app.js?v=125" defer></script>
+    <script src="app.js?v=126" defer></script>
     <script src="js/analytics.js?v=1" defer></script>
     <script src="js/agent-editor.js?v=30" defer></script>
     <script src="js/credit-format.js?v=1" defer></script>

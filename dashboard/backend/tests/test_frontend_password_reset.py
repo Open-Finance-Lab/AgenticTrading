@@ -75,4 +75,62 @@ def test_cache_bust_version_was_bumped():
     # Parsed >= rather than ==, per the convention in
     # test_frontend_account_page.py::test_cache_bust_versions_were_bumped.
     app_version = int(re.search(r"app\.js\?v=(\d+)", APP_HTML).group(1))
-    assert app_version >= 125
+    assert app_version >= 126
+
+
+# --- Resend code -------------------------------------------------------------
+
+
+def _reset_step_markup():
+    start = APP_HTML.index('id="resetCodeStep"')
+    return APP_HTML[start : APP_HTML.index('id="authError"', start)]
+
+
+def test_resend_button_lives_inside_the_code_step():
+    step = _reset_step_markup()
+    assert 'id="resetResendBtn"' in step
+    # A submit button here would fire the stage-2 handler on Enter.
+    assert re.search(r'<button[^>]*type="button"[^>]*id="resetResendBtn"', step)
+
+
+def test_stage_one_success_starts_the_resend_countdown():
+    init = fn_body("function initAuthUI")
+    advance = init.index("resetStage = 2")
+    assert "startResendCountdown(" in init[advance : advance + 900]
+
+
+def test_resend_and_stage_two_use_the_address_stage_one_submitted():
+    # The code went to the address stage 1 sent, not whatever is in the input
+    # now; both the resend and the final submit must key on that same value.
+    init = fn_body("function initAuthUI")
+    assert "resetEmail = email" in init
+    assert "AuthAPI.requestPasswordReset(resetEmail)" in init
+    assert "AuthAPI.resetPassword(resetEmail," in init
+    assert "AuthAPI.resetPassword(email," not in init
+    # ...and the locked field shows that address, not an edit made in flight.
+    assert "emailInput.value = resetEmail" in init
+    assert "emailInput.readOnly = true" in init
+
+
+def test_resend_state_is_cleared_with_the_form():
+    init = fn_body("function initAuthUI")
+    start = init.index("resetPasswordResetForm = () => {")
+    body = init[start : init.index("};", start)]
+    assert "stopResendCountdown()" in body
+    assert "resetEmail = ''" in body
+    assert "readOnly = false" in body
+
+
+def test_resend_reads_retry_after_from_a_429():
+    init = fn_body("function initAuthUI")
+    click = init.index("resetResendBtn?.addEventListener('click'")
+    handler = init[click : click + 2500]
+    assert "error.retryAfter" in handler
+    # A stale rate-limit banner must not sit beside fresh "sent" copy.
+    assert "errorEl.hidden = true" in handler
+
+
+def test_auth_api_exposes_retry_after():
+    request = fn_body("async request(path, options = {})")
+    assert "retry-after" in request
+    assert "error.retryAfter" in request
