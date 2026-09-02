@@ -52,6 +52,16 @@ from dashboard.backend.infrastructure.llm.token_cost import (
 AdapterResolver = Callable[[ProviderRecord], ProviderExecutionAdapter]
 PricingSnapshotFactory = Callable[[str, str], PricingSnapshot]
 
+_PLATFORM_FAILOVER_CATEGORIES = frozenset(
+    {
+        ExecutionErrorCategory.CREDENTIAL_MISSING,
+        ExecutionErrorCategory.CREDENTIAL_INVALID,
+        ExecutionErrorCategory.PROVIDER_UNAVAILABLE,
+        ExecutionErrorCategory.PROVIDER_TIMEOUT,
+        ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED,
+    }
+)
+
 
 # The provider receives the serialized messages, but its tokenizer is not
 # necessarily the same as ATL's estimator. Reserving the UTF-8 byte count is a
@@ -350,22 +360,13 @@ class LLMExecutionService:
         self,
         request: LLMExecutionRequest,
     ) -> LLMExecutionResult:
-        """Apply the one-way OpenRouter quota failover policy."""
+        """Try ordered platform candidates, retaining one requested identity."""
 
-        try:
-            return self._execute_once(
-                request,
-                attempt_index=0,
-                requested_provider_id=request.provider_id,
-            )
-        except LLMExecutionError as primary_error:
-            if (
-                request.provider_id != "openrouter"
-                or primary_error.category
-                is not ExecutionErrorCategory.PROVIDER_QUOTA_EXHAUSTED
-            ):
-                raise
-
+        candidates = tuple(request.provider_ids or (request.provider_id,))
+        # Direct service callers predating the candidate-list handoff still get
+        # the established OpenRouter -> CommonStack fallback when the route is
+        # available. New handoffs always carry the complete ordered tuple.
+        if candidates == ("openrouter",):
             try:
                 self.providers.preflight_execution_model(
                     "commonstack", request.model_id
@@ -376,16 +377,31 @@ class LLMExecutionService:
                 CredentialResolutionError,
                 UnsupportedExecutionModel,
             ):
-                raise primary_error
+                pass
+            else:
+                candidates = ("openrouter", "commonstack")
 
-            fallback_request = request.model_copy(
-                update={"provider_id": "commonstack"}
+        requested_provider_id = candidates[0]
+        last_error: LLMExecutionError | None = None
+        for attempt_index, provider_id in enumerate(candidates):
+            attempt_request = request.model_copy(
+                update={
+                    "provider_id": provider_id,
+                    "provider_ids": candidates,
+                }
             )
-            return self._execute_once(
-                fallback_request,
-                attempt_index=1,
-                requested_provider_id=request.provider_id,
-            )
+            try:
+                return self._execute_once(
+                    attempt_request,
+                    attempt_index=attempt_index,
+                    requested_provider_id=requested_provider_id,
+                )
+            except LLMExecutionError as exc:
+                last_error = exc
+                if exc.category not in _PLATFORM_FAILOVER_CATEGORIES:
+                    raise
+        assert last_error is not None
+        raise last_error
 
     def _resolve_provider(self, provider_id: str) -> ProviderRecord:
         store = getattr(self.providers, "store", None)

@@ -13,7 +13,11 @@ import time
 from collections.abc import Mapping
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+
+from dashboard.backend.domain.model_providers.repository_common import (
+    validate_provider_id,
+)
 
 from dashboard.backend.infrastructure.llm.execution.models import BillingMode
 from dashboard.backend.session_tokens import session_hash_secret
@@ -41,6 +45,7 @@ class ExecutionHandoff(BaseModel):
     run_id: str = Field(min_length=1, max_length=128)
     billing_mode: BillingMode
     provider_id: str = Field(min_length=2, max_length=64, pattern=r"^[a-z0-9_]+$")
+    provider_ids: tuple[str, ...] = Field(default=(), max_length=8)
     model_id: str = Field(
         min_length=1,
         max_length=64,
@@ -50,6 +55,31 @@ class ExecutionHandoff(BaseModel):
     nonce: str = Field(min_length=16, max_length=128)
     issued_at: int = Field(gt=0)
     expires_at: int = Field(gt=0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_provider_candidates(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "provider_ids" not in payload or payload["provider_ids"] is None:
+            payload["provider_ids"] = (payload.get("provider_id"),)
+        return payload
+
+    @model_validator(mode="after")
+    def validate_provider_candidates(self) -> "ExecutionHandoff":
+        try:
+            cleaned = tuple(validate_provider_id(value) for value in self.provider_ids)
+        except Exception as exc:
+            raise ValueError("invalid provider candidates") from exc
+        if (
+            not cleaned
+            or cleaned[0] != self.provider_id
+            or len(set(cleaned)) != len(cleaned)
+        ):
+            raise ValueError("provider candidates must be ordered and unique")
+        object.__setattr__(self, "provider_ids", cleaned)
+        return self
 
 
 class HandoffReplayGuard:
@@ -117,6 +147,7 @@ def create_execution_handoff(
     billing_mode: BillingMode | str,
     provider_id: str,
     model_id: str,
+    provider_ids: tuple[str, ...] | None = None,
     prompt_metadata: Mapping[str, Any] | None = None,
     ttl_seconds: int = _DEFAULT_TTL_SECONDS,
     now: int | None = None,
@@ -132,6 +163,7 @@ def create_execution_handoff(
             run_id=run_id.strip(),
             billing_mode=billing_mode,
             provider_id=provider_id.strip(),
+            provider_ids=provider_ids or (provider_id.strip(),),
             model_id=model_id.strip(),
             prompt_digest=_prompt_digest(prompt_metadata),
             nonce=secrets.token_urlsafe(24),

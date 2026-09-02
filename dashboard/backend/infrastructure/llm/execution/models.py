@@ -54,6 +54,7 @@ class LLMExecutionRequest(BaseModel):
     call_index: int = Field(ge=0)
     billing_mode: BillingMode
     provider_id: str = Field(min_length=2, max_length=64, pattern=r"^[a-z0-9_]+$")
+    provider_ids: tuple[str, ...] = Field(default=(), max_length=8)
     model_id: str = Field(
         min_length=1,
         max_length=64,
@@ -72,6 +73,35 @@ class LLMExecutionRequest(BaseModel):
         if not value:
             raise ValueError("identifier must not be blank")
         return value
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_provider_candidates(cls, value: object) -> object:
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        if "provider_ids" not in payload or payload["provider_ids"] is None:
+            payload["provider_ids"] = (payload.get("provider_id"),)
+        return payload
+
+    @field_validator("provider_ids")
+    @classmethod
+    def validate_provider_candidates(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        try:
+            cleaned = tuple(validate_provider_id(value) for value in values)
+        except Exception as exc:
+            raise ValueError("provider_ids contains an invalid provider id") from exc
+        if len(set(cleaned)) != len(cleaned):
+            raise ValueError("provider_ids must be ordered and unique")
+        return cleaned
+
+    @model_validator(mode="after")
+    def validate_provider_candidate_head(self) -> "LLMExecutionRequest":
+        candidates = self.provider_ids or (self.provider_id,)
+        if candidates[0] != self.provider_id:
+            raise ValueError("provider_ids must start with provider_id")
+        object.__setattr__(self, "provider_ids", candidates)
+        return self
 
     @field_validator("system_message")
     @classmethod

@@ -1839,13 +1839,14 @@ def run_backtest_endpoint(
                 status_code=401,
                 detail="Sign in before running an LLM backtest.",
             )
-        if billing_mode is None or not provider_id or not provider_id.strip():
+        if billing_mode is None:
             raise HTTPException(
                 status_code=422,
-                detail="billing_mode and provider_id are required for LLM backtests.",
+                detail="billing_mode is required for LLM backtests.",
             )
-        provider_id = provider_id.strip()
-        if not re.fullmatch(r"^[a-z0-9_]{2,64}$", provider_id):
+        if provider_id and not re.fullmatch(
+            r"^[a-z0-9_]{2,64}$", provider_id.strip()
+        ):
             raise HTTPException(status_code=422, detail="Invalid provider id.")
         if not model or not model.strip():
             raise HTTPException(
@@ -1853,17 +1854,38 @@ def run_backtest_endpoint(
                 detail="model is required for LLM backtests.",
             )
         provider_service = get_model_provider_service()
+        provider_ids: tuple[str, ...]
         try:
-            route = provider_service.preflight_execution_model(
-                provider_id,
-                model.strip(),
-            )
             if billing_mode is BillingMode.BYOK:
+                if not provider_id or not provider_id.strip():
+                    raise HTTPException(
+                        status_code=422,
+                        detail="provider_id is required for BYOK backtests.",
+                    )
+                provider_id = provider_id.strip()
+                route = provider_service.preflight_execution_model(
+                    provider_id,
+                    model.strip(),
+                )
                 provider_service.preflight_user_default_credential(
                     int(user_id), provider_id
                 )
+                provider_ids = (provider_id,)
             else:
-                provider_service.preflight_platform_credential(provider_id)
+                provider_ids = provider_service.resolve_platform_execution_candidates(
+                    model.strip(),
+                    preferred_provider_id=provider_id,
+                )
+                if not provider_ids:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="ATL Credits model execution is unavailable right now.",
+                    )
+                provider_id = provider_ids[0]
+                route = provider_service.preflight_execution_model(
+                    provider_id,
+                    model.strip(),
+                )
         except UnsupportedExecutionModel as exc:
             raise HTTPException(
                 status_code=422,
@@ -1873,7 +1895,14 @@ def run_backtest_endpoint(
                 ),
             ) from exc
         except CredentialResolutionError as exc:
+            if billing_mode is BillingMode.PLATFORM_CREDITS:
+                raise HTTPException(
+                    status_code=422,
+                    detail="ATL Credits model execution is unavailable right now.",
+                ) from exc
             raise HTTPException(status_code=422, detail=exc.safe_message) from exc
+        except HTTPException:
+            raise
         except Exception as exc:  # noqa: BLE001 - never expose provider internals
             raise HTTPException(
                 status_code=503,
@@ -1885,6 +1914,7 @@ def run_backtest_endpoint(
             run_id=live_run_id,
             billing_mode=billing_mode,
             provider_id=provider_id,
+            provider_ids=provider_ids,
             model_id=route.catalog_id,
             prompt_metadata={
                 "start_date": start_date,

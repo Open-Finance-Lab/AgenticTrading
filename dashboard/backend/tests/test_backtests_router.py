@@ -391,6 +391,24 @@ class _OpenRouterExecutionPreflightService:
         self.credential_calls.append((None, provider_id))
 
 
+class _AutoPlatformExecutionPreflightService(_OpenRouterExecutionPreflightService):
+    def resolve_platform_execution_candidates(
+        self, catalog_model_id, preferred_provider_id=None
+    ):
+        assert catalog_model_id in _ATL_EXECUTION_MODEL_IDS
+        return ("openrouter", "commonstack")
+
+    def preflight_execution_model(self, provider_id, catalog_model_id):
+        self.execution_calls.append((provider_id, catalog_model_id))
+        if provider_id not in {"openrouter", "commonstack"}:
+            raise UnsupportedExecutionModel(catalog_model_id)
+        return ExecutionModelRoute(
+            catalog_id=catalog_model_id,
+            label=catalog_model_id,
+            provider_model_id=catalog_model_id,
+        )
+
+
 def _enable_authenticated_openrouter_byok(monkeypatch):
     service = _OpenRouterExecutionPreflightService()
     monkeypatch.setattr(bt, "get_model_provider_service", lambda: service)
@@ -1108,6 +1126,44 @@ def test_openai_byok_accepts_gpt_catalog_id_and_keeps_it_in_handoff(monkeypatch)
     assert captured_handoff["model_id"] == "openai/gpt-5.5"
     assert service.execution_calls == [("openai", "openai/gpt-5.5")]
     assert service.credential_calls == [(7, "openai")]
+    assert spy.calls == 1
+
+
+def test_platform_credits_resolves_candidates_without_provider_input(monkeypatch):
+    spy = _Spy()
+    service = _AutoPlatformExecutionPreflightService()
+    captured_handoff = {}
+    monkeypatch.setattr(bt, "run_backtest_background", spy)
+    monkeypatch.setattr(bt, "get_model_provider_service", lambda: service)
+    monkeypatch.setattr(
+        "dashboard.backend.api.dependencies._optional_user",
+        lambda *_args, **_kwargs: {"id": 7},
+    )
+
+    def capture_handoff(**kwargs):
+        captured_handoff.update(kwargs)
+        return "signed-platform-handoff"
+
+    monkeypatch.setattr(bt, "create_execution_handoff", capture_handoff)
+
+    response = TestClient(app).post(
+        "/backtest/run",
+        json={
+            "start_date": "2026-05-01",
+            "end_date": "2026-05-02",
+            "decision_source": "llm",
+            "billing_mode": "platform_credits",
+            "model": "qwen/qwen3.7-plus",
+        },
+        headers=_sess(),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["provider_id"] == "openrouter"
+    assert captured_handoff["provider_id"] == "openrouter"
+    assert captured_handoff["provider_ids"] == ("openrouter", "commonstack")
+    assert service.execution_calls == [("openrouter", "qwen/qwen3.7-plus")]
+    assert service.credential_calls == []
     assert spy.calls == 1
 
 

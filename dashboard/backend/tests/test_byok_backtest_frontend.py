@@ -27,6 +27,7 @@ def test_run_backtest_modal_has_execution_controls():
     _assert_contains(APP_HTML, 'data-billing-mode="byok"')
     _assert_contains(APP_HTML, 'data-billing-mode="platform_credits"')
     _assert_contains(APP_HTML, 'id="runBacktestProviderSelect"')
+    _assert_contains(APP_HTML, 'id="runBacktestProviderControl"')
     _assert_contains(APP_HTML, 'id="modelSelect"')
     _assert_contains(APP_HTML, "Model for this run")
 
@@ -44,6 +45,29 @@ def test_pipeline_llm_payload_sends_explicit_execution_lane():
     _assert_contains(body, "payload.provider_id")
     _assert_contains(body, "payload.model")
     _assert_contains(body, "Choose an AI billing method, provider, and model.")
+
+
+def test_atl_credits_hides_provider_and_omits_provider_payload():
+    _assert_contains(APP_JS, "function syncRunBacktestProviderVisibility()")
+    visibility = _function_body("syncRunBacktestProviderVisibility")
+    _assert_contains(visibility, "runBacktestBillingMode !== 'byok'")
+    body = _function_body("runBacktest")
+    _assert_contains(body, "selectedBillingMode === 'platform_credits'")
+    _assert_contains(body, "if (selectedBillingMode === 'byok')")
+    assert body.index("payload.billing_mode = selectedBillingMode") < body.index(
+        "payload.provider_id = selectedProviderId"
+    )
+    _assert_contains(
+        APP_JS,
+        "ATL Credits automatically use OpenRouter first, then CommonStack if needed.",
+    )
+
+
+def test_atl_model_options_are_merged_without_duplicate_ids():
+    body = _function_body("syncRunBacktestModelOptions")
+    _assert_contains(body, "availableRunBacktestProviders('platform_credits')")
+    _assert_contains(body, "const seenModels = new Set()")
+    _assert_contains(body, "seenModels.has(normalizedId)")
 
 
 def test_completed_run_config_prefers_backend_execution_evidence():
