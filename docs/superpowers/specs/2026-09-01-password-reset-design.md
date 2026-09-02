@@ -502,9 +502,15 @@ that a five-minute wait with nothing on screen saying so.
 - `_FORGOT_COOLDOWN_LIMITER = _build_limiter("AUTH_FORGOT_COOLDOWN", 1, 60)`,
   keyed on the typed normalized address like `_FORGOT_EMAIL_LIMITER` — so it is
   existence-blind and its 429 says nothing about accounts
-  (`test_forgot_password_cooldown_429_is_existence_blind`). Checked **before**
-  the hourly limiter, so a click refused by the cooldown never spends one of the
-  hour's six (`…cooldown_refusal_does_not_charge_the_hourly_budget`).
+  (`test_forgot_password_cooldown_429_is_existence_blind`). **Checked** before
+  the hourly limiter and **recorded** only once the request is accepted, so a
+  click refused by either gate (or by the 503) spends neither the minute nor
+  one of the hour's six — an hourly 429 whose `Retry-After` the browser counts
+  down must not have re-armed the minute on its way out
+  (`…cooldown_refusal_does_not_charge_the_hourly_budget`,
+  `…hourly_refusal_does_not_arm_the_cooldown`). The tiny check-then-record
+  window lets two simultaneous clicks both pass the minute; both are still
+  bounded by the atomic hourly `allow()` and the durable cooldown.
 - `_FORGOT_EMAIL_LIMITER`'s default is now
   `PASSWORD_RESET_MAX_REQUESTS_PER_HOUR` (6) rather than a literal, so the
   visible gate and the durable backstop cannot drift apart.
@@ -515,8 +521,13 @@ that a five-minute wait with nothing on screen saying so.
   `users.py` constant, because the limiter is the gate the browser actually
   hits. `AUTH_FORGOT_COOLDOWN_MAX=0` does not remove the cooldown, it makes it
   silent (the durable backstop still skips); the body keeps reporting the window.
+  `_check_forgot_policy_coherence()` prints a `WARNING` at startup for each
+  `AUTH_FORGOT_*` override that sets a visible gate looser than its durable
+  backstop (cooldown max ≠ 1, cooldown window below durable + skew, hourly max
+  above the durable cap or 0, hourly window below the durable window + skew) —
+  the `_env_int` fail-visible convention; nothing is clamped.
 - Durable backstops (`users.py`), which only bite silently and only across a
-  restart: `PASSWORD_RESET_COOLDOWN_SECONDS` 300 → **45**,
+  restart: `PASSWORD_RESET_COOLDOWN_SECONDS` 300 → **40**,
   new `PASSWORD_RESET_MAX_REQUESTS_PER_HOUR = 6` (rolling hour, skewed — next
   bullet; skip reason `hourly_cap`), `PASSWORD_RESET_MAX_REQUESTS_PER_DAY`
   5 → **12**. The daily cap is a mail-bomb bound on the victim's inbox
@@ -527,17 +538,22 @@ that a five-minute wait with nothing on screen saying so.
   rises from 5/day to 12/day; Brevo-quota worst case is unchanged (the global
   10/h limiter is what bounds that).
 
-### The three clocks (`_BACKSTOP_SKEW_SECONDS = 15`)
+### The three clocks (`_BACKSTOP_SKEW_SECONDS = 20`)
 
 The in-process limiters stamp a request on **arrival**; the browser's countdown
 starts at the **response** (earlier still — the 200 precedes all account work);
 a `password_reset_requests` row is stamped only after the Brevo send
-**returns** (lookup, two reads, a POST with a 10 s timeout). A durable window
+**returns** — a lookup, three reads, the send, and the insert; a cold Neon
+compute adds seconds to the first read. The send runs under a hard
+`asyncio.wait_for` deadline (`_SEND_DEADLINE_SECONDS = 10`) because httpx's
+timeout is per phase (connect, read, write, pool), not a ceiling on the call;
+a timed-out send raises and is reported as a failed delivery, nothing
+persisted (`test_forgot_password_send_has_a_hard_deadline`). A durable window
 equal to its visible twin therefore ends a send-latency *after* the gate has
 reopened, and the click the countdown (or a 429's `Retry-After`) lines up would
 pass the limiter only to be swallowed by the silent backstop — charging the
-hour's budget for a code that never went out. The durable cooldown is 45 s
-against the visible 60, and `_HOURLY_CAP_WINDOW` is `1h − 15 s`, so in a single
+hour's budget for a code that never went out. The durable cooldown is 40 s
+against the visible 60, and `_HOURLY_CAP_WINDOW` is `1h − 20 s`, so in a single
 process the visible gate always decides; the backstops only bite across a
 restart, where the limiters are empty anyway. Pinned by
 `test_forgot_limiter_defaults_match_the_advertised_resend_policy`,
@@ -562,6 +578,18 @@ restart, where the limiters are empty anyway. Pinned by
   already funnels through (mode switch, close, logout, deep link). This also
   closes the post-merge finding "editable stage-2 email mismatches the
   (email, code) pair".
+- **A stage-1 submit refused with a 429** (a reload, a second tab, the
+  `?auth=reset` deep link inside the minute) still opens the code step —
+  copy "A code was already requested for … — enter it below if you have it,
+  or resend when the timer ends", countdown from `Retry-After`. The refusal
+  cancelled nothing, so the code already in the inbox is valid; before this a
+  refused resubmit left the user on a dead stage 1 with no code input.
+- **Stale continuations are dropped.** `resetGeneration` is bumped by
+  `resetPasswordResetForm`; every `await` in the flow captures it first and
+  bails if it moved, so a response landing after "Back to sign in" cannot lock
+  the login email field, repaint the login error, or restart a countdown on a
+  hidden button. (The stage-2 success toast still shows — the reset did
+  happen — only the mode switch and prefill are skipped.)
 - Resend success clears `#authError` so a stale 429 banner never sits beside
   fresh "sent" copy; the copy is "We sent a new code to …", the same claim
   stage 1 already makes.

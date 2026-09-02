@@ -2546,6 +2546,9 @@ def test_forgot_limiter_defaults_match_the_advertised_resend_policy():
     # countdown is decided by the visible gate, never swallowed by the backstop.
     skew = auth_api._BACKSTOP_SKEW_SECONDS
     assert 0 < skew < 60
+    # The row is stamped after the send returns, so the skew must cover the
+    # send's hard deadline plus the store round-trips before and after it.
+    assert auth_api._SEND_DEADLINE_SECONDS < skew
     assert PASSWORD_RESET_COOLDOWN_SECONDS + skew <= auth_api._FORGOT_COOLDOWN_LIMITER.window_seconds
     assert auth_api._HOURLY_CAP_WINDOW.total_seconds() == 3600 - skew
     # "Wait an hour" must be true: the daily backstop has to clear a full hour's
@@ -2612,6 +2615,110 @@ def test_forgot_password_cooldown_refusal_does_not_charge_the_hourly_budget(
     assert capped.status_code == 429
     assert capped.json()["detail"] == auth_api.FORGOT_RATE_LIMIT_DETAIL
     assert int(capped.headers["Retry-After"]) > 60
+
+
+def _clocked_forgot_limiters(monkeypatch):
+    """Both address-keyed gates on one fake clock, so a test can walk an hour."""
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    now = [0.0]
+    clock = lambda: now[0]  # noqa: E731
+    _widen_forgot_limiters(monkeypatch)
+    monkeypatch.setattr(
+        auth_api,
+        "_FORGOT_COOLDOWN_LIMITER",
+        FixedWindowRateLimiter(max_events=1, window_seconds=60, clock=clock),
+    )
+    monkeypatch.setattr(
+        auth_api,
+        "_FORGOT_EMAIL_LIMITER",
+        FixedWindowRateLimiter(max_events=6, window_seconds=3600, clock=clock),
+    )
+    return now
+
+
+def test_forgot_password_hourly_refusal_does_not_arm_the_cooldown(
+    client, reset_outbox, monkeypatch
+):
+    # The other direction of the budget-ordering test: a click the hour refuses
+    # must not spend the minute either, or the 429's Retry-After lies -- the
+    # click it lines up would then meet a cooldown 429 the server never mentioned.
+    from dashboard.backend.api import auth as auth_api
+
+    now = _clocked_forgot_limiters(monkeypatch)
+    for i in range(6):
+        now[0] = i * 60.0
+        _request_reset(client, "seventh@example.com")
+
+    now[0] = 3590.0
+    refused = client.post("/api/auth/forgot-password", json={"email": "seventh@example.com"})
+    assert refused.status_code == 429
+    assert refused.json()["detail"] == auth_api.FORGOT_RATE_LIMIT_DETAIL
+    assert int(refused.headers["Retry-After"]) == 10
+
+    now[0] = 3601.0  # the click the header lined up
+    _request_reset(client, "seventh@example.com")
+
+
+def test_forgot_policy_coherence_warns_when_env_overrides_outrun_the_backstops(
+    monkeypatch, capsys
+):
+    # The env knobs can set the visible gates looser than the durable backstops,
+    # which turns a countdown that ended into a silent skip. Defaults are
+    # coherent and say nothing; each incoherent setting gets its own WARNING.
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.api.rate_limit import FixedWindowRateLimiter
+
+    auth_api._check_forgot_policy_coherence()
+    assert capsys.readouterr().out == ""
+
+    monkeypatch.setattr(
+        auth_api, "_FORGOT_COOLDOWN_LIMITER", FixedWindowRateLimiter(max_events=1, window_seconds=30)
+    )
+    auth_api._check_forgot_policy_coherence()
+    out = capsys.readouterr().out
+    assert "WARNING" in out and "AUTH_FORGOT_COOLDOWN_WINDOW_SECONDS" in out
+
+    monkeypatch.setattr(
+        auth_api, "_FORGOT_COOLDOWN_LIMITER", FixedWindowRateLimiter(max_events=0, window_seconds=60)
+    )
+    monkeypatch.setattr(
+        auth_api, "_FORGOT_EMAIL_LIMITER", FixedWindowRateLimiter(max_events=10, window_seconds=1800)
+    )
+    auth_api._check_forgot_policy_coherence()
+    out = capsys.readouterr().out
+    assert "AUTH_FORGOT_COOLDOWN_MAX" in out
+    assert "AUTH_FORGOT_EMAIL_MAX" in out
+    assert "AUTH_FORGOT_EMAIL_WINDOW_SECONDS" in out
+
+
+def test_forgot_password_send_has_a_hard_deadline(
+    client, reset_outbox, temp_user_store, capsys, monkeypatch
+):
+    # httpx's timeout is per phase, not a ceiling on the call; the skew that
+    # keeps the backstop behind the gate is sized against a real deadline.
+    import asyncio
+
+    from dashboard.backend.api import auth as auth_api
+    from dashboard.backend.infrastructure.email import sender as email_sender
+
+    _widen_forgot_limiters(monkeypatch)
+    monkeypatch.setattr(auth_api, "_SEND_DEADLINE_SECONDS", 0.05)
+
+    async def _slow_send(to, subject, text_body):
+        await asyncio.sleep(0.5)
+        reset_outbox.append({"to": to, "subject": subject, "body": text_body})
+        return True
+
+    monkeypatch.setattr(email_sender, "send_email", _slow_send)
+    _signup_and_token(client, email="slow-send@example.com")
+
+    _request_reset(client, "slow-send@example.com")
+
+    assert len(reset_outbox) == 0
+    assert _reset_row_count(temp_user_store) == 0  # send-before-persist held
+    assert "delivery failed" in capsys.readouterr().out
 
 
 def test_forgot_password_durable_cooldown_sits_inside_the_visible_gate(

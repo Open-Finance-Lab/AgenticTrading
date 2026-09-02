@@ -130,6 +130,35 @@ def test_resend_reads_retry_after_from_a_429():
     assert "errorEl.hidden = true" in handler
 
 
+def test_stage_one_429_still_opens_the_code_step():
+    # A resubmit inside the minute (reload, second tab, the deep link) is
+    # refused by the cooldown -- but the code already mailed is still valid,
+    # so the user must get the code input, not a dead stage 1.
+    init = fn_body("function initAuthUI")
+    stage1 = init.index("if (resetStage === 1)")
+    catch = init.index("} catch (error) {", stage1)
+    shared_guard = init.index("if (!email || !password)", catch)
+    catch_block = init[catch:shared_guard]
+    assert "error.status === 429" in catch_block
+    assert "enterCodeStep(" in catch_block
+    assert "error.retryAfter" in catch_block
+    # The helper is the single owner of "we are on stage 2 now".
+    assert "resetStage = 2" in fn_body("function initAuthUI")
+    assert init.count("resetStage = 2") == 1
+
+
+def test_stale_reset_responses_are_dropped_after_a_mode_switch():
+    # Every await in the reset flow re-checks a generation counter that
+    # resetPasswordResetForm bumps, so a response landing after "Back to sign
+    # in" cannot lock the login email field or repaint the login error.
+    init = fn_body("function initAuthUI")
+    start = init.index("resetPasswordResetForm = () => {")
+    body = init[start : init.index("};", start)]
+    assert "resetGeneration += 1" in body
+    # stage-1 success + catch, resend success + catch: four checks at least.
+    assert init.count("gen !== resetGeneration") >= 4
+
+
 def test_auth_api_exposes_retry_after():
     request = fn_body("async request(path, options = {})")
     assert "retry-after" in request

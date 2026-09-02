@@ -122,11 +122,15 @@ _SIGNUP_EMAIL_LIMITER = _build_limiter("AUTH_SIGNUP_EMAIL", 5, 3600)
 # here and enforced durably by users.py's PASSWORD_RESET_* backstops:
 #   COOLDOWN  one request per 60 s per typed address -- the resend countdown;
 #   EMAIL     one send plus five resends an hour, then an hour's wait.
-# Checked in that order, so a click refused by the cooldown never spends one
-# of the hour's six. Both keys are the typed normalized address, so neither
-# 429 says anything about accounts. Setting AUTH_FORGOT_COOLDOWN_MAX=0 does
-# not remove the cooldown, it makes it silent (the durable backstop still
-# skips); the countdown the browser runs keeps reading this limiter's window.
+# The cooldown is CHECKED first and RECORDED only once the request is
+# accepted, so a click refused by either gate (or by the 503) spends neither
+# the minute nor one of the hour's six -- an hourly 429 whose Retry-After the
+# browser counts down must not have re-armed the minute on its way out. Both
+# keys are the typed normalized address, so neither 429 says anything about
+# accounts. Setting AUTH_FORGOT_COOLDOWN_MAX=0 does not remove the cooldown,
+# it makes it silent (the durable backstop still skips); the countdown the
+# browser runs keeps reading this limiter's window. _check_forgot_policy_
+# coherence() below WARNs at startup when an override breaks the relation.
 _FORGOT_IP_LIMITER = _build_limiter("AUTH_FORGOT_IP", 30, 3600)
 _FORGOT_COOLDOWN_LIMITER = _build_limiter("AUTH_FORGOT_COOLDOWN", 1, 60)
 _FORGOT_EMAIL_LIMITER = _build_limiter(
@@ -1025,14 +1029,17 @@ _DAILY_CAP_WINDOW = timedelta(days=1)
 # in-process limiters stamp a request on ARRIVAL, the browser's countdown
 # starts at the RESPONSE (earlier still, since the 200 precedes all account
 # work), and a password_reset_requests row is stamped only after the Brevo
-# send RETURNS -- lookup, two reads and a POST with a 10 s timeout later. A
+# send RETURNS -- a lookup, three reads, the send under the hard deadline
+# below (httpx's own timeout is per phase, not a ceiling on the call) and the
+# insert later; a cold Neon compute adds seconds to the first read. A
 # durable window equal to its visible twin therefore ends after the gate has
 # already reopened, and the click the countdown (or a 429's Retry-After)
 # lines up would pass the limiter only to be swallowed by the silent backstop.
 # The durable windows are shortened by this allowance so that, in one
 # process, the visible gate is always the one that decides; the backstops
 # only bite across a restart, where the limiters are empty anyway.
-_BACKSTOP_SKEW_SECONDS = 15
+_SEND_DEADLINE_SECONDS = 10.0
+_BACKSTOP_SKEW_SECONDS = 20
 _HOURLY_CAP_WINDOW = timedelta(hours=1) - timedelta(seconds=_BACKSTOP_SKEW_SECONDS)
 
 
@@ -1044,6 +1051,52 @@ def _daily_window_start() -> str:
 def _hourly_window_start() -> str:
     """Stored-format start of the rolling hourly reset-cap window (skewed)."""
     return format_stored_timestamp(datetime.now(timezone.utc) - _HOURLY_CAP_WINDOW)
+
+
+def _check_forgot_policy_coherence() -> None:
+    """WARN when an env override sets a visible gate looser than its backstop.
+
+    The resend countdown ends when the GATE reopens; a backstop still closed
+    at that moment turns the click into a silent skip that also spends one
+    of the hour's sends. The defaults are coherent by construction (pinned by
+    test_forgot_limiter_defaults_match_the_advertised_resend_policy); the
+    AUTH_FORGOT_* knobs are the one way to break it, so say so at startup in
+    the voice ``_env_int`` uses for an out-of-range value. Not clamped: the
+    operator asked for the number, the log says what it costs.
+    """
+    cooldown = _FORGOT_COOLDOWN_LIMITER
+    hourly = _FORGOT_EMAIL_LIMITER
+    durable_cooldown = users_module.PASSWORD_RESET_COOLDOWN_SECONDS
+    per_hour = users_module.PASSWORD_RESET_MAX_REQUESTS_PER_HOUR
+    if cooldown.max_events != 1:
+        print(
+            f"WARNING: AUTH_FORGOT_COOLDOWN_MAX={cooldown.max_events}: the resend "
+            f"cooldown is only visible at 1; the durable {durable_cooldown}s "
+            "cooldown now skips silently"
+        )
+    floor = durable_cooldown + _BACKSTOP_SKEW_SECONDS
+    if cooldown.window_seconds < floor:
+        print(
+            f"WARNING: AUTH_FORGOT_COOLDOWN_WINDOW_SECONDS={int(cooldown.window_seconds)} "
+            f"is below the durable cooldown plus skew ({floor}s); the click after "
+            "the countdown will be skipped silently"
+        )
+    if hourly.max_events == 0 or hourly.max_events > per_hour:
+        print(
+            f"WARNING: AUTH_FORGOT_EMAIL_MAX={hourly.max_events} exceeds the durable "
+            f"hourly cap ({per_hour}); requests past it are accepted and skipped "
+            "silently"
+        )
+    hourly_floor = int(_HOURLY_CAP_WINDOW.total_seconds()) + _BACKSTOP_SKEW_SECONDS
+    if hourly.window_seconds < hourly_floor:
+        print(
+            f"WARNING: AUTH_FORGOT_EMAIL_WINDOW_SECONDS={int(hourly.window_seconds)} "
+            f"is below the durable hourly window plus skew ({hourly_floor}s); the "
+            "click after an hourly 429 will be skipped silently"
+        )
+
+
+_check_forgot_policy_coherence()
 
 
 def _password_reset_body(code: str) -> str:
@@ -1109,11 +1162,18 @@ async def _deliver_password_reset_code(email: str) -> None:
 
     code = generate_code()
     # Send BEFORE persisting (the email-change invariant): a failed send
-    # persists nothing, so the user's retry is not cooldown-blocked.
-    sent = await email_sender.send_email(
-        to=str(user["email"]),
-        subject="Your Agentic Trading Lab password reset code",
-        text_body=_password_reset_body(code),
+    # persists nothing, so the user's retry is not cooldown-blocked. Under a
+    # hard deadline: the row's timestamp is what the durable cooldown reads,
+    # and _BACKSTOP_SKEW_SECONDS is sized against this bound (httpx's timeout
+    # is per phase, so it is not one). A timed-out send raises, which the
+    # task wrapper reports as a failed delivery -- nothing persisted.
+    sent = await asyncio.wait_for(
+        email_sender.send_email(
+            to=str(user["email"]),
+            subject="Your Agentic Trading Lab password reset code",
+            text_body=_password_reset_body(code),
+        ),
+        timeout=_SEND_DEADLINE_SECONDS,
     )
     if not sent:
         print(
@@ -1153,10 +1213,11 @@ async def forgot_password(
     ip_key = f"forgot:{client_key(request)}"
     if not _FORGOT_IP_LIMITER.allow(ip_key):
         raise _auth_rate_limited(_FORGOT_IP_LIMITER, ip_key, FORGOT_RATE_LIMIT_DETAIL)
-    # Cooldown before the hourly budget: a click inside the minute is refused
-    # without spending one of the hour's sends (see the limiter block).
+    # Cooldown CHECKED before the hourly budget and RECORDED only once the
+    # request is accepted (below): a click refused by either gate spends
+    # neither the minute nor one of the hour's sends (see the limiter block).
     cooldown_key = f"forgot:cooldown:{payload.email}"
-    if not _FORGOT_COOLDOWN_LIMITER.allow(cooldown_key):
+    if not _FORGOT_COOLDOWN_LIMITER.check(cooldown_key):
         raise _auth_rate_limited(
             _FORGOT_COOLDOWN_LIMITER, cooldown_key, FORGOT_COOLDOWN_DETAIL
         )
@@ -1184,6 +1245,7 @@ async def forgot_password(
     # response so neither the body nor the latency says whether an account
     # exists. (TestClient runs background tasks before returning, so tests
     # stay deterministic.)
+    _FORGOT_COOLDOWN_LIMITER.record(cooldown_key)
     background_tasks.add_task(_deliver_password_reset_code_task, payload.email)
     # The browser's resend countdown has one owner: the visible gate's window.
     # Config-shaped and identical for every caller, so still enumeration-blind.
