@@ -331,6 +331,18 @@ ON credit_llm_usage_entries(user_id, id DESC);
 """
 
 
+# ADDING A COLUMN LATER? It must go in an `ALTER TABLE ... ADD COLUMN IF NOT
+# EXISTS` here, *not* only in CREDITS_POSTGRES_DDL above: CREATE TABLE IF NOT
+# EXISTS silently no-ops once the table exists, so a deployed table would never
+# gain the column and every query naming it would raise UndefinedColumn. Any
+# index over that column must be created here too, *below* its ADD COLUMN --
+# never in the base DDL, which runs first. #432 killed the Render boot exactly
+# that way, and credits_store is built at import, so the crash took the whole
+# app down rather than one surface. Nothing catches either mistake first:
+# SQLite is the default test tier and CI's Postgres container is empty on
+# every run, so only the CREATE path is ever exercised there.
+# test_store_twin_parity.py pins both rules statically; see
+# domain/agents/repository_postgres.py for the worked example.
 CREDITS_POSTGRES_GRANT_MIGRATION_DDL = """
 ALTER TABLE credit_ledger_entries
 ADD COLUMN IF NOT EXISTS bucket TEXT;
@@ -361,9 +373,6 @@ ALTER TABLE credit_llm_reservations
 ADD COLUMN IF NOT EXISTS provider_id TEXT;
 ALTER TABLE credit_llm_reservations
 ADD COLUMN IF NOT EXISTS attempt_index INTEGER NOT NULL DEFAULT 0;
-DROP INDEX IF EXISTS idx_credit_llm_reservations_run_status;
-CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
-ON credit_llm_reservations(run_id, status, call_index, attempt_index);
 ALTER TABLE credit_llm_reservations
 DROP CONSTRAINT IF EXISTS credit_llm_reservations_attempt_index_check;
 ALTER TABLE credit_llm_reservations
@@ -428,6 +437,29 @@ DROP CONSTRAINT IF EXISTS credit_llm_reservations_logical_attempt_key;
 ALTER TABLE credit_llm_reservations
 ADD CONSTRAINT credit_llm_reservations_logical_attempt_key
 UNIQUE (user_id, run_id, call_index, attempt_index);
+DO $$
+BEGIN
+    -- Prod carried this index name over (run_id, status, call_index) before
+    -- #432 added attempt_index. CREATE INDEX IF NOT EXISTS matches by name
+    -- alone and would keep that stale definition forever, so drop it -- but
+    -- only while it is stale: this DDL runs on every boot (credits_store is
+    -- built at import), and an unconditional DROP+CREATE would rebuild the
+    -- index under ACCESS EXCLUSIVE on every deploy instead of converging.
+    IF EXISTS (
+        SELECT 1
+        FROM pg_index AS idx
+        JOIN pg_class AS rel ON rel.oid = idx.indexrelid
+        WHERE idx.indrelid = 'credit_llm_reservations'::regclass
+          AND rel.relname = 'idx_credit_llm_reservations_run_status'
+          AND split_part(pg_get_indexdef(idx.indexrelid), ' USING btree ', 2)
+              <> '(run_id, status, call_index, attempt_index)'
+    ) THEN
+        DROP INDEX idx_credit_llm_reservations_run_status;
+    END IF;
+END
+$$;
+CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_run_status
+ON credit_llm_reservations(run_id, status, call_index, attempt_index);
 
 ALTER TABLE credit_grant_pool_ledger_entries
 ADD COLUMN IF NOT EXISTS pool_name_snapshot TEXT;

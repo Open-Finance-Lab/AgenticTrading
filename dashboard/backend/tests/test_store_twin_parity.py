@@ -17,6 +17,11 @@ independent ways a twin can diverge both surface only on prod:
   must repeat every lazy migration the SQLite store performs (declaring a
   column in ``CREATE`` alone reaches a fresh database but never a deployed
   one, which is the failure mode the twin's own header comment warns about).
+* **Index order.** The same no-op bites a ``CREATE INDEX`` that names a
+  column the twin only adds by ``ALTER TABLE`` further down: on a deployed
+  table the index runs first and raises ``UndefinedColumn`` at import (#432
+  killed the Render boot this way). Each index must sit below every ADD
+  COLUMN it depends on.
 
 #227 hit the first axis: it added ``live_trading_enabled`` to
 ``AgentStore.update_agent`` only, and every agent Configure PATCH on prod
@@ -270,6 +275,14 @@ _ADD_COLUMN = re.compile(
     r"(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)",
     re.IGNORECASE,
 )
+_CREATE_INDEX = re.compile(
+    r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+NOT\s+EXISTS\s+)?"
+    r"([A-Za-z_][A-Za-z0-9_]*)\s+ON\s+(?:ONLY\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*"
+    r"(?:USING\s+[A-Za-z_]+\s*)?\(",
+    re.IGNORECASE,
+)
+_SQL_STRING = re.compile(r"'(?:[^']|'')*'")
+_IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # Tables a Postgres twin deliberately never creates, keyed by twin class name.
 # The default is that both twins declare the same tables -- a divergence is
 # normally the #227 bug -- so every entry needs its reason recorded here, and
@@ -300,12 +313,17 @@ _CONSTRAINT_KEYWORDS = {
 
 
 def _string_literals(source: str) -> list[str]:
-    """Every string literal in a module, with f-strings reassembled.
+    """Every string literal in a module, in source order, f-strings reassembled.
 
     Adjacent plain literals are folded by the parser, so a statement split
     across source lines arrives as one string. f-strings become one JoinedStr
     whose interpolations collapse to a placeholder -- enough to read the
     column name, which is never interpolated.
+
+    Source order is what the index-ordering guard reads as *execution* order:
+    every twin runs its DDL top to bottom. ``ast.walk`` is breadth-first, so
+    a statement nested one level deeper (inside an ``if``, say) would
+    otherwise sort after a shallower statement that follows it in the file.
     """
     tree = ast.parse(source)
 
@@ -314,18 +332,22 @@ def _string_literals(source: str) -> list[str]:
         if isinstance(node, ast.JoinedStr):
             nested.update(id(inner) for inner in ast.walk(node) if inner is not node)
 
-    literals = []
+    positioned: list[tuple[int, int, str]] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.JoinedStr):
-            literals.append(
-                "".join(
-                    (
-                        part.value
-                        if isinstance(part, ast.Constant)
-                        and isinstance(part.value, str)
-                        else _EXPR
-                    )
-                    for part in node.values
+            positioned.append(
+                (
+                    node.lineno,
+                    node.col_offset,
+                    "".join(
+                        (
+                            part.value
+                            if isinstance(part, ast.Constant)
+                            and isinstance(part.value, str)
+                            else _EXPR
+                        )
+                        for part in node.values
+                    ),
                 )
             )
         elif (
@@ -333,8 +355,49 @@ def _string_literals(source: str) -> list[str]:
             and isinstance(node.value, str)
             and id(node) not in nested
         ):
-            literals.append(node.value)
-    return literals
+            positioned.append((node.lineno, node.col_offset, node.value))
+    positioned.sort(key=lambda item: item[:2])
+    return [value for _, _, value in positioned]
+
+
+class _IndexReference(NamedTuple):
+    name: str
+    table: str
+    #: every identifier the index names -- key columns, INCLUDE, the partial
+    #: WHERE predicate -- because a missing column anywhere in it is fatal
+    columns: frozenset[str]
+
+
+def _index_references(literal: str) -> list[tuple[int, _IndexReference]]:
+    """``(offset, reference)`` for every ``CREATE INDEX`` in one literal.
+
+    Identifiers are collected from the whole statement after ``ON <table>``
+    up to its ``;`` (or the literal's end), minus string literals, so a
+    partial index's predicate counts too. Keywords (DESC, WHERE, TRUE ...)
+    come along; the guard only ever intersects this set with a table's
+    migrated columns, so they cost nothing.
+    """
+    references = []
+    for match in _CREATE_INDEX.finditer(literal):
+        open_paren = match.end() - 1
+        body = _balanced_body(literal, open_paren)
+        if body is None:
+            continue
+        close_paren = open_paren + len(body) + 1
+        terminator = literal.find(";", close_paren)
+        predicate = literal[close_paren + 1 : None if terminator == -1 else terminator]
+        clause = _SQL_STRING.sub(" ", f"{body} {predicate}")
+        references.append(
+            (
+                match.start(),
+                _IndexReference(
+                    match.group(1).lower(),
+                    match.group(2).lower(),
+                    frozenset(tok.lower() for tok in _IDENTIFIER.findall(clause)),
+                ),
+            )
+        )
+    return references
 
 
 def _skip_quoted(text: str, i: int) -> int:
@@ -507,6 +570,100 @@ def _init_schema(self):
     # The ALTER-only view must not absorb the CREATE's columns: the check that
     # a deployed table still gains new columns depends on the two being distinct.
     assert schema.migrated == {"widgets": {"retired", "mode", "note"}}
+
+
+def test_string_literals_come_back_in_source_order():
+    """The ordering guard below reads position as execution order."""
+    source = (
+        "def f(x):\n"
+        "    if x:\n"
+        "        a = 'nested first'\n"
+        "    b = 'shallow second'\n"
+    )
+
+    assert _string_literals(source) == ["nested first", "shallow second"]
+
+
+def test_ddl_parser_extracts_index_references():
+    """Guards the ordering check below from passing vacuously."""
+    source = '''
+cur.execute(
+    "CREATE INDEX IF NOT EXISTS idx_widgets_owner "
+    "ON widgets(owner_id, updated_at DESC)"
+)
+cur.execute(
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_widgets_default
+    ON widgets (owner_id) WHERE is_default = TRUE AND label <> 'retired';
+    CREATE INDEX idx_widgets_note ON widgets USING btree (lower(note));
+    """
+)
+'''
+    references = [
+        reference
+        for literal in _string_literals(source)
+        for _, reference in _index_references(literal)
+    ]
+
+    assert [reference.name for reference in references] == [
+        "idx_widgets_owner",
+        "uq_widgets_default",
+        "idx_widgets_note",
+    ]
+    assert {reference.table for reference in references} == {"widgets"}
+    assert {"owner_id", "updated_at"} <= references[0].columns
+    # The partial-index predicate counts: a column missing there is just as
+    # fatal. The quoted value must not, or a column literally named "retired"
+    # would be reported as referenced.
+    assert {"owner_id", "is_default", "label"} <= references[1].columns
+    assert "retired" not in references[1].columns
+    assert "note" in references[2].columns
+
+
+@pytest.mark.parametrize(
+    "sqlite_mod,sqlite_cls,postgres_mod,postgres_cls", _TWINS, ids=_TWIN_IDS
+)
+def test_postgres_twin_indexes_a_migrated_column_only_after_adding_it(
+    sqlite_mod, sqlite_cls, postgres_mod, postgres_cls
+):
+    """The #432 Render boot crash, as a rule rather than a credits-only guard.
+
+    An ``ALTER TABLE t ADD COLUMN IF NOT EXISTS c`` exists because some
+    deployed table predates ``c``. On that deployment ``CREATE TABLE IF NOT
+    EXISTS`` no-ops, so a ``CREATE INDEX`` naming ``c`` that runs *before*
+    the ALTER raises UndefinedColumn at import -- fatal for a store built at
+    module scope, and invisible to CI, whose Postgres is empty on every run
+    and therefore only ever exercises the CREATE path. Position in the source
+    is execution order here: every twin runs its DDL top to bottom.
+    """
+    source = _module_source_path(postgres_mod).read_text(encoding="utf-8")
+    literals = _string_literals(source)
+
+    first_added: dict[tuple[str, str], tuple[int, int]] = {}
+    for position, literal in enumerate(literals):
+        for match in _ADD_COLUMN.finditer(literal):
+            key = (match.group(1).lower(), match.group(2).lower())
+            first_added.setdefault(key, (position, match.start()))
+
+    too_early = []
+    for position, literal in enumerate(literals):
+        for offset, reference in _index_references(literal):
+            for column in sorted(reference.columns):
+                added_at = first_added.get((reference.table, column))
+                if added_at is not None and added_at > (position, offset):
+                    too_early.append(
+                        f"  {reference.name} indexes {reference.table}.{column} "
+                        f"before ALTER TABLE {reference.table} ADD COLUMN IF NOT "
+                        f"EXISTS {column}"
+                    )
+
+    assert not too_early, (
+        f"{postgres_cls} creates an index on a column its own migration adds "
+        f"later. On a deployment whose table predates that column the CREATE "
+        f"TABLE no-ops and the CREATE INDEX raises UndefinedColumn at import "
+        f"(the #432 Render boot crash). Move the CREATE INDEX below the ADD "
+        f"COLUMN:\n" + "\n".join(too_early)
+    )
 
 
 @pytest.mark.parametrize(

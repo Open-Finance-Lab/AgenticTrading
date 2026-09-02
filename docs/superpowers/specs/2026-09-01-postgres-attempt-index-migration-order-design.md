@@ -61,3 +61,9 @@ The migration continues to run in the existing PostgreSQL transaction. Any later
 ## Deployment
 
 After the hotfix PR merges, manually trigger a Render deployment because the service has `autoDeploy` disabled. Verify the deployed commit reaches `live`, confirm the startup migration no longer raises `UndefinedColumn`, then run one platform-model smoke test that can exercise OpenRouter-to-CommonStack failover.
+
+## Amendment (PR #433, 2026-09-02): the index may already exist with the wrong columns
+
+The design above assumes a legacy table has *no* `idx_credit_llm_reservations_run_status`. Production had one: commit `c0bcd863` (2026-08-24) created it over `(run_id, status, call_index)`, and `CREATE INDEX IF NOT EXISTS` matches by name alone, so the bare statement in the migration DDL no-ops against that table and the four-column definition never lands. The migration now drops the index only when `pg_get_indexdef` reports a column list other than `(run_id, status, call_index, attempt_index)`, then recreates it. The drop is conditional on purpose: this DDL runs at import on every deploy, and an unconditional DROP+CREATE would rebuild the index under ACCESS EXCLUSIVE each time instead of converging.
+
+Pinned by `test_postgres_boot_migrates_pre_failover_reservation_table` (starts from the exact pre-#432 table, stale index included) and `test_postgres_boot_leaves_a_repaired_run_status_index_alone` (a second boot keeps the same index object). `test_store_twin_parity.py` now also checks that every Postgres twin creates an index only below the `ADD COLUMN` of any column it names, which is the general form of this defect.
