@@ -94,6 +94,11 @@ def temp_postgres_store():
             cur.execute("DELETE FROM password_reset_requests")
             cur.execute("DELETE FROM email_change_requests")
             cur.execute("DELETE FROM auth_sessions")
+            # Redundant on a schema this repo created (every child table FKs
+            # users with ON DELETE CASCADE), like the three above -- the
+            # explicit wipe is what keeps a long-lived dev database honest
+            # after a review branch's divergent DDL or manual tampering (#437).
+            cur.execute("DELETE FROM user_entitlements")
             cur.execute("DELETE FROM users")
     yield store
 
