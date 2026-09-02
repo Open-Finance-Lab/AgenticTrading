@@ -38,6 +38,41 @@ Sign in and out
   dashboard you just left; sign in again to get back to it.
 
 
+.. _accounts-reset-password:
+
+Reset a forgotten password
+--------------------------
+
+If you cannot sign in, reset your password from the sign-in dialog:
+
+1. Click **Sign in** in the header, then **Forgot password?**.
+2. Enter your account email and click **Send code**. A 6-character reset code
+   goes to that address if it belongs to an account.
+3. Enter the code and your new password, then click **Reset password**.
+4. Sign in with the new password — the email field is already filled in.
+
+The new password must meet the same rules as at sign-up.
+
+A few things worth knowing:
+
+- **The code expires after 15 minutes**, and five wrong codes cancels the
+  request. Codes are not case-sensitive.
+- **Check your spam folder.** A code sitting in spam looks exactly like a code
+  that was never sent.
+- The confirmation looks the same whether or not the address belongs to an
+  account, so no code arriving usually means a typo in the address — or an
+  account under a different email.
+- **Need another code?** Go back to sign-in and start over from **Forgot
+  password?**. One account is sent at most one code every 5 minutes and five
+  per day; asking again sooner looks like a success but sends nothing, so wait
+  out the five minutes.
+- A successful reset **signs you out of all devices** and cancels any
+  :ref:`email change <accounts-change-email>` you had in progress. There is no
+  automatic sign-in — you sign in fresh with the new password.
+- The reverse also holds: changing your password from the **Account** page, or
+  finishing an email change, cancels an outstanding reset code.
+
+
 Manage your profile
 -------------------
 
