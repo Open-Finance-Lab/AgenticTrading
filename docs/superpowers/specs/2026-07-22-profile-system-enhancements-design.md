@@ -129,6 +129,12 @@ Account page shows a larger preview with upload/remove controls.
 
 ## Phase 2 — Password reset via email
 
+> **Superseded (2026-09-01):** this section predates the Brevo sender and the
+> `verification_codes.py` extraction. The shipped design — emailed 6-character
+> code via Brevo, not a Resend link — is
+> `2026-09-01-password-reset-design.md`. Kept for history; do not implement
+> from this section.
+
 **Provider: Resend**, called via plain HTTPS POST (`https://api.resend.com/emails`,
 no SDK dependency). Config via env vars set in the Render dashboard:
 

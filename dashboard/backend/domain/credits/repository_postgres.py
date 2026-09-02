@@ -312,11 +312,6 @@ CREATE TABLE IF NOT EXISTS credit_llm_reservations (
 CREATE INDEX IF NOT EXISTS idx_credit_llm_reservations_user_status
 ON credit_llm_reservations(user_id, status, created_at);
 
--- idx_credit_llm_reservations_run_status is created in
--- CREDITS_POSTGRES_GRANT_MIGRATION_DDL *after* ADD COLUMN attempt_index.
--- CREATE TABLE IF NOT EXISTS is a no-op on the deployed table, so indexing
--- the new column here raises UndefinedColumn at import (Render #432).
-
 CREATE TABLE IF NOT EXISTS credit_llm_usage_entries (
     id BIGSERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
