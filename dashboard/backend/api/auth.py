@@ -119,7 +119,7 @@ _SIGNUP_EMAIL_LIMITER = _build_limiter("AUTH_SIGNUP_EMAIL", 5, 3600)
 # addresses is the one genuinely new drain surface this flow opens, and
 # 10/hour caps the worst case under the provider's free-tier daily allowance.
 # The resend policy the login modal advertises, made VISIBLE (429 + Retry-After)
-# here and enforced durably by users.py's PASSWORD_RESET_* backstops:
+# here and enforced durably by users.py's RESET_CODE_* backstops:
 #   COOLDOWN  one request per 60 s per typed address -- the resend countdown;
 #   EMAIL     one send plus five resends an hour, then an hour's wait.
 # The cooldown is CHECKED first and RECORDED only once the request is
@@ -134,7 +134,7 @@ _SIGNUP_EMAIL_LIMITER = _build_limiter("AUTH_SIGNUP_EMAIL", 5, 3600)
 _FORGOT_IP_LIMITER = _build_limiter("AUTH_FORGOT_IP", 30, 3600)
 _FORGOT_COOLDOWN_LIMITER = _build_limiter("AUTH_FORGOT_COOLDOWN", 1, 60)
 _FORGOT_EMAIL_LIMITER = _build_limiter(
-    "AUTH_FORGOT_EMAIL", users_module.PASSWORD_RESET_MAX_REQUESTS_PER_HOUR, 3600
+    "AUTH_FORGOT_EMAIL", users_module.RESET_CODE_MAX_REQUESTS_PER_HOUR, 3600
 )
 _FORGOT_GLOBAL_LIMITER = _build_limiter("AUTH_FORGOT_GLOBAL", 10, 3600)
 # reset-password mirrors login's check/record/allow split: the per-email
@@ -1066,8 +1066,8 @@ def _check_forgot_policy_coherence() -> None:
     """
     cooldown = _FORGOT_COOLDOWN_LIMITER
     hourly = _FORGOT_EMAIL_LIMITER
-    durable_cooldown = users_module.PASSWORD_RESET_COOLDOWN_SECONDS
-    per_hour = users_module.PASSWORD_RESET_MAX_REQUESTS_PER_HOUR
+    durable_cooldown = users_module.RESET_CODE_COOLDOWN_SECONDS
+    per_hour = users_module.RESET_CODE_MAX_REQUESTS_PER_HOUR
     if cooldown.max_events != 1:
         print(
             f"WARNING: AUTH_FORGOT_COOLDOWN_MAX={cooldown.max_events}: the resend "
@@ -1107,7 +1107,7 @@ def _password_reset_body(code: str) -> str:
         "account belonging to this address.\n\n"
         f"Your reset code: {code}\n\n"
         "Enter it on the password reset screen along with your new password. "
-        f"The code expires in {users_module.PASSWORD_RESET_TTL_MINUTES} "
+        f"The code expires in {users_module.RESET_CODE_TTL_MINUTES} "
         "minutes and can be used once.\n\n"
         "If you didn't request this, you can ignore this email -- your "
         "password has not been changed."
@@ -1138,19 +1138,19 @@ async def _deliver_password_reset_code(email: str) -> None:
     # the hard bound on issuance cadence, these are the backstop that survives
     # a redeploy.
     last_at = await asyncio.to_thread(store.last_password_reset_request_at, user_id)
-    if last_at and _seconds_since(last_at) < users_module.PASSWORD_RESET_COOLDOWN_SECONDS:
+    if last_at and _seconds_since(last_at) < users_module.RESET_CODE_COOLDOWN_SECONDS:
         print(f"auth.reset_skipped reason=cooldown domain={domain}")
         return
     recent_hour = await asyncio.to_thread(
         store.password_reset_request_times_since, user_id, _hourly_window_start()
     )
-    if len(recent_hour) >= users_module.PASSWORD_RESET_MAX_REQUESTS_PER_HOUR:
+    if len(recent_hour) >= users_module.RESET_CODE_MAX_REQUESTS_PER_HOUR:
         print(f"auth.reset_skipped reason=hourly_cap domain={domain}")
         return
     recent_day = await asyncio.to_thread(
         store.password_reset_request_times_since, user_id, _daily_window_start()
     )
-    if len(recent_day) >= users_module.PASSWORD_RESET_MAX_REQUESTS_PER_DAY:
+    if len(recent_day) >= users_module.RESET_CODE_MAX_REQUESTS_PER_DAY:
         print(f"auth.reset_skipped reason=daily_cap domain={domain}")
         return
 

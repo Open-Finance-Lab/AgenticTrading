@@ -311,31 +311,31 @@ def test_get_active_password_reset_folds_expiry_into_no_active_row(store, user):
 
 
 def test_record_password_reset_attempt_cancels_at_the_cap(store, user):
-    from dashboard.backend.users import PASSWORD_RESET_MAX_ATTEMPTS
+    from dashboard.backend.users import RESET_CODE_MAX_ATTEMPTS
 
     row = store.create_password_reset_request(user["id"], hash_code("A"))
 
-    for expected in range(1, PASSWORD_RESET_MAX_ATTEMPTS):
+    for expected in range(1, RESET_CODE_MAX_ATTEMPTS):
         assert store.record_password_reset_attempt(row["id"]) == expected
         assert store.get_active_password_reset(user["id"]) is not None
 
-    assert store.record_password_reset_attempt(row["id"]) == PASSWORD_RESET_MAX_ATTEMPTS
+    assert store.record_password_reset_attempt(row["id"]) == RESET_CODE_MAX_ATTEMPTS
     assert store.get_active_password_reset(user["id"]) is None
 
     # Further attempts never push past the cap.
-    assert store.record_password_reset_attempt(row["id"]) == PASSWORD_RESET_MAX_ATTEMPTS
+    assert store.record_password_reset_attempt(row["id"]) == RESET_CODE_MAX_ATTEMPTS
     conn = store._get_connection()
     attempts = conn.execute(
         "SELECT attempts FROM password_reset_requests WHERE id = ?", (row["id"],)
     ).fetchone()["attempts"]
     conn.close()
-    assert attempts == PASSWORD_RESET_MAX_ATTEMPTS
+    assert attempts == RESET_CODE_MAX_ATTEMPTS
 
 
 def test_record_password_reset_attempt_cap_holds_under_concurrency(store, user):
     import threading
 
-    from dashboard.backend.users import PASSWORD_RESET_MAX_ATTEMPTS
+    from dashboard.backend.users import RESET_CODE_MAX_ATTEMPTS
 
     row = store.create_password_reset_request(user["id"], hash_code("A"))
 
@@ -355,7 +355,7 @@ def test_record_password_reset_attempt_cap_holds_under_concurrency(store, user):
     ).fetchone()["attempts"]
     conn.close()
     # 12 racing attempts; the SQL predicate is what bounds the count.
-    assert attempts == PASSWORD_RESET_MAX_ATTEMPTS
+    assert attempts == RESET_CODE_MAX_ATTEMPTS
 
 
 def test_mark_password_reset_used_is_a_single_winner_cas(store, user):

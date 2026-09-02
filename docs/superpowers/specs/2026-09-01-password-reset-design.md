@@ -132,8 +132,8 @@ The background task (`async`; store calls wrapped in `asyncio.to_thread`,
 2. **DB-backed cooldown and daily cap**, enforced silently (still 200 —
    an inline 429 keyed on account state would be an enumeration oracle):
    skip (with `reason=cooldown` / `reason=daily_cap`) if the account's latest
-   request row is younger than `PASSWORD_RESET_COOLDOWN_SECONDS`, or if
-   `PASSWORD_RESET_MAX_REQUESTS_PER_DAY` rows exist in the trailing 24h.
+   request row is younger than `RESET_CODE_COOLDOWN_SECONDS`, or if
+   `RESET_CODE_MAX_REQUESTS_PER_DAY` rows exist in the trailing 24h.
    Reads are **status-blind** (cancelled/used rows still count), exactly like
    `last_email_change_request_at` — so a cross-flow cancellation does *not*
    reset the cooldown clock, and cancelling can never be used to mint codes
@@ -187,7 +187,7 @@ Order:
 3. Code compare: `hmac.compare_digest(hash_code(payload.code),
    row["code_hash"])` — mismatch → `record_password_reset_attempt(row_id)`,
    an **atomic conditional increment** whose return value tells the route the
-   cap was hit (reaching `PASSWORD_RESET_MAX_ATTEMPTS` cancels the request —
+   cap was hit (reaching `RESET_CODE_MAX_ATTEMPTS` cancels the request —
    email-change precedent, but enforced in SQL so a concurrent burst cannot
    exceed the budget); same generic 400.
 4. Only after the code passes: `validate_new_password(new_password, email)` —
@@ -236,7 +236,7 @@ New append-only table `password_reset_requests` in **both**
 | `code_hash` | TEXT NOT NULL | `verification_codes.hash_code` output; raw code never stored |
 | `attempts` | INTEGER NOT NULL DEFAULT 0 | |
 | `created_at` | timestamp | store-native format |
-| `expires_at` | timestamp | `created_at` + `PASSWORD_RESET_TTL_MINUTES` |
+| `expires_at` | timestamp | `created_at` + `RESET_CODE_TTL_MINUTES` |
 | `used_at` | timestamp NULL | set on successful reset |
 | `cancelled_at` | timestamp NULL | set by cancel paths; rows are never deleted |
 
@@ -276,10 +276,10 @@ DB caps suffice — they are the durable backstop, not the enforcement).
 ### Constants (in `users.py`, beside the email-change block)
 
 ```python
-PASSWORD_RESET_TTL_MINUTES = 15
-PASSWORD_RESET_MAX_ATTEMPTS = 5
-PASSWORD_RESET_COOLDOWN_SECONDS = 300   # July spec's one-request-per-5-minutes
-PASSWORD_RESET_MAX_REQUESTS_PER_DAY = 5
+RESET_CODE_TTL_MINUTES = 15
+RESET_CODE_MAX_ATTEMPTS = 5
+RESET_CODE_COOLDOWN_SECONDS = 300   # July spec's one-request-per-5-minutes
+RESET_CODE_MAX_REQUESTS_PER_DAY = 5
 ```
 
 ### Email copy
@@ -296,7 +296,7 @@ Follow the `_email_change_*_body` f-string style; plain text.
   Your reset code: {code}
 
   Enter it on the password reset screen along with your new password. The
-  code expires in {PASSWORD_RESET_TTL_MINUTES} minutes and can be used once.
+  code expires in {RESET_CODE_TTL_MINUTES} minutes and can be used once.
 
   If you didn't request this, you can ignore this email — your password has
   not been changed.
@@ -494,10 +494,11 @@ that a five-minute wait with nothing on screen saying so.
   code."), the seventh request in an hour answers 429 `FORGOT_RATE_LIMIT_DETAIL`
   — each with `Retry-After`, which the browser counts down on the button.
 - The interpretation of "max retry of 5 times" is five *resends*; if it was
-  meant as five sends total, `PASSWORD_RESET_MAX_REQUESTS_PER_HOUR` (which also
+  meant as five sends total, `RESET_CODE_MAX_REQUESTS_PER_HOUR` (which also
   sets `_FORGOT_EMAIL_LIMITER`'s default) is the one constant to change.
 
 ### Backend
+- Constants renamed `PASSWORD_RESET_*` → `RESET_CODE_*` (all five, both store twins): CodeQL's `py/clear-text-logging-sensitive-data` classifies a *source* by identifier name, so the new startup lines that print these counts were flagged as logging a password (alerts #1287–#1292 on the merge ref; the repo's `_BOOTSTRAP_MIN_LENGTH` precedent). They are durations and counts; the name now says so.
 
 - `_FORGOT_COOLDOWN_LIMITER = _build_limiter("AUTH_FORGOT_COOLDOWN", 1, 60)`,
   keyed on the typed normalized address like `_FORGOT_EMAIL_LIMITER` — so it is
@@ -512,7 +513,7 @@ that a five-minute wait with nothing on screen saying so.
   window lets two simultaneous clicks both pass the minute; both are still
   bounded by the atomic hourly `allow()` and the durable cooldown.
 - `_FORGOT_EMAIL_LIMITER`'s default is now
-  `PASSWORD_RESET_MAX_REQUESTS_PER_HOUR` (6) rather than a literal, so the
+  `RESET_CODE_MAX_REQUESTS_PER_HOUR` (6) rather than a literal, so the
   visible gate and the durable backstop cannot drift apart.
 - The 200 body becomes `{"status": "ok", "resend_after_seconds": <cooldown
   window>}` — config-shaped and identical for every caller, so the
@@ -527,9 +528,9 @@ that a five-minute wait with nothing on screen saying so.
   above the durable cap or 0, hourly window below the durable window + skew) —
   the `_env_int` fail-visible convention; nothing is clamped.
 - Durable backstops (`users.py`), which only bite silently and only across a
-  restart: `PASSWORD_RESET_COOLDOWN_SECONDS` 300 → **40**,
-  new `PASSWORD_RESET_MAX_REQUESTS_PER_HOUR = 6` (rolling hour, skewed — next
-  bullet; skip reason `hourly_cap`), `PASSWORD_RESET_MAX_REQUESTS_PER_DAY`
+  restart: `RESET_CODE_COOLDOWN_SECONDS` 300 → **40**,
+  new `RESET_CODE_MAX_REQUESTS_PER_HOUR = 6` (rolling hour, skewed — next
+  bullet; skip reason `hourly_cap`), `RESET_CODE_MAX_REQUESTS_PER_DAY`
   5 → **12**. The daily cap is a mail-bomb bound on the victim's inbox
   (two full hourly windows), not the user-facing limit; it must clear a full
   hour's worth or "wait an hour" would be false — and it *had* to move, because

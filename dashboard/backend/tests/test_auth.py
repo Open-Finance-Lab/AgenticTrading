@@ -2531,14 +2531,14 @@ def test_forgot_limiter_defaults_match_the_advertised_resend_policy():
     drift apart -- a backstop tighter than its gate is a silent skip."""
     from dashboard.backend.api import auth as auth_api
     from dashboard.backend.users import (
-        PASSWORD_RESET_COOLDOWN_SECONDS,
-        PASSWORD_RESET_MAX_REQUESTS_PER_DAY,
-        PASSWORD_RESET_MAX_REQUESTS_PER_HOUR,
+        RESET_CODE_COOLDOWN_SECONDS,
+        RESET_CODE_MAX_REQUESTS_PER_DAY,
+        RESET_CODE_MAX_REQUESTS_PER_HOUR,
     )
 
     assert auth_api._FORGOT_COOLDOWN_LIMITER.max_events == 1
     assert auth_api._FORGOT_COOLDOWN_LIMITER.window_seconds == 60
-    assert auth_api._FORGOT_EMAIL_LIMITER.max_events == PASSWORD_RESET_MAX_REQUESTS_PER_HOUR == 6
+    assert auth_api._FORGOT_EMAIL_LIMITER.max_events == RESET_CODE_MAX_REQUESTS_PER_HOUR == 6
     assert auth_api._FORGOT_EMAIL_LIMITER.window_seconds == 3600
     # Three clocks: the gate stamps request ARRIVAL, the row is stamped after
     # the send returns, the browser counts from the response. The durable
@@ -2549,11 +2549,11 @@ def test_forgot_limiter_defaults_match_the_advertised_resend_policy():
     # The row is stamped after the send returns, so the skew must cover the
     # send's hard deadline plus the store round-trips before and after it.
     assert auth_api._SEND_DEADLINE_SECONDS < skew
-    assert PASSWORD_RESET_COOLDOWN_SECONDS + skew <= auth_api._FORGOT_COOLDOWN_LIMITER.window_seconds
+    assert RESET_CODE_COOLDOWN_SECONDS + skew <= auth_api._FORGOT_COOLDOWN_LIMITER.window_seconds
     assert auth_api._HOURLY_CAP_WINDOW.total_seconds() == 3600 - skew
     # "Wait an hour" must be true: the daily backstop has to clear a full hour's
     # worth, and it is a mail-bomb bound rather than the user-facing limit.
-    assert PASSWORD_RESET_MAX_REQUESTS_PER_HOUR < PASSWORD_RESET_MAX_REQUESTS_PER_DAY <= 12
+    assert RESET_CODE_MAX_REQUESTS_PER_HOUR < RESET_CODE_MAX_REQUESTS_PER_DAY <= 12
 
 
 def test_forgot_password_reports_the_resend_cooldown(client, reset_outbox):
@@ -2724,7 +2724,7 @@ def test_forgot_password_send_has_a_hard_deadline(
 def test_forgot_password_durable_cooldown_sits_inside_the_visible_gate(
     client, reset_outbox, temp_user_store, capsys, monkeypatch
 ):
-    from dashboard.backend.users import PASSWORD_RESET_COOLDOWN_SECONDS
+    from dashboard.backend.users import RESET_CODE_COOLDOWN_SECONDS
 
     _widen_forgot_limiters(monkeypatch)
     _signup_and_token(client, email="skew@example.com")
@@ -2736,7 +2736,7 @@ def test_forgot_password_durable_cooldown_sits_inside_the_visible_gate(
     _backdate_password_reset_rows(
         temp_user_store,
         user["id"],
-        created_at=_stored_time(seconds=PASSWORD_RESET_COOLDOWN_SECONDS + 1),
+        created_at=_stored_time(seconds=RESET_CODE_COOLDOWN_SECONDS + 1),
     )
     _request_reset(client, "skew@example.com")
     assert len(reset_outbox) == 2
@@ -2744,7 +2744,7 @@ def test_forgot_password_durable_cooldown_sits_inside_the_visible_gate(
     _backdate_password_reset_rows(
         temp_user_store,
         user["id"],
-        created_at=_stored_time(seconds=PASSWORD_RESET_COOLDOWN_SECONDS - 5),
+        created_at=_stored_time(seconds=RESET_CODE_COOLDOWN_SECONDS - 5),
     )
     _request_reset(client, "skew@example.com")
     assert len(reset_outbox) == 2
@@ -2754,23 +2754,23 @@ def test_forgot_password_durable_cooldown_sits_inside_the_visible_gate(
 def test_forgot_password_requests_are_capped_per_hour(
     client, reset_outbox, temp_user_store, capsys, monkeypatch
 ):
-    from dashboard.backend.users import PASSWORD_RESET_MAX_REQUESTS_PER_HOUR
+    from dashboard.backend.users import RESET_CODE_MAX_REQUESTS_PER_HOUR
 
     _widen_forgot_limiters(monkeypatch)
     _signup_and_token(client, email="hourly@example.com")
     user = temp_user_store.get_user_by_email("hourly@example.com")
 
-    for _ in range(PASSWORD_RESET_MAX_REQUESTS_PER_HOUR):
+    for _ in range(RESET_CODE_MAX_REQUESTS_PER_HOUR):
         _request_reset(client, "hourly@example.com")
         # Past the cooldown, inside the hour.
         _backdate_password_reset_rows(
             temp_user_store, user["id"], created_at=_stored_time(minutes=2)
         )
-    assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_HOUR
+    assert len(reset_outbox) == RESET_CODE_MAX_REQUESTS_PER_HOUR
 
     _request_reset(client, "hourly@example.com")
 
-    assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_HOUR
+    assert len(reset_outbox) == RESET_CODE_MAX_REQUESTS_PER_HOUR
     assert "reason=hourly_cap" in capsys.readouterr().out
 
     # The oldest send ageing out frees exactly one slot -- and the durable
@@ -2780,29 +2780,29 @@ def test_forgot_password_requests_are_capped_per_hour(
         temp_user_store, user["id"], created_at=_stored_time(seconds=3600 - 5)
     )
     _request_reset(client, "hourly@example.com")
-    assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_HOUR + 1
+    assert len(reset_outbox) == RESET_CODE_MAX_REQUESTS_PER_HOUR + 1
 
 
 def test_forgot_password_requests_are_capped_per_day(
     client, reset_outbox, temp_user_store, capsys, monkeypatch
 ):
-    from dashboard.backend.users import PASSWORD_RESET_MAX_REQUESTS_PER_DAY
+    from dashboard.backend.users import RESET_CODE_MAX_REQUESTS_PER_DAY
 
     _widen_forgot_limiters(monkeypatch)
     _signup_and_token(client, email="capped-reset@example.com")
     user = temp_user_store.get_user_by_email("capped-reset@example.com")
 
-    for _ in range(PASSWORD_RESET_MAX_REQUESTS_PER_DAY):
+    for _ in range(RESET_CODE_MAX_REQUESTS_PER_DAY):
         _request_reset(client, "capped-reset@example.com")
         # Outside the hour, inside the 24h window.
         _backdate_password_reset_rows(
             temp_user_store, user["id"], created_at=_stored_time(hours=2)
         )
-    assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_DAY
+    assert len(reset_outbox) == RESET_CODE_MAX_REQUESTS_PER_DAY
 
     _request_reset(client, "capped-reset@example.com")
 
-    assert len(reset_outbox) == PASSWORD_RESET_MAX_REQUESTS_PER_DAY
+    assert len(reset_outbox) == RESET_CODE_MAX_REQUESTS_PER_DAY
     assert "reason=daily_cap" in capsys.readouterr().out
 
 
@@ -2863,14 +2863,14 @@ def test_reset_password_failures_are_uniform(client, reset_outbox):
 
 
 def test_reset_password_gives_up_after_five_wrong_codes(client, reset_outbox):
-    from dashboard.backend.users import PASSWORD_RESET_MAX_ATTEMPTS
+    from dashboard.backend.users import RESET_CODE_MAX_ATTEMPTS
 
     _signup_and_token(client, email="attempts-reset@example.com")
     _request_reset(client, "attempts-reset@example.com")
     real = _reset_code_from(reset_outbox[0]["body"])
     wrong = "ZZZZZZ" if real != "ZZZZZZ" else "YYYYYY"
 
-    for _ in range(PASSWORD_RESET_MAX_ATTEMPTS):
+    for _ in range(RESET_CODE_MAX_ATTEMPTS):
         attempt = _reset_password(
             client, "attempts-reset@example.com", wrong, "fresh-sturdy-pw-3"
         )

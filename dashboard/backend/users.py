@@ -80,11 +80,11 @@ EMAIL_CHANGE_MIN_INTERVAL_DAYS = 7
 #
 # PER_DAY is a mail-bomb bound on the victim's inbox, not the user-facing
 # limit: it must clear a full hour's worth or "wait an hour" would be false.
-PASSWORD_RESET_TTL_MINUTES = 15
-PASSWORD_RESET_MAX_ATTEMPTS = 5
-PASSWORD_RESET_COOLDOWN_SECONDS = 40
-PASSWORD_RESET_MAX_REQUESTS_PER_HOUR = 6   # 1 send + 5 resends
-PASSWORD_RESET_MAX_REQUESTS_PER_DAY = 12   # two full hourly windows
+RESET_CODE_TTL_MINUTES = 15
+RESET_CODE_MAX_ATTEMPTS = 5
+RESET_CODE_COOLDOWN_SECONDS = 40
+RESET_CODE_MAX_REQUESTS_PER_HOUR = 6   # 1 send + 5 resends
+RESET_CODE_MAX_REQUESTS_PER_DAY = 12   # two full hourly windows
 
 
 def _expiry_iso(minutes: int) -> str:
@@ -1320,7 +1320,7 @@ class UserStore:
         return [str(row["created_at"]) for row in rows]
 
     def _password_reset_expiry(self) -> str:
-        return _expiry_iso(PASSWORD_RESET_TTL_MINUTES)
+        return _expiry_iso(RESET_CODE_TTL_MINUTES)
 
     def create_password_reset_request(
         self, user_id: int, code_hash: str
@@ -1403,17 +1403,17 @@ class UserStore:
                 AND attempts < ?
             """,
             (
-                PASSWORD_RESET_MAX_ATTEMPTS,
+                RESET_CODE_MAX_ATTEMPTS,
                 _utcnow_iso(),
                 request_id,
-                PASSWORD_RESET_MAX_ATTEMPTS,
+                RESET_CODE_MAX_ATTEMPTS,
             ),
         )
         counted = cursor.rowcount == 1
         conn.commit()
         if not counted:
             conn.close()
-            return PASSWORD_RESET_MAX_ATTEMPTS
+            return RESET_CODE_MAX_ATTEMPTS
         cursor.execute(
             "SELECT attempts FROM password_reset_requests WHERE id = ?",
             (request_id,),

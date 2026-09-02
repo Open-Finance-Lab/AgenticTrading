@@ -797,7 +797,7 @@ def test_password_reset_attempt_cap_cancels_postgres(temp_postgres_store):
     user = store.create_user("cap-pg@example.com", "Cap PG", "securepass1")
     row = store.create_password_reset_request(user["id"], hash_code("A"))
 
-    cap = users_module.PASSWORD_RESET_MAX_ATTEMPTS
+    cap = users_module.RESET_CODE_MAX_ATTEMPTS
     for expected in range(1, cap + 1):
         assert store.record_password_reset_attempt(row["id"]) == expected
     assert store.get_active_password_reset(user["id"]) is None
