@@ -75,7 +75,7 @@ def test_every_leaderboard_llm_has_a_supermarket_card():
     catalog_names = {
         template["name"]
         for template in _CATALOG
-        if template["template_id"] != "ai-hedge-fund"
+        if template.get("shelf") == "llms"
     }
     assert catalog_names == board_names
     # The API payload exposes each entry's *model* string (service.py builds
@@ -123,8 +123,8 @@ def test_llm_card_prompts_pin_the_default_starter_instruction():
         assert step["prompt"] == DEFAULT_STARTER_INSTRUCTION, template["template_id"]
 
 
-def test_retired_strategy_templates_are_gone():
-    retired = {
+def test_restored_strategy_templates_sit_on_the_agents_shelf():
+    restored = {
         "balanced-starter",
         "momentum-scout",
         "pipeline-analyst",
@@ -136,8 +136,10 @@ def test_retired_strategy_templates_are_gone():
         "volatility-guard",
         "ashare-momentum-t1",
     }
-    present = {template["template_id"] for template in _CATALOG}
-    assert not (retired & present)
+    by_id = {template["template_id"]: template for template in _CATALOG}
+    assert restored <= set(by_id)
+    for template_id in restored:
+        assert by_id[template_id].get("shelf") == "open", template_id
 
 
 def test_catalog_rows_declare_a_supermarket_shelf():
@@ -153,9 +155,9 @@ def test_catalog_covers_every_pickable_vendor():
     assert {"anthropic", "openai", "google", "deepseek", "qwen"} <= vendors
 
 
-def test_catalog_has_no_china_a_share_templates():
-    """Community chips are catalog-derived. A cn_ashares row would re-ship the
-    China A-Share supermarket chip this change took off; add the row when
-    A-share templates come back, don't add a hardcoded chip.
+def test_catalog_includes_both_markets():
+    """Community chips follow the catalog. A-share templates are back on the
+    Agents shelf, so the China A-Share chip ships again without a hardcoded
+    chip list.
     """
-    assert {t.get("category") for t in _CATALOG} == {"us_stocks"}
+    assert {t.get("category") for t in _CATALOG} == {"us_stocks", "cn_ashares"}

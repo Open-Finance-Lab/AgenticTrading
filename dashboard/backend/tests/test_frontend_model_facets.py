@@ -259,8 +259,8 @@ console.log(JSON.stringify(results));
 
 
 def test_only_open_weight_models_get_a_badge():
-    """LLM tiles no longer claim licence. Open Agents use an explicit
-    Open Source mark; closed models get nothing."""
+    """LLM tiles no longer claim licence. Hosted repo cards use an explicit
+    Open Source mark; closed models and strategy templates get nothing."""
     card = fn_body("function buildMarketplaceCardHtml")
     assert "Open Source" in card
     assert "Open-source model" not in card
@@ -300,7 +300,7 @@ let marketplaceContestMeta = {{ start_date: null, end_date: null, display_capita
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
 def test_shipped_grid_badges_only_open_weight_cards():
-    """Open Source is an Open Agents mark, not an open-weight-model claim."""
+    """Open Source is a repo-card mark, not an Agents-shelf or open-weight claim."""
     script = f"""
 {_CARD_HELPERS}
 const cards = [
@@ -312,6 +312,9 @@ const cards = [
     name: 'AI Hedge Fund', model_name: 'nvidia/nemotron-3-nano-30b-a3b',
     card_subtitle: 'Open-source multi-agent system',
     repo_url: 'https://github.com/virattt/ai-hedge-fund' }}),
+  buildMarketplaceCardHtml({{ template_id: 'balanced-starter', shelf: 'open', category: 'us_stocks',
+    name: 'Balanced Starter', model_name: 'anthropic/claude-haiku-4-5',
+    description: 'A simple starter agent that diversifies across strong stocks.' }}),
 ];
 console.log(JSON.stringify(cards.map((html) => html.includes('Open Source'))));
 """
@@ -319,7 +322,7 @@ console.log(JSON.stringify(cards.map((html) => html.includes('Open Source'))));
         ["node", "-e", script], capture_output=True, text=True, timeout=30
     )
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == [False, False, True]
+    assert json.loads(result.stdout) == [False, False, True, False]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
@@ -406,6 +409,9 @@ console.log(JSON.stringify({{
   rankedHasMeta: ranked.includes('DJIA 30'),
   rankedHasWindow: ranked.includes('Apr 15–May 15'),
   rankedHasCapital: ranked.includes('$10K'),
+  rankedHasHead: ranked.includes('mp-competition-head'),
+  rankedMetaBeforeBody: ranked.indexOf('DJIA 30') < ranked.indexOf('mp-competition-body')
+    && ranked.indexOf('Competition result') < ranked.indexOf('mp-competition-body'),
   rankedHasComingSoon: ranked.includes('Performance data coming soon'),
   unrankedHasCompetition: unranked.includes('Competition result'),
   unrankedHasSpark: unranked.includes('mp-compare-chart'),
@@ -436,6 +442,8 @@ console.log(JSON.stringify({{
     assert data["rankedHasMeta"] is True
     assert data["rankedHasWindow"] is True
     assert data["rankedHasCapital"] is True
+    assert data["rankedHasHead"] is True
+    assert data["rankedMetaBeforeBody"] is True
     assert data["rankedHasComingSoon"] is False
     assert data["unrankedHasCompetition"] is False
     assert data["unrankedHasSpark"] is False

@@ -10973,6 +10973,14 @@ body.agent-editor-open {
     min-width: 0;
 }
 
+.mp-competition-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    min-width: 0;
+}
+
 .mp-competition-kicker {
     margin: 0;
     font-size: 0.68rem;
@@ -10980,6 +10988,7 @@ body.agent-editor-open {
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: var(--text-muted, var(--text-secondary));
+    flex-shrink: 0;
 }
 
 .mp-competition-body {
@@ -11073,11 +11082,14 @@ body.agent-editor-open {
 .mp-contest-meta {
     display: flex;
     align-items: center;
+    justify-content: flex-end;
     gap: 6px;
     margin: 0;
-    font-size: 0.75rem;
+    font-size: 0.72rem;
     font-weight: 600;
     color: var(--text-muted, var(--text-secondary));
+    min-width: 0;
+    text-align: right;
 }
 
 .mp-contest-meta-icon {

@@ -2209,7 +2209,7 @@ let marketplaceContestMeta = {
  *  here plus ``shelf`` on the catalog row, not a one-off card layout. */
 const MARKETPLACE_SHELVES = [
   { key: 'llms', title: 'LLMs', sub: 'LLMs tested on the ATL leaderboard' },
-  { key: 'open', title: 'Open Agents', sub: 'Open-source trading agents' },
+  { key: 'open', title: 'Agents', sub: 'Ready-made trading agents' },
 ];
 /** 'all' or one of MARKET_LABELS' keys. Set by the chip row and by the Prompted
  * Models shelf's empty-state Community button (via navigateToPage's options). */
@@ -2606,8 +2606,8 @@ function buildMarketplaceCardHtml(template) {
   const cloneLabel = 'Add to My Agents';
   const categoryLabel = MARKET_LABELS[String(template.category || '').toLowerCase()] || '';
   const companyLabel = formatModelCompanyLabel(template.model_name);
-  const submeta = isOpen
-    ? (template.card_subtitle || 'Open-source trading agent')
+  const submeta = (isOpen && template.card_subtitle)
+    ? template.card_subtitle
     : [companyLabel, categoryLabel].filter(Boolean).join(' · ');
   const returnPositive = Number(stats.contestReturn) >= 0;
   const formattedReturn = formatMarketplaceReturnPct(stats.contestReturn);
@@ -2621,7 +2621,7 @@ function buildMarketplaceCardHtml(template) {
             <svg class="ui-icon mp-rank-badge-icon" aria-hidden="true"><use href="#icon-trophy"></use></svg>
             #${stats.leaderboardRank} of ${stats.totalEntries}
           </span>`
-    : (isOpen ? '<span class="marketplace-mode-chip">Open Source</span>' : '');
+    : (template.repo_url ? '<span class="marketplace-mode-chip">Open Source</span>' : '');
 
   const chartHtml = !isOpen
     ? buildMarketplaceCompareChartHtml(stats.agentCurve, stats.benchmarkCurve, {
@@ -2642,7 +2642,10 @@ function buildMarketplaceCardHtml(template) {
 
   const competitionHtml = !isOpen
     ? `<div class="mp-competition">
-        <p class="mp-competition-kicker">Competition result</p>
+        <div class="mp-competition-head">
+          <p class="mp-competition-kicker">Competition result</p>
+          ${contestMeta}
+        </div>
         <div class="mp-competition-body">
           <div class="mp-total-return">
             <span class="mp-total-return-value ${returnClass}">${escapeHtml(returnValue)}</span>
@@ -2650,8 +2653,7 @@ function buildMarketplaceCardHtml(template) {
           </div>
           ${chartHtml}
         </div>
-      </div>
-      ${contestMeta}`
+      </div>`
     : '';
 
   const description = isOpen ? String(template.description || '').trim() : '';

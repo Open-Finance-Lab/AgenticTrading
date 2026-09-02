@@ -18,7 +18,7 @@ from dashboard.backend.paths import CONFIG_DIR
 _MARKETPLACE_PATH = CONFIG_DIR / "marketplace.json"
 
 # Community supermarket rows. Declared order is display order: LLMs first,
-# then Open Agents. Unknown / omitted values fall through ``_normalize_shelf``.
+# then Agents. Unknown / omitted values fall through ``_normalize_shelf``.
 MARKETPLACE_SHELVES = ("llms", "open")
 
 
@@ -103,7 +103,7 @@ def list_marketplace_templates() -> List[Dict[str, Any]]:
     """Return public marketplace cards grouped by supermarket shelf.
 
     ``MARKETPLACE_SHELVES`` declaration order is the page order (LLMs, then
-    Open Agents). Within a shelf the catalog's insertion order is preserved
+    Agents). Within a shelf the catalog's insertion order is preserved
     (stable sort) so Community can list models in the leaderboard roster
     order without a second sort key.
     """

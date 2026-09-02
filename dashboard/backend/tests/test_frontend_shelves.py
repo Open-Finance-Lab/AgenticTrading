@@ -268,6 +268,16 @@ def test_render_marketplace_category_chips_is_built_from_the_shared_label_map():
         assert label not in renderer, f"{label!r} hardcoded instead of read from MARKET_LABELS"
 
 
+def test_supermarket_second_shelf_is_titled_agents():
+    """Community's second row is Agents, not Open Agents. My Agents keeps its
+    own Open Agents title -- that surface is hosted runtimes only.
+    """
+    decl = js_const("MARKETPLACE_SHELVES")
+    assert "title: 'Agents'" in decl
+    assert "title: 'Open Agents'" not in decl
+    assert "Ready-made trading agents" in decl
+
+
 def test_navigate_to_page_resets_chip_filter_on_plain_community_entry():
     """A category set by one Community visit must not leak into a later,
     unrelated visit made through the plain nav tab -- the most common entry

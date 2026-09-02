@@ -833,7 +833,7 @@ def test_marketplace_catalog_shape():
 
 
 def test_marketplace_listing_is_ordered_by_shelf_not_by_slug():
-    """Community cards group by supermarket shelf, LLMs then Open Agents.
+    """Community cards group by supermarket shelf, LLMs then Agents.
 
     Within a shelf the catalog's insertion order is preserved so the LLM
     row can follow the leaderboard roster instead of alphabetical names.
@@ -848,10 +848,15 @@ def test_marketplace_listing_is_ordered_by_shelf_not_by_slug():
     llms = [t for t in templates if t["shelf"] == "llms"]
     opens = [t for t in templates if t["shelf"] == "open"]
     assert llms, "the LLM shelf is empty"
-    assert opens, "the Open Agents shelf is empty"
+    assert opens, "the Agents shelf is empty"
     assert templates[0]["shelf"] == "llms"
     assert templates[-1]["shelf"] == "open"
-    assert [t["name"] for t in opens] == ["AI Hedge Fund"]
+    assert [t["name"] for t in opens][0] == "AI Hedge Fund"
+    assert {t["template_id"] for t in opens} >= {
+        "ai-hedge-fund",
+        "balanced-starter",
+        "ashare-momentum-t1",
+    }
 
 
 def test_uncategorized_templates_sort_last_and_carry_no_fake_shelf():
